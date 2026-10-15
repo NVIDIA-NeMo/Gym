@@ -47,7 +47,9 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY
+from nemo_gym.rollout_observability import AgentObservationBundle
 from nemo_gym.server_utils import get_server_url, is_nemo_gym_fastapi_entrypoint
+from responses_api_agents.tau2.observability import build_tool_observations
 from responses_api_models.vllm_model.app import VLLMConverter, split_responses_input_output_items
 from tau2.data_model.simulation import SimulationRun, TextRunConfig
 from tau2.data_model.tasks import Task
@@ -198,6 +200,7 @@ class Tau2RunRequest(BaseRunRequest):
 
 
 class Tau2VerifyResponse(Tau2RunRequest, BaseVerifyResponse):
+    ng_agent_observations: AgentObservationBundle
     result: SimulationRun
     duration: float
     num_steps: int
@@ -264,7 +267,11 @@ class Tau2Agent(SimpleResponsesAPIAgent):
             )
 
     async def _run(self, body: Tau2RunRequest) -> Tau2VerifyResponse:
-        body_dict = {name: getattr(body, name) for name in Tau2RunRequest.model_fields}
+        # Gym-internal request fields (e.g. `capture_rollout_id`) are marked `exclude=True`;
+        # skip them so only tau2-bench arguments reach `run_single_task`.
+        body_dict = {
+            name: getattr(body, name) for name, field in Tau2RunRequest.model_fields.items() if not field.exclude
+        }
         responses_create_params = body_dict.pop("responses_create_params").model_dump(exclude_unset=True)
 
         config: TextRunConfig = body_dict["config"]
@@ -343,6 +350,7 @@ class Tau2Agent(SimpleResponsesAPIAgent):
 
         return Tau2VerifyResponse(
             **body_dict,
+            ng_agent_observations=build_tool_observations(result),
             responses_create_params=dict(
                 input=body.responses_create_params.input + input_items_1 + input_items_2,
                 model=body.responses_create_params.model or "",

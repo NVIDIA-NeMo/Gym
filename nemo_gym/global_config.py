@@ -15,18 +15,21 @@
 import logging
 import re
 import sys
+import textwrap
 from argparse import ArgumentParser
-from collections import defaultdict
+from collections import Counter, defaultdict
 from copy import deepcopy
 from dataclasses import dataclass
 from difflib import get_close_matches
 from importlib import import_module
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as distribution_version
 from os import environ, getenv
 from pathlib import Path
 from platform import python_version
 from random import randint
 from socket import gethostbyname, gethostname, socket
-from typing import ClassVar, Dict, List, Optional, Set, Tuple, Type
+from typing import Any, ClassVar, Dict, Iterable, List, Mapping, Optional, Set, Tuple, Type
 
 import hydra
 import rich
@@ -34,16 +37,21 @@ from omegaconf import MISSING, DictConfig, ListConfig, OmegaConf, open_dict
 from omegaconf.errors import InterpolationResolutionError
 from openai import __version__ as openai_version
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
-from ray import __version__ as ray_version
 
 from nemo_gym import CACHE_DIR, RESULTS_DIR, WORKING_DIR, _resolve_under_cwd_or_install, component_search_roots
+from nemo_gym._checkpoint.settings import CHECKPOINT_BLOCK
+from nemo_gym._config_aliases import LEGACY_AGENT_ALIASES, legacy_config_path_alias
 from nemo_gym.config_types import (
     AgentCompositionError,
+    AgentWithoutEnvironmentServerError,
     AlmostServerError,
+    AmbiguousAgentRenameError,
+    BaseServerConfig,
     ConfigError,
     ConfigInterpolationError,
     ConfigMissingValuesError,
     ConfigPathNotFoundError,
+    HeadServerConfigMalformedError,
     InheritPathNotFoundError,
     MalformedConfigPathsError,
     NoServerInstancesError,
@@ -51,11 +59,13 @@ from nemo_gym.config_types import (
     ServerRefNotFoundError,
     UnsupportedAgentOverrideError,
     UnsupportedAgentPairingError,
+    UnsupportedModelPairingError,
     is_almost_server,
     is_server_ref,
     maybe_get_server_instance_config,
 )
 from nemo_gym.exporters import setup_exporters
+from nemo_gym.h2_ping_sidecar.config import H2_PING_SIDECAR_KEY_NAME
 from nemo_gym.secret_utils import recursively_hide_secrets
 from nemo_gym.telemetry.setup import (
     TELEMETRY_KEY_NAME,
@@ -64,6 +74,20 @@ from nemo_gym.telemetry.setup import (
     telemetry_config_from_global_config,
 )
 
+
+logger = logging.getLogger(__name__)
+
+
+def _installed_version(distribution: str) -> Optional[str]:
+    """The installed version of a distribution, or None when it isn't installed."""
+    try:
+        return distribution_version(distribution)
+    except PackageNotFoundError:
+        return None
+
+
+# None when Ray isn't installed. Gym imports Ray only in processes that use it.
+ray_version = _installed_version("ray")
 
 _GLOBAL_CONFIG_DICT = None
 NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME = "NEMO_GYM_CONFIG_DICT"
@@ -74,6 +98,7 @@ DEFAULT_HOST_KEY_NAME = "default_host"
 HEAD_SERVER_KEY_NAME = "head_server"
 DISALLOWED_PORTS_KEY_NAME = "disallowed_ports"
 HEAD_SERVER_DEPS_KEY_NAME = "head_server_deps"
+HEAD_SERVER_CONSTRAINTS_KEY_NAME = "head_server_constraints"
 PYTHON_VERSION_KEY_NAME = "python_version"
 PIP_INSTALL_VERBOSE_KEY_NAME = "pip_install_verbose"
 USE_ABSOLUTE_IP = "use_absolute_ip"
@@ -85,9 +110,11 @@ PORT_RANGE_LOW_KEY_NAME = "port_range_low"
 PORT_RANGE_HIGH_KEY_NAME = "port_range_high"
 DRY_RUN_KEY_NAME = "dry_run"
 UVICORN_TIMEOUT_WORKER_HEALTHCHECK = "uvicorn_timeout_worker_healthcheck"
+SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME = "server_spinup_timeout_seconds"
 MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME = "model_endpoint_readiness_timeout_seconds"
 ALLOW_OPENAI_VERSION_SKEW_KEY_NAME = "allow_openai_version_skew"
 UV_CACHE_DIR_KEY_NAME = "uv_cache_dir"
+UV_LOCK_TIMEOUT_KEY_NAME = "uv_lock_timeout_seconds"
 UV_VENV_DIR_KEY_NAME = "uv_venv_dir"
 RESULTS_DIR_KEY_NAME = "results_dir"
 CACHE_DIR_KEY_NAME = "cache_dir"
@@ -113,6 +140,12 @@ SKIP_VERIFICATION_KEY_NAME = "skip_verification"
 SKIP_VERIFICATION_REWARD_KEY_NAME = "skip_verification_reward"
 ALLOW_UNSUPPORTED_PAIRING_KEY_NAME = "allow_unsupported_pairing"
 ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME = "NEMO_GYM_ALLOW_UNSUPPORTED_PAIRING"
+ENVIRONMENT_SERVER_NAME_KEY_NAME = "environment_server_name"
+ENVIRONMENT_SERVER_ROUTES_KEY_NAME = "environment_server_routes"
+ENVIRONMENT_ROUTING_MODE_KEY_NAME = "environment_routing_mode"
+# When set, an agent without an environment server fails config validation.
+# When unset, Gym generates a legacy_agent relay for the agent and logs a deprecation warning.
+ERROR_ON_AGENT_WITHOUT_ENVIRONMENT_SERVER_KEY_NAME = "error_on_agent_without_environment_server"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
     ENTRYPOINT_KEY_NAME,
@@ -120,6 +153,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     HEAD_SERVER_KEY_NAME,
     DISALLOWED_PORTS_KEY_NAME,
     HEAD_SERVER_DEPS_KEY_NAME,
+    HEAD_SERVER_CONSTRAINTS_KEY_NAME,
     PYTHON_VERSION_KEY_NAME,
     PIP_INSTALL_VERBOSE_KEY_NAME,
     USE_ABSOLUTE_IP,
@@ -130,9 +164,11 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     PORT_RANGE_LOW_KEY_NAME,
     PORT_RANGE_HIGH_KEY_NAME,
     DRY_RUN_KEY_NAME,
+    SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME,
     MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME,
     ALLOW_OPENAI_VERSION_SKEW_KEY_NAME,
     UV_CACHE_DIR_KEY_NAME,
+    UV_LOCK_TIMEOUT_KEY_NAME,
     UV_VENV_DIR_KEY_NAME,
     RESULTS_DIR_KEY_NAME,
     CACHE_DIR_KEY_NAME,
@@ -149,15 +185,67 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     SKIP_VERIFICATION_KEY_NAME,
     SKIP_VERIFICATION_REWARD_KEY_NAME,
     TELEMETRY_KEY_NAME,
+    H2_PING_SIDECAR_KEY_NAME,
+    CHECKPOINT_BLOCK,
     ALLOW_UNSUPPORTED_PAIRING_KEY_NAME,
+    ENVIRONMENT_SERVER_NAME_KEY_NAME,
+    ENVIRONMENT_SERVER_ROUTES_KEY_NAME,
+    ENVIRONMENT_ROUTING_MODE_KEY_NAME,
 ]
 
 AGENT_SERVER_TYPE_KEY_NAME = "responses_api_agents"
+# The field an environment server names its agent in.
+AGENT_SERVER_REF_KEY_NAME = "agent_server"
+ENVIRONMENT_SERVER_TYPE_KEY_NAME = "environment_servers"
 # Carried over from the environment's agent instance onto the composed agent; every other key is dropped.
 _COMPOSED_AGENT_CARRY_OVER_KEYS = ("resources_server", "model_server", "datasets")
 # Declared on a resources server: the agent types it is known to score correctly. Absent means any harness.
 ALLOWED_AGENTS_KEY_NAME = "allowed_agents"
+# Declared on a resources server: the model adapter types that can carry its workload. Absent means any adapter.
+ALLOWED_MODEL_TYPES_KEY_NAME = "allowed_model_types"
+MODEL_SERVER_TYPE_KEY_NAME = "responses_api_models"
 RESOURCES_SERVER_TYPE_KEY_NAME = "resources_servers"
+
+
+def environment_server_agent_refs(server: DictConfig) -> list[DictConfig]:
+    """Return the agent references in one environment server's config.
+
+    An environment server can front several agents, such as a user and an assistant.
+    Any top-level field whose value has `type: responses_api_agents` references an agent.
+    So does `agent_server`, whose type may be left out.
+    `scripts/add_legacy_agent_environment_servers.py` applies the same rule.
+    """
+    return [
+        reference
+        for field, reference in server.items()
+        if isinstance(reference, DictConfig)
+        and (
+            reference.get("type") == AGENT_SERVER_TYPE_KEY_NAME
+            or (field == AGENT_SERVER_REF_KEY_NAME and reference.get("type") is None)
+        )
+    ]
+
+
+def environment_server_agent_names(server: DictConfig) -> list[str]:
+    """Return the names of the agents one environment server's config references."""
+    return [
+        str(reference["name"])
+        for reference in environment_server_agent_refs(server)
+        if reference.get("name") is not None
+    ]
+
+
+def environment_server_attributed_agent(server: DictConfig) -> Optional[str]:
+    """Return the agent that results from one environment server are attributed to.
+
+    That is the server's `agent_server`, or the only agent it references.
+    A server that fronts several agents without an `agent_server` has no single agent to attribute.
+    """
+    agent_ref = server.get(AGENT_SERVER_REF_KEY_NAME)
+    if isinstance(agent_ref, DictConfig):
+        return agent_ref.get("name")
+    agents = environment_server_agent_names(server)
+    return agents[0] if len(agents) == 1 else None
 
 
 @dataclass(frozen=True)
@@ -178,60 +266,19 @@ ATTEMPT_INDEX_KEY_NAME = "_ng_attempt_index"
 # An explicit capture id replaces the task and rollout derivation.
 # Set it when dispatches reuse task and rollout indices.
 # Otherwise two dispatches would share one capture key.
+# The suffix "-a<N>" is reserved for attempt-qualified ids, so a dataset row's id must not end with it.
 ROLLOUT_ID_KEY_NAME = "_ng_rollout_id"
 RESPONSES_CREATE_PARAMS_KEY_NAME = "responses_create_params"
 RESPONSE_KEY_NAME = "response"
 AGENT_REF_KEY_NAME = "agent_ref"
+# Stamped by rollout collection on every record: the Environment Server that ran the rollout.
+ENVIRONMENT_SERVER_STAMP_KEY_NAME = "_ng_environment_server"
 # The config instance that declares the row's dataset (a resources server normally; the agent
 # itself for self-contained environments). Stamped into derived artifacts at collate/load time;
 # resolved to an agent at dispatch time. See the dataset-decoupling RFC.
 TASK_SOURCE_KEY_NAME = "task_source"
 SKILLS_REF_KEY_NAME = "skills_ref"
 REWARD_KEY_NAME = "reward"
-
-# Metric key names. `RewardProfiler` builds its metric names from these prefixes and suffixes, and
-# consumers of `*_aggregate_metrics.json` (e.g. `gym eval compare`) parse them back out -- so they
-# live here, where both sides can import them without pulling in pandas/scipy/wandb.
-MEAN_STAT_NAME = "mean"
-MAX_STAT_NAME = "max"
-MIN_STAT_NAME = "min"
-MEDIAN_STAT_NAME = "median"
-STD_STAT_NAME = "std"
-SEM_STAT_NAME = "sem"
-P25_STAT_NAME = "p25"
-P75_STAT_NAME = "p75"
-CI_LOW_95_STAT_NAME = "ci_low_95"
-CI_HIGH_95_STAT_NAME = "ci_high_95"
-HISTOGRAM_STAT_NAME = "histogram"
-
-# `<stat>/<field>`, e.g. `mean/reward`.
-STAT_SEPARATOR = "/"
-MEAN_PREFIX = f"{MEAN_STAT_NAME}{STAT_SEPARATOR}"
-MAX_PREFIX = f"{MAX_STAT_NAME}{STAT_SEPARATOR}"
-MIN_PREFIX = f"{MIN_STAT_NAME}{STAT_SEPARATOR}"
-MEDIAN_PREFIX = f"{MEDIAN_STAT_NAME}{STAT_SEPARATOR}"
-STD_PREFIX = f"{STD_STAT_NAME}{STAT_SEPARATOR}"
-SEM_PREFIX = f"{SEM_STAT_NAME}{STAT_SEPARATOR}"
-P25_PREFIX = f"{P25_STAT_NAME}{STAT_SEPARATOR}"
-P75_PREFIX = f"{P75_STAT_NAME}{STAT_SEPARATOR}"
-CI_LOW_95_PREFIX = f"{CI_LOW_95_STAT_NAME}{STAT_SEPARATOR}"
-CI_HIGH_95_PREFIX = f"{CI_HIGH_95_STAT_NAME}{STAT_SEPARATOR}"
-
-# `<stat>_across_repeats/mean/<field>`: one repeat's estimate aggregated over the run's repeats.
-ACROSS_REPEATS_MARKER = f"_across_repeats{STAT_SEPARATOR}"
-MEAN_ACROSS_REPEATS_PREFIX = f"{MEAN_STAT_NAME}{ACROSS_REPEATS_MARKER}"
-MEDIAN_ACROSS_REPEATS_PREFIX = f"{MEDIAN_STAT_NAME}{ACROSS_REPEATS_MARKER}"
-STD_ACROSS_REPEATS_PREFIX = f"{STD_STAT_NAME}{ACROSS_REPEATS_MARKER}"
-MIN_ACROSS_REPEATS_PREFIX = f"{MIN_STAT_NAME}{ACROSS_REPEATS_MARKER}"
-MAX_ACROSS_REPEATS_PREFIX = f"{MAX_STAT_NAME}{ACROSS_REPEATS_MARKER}"
-SE_ACROSS_REPEATS_PREFIX = f"se{ACROSS_REPEATS_MARKER}"
-CI_LOW_95_ACROSS_REPEATS_PREFIX = f"{CI_LOW_95_STAT_NAME}{ACROSS_REPEATS_MARKER}"
-CI_HIGH_95_ACROSS_REPEATS_PREFIX = f"{CI_HIGH_95_STAT_NAME}{ACROSS_REPEATS_MARKER}"
-
-# Suffixes `compute_pass_majority_metrics` appends to a pass@k metric name.
-STD_DEV_ACROSS_RUNS_SUFFIX = f"{STAT_SEPARATOR}std_dev_across_runs"
-STD_ERR_ACROSS_RUNS_SUFFIX = f"{STAT_SEPARATOR}std_err_across_runs"
-AVG_SAMPLE_STD_DEV_SUFFIX = f"{STAT_SEPARATOR}avg_sample_std_dev"
 
 # Per-task keys in `group_level_metrics`.
 ROLLOUT_INFOS_KEY_NAME = "rollout_infos"
@@ -255,6 +302,66 @@ def get_hf_token() -> Optional[str]:  # pragma: no cover
 # OmegaConf new resolvers
 OmegaConf.register_new_resolver("inherit_from", lambda a: f"${{inherit_from:{a}}}")
 OmegaConf.register_new_resolver("copy", lambda a: f"${{copy:{a}}}")
+
+
+def rollout_run_key(row: Mapping[str, Any]) -> Optional[str]:
+    """Identify what ran a rollout, for grouping: its Environment Server.
+
+    Records written before rollout collection stamped the Environment Server fall back to their agent.
+    """
+    server = row.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME)
+    if server is not None:
+        return server
+    return (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
+
+
+def label_runs(agent_by_key: Mapping[str, Optional[str]]) -> Dict[str, str]:
+    """Label each run key by its agent's name when that name identifies exactly one run, else by the key.
+
+    A run with one Environment Server per agent keeps its agent's name, so existing labels do not change.
+    Every run of an agent that several Environment Servers front is labelled by its own Environment Server.
+    A label that would still repeat, because one server's name equals another run's agent name, also falls back
+    to the key. The result depends only on the mapping, not on its order, and every label is unique.
+    """
+    keys_by_agent: Dict[str, set] = defaultdict(set)
+    for key, agent_name in agent_by_key.items():
+        if agent_name is not None:
+            keys_by_agent[agent_name].add(key)
+    labels = {
+        key: agent_name if agent_name is not None and len(keys_by_agent[agent_name]) == 1 else key
+        for key, agent_name in agent_by_key.items()
+    }
+    while True:
+        counts = Counter(labels.values())
+        clashing = [key for key, label in labels.items() if counts[label] > 1 and label != key]
+        if not clashing:
+            return labels
+        for key in clashing:
+            labels[key] = key
+
+
+def rollout_run_labels(rows: Iterable[Mapping[str, Any]]) -> Dict[str, str]:
+    """Label each ``rollout_run_key`` for reports, the same way rollout collection labels aggregate metrics.
+
+    See ``label_runs``. A row without an ``agent_ref`` is labelled by its Environment Server.
+    """
+    agent_by_key: Dict[str, Optional[str]] = {}
+    for row in rows:
+        key = rollout_run_key(row)
+        if key is not None and key not in agent_by_key:
+            agent_by_key[key] = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
+    return label_runs(agent_by_key)
+
+
+def rollout_agent_label(row: Mapping[str, Any]) -> Optional[str]:
+    """Name the agent that acted in one rollout, for per-rollout output such as trajectories and debug lines.
+
+    Rows without an ``agent_ref``, such as episode rows, use their Environment Server.
+    """
+    agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
+    if agent_name is not None:
+        return agent_name
+    return row.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME)
 
 
 class GlobalConfigDictParserConfig(BaseModel):
@@ -425,6 +532,12 @@ class GlobalConfigDictParser(BaseModel):
             else:
                 searched_locations = [root / config_path for root in component_search_roots()]
             config_path = _resolve_under_cwd_or_install(original_entry)
+            if not config_path.exists() and (canonical_entry := legacy_config_path_alias(original_entry)):
+                canonical_path = _resolve_under_cwd_or_install(canonical_entry)
+                if canonical_path.exists():
+                    logger.warning(f"Config path `{original_entry}` is deprecated; use `{canonical_entry}`.")
+                    config_paths[index] = canonical_entry
+                    config_path = canonical_path
 
             try:
                 extra_config = _load_config_yaml(config_path)
@@ -447,10 +560,14 @@ Check the path is spelled correctly and is relative to your working directory, a
 
         if duplicate_config_paths:
             duplicate_config_paths_str = "".join(f"- {p}\n" for p in duplicate_config_paths)
-            print(f"""Found configs that reference the same source config path. You may want to double check whether the configs you have need to use different configs for the same server.
+            # Diagnostics go to stderr so that `--json` output on stdout stays machine-readable.
+            print(
+                f"""Found configs that reference the same source config path. You may want to double check whether the configs you have need to use different configs for the same server.
 In cases like these, you may want to consider using the `inherit_from` OmegaConf directive e.g. '++my_specific_server=${{inherit_from:generic_server}}' and then overriding config parameters in `my_specific_server`.
 Duplicate config paths:
-{duplicate_config_paths_str}""")
+{duplicate_config_paths_str}""",
+                file=sys.stderr,
+            )
 
         # Flatten the include tree so that every config merges after -- and therefore
         # overrides -- the ones it pulled in, and each subtree stays contiguous in
@@ -533,6 +650,16 @@ Duplicate config paths:
                     else:
                         available = ", ".join(repr(n) for n in sorted(same_type_names)) or "(none)"
                         hint = f"Available {maybe_server_ref.type}: {available}"
+                    if (
+                        maybe_server_ref.type == AGENT_SERVER_TYPE_KEY_NAME
+                        and server_instance_config.get_server_ref().type == ENVIRONMENT_SERVER_TYPE_KEY_NAME
+                    ):
+                        hint += (
+                            "\nGym follows top-level `_inherit_from` agent renames when there is one destination "
+                            "and it still defines exactly one agent."
+                            f"\nFor other inheritance patterns, point this server's {field_name}.name "
+                            "at an existing agent."
+                        )
                     raise ServerRefNotFoundError(
                         f"""In server instance '{server_instance_config.name}', field '{field_name}' references {maybe_server_ref.type}/'{maybe_server_ref.name}', which is not defined in the merged config.
 {hint}"""
@@ -629,6 +756,73 @@ Duplicate config paths:
         reference = OmegaConf.select(server_config, "resources_server")
         return reference if isinstance(reference, DictConfig) else None
 
+    @staticmethod
+    def _model_server_reference(server_config: DictConfig) -> Optional[DictConfig]:
+        """The agent's `model_server` block, or None when it declares none."""
+        reference = OmegaConf.select(server_config, "model_server")
+        return reference if isinstance(reference, DictConfig) else None
+
+    def raise_on_unsupported_model_pairings(self, global_config_dict: DictConfig) -> None:
+        """Reject resource/model bindings that explicitly disallow the selected model adapter.
+
+        This runs while parsing the merged config, before Ray or any server subprocess starts. A resources
+        server opts in with ``allowed_model_types``; existing configs that do not declare it stay unrestricted.
+        """
+        if pairing_override_enabled(global_config_dict):
+            return
+
+        restrictions: List[List[str]] = []
+        rejected: List[Tuple[_AgentInstance, str, str, str, List[str]]] = []
+        for agent in self._agent_instances(global_config_dict):
+            resources_reference = self._resources_server_reference(agent.server_config)
+            if not resources_reference or resources_reference.get("type") != RESOURCES_SERVER_TYPE_KEY_NAME:
+                continue
+            resources_server_name = resources_reference.get("name")
+            allowed = allowed_model_types_for(global_config_dict, resources_server_name)
+            if allowed is None:
+                continue
+
+            model_reference = self._model_server_reference(agent.server_config)
+            if not model_reference or model_reference.get("type") != MODEL_SERVER_TYPE_KEY_NAME:
+                continue
+            model_server_name = model_reference.get("name")
+            model_type = model_type_for(global_config_dict, model_server_name)
+            # ``dummy_model`` is injected for parser clients that only need benchmark data or static config
+            # inspection (for example, ``gym eval prepare``). It is not a runtime model selection.
+            if model_type is None or model_type == "dummy_model":
+                continue
+
+            restrictions.append(allowed)
+            if model_type not in allowed:
+                rejected.append((agent, str(resources_server_name), str(model_server_name), model_type, allowed))
+
+        if not rejected:
+            return
+
+        rejected_list = "\n".join(
+            f"  - agent '{agent.name}' uses model server '{model_server_name}' (type '{model_type}'), "
+            f"but resources server '{resources_server_name}' accepts only: {', '.join(allowed)}"
+            for agent, resources_server_name, model_server_name, model_type, allowed in rejected
+        )
+        supported = [
+            model_type
+            for model_type in restrictions[0]
+            if all(model_type in restriction for restriction in restrictions[1:])
+        ]
+        if supported:
+            remedy = (
+                f"Select a compatible model adapter (for example, --model-type {supported[0]}). "
+                f"Supported model types: {', '.join(supported)}."
+            )
+        else:
+            remedy = "No single model type satisfies all of these resources servers."
+        raise UnsupportedModelPairingError(
+            "The selected Gym model-server adapter is not compatible with this workload:\n"
+            f"{rejected_list}\n\n"
+            f"{remedy} Or pass --allow-unsupported-pairing (or set "
+            f"{ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME}=1) to bypass the check."
+        )
+
     def _runs_against_a_resources_server(self, server_config: DictConfig) -> bool:
         """True when the agent has a task to hand over, so another agent can take its place.
 
@@ -699,10 +893,31 @@ Duplicate config paths:
                 agents[source.agent_type] = composed
                 global_config_dict[renames[target.name]] = instance
 
+            self._retarget_environment_servers(global_config_dict, renames)
             self._raise_on_outdated_routing(global_config_dict, renames)
             self._route_rows_stamped_before_the_swap(global_config_dict, renames)
 
         self._raise_on_unapplied_agent_overrides(held_agent_overrides, set(renames.values()))
+
+    @staticmethod
+    def _retarget_environment_servers(global_config_dict: DictConfig, renames: dict[str, str]) -> None:
+        """Point each environment server at the agent composition put in place of the one it named.
+
+        The server is named after the environment, not the agent, so a swap leaves its own name
+        alone and only its references to the swapped agent have to follow.
+        """
+        for instance in global_config_dict.values():
+            if not isinstance(instance, DictConfig):
+                continue
+            servers = instance.get(ENVIRONMENT_SERVER_TYPE_KEY_NAME)
+            if not isinstance(servers, DictConfig):
+                continue
+            for server in servers.values():
+                if not isinstance(server, DictConfig):
+                    continue
+                for reference in environment_server_agent_refs(server):
+                    if reference.get("name") in renames:
+                        reference["name"] = renames[reference["name"]]
 
     @staticmethod
     def _composed_instance_name(target: _AgentInstance, agent_type: str) -> str:
@@ -775,6 +990,46 @@ Use the name the composed config reports."""
         if isinstance(declared, DictConfig):
             routes.update({str(key): value for key, value in declared.items()})
         global_config_dict["agent_map"] = routes
+
+    @staticmethod
+    def apply_legacy_agent_aliases(global_config_dict: DictConfig) -> None:
+        """Route legacy reasoning-gym agent names to their canonical instances."""
+        declared = global_config_dict.get("agent_map")
+        routes = dict(declared) if isinstance(declared, DictConfig) else {}
+        active_aliases = {}
+        for legacy, canonical in LEGACY_AGENT_ALIASES.items():
+            destination = routes.get(canonical, canonical)
+            if legacy not in global_config_dict and destination in global_config_dict:
+                active_aliases[legacy] = destination
+        if not active_aliases:
+            return
+
+        deprecated_uses = set()
+        selected = global_config_dict.get("agent_name")
+        if selected in active_aliases:
+            deprecated_uses.add(str(selected))
+            global_config_dict["agent_name"] = active_aliases[selected]
+
+        for key, destination in list(routes.items()):
+            if destination in active_aliases:
+                deprecated_uses.add(str(destination))
+                routes[key] = active_aliases[destination]
+        for legacy, destination in active_aliases.items():
+            routes.setdefault(legacy, destination)
+        global_config_dict["agent_map"] = routes
+
+        fan_out = global_config_dict.get("fan_out")
+        if isinstance(fan_out, DictConfig):
+            for key, destinations in fan_out.items():
+                if not isinstance(destinations, (list, ListConfig)):
+                    continue
+                replacements = [active_aliases.get(destination, destination) for destination in destinations]
+                deprecated_uses.update(destination for destination in destinations if destination in active_aliases)
+                fan_out[key] = replacements
+
+        if deprecated_uses:
+            replacements = ", ".join(f"`{legacy}` -> `{active_aliases[legacy]}`" for legacy in sorted(deprecated_uses))
+            logger.warning(f"Legacy agent names are deprecated; use {replacements}.")
 
     def _raise_on_unsupported_pairing(
         self, global_config_dict: DictConfig, source: _AgentInstance, targets: List[_AgentInstance]
@@ -856,6 +1111,8 @@ the check."""
         if held_agent_overrides is None:
             return
         override = OmegaConf.select(held_agent_overrides, f"{name}.{AGENT_SERVER_TYPE_KEY_NAME}.{agent_type}")
+        with open_dict(held_agent_overrides):
+            held_agent_overrides.pop(name, None)
         if not isinstance(override, DictConfig):
             return
         # Struct mode is what makes a field the agent does not declare an error rather than a silent add.
@@ -888,6 +1145,68 @@ the check."""
             elif OmegaConf.is_missing(original, key):
                 composed[key] = MISSING
 
+    def _front_agents_without_environment_server(self, global_config_dict: DictConfig) -> None:
+        """Give every agent an environment server, since rollout collection reaches agents only through one.
+
+        Runs after composition, so every agent left is one a run can dispatch to.
+        An agent that no environment server names gets a generated `legacy_agent` relay.
+        The relay is the same block that scripts/add_legacy_agent_environment_servers.py declares.
+        One deprecation warning lists every generated relay and how to declare it.
+        This keeps configs written before environment servers running.
+        With `error_on_agent_without_environment_server` set, such an agent is an error instead.
+
+        Only agents with no environment server are touched.
+        A generated relay therefore never makes an agent's routing ambiguous, and no existing reference is rewritten.
+        """
+        with_environment_server = set()
+        for instance in global_config_dict.values():
+            if not isinstance(instance, DictConfig):
+                continue
+            servers = instance.get(ENVIRONMENT_SERVER_TYPE_KEY_NAME)
+            if not isinstance(servers, DictConfig):
+                continue
+            for server in servers.values():
+                if not isinstance(server, DictConfig):
+                    continue
+                for reference in environment_server_agent_refs(server):
+                    if reference.get("name") is not None:
+                        with_environment_server.add(reference["name"])
+
+        without_environment_server = sorted(
+            agent.name
+            for agent in self._agent_instances(global_config_dict)
+            if not self._is_unbound_agent(agent.server_config)
+            and agent.name not in with_environment_server
+            and agent.server_config.get("entrypoint") is not None
+        )
+        if not without_environment_server:
+            return
+
+        if global_config_dict.get(ERROR_ON_AGENT_WITHOUT_ENVIRONMENT_SERVER_KEY_NAME, False):
+            listing = "\n".join(f"  - {name}" for name in without_environment_server)
+            raise AgentWithoutEnvironmentServerError(
+                f"""Agent instance(s) have no environment server, so rollout collection cannot reach them:
+{listing}
+
+Declare one for each, naming the agent in its `{AGENT_SERVER_REF_KEY_NAME}` reference.
+To add them automatically, run `python scripts/add_legacy_agent_environment_servers.py <your config paths>` from a NeMo Gym checkout.
+Unset {ERROR_ON_AGENT_WITHOUT_ENVIRONMENT_SERVER_KEY_NAME} to generate a legacy_agent relay for each instead, with a deprecation warning."""
+            )
+
+        agent_types = {agent.name: agent.agent_type for agent in self._agent_instances(global_config_dict)}
+        generated = {}
+        for agent_name in without_environment_server:
+            server_name = legacy_environment_server_name(agent_name, agent_types[agent_name])
+            if server_name in global_config_dict or server_name in generated.values():
+                server_name = f"{agent_name}{LEGACY_ENVIRONMENT_SERVER_SUFFIX}"
+            while server_name in global_config_dict:
+                server_name = f"{server_name}{LEGACY_ENVIRONMENT_SERVER_SUFFIX}"
+            with open_dict(global_config_dict):
+                global_config_dict[server_name] = legacy_environment_server_block(agent_name)
+            generated[agent_name] = server_name
+
+        logger.warning(agents_without_environment_server_deprecation(generated))
+
     def raise_on_missing_values(self, global_config_dict: DictConfig) -> None:
         """Fail fast with one actionable error listing every unset '???' value.
 
@@ -911,8 +1230,76 @@ For example, on the command line:
 
     def _recursively_swap_keys(self, dict_config: DictConfig) -> None:
         frozen_dict_config = deepcopy(dict_config)
+        original_agents = {agent.name for agent in self._agent_instances(frozen_dict_config)}
+        destinations: dict[str, list[str]] = defaultdict(list)
+        # Only a top-level move of an agent can retarget its environment server. Copies and
+        # nested inheritance do not rename the instance, and multiple destinations are ambiguous.
+        for name, value in frozen_dict_config.items_ex(resolve=False):
+            source = None
+            if isinstance(value, str) and value.startswith("${inherit_from:"):
+                source = value.removeprefix("${inherit_from:").removesuffix("}")
+            elif isinstance(value, DictConfig) and not OmegaConf.is_missing(value, INHERIT_FROM_KEY_NAME):
+                source = value.get(INHERIT_FROM_KEY_NAME)
+            if isinstance(source, str) and source in original_agents:
+                destinations[source].append(name)
+
         with open_dict(dict_config):
             self._recursively_swap_keys_helper(dict_config, dict_config, frozen_dict_config)
+            final_agents = {agent.name for agent in self._agent_instances(dict_config)}
+            destinations = {
+                source: [target for target in targets if target in final_agents]
+                for source, targets in destinations.items()
+            }
+            renames = {
+                source: targets[0]
+                for source, targets in destinations.items()
+                if source not in dict_config and len(targets) == 1
+            }
+            ambiguous = {
+                source: targets
+                for source, targets in destinations.items()
+                if source not in dict_config and len(targets) > 1
+            }
+            if ambiguous:
+                self._raise_on_ambiguous_environment_agent_renames(dict_config, ambiguous)
+            if renames:
+                self._retarget_environment_servers(dict_config, renames)
+
+    @staticmethod
+    def _raise_on_ambiguous_environment_agent_renames(
+        dict_config: DictConfig, ambiguous: Dict[str, List[str]]
+    ) -> None:
+        # Several benchmarks may inherit the same agent. Only a reference still naming
+        # the removed source requires the user to choose a destination.
+        for name, instance in dict_config.items_ex(resolve=False):
+            if not isinstance(instance, DictConfig):
+                continue
+            servers = instance.get(ENVIRONMENT_SERVER_TYPE_KEY_NAME)
+            if not isinstance(servers, DictConfig):
+                continue
+            for server_type, server in servers.items_ex(resolve=False):
+                if not isinstance(server, DictConfig):
+                    continue
+                for field, reference in server.items_ex(resolve=False):
+                    if not isinstance(reference, DictConfig):
+                        continue
+                    if OmegaConf.is_missing(reference, "type") or OmegaConf.is_missing(reference, "name"):
+                        continue
+                    if reference.get("type") != AGENT_SERVER_TYPE_KEY_NAME and not (
+                        field == AGENT_SERVER_REF_KEY_NAME and reference.get("type") is None
+                    ):
+                        continue
+                    source = reference.get("name")
+                    if source in ambiguous:
+                        targets = ", ".join(repr(target) for target in ambiguous[source])
+                        path = f"{name}.{ENVIRONMENT_SERVER_TYPE_KEY_NAME}.{server_type}.{field}.name"
+                        raise AmbiguousAgentRenameError(
+                            f"Agent '{source}' was inherited into several names: {targets}. "
+                            f"'{path}' still references '{source}'. "
+                            f"Give each new agent its own environment server that inherits '{name}' "
+                            "and references that agent, or point this field at the one agent that should use "
+                            "this server and ensure the other agents also have environment servers."
+                        )
 
     def _recursively_swap_keys_helper(
         self, dict_config: DictConfig, original_dict_config: DictConfig, frozen_dict_config: DictConfig
@@ -1027,6 +1414,8 @@ For example, on the command line:
         cli_global_config_dict = (
             DictConfig(dict()) if parse_config.skip_load_from_cli else self.parse_global_config_dict_from_cli()
         )
+        # @bxyu-nvidia: Hydra returns `cli_global_config_dict` as a struct, but this causes problems in downstream swapping/merging.
+        OmegaConf.set_struct(cli_global_config_dict, False)
 
         # Command line overrides function input.
         initial_global_config_dict = OmegaConf.create(parse_config.initial_global_config_dict or dict())
@@ -1083,13 +1472,19 @@ Pass each config with --config (it builds the list for you), e.g.:
 
         # Must run after the swap above (inherited bindings must exist to carry over) and before the
         # missing-value check below (it removes the unbound agent instance that still carries '???').
+        # NOTE(martas): this is the logic for legacy config structure. after migration
+        # to environment servers, this should be updated.
         self.compose_unbound_agent(global_config_dict, held_agent_overrides)
+        global_config_dict = OmegaConf.merge(global_config_dict, held_agent_overrides)
+        self.apply_legacy_agent_aliases(global_config_dict)
 
         # Fail fast with one actionable error if any required value is still '???'. Runs *after*
         # _recursively_swap_keys so that _delete_key/_inherit_from/_copy have been applied first —
         # a '???' in a deleted or overwritten branch is not reported. Otherwise the first unset
         # value surfaces as an opaque MissingMandatoryValue deep in the pipeline.
         self.raise_on_missing_values(global_config_dict)
+        # NOTE(martas): this is for catching agents not attached to an environment server
+        self._front_agents_without_environment_server(global_config_dict)
 
         # TODO @bxyu-nvidia: We need a better way of handling dummy model configs
         with open_dict(global_config_dict):
@@ -1113,14 +1508,15 @@ Pass each config with --config (it builds the list for you), e.g.:
         almost_servers = self.detect_and_report_almost_servers(global_config_dict)
 
         if almost_servers:
-            rich.print("[yellow]═══════════════════════════════════════════════════[/yellow]")
-            rich.print("[yellow]Configuration Warnings: Almost-Servers Detected[/yellow]")
-            rich.print("[yellow]═══════════════════════════════════════════════════[/yellow]")
+            # Diagnostics go to stderr so that `--json` output on stdout stays machine-readable.
+            rich.print("[yellow]═══════════════════════════════════════════════════[/yellow]", file=sys.stderr)
+            rich.print("[yellow]Configuration Warnings: Almost-Servers Detected[/yellow]", file=sys.stderr)
+            rich.print("[yellow]═══════════════════════════════════════════════════[/yellow]", file=sys.stderr)
 
             for server_name, error in almost_servers:
-                rich.print(format_almost_server_warning(server_name, error))
+                rich.print(format_almost_server_warning(server_name, error), file=sys.stderr)
 
-            rich.print("[yellow]═══════════════════════════════════════════════════[/yellow]\n")
+            rich.print("[yellow]═══════════════════════════════════════════════════[/yellow]\n", file=sys.stderr)
 
             error_on_almost_servers = global_config_dict.get("error_on_almost_servers", True)
             if error_on_almost_servers:
@@ -1135,6 +1531,7 @@ Found global config dict yaml:
                 raise AlmostServerError(error_msg)
 
         server_instance_configs = self.filter_for_server_instance_configs(global_config_dict)
+        self.raise_on_unsupported_model_pairings(global_config_dict)
 
         with open_dict(global_config_dict):
             use_absolute_ip = global_config_dict.setdefault(USE_ABSOLUTE_IP, False)
@@ -1144,10 +1541,27 @@ Found global config dict yaml:
             # Do one pass through all the configs validate and populate various configs for our servers.
             default_host = global_config_dict.get(DEFAULT_HOST_KEY_NAME) or "127.0.0.1"
 
-        head_server_config = global_config_dict.get(HEAD_SERVER_KEY_NAME, {})
-        head_server_port = head_server_config.get("port", DEFAULT_HEAD_SERVER_PORT)
+        # Only an absent or null block means "all defaults"; any other non-mapping (incl. false, 0, "" and []) is
+        # malformed. `host` is not read here: it may reference a server host that validate_and_populate_defaults
+        # fills in below.
+        head_server = global_config_dict.get(HEAD_SERVER_KEY_NAME)
+        if head_server is None:
+            head_server = {}
+        elif not isinstance(head_server, Mapping):
+            raise HeadServerConfigMalformedError(
+                f"""'{HEAD_SERVER_KEY_NAME}' must be a mapping of `host` and `port`. Got: {head_server!r}.
+Set the keys individually, in a config or as overrides, e.g.:
+  ++{HEAD_SERVER_KEY_NAME}.host=127.0.0.1 ++{HEAD_SERVER_KEY_NAME}.port={DEFAULT_HEAD_SERVER_PORT}"""
+            )
 
-        initial_disallowed_ports = [head_server_port] if head_server_port is not None else []
+        # The port is coerced so a quoted `port: "11000"` still keeps it away from the allocator. A port that does
+        # not coerce is left to the full check below, which reports it together with any `host` problem.
+        try:
+            initial_disallowed_ports = [
+                TypeAdapter(int).validate_python(head_server.get("port", DEFAULT_HEAD_SERVER_PORT))
+            ]
+        except ValidationError:
+            initial_disallowed_ports = []
 
         with open_dict(global_config_dict):
             port_range_low = global_config_dict.setdefault(PORT_RANGE_LOW_KEY_NAME, 10_001)
@@ -1165,22 +1579,39 @@ Found global config dict yaml:
         )
 
         with open_dict(global_config_dict):
-            # Populate head server defaults
-            if not global_config_dict.get(HEAD_SERVER_KEY_NAME):
-                global_config_dict[HEAD_SERVER_KEY_NAME] = {
-                    "host": default_host,
-                    "port": DEFAULT_HEAD_SERVER_PORT,
-                }
+            # Head server defaults, filled per key so a config may pin just one.
+            head_server.setdefault("host", default_host)
+            head_server.setdefault("port", DEFAULT_HEAD_SERVER_PORT)
+            global_config_dict[HEAD_SERVER_KEY_NAME] = head_server
 
+        # Validated here, still in the config parse, rather than where the block is next built into a
+        # BaseServerConfig (ServerClient.load_head_server_config, after Ray is up for `gym env start`):
+        # BaseServerConfig is not a CLI config, so its pydantic error would otherwise escape `main()` as a raw
+        # traceback (#2686). Not earlier: a `host` that references another server's host only resolves once
+        # validate_and_populate_defaults has filled that host in.
+        # Validate-only: the block is left as written, so `gym env resolve` prints what the user configured.
+        try:
+            BaseServerConfig.model_validate(head_server)
+        except ValidationError as e:
+            problems = "; ".join(
+                f"{'.'.join([HEAD_SERVER_KEY_NAME, *map(str, error['loc'])])} ({error['msg']})" for error in e.errors()
+            )
+            raise HeadServerConfigMalformedError(
+                f"""'{HEAD_SERVER_KEY_NAME}' is invalid: {problems}.
+`{HEAD_SERVER_KEY_NAME}.host` must be a hostname or IP; `{HEAD_SERVER_KEY_NAME}.port` and, if set, `{HEAD_SERVER_KEY_NAME}.num_workers` must be integers. Set them in a config or as overrides, e.g.:
+  ++{HEAD_SERVER_KEY_NAME}.host=127.0.0.1 ++{HEAD_SERVER_KEY_NAME}.port={DEFAULT_HEAD_SERVER_PORT}"""
+            ) from e
+
+        with open_dict(global_config_dict):
             # Store final list of disallowed ports.
             global_config_dict[DISALLOWED_PORTS_KEY_NAME] = disallowed_ports
 
             # Constrain sensitive package versions
-            head_server_deps = [
-                # The ray version is very sensitive. The children ray versions must exactly match those of the parent ray.
-                # The ray extra [default] should also exactly match the extra in the top-level Gym pyproject.toml.
-                f"ray[default]=={ray_version}",
-            ]
+            head_server_deps = []
+            # The ray version is very sensitive: a server that joins this process's Ray cluster must run exactly
+            # the same version. Pin it as a constraint rather than a requirement, so a server venv gets Ray only
+            # when that server's own dependencies ask for it.
+            global_config_dict[HEAD_SERVER_CONSTRAINTS_KEY_NAME] = [f"ray=={ray_version}"] if ray_version else []
             # OpenAI version is also sensitive since it changes so often and may introduce subtle
             # incompatibilities — but only pin the parent's version when nemo-gym's own constraint
             # accepts it; otherwise the sub-venv resolutions are unsatisfiable and the venvs come
@@ -1212,7 +1643,7 @@ Found global config dict yaml:
                     "different openai versions across the HTTP boundary)."
                 )
             # Telemetry, when enabled. Server venvs install nemo-gym[dev], not
-            # nemo-gym[telemetry], so without this the orchestrator would export spans and
+            # nemo-gym[telemetry], so without this the supervisor would export spans and
             # every server process would silently have no telemetry at all — a trace with a
             # hole in the middle. Translating the config into the environment first is what
             # lets server_venv_requirements() see that telemetry is on.
@@ -1228,6 +1659,10 @@ Found global config dict yaml:
             global_config_dict.setdefault(SKIP_VENV_IF_PRESENT_KEY_NAME, False)
 
             global_config_dict.setdefault(DRY_RUN_KEY_NAME, False)
+
+            # Bound server startup independently of model-endpoint readiness. Multi-worker
+            # supervisors can otherwise replace a deterministically failing worker forever.
+            global_config_dict.setdefault(SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME, 600)
 
             # How long `gym env start` waits for the model endpoints named in the config to accept
             # a connection. Generous because vLLM can take minutes to load weights; 0 skips it.
@@ -1256,6 +1691,20 @@ Found global config dict yaml:
             # Runtime subprocesses inherit the configured cache directory.
             if not parse_config.offline:
                 environ["UV_CACHE_DIR"] = global_config_dict[UV_CACHE_DIR_KEY_NAME]
+            # Every server installs into that one shared cache, and they all start at once, so
+            # exactly one holds uv's distribution-cache lock while the rest wait out its cold
+            # resolve and download. uv's own default is 300s, which is shorter than a cold install
+            # of a large dependency set - the waiters then abort and the run dies during spinup.
+            # An explicit key wins, then a UV_LOCK_TIMEOUT the user already exported, then 1800.
+            # A null key exports nothing, so the inherited environment (or uv's default) applies.
+            exported_uv_lock_timeout = environ.get("UV_LOCK_TIMEOUT", "").strip()
+            global_config_dict.setdefault(
+                UV_LOCK_TIMEOUT_KEY_NAME,
+                int(exported_uv_lock_timeout) if exported_uv_lock_timeout.isdecimal() else 1800,
+            )
+            uv_lock_timeout = global_config_dict[UV_LOCK_TIMEOUT_KEY_NAME]
+            if not parse_config.offline and uv_lock_timeout is not None:
+                environ["UV_LOCK_TIMEOUT"] = str(uv_lock_timeout)
             # By default, build the directories in their individual folders using the root repository
             # e.g. WORKING_DIR/responses_api_models/my_server
             # Deliberately anchored at WORKING_DIR rather than the cache root: venv
@@ -1375,6 +1824,24 @@ def _apply_verbosity(global_config_dict: DictConfig) -> None:
         logging.getLogger().setLevel(logging.DEBUG)
 
 
+def translate_interpolation_error(e: InterpolationResolutionError) -> ConfigInterpolationError:
+    """Same class of user error as an unset '???' (see raise_on_missing_values), reported the same way
+    instead of letting omegaconf's traceback reach the top level. Covers both a missing `${key}`
+    (InterpolationKeyError) and a failing resolver such as `${oc.env:VAR}`, which carries its own
+    message and so is passed through as-is."""
+    match = re.search(r"Interpolation key '([^']+)' not found", str(e))
+    if not match:
+        return ConfigInterpolationError(str(e))
+    key = match.group(1)
+    return ConfigInterpolationError(
+        f"""Config value '{e.full_key}' references '{key}', which is not set after merging.
+
+Provide it via a CLI override, in env.yaml, or in a config you pass via config_paths.
+For example, on the command line:
+  ++{key}=<value>"""
+    )
+
+
 def set_global_config_dict(
     global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
     global_config_dict_parser_cls: Type[GlobalConfigDictParser] = GlobalConfigDictParser,
@@ -1383,21 +1850,7 @@ def set_global_config_dict(
     try:
         global_config_dict = global_config_dict_parser_cls().parse(global_config_dict_parser_config)
     except InterpolationResolutionError as e:
-        # Same class of user error as an unset '???' (see raise_on_missing_values), so report it the same
-        # way instead of letting omegaconf's traceback reach the top level. Covers both a missing `${key}`
-        # (InterpolationKeyError) and a failing resolver such as `${oc.env:VAR}`, which carries its own
-        # message and so is passed through as-is.
-        match = re.search(r"Interpolation key '([^']+)' not found", str(e))
-        if not match:
-            raise ConfigInterpolationError(str(e)) from e
-        key = match.group(1)
-        raise ConfigInterpolationError(
-            f"""Config value '{e.full_key}' references '{key}', which is not set after merging.
-
-Provide it via a CLI override, in env.yaml, or in a config you pass via config_paths.
-For example, on the command line:
-  ++{key}=<value>"""
-        ) from e
+        raise translate_interpolation_error(e) from e
 
     _GLOBAL_CONFIG_DICT = global_config_dict
 
@@ -1437,8 +1890,98 @@ def allowed_agents_for(global_config_dict: DictConfig, resources_server_name: Op
     return [str(name) for name in declared]
 
 
+def allowed_model_types_for(
+    global_config_dict: DictConfig, resources_server_name: Optional[str]
+) -> Optional[List[str]]:
+    """The model adapter types `resources_server_name` declares support for, or None when unrestricted."""
+    instance = global_config_dict.get(resources_server_name) if resources_server_name else None
+    if not isinstance(instance, DictConfig) or RESOURCES_SERVER_TYPE_KEY_NAME not in instance:
+        return None
+    servers = instance[RESOURCES_SERVER_TYPE_KEY_NAME]
+    if not isinstance(servers, DictConfig) or len(servers) != 1:
+        return None
+    implementation = next(iter(servers))
+    declared = servers[implementation].get(ALLOWED_MODEL_TYPES_KEY_NAME)
+    if not declared:
+        return None
+    if isinstance(declared, str):
+        return [declared]
+    if not isinstance(declared, ListConfig):
+        raise ConfigError(
+            f"'{resources_server_name}.{RESOURCES_SERVER_TYPE_KEY_NAME}.{implementation}."
+            f"{ALLOWED_MODEL_TYPES_KEY_NAME}' must be a list of model types, got {type(declared).__name__}."
+        )
+    return [str(name) for name in declared]
+
+
+def model_type_for(global_config_dict: DictConfig, model_server_name: Optional[str]) -> Optional[str]:
+    """The single model adapter type hosted by `model_server_name`, or None when it cannot be determined."""
+    instance = global_config_dict.get(model_server_name) if model_server_name else None
+    if not isinstance(instance, DictConfig) or MODEL_SERVER_TYPE_KEY_NAME not in instance:
+        return None
+    models = instance[MODEL_SERVER_TYPE_KEY_NAME]
+    if not isinstance(models, DictConfig) or len(models) != 1:
+        return None
+    return str(next(iter(models)))
+
+
+LEGACY_ENVIRONMENT_SERVER_SUFFIX = "_environment_server"
+
+
+def legacy_environment_server_name(agent_name: str, agent_type: str) -> str:
+    """Name an agent's legacy_agent relay after its environment, as the migration script does.
+
+    The agent type, or else a trailing `_agent`, is stripped from the agent name.
+    For example, `workplace_assistant_simple_agent` becomes `workplace_assistant_environment_server`.
+    The name then stays the same when the agent is swapped for another type.
+    """
+    stem = agent_name.removesuffix(f"_{agent_type}").removesuffix(agent_type).rstrip("_")
+    if stem == agent_name:
+        stem = agent_name.removesuffix("_agent").rstrip("_")
+    return f"{stem or agent_type}{LEGACY_ENVIRONMENT_SERVER_SUFFIX}"
+
+
+def legacy_environment_server_block(agent_name: str) -> dict[str, Any]:
+    """The legacy_agent environment server config that relays to one agent."""
+    return {
+        ENVIRONMENT_SERVER_TYPE_KEY_NAME: {
+            "legacy_agent": {
+                "entrypoint": "app.py",
+                AGENT_SERVER_REF_KEY_NAME: {"type": AGENT_SERVER_TYPE_KEY_NAME, "name": agent_name},
+            }
+        }
+    }
+
+
+def agents_without_environment_server_deprecation(generated: Mapping[str, str]) -> str:
+    """Explain the deprecation and how to migrate, with the exact config to add for each agent."""
+    blocks = "\n".join(
+        OmegaConf.to_yaml({server: legacy_environment_server_block(agent)}) for agent, server in generated.items()
+    )
+    agents = ", ".join(f"`{agent}`" for agent in generated)
+    return f"""DEPRECATED: agents without an environment server: {agents}.
+Rollout collection reaches an agent only through an environment server.
+This run generated a legacy_agent environment server for each agent above.
+Each one relays /run to its agent unchanged, so results are not affected.
+A future release will reject these configs with AgentWithoutEnvironmentServerError.
+
+To migrate, declare the environment servers in your config. Either:
+
+1. Run the migration script from a NeMo Gym checkout on your config files or directories:
+
+     python scripts/add_legacy_agent_environment_servers.py path/to/config.yaml [more paths] [--check]
+
+   --check reports what would change without writing.
+
+2. Or add these blocks yourself, at the same level as the agents:
+
+{textwrap.indent(blocks, "     ")}
+To make this an error now, set {ERROR_ON_AGENT_WITHOUT_ENVIRONMENT_SERVER_KEY_NAME}: true in your config.
+You can also pass +{ERROR_ON_AGENT_WITHOUT_ENVIRONMENT_SERVER_KEY_NAME}=true on the command line."""
+
+
 def pairing_override_enabled(global_config_dict: DictConfig) -> bool:
-    """True when the `allowed_agents` guard has been waived by config key or environment variable."""
+    """True when a declared agent/model compatibility guard has been explicitly waived."""
     return bool(global_config_dict.get(ALLOW_UNSUPPORTED_PAIRING_KEY_NAME)) or getenv(
         ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME, ""
     ).lower() not in ("", "0", "false")
@@ -1482,14 +2025,31 @@ def dataset_agent_pins(global_config_dict: DictConfig, instance_name: str) -> Li
     return pins
 
 
+def taskset_environment_server_name(global_config_dict: DictConfig, taskset: Optional[str]) -> Optional[str]:
+    """The Environment Server ``environment_server_routes`` names for a taskset, or None without one."""
+    routes = global_config_dict.get(ENVIRONMENT_SERVER_ROUTES_KEY_NAME)
+    name = routes.get(taskset) if taskset is not None and isinstance(routes, DictConfig) else None
+    return name if isinstance(name, str) else None
+
+
 def resolve_dataset_agent(
-    global_config_dict: DictConfig, declaring_instance_name: str, pin: Optional[str] = None
-) -> str:
+    global_config_dict: DictConfig,
+    declaring_instance_name: str,
+    pin: Optional[str] = None,
+    *,
+    taskset: Optional[str] = None,
+) -> Optional[str]:
     """Resolve the agent that runs a dataset declared by ``declaring_instance_name``.
 
-    Single source of truth for dataset -> agent routing, shared by benchmark discovery,
-    preparation, manifest validation, and rollout dispatch, so they can never disagree.
-    First hit wins:
+    Shared by benchmark discovery, preparation, manifest validation, and flat-row dispatch.
+    A declared ``taskset`` routes to the Environment Server named by ``environment_server_routes``, not
+    to an agent, so its dataset cannot pin one. Resolution checks the route: every agent the server
+    references (``environment_server_agent_refs``) must exist, a declaring agent must be one of them,
+    and a declaring resources server must be the one the server binds. It returns the declaring agent,
+    or the server's attributed agent (``environment_server_attributed_agent``), or None when the server
+    fronts several agents, such as a user and an assistant, without an ``agent_server``. It does not
+    require an agent -> resources edge.
+    Otherwise, first hit wins:
 
     1. ``pin`` (the dataset's ``agent:`` key) — validated: it must name the declaring agent
        itself, or an agent referencing the declaring resources server. Anything else is a hard
@@ -1499,6 +2059,54 @@ def resolve_dataset_agent(
     """
     block = global_config_dict.get(declaring_instance_name)
     is_agent = isinstance(block, DictConfig) and "responses_api_agents" in block
+
+    if taskset is not None:
+        routes = global_config_dict.get(ENVIRONMENT_SERVER_ROUTES_KEY_NAME)
+        environment_name = routes.get(taskset) if isinstance(routes, DictConfig) else None
+        if not isinstance(environment_name, str) or not environment_name:
+            raise ConfigError(f"No Environment Server route for taskset {taskset!r}; set environment_server_routes.")
+        environment = global_config_dict.get(environment_name)
+        servers = environment.get(ENVIRONMENT_SERVER_TYPE_KEY_NAME) if isinstance(environment, DictConfig) else None
+        if not isinstance(servers, DictConfig) or len(servers) != 1:
+            raise ConfigError(f"Taskset {taskset!r} route {environment_name!r} must name an Environment Server.")
+        environment_config = next(iter(servers.values()))
+        if not isinstance(environment_config, DictConfig):
+            raise ConfigError(f"Environment Server {environment_name!r} must have a configuration mapping.")
+        agent_names = []
+        for agent_ref in environment_server_agent_refs(environment_config):
+            name = agent_ref.get("name")
+            agent = global_config_dict.get(name) if isinstance(name, str) else None
+            if not isinstance(agent, DictConfig) or AGENT_SERVER_TYPE_KEY_NAME not in agent:
+                raise ConfigError(
+                    f"Environment Server {environment_name!r} references {name!r}, which is not an agent. "
+                    "Its agent_server and other agent references must name agents."
+                )
+            agent_names.append(name)
+        if not agent_names:
+            raise ConfigError(
+                f"Environment Server {environment_name!r} must bind a valid agent_server for this dataset."
+            )
+        if pin is not None:
+            raise ConfigError(
+                f"Taskset {taskset!r} pins agent {pin!r}, but a taskset routes to Environment Server "
+                f"{environment_name!r} through environment_server_routes, not to an agent. Remove the `agent` key."
+            )
+        if is_agent and declaring_instance_name not in agent_names:
+            raise ConfigError(f"Taskset {taskset!r} must route to its declaring agent {declaring_instance_name!r}.")
+        if not is_agent:
+            resources_ref = environment_config.get("resources_server")
+            if (
+                not isinstance(resources_ref, DictConfig)
+                or resources_ref.get("name") != declaring_instance_name
+                or resources_ref.get("type", RESOURCES_SERVER_TYPE_KEY_NAME) != RESOURCES_SERVER_TYPE_KEY_NAME
+            ):
+                raise ConfigError(
+                    f"Environment Server {environment_name!r} must bind declaring resources server "
+                    f"{declaring_instance_name!r} for taskset {taskset!r}."
+                )
+        if is_agent:
+            return str(declaring_instance_name)
+        return environment_server_attributed_agent(environment_config)
 
     if is_agent:
         if pin is not None and pin != declaring_instance_name:
@@ -1586,7 +2194,7 @@ def format_almost_server_warning(server_name: str, error: ValidationError) -> st
     errors = error.errors()
 
     # Identify the actual server type from the error (excluding Union discriminator noise)
-    server_type_keys = ["responses_api_models", "resources_servers", "responses_api_agents"]
+    server_type_keys = ["responses_api_models", "resources_servers", "responses_api_agents", "environment_servers"]
     actual_server_type = None
 
     # Example error structure: ('ResponsesAPIAgentServerInstanceConfig', 'responses_api_agents', 'simple_agent', 'datasets', 0, 'license')

@@ -22,6 +22,7 @@ lmarena_v3_benchmark_agent:
   _inherit_from: lmarena_v3_simple_agent
   responses_api_agents:
     simple_agent:
+      max_steps: 1
       resources_server:
         type: resources_servers
         name: lmarena_v3_benchmark_resources_server
@@ -52,3 +53,10 @@ responses_create_params:
   top_p: 0.95
   max_output_tokens: 32768
   stream: false
+
+lmarena_v3_benchmark_environment_server:
+  _inherit_from: lmarena_v3_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: lmarena_v3_benchmark_agent

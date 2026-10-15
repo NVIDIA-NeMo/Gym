@@ -78,3 +78,11 @@ litmus_agent_agent:
         - name: example
           type: example
           jsonl_fpath: resources_servers/litmus_agent/data/example.jsonl
+
+litmus_agent_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: litmus_agent_agent

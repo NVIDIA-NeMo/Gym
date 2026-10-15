@@ -16,6 +16,10 @@ import asyncio
 import importlib
 import json
 import logging
+import site
+import subprocess
+import sys
+import sysconfig
 from collections.abc import Sequence
 from copy import deepcopy
 from multiprocessing import Pool
@@ -27,6 +31,7 @@ from pydantic import Field
 from rich.table import Table
 from tqdm.auto import tqdm
 
+from nemo_gym import PARENT_DIR
 from nemo_gym.benchmarks import (
     BenchmarkConfig,
     discover_benchmarks,
@@ -40,19 +45,37 @@ from nemo_gym.cli.utils import (
     print_rich_table,
     render_component_inspection,
 )
-from nemo_gym.config_types import BaseNeMoGymCLIConfig, BenchmarkDatasetConfig, ConfigError, ConfigPathNotFoundError
+from nemo_gym.config_types import (
+    BaseNeMoGymCLIConfig,
+    BenchmarkDatasetConfig,
+    ConfigError,
+    ConfigPathNotFoundError,
+    DatasetConfig,
+    ServerInstanceConfig,
+)
 from nemo_gym.discovery import read_config_metadata
+from nemo_gym.eval_plan import (
+    PlanBenchmark,
+    PlanGym,
+    build_eval_plan,
+    eval_plan_json_schema,
+    write_eval_plan,
+)
 from nemo_gym.global_config import (
     COMPONENT_NAME_KEY_NAME,
     JSON_OUTPUT_KEY_NAME,
     QUERY_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
+    GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     get_first_server_config_dict,
     get_global_config_dict,
     resolve_dataset_agent,
+    taskset_environment_server_name,
 )
+from nemo_gym.orchestration.jobs import installed_gym_commit
+from nemo_gym.package_info import __version__
 
 
 logger = logging.getLogger(__name__)
@@ -73,7 +96,8 @@ def _inspect_benchmark(name: str, benchmarks: dict, global_config_dict) -> None:
     domain, description = read_config_metadata(bench.path)
     details = {
         "config": str(bench.path.resolve()),
-        "agent": bench.agent_name,
+        "agent": bench.agent_name or "",
+        "environment server": bench.environment_server or "",
         "num repeats": str(bench.num_repeats),
         "dataset": str(bench.dataset.jsonl_fpath),
         "prepare script": str(bench.dataset.prepare_script),
@@ -130,6 +154,7 @@ def list_benchmarks() -> None:
             {
                 "name": name,
                 "agent_name": bench.agent_name,
+                "environment_server": bench.environment_server,
                 "domain": metadata[name][0] or "",
                 "num_repeats": bench.num_repeats,
                 "description": metadata[name][1] or "",
@@ -158,7 +183,9 @@ def list_benchmarks() -> None:
 
     for name, bench in benchmarks.items():
         domain, description = metadata[name]
-        table.add_row(name, domain or "", description or "", bench.agent_name, str(bench.num_repeats))
+        # A taskset routed to a server that fronts several agents has no single agent; name the server instead.
+        agent = bench.agent_name or f"{bench.environment_server} (environment server)"
+        table.add_row(name, domain or "", description or "", agent, str(bench.num_repeats))
 
     print_rich_table(table)
 
@@ -169,6 +196,10 @@ class PrepareBenchmarkConfig(BaseNeMoGymCLIConfig):
 
     The benchmark is identified from a config_paths entry pointing to a
     benchmarks/*/config.yaml file.
+
+    With `use_cached_prepared_benchmarks=true`, an existing prepared file is reused. A prepare.py whose output
+    depends on its own code (for example, settings written into each row) can define
+    `is_prepared_data_current(fpath: Path) -> bool`; when it returns False, the cached file is prepared again.
 
     Examples:
 
@@ -194,31 +225,52 @@ def _multiprocess_benchmark_prepare_fn(args):
     prepare_script_args: Dict[str, Any]
     (benchmark_config, prepare_module_path, prepare_script_args) = args
 
-    print(f"Preparing benchmark: {benchmark_config.name}")
+    print(f"Preparing dataset: {benchmark_config.name}")
 
     module = importlib.import_module(prepare_module_path)
     output_fpath = module.prepare(**prepare_script_args)
-    if output_fpath.absolute() != benchmark_config.dataset.jsonl_fpath.absolute():
+    expected_output_fpath = Path(benchmark_config.dataset.jsonl_fpath).absolute()
+    if output_fpath.absolute() != expected_output_fpath:
         raise ConfigError(
-            f"Expected the actual prepared dataset output fpath to match the jsonl_fpath set in the config. Instead got {output_fpath=} jsonl_fpath={benchmark_config.dataset.jsonl_fpath}"
+            f"Expected the actual prepared dataset output fpath to match the jsonl_fpath set in the config. "
+            f"Instead got {output_fpath=} jsonl_fpath={expected_output_fpath}"
         )
-    print(f"Benchmark data prepared at: {output_fpath}")
+    print(f"Dataset prepared at: {output_fpath}")
 
 
-@exit_cleanly_on_config_error
-def prepare_benchmark() -> None:
-    """CLI command: prepare benchmark data."""
-    global_config_dict = get_global_config_dict(
-        global_config_dict_parser_config=GlobalConfigDictParserConfig(
-            initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
-        )
-    )
-    prepare_benchmark_config = PrepareBenchmarkConfig.model_validate(global_config_dict)
+def _install_prepare_dependencies(benchmark_config: "BenchmarkConfig") -> None:
+    """Install what a benchmark's prepare script imports, before importing it.
 
+    Gym cannot depend on every benchmark's data-prep requirements, so a benchmark
+    needing something extra had to shell out to pip from inside the prepare script
+    itself. Declaring it on the dataset puts it in the config instead.
+    """
+    dependencies = benchmark_config.dataset.prepare_dependencies
+    if not dependencies:
+        return
+    logger.info("Installing prepare dependencies for %s: %s", benchmark_config.name, " ".join(dependencies))
+    try:
+        subprocess.run(["uv", "pip", "install", "--python", sys.executable, *dependencies], check=True)
+        # An editable install only adds a .pth file, which `site` reads at
+        # interpreter startup -- this process would not see it otherwise.
+        importlib.invalidate_caches()
+        site.addsitedir(sysconfig.get_paths()["purelib"])
+    except FileNotFoundError as exc:
+        raise ConfigError(
+            f"`uv` is required to install prepare_dependencies for dataset '{benchmark_config.name}'."
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        raise ConfigError(
+            f"Could not install prepare_dependencies for dataset '{benchmark_config.name}': {' '.join(dependencies)}"
+        ) from exc
+
+
+def _datasets_to_prepare(global_config_dict: DictConfig) -> List[BenchmarkConfig]:
+    """Every dataset the resolved config prepares: benchmark datasets and other datasets with a prepare_script."""
     # A benchmark dataset may be declared by an agent block (legacy) or a resources server
     # block (decoupled layout). `resolve_dataset_agent` is the same resolver rollout dispatch
     # uses, so preparation and rollout always agree.
-    benchmarks_dict: Dict[str, BenchmarkConfig] = dict()
+    datasets_to_prepare: List[BenchmarkConfig] = []
     inspected_server_instances: List[str] = []
     for server_instance_name in global_config_dict:
         server_config = global_config_dict[server_instance_name]
@@ -231,79 +283,93 @@ def prepare_benchmark() -> None:
         inspected_server_instances.append(server_instance_name)
         inner_server_config = get_first_server_config_dict(global_config_dict, server_instance_name)
 
-        datasets: List[BenchmarkDatasetConfig] = []
+        datasets: List[BenchmarkDatasetConfig | DatasetConfig] = []
         for dataset in inner_server_config.get("datasets") or []:
-            if dataset["type"] != "benchmark":
+            if dataset["type"] == "benchmark":
+                datasets.append(BenchmarkDatasetConfig.model_validate(dataset))
+            elif dataset.get("prepare_script"):
+                datasets.append(DatasetConfig.model_validate(dataset))
+            else:
                 continue
 
-            datasets.append(BenchmarkDatasetConfig.model_validate(dataset))
+        for dataset in datasets:
+            try:
+                agent_name = resolve_dataset_agent(
+                    global_config_dict,
+                    str(server_instance_name),
+                    pin=getattr(dataset, "agent", None),
+                    taskset=dataset.taskset,
+                )
+            except ConfigError as e:
+                raise ConfigError(f"Dataset {dataset.name!r}: {e}") from e
 
-        if len(datasets) < 1:
-            continue
-
-        if len(datasets) != 1:
-            raise ConfigError(
-                f"Expected exactly 1 benchmark dataset for server instance `{server_instance_name}`, "
-                f"but found {len(datasets)}: {[d.name for d in datasets]}. "
-                "A benchmark config must define a single benchmark dataset."
+            datasets_to_prepare.append(
+                BenchmarkConfig(
+                    name=dataset.name,
+                    path=Path(""),
+                    agent_name=agent_name,
+                    num_repeats=dataset.num_repeats,
+                    dataset=dataset,
+                    environment_server=taskset_environment_server_name(global_config_dict, dataset.taskset),
+                )
             )
 
-        dataset = datasets[0]
-
-        try:
-            agent_name = resolve_dataset_agent(global_config_dict, str(server_instance_name), pin=dataset.agent)
-        except ConfigError as e:
-            raise ConfigError(f"Benchmark dataset {dataset.name!r}: {e}") from e
-
-        # Keyed by the declaring instance: two declarations may resolve to the same agent, and
-        # keying by agent would silently drop all but the last.
-        benchmarks_dict[str(server_instance_name)] = BenchmarkConfig(
-            name=dataset.name,
-            path=Path(""),
-            agent_name=agent_name,
-            num_repeats=dataset.num_repeats,
-            dataset=dataset,
-        )
-
-    if not benchmarks_dict:
+    if not datasets_to_prepare:
         raise ConfigError(
-            "No benchmark config found. "
+            "No preparable dataset config found. "
             + (
-                f"Inspected server instances {inspected_server_instances}, but none declared a `benchmark` dataset."
+                f"Inspected server instances {inspected_server_instances}, but none declared a `benchmark` dataset "
+                "or another dataset with `prepare_script`."
                 if inspected_server_instances
                 else "No server instances with `responses_api_agents` were found in the resolved config."
             )
-            + " Pass a benchmark with `gym eval prepare --benchmark <name>` (e.g. `--benchmark aime24`)."
+            + " Pass a config with `--config <config path>` or a benchmark with `--benchmark <name>`."
         )
 
-    # Validate all benchmarks before preparing any
+    return datasets_to_prepare
+
+
+def _prepare_datasets(datasets: Sequence[BenchmarkConfig], prepare_benchmark_config: PrepareBenchmarkConfig) -> None:
+    """Run each dataset's prepare script, after validating all of them."""
+    # Validate all datasets before preparing any
     prepare_script_missing: List[BenchmarkConfig] = []
     prepare_function_missing: List[BenchmarkConfig] = []
 
     validated: List[Tuple[BenchmarkConfig, str]] = []
     already_prepared: List[BenchmarkConfig] = []
-    for benchmark_config in benchmarks_dict.values():
-        prepare_script_path = benchmark_config.dataset.prepare_script
+    for benchmark_config in datasets:
+        prepare_script = benchmark_config.dataset.prepare_script
+        if prepare_script is None:
+            raise ConfigError(f"Dataset {benchmark_config.name!r} has no prepare_script")
+        prepare_script_path = Path(prepare_script)
         if not prepare_script_path.exists():
             prepare_script_missing.append(benchmark_config)
             continue
 
         prepare_module_path = ".".join(prepare_script_path.with_suffix("").parts)
+        _install_prepare_dependencies(benchmark_config)
         module = importlib.import_module(prepare_module_path)
         if not hasattr(module, "prepare"):
             prepare_function_missing.append(benchmark_config)
             continue
 
-        is_already_prepared = benchmark_config.dataset.jsonl_fpath.exists()
+        is_already_prepared = Path(benchmark_config.dataset.jsonl_fpath).exists()
         if prepare_benchmark_config.use_cached_prepared_benchmarks and is_already_prepared:
-            already_prepared.append(benchmark_config)
-            continue
+            is_current = getattr(module, "is_prepared_data_current", None)
+            if callable(is_current) and not is_current(benchmark_config.dataset.jsonl_fpath):
+                print(
+                    f"The cached file for {benchmark_config.name} ({benchmark_config.dataset.jsonl_fpath}) "
+                    "is out of date, so it will be prepared again."
+                )
+            else:
+                already_prepared.append(benchmark_config)
+                continue
 
         validated.append((benchmark_config, prepare_module_path, dict(prepare_benchmark_config.prepare_script_args)))
 
     if already_prepared:
         already_prepared_str = "".join(f"- {bc.name}: {bc.dataset.jsonl_fpath}\n" for bc in already_prepared)
-        already_prepared_str = f"""The following benchmarks have already been prepared. Since `use_cached_prepared_benchmarks=true`, we will skip re-preparation of those benchmarks.
+        already_prepared_str = f"""The following datasets have already been prepared. Since `use_cached_prepared_benchmarks=true`, we will skip re-preparation of those datasets.
         {already_prepared_str}"""
         print(already_prepared_str)
 
@@ -312,18 +378,18 @@ def prepare_benchmark() -> None:
         prepare_script_missing_str = "".join(
             f"- {bc.name}: {bc.dataset.prepare_script}\n" for bc in prepare_script_missing
         )
-        errors_to_print += f"""The following benchmarks are missing a valid prepare script:
+        errors_to_print += f"""The following datasets are missing a valid prepare script:
 {prepare_script_missing_str}
 """
     if prepare_function_missing:  # pragma: no cover
         prepare_function_missing_str = "".join(
             f"- {bc.name}: {bc.dataset.prepare_script}\n" for bc in prepare_function_missing
         )
-        errors_to_print += f"""The following benchmarks have a prepare script, but are missing the prepare function:
+        errors_to_print += f"""The following datasets have a prepare script, but are missing the prepare function:
 {prepare_function_missing_str}
 """
     if errors_to_print:
-        errors_to_print = f"""Did not prepare any benchmarks due to benchmark config errors.
+        errors_to_print = f"""Did not prepare any datasets due to dataset config errors.
 {errors_to_print}"""
         raise ConfigError(errors_to_print)
 
@@ -335,6 +401,145 @@ def prepare_benchmark() -> None:
     else:
         results = map(_multiprocess_benchmark_prepare_fn, validated)
         list(tqdm(results, total=len(validated)))
+
+
+@exit_cleanly_on_config_error
+def prepare_benchmark() -> None:
+    """CLI command: prepare benchmark data."""
+    global_config_dict = get_global_config_dict(
+        global_config_dict_parser_config=GlobalConfigDictParserConfig(
+            initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+        )
+    )
+    prepare_benchmark_config = PrepareBenchmarkConfig.model_validate(global_config_dict)
+    _prepare_datasets(_datasets_to_prepare(global_config_dict), prepare_benchmark_config)
+
+
+class PlanBenchmarkConfig(PrepareBenchmarkConfig):
+    """
+    Prepare one benchmark and write its plan: every task once, with a stable id and a digest of its input.
+
+    The plan file's format is versioned and printed by `--schema`.
+    Benchmarks whose rows have no `task_id`/`problem_id`/`instance_id`, and benchmarks with a prompt template,
+    are refused.
+
+    Examples:
+
+    ```bash
+    gym eval plan --benchmark terminal_bench_2_1/terminus_2 --out plan.json
+    gym eval plan --schema
+    ```
+    """
+
+    plan_output_fpath: Path | None = Field(default=None, description="Where to write the plan file")
+    plan_task_ids: List[str] | None = Field(default=None, description="Only plan these task ids")
+    print_plan_schema: bool = Field(default=False, description="Print the plan file's JSON Schema and exit")
+
+
+def _gym_relative_path(path: str) -> str:
+    """A config path relative to the Gym checkout when it lies inside it, so plans match across machines."""
+    try:
+        return str(Path(path).resolve().relative_to(PARENT_DIR.resolve()))
+    except ValueError:
+        return str(path)
+
+
+@exit_cleanly_on_config_error
+def plan_benchmark() -> None:
+    """CLI command: write a benchmark's evaluation plan."""
+    global_config_dict = get_global_config_dict(
+        global_config_dict_parser_config=GlobalConfigDictParserConfig(
+            initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+        )
+    )
+    plan_config = PlanBenchmarkConfig.model_validate(global_config_dict)
+    if plan_config.print_plan_schema:
+        print(eval_plan_json_schema(), end="")
+        return
+    if plan_config.plan_output_fpath is None:
+        raise ConfigError("Pass `--out <path>` for the plan file.")
+
+    # Other datasets with a prepare script are not benchmarks, so they are not part of the plan.
+    benchmarks = [
+        dataset
+        for dataset in _datasets_to_prepare(global_config_dict)
+        if isinstance(dataset.dataset, BenchmarkDatasetConfig)
+    ]
+    if len(benchmarks) != 1:
+        raise ConfigError(
+            f"A plan covers exactly one benchmark, but the config declares {len(benchmarks)}: "
+            f"{[benchmark.name for benchmark in benchmarks]}."
+        )
+    benchmark = benchmarks[0]
+    if benchmark.dataset.prompt_config is not None:
+        raise ConfigError(
+            f"Benchmark {benchmark.name!r} declares a prompt template ({benchmark.dataset.prompt_config}); "
+            "plans do not support prompt templates yet."
+        )
+
+    _prepare_datasets([benchmark], plan_config)
+    rows = [json.loads(line) for line in benchmark.dataset.jsonl_fpath.read_text().splitlines() if line.strip()]
+    plan = build_eval_plan(
+        rows,
+        benchmark=PlanBenchmark(
+            name=benchmark.name,
+            config_paths=[_gym_relative_path(path) for path in global_config_dict.get("config_paths") or []],
+        ),
+        taskset=benchmark.dataset.taskset or benchmark.name,
+        gym=PlanGym(version=__version__, commit=installed_gym_commit()),
+        selected_task_ids=plan_config.plan_task_ids,
+    )
+    write_eval_plan(plan, plan_config.plan_output_fpath)
+    print(f"Wrote the plan for {benchmark.name} ({len(plan.tasks)} tasks) to {plan_config.plan_output_fpath}")
+
+
+def _validate_split_datasets_declared(split: str, server_instance_configs: Sequence[ServerInstanceConfig]) -> None:
+    """Fail fast when no config declares a dataset of the requested split's type.
+
+    Data preparation silently produces nothing for such a split, so without this check the run
+    walks the entire preparation sequence (including its success banners) and only dies later
+    trying to read the collated split file.
+    """
+    declared_lines: List[str] = []
+    declared_types: set = set()
+    example_fpaths: List[str] = []
+    for c in server_instance_configs:
+        if c.SERVER_TYPE not in ("responses_api_agents", "resources_servers"):
+            continue
+        for d in c.datasets or []:
+            declared_types.add(d.type)
+            declared_lines.append(f"- {c.name}: {d.name} (type: {d.type})")
+            if d.type == "example":
+                example_fpaths.append(str(d.jsonl_fpath))
+    if split in declared_types:
+        return
+
+    declared_str = "\n".join(declared_lines) if declared_lines else "- (none)"
+    message = (
+        f"No dataset of type `{split}` is declared in this config, so `--split {split}` has nothing to run.\n"
+        f"Declared datasets:\n{declared_str}"
+    )
+    if example_fpaths:
+        example_fpaths_str = "\n".join(
+            f"  gym eval run --no-serve --input {fpath} --output <out>.jsonl" for fpath in example_fpaths
+        )
+        message += (
+            "\nExample datasets are committed smoke-test samples and are not runnable via --split. "
+            "To run one, start the servers (gym env start ...) and collect against the file directly:\n"
+            f"{example_fpaths_str}"
+        )
+    raise ConfigError(message)
+
+
+def _validate_prepared_split_file_exists(input_jsonl_fpath: Path, split: str, output_dirpath: Path) -> None:
+    """Explicit check (not an assert: user-facing, and must survive `python -O`)."""
+    if input_jsonl_fpath.exists():
+        return
+    prepared = sorted(p.name for p in output_dirpath.glob("*.jsonl")) if output_dirpath.exists() else []
+    raise ConfigError(
+        f"Data preparation did not produce `{input_jsonl_fpath}` for split `{split}`. "
+        f"Files prepared under `{output_dirpath}`: {prepared if prepared else 'none'}."
+    )
 
 
 @exit_cleanly_on_config_error
@@ -361,6 +566,9 @@ def e2e_rollout_collection():  # pragma: no cover
         data_process_output_dir = output_fpath.with_suffix("") / "preprocessed_datasets"
         data_processor_config_dict["output_dirpath"] = str(data_process_output_dir)
 
+    server_instance_configs = GlobalConfigDictParser().filter_for_server_instance_configs(global_config_dict)
+    _validate_split_datasets_declared(e2e_rollout_collection_config.split, server_instance_configs)
+
     input_jsonl_fpath = data_process_output_dir / f"{e2e_rollout_collection_config.split}.jsonl"
     should_skip_data_processing = (
         e2e_rollout_collection_config.reuse_existing_data_preparation and input_jsonl_fpath.exists()
@@ -381,7 +589,9 @@ def e2e_rollout_collection():  # pragma: no cover
     # Convert to RolloutCollectionConfig
     rollout_collection_config_dict = deepcopy(global_config_dict)
     with open_dict(rollout_collection_config_dict):
-        assert input_jsonl_fpath.exists(), input_jsonl_fpath
+        _validate_prepared_split_file_exists(
+            input_jsonl_fpath, e2e_rollout_collection_config.split, data_process_output_dir
+        )
         rollout_collection_config_dict["input_jsonl_fpath"] = str(input_jsonl_fpath)
 
     rollout_collection_config = RolloutCollectionConfig.model_validate(
@@ -425,6 +635,8 @@ def e2e_rollout_collection():  # pragma: no cover
             asyncio.run(rch.run_from_config(rollout_collection_config))
         collection_completed = True
     except KeyboardInterrupt:
+        if rollout_collection_config.require_complete:
+            raise RuntimeError("EVAL FAILED: rollout collection interrupted; partial artifacts retained.") from None
         pass
     finally:
         rh.shutdown()
@@ -447,11 +659,24 @@ def e2e_rollout_collection():  # pragma: no cover
 @exit_cleanly_on_config_error
 def collect_rollouts():  # pragma: no cover
     from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+    from nemo_gym.telemetry.setup import (
+        configure_telemetry_env,
+        init_telemetry,
+        shutdown_telemetry,
+        telemetry_config_from_global_config,
+    )
 
-    config = RolloutCollectionConfig.model_validate(get_global_config_dict())
+    global_config_dict = get_global_config_dict()
+    config = RolloutCollectionConfig.model_validate(global_config_dict)
     rch = RolloutCollectionHelper()
 
-    asyncio.run(rch.run_from_config(config))
+    # A standalone driver starts no supervisor, so it sets up its own telemetry for the `gym.job` span and driver metrics.
+    configure_telemetry_env(telemetry_config_from_global_config(global_config_dict))
+    init_telemetry(server_name="driver", server_type="driver")
+    try:
+        asyncio.run(rch.run_from_config(config))
+    finally:
+        shutdown_telemetry()
 
 
 @exit_cleanly_on_config_error
@@ -486,6 +711,16 @@ def health_check_rollouts(
 
 
 @exit_cleanly_on_config_error
+def export_rollouts_as_atif() -> None:  # pragma: no cover
+    from nemo_gym.atif_export import ExportAtifConfig, export_rollouts_to_atif
+
+    config = ExportAtifConfig.model_validate(get_global_config_dict())
+    result = export_rollouts_to_atif(config)
+    print(f"Exported {result.trajectory_count} ATIF trajectory file(s) to {result.output_dirpath}")
+    print(f"Manifest: {result.manifest_fpath}")
+
+
+@exit_cleanly_on_config_error
 def reverify_rollouts():  # pragma: no cover
     from nemo_gym.rollout_reverification import RolloutReverificationConfig, RolloutReverificationHelper
 
@@ -500,7 +735,12 @@ def reverify_rollouts():  # pragma: no cover
 
 @exit_cleanly_on_config_error
 def reward_profile():  # pragma: no cover
-    from nemo_gym.reward_profile import RewardProfileConfig, RewardProfiler
+    from nemo_gym.reward_profile import (
+        RewardProfileConfig,
+        RewardProfiler,
+        coverage_by_agent,
+        select_measured,
+    )
     from nemo_gym.rollout_collection import loads_jsonl_line
 
     config = RewardProfileConfig.model_validate(get_global_config_dict())
@@ -525,9 +765,32 @@ def reward_profile():  # pragma: no cover
     results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
 
     rp = RewardProfiler()
+
+    # Completeness is judged on what was actually collected, before any masking filter:
+    # dropping masked pairs first would hide a genuinely missing rollout behind a set that
+    # happens to align, and silently profile a partial collection as a whole one.
+    rp.align_rows_and_results(rows, results, allow_partial_rollouts=config.allow_partial_rollouts)
+
+    # Quality metrics then come from the measured subset only, the same selection the
+    # aggregation path makes, so profiling the saved rollouts of a run agrees with the
+    # metrics that run published. Completion accounting below still sees every row: a
+    # masked rollout did run, and is not a gap in the collection.
+    measured_rows, measured_results, masked, _ = select_measured(rows, results)
     group_level_metrics, agent_level_metrics, repeat_level_metrics = rp.profile_from_data(
-        rows, results, allow_partial_rollouts=config.allow_partial_rollouts
+        measured_rows, measured_results, allow_partial_rollouts=config.allow_partial_rollouts
     )
+
+    # Each agent carries its own coverage, never the run's. An agent whose every result was
+    # masked has no quality metrics at all, so it is kept as a coverage-only entry rather
+    # than disappearing from the artifact.
+    agent_coverage = coverage_by_agent(rows, results)
+    for entry in agent_level_metrics:
+        name = (entry.get("agent_ref") or {}).get("name")
+        if name in agent_coverage:
+            entry.update(agent_coverage.pop(name))
+    for name, entry_coverage in agent_coverage.items():
+        agent_level_metrics.append({"agent_ref": {"name": name}, **entry_coverage})
+
     completion_summary = rp.profile_completion_summary(rows, results)
     reward_profiling_fpath, agent_level_metrics_fpath, repeat_level_metrics_fpath = rp.write_to_disk(
         group_level_metrics, agent_level_metrics, repeat_level_metrics, Path(config.rollouts_jsonl_fpath)
@@ -536,6 +799,7 @@ def reward_profile():  # pragma: no cover
     print(f"""Profiling outputs:
 Reward profile completion: {completion_summary["completed_rollout_rows"]}/{completion_summary["expected_rollout_rows"]} rollout rows ({completion_summary["reward_profile_completion_pct"]:.2f}%)
 Input rows: {completion_summary["total_input_rows"]} total; {completion_summary["complete_input_rows"]} complete; {completion_summary["partial_input_rows"]} partial; {completion_summary["missing_input_rows"]} without rollouts dropped from output.
+Masked from quality metrics: {len(masked)} rollout rows (kept in completion accounting above).
 Reward profiling outputs: {reward_profiling_fpath}
 Agent-level metrics: {agent_level_metrics_fpath}
 Repeat-level metrics: {repeat_level_metrics_fpath}""")

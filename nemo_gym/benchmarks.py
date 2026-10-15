@@ -24,7 +24,7 @@ from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.config_types import BenchmarkDatasetConfig, ConfigError
+from nemo_gym.config_types import BenchmarkDatasetConfig, ConfigError, DatasetConfig
 from nemo_gym.discovery import _parse_no_environment_tolerating_unset_values, discover_components
 from nemo_gym.global_config import (
     POLICY_MODEL_KEY_NAME,
@@ -32,19 +32,24 @@ from nemo_gym.global_config import (
     GlobalConfigDictParserConfig,
     get_first_server_config_dict,
     resolve_dataset_agent,
+    taskset_environment_server_name,
 )
 
 
 BENCHMARKS_SUBDIR = "benchmarks"
 BENCHMARKS_DIR = PARENT_DIR / BENCHMARKS_SUBDIR
+MANIFEST_FILENAME = "manifest.yaml"
 
 
 class BenchmarkConfig(BaseModel):
     name: str  # this is a dataset name, not the config name (they are usually the same)
     path: Path
-    agent_name: str
+    # None when the dataset routes by taskset to an Environment Server that fronts several agents.
+    agent_name: Optional[str]
     num_repeats: int
-    dataset: BenchmarkDatasetConfig
+    dataset: BenchmarkDatasetConfig | DatasetConfig
+    # The Environment Server a taskset dataset routes to; None for datasets routed by agent.
+    environment_server: Optional[str] = None
 
     @classmethod
     def from_config_path(cls, config_path: Path, *, strict: bool = True) -> "Optional[BenchmarkConfig]":
@@ -95,13 +100,22 @@ class BenchmarkConfig(BaseModel):
         if len(datasets) < 1:
             return
 
+        # A config resolving to several benchmark datasets is an eval suite. Reporting the first would alias
+        # the suite to whichever benchmark happened to sort first, under the suite's own name.
         if len(datasets) > 1:
-            print(f"Expected 1 benchmark dataset for config {path}, but found {len(datasets)}!")
+            print(
+                f"Warning: skipping '{path}': it resolves to {len(datasets)} benchmark datasets, "
+                "so it is an eval suite rather than a single benchmark.",
+                file=sys.stderr,
+            )
+            return
 
         dataset = datasets[0]
 
         try:
-            agent_name = resolve_dataset_agent(global_config_dict, declaring_instance_names[0], pin=dataset.agent)
+            agent_name = resolve_dataset_agent(
+                global_config_dict, declaring_instance_names[0], pin=dataset.agent, taskset=dataset.taskset
+            )
         except ConfigError as e:
             raise ConfigError(f"Benchmark config {path}: dataset {dataset.name!r}: {e}") from e
 
@@ -111,6 +125,7 @@ class BenchmarkConfig(BaseModel):
             agent_name=agent_name,
             num_repeats=dataset.num_repeats,
             dataset=dataset,
+            environment_server=taskset_environment_server_name(global_config_dict, dataset.taskset),
         )
 
 
@@ -127,21 +142,25 @@ def _benchmark_config_name(rel_config_path: Path) -> str:
 
 
 def _is_benchmark_config(config_path: Path) -> bool:
-    """True if the config declares a `type: benchmark` dataset anywhere in its structure.
+    """True if the config declares exactly one `type: benchmark` dataset in its own structure.
 
     A raw single-file parse (no `config_paths`/interpolation resolution), so it's format-agnostic and can't
-    fail on includes. An unparseable file is kept (returns True) so the resolve step surfaces a diagnostic.
+    fail on includes. Declaring several makes it an eval suite rather than a benchmark: there is no single
+    name, agent, or repeat count to catalog it under, so it is not a valid `--benchmark` argument. An
+    unparseable file is kept (returns True) so the resolve step surfaces a diagnostic.
     """
-
-    def declares(node: object) -> bool:
-        if isinstance(node, dict):
-            return node.get("type") == "benchmark" or any(declares(v) for v in node.values())
-        if isinstance(node, list):
-            return any(declares(v) for v in node)
+    if config_path.name == MANIFEST_FILENAME:
         return False
 
+    def count(node: object) -> int:
+        if isinstance(node, dict):
+            return (1 if node.get("type") == "benchmark" else 0) + sum(count(v) for v in node.values())
+        if isinstance(node, list):
+            return sum(count(v) for v in node)
+        return 0
+
     try:
-        return declares(yaml.safe_load(config_path.read_text(errors="ignore")))
+        return count(yaml.safe_load(config_path.read_text(errors="ignore"))) == 1
     except yaml.YAMLError:
         return True
 
@@ -149,8 +168,8 @@ def _is_benchmark_config(config_path: Path) -> bool:
 def _benchmark_config_paths(benchmarks_dir: Path) -> List[Path]:
     """Sorted config paths under one dir that declare a benchmark, discovered by content.
 
-    A config is a benchmark iff it declares a `type: benchmark` dataset, regardless of filename, so we scan
-    every yaml. :func:`_is_benchmark_config` is a cheap prefilter (pay the resolve cost only on real
+    A config is a benchmark iff it declares exactly one `type: benchmark` dataset, regardless of filename, so
+    we scan every yaml. :func:`_is_benchmark_config` is a cheap prefilter (pay the resolve cost only on real
     candidates) that also catches non-`config.yaml` names like tau2's `configs/*.yaml`. Empty if dir missing.
     """
     if not benchmarks_dir.is_dir():
@@ -167,8 +186,8 @@ def _discover_benchmarks_in_dir(benchmarks_dir: Path) -> Dict[str, BenchmarkConf
             # Listing has no runtime context, so tolerate unset runtime-only values.
             maybe_bc = BenchmarkConfig.from_config_path(config_path, strict=False)
         except Exception as e:
-            # Still unresolvable (e.g. a multi-benchmark suite) — skip with a warning rather than fail the
-            # whole listing, so it isn't silently invisible.
+            # Still unresolvable (e.g. missing runtime-only values) — skip with a warning rather than fail
+            # the whole listing, so it isn't silently invisible.
             print(
                 f"Warning: skipping benchmark config '{config_path}': could not resolve it "
                 f"({type(e).__name__}: {str(e).splitlines()[0]}).",

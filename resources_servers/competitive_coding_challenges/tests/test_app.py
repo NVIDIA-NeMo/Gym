@@ -113,6 +113,7 @@ def server() -> CompetitiveCodingChallengesResourcesServer:
 
 def test_sanity(server: CompetitiveCodingChallengesResourcesServer) -> None:
     assert server.config.name == "competitive_coding_challenges"
+    assert server.config.local_compile_dir == "/tmp/nemo-gym-compile"
 
 
 def test_setup_webserver_initializes_evaluator(server: CompetitiveCodingChallengesResourcesServer) -> None:
@@ -125,12 +126,34 @@ def test_setup_webserver_initializes_evaluator(server: CompetitiveCodingChalleng
             "test_batch_size": server.config.test_batch_size,
             "time_scale": server.config.time_scale,
             "shared_dir": server.config.shared_dir,
+            "local_compile_dir": server.config.local_compile_dir,
             "run_all_tests": False,
         },
         num_parallel_requests=server.config.num_parallel_requests,
     )
     assert app is not None
     assert server._evaluator is evaluator_cls.return_value
+
+
+def test_setup_webserver_warns_when_shared_dir_is_tmp(
+    server: CompetitiveCodingChallengesResourcesServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    with (
+        caplog.at_level("WARNING", logger="resources_servers.competitive_coding_challenges.app"),
+        patch("resources_servers.competitive_coding_challenges.app.CCCEvaluator"),
+    ):
+        server.setup_webserver()
+
+    assert "CCC shared_dir is /tmp" in caplog.text
+    assert "Set SHARED_TEMP_DIR to a path mounted into both containers" in caplog.text
+
+
+def test_setup_webserver_allows_disabling_local_compile_staging() -> None:
+    server = _make_server(local_compile_dir=None)
+    with patch("resources_servers.competitive_coding_challenges.app.CCCEvaluator") as evaluator_cls:
+        server.setup_webserver()
+
+    assert evaluator_cls.call_args.kwargs["config"]["local_compile_dir"] is None
 
 
 @pytest.mark.asyncio

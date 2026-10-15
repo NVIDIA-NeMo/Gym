@@ -16,7 +16,7 @@
 This file contains patches copied from https://github.com/SWE-bench/SWE-bench/pull/630
 """
 
-from typing import Optional
+from typing import Any, Dict, Optional
 
 # @bxyu-nvidia: We import wildcard because there are a million imports otherwise...
 from swebench.harness.constants import END_TEST_OUTPUT, MAP_REPO_TO_EXT, START_TEST_OUTPUT
@@ -257,6 +257,29 @@ async def run_instance(
 
 
 ########################################
+# START SWE Bench Verified instance patches
+########################################
+
+
+def patch_swebench_verified_env_vars(repo: str, env: Dict[str, Any]) -> None:
+    if MAP_REPO_TO_EXT.get(repo) == "py":
+        # Activate the SWEBench Verified python conda environment
+        env["CONDA_EXE"] = "/opt/miniconda3/bin/conda"
+        env["_CE_M"] = ""
+        env["CONDA_PREFIX"] = "/opt/miniconda3/envs/testbed"
+        env["CONDA_PROMPT_MODIFIER"] = "(testbed) "
+        env["_CE_CONDA"] = ""
+        env["CONDA_SHLVL"] = "2"
+        env["SHLVL"] = "0"
+        env["CONDA_PYTHON_EXE"] = "/opt/miniconda3/bin/python"
+        env["CONDA_DEFAULT_ENV"] = "testbed"
+        env["PATH"] = (
+            "/opt/miniconda3/envs/testbed/bin:/opt/miniconda3/condabin:/opt/miniconda3/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        )
+        env["CONDA_PREFIX_1"] = "/opt/miniconda3"
+
+
+########################################
 # START SWE Bench Multilingual instance patches
 ########################################
 
@@ -327,7 +350,7 @@ fi""")
         await sandbox.upload(settings_xml_path, "/root/.m2/settings.xml")
 
         # This init.d is necessary for some Java tests to properly pull from the maven mirror
-        await sandbox.upload(init_gradle_path, "~/.gradle/init.d/maven_central_mirror.gradle")
+        await sandbox.upload(init_gradle_path, "/root/.gradle/init.d/maven_central_mirror.gradle")
 
     # tokio-rs__tokio-4384 otherwise resolves getrandom 0.4.3, which
     # requires Cargo 1.85 while its image provides Cargo 1.81.

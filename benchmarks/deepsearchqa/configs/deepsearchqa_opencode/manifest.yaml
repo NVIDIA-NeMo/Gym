@@ -1,0 +1,31 @@
+name: deepsearchqa/configs/deepsearchqa_opencode
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: knowledge
+description: Multi-step web research with answer-set F1 scoring using the opencode
+  harness and Exa search.
+modality: text
+licensing: unknown
+authors:
+- Christian Munley
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+config_path: ../deepsearchqa_opencode.yaml
+resources_server: deepsearchqa
+agent_server: harness_exa_search
+datasets:
+- name: deepsearchqa
+  type: benchmark
+  jsonl_fpath: benchmarks/deepsearchqa/data/deepsearchqa_benchmark.jsonl
+  prepare_script: benchmarks/deepsearchqa/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active

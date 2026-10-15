@@ -11,11 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from omegaconf import OmegaConf
 from stirrup.core.models import AssistantMessage, TokenUsage, ToolCall
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
@@ -33,6 +35,9 @@ from responses_api_agents.stirrup_agent.app import (
     StirrupAgentWrapper,
     StirrupAgentWrapperConfig,
     StirrupRunRequest,
+    TaskPerAttemptTimeoutError,
+    _classify_verify_failure,
+    _has_real_deliverable,
     _load_task_registry,
     _task_finished,
     _verify_cache_path,
@@ -40,7 +45,7 @@ from responses_api_agents.stirrup_agent.app import (
 )
 from responses_api_agents.stirrup_agent.nemo_agent import NeMoUserMessage
 from responses_api_agents.stirrup_agent.stirrup_utils import convert_stirrup_history_to_output_items
-from responses_api_agents.stirrup_agent.task_strategy import TaskStrategy
+from responses_api_agents.stirrup_agent.task_strategy import TaskSampleSkipError, TaskStrategy
 
 
 STIRRUP_AGENT_DIR = Path(__file__).resolve().parent.parent
@@ -124,6 +129,104 @@ class TestApp:
             ),
         )
         StirrupAgentWrapper(config=config, server_client=MagicMock(spec=ServerClient))
+
+        # Generic Stirrup users retain the historical behavior. GDPVal opts in
+        # to its larger floor and matching template semantics in its benchmark
+        # config below.
+        assert config.min_completion_tokens == 1024
+        assert config.context_window_tokens == 262144
+        assert config.prompt_estimator_truncate_history_thinking is None
+        assert config.min_compaction_summary_words == 1
+        assert config.truncation_recovery is False
+
+    def test_gdpval_config_opts_into_safe_context_budget(self) -> None:
+        repo_root = STIRRUP_AGENT_DIR.parents[1]
+        config = OmegaConf.load(repo_root / "benchmarks" / "gdpval" / "config.yaml")
+        agent = config.gdpval_stirrup_agent.responses_api_agents.stirrup_agent
+
+        assert agent.min_completion_tokens == 8192
+        assert agent.context_window_tokens == 262144
+        assert "prompt_estimator_truncate_history_thinking" not in agent
+        assert agent.min_compaction_summary_words == 50
+        assert agent.truncation_recovery is True
+
+    @pytest.mark.asyncio
+    async def test_request_output_cap_does_not_replace_model_context_window(self) -> None:
+        config = _make_config()
+        config.context_window_tokens = 262144
+        config.max_completion_tokens_cap = 64000
+        wrapper = StirrupAgentWrapper(config=config, server_client=MagicMock(spec=ServerClient))
+        body = NeMoGymResponseCreateParamsNonStreaming(
+            input="ignored",
+            model="policy",
+            max_output_tokens=8192,
+            metadata={"task_id": "task-1", "prompt": "do the thing"},
+        )
+        captured = {}
+
+        async def completed_rollout():
+            return {
+                "input_items": [],
+                "output_items": [],
+                "deliverable_text": "",
+                "elapsed_seconds": 0,
+            }
+
+        def launch(params):
+            captured.update(params)
+            return completed_rollout()
+
+        with (
+            patch.object(StirrupAgentWrapper, "resolve_model_base_url", return_value="http://policy.invalid/v1"),
+            patch.object(wrapper.task_strategy, "get_exec_provider", return_value=None),
+            patch(
+                "responses_api_agents.stirrup_agent.app.run_stirrup_agent_remote.remote",
+                side_effect=launch,
+            ),
+        ):
+            await wrapper.responses(body)
+
+        assert captured["context_window_tokens"] == 262144
+        assert captured["max_completion_tokens_cap"] == 8192
+
+    @pytest.mark.parametrize("truncation_recovery", [None, False, True])
+    @pytest.mark.asyncio
+    async def test_truncation_recovery_is_forwarded_to_the_rollout(self, truncation_recovery) -> None:
+        config = _make_config()
+        if truncation_recovery is not None:
+            config.truncation_recovery = truncation_recovery
+        wrapper = StirrupAgentWrapper(config=config, server_client=MagicMock(spec=ServerClient))
+        body = NeMoGymResponseCreateParamsNonStreaming(
+            input="ignored",
+            model="policy",
+            metadata={"task_id": "task-1", "prompt": "do the thing"},
+        )
+        captured = {}
+
+        async def completed_rollout():
+            return {
+                "input_items": [],
+                "output_items": [],
+                "deliverable_text": "",
+                "elapsed_seconds": 0,
+            }
+
+        def launch(params):
+            captured.update(params)
+            return completed_rollout()
+
+        with (
+            patch.object(StirrupAgentWrapper, "resolve_model_base_url", return_value="http://policy.invalid/v1"),
+            patch.object(wrapper.task_strategy, "get_exec_provider", return_value=None),
+            patch(
+                "responses_api_agents.stirrup_agent.app.run_stirrup_agent_remote.remote",
+                side_effect=launch,
+            ),
+        ):
+            await wrapper.responses(body)
+
+        # Unset means off: only configs that opt in (GDPVal's benchmark config) get recovery nudges.
+        assert captured["truncation_recovery"] is bool(truncation_recovery)
 
     def test_output_history_preserves_nemo_user_tool_results(self) -> None:
         """Run-history export should keep NeMo user-role tool results as tool outputs."""
@@ -290,6 +393,41 @@ class TestJudgeOnlyMode:
         assert result["skipped"] is True
         assert result["reward"] == 0.0
 
+    @pytest.mark.parametrize(
+        "stage,listed,forwarded", [(0, True, False), (None, True, False), (1, False, False), (1, True, True)]
+    )
+    @pytest.mark.asyncio
+    async def test_missing_candidate_policy_is_stage_one_only(self, tmp_path, stage, listed, forwarded) -> None:
+        config = _make_config(judge_only=True, rerun_incomplete=True, persist_deliverables_dir=str(tmp_path))
+        config.count_eval_missing_as_loss = True
+        config.missing_eval_task_ids = ["task-1"] if listed else []
+        client = MagicMock(spec=ServerClient)
+        client.post = AsyncMock(return_value=MagicMock())
+        wrapper = StirrupAgentWrapper(config=config, server_client=client)
+        body = StirrupRunRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                input="ignored", metadata={"task_id": "task-1", "prompt": "do the thing", "_ng_rollout_index": "0"}
+            ),
+            task_id="task-1",
+            stage_index=stage,
+        )
+        synthetic = {"reward": 0.0, "judge_response": {"manual_imputation": "eval_missing_as_loss"}}
+        with (
+            patch.object(StirrupAgentWrapper, "responses", AsyncMock()) as rollout,
+            patch("responses_api_agents.stirrup_agent.app.raise_for_status", AsyncMock()),
+            patch("responses_api_agents.stirrup_agent.app.get_response_json", AsyncMock(return_value=synthetic)),
+        ):
+            result = await wrapper.run(MagicMock(cookies={}), body)
+        rollout.assert_not_awaited()
+        verify_calls = [call for call in client.post.await_args_list if call.kwargs.get("url_path") == "/verify"]
+        assert len(verify_calls) == int(forwarded)
+        if forwarded:
+            assert verify_calls[0].kwargs["json"]["stage_index"] == 1
+            assert result == synthetic
+            assert not list(tmp_path.rglob("*verify_response*"))
+        else:
+            assert result["skipped"] is True
+
 
 class TestTaskFinished:
     def test_none_dir_is_unfinished(self) -> None:
@@ -328,6 +466,20 @@ class TestTaskFinished:
         the rollout did not actually finish."""
         (tmp_path / "report.docx").write_text("the deliverable")
         assert _task_finished(str(tmp_path)) is False
+
+
+class TestHasRealDeliverable:
+    def test_metadata_only_directory_has_no_deliverable(self, tmp_path) -> None:
+        for name in ("finish_params.json", "history.json", "metadata.json", "log.txt"):
+            (tmp_path / name).write_text("{}")
+
+        assert _has_real_deliverable(str(tmp_path)) is False
+
+    def test_answer_artifact_is_a_deliverable(self, tmp_path) -> None:
+        (tmp_path / "finish_params.json").write_text("{}")
+        (tmp_path / "answer.txt").write_text("the answer")
+
+        assert _has_real_deliverable(str(tmp_path)) is True
 
 
 class TestRerunIncompleteMode:
@@ -439,6 +591,9 @@ class TestRerunIncompleteMode:
         assert result["error_class"] == "incomplete"
         assert result["reward"] == 0.0
         assert result["skipped"] is False
+        assert result["response"]["id"] == "gdpval-task-1"
+        assert result["response"]["metadata"] is None
+        assert result["response"]["output"][0]["content"][0]["text"] == "done"
         assert NG_TERMINAL_KEY not in result
         assert NG_NO_PERSIST_KEY not in result
 
@@ -649,6 +804,40 @@ class TestRerunIncompleteMode:
         cache_path = _verify_cache_path(str(deliverables_root))
         assert json.loads(cache_path.read_text()) == {"reward": 0.3, "judge_response": "fresh"}
 
+    @pytest.mark.asyncio
+    async def test_judge_only_legacy_invalid_cache_is_rejudged_and_replaced(self, tmp_path) -> None:
+        deliverables_root = tmp_path / "task_task-1" / "repeat_0"
+        deliverables_root.mkdir(parents=True)
+        (deliverables_root / "report.docx").write_text("cached deliverable")
+        cache_path = _verify_cache_path(str(deliverables_root))
+        cache_path.write_text(
+            json.dumps(
+                {
+                    "reward": 0.0,
+                    "invalid_judge_response": True,
+                    "judge_response": {"scoring_error": "no_score_in_response"},
+                }
+            )
+        )
+
+        config = _make_config(rerun_incomplete=True, judge_only=True, persist_deliverables_dir=str(tmp_path))
+        server_client = MagicMock(spec=ServerClient)
+        server_client.post = AsyncMock(return_value=MagicMock())
+        wrapper = StirrupAgentWrapper(config=config, server_client=server_client)
+        request = MagicMock()
+        request.cookies = {}
+        fresh = {"reward": 0.6, "invalid_judge_response": False, "judge_response": {"score": 0.6}}
+
+        with (
+            patch.object(StirrupAgentWrapper, "responses", AsyncMock()),
+            patch("responses_api_agents.stirrup_agent.app.raise_for_status", AsyncMock()),
+            patch("responses_api_agents.stirrup_agent.app.get_response_json", AsyncMock(return_value=fresh)),
+        ):
+            result = await wrapper.run(request, self._make_body())
+
+        assert result == fresh
+        assert json.loads(cache_path.read_text()) == fresh
+
 
 class TestReuseCachedDeliverable:
     """Per-request ``reuse_cached_deliverable`` (used by multi-stage ELO): reuse a
@@ -754,6 +943,289 @@ class TestReuseCachedDeliverable:
         responses_mock.assert_awaited_once()
         assert result == {"reward": 0.5}
 
+    @pytest.mark.asyncio
+    async def test_reuse_falls_back_to_policy_for_metadata_only_directory(self, tmp_path) -> None:
+        deliverables_root = tmp_path / "task_task-1" / "repeat_0"
+        deliverables_root.mkdir(parents=True)
+        (deliverables_root / "finish_params.json").write_text("{}")
+        (deliverables_root / "history.json").write_text("[]")
+        (deliverables_root / "metadata.json").write_text("{}")
+
+        config = _make_config(persist_deliverables_dir=str(tmp_path))
+        server_client = MagicMock(spec=ServerClient)
+        server_client.post = AsyncMock(return_value=MagicMock())
+        wrapper = StirrupAgentWrapper(config=config, server_client=server_client)
+        params = NeMoGymResponseCreateParamsNonStreaming(
+            input="ignored",
+            metadata={"task_id": "task-1", "prompt": "do the thing", "_ng_rollout_index": "0"},
+        )
+        body = StirrupRunRequest(
+            responses_create_params=params,
+            task_id="task-1",
+            prompt="do the thing",
+            reuse_cached_deliverable=True,
+        )
+        request = MagicMock(cookies={})
+        responses_mock = AsyncMock(return_value=_fake_response())
+
+        with (
+            patch.object(StirrupAgentWrapper, "responses", responses_mock),
+            patch("responses_api_agents.stirrup_agent.app.raise_for_status", AsyncMock()),
+            patch(
+                "responses_api_agents.stirrup_agent.app.get_response_json",
+                AsyncMock(return_value={"reward": 0.5}),
+            ),
+        ):
+            result = await wrapper.run(request, body)
+
+        responses_mock.assert_awaited_once()
+        assert result == {"reward": 0.5}
+
+    @pytest.mark.asyncio
+    async def test_invalid_judgement_is_retryable_and_not_cached(self, tmp_path) -> None:
+        deliverables_root = tmp_path / "task_task-1" / "repeat_0"
+        deliverables_root.mkdir(parents=True)
+        (deliverables_root / "answer.txt").write_text("cached deliverable")
+
+        config = _make_config(rerun_incomplete=True, persist_deliverables_dir=str(tmp_path))
+        server_client = MagicMock(spec=ServerClient)
+        server_client.post = AsyncMock(return_value=MagicMock())
+        wrapper = StirrupAgentWrapper(config=config, server_client=server_client)
+        params = NeMoGymResponseCreateParamsNonStreaming(
+            input="ignored",
+            metadata={"task_id": "task-1", "prompt": "do the thing", "_ng_rollout_index": "0"},
+        )
+        body = StirrupRunRequest(
+            responses_create_params=params,
+            task_id="task-1",
+            prompt="do the thing",
+            reuse_cached_deliverable=True,
+        )
+        request = MagicMock()
+        request.cookies = {}
+        invalid_result = {
+            "reward": 0.0,
+            "invalid_judge_response": True,
+            "judge_response": {"scoring_error": "no_score_in_response"},
+        }
+
+        with (
+            patch.object(StirrupAgentWrapper, "responses", AsyncMock()),
+            patch("responses_api_agents.stirrup_agent.app.raise_for_status", AsyncMock()),
+            patch(
+                "responses_api_agents.stirrup_agent.app.get_response_json",
+                AsyncMock(return_value=invalid_result),
+            ),
+        ):
+            result = await wrapper.run(request, body)
+
+        assert result[NG_FAILURE_CLASS_KEY] == "judge_invalid"
+        assert NG_TERMINAL_KEY not in result
+        assert NG_NO_PERSIST_KEY not in result
+        assert "no_score_in_response" in result["error_message"]
+        assert result["invalid_judge_response"] is True
+        assert result["judge_response"] == invalid_result["judge_response"]
+        assert result["reuse_cached_deliverable"] is True
+        assert result["deliverables_dir"] == str(deliverables_root)
+        assert not _verify_cache_path(str(deliverables_root)).exists()
+
+    @pytest.mark.asyncio
+    async def test_invalid_judgement_preserves_completed_policy_response(self, tmp_path) -> None:
+        deliverables_root = tmp_path / "task_task-1" / "repeat_0"
+        deliverables_root.mkdir(parents=True)
+        (deliverables_root / "finish_params.json").write_text("{}")
+        (deliverables_root / "history.json").write_text("[]")
+
+        wrapper = StirrupAgentWrapper(
+            config=_make_config(persist_deliverables_dir=str(tmp_path)),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        wrapper.server_client.post = AsyncMock(return_value=MagicMock())
+        params = NeMoGymResponseCreateParamsNonStreaming(
+            input="ignored",
+            metadata={"task_id": "task-1", "prompt": "do the thing", "_ng_rollout_index": "0"},
+        )
+        body = StirrupRunRequest(responses_create_params=params, task_id="task-1", prompt="do the thing")
+        request = MagicMock(cookies={})
+
+        with (
+            patch.object(StirrupAgentWrapper, "responses", AsyncMock(return_value=_fake_response())),
+            patch("responses_api_agents.stirrup_agent.app.raise_for_status", AsyncMock()),
+            patch(
+                "responses_api_agents.stirrup_agent.app.get_response_json",
+                AsyncMock(
+                    return_value={
+                        "reward": 0.0,
+                        "invalid_judge_response": True,
+                        "judge_response": {"scoring_error": "no_score_in_response"},
+                    }
+                ),
+            ),
+        ):
+            result = await wrapper.run(request, body)
+
+        assert result[NG_FAILURE_CLASS_KEY] == "judge_invalid"
+        assert result["response"]["id"] == "gdpval-task-1"
+        assert result["response"]["metadata"] is None
+        assert result["response"]["output"][0]["content"][0]["text"] == "done"
+        # Bookkeeping files alone must not advertise a cached policy artifact.
+        assert "reuse_cached_deliverable" not in result
+        assert result["deliverables_dir"] == str(deliverables_root)
+
+    @pytest.mark.asyncio
+    async def test_nonretryable_invalid_judgement_is_terminal(self, tmp_path) -> None:
+        deliverables_root = tmp_path / "task_task-1" / "repeat_0"
+        deliverables_root.mkdir(parents=True)
+        (deliverables_root / "answer.txt").write_text("cached deliverable")
+        wrapper = StirrupAgentWrapper(
+            config=_make_config(rerun_incomplete=True, persist_deliverables_dir=str(tmp_path)),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        params = NeMoGymResponseCreateParamsNonStreaming(
+            input="ignored",
+            metadata={"task_id": "task-1", "prompt": "do the thing", "_ng_rollout_index": "0"},
+        )
+        body = StirrupRunRequest(
+            responses_create_params=params,
+            task_id="task-1",
+            prompt="do the thing",
+            reuse_cached_deliverable=True,
+        )
+        request = MagicMock(cookies={})
+
+        with (
+            patch.object(StirrupAgentWrapper, "responses", AsyncMock()),
+            patch("responses_api_agents.stirrup_agent.app.raise_for_status", AsyncMock()),
+            patch(
+                "responses_api_agents.stirrup_agent.app.get_response_json",
+                AsyncMock(
+                    return_value={
+                        "reward": 0.0,
+                        "invalid_judge_response": True,
+                        "invalid_judge_retryable": False,
+                        "judge_response": {"scoring_error": "missing_rubric"},
+                    }
+                ),
+            ),
+        ):
+            result = await wrapper.run(request, body)
+
+        assert result[NG_FAILURE_CLASS_KEY] == "permanent"
+        assert result[NG_TERMINAL_KEY] is True
+        assert result["invalid_judge_retryable"] is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("verify_error", "expected_class", "terminal"),
+        [
+            (asyncio.TimeoutError("judge timed out"), "transient", False),
+            (
+                RuntimeError("GDPVal judge request size budget exhausted before dispatch"),
+                "permanent",
+                True,
+            ),
+        ],
+    )
+    async def test_verify_exception_reuses_completed_policy_artifact(
+        self,
+        tmp_path,
+        verify_error: Exception,
+        expected_class: str,
+        terminal: bool,
+    ) -> None:
+        deliverables_root = tmp_path / "task_task-1" / "repeat_0"
+        deliverables_root.mkdir(parents=True)
+        (deliverables_root / "answer.txt").write_text("completed policy artifact")
+        wrapper = StirrupAgentWrapper(
+            config=_make_config(persist_deliverables_dir=str(tmp_path)),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        wrapper.server_client.post = AsyncMock(return_value=MagicMock())
+        body = StirrupRunRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                input="ignored",
+                metadata={"task_id": "task-1", "prompt": "do the thing", "_ng_rollout_index": "0"},
+            ),
+            task_id="task-1",
+            prompt="do the thing",
+        )
+        request = MagicMock(cookies={})
+        responses_mock = AsyncMock(return_value=_fake_response())
+
+        with (
+            patch.object(StirrupAgentWrapper, "responses", responses_mock),
+            patch("responses_api_agents.stirrup_agent.app.raise_for_status", AsyncMock()),
+            patch(
+                "responses_api_agents.stirrup_agent.app.get_response_json",
+                AsyncMock(side_effect=verify_error),
+            ),
+        ):
+            result = await wrapper.run(request, body)
+
+        responses_mock.assert_awaited_once()
+        assert result[NG_FAILURE_CLASS_KEY] == expected_class
+        assert bool(result.get(NG_TERMINAL_KEY)) is terminal
+        assert result["deliverables_dir"] == str(deliverables_root)
+        assert result["reuse_cached_deliverable"] is True
+        assert result["response"]["id"] == "gdpval-task-1"
+        assert result["response"]["metadata"] is None
+        assert result["response"]["output"][0]["content"][0]["text"] == "done"
+
+
+class TestVerifyFailureClassification:
+    def test_nested_request_size_failure_is_permanent(self) -> None:
+        outer = RuntimeError("resources server failed")
+        outer.__cause__ = RuntimeError("Request size is too large for this model")
+        assert _classify_verify_failure(outer) == "permanent"
+
+    def test_internal_request_budget_failure_is_permanent(self) -> None:
+        outer = RuntimeError(
+            "all GDPVal comparison matchups failed: GDPVal judge request size budget exhausted before dispatch"
+        )
+        assert _classify_verify_failure(outer) == "permanent"
+
+    def test_wrapped_http_500_payload_error_is_permanent(self) -> None:
+        from aiohttp import ClientResponseError
+
+        exc = ClientResponseError(
+            request_info=MagicMock(real_url="http://judge/verify"),
+            history=(),
+            status=500,
+            message="Internal Server Error",
+        )
+        exc.response_content = b'{"error":"maximum context length exceeded"}'
+        assert _classify_verify_failure(exc) == "permanent"
+
+    def test_ordinary_http_500_remains_retryable(self) -> None:
+        from aiohttp import ClientResponseError
+
+        exc = ClientResponseError(
+            request_info=MagicMock(real_url="http://judge/verify"),
+            history=(),
+            status=500,
+            message="Internal Server Error",
+        )
+        exc.response_content = b'{"error":"temporary upstream outage"}'
+        assert _classify_verify_failure(exc) == "transient"
+
+    def test_permanent_payload_is_terminal(self) -> None:
+        config = _make_config()
+        wrapper = StirrupAgentWrapper(config=config, server_client=MagicMock(spec=ServerClient))
+        params = NeMoGymResponseCreateParamsNonStreaming(
+            input="ignored",
+            metadata={"task_id": "task-1", "prompt": "do the thing"},
+        )
+        payload = wrapper._build_failed_run_payload(
+            body_dict={"task_id": "task-1"},
+            fixed_params=params,
+            task_info={"task_id": "task-1"},
+            reason="request size is too large",
+            skipped=False,
+            error_class="permanent",
+        )
+        assert payload[NG_FAILURE_CLASS_KEY] == "permanent"
+        assert payload[NG_TERMINAL_KEY] is True
+
 
 class TestReferenceKeyedVerifyCache:
     """rerun_incomplete + multi-stage ELO: the cached judgement is keyed by the
@@ -779,12 +1251,17 @@ class TestReferenceKeyedVerifyCache:
         bc = _verify_cache_path(d, ["ref_b", "ref_c"])
         cb = _verify_cache_path(d, ["ref_c", "ref_b"])
         bd = _verify_cache_path(d, ["ref_b", "ref_d"])
+        empty = _verify_cache_path(d, [])
+        namespaced_a = _verify_cache_path(d, ["ref_b", "ref_c"], "run-a")
+        namespaced_b = _verify_cache_path(d, ["ref_b", "ref_c"], "run-b")
         # No references ⇒ the single unkeyed slot.
         assert unkeyed.name == "repeat_0_verify_response.json"
-        # Reference sets get distinct, order-independent slots.
+        # Reference sets and run semantics get distinct, order-independent slots.
         assert bc == cb
         assert bc != unkeyed
         assert bc != bd
+        assert empty != unkeyed
+        assert namespaced_a not in {bc, namespaced_b}
 
     @pytest.mark.asyncio
     async def test_same_reference_set_reuses_cached_judgement(self, tmp_path) -> None:
@@ -814,6 +1291,39 @@ class TestReferenceKeyedVerifyCache:
         verify_calls = [c for c in server_client.post.await_args_list if c.kwargs.get("url_path") == "/verify"]
         assert verify_calls == []
         assert result == cached
+
+    @pytest.mark.parametrize("stage,marker", [(0, None), (0, "{}"), (1, "null"), (1, "{}")])
+    @pytest.mark.asyncio
+    async def test_synthetic_cache_is_rechecked_for_calibration_and_repaired_artifacts(
+        self, tmp_path, stage, marker
+    ) -> None:
+        directory = tmp_path / "task_task-1" / "repeat_0"
+        directory.mkdir(parents=True)
+        if marker is not None:
+            (directory / "finish_params.json").write_text(marker)
+        cache = _verify_cache_path(str(directory), ["ref"])
+        cache.write_text(json.dumps({"reward": 0.0, "judge_response": {"manual_imputation": "eval_missing_as_loss"}}))
+        config = _make_config(judge_only=True, rerun_incomplete=True, persist_deliverables_dir=str(tmp_path))
+        config.count_eval_missing_as_loss = True
+        config.missing_eval_task_ids = ["task-1"]
+        client = MagicMock(spec=ServerClient)
+        client.post = AsyncMock(return_value=MagicMock())
+        wrapper = StirrupAgentWrapper(config=config, server_client=client)
+        body = self._body(["ref"])
+        body.stage_index = stage
+        fresh = {"reward": 0.5, "judge_response": {"total_judged": 4}}
+        with (
+            patch.object(StirrupAgentWrapper, "responses", AsyncMock()) as rollout,
+            patch("responses_api_agents.stirrup_agent.app.raise_for_status", AsyncMock()),
+            patch("responses_api_agents.stirrup_agent.app.get_response_json", AsyncMock(return_value=fresh)),
+        ):
+            result = await wrapper.run(MagicMock(cookies={}), body)
+        rollout.assert_not_awaited()
+        verify_calls = [call for call in client.post.await_args_list if call.kwargs.get("url_path") == "/verify"]
+        assert len(verify_calls) == 1
+        assert verify_calls[0].kwargs["json"]["stage_index"] == stage
+        assert result == fresh
+        assert json.loads(cache.read_text()) == fresh
 
     @pytest.mark.asyncio
     async def test_different_reference_set_rejudges_and_caches_separately(self, tmp_path) -> None:
@@ -882,3 +1392,108 @@ class TestExampleDataset:
             # reference_files / rubric_json are JSON-encoded strings.
             json.loads(metadata["reference_files"])
             json.loads(metadata["rubric_json"])
+
+
+class TestPerTaskTimeoutIsRetryable:
+    """A per-task timeout describes the attempt's conditions, not the task.
+
+    Per-stream decode slows as in-flight count rises, so the same task can
+    breach the cap under load and finish comfortably on a quieter allocation.
+    Marking it terminal converted recoverable contention into permanent data
+    loss, and hid it — aggregate rollouts/hr *improves* as this gets worse.
+    """
+
+    def _make_body(self, task_id: str = "task-1") -> StirrupRunRequest:
+        params = NeMoGymResponseCreateParamsNonStreaming(
+            input="ignored",
+            metadata={"task_id": task_id, "prompt": "do the thing", "_ng_rollout_index": "0"},
+        )
+        return StirrupRunRequest(responses_create_params=params, task_id=task_id, prompt="do the thing")
+
+    @pytest.mark.asyncio
+    async def test_timeout_goes_to_sidecar_without_terminal_flag(self, tmp_path) -> None:
+        config = _make_config(persist_deliverables_dir=str(tmp_path))
+        server_client = MagicMock(spec=ServerClient)
+        server_client.post = AsyncMock(side_effect=RuntimeError("no server in unit test"))
+        wrapper = StirrupAgentWrapper(config=config, server_client=server_client)
+
+        request = MagicMock()
+        request.cookies = {}
+
+        timeout = TaskPerAttemptTimeoutError("per-task timeout exceeded (12600 s)")
+        with patch.object(StirrupAgentWrapper, "responses", AsyncMock(side_effect=timeout)):
+            result = await wrapper.run(request, self._make_body())
+
+        assert result[NG_FAILURE_CLASS_KEY] == "timeout_exceeded"
+        # The whole point: retryable, so a resume re-dispatches it.
+        assert NG_TERMINAL_KEY not in result
+        assert NG_NO_PERSIST_KEY not in result
+        # Contention at the time of failure, so a timeout at concurrency 1 stays
+        # distinguishable from one at concurrency 16.
+        assert result["_ng_timeout_concurrency_limit"] == config.concurrency
+        assert result["_ng_timeout_inflight"] == 1
+
+    @pytest.mark.asyncio
+    async def test_skipped_sample_stays_terminal(self, tmp_path) -> None:
+        """A sample that cannot be built is genuinely unretryable."""
+        config = _make_config(persist_deliverables_dir=str(tmp_path))
+        server_client = MagicMock(spec=ServerClient)
+        server_client.post = AsyncMock(side_effect=RuntimeError("no server in unit test"))
+        wrapper = StirrupAgentWrapper(config=config, server_client=server_client)
+
+        request = MagicMock()
+        request.cookies = {}
+
+        with patch.object(
+            StirrupAgentWrapper, "responses", AsyncMock(side_effect=TaskSampleSkipError("unusable sample"))
+        ):
+            result = await wrapper.run(request, self._make_body())
+
+        assert result[NG_FAILURE_CLASS_KEY] == "skipped"
+        assert result[NG_TERMINAL_KEY] is True
+
+    @pytest.mark.asyncio
+    async def test_failure_rows_carry_elapsed_seconds(self, tmp_path) -> None:
+        """Without this the resume-time longest-first sort has nothing to sort on.
+
+        Successes get ``elapsed_seconds`` from the Ray result, but failure rows
+        are built from the request body and used to carry no timing at all — so
+        the timed-out tasks, whose length is exactly what the ordering wants to
+        know, were invisible to it.
+        """
+        config = _make_config(persist_deliverables_dir=str(tmp_path))
+        server_client = MagicMock(spec=ServerClient)
+        server_client.post = AsyncMock(side_effect=RuntimeError("no server in unit test"))
+        wrapper = StirrupAgentWrapper(config=config, server_client=server_client)
+
+        request = MagicMock()
+        request.cookies = {}
+
+        with patch.object(
+            StirrupAgentWrapper,
+            "responses",
+            AsyncMock(side_effect=TaskPerAttemptTimeoutError("per-task timeout exceeded")),
+        ):
+            result = await wrapper.run(request, self._make_body())
+
+        assert result["elapsed_seconds"] >= 0.0
+        assert isinstance(result["elapsed_seconds"], float)
+
+    @pytest.mark.asyncio
+    async def test_inflight_returns_to_zero_after_a_failure(self, tmp_path) -> None:
+        config = _make_config(persist_deliverables_dir=str(tmp_path))
+        server_client = MagicMock(spec=ServerClient)
+        server_client.post = AsyncMock(side_effect=RuntimeError("no server in unit test"))
+        wrapper = StirrupAgentWrapper(config=config, server_client=server_client)
+
+        request = MagicMock()
+        request.cookies = {}
+
+        assert wrapper.inflight == 0
+        with patch.object(
+            StirrupAgentWrapper,
+            "responses",
+            AsyncMock(side_effect=TaskPerAttemptTimeoutError("per-task timeout exceeded")),
+        ):
+            await wrapper.run(request, self._make_body())
+        assert wrapper.inflight == 0

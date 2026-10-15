@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+from copy import deepcopy
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -158,6 +159,56 @@ class TestHelpers:
 class TestApp:
     def test_sanity(self):
         _make_server()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("missing_turns", [(), (1,), (2,), (1, 2)])
+    @pytest.mark.parametrize("detail_tokens", [None, 0, 5])
+    async def test_run_reports_both_turns_usage(self, missing_turns, detail_tokens):
+        server = _make_server()
+        turn1 = deepcopy(_MODEL_RESPONSE)
+        turn2 = deepcopy(_MODEL_RESPONSE)
+        turn1["output"][0]["content"][0]["text"] = "<think>Solving...</think>The answer is 1.23"
+        turn2["output"][0]["content"][0]["text"] = "def solve():\n    return 1.23"
+        for turn, response, input_tokens, output_tokens in [(1, turn1, 100, 200), (2, turn2, 350, 20)]:
+            response["usage"] = (
+                None
+                if turn in missing_turns
+                else {
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "total_tokens": input_tokens + output_tokens,
+                    "input_tokens_details": {"cached_tokens": detail_tokens},
+                    "output_tokens_details": {"reasoning_tokens": detail_tokens},
+                }
+            )
+
+        async def post(*, url_path, json, **kwargs):
+            if url_path == "/verify":
+                return _mock_post_response(json | {"reward": 1.0})
+            return _mock_post_response(next(responses))
+
+        responses = iter([{}, turn1, turn2])
+        server.server_client.post.side_effect = post
+        request_mock = MagicMock(cookies={})
+        result = await server.run(request_mock, _make_run_body())
+
+        verify_data = server.server_client.post.call_args_list[3].kwargs["json"]
+        assert verify_data["response"]["output"] == turn2["output"]
+        assert _extract_output_text(result.response.model_dump()) == "def solve():\n    return 1.23"
+        assert result.reward == 1.0
+        if missing_turns:
+            assert verify_data["response"]["usage"] is None
+            assert result.response.usage is None
+        else:
+            expected_usage = {
+                "input_tokens": 450,
+                "output_tokens": 220,
+                "total_tokens": 670,
+                "input_tokens_details": {"cached_tokens": None if detail_tokens is None else 2 * detail_tokens},
+                "output_tokens_details": {"reasoning_tokens": None if detail_tokens is None else 2 * detail_tokens},
+            }
+            assert verify_data["response"]["usage"] == expected_usage
+            assert result.response.usage.model_dump() == expected_usage
 
     @pytest.mark.asyncio
     async def test_run_correct(self):

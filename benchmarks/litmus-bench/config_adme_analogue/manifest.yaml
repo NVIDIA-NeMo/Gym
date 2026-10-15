@@ -1,0 +1,31 @@
+name: litmus-bench/config_adme_analogue
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: knowledge
+description: ADME Tier-5 analogue property evaluation from local validation exports,
+  scored with per-row comparison rules.
+modality: text
+licensing: unknown
+authors:
+- Olivia Viessmann
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+config_path: ../config_adme_analogue.yaml
+resources_server: litmus_agent
+agent_server: simple_agent
+datasets:
+- name: adme-tier5-analogue
+  type: benchmark
+  jsonl_fpath: benchmarks/litmus-bench/data/adme-tier5-analogue_benchmark.jsonl
+  prepare_script: benchmarks/litmus-bench/prepare_adme_tier5.py
+  num_repeats: 5
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active

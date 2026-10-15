@@ -29,13 +29,23 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Callable
 from contextvars import ContextVar, Token
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 
-from nemo_gym.token_id_capture.lineage import assistant_fingerprint, stamp_continuation
-from nemo_gym.token_id_capture.protocols import LineageResolution, LineageStore, TokenSink
+from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint
+from nemo_gym.token_id_capture.lineage import stamp_continuation
+from nemo_gym.token_id_capture.protocols import (
+    CaptureLedger,
+    LineageResolution,
+    LineageResolver,
+    RolloutRetiredError,
+    TokenCaptureFrozenError,
+    TokenSink,
+)
 from nemo_gym.token_id_capture.records import (
+    UNRESOLVED_PARENT_REASON,
     ParentResolutionStatus,
     TokenEntry,
     extract_token_fields,
@@ -46,6 +56,16 @@ from nemo_gym.token_id_capture.records import (
 
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from nemo_gym.token_id_capture.staging.records import CaptureAdmission, CaptureLedgerCommit
+
+# Wire field names between the Gym model server and a framework inference
+# worker: the typed admission rides the engine-bound request under
+# ``NG_CAPTURE_FIELD``; the worker's token-light acknowledgement rides the
+# response under ``NG_COMMIT_COORDS_FIELD``.
+NG_CAPTURE_FIELD = "ng_capture"
+NG_COMMIT_COORDS_FIELD = "ng_commit_coords"
 
 
 @dataclass
@@ -64,7 +84,8 @@ class CaptureContext:
     # ``None`` means another process owns record staging.
     # The context still carries the capture identity.
     token_sink: TokenSink | None
-    lineage_store: LineageStore | None = None
+    # External staging binds a ``CaptureLedger``; the built-in path needs only a resolver.
+    lineage_store: LineageResolver | CaptureLedger | None = None
     model: str = ""
     # ``commit_entry`` sets this after another capture path records the call.
     committed: bool = False
@@ -77,6 +98,36 @@ class CaptureContext:
     # Resolve the parent once before dispatch.
     # Downstream inference and capture share this immutable decision.
     parent_resolution: LineageResolution | None = None
+    # A framework inference worker stages this call's tokens; the lineage
+    # store doubles as the rollout's capture ledger and admission is the
+    # strict tri-state of the lineage result.
+    external_staging: bool = False
+    # Stamped once when the middleware admits the call. The ledger row reuses
+    # this value on every commit retry so idempotent re-records stay
+    # byte-identical.
+    admitted_at: float | None = None
+    capture_admission: CaptureAdmission | None = None
+    parent_staging_chain: list[str] = field(default_factory=list)
+    parent_chain_hash: str = ""
+    # The request items as received from the harness, stashed by
+    # ``resolve_parent`` so the commit hook can publish the ledger row with
+    # the exact representation the next request will echo.
+    request_items: list[dict] | None = None
+    # Retain the worker acknowledgement privately until API conversion finishes.
+    external_commit_coords: dict[str, Any] | None = None
+    # A normal worker completion was received, even if its acknowledgement is
+    # missing. Synthetic guard/overflow completions leave this false.
+    external_worker_response_seen: bool = False
+    # Lets a checkpoint participant amend this call's admission before dispatch,
+    # for example to continue a restored generation cut.
+    # Set per call; never process-global.
+    admission_hook: Callable[[CaptureContext, CaptureAdmission], CaptureAdmission] | None = None
+    # Set by a checkpoint gate in front of this call.
+    # The gate then publishes the ledger row when the response starts,
+    # so no row exists for an answer that is held back or never sent.
+    publish_on_delivery: bool = False
+    # The ledger row that finalization left for the gate to publish; kept after publication.
+    deferred_commit: CaptureLedgerCommit | None = None
 
     @property
     def parent_call_id(self) -> str | None:
@@ -125,6 +176,25 @@ def current_capture_context() -> CaptureContext | None:
     return _CAPTURE_CONTEXT.get()
 
 
+def mark_external_staging_committed(*, rollout_id: str, model_call_id: str) -> None:
+    """Mark the current call as durably recorded by a framework worker.
+
+    Call this only after the external staging sink has acknowledged the call.
+    Identity validation prevents a delayed or cross-request acknowledgement
+    from suppressing normal capture for a different request.
+    """
+    context = _CAPTURE_CONTEXT.get()
+    if context is None:
+        raise RuntimeError("no training-token capture context is active")
+    if context.rollout_id != rollout_id or context.model_call_id != model_call_id:
+        raise ValueError(
+            "external staging acknowledgement does not match the active capture "
+            f"context ({rollout_id}/{model_call_id} != "
+            f"{context.rollout_id}/{context.model_call_id})"
+        )
+    context.committed = True
+
+
 def reset_token_sink(token: Token) -> None:
     _CAPTURE_CONTEXT.reset(token)
 
@@ -138,10 +208,21 @@ async def resolve_parent(request_messages: list | None) -> None:
     Return without work for untagged traffic.
     Every attempted resolution records a root, resolved, or unresolved decision.
     An unresolved decision includes its reason.
+
+    For external staging, parent resolution determines whether the worker may capture the call:
+
+    * A unique parent creates a ``token_in`` admission.
+    * A request with no prior assistant output creates a ``text`` root.
+    * An unresolved request may create a ``text`` root only when the rollout has no ledger rows.
+    * Every other result records a failure and leaves the call unadmitted.
+
+    An unresolved continuation cannot become a new root.
+    Doing so would train the earlier generated tokens as prompt tokens.
     """
     context = _CAPTURE_CONTEXT.get()
     if context is None or request_messages is None:
         return
+    context.request_items = list(request_messages)
     try:
         if not assistant_fingerprint(request_messages):
             context.parent_resolution = LineageResolution(ParentResolutionStatus.ROOT)
@@ -163,12 +244,88 @@ async def resolve_parent(request_messages: list | None) -> None:
         else:
             context.parent_resolution = await context.lineage_store.resolve(context.rollout_id, request_messages)
         _count_resolution(context.parent_resolution.status.value)
-    except Exception:
+    except Exception as error:
+        # Worker custody fails closed: an unresolved parent would silently
+        # break the ledger's chained-ancestry guarantees.
+        if context.external_staging:
+            raise RuntimeError(f"ledger lineage resolution failed for rollout {context.rollout_id}") from error
         logger.warning("Could not resolve a parent for rollout %s.", context.rollout_id, exc_info=True)
         context.parent_resolution = LineageResolution(
             ParentResolutionStatus.UNRESOLVED,
             reason="lookup_error",
         )
+    resolved_match = context.parent_resolution.match if context.parent_resolution is not None else None
+    if resolved_match is not None:
+        context.parent_staging_chain = list(resolved_match.staging_chain)
+        context.parent_chain_hash = resolved_match.chain_hash
+    if not context.external_staging or context.capture_admission is not None or context.lineage_store is None:
+        return
+    ledger = context.lineage_store
+    if not isinstance(ledger, CaptureLedger):
+        raise RuntimeError("external staging requires a CaptureLedger on the capture context")
+
+    # Deferred: staging.records pulls in the digest module.
+    from nemo_gym.token_id_capture.staging.records import CaptureAdmission
+
+    match = context.parent_resolution.match if context.parent_resolution is not None else None
+    if match is not None:
+        # A legacy external parent row without a chain hash cannot anchor a
+        # chained child; the CaptureAdmission validator rejects it and the
+        # except path below poisons the call (fail closed).
+        try:
+            context.capture_admission = CaptureAdmission(
+                rollout_id=context.rollout_id,
+                model_call_id=context.model_call_id,
+                parent_call_id=match.model_call_id,
+                prev_len=match.prev_len,
+                mode="token_in",
+                required_prefix_token_ids=[],
+                staging_chain=list(match.staging_chain),
+                parent_chain_hash=match.chain_hash or None,
+            )
+        except ValueError:
+            logger.warning(
+                "Parent %s of model call %s (rollout %s) cannot admit a chained child; poisoning the call.",
+                match.model_call_id,
+                context.model_call_id,
+                context.rollout_id,
+                exc_info=True,
+            )
+            await ledger.record_failure(
+                context.rollout_id,
+                context.model_call_id,
+                UNRESOLVED_PARENT_REASON,
+            )
+        return
+    is_root = context.parent_resolution is not None and context.parent_resolution.status == ParentResolutionStatus.ROOT
+    try:
+        has_rows = await ledger.has_rows(context.rollout_id)
+    except RolloutRetiredError:
+        # A late call of an abandoned attempt, or the first call of a duplicate run. Admitting it would stage
+        # tokens that the ledger then refuses to record, so no manifest would ever name them.
+        logger.warning(
+            "Model call %s of rollout %s arrived after the rollout was retired; its tokens are not captured.",
+            context.model_call_id,
+            context.rollout_id,
+        )
+        return
+    if is_root or not has_rows:
+        context.capture_admission = CaptureAdmission(
+            rollout_id=context.rollout_id,
+            model_call_id=context.model_call_id,
+            mode="text",
+        )
+        return
+    logger.warning(
+        "Unresolved parent for model call %s of rollout %s; poisoning the call.",
+        context.model_call_id,
+        context.rollout_id,
+    )
+    await ledger.record_failure(
+        context.rollout_id,
+        context.model_call_id,
+        UNRESOLVED_PARENT_REASON,
+    )
 
 
 async def register_call_intent() -> None:
@@ -202,6 +359,10 @@ async def capture_tokens(
     """
     context = _CAPTURE_CONTEXT.get()
     if context is None:
+        return
+    # Worker custody has already staged and committed through the external
+    # response hook. It must never fall back to a local/no-op token sink.
+    if context.external_staging:
         return
     # Guard response decoding and record validation.
     # Either failure leaves the rollout short one call.
@@ -276,12 +437,12 @@ async def commit_entry(
     if context is None:
         return
     if entry.rollout_id != context.rollout_id or entry.model_call_id != context.model_call_id:
-        logger.warning(
-            "Training-token capture identity mismatch for model call %s of rollout %s.",
-            context.model_call_id,
-            context.rollout_id,
-        )
-        await _mark_incomplete(context)
+        if await _mark_incomplete(context):
+            logger.warning(
+                "Training-token capture identity mismatch for model call %s of rollout %s.",
+                context.model_call_id,
+                context.rollout_id,
+            )
         return
     if context.token_sink is None:
         context.committed = True
@@ -323,6 +484,19 @@ async def commit_entry(
         entry.parent_resolution_reason = resolution.reason or ""
         await context.token_sink.put(entry)
         context.committed = True
+    except TokenCaptureFrozenError:
+        # The rollout finished and its capture was frozen while this call was
+        # still in flight (for example its harness was killed at a timeout
+        # backstop). The freeze already judged completeness from the durable
+        # intent ledger, so the verdict is sealed. Drop the late record.
+        # Marking the rollout incomplete here would mutate the frozen state
+        # and break conditional retirement of the snapshot finalize consumed.
+        logger.warning(
+            "Training-token capture for model call %s of rollout %s arrived after the capture "
+            "was frozen or retired; the late record is dropped.",
+            context.model_call_id,
+            context.rollout_id,
+        )
     except Exception:
         await _capture_failed(context, "write")
 
@@ -333,7 +507,10 @@ async def _capture_failed(context: CaptureContext, stage: str) -> None:
     Bad token payloads must not fail the model call.
     Mark the rollout so consumers can mask the sample.
     Call this only from an ``except`` block.
+    A call that arrives after its rollout was frozen or retired is a late call, not a capture failure.
     """
+    if not await _mark_incomplete(context):
+        return
     with _STATS_LOCK:
         _CAPTURE_FAILURES[0] += 1
         failures = _CAPTURE_FAILURES[0]
@@ -346,7 +523,6 @@ async def _capture_failed(context: CaptureContext, stage: str) -> None:
         context.rollout_id,
         exc_info=True,
     )
-    await _mark_incomplete(context)
 
 
 async def _capture_missing(context: CaptureContext, reason: str) -> None:
@@ -363,20 +539,21 @@ async def _capture_missing(context: CaptureContext, reason: str) -> None:
     """
     if context.committed or context.token_sink is None:
         return
-    logger.warning(
-        "Training-token capture has no token ids for model call %s of rollout %s: %s.",
-        context.model_call_id,
-        context.rollout_id,
-        reason,
-    )
-    await _mark_incomplete(context)
+    if await _mark_incomplete(context):
+        logger.warning(
+            "Training-token capture has no token ids for model call %s of rollout %s: %s.",
+            context.model_call_id,
+            context.rollout_id,
+            reason,
+        )
 
 
-async def _mark_incomplete(context: CaptureContext) -> None:
+async def _mark_incomplete(context: CaptureContext) -> bool:
     """Mark the rollout, or say loudly why it could not be marked.
 
     A missing ``mark_incomplete`` method can hide incomplete capture.
     Log that condition as an error.
+    Return False when the call is late (its rollout was frozen or retired), so callers can stay quiet.
     """
     mark = getattr(context.token_sink, "mark_incomplete", None)
     if mark is None:
@@ -386,8 +563,18 @@ async def _mark_incomplete(context: CaptureContext) -> None:
             type(context.token_sink).__name__,
             context.rollout_id,
         )
-        return
+        return True
     try:
         await mark(context.rollout_id, context.model_call_id)
+    except TokenCaptureFrozenError:
+        # The rollout was frozen or retired while this call was in flight, for example an abandoned attempt's
+        # late call. Its verdict is sealed, or nobody will read it, so there is nothing to mark.
+        logger.warning(
+            "Model call %s of rollout %s finished after the capture was frozen or retired; not marking it incomplete.",
+            context.model_call_id,
+            context.rollout_id,
+        )
+        return False
     except Exception:
         logger.warning("Could not mark rollout %s incomplete.", context.rollout_id, exc_info=True)
+    return True

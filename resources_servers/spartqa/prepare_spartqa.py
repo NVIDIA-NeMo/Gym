@@ -149,10 +149,10 @@ def _to_task(record: dict[str, Any]) -> dict[str, Any]:
         "responses_create_params": {"input": [{"role": "user", "content": content}]},
         "target": record["target"],
         "options": record["options"],
-        # ``options`` is a list and is dropped by the nemo-evaluator
-        # ``gym://...protocol=native`` driver (it forwards only top-level scalar
-        # fields to /verify). Mirror the candidate set into verifier_metadata,
-        # which the driver forwards intact, so verify() sees every label.
+        # ``options`` is a list, and an external runner may forward only
+        # top-level scalar fields to /verify. Mirror the candidate set into
+        # verifier_metadata, which is forwarded intact, so verify() sees every
+        # label.
         "verifier_metadata": {
             "target": record["target"],
             "options": record["options"],

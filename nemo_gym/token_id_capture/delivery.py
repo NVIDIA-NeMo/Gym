@@ -51,8 +51,10 @@ _REDUNDANT_CAPTURE_KEY = "_redundant_capture"
 
 # A caller that knows the kept model call names it here on the result.
 # A gate seal or an agent-declared terminal id uses this key.
-# It joins with the response-id and content witnesses for terminal attribution.
+# It joins with the response-id, item-id, and content witnesses for terminal attribution.
 TERMINAL_CALL_KEY = "_ng_terminal_model_call_id"
+# Served response id the harness reports for the completion it kept.
+TERMINAL_RESPONSE_ID_KEY = "terminal_response_id"
 
 
 def rollout_carries_token_ids(result: dict) -> bool:
@@ -82,7 +84,9 @@ def _unusable(result: dict, error: str, message: str) -> dict:
     return {"rebuilt_response": None, MASK_SAMPLE_KEY: True, "error": error, "metrics": metrics}
 
 
-async def finalize_rollout_token_capture(result: dict, source: TokenSource | None) -> dict | None:
+async def finalize_rollout_token_capture(
+    result: dict, source: TokenSource | None, *, mask_incomplete_when_attributed: bool = True
+) -> dict | None:
     """Rebuild one finished rollout record's ``response.output`` from its recorded token ids.
 
     Call this after the harness and verifier finish the record.
@@ -104,6 +108,10 @@ async def finalize_rollout_token_capture(result: dict, source: TokenSource | Non
     Return the build with its rebuilt response, metrics, and optional error.
     Return ``None`` when no source exists.
     An unusable build has no rebuilt response and sets ``mask_sample``.
+
+    ``mask_incomplete_when_attributed`` is the
+    ``token_id_capture.mask_incomplete_when_attributed`` setting, which decides
+    whether an incomplete snapshot always masks the rollout.
     """
     if source is None:
         return None
@@ -150,6 +158,7 @@ async def finalize_rollout_token_capture(result: dict, source: TokenSource | Non
 
     response = result.get("response") if isinstance(result.get("response"), dict) else {}
     explicit_terminal = result.get(TERMINAL_CALL_KEY)
+    declared_terminal = result.get(TERMINAL_RESPONSE_ID_KEY)
     try:
         # The result's response is what the verifier scored.
         # Terminal attribution joins it to one captured call.
@@ -159,6 +168,8 @@ async def finalize_rollout_token_capture(result: dict, source: TokenSource | Non
             model=str(response.get("model") or ""),
             verified_response=response or None,
             explicit_terminal_call_id=str(explicit_terminal) if explicit_terminal else None,
+            mask_incomplete_when_attributed=mask_incomplete_when_attributed,
+            declared_response_id=str(declared_terminal) if declared_terminal else None,
         )
     except Exception as error:
         # A transport failure may be unrelated to this rollout.

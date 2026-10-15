@@ -26,7 +26,17 @@ unconditionally from Gym's config machinery.
 
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+
+class MemoryProfilingConfig(BaseModel):
+    """Periodic host and logical-server memory sampling."""
+
+    enabled: bool = False
+    """Collect host memory and every server process tree."""
+
+    interval_seconds: float = Field(default=1.0, gt=0)
+    """Seconds between samples."""
 
 
 class TelemetryConfig(BaseModel, extra="allow"):
@@ -64,19 +74,8 @@ class TelemetryConfig(BaseModel, extra="allow"):
     span_groups: str = "default"
     """Span-group spec: a preset (``default`` | ``per_rollout`` | ``all``) or a
     comma-separated list of group names (e.g. ``"default,sandbox"``). See
-    :class:`~nemo_gym.telemetry.span_groups.GymSpanGroup`."""
-
-    export_strategy: str = "all_ranks"
-    """Which processes export: ``all_ranks`` | ``single_rank`` | ``sampled`` |
-    ``first_rank_per_node``.
-
-    Defaults to ``all_ranks``, unlike NeMo-RL and Megatron-LM which default to
-    ``single_rank``. Those run one process tree per job where rank 0 sees a
-    representative slice; Gym runs N independent server processes, each rank 0 of its own
-    world. Silencing any of them puts a hole in the middle of every distributed trace."""
-
-    export_rank: int = -1
-    """For ``single_rank``: which rank exports (``-1`` = last rank)."""
+    :class:`~nemo_gym.telemetry.span_groups.GymSpanGroup`. An unknown name is logged as a
+    warning and ignored rather than rejected."""
 
     traces_enabled: bool = True
     """Emit trace spans."""
@@ -84,6 +83,19 @@ class TelemetryConfig(BaseModel, extra="allow"):
     metrics_enabled: bool = True
     """Emit metric instruments (the ``gym.*`` histograms/gauges plus the FastAPI
     instrumentor's ``http.server.*``)."""
+
+    memory_profiling: MemoryProfilingConfig = Field(default_factory=MemoryProfilingConfig)
+    """Sample each Gym-managed server process tree and emit memory metrics."""
+
+    event_loop_sample_interval_seconds: float = Field(default=1.0, gt=0)
+    """Seconds between samples of each process's event-loop lag, when metrics are on."""
+
+    event_loop_task_count: bool = False
+    """Also report how many asyncio tasks exist on each event loop, at every sample.
+
+    Off by default because counting tasks walks every task on the loop while holding it.
+    That takes about a millisecond per sample at 16,000 tasks, which a driver at high concurrency can reach.
+    """
 
     logs_enabled: bool = False
     """Bridge Python logging to OTel logs, exported with trace correlation."""
@@ -108,14 +120,6 @@ class TelemetryConfig(BaseModel, extra="allow"):
     ``${oc.env:MY_API_KEY}`` interpolation for the secret portion so the raw credential
     does not live in a committed YAML file."""
 
-    instrument_aiohttp: bool = True
-    """Use nemo-lens's aiohttp auto-instrumentation for outbound calls, which produces a
-    CLIENT span per request in addition to injecting ``traceparent``.
-
-    When false, ``nemo_gym.server_utils.request`` still injects ``traceparent`` manually,
-    so cross-process traces stay joined — you lose the client-side span, not the trace.
-    Turn it off if the per-request patching cost matters at very high concurrency."""
-
     run_id: Optional[str] = None
     """Correlates every process of one ``gym env start`` / ``gym env test`` invocation.
-    Generated in the orchestrator and inherited by the servers when unset."""
+    Generated in the supervisor and inherited by the servers when unset."""

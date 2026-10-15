@@ -4,5 +4,5 @@ rouge-score>=0.1.2
 # Rule-following: vendored IFEval checkers (ifeval/) depend on these.
 immutabledict>=2.0
 langdetect>=1.0.9
-nltk>=3.10.0
+nltk>=3.10.3
 defusedxml>=0.7.1

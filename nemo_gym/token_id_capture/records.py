@@ -33,6 +33,14 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
+# Separator between a namespace tool's group name and a member tool's name when
+# the group is flattened into plain function tools for a chat-completions
+# engine (``nemo_gym.responses_streaming``). Defined here because terminal
+# attribution needs it to strip the group name from a recorded call, and this
+# package must not import the server stack.
+NAMESPACE_TOOL_DELIMITER = "__"
+
+
 # These fields carry token metadata on a served response.
 # ``routed_experts`` is optional for MoE backends.
 TOKEN_FIELDS = ("prompt_token_ids", "generation_token_ids", "generation_log_probs", "routed_experts")
@@ -52,6 +60,20 @@ TOKEN_ENTRY_MIN_SCHEMA_VERSION = 1
 DIGEST_VERSION = 1
 _DIGEST_DOMAIN = b"nemo-gym-tokens"
 _EMPTY_DIGEST = hashlib.sha256(_DIGEST_DOMAIN).hexdigest()
+
+# Capture failure reasons shared by the built-in and external staging paths.
+# These strings are a wire contract: the training framework switches on them.
+# Never repurpose one.
+
+# Parent resolution could not admit the call. Written by ``resolve_parent``.
+UNRESOLVED_PARENT_REASON = "unresolved_parent"
+# The call was admitted but finished without worker commit coordinates.
+# Written by the capture middleware.
+UNCOMMITTED_CALL_REASON = "request_finished_without_staged_coordinates"
+# A committed ledger row lacks the served response id that terminal attribution joins on.
+LEDGER_ROW_MISSING_RESPONSE_ID_REASON = "ledger_row_missing_response_id"
+# A committed ledger row lacks the chain or cumulative digest that verification anchors on.
+LEDGER_ROW_MISSING_CHAIN_HASH_REASON = "ledger_row_missing_chain_hash"
 
 
 class ParentResolutionStatus(StrEnum):
@@ -252,11 +274,28 @@ def response_to_output_items(payload: dict) -> list[dict]:
 
     Responses payloads already carry ``output``.
     Chat payloads carry ``choices[*].message``.
+    Anthropic Messages payloads carry top-level assistant content.
     Wrap each assistant message as a Responses ``message`` item.
     """
     output = payload.get("output")
     if isinstance(output, list) and output:
         return [item for item in output if isinstance(item, dict)]
+    if payload.get("type") == "message" and payload.get("role") == "assistant":
+        reasoning_items: list[dict] = []
+        message_content: list[Any] = []
+        for block in payload.get("content") or []:
+            if not isinstance(block, dict) or block.get("type") not in {"thinking", "redacted_thinking"}:
+                message_content.append(block)
+                continue
+            reasoning_item: dict[str, Any] = {"type": "reasoning", "summary": []}
+            if block.get("type") == "thinking" and isinstance(block.get("thinking"), str):
+                reasoning_item["summary"] = [{"type": "summary_text", "text": block["thinking"]}]
+            elif block.get("type") == "redacted_thinking" and block.get("data") is not None:
+                reasoning_item["encrypted_content"] = block["data"]
+            reasoning_items.append(reasoning_item)
+        if message_content:
+            reasoning_items.append({"type": "message", "role": "assistant", "content": message_content})
+        return reasoning_items
     items: list[dict] = []
     for choice in payload.get("choices") or []:
         message = (choice or {}).get("message") or {}

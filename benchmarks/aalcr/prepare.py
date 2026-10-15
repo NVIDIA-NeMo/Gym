@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Prepare AA-LCR benchmark data.
+"""Prepare legacy-compatible AA-LCR v1.0 benchmark data.
 
 From the instructions at https://huggingface.co/datasets/ArtificialAnalysis/AA-LCR"""
 
@@ -30,7 +30,10 @@ from nemo_gym.global_config import get_hf_token
 
 BENCHMARK_DIR = Path(__file__).parent
 DATA_DIR = BENCHMARK_DIR / "data"
-OUTPUT_FPATH = DATA_DIR / "aalcr_benchmark.jsonl"
+OUTPUT_FPATH = DATA_DIR / "aalcr_v1_0_benchmark.jsonl"
+DATASET_REVISION = "bdae010bbce259820c0e34c1d7cce210d966fb75"  # pragma: allowlist secret
+BENCHMARK_VERSION = "1.0.0"
+JUDGE_PROTOCOL = "legacy_v1_0"
 
 
 # From https://github.com/NVIDIA-NeMo/Skills/blob/54d2e113c2f64bf74bda72e15f23f01b524850da/nemo_skills/dataset/aalcr/prepare.py#L94-L105
@@ -51,12 +54,26 @@ def _dirty_filename(fname: str) -> str:
     return filename_with_artifacts
 
 
-def prepare() -> Path:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+def prepare_version(
+    *,
+    dataset_revision: str,
+    benchmark_version: str,
+    judge_protocol: str,
+    output_fpath: Path,
+) -> Path:
+    output_fpath.parent.mkdir(parents=True, exist_ok=True)
 
-    data = load_dataset("ArtificialAnalysis/AA-LCR", split="test", token=get_hf_token())
+    data = load_dataset(
+        "ArtificialAnalysis/AA-LCR",
+        revision=dataset_revision,
+        split="test",
+        token=get_hf_token(),
+    )
 
-    documents_url = "https://huggingface.co/datasets/ArtificialAnalysis/AA-LCR/resolve/main/extracted_text/AA-LCR_extracted-text.zip"
+    documents_url = (
+        "https://huggingface.co/datasets/ArtificialAnalysis/AA-LCR/"
+        f"resolve/{dataset_revision}/extracted_text/AA-LCR_extracted-text.zip"
+    )
     response = requests.get(documents_url)
     response.raise_for_status()
     zip_file = ZipFile(BytesIO(response.content))
@@ -126,16 +143,30 @@ END QUESTION
             "data_source_urls": row["data_source_urls"],
             "input_tokens": row["input_tokens"],
             "input_tokens_band": input_tokens_band,
+            "aa_lcr_version": benchmark_version,
+            "aa_lcr_dataset_revision": dataset_revision,
+            "aa_lcr_judge_protocol": judge_protocol,
         }
         samples.append(sample)
 
-    with OUTPUT_FPATH.open("w") as f:
+    with output_fpath.open("w") as f:
         for sample in samples:
             f.write(json.dumps(sample) + "\n")
 
-    print(f"Wrote {len(samples)} samples to {OUTPUT_FPATH}")
+    print(f"Wrote {len(samples)} samples to {output_fpath}")
 
-    return OUTPUT_FPATH
+    return output_fpath
+
+
+def prepare(*, dataset_revision: str = DATASET_REVISION) -> Path:
+    if dataset_revision != DATASET_REVISION:
+        raise ValueError(f"AA-LCR v1.0 requires dataset revision {DATASET_REVISION}, got {dataset_revision}")
+    return prepare_version(
+        dataset_revision=dataset_revision,
+        benchmark_version=BENCHMARK_VERSION,
+        judge_protocol=JUDGE_PROTOCOL,
+        output_fpath=OUTPUT_FPATH,
+    )
 
 
 if __name__ == "__main__":

@@ -21,7 +21,7 @@ import pytest
 from fastapi import Body, FastAPI, Response
 from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
 from nemo_gym.base_responses_api_model import (
@@ -75,11 +75,16 @@ class _DispatchPayload(BaseModel):
     token_ids: list[int]
 
 
+class _AliasedDispatchPayload(BaseModel):
+    schema_: dict = Field(alias="schema")
+
+
 @pytest.mark.parametrize(
     ("content", "expected"),
     [
         ({"text": "café", "token_ids": [1, 2, 3]}, {"text": "café", "token_ids": [1, 2, 3]}),
         (_DispatchPayload(text="café", token_ids=[1, 2, 3]), {"text": "café", "token_ids": [1, 2, 3]}),
+        (_AliasedDispatchPayload(schema={"type": "object"}), {"schema": {"type": "object"}}),
     ],
 )
 def test_orjson_dispatch_response_serializes_json(content, expected):
@@ -90,10 +95,64 @@ def test_orjson_dispatch_response_serializes_json(content, expected):
     assert response.headers["content-type"] == "application/json"
 
 
+def test_orjson_dispatch_response_preserves_pydantic_aliases():
+    content = NeMoGymResponse(
+        id="resp_1",
+        created_at=0,
+        model="test-model",
+        object="response",
+        output=[],
+        parallel_tool_calls=True,
+        tool_choice="auto",
+        tools=[],
+        text={
+            "format": {
+                "type": "json_schema",
+                "name": "answer",
+                "schema": {"type": "object", "properties": {"answer": {"type": "string"}}},
+            }
+        },
+    )
+
+    body = orjson.loads(_orjson_dispatch_response(content).body)
+    wire_format = body["text"]["format"]
+
+    assert "schema" in wire_format
+    assert "schema_" not in wire_format
+
+
 def test_orjson_dispatch_response_preserves_existing_response():
     existing_response = Response(content=b"already encoded", media_type="application/octet-stream", status_code=202)
 
     assert _orjson_dispatch_response(existing_response) is existing_response
+
+
+def test_orjson_dispatch_response_preserves_json_schema_alias() -> None:
+    """Structured judge replies must retain API field names across the HTTP boundary."""
+    schema = {
+        "type": "object",
+        "properties": {"correct": {"type": "boolean"}},
+        "required": ["correct"],
+        "additionalProperties": False,
+    }
+    original = NeMoGymResponse(
+        id="structured_judge",
+        created_at=0,
+        model="fixture",
+        object="response",
+        status="completed",
+        output=[],
+        parallel_tool_calls=False,
+        tool_choice="none",
+        tools=[],
+        text={"format": {"type": "json_schema", "name": "judge", "schema": schema, "strict": True}},
+    )
+
+    payload = orjson.loads(_orjson_dispatch_response(original).body)
+
+    assert payload["text"]["format"]["schema"] == schema
+    assert "schema_" not in payload["text"]["format"]
+    assert NeMoGymResponse.model_validate(payload) == original
 
 
 def _capture_config(tmp_path, *, enabled: bool = True) -> ModelCallCaptureConfig:
@@ -108,6 +167,7 @@ def _install_capture(app, tmp_path, *, model_server_name: str = "srv") -> None:
         app,
         _capture_config(tmp_path),
         model_server_name=model_server_name,
+        assistant_message_header=b"x-assistant-message-id",
     )
 
 
@@ -156,6 +216,8 @@ def test_capture_store_raises_on_malformed_nonblank_json(tmp_path):
 def test_build_model_call_record_from_exchange():
     exchange = {
         "model_call_id": "call-1",
+        "client_session_id": "session-1",
+        "client_assistant_message_id": "assistant-1",
         "dialect": "responses",
         "model_ref": {"type": "responses_api_models", "name": "srv"},
         "started_at": 100.0,
@@ -182,6 +244,8 @@ def test_build_model_call_record_from_exchange():
     rec = build_model_call_record(exchange, call_index=3)
     assert rec.model_call_id == "call-1"
     assert rec.response_id == "resp-1"
+    assert rec.client_session_id == "session-1"
+    assert rec.client_assistant_message_id == "assistant-1"
     assert rec.call_index == 3
     assert rec.model_ref is not None and rec.model_ref.name == "srv"
     assert rec.model == "m"
@@ -196,9 +260,15 @@ def test_build_model_call_record_from_exchange():
     empty = build_model_call_record({"request": {}, "response": {}}, call_index=0)
     assert empty.request == {}
     assert empty.response == {}
+    assert empty.client_assistant_message_id is None
+    assert (
+        build_model_call_record({"client_assistant_message_id": 123}, call_index=0).client_assistant_message_id is None
+    )
     assert {
         "model_call_id",
         "response_id",
+        "client_session_id",
+        "client_assistant_message_id",
         "call_index",
         "model_ref",
         "model",
@@ -262,6 +332,90 @@ def test_build_model_call_record_tolerates_malformed_nested_shapes():
     assert record.tool_calls == []
 
 
+@pytest.mark.parametrize(
+    "headers,expected",
+    [
+        ([], None),
+        ([(b"X-Session-Id", b"session-1")], "session-1"),
+        ([(b"x-session-id", b"session-1"), (b"X-Session-Id", b"session-1")], "session-1"),
+        ([(b"x-session-id", b"session-1"), (b"x-session-id", b"session-2")], None),
+    ],
+)
+def test_unique_request_header_requires_one_value(headers, expected):
+    from nemo_gym.base_responses_api_model import _unique_request_header
+
+    assert _unique_request_header(headers, b"x-session-id") == expected
+
+
+@pytest.mark.parametrize(
+    "headers,expected",
+    [
+        ([], None),
+        ([(b"X-Assistant-Message-Id", b"assistant-1")], "assistant-1"),
+        (
+            [
+                (b"x-assistant-message-id", b"assistant-1"),
+                (b"X-Assistant-Message-Id", b"assistant-1"),
+            ],
+            "assistant-1",
+        ),
+        (
+            [
+                (b"x-assistant-message-id", b"assistant-1"),
+                (b"X-Assistant-Message-Id", b"assistant-2"),
+            ],
+            None,
+        ),
+        ([(b"x-assistant-message-id", b"")], None),
+    ],
+)
+def test_capture_assistant_message_header_round_trip(tmp_path, headers, expected):
+    import asyncio
+
+    from nemo_gym.base_responses_api_model import _CaptureMiddleware
+
+    store = CaptureStore(tmp_path)
+    forwarded_headers = []
+
+    async def app(scope, receive, send):
+        forwarded_headers.extend(scope["headers"])
+        await receive()
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b'{"output":[]}', "more_body": False})
+
+    async def receive():
+        return {"type": "http.request", "body": b'{"input":"hi"}', "more_body": False}
+
+    async def send(_message):
+        pass
+
+    request_headers = [(b"x-session-id", b"opencode-session"), *headers]
+    asyncio.run(
+        _CaptureMiddleware(
+            app, store=store, model_server_name="srv", assistant_message_header=b"x-assistant-message-id"
+        )(
+            {
+                "type": "http",
+                "path": "/ng-rollout/header-round-trip/v1/responses",
+                "raw_path": b"/ng-rollout/header-round-trip/v1/responses",
+                "headers": request_headers,
+            },
+            receive,
+            send,
+        )
+    )
+
+    assert forwarded_headers == request_headers
+    [exchange] = store.read("header-round-trip")
+    assert exchange.get("client_assistant_message_id") == expected
+    if expected is None:
+        assert "client_assistant_message_id" not in exchange
+    [call] = read_model_call_records(store, "header-round-trip")
+    assert call.client_assistant_message_id == expected
+    assert call.client_session_id == "opencode-session"
+    assert call.response == {"output": []}
+
+
 def test_capture_is_durable_before_stream_terminal_event_is_sent(tmp_path):
     import asyncio
 
@@ -290,15 +444,23 @@ def test_capture_is_durable_before_stream_terminal_event_is_sent(tmp_path):
 
     async def send(message):
         if message["type"] == "http.response.body":
-            durable_call_counts.append(len(store.read("fast-rollout")))
+            exchanges = store.read("fast-rollout")
+            durable_call_counts.append(len(exchanges))
+            if exchanges:
+                assert exchanges[0]["client_assistant_message_id"] == "assistant-stream"
 
     asyncio.run(
-        _CaptureMiddleware(app, store=store, model_server_name="srv")(
+        _CaptureMiddleware(
+            app, store=store, model_server_name="srv", assistant_message_header=b"x-assistant-message-id"
+        )(
             {
                 "type": "http",
                 "path": "/ng-rollout/fast-rollout/v1/messages",
                 "raw_path": b"/ng-rollout/fast-rollout/v1/messages",
-                "headers": [],
+                "headers": [
+                    (b"x-session-id", b"opencode-session"),
+                    (b"x-assistant-message-id", b"assistant-stream"),
+                ],
             },
             receive,
             send,
@@ -306,6 +468,9 @@ def test_capture_is_durable_before_stream_terminal_event_is_sent(tmp_path):
     )
 
     assert durable_call_counts == [0, 1, 1]
+    [call] = read_model_call_records(store, "fast-rollout")
+    assert call.client_session_id == "opencode-session"
+    assert call.client_assistant_message_id == "assistant-stream"
 
 
 def test_capture_retains_partial_stream_when_downstream_raises(tmp_path):
@@ -332,19 +497,24 @@ def test_capture_retains_partial_stream_when_downstream_raises(tmp_path):
 
     with pytest.raises(RuntimeError, match="stream failed"):
         asyncio.run(
-            _CaptureMiddleware(app, store=store, model_server_name="srv")(
+            _CaptureMiddleware(
+                app, store=store, model_server_name="srv", assistant_message_header=b"x-assistant-message-id"
+            )(
                 {
                     "type": "http",
                     "path": "/ng-rollout/partial/v1/responses",
                     "raw_path": b"/ng-rollout/partial/v1/responses",
-                    "headers": [],
+                    "headers": [(b"x-assistant-message-id", b"assistant-partial")],
                 },
                 receive,
                 send,
             )
         )
 
+    [exchange] = store.read("partial")
+    assert exchange["client_assistant_message_id"] == "assistant-partial"
     [call] = read_model_call_records(store, "partial")
+    assert call.client_assistant_message_id == "assistant-partial"
     assert call.status_code == 200
     assert call.error_category == "exception"
     assert call.response_raw == partial.decode()
@@ -375,10 +545,17 @@ def test_http_200_stream_error_is_not_recorded_as_success(tmp_path):
 
     _install_capture(app, tmp_path)
 
-    response = TestClient(app).post("/ng-rollout/r-error/v1/messages", json={"messages": []})
+    response = TestClient(app).post(
+        "/ng-rollout/r-error/v1/messages",
+        json={"messages": []},
+        headers={"X-Assistant-Message-Id": "assistant-stream-error"},
+    )
 
     assert response.status_code == 200
+    [exchange] = CaptureStore(tmp_path).read("r-error")
+    assert exchange["client_assistant_message_id"] == "assistant-stream-error"
     calls = read_model_call_records(CaptureStore(tmp_path), "r-error")
+    assert calls[0].client_assistant_message_id == "assistant-stream-error"
     assert len(calls) == 1 and calls[0].error_category == "upstream_error"
 
 
@@ -396,10 +573,17 @@ def test_failed_call_is_captured_with_error_category(tmp_path):
     _install_capture(app, tmp_path)
     client = TestClient(app)
 
-    r = client.post("/ng-rollout/r-err/v1/responses", json={"input": "x"})
+    r = client.post(
+        "/ng-rollout/r-err/v1/responses",
+        json={"input": "x"},
+        headers={"X-Assistant-Message-Id": "assistant-http-error"},
+    )
     assert r.status_code == 500  # response unchanged
 
+    [exchange] = CaptureStore(tmp_path).read("r-err")
+    assert exchange["client_assistant_message_id"] == "assistant-http-error"
     calls = read_model_call_records(CaptureStore(tmp_path), "r-err")
+    assert calls[0].client_assistant_message_id == "assistant-http-error"
     assert len(calls) == 1
     assert calls[0].model_call_id
     assert calls[0].model_ref is not None and calls[0].model_ref.name == "srv"
@@ -422,10 +606,17 @@ def test_raised_call_is_captured_then_reraised(tmp_path):
     _install_capture(app, tmp_path)
     client = TestClient(app, raise_server_exceptions=False)
 
-    r = client.post("/ng-rollout/r-raise/v1/responses", json={"input": "x"})
+    r = client.post(
+        "/ng-rollout/r-raise/v1/responses",
+        json={"input": "x"},
+        headers={"X-Assistant-Message-Id": "assistant-exception"},
+    )
     assert r.status_code == 500  # error propagated, response unchanged
 
+    [exchange] = CaptureStore(tmp_path).read("r-raise")
+    assert exchange["client_assistant_message_id"] == "assistant-exception"
     calls = read_model_call_records(CaptureStore(tmp_path), "r-raise")
+    assert calls[0].client_assistant_message_id == "assistant-exception"
     assert len(calls) == 1
     assert calls[0].model_call_id
     assert calls[0].model_ref is not None and calls[0].model_ref.name == "srv"
@@ -434,6 +625,66 @@ def test_raised_call_is_captured_then_reraised(tmp_path):
     assert calls[0].started_at <= calls[0].completed_at
     assert calls[0].error_category == "exception" and calls[0].response is None
     assert calls[0].latency_ttft_ms is None  # nothing streamed before the raise
+
+
+def test_cancelled_call_is_captured_then_reraised(tmp_path):
+    import asyncio
+
+    from nemo_gym.base_responses_api_model import _CaptureMiddleware
+
+    store = CaptureStore(tmp_path)
+    seen_paths: list[str] = []
+
+    async def run_cancelled_request() -> None:
+        request_read = asyncio.Event()
+
+        async def app(scope, receive, send) -> None:
+            del send
+            seen_paths.append(scope["path"])
+            message = await receive()
+            assert message["body"] == b'{"input":"x"}'
+            request_read.set()
+            await asyncio.sleep(3600)
+
+        async def receive() -> dict:
+            return {"type": "http.request", "body": b'{"input":"x"}', "more_body": False}
+
+        async def send(_message: dict) -> None:
+            pass
+
+        task = asyncio.create_task(
+            _CaptureMiddleware(
+                app, store=store, model_server_name="srv", assistant_message_header=b"x-assistant-message-id"
+            )(
+                {
+                    "type": "http",
+                    "path": "/ng-rollout/r-cancel/v1/responses",
+                    "raw_path": b"/ng-rollout/r-cancel/v1/responses",
+                    "headers": [(b"x-assistant-message-id", b"assistant-cancel")],
+                },
+                receive,
+                send,
+            )
+        )
+        await request_read.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run_cancelled_request())
+
+    assert seen_paths == ["/v1/responses"]
+    [exchange] = store.read("r-cancel")
+    assert exchange["request"] == {"input": "x"}
+    assert exchange["response"] is None
+    assert exchange["status_code"] is None
+    assert exchange["error_category"] == "cancelled"
+    assert exchange["client_assistant_message_id"] == "assistant-cancel"
+
+    [call] = read_model_call_records(store, "r-cancel")
+    assert call.error_category == "cancelled"
+    assert call.client_assistant_message_id == "assistant-cancel"
+    assert call.response is None
 
 
 def test_raised_upstream_error_preserves_status_and_body(tmp_path):
@@ -588,6 +839,7 @@ def test_classify_exception_branches():
     class _ReadTimeout(Exception):
         pass
 
+    assert _classify_exception(asyncio.CancelledError()) == "cancelled"
     assert _classify_exception(asyncio.TimeoutError()) == "timeout"
     assert _classify_exception(_ReadTimeout()) == "timeout"  # name contains "timeout"
     assert _classify_exception(ConnectionError()) == "connection"  # name contains "conn"
@@ -611,6 +863,58 @@ def test_exception_http_details_tolerates_lazy_response_failure():
     error = RuntimeError("upstream")
     error.response = _Response()
     assert _exception_http_details(error) == (503, b"")
+
+
+def test_context_overflow_error_fields_reads_the_engine_body_and_the_marked_code():
+    from nemo_gym.base_responses_api_model import (
+        CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
+        PROPAGATED_REFUSAL_CODE_ATTRIBUTE,
+        context_overflow_error_fields,
+        is_propagated_refusal,
+    )
+
+    overflow = (
+        "This model's maximum context length is 4096 tokens. However, you requested 256 output tokens and "
+        "your prompt contains 4000 input tokens, for a total of 4256 tokens. Please reduce the length of the "
+        "input prompt or the number of requested output tokens."
+    )
+
+    # vLLM 0.10.1 and later nest the message, param and integer code inside an "error" object: the
+    # message and param come back verbatim, and the code defaults to OpenAI's overflow code.
+    error = RuntimeError("400, message='Bad Request'")
+    error.response_content = json.dumps(
+        {"error": {"message": overflow, "type": "BadRequestError", "param": "input_tokens", "code": 400}}
+    ).encode()
+    assert context_overflow_error_fields(error) == (overflow, CONTEXT_LENGTH_EXCEEDED_ERROR_CODE, "input_tokens")
+    assert not is_propagated_refusal(error)
+
+    # The code is whatever the server stored when it marked the error; a refusal of the request's own
+    # max_tokens carries none, and the attribute's presence still marks the error.
+    setattr(error, PROPAGATED_REFUSAL_CODE_ATTRIBUTE, None)
+    assert is_propagated_refusal(error)
+    error.response_content = json.dumps(
+        {"error": {"message": "max_tokens must be at least 1, got 0.", "param": None, "code": 400}}
+    ).encode()
+    assert context_overflow_error_fields(error) == ("max_tokens must be at least 1, got 0.", None, None)
+
+    # Older engines put the message at the top level; that shape is still read.
+    flat = RuntimeError("400, message='Bad Request'")
+    flat.response_content = json.dumps(
+        {"object": "error", "message": "maximum context length is 4096 tokens", "code": 400}
+    ).encode()
+    assert context_overflow_error_fields(flat) == (
+        "maximum context length is 4096 tokens",
+        CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
+        None,
+    )
+
+    # A non-JSON body, or JSON without a message string in either shape, falls back to the raw text
+    # so no information is lost; a missing body yields an empty message rather than an exception.
+    flat.response_content = b"upstream exploded in a non-JSON way"
+    assert context_overflow_error_fields(flat)[0] == "upstream exploded in a non-JSON way"
+    flat.response_content = b'{"error": "nested string"}'
+    assert context_overflow_error_fields(flat)[0] == '{"error": "nested string"}'
+    assert context_overflow_error_fields(RuntimeError("bare")) == ("", CONTEXT_LENGTH_EXCEEDED_ERROR_CODE, None)
 
 
 # --- capture-store config + init failure ---
@@ -840,6 +1144,7 @@ def test_base_agent_resolve_model_base_url(monkeypatch):
 
     monkeypatch.setattr(base_agent, "get_first_server_config_dict", lambda _config, _name: {"host": "h", "port": 1})
     agent = SimpleNamespace(
+        resolved_model_base_url=None,
         server_client=SimpleNamespace(
             global_config_dict={},
             _build_server_base_url=lambda _config: "http://h:1",
@@ -1304,6 +1609,59 @@ def test_merge_capture_attaches_metrics_without_raw_payloads(tmp_path):
     assert attached_call["response_raw"] == "malformed response"
 
 
+def test_merge_capture_owns_opencode_calls_by_client_session(tmp_path):
+    from nemo_gym.base_responses_api_model import CaptureStore, merge_model_call_capture_into_record
+
+    store = CaptureStore(tmp_path)
+    exchange = _capture_exchange(
+        "chat",
+        "A",
+        {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+        {"id": "resp-A", "choices": [{"finish_reason": "stop", "message": {"content": "ok"}}]},
+    )
+    exchange["client_session_id"] = "opencode-root"
+    store.record("0-0", exchange)
+    record = {
+        "_ng_task_index": 0,
+        "_ng_rollout_index": 0,
+        "ng_agent_observations": {
+            "source": "opencode",
+            "records": [{"kind": "agent_invocation", "invocation_id": "opencode-root"}],
+        },
+    }
+
+    merge_model_call_capture_into_record(record, [tmp_path])
+
+    [reference] = record["ng_agent_observations"]["records"][0]["model_calls"]
+    assert reference["model_call_id"] == "call-A"
+    assert record["ng_agent_observations"]["gaps"] == []
+
+
+def test_merge_capture_reports_observation_join_failure(tmp_path, monkeypatch):
+    from nemo_gym.base_responses_api_model import CaptureStore, merge_model_call_capture_into_record
+
+    store = CaptureStore(tmp_path)
+    exchange = _capture_exchange("chat", "A", {}, {"id": "resp-A"})
+    exchange["client_session_id"] = "opencode-root"
+    store.record("0-0", exchange)
+    record = {
+        "_ng_task_index": 0,
+        "_ng_rollout_index": 0,
+        "ng_agent_observations": {
+            "source": "opencode",
+            "records": [{"kind": "agent_invocation", "invocation_id": "opencode-root"}],
+        },
+    }
+
+    def fail_association(*_args, **_kwargs):
+        raise RuntimeError("association failed")
+
+    monkeypatch.setattr("nemo_gym.base_responses_api_model.join_model_call_observations", fail_association)
+    merge_model_call_capture_into_record(record, [tmp_path])
+
+    assert [gap["code"] for gap in record["ng_model_call_capture"]["gaps"]] == ["agent_observation_join_failed"]
+
+
 def test_merge_capture_reports_missing_capture(tmp_path):
     from nemo_gym.base_responses_api_model import CaptureStore, merge_model_call_capture_into_record
 
@@ -1676,3 +2034,174 @@ def test_observed_dialect_under_capture_prefix_is_not_marked_incomplete(tmp_path
 
     assert forwarded == ["/v1/chat/completions"]
     assert not token_store.is_incomplete("hole-2")
+
+
+@pytest.mark.parametrize("header", [b"X-Custom-Reply-Id", None])
+def test_capture_uses_supplied_assistant_header_or_none(tmp_path, header):
+    app = FastAPI()
+
+    @app.post("/v1/responses")
+    async def respond():
+        return {"output": []}
+
+    config = ModelCallCaptureConfig(
+        observability_enabled=True,
+        model_call_capture_dir=tmp_path,
+    )
+    install_model_call_capture(app, config, model_server_name="policy", assistant_message_header=header)
+    with TestClient(app) as client:
+        response = client.post(
+            "/ng-rollout/configured-header/v1/responses",
+            json={"input": "hello"},
+            headers={"x-custom-reply-id": "persisted-reply", "x-assistant-message-id": "other-reply"},
+        )
+        assert response.status_code == 200
+        response = client.post(
+            "/ng-rollout/no-configured-header/v1/responses",
+            json={"input": "hello"},
+            headers={"x-assistant-message-id": "other-reply"},
+        )
+        assert response.status_code == 200
+    [captured] = read_model_call_records(CaptureStore(tmp_path), "configured-header")
+    assert captured.client_assistant_message_id == ("persisted-reply" if header else None)
+    [absent] = read_model_call_records(CaptureStore(tmp_path), "no-configured-header")
+    assert absent.client_assistant_message_id is None
+
+
+def test_capture_store_pending_claims_are_scoped_to_one_rollout(tmp_path):
+    store = CaptureStore(tmp_path)
+
+    store.mark_pending("1-0-retry1", "call-1")
+
+    # The dot after the rollout id keeps a prefix from matching a longer id.
+    assert store.has_pending("1-0-retry1") is True
+    assert store.has_pending("1-0") is False
+
+    store.clear_pending("1-0-retry1", "call-1")
+    assert store.has_pending("1-0-retry1") is False
+
+
+def test_capture_store_pending_token_survives_an_unsafe_model_call_id(tmp_path):
+    store = CaptureStore(tmp_path)
+
+    store.mark_pending("1-0", "a/b c.d")
+
+    assert store.has_pending("1-0") is True
+    assert store.pending_path_for("1-0", "a/b c.d").name == "1-0.a_b_c_d.capture.pending"
+
+
+@pytest.mark.asyncio
+async def test_await_quiescence_waits_for_a_detached_write_to_land(tmp_path):
+    import asyncio
+
+    from nemo_gym.base_responses_api_model import await_model_call_capture_quiescence
+
+    store = CaptureStore(tmp_path)
+    store.mark_pending("2-0", "call-1")
+
+    async def late_write():
+        await asyncio.sleep(0.2)
+        store.record("2-0", _capture_exchange("responses", "A", {}, {"id": "resp-A"}))
+        store.clear_pending("2-0", "call-1")
+
+    task = asyncio.create_task(late_write())
+    # The race is real at this point: snapshotting now would miss the row.
+    assert store.read("2-0") == []
+
+    quiesced = await await_model_call_capture_quiescence("2-0", [tmp_path])
+    await task
+
+    assert quiesced is True
+    assert len(store.read("2-0")) == 1
+
+
+@pytest.mark.asyncio
+async def test_await_quiescence_gives_up_on_a_stranded_claim(tmp_path):
+    from nemo_gym.base_responses_api_model import await_model_call_capture_quiescence
+
+    CaptureStore(tmp_path).mark_pending("3-0", "call-1")
+
+    assert await await_model_call_capture_quiescence("3-0", [tmp_path], timeout_s=0.05, poll_s=0.01) is False
+
+
+def test_merge_capture_flags_a_claim_that_never_landed(tmp_path):
+    from nemo_gym.base_responses_api_model import merge_model_call_capture_into_record
+
+    store = CaptureStore(tmp_path)
+    store.record("4-0", _capture_exchange("responses", "A", {}, {"id": "resp-A"}))
+    store.mark_pending("4-0", "call-2")
+
+    record = {"_ng_task_index": 4, "_ng_rollout_index": 0}
+    merge_model_call_capture_into_record(record, [tmp_path])
+
+    assert "model_call_capture_pending" in [gap["code"] for gap in record["ng_model_call_capture"]["gaps"]]
+
+
+def test_clear_captures_for_rollouts_drops_stale_pending_claims(tmp_path):
+    from nemo_gym.base_responses_api_model import clear_model_call_captures_for_rollouts
+
+    store = CaptureStore(tmp_path)
+    store.mark_pending("5-0", "call-1")
+
+    clear_model_call_captures_for_rollouts([{"_ng_task_index": 5, "_ng_rollout_index": 0}], [tmp_path])
+
+    assert store.has_pending("5-0") is False
+
+
+def test_capture_claim_is_visible_while_the_call_is_still_in_flight(tmp_path):
+    """The claim must exist for the call's whole lifetime, not just its write.
+
+    A claim taken at write time does not exist yet while the call is in flight, so a reader can
+    poll, see nothing outstanding, and snapshot the rollout before the row lands.
+    """
+    import asyncio
+
+    from nemo_gym.base_responses_api_model import _CaptureMiddleware, await_model_call_capture_quiescence
+
+    store = CaptureStore(tmp_path)
+
+    async def run() -> None:
+        in_flight = asyncio.Event()
+        release = asyncio.Event()
+
+        async def app(scope, receive, send) -> None:
+            del scope
+            await receive()
+            in_flight.set()
+            await release.wait()
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b'{"id":"resp-1"}', "more_body": False})
+
+        async def receive() -> dict:
+            return {"type": "http.request", "body": b'{"input":"x"}', "more_body": False}
+
+        async def send(_message: dict) -> None:
+            pass
+
+        task = asyncio.create_task(
+            _CaptureMiddleware(
+                app, store=store, model_server_name="srv", assistant_message_header=b"x-assistant-message-id"
+            )(
+                {
+                    "type": "http",
+                    "path": "/ng-rollout/r-inflight/v1/responses",
+                    "raw_path": b"/ng-rollout/r-inflight/v1/responses",
+                    "headers": [(b"x-assistant-message-id", b"assistant-inflight")],
+                },
+                receive,
+                send,
+            )
+        )
+        await in_flight.wait()
+        # The row is not on disk yet, so only the claim can tell a reader to wait.
+        assert store.read("r-inflight") == []
+        assert store.has_pending("r-inflight") is True
+        assert await await_model_call_capture_quiescence("r-inflight", [tmp_path], timeout_s=0.05) is False
+
+        release.set()
+        await task
+        assert await await_model_call_capture_quiescence("r-inflight", [tmp_path], timeout_s=5.0) is True
+        assert store.has_pending("r-inflight") is False
+        assert len(store.read("r-inflight")) == 1
+
+    asyncio.run(run())
