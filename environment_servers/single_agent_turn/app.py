@@ -10,7 +10,7 @@ from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseErr
 from fastapi import Body
 from pydantic import BaseModel, ConfigDict, Field
 
-from nemo_gym._checkpoint.steps import StepMode, seed_restarts, seed_verify_mode
+from nemo_gym._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER, StepMode, seed_restarts, seed_verify_mode
 from nemo_gym.base_environment_server import (
     BaseEnvironmentServer,
     BaseEnvironmentServerConfig,
@@ -417,6 +417,8 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                     "response": agent_response.model_dump(mode="json"),
                 },
                 cookies=handles.resources_cookies,
+                # Final cleanup closes the session, so the Resources Server keeps tracking it until then.
+                headers={CHECKPOINT_CLOSE_FOLLOWS_HEADER: "1"},
             )
             await raise_for_status(verify_http_response)
             return SingleAgentTurnResult.model_validate(await get_response_json(verify_http_response))

@@ -785,12 +785,19 @@ def _length_cut_chain_entries() -> list[TokenEntry]:
     ]
 
 
-def _finalize_length_cut_rollout(tmp_path, harness_status: str | None) -> tuple[dict, dict]:
-    """Deliver a length-cut rollout whose harness response reports ``harness_status`` (or none)."""
+def _finalize_length_cut_rollout(
+    tmp_path, harness_status: str | None, incomplete_details: dict | None = None
+) -> tuple[dict, dict]:
+    """Deliver a length-cut rollout whose harness response reports ``harness_status`` (or none).
+
+    ``incomplete_details`` is the harness's own cause for an ``incomplete`` status.
+    """
     store = TokenCaptureStore(tmp_path)
     response = _response([_assistant_item("step one"), _assistant_item("final answer")], response_id="resp_2")
     if harness_status is not None:
         response["status"] = harness_status
+    if incomplete_details is not None:
+        response["incomplete_details"] = incomplete_details
     result = {"_ng_rollout_id": "t0-r0", "response": response, "reward": 1.0}
 
     async def go() -> dict:
@@ -825,6 +832,20 @@ def test_finalize_keeps_a_harness_verdict_that_is_already_a_failure(tmp_path):
     assert built["rebuilt_response"]["status"] == "incomplete"
     assert result["response"]["status"] == "failed"
     assert "incomplete_details" not in result["response"]
+    assert [i["generation_token_ids"] for i in result["response"]["output"] if i.get("generation_token_ids")] == [
+        [3, 4],
+        [7, 8],
+    ]
+
+
+def test_finalize_keeps_a_harness_verdict_that_is_already_incomplete(tmp_path):
+    # A harness that reported ``incomplete`` for a reason of its own gave the more specific
+    # verdict; delivery replaces the output but leaves that status and its ``incomplete_details``
+    # alone instead of overwriting them with the capture's ``max_output_tokens``.
+    built, result = _finalize_length_cut_rollout(tmp_path, "incomplete", {"reason": "result_missing"})
+    assert built["rebuilt_response"]["status"] == "incomplete"
+    assert result["response"]["status"] == "incomplete"
+    assert result["response"]["incomplete_details"] == {"reason": "result_missing"}
     assert [i["generation_token_ids"] for i in result["response"]["output"] if i.get("generation_token_ids")] == [
         [3, 4],
         [7, 8],

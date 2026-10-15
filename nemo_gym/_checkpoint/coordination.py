@@ -12,6 +12,8 @@ The participant order is a Gym invariant:
   Environment servers park their episodes first.
   The policy model then closes admission and cuts in-flight generations, so agents waiting on it reach a boundary.
   Resources servers go last because agents and environments call them until they park.
+  Each stage's request names the restarts every earlier stage reported.
+  The commit leaves those episodes out, so later stages do not wait for them.
 - ``resume`` runs the stages in reverse, so no server reopens before the servers it calls.
 - ``commit`` and ``restore`` fan out to every participant at once.
 - ``retire`` runs callers before callees: environment servers, then agents,
@@ -180,12 +182,18 @@ async def discover(client: ServerClient, *, auth_token: str) -> Participants:
 async def prepare(participants: Participants, checkpoint_id: str, *, deadline_ts: float) -> PrepareResult:
     """Prepare every participant in order, stopping at the first stage that is not ready by the deadline."""
     replies: dict[str, dict[str, Any]] = {}
-    body = {"checkpoint_id": checkpoint_id, "deadline_ts": deadline_ts}
+    restarts: set[str] = set()
     for kind in PREPARE_ORDER:
+        body: dict[str, Any] = {"checkpoint_id": checkpoint_id, "deadline_ts": deadline_ts}
+        if restarts:
+            # The commit leaves out every restart an earlier stage reported,
+            # so this stage does not wait for those episodes either.
+            body["restarts"] = sorted(restarts)
         stage = await _fan_out(participants, participants.of_kind(kind), "prepare", body, deadline_ts)
         replies.update(stage)
         if any(reply["phase"] != "prepared" for reply in stage.values()):
             return PrepareResult(prepared=False, replies=replies)
+        restarts.update(key for reply in stage.values() for key in (reply.get("report") or {}).get("restarts", []))
     return PrepareResult(prepared=True, replies=replies)
 
 

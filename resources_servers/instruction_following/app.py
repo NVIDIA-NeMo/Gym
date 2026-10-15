@@ -81,6 +81,10 @@ class InstructionFollowingVerifyResponse(BaseVerifyResponse):
 
 
 class InstructionFollowingResourcesServer(SimpleResourcesServer):
+    # Each verification checks the response against the task's instructions: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     config: InstructionFollowingResourcesServerConfig
 
     def __init__(self, **kwargs):
