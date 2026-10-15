@@ -38,7 +38,7 @@ VLLM_COMMON_ARGS=(
     --reasoning-parser nemotron_v3
     --no-enable-chunked-prefill
     --enable-prefix-caching
-    --max-model-len 262144
+    --max-model-len 131072
     --kv-cache-dtype fp8
     --no-disable-hybrid-kv-cache-manager
     --block-size 128
@@ -92,7 +92,7 @@ VLLM_PREFILL_ARGS=(
         }
     }'
     --max-cudagraph-capture-size 1200
-    --max-num-batched-tokens 33920
+    --max-num-batched-tokens 135680
     --max-num-seqs 1024
 )
 # @bxyu-nvidia: We set "enable_lookup": false for the Mooncake store connector because the prefill worker handles the prefix cache lookup and decode just needs to receive the transferred kv cache.
