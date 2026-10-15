@@ -154,6 +154,9 @@ def prepare_target(
     else:
         folder = Path(target).expanduser().resolve()
     taskset = folder.name
+    # Dataset-level files (dataset.toml, the recorded image configurations, the built images) live at the
+    # dataset root, which is where the loader and the environment server read them from for nested tasks.
+    dataset_root = folder.parent if is_task_folder(folder) else folder
     exclude = exclude or []
 
     def selected(task_id: str) -> bool:
@@ -163,7 +166,8 @@ def prepare_target(
     # before the tasks load; a base image the registry cannot resolve stops the preparation here. Only
     # the selected tasks' images are recorded, so an image a left-out task uses cannot stop it. A target
     # that is itself a task folder always loads (discover_tasks raises for it); selection applies after.
-    # A missing or unreadable target is reported by discover_tasks below, in its own words. Images are
+    # A missing or unreadable target is reported by discover_tasks below, in its own words. Duplicate
+    # task IDs are rejected by the folder walk itself, before any registry or docker work. Images are
     # recorded for the platform the sandboxes run, ``builds.platform`` (linux/amd64 unless set), as the
     # built ones are.
     images = (
@@ -209,7 +213,7 @@ def prepare_target(
         raise _no_runnable_task(folder, errors)
     # A Compose file that does not resolve leaves its task out the same way; the others' images are still recorded.
     unresolved: dict[str, str] = {}
-    images = record_compose_images(tasks, tasks[0].path.parent, skipped=unresolved, platform=build.platform)
+    images = record_compose_images(tasks, dataset_root, skipped=unresolved, platform=build.platform)
     if unresolved:
         for task_id, reason in unresolved.items():
             errors[task_id] = HarborTaskError(reason)
