@@ -309,7 +309,7 @@ GB, tens of minutes):
 
 ```bash
 cd responses_api_agents/stirrup_agent/containers
-apptainer build --fakeroot "$PWD/gdpval.sif" gdpval.def
+apptainer build "$PWD/gdpval.sif" gdpval.def    # as a non-root user: apptainer build --fakeroot ...
 export GDPVAL_CONTAINER_PATH=$PWD/gdpval.sif
 cd -
 ```

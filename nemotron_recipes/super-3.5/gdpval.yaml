@@ -37,8 +37,9 @@
 #   * Apptainer, and the sandbox image built from Gym's definition at this commit (several GB,
 #     tens of minutes), from the Gym repo root after run.sh has pinned it once:
 #       (cd responses_api_agents/stirrup_agent/containers && \
-#        apptainer build --fakeroot "$PWD/gdpval.sif" gdpval.def)
-#     then export GDPVAL_CONTAINER_PATH=<path to gdpval.sif>. On aarch64, five pinned packages
+#        apptainer build "$PWD/gdpval.sif" gdpval.def)
+#     (add --fakeroot if you build as a non-root user), then export
+#     GDPVAL_CONTAINER_PATH=<path to gdpval.sif>. On aarch64, five pinned packages
 #     are left out (see gdpval_aa_v2_arm64_exclusions.txt).
 #
 # run.sh first sources gdpval.setup.sh, which checks the image path and Tavily key and picks
