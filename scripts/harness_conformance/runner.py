@@ -115,6 +115,7 @@ def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dic
         terminal_error=scenario.terminal_error,
         tool_steps=scenario.tool_steps,
         expected_reward=scenario.expected_reward,
+        judge_verifier=scenario.judge_verifier,
         fingerprint=_fingerprint,
     )
     health_inputs = [path for path in (bundle, directory / "rollouts_failures.jsonl") if path.is_file()]
