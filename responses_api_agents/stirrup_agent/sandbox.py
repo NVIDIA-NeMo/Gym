@@ -22,8 +22,6 @@ from nemo_gym.tool_access import DirectHTTPToolAccess
 
 # The sandbox runs the Python and Stirrup versions installed with this server.
 PYTHON_VERSION = f"{sys.version_info.major}.{sys.version_info.minor}"
-# NOTE(martas): transformers was removed from deps because it was a dead dependency
-# it's only used when stirrup gets model id (it's use to count tokens)
 STIRRUP_REQUIREMENT = f"stirrup=={importlib.metadata.version('stirrup')}"
 _RUNTIME_KEY = hashlib.sha256(f"{PYTHON_VERSION} {STIRRUP_REQUIREMENT}".encode()).hexdigest()[:12]
 # Outside the working directory, so the model's files stay its own.
