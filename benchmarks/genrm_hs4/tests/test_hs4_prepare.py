@@ -5,8 +5,8 @@
 from pathlib import Path
 from unittest.mock import patch
 
-from benchmarks.genrm_hs3.metrics import validate_metadata
 from benchmarks.genrm_hs4.prepare import prepare
+from resources_servers.genrm_eval.preferences import validate_metadata
 
 
 def test_download_configuration(tmp_path: Path) -> None:

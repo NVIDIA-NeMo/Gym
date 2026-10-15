@@ -27,9 +27,9 @@ def test_judgebench_both_orientations_and_repeats() -> None:
             [rollout(6, pair_id="q-flip", source="livebench-math", label="B>A")],
         ],
     )
-    assert metrics["metrics"]["overall"] == pytest.approx(1 / 4)
+    assert metrics["metrics"]["overall"] == pytest.approx(2 / 4)
     assert metrics["metrics"]["knowledge"] == 0.5
-    assert metrics["metrics"]["math"] == 0
+    assert metrics["metrics"]["math"] == 1
     assert metrics["counts"]["overall"]["total"] == 4
     assert metrics["incomplete_pairs"] == 1
     assert metrics["no_answer"] == 1
@@ -59,3 +59,29 @@ def test_incomplete_pair_counts_as_incorrect() -> None:
     assert metrics["metrics"]["overall"] == 0.5
     assert metrics["counts"]["overall"]["total"] == 2
     assert metrics["incomplete_pairs"] == 1
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "expected"),
+    [
+        (1, 6, 1),
+        (1, None, 1),
+        (None, 6, 1),
+        (1, 1, 0),
+        (6, 6, 0),
+        (6, 1, 0),
+        (6, None, 0),
+        (None, 1, 0),
+        (None, None, 0),
+    ],
+)
+def test_upstream_two_order_scoring(first, second, expected) -> None:
+    metrics = compute_metrics(
+        [
+            [rollout(first, pair_id="p", label="A>B")],
+            [rollout(second, pair_id="p-flipped", label="B>A")],
+        ]
+    )
+    assert metrics["metrics"]["overall"] == expected
+    assert metrics["counts"]["overall"]["total"] == 1
+    assert metrics["no_answer"] == (first is None) + (second is None)

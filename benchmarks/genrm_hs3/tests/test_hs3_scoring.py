@@ -4,7 +4,7 @@
 
 import pytest
 
-from benchmarks.genrm_hs3.metrics import compute_metrics, score
+from resources_servers.genrm_eval.preferences import compute_metrics, score
 
 
 def rollout(ranking: float | None, **metadata: object) -> dict:

@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
-from benchmarks.genrm_hs3.metrics import validate_metadata
+from resources_servers.genrm_eval.preferences import validate_metadata
 from resources_servers.genrm_eval.prepare import download_prepared_dataset, make_task
 
 

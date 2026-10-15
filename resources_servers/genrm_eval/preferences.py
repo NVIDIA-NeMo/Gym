@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Score HS3 response-pair preferences."""
+"""Score response-pair preference direction."""
 
 from typing import Any
 
@@ -14,7 +14,7 @@ def validate_metadata(metadata: dict[str, Any]) -> None:
         raise ValueError("Expected data_type to be a string")
 
 
-def hs3_metrics(results: list[dict[str, Any]]) -> dict[str, Any]:
+def preference_metrics(results: list[dict[str, Any]]) -> dict[str, Any]:
     metrics: dict[str, Any] = {
         "overall": {"total": 0, "correct": 0, "accuracy": 0.0, "no_answer": 0},
         "by_data_type": {},
@@ -64,4 +64,4 @@ def compute_metrics(tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
         for task in tasks
         for row in task
     ]
-    return hs3_metrics(results)
+    return preference_metrics(results)

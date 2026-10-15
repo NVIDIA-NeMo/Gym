@@ -4,6 +4,8 @@ genrm_eval:
       entrypoint: app.py
       domain: rlhf
       verified: false
+      scoring_module: resources_servers.genrm_eval.preferences
+      metric_key: overall/accuracy
       description: Evaluate a generative reward model against chat preferences
 
 genrm_eval_simple_agent:

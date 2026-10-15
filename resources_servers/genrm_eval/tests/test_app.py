@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Exercise native Gym verification requests and reasoning separation."""
 
+import runpy
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -33,7 +35,7 @@ async def test_verify(text: str, expected: float, ranking: float | None) -> None
             port=8000,
             name="genrm_eval",
             entrypoint="app.py",
-            scoring_module="benchmarks.genrm_hs3.metrics",
+            scoring_module="resources_servers.genrm_eval.preferences",
             metric_key="overall/accuracy",
         ),
         server_client=MagicMock(spec=ServerClient),
@@ -96,7 +98,7 @@ def test_tokenizer_is_loaded_at_startup() -> None:
                 port=8000,
                 name="genrm_eval",
                 entrypoint="app.py",
-                scoring_module="benchmarks.genrm_hs3.metrics",
+                scoring_module="resources_servers.genrm_eval.preferences",
                 metric_key="overall/accuracy",
             ),
             server_client=MagicMock(spec=ServerClient),
@@ -123,3 +125,16 @@ def test_configured_coverage_is_in_headline_metrics() -> None:
         "avg": 0.25,
         "domain_coverage": 0.25,
     }
+
+
+@pytest.mark.parametrize("is_worker", [False, True])
+def test_worker_entrypoint(is_worker: bool) -> None:
+    with (
+        patch("nemo_gym.server_utils.is_nemo_gym_fastapi_entrypoint", return_value=is_worker),
+        patch("nemo_gym.base_resources_server.SimpleResourcesServer.run_webserver") as start,
+    ):
+        module = runpy.run_path(str(Path(__file__).parents[1] / "app.py"), run_name="worker_import")
+    assert ("app" in module) == is_worker
+    assert start.call_count == int(is_worker)
+    if is_worker:
+        assert module["app"] is start.return_value

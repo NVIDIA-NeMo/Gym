@@ -38,7 +38,7 @@ def judgebench_metrics(results: list[dict[str, Any]]) -> dict[str, Any]:
             raise ValueError(f"Duplicate JudgeBench orientations for {pair_id}")
         if len(samples) == 2 and {sample.get("label") for sample in samples} != {"A>B", "B>A"}:
             raise ValueError(f"JudgeBench pair {pair_id} must have opposite labels")
-        pair_correct = int(len(samples) == 2)
+        balance = 0
         if len(samples) != 2:
             logger.warning("Expected 2 samples for %s, got %d", pair_id, len(samples))
             incomplete_pairs += 1
@@ -46,13 +46,13 @@ def judgebench_metrics(results: list[dict[str, Any]]) -> dict[str, Any]:
             ranking = sample.get("predicted_ranking")
             if ranking is None:
                 no_answer += 1
-                pair_correct = 0
                 continue
             label = sample.get("label")
-            if not ((label == "A>B" and ranking <= 3.5) or (label == "B>A" and ranking > 3.5)):
-                pair_correct = 0
+            correct = (label == "A>B" and ranking <= 3.5) or (label == "B>A" and ranking > 3.5)
+            # Upstream: correct +1, incorrect -1, unparseable 0.
+            balance += 1 if correct else -1
         category = category_for_source(samples[0].get("source", "unknown"))
-        category_scores.setdefault(category, []).append(pair_correct)
+        category_scores.setdefault(category, []).append(int(len(samples) == 2 and balance > 0))
 
     metrics: dict[str, Any] = {}
     counts: dict[str, dict[str, int]] = {}

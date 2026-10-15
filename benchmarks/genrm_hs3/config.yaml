@@ -5,7 +5,7 @@ genrm_hs3_resources_server:
   _inherit_from: genrm_eval
   resources_servers:
     genrm_eval:
-      scoring_module: benchmarks.genrm_hs3.metrics
+      scoring_module: resources_servers.genrm_eval.preferences
       metric_key: overall/accuracy
 
 genrm_hs3_benchmark_agent:

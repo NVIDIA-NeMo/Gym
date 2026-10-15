@@ -27,6 +27,10 @@ for an example. Gym adds no extra prompt (`prompt_config: null`).
 Labels stay in verifier metadata. HS3/HS4 retain preference strength; scoring uses direction only.
 JudgeBench and RM-Bench supply direction labels without strength.
 
+The five examples reuse public JudgeBench inputs and saved GenRM outputs.
+Direction-only labels use 3/4 for the generic preference scorer. Run and model
+identifiers are anonymized; generated answers and reasoning are unchanged.
+
 ## Prepare and evaluate
 
 Supported benchmarks: JudgeBench, RM-Bench, HS3, and HS4. Prepare their inputs:
@@ -80,12 +84,13 @@ OPENBLAS_NUM_THREADS=1 gym eval reverify \
 
 | Benchmark | How the score is calculated |
 |---|---|
-| JudgeBench | Percentage of response pairs correct in both candidate orders; missing rankings or orders count as incorrect. |
+| JudgeBench | Percentage of pairs with a positive sum across both orders: correct +1, incorrect -1, unparseable 0. Missing orders count as incorrect. |
 | RM-Bench | Average of the chat, math, code, and safety domain scores, with equal weight per domain; missing rankings receive 0.5. |
 | HS3 / HS4 | Percentage of records with the correct preference; missing rankings count as incorrect. |
 
 Rankings must be integers 1–6; invalid values (including 3.5) count as unparseable.
-Each benchmark config must supply `scoring_module` and `metric_key`.
+The standalone config uses generic preference accuracy; benchmark configs select
+their own `scoring_module` and `metric_key`.
 
 RM-Bench includes `domain_coverage` alongside its headline score and reports per-domain counts. With coverage below 1,
 the score is incomplete: absent domains contribute zero to the four-domain average.
