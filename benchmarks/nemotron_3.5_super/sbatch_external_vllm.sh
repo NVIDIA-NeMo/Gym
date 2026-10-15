@@ -105,8 +105,9 @@ DECODE_DP_RPC_PORT=13346
 ROUTER_PREFILL_POLICY="${ROUTER_PREFILL_POLICY:-cache_aware}"
 ROUTER_DECODE_POLICY="${ROUTER_DECODE_POLICY:-cache_aware}"
 ROUTER_POLICY="${ROUTER_POLICY:-cache_aware}"
-# Shared startup deadline for router workers and Gym endpoint readiness.
+# Shared startup timeout for vLLM engines, router workers, and Gym endpoint readiness.
 ROUTER_WORKER_STARTUP_TIMEOUT_SECONDS="${ROUTER_WORKER_STARTUP_TIMEOUT_SECONDS:-1800}"
+VLLM_ENGINE_READY_TIMEOUT_S="${VLLM_ENGINE_READY_TIMEOUT_S:-$ROUTER_WORKER_STARTUP_TIMEOUT_SECONDS}"
 ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE="${ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE:-1}"
 if [[ "$VLLM_ENGINES_PER_NODE" != 1 && "$ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE" != 1 ]]; then
     echo "ERROR: Multiple independent engines require ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE=1." >&2
@@ -215,6 +216,7 @@ set -euo pipefail
 
 # Generic vLLM environment variables.
 export VLLM_USE_FASTOKENS=1
+export VLLM_ENGINE_READY_TIMEOUT_S="$VLLM_ENGINE_READY_TIMEOUT_S"
 
 # @bxyu-nvidia: This timeout keep_alive helps reduce connection reset errors between vllm-router and the prefill/decode instances.
 export VLLM_HTTP_TIMEOUT_KEEP_ALIVE=180
