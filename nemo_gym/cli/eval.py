@@ -119,6 +119,7 @@ from nemo_gym.environment.benchmarks import (
 )
 from nemo_gym.environment.discovery import read_config_metadata
 from nemo_gym.eval.eval_plan import (
+    EvalPlan,
     PlanBenchmark,
     PlanGym,
     build_eval_plan,
@@ -502,6 +503,39 @@ def _gym_relative_path(path: str) -> str:
         return str(path)
 
 
+def plan_for_config(
+    global_config_dict: DictConfig,
+    prepare_config: PrepareBenchmarkConfig,
+    task_ids: Sequence[str] | None = None,
+) -> EvalPlan:
+    """Prepare the one benchmark a resolved config declares and build its plan (shared by `gym eval plan`)."""
+    # Other datasets with a prepare script are not benchmarks, so they are not part of the plan.
+    benchmarks = [
+        dataset
+        for dataset in _datasets_to_prepare(global_config_dict)
+        if isinstance(dataset.dataset, BenchmarkDatasetConfig)
+    ]
+    if len(benchmarks) != 1:
+        raise ConfigError(
+            f"A plan covers exactly one benchmark, but the config declares {len(benchmarks)}: "
+            f"{[benchmark.name for benchmark in benchmarks]}."
+        )
+    benchmark = benchmarks[0]
+
+    _prepare_datasets([benchmark], prepare_config)
+    rows = [json.loads(line) for line in benchmark.dataset.jsonl_fpath.read_text().splitlines() if line.strip()]
+    return build_eval_plan(
+        rows,
+        benchmark=PlanBenchmark(
+            name=benchmark.name,
+            config_paths=[_gym_relative_path(path) for path in global_config_dict.get("config_paths") or []],
+        ),
+        taskset=benchmark.dataset.taskset or benchmark.name,
+        gym=PlanGym(version=__version__, commit=installed_gym_commit()),
+        selected_task_ids=task_ids,
+    )
+
+
 @exit_cleanly_on_config_error
 def plan_benchmark() -> None:
     """CLI command: write a benchmark's evaluation plan."""
@@ -517,33 +551,9 @@ def plan_benchmark() -> None:
     if plan_config.plan_output_fpath is None:
         raise ConfigError("Pass `--out <path>` for the plan file.")
 
-    # Other datasets with a prepare script are not benchmarks, so they are not part of the plan.
-    benchmarks = [
-        dataset
-        for dataset in _datasets_to_prepare(global_config_dict)
-        if isinstance(dataset.dataset, BenchmarkDatasetConfig)
-    ]
-    if len(benchmarks) != 1:
-        raise ConfigError(
-            f"A plan covers exactly one benchmark, but the config declares {len(benchmarks)}: "
-            f"{[benchmark.name for benchmark in benchmarks]}."
-        )
-    benchmark = benchmarks[0]
-
-    _prepare_datasets([benchmark], plan_config)
-    rows = [json.loads(line) for line in benchmark.dataset.jsonl_fpath.read_text().splitlines() if line.strip()]
-    plan = build_eval_plan(
-        rows,
-        benchmark=PlanBenchmark(
-            name=benchmark.name,
-            config_paths=[_gym_relative_path(path) for path in global_config_dict.get("config_paths") or []],
-        ),
-        taskset=benchmark.dataset.taskset or benchmark.name,
-        gym=PlanGym(version=__version__, commit=installed_gym_commit()),
-        selected_task_ids=plan_config.plan_task_ids,
-    )
+    plan = plan_for_config(global_config_dict, plan_config, plan_config.plan_task_ids)
     write_eval_plan(plan, plan_config.plan_output_fpath)
-    print(f"Wrote the plan for {benchmark.name} ({len(plan.tasks)} tasks) to {plan_config.plan_output_fpath}")
+    print(f"Wrote the plan for {plan.benchmark.name} ({len(plan.tasks)} tasks) to {plan_config.plan_output_fpath}")
 
 
 def _validate_split_datasets_declared(split: str, server_instance_configs: Sequence[ServerInstanceConfig]) -> None:

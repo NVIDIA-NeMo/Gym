@@ -82,7 +82,9 @@ Read the diagram top to bottom, and left to right within a group: each package m
 | `utils` | General helpers. |
 | `config` | Loading the run config. |
 
-Three modules sit directly in `nemo_gym/` instead of in a package. `failure_transport` and `typed_exceptions` share the `core` layer: they define the exception a failure raises and carry its failure report from one Gym server to the next. `exception_inspection` shares the `utils` layer and reads the causes, type name, and HTTP status of any Python exception.
+Four modules sit directly in `nemo_gym/` instead of in a package. `failure_transport` and `typed_exceptions` share the `core` layer: they define the exception a failure raises and carry its failure report from one Gym server to the next. `exception_inspection` shares the `utils` layer and reads the causes, type name, and HTTP status of any Python exception.
+
+`nemo_gym.in_process` is the in-process API for callers outside Gym (see [Planning and running single tasks in-process](#planning-and-running-single-tasks-in-process)). It sits above `cli`, because it plans benchmarks and starts servers through it.
 
 `nemo_gym.verifiers` sits outside the layers. It runs inside a Harbor task's verifier sandbox, so it uses only the standard library.
 
@@ -91,3 +93,25 @@ Servers, benchmarks, and other code outside `nemo_gym/` import from the package,
 ### Old Import Paths
 
 Modules that moved when `nemo_gym` was split into packages keep their old import paths, such as `nemo_gym.server_utils`, until release 0.10.0. Each use of an old path emits a `DeprecationWarning` that names the new one. To update your code, run `python scripts/migrate_imports.py <path>` from a Gym checkout.
+
+## Planning and running single tasks in-process
+
+To run a benchmark task by task from Python, plan it once with `plan_benchmark`, then run each task through
+`TaskRunner.run_task` against Gym servers that are already running:
+
+```python
+from nemo_gym.config import BaseServerConfig
+from nemo_gym.in_process import TaskRunner, plan_benchmark
+
+planned = plan_benchmark("ifeval")          # resolve, prepare, plan and collate the benchmark
+runner = TaskRunner(planned.rows, head_server=BaseServerConfig(host="127.0.0.1", port=11000))
+result = await runner.run_task(planned.task_ids()[0])
+print(result.rewards)
+```
+
+`plan_benchmark` builds the same plan as `gym eval plan` and collates the benchmark's rows. It reads no
+command-line arguments and does not set Gym's process-wide configuration, so a long-lived process can call it.
+Start the servers with `gym env start --benchmark NAME` first.
+
+This module is a supported API. Its signatures change only additively: a new parameter is optional and
+keyword-only, and a parameter is deprecated before it is removed or renamed.
