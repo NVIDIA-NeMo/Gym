@@ -19,6 +19,8 @@ import glob as glob_module
 import json
 import logging
 import os
+import re
+import signal
 import tempfile
 import time
 import warnings
@@ -33,6 +35,7 @@ from itertools import repeat
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
+import aiohttp
 import orjson
 from aiohttp import ClientError
 from omegaconf import DictConfig, OmegaConf
@@ -104,6 +107,7 @@ from nemo_gym.server_utils import (
     ServerClient,
     get_response_json,
     raise_for_status,
+    request,
 )
 from nemo_gym.server_utils import (
     setup_server_client as setup_server_client_utils,
@@ -1136,6 +1140,210 @@ class E2ERolloutCollectionConfig(SharedRolloutCollectionConfig):
 NG_ELAPSED_KEY = "elapsed_seconds"
 
 
+class RunTimingReport:
+    """Health table for a collection whose rollouts have a per-rollout wall-clock limit.
+
+    A per-rollout limit (e.g. BrowseComp's ``rollout_timeout_s``) makes the score depend on the
+    deployment as well as the model: if the servers are too few or too slow, rollouts start late,
+    queue for the GPU, or run into the limit, and are scored 0 for reasons unrelated to the model.
+    This table shows whether a run stayed clear of that, so a score from a starved run is not
+    mistaken for a model result. Each row compares this run with a healthy bound:
+
+    - start coverage: rollouts started within ``start_within_s`` and all started by
+      ``all_started_within_s`` (late starts eat into a fixed job allocation);
+    - rollouts ended by the wall-clock limit (above the bound, the limit is shaping the score);
+    - rollouts longer than ``long_rollout_s`` (an early sign that the limit is too tight);
+    - summed waiting / running requests on the model servers, when their URLs are given
+      (requests queue instead of being served).
+
+    Diagnostic only: it prints a warning per unhealthy row and never stops the run.
+    """
+
+    def __init__(
+        self,
+        *,
+        total: int,
+        start_within_s: float,
+        start_min_fraction: float,
+        all_started_within_s: Optional[float],
+        long_rollout_s: Optional[float],
+        long_rollout_max_fraction: float,
+        timed_out_max_fraction: float,
+        max_waiting_ratio: Optional[float] = None,
+    ) -> None:
+        self._total = total
+        self._max_waiting_ratio = max_waiting_ratio
+        self._waiting_sum = 0.0
+        self._running_sum = 0.0
+        self._peak_ratio = 0.0
+        self._queue_samples = 0
+        self._start_within_s = start_within_s
+        self._start_min_fraction = start_min_fraction
+        self._all_started_within_s = all_started_within_s if all_started_within_s is not None else start_within_s
+        self._long_rollout_s = long_rollout_s
+        self._long_rollout_max_fraction = long_rollout_max_fraction
+        self._timed_out_max_fraction = timed_out_max_fraction
+        self._t0 = time.monotonic()
+        self._start_offsets: List[float] = []
+        self._durations: List[float] = []
+        self._timed_out = 0
+
+    def record_start(self, now: float) -> None:
+        self._start_offsets.append(now - self._t0)
+
+    def record_queue(self, waiting: float, running: float) -> None:
+        """One sample of requests waiting and running, summed over every server."""
+        self._queue_samples += 1
+        self._waiting_sum += waiting
+        self._running_sum += running
+        if running > 0:
+            self._peak_ratio = max(self._peak_ratio, waiting / running)
+
+    def record_result(self, result: Mapping[str, Any], seconds: float) -> None:
+        self._durations.append(seconds)
+        if result.get("timed_out") or result.get(NG_FAILURE_CLASS_KEY) == "timeout_exceeded":
+            self._timed_out += 1
+
+    def table(self) -> str:
+        elapsed = time.monotonic() - self._t0
+        started = len(self._start_offsets)
+        all_started = started >= self._total
+        window_min, all_by_min = self._start_within_s / 60, self._all_started_within_s / 60
+        rows: List[Tuple[str, str, str, bool]] = []
+        if all_started:
+            started_by = max(self._start_offsets) / 60
+            rows.append(
+                (
+                    "all rollouts started by",
+                    f"{started_by:.1f} min",
+                    f"<= {all_by_min:.0f} min",
+                    started_by <= all_by_min,
+                )
+            )
+        else:
+            # Judged only once the deadline has passed; until then the count is progress, not a failure.
+            rows.append(
+                (
+                    "rollouts started so far",
+                    f"{started}/{self._total}",
+                    f"all by {all_by_min:.0f} min",
+                    elapsed <= self._all_started_within_s,
+                )
+            )
+        within = sum(1 for o in self._start_offsets if o <= self._start_within_s) / self._total if self._total else 0.0
+        window_open = not all_started and elapsed <= self._start_within_s
+        rows.append(
+            (
+                f"started within {window_min:.0f} min" + (" (window open)" if window_open else ""),
+                f"{within:.1%}",
+                f">= {self._start_min_fraction:.0%}",
+                window_open or within >= self._start_min_fraction,
+            )
+        )
+        n = len(self._durations)
+        if n:
+            timed_out = self._timed_out / n
+            rows.append(
+                (
+                    "hit wall-clock limit",
+                    f"{timed_out:.1%} ({self._timed_out})",
+                    f"<= {self._timed_out_max_fraction:.0%}",
+                    timed_out <= self._timed_out_max_fraction,
+                )
+            )
+            if self._long_rollout_s is not None:
+                long = sum(1 for d in self._durations if d > self._long_rollout_s) / n
+                rows.append(
+                    (
+                        f"longer than {self._long_rollout_s / 60:.0f} min",
+                        f"{long:.1%}",
+                        f"<= {self._long_rollout_max_fraction:.0%}",
+                        long <= self._long_rollout_max_fraction,
+                    )
+                )
+        if self._queue_samples and self._max_waiting_ratio is not None:
+            ratio = self._waiting_sum / self._running_sum if self._running_sum else 0.0
+            rows.append(
+                (
+                    "waiting / running requests",
+                    f"{ratio:.2f} (peak {self._peak_ratio:.2f})",
+                    f"<= {self._max_waiting_ratio:.2f}",
+                    ratio <= self._max_waiting_ratio,
+                )
+            )
+        width = max(len(r[0]) for r in rows)
+        lines = ["Run timing summary (this run | healthy):"]
+        for label, value, healthy, ok in rows:
+            lines.append(f"  {label:<{width}} : {value:>12} | {healthy}" + ("" if ok else "   <-- WARNING"))
+        return "\n".join(lines)
+
+
+_NO_SIGTERM_HOOK = object()
+
+
+def _sum_vllm_queue(metrics_text: str) -> Tuple[float, float]:
+    waiting = running = 0.0
+    for line in metrics_text.splitlines():
+        if line.startswith("vllm:num_requests_waiting"):
+            waiting += float(line.rsplit(" ", 1)[1])
+        elif line.startswith("vllm:num_requests_running"):
+            running += float(line.rsplit(" ", 1)[1])
+    return waiting, running
+
+
+async def _sample_server_queues(report: "RunTimingReport", base_urls: List[str], interval_s: float) -> None:
+    """Poll every vLLM server's /metrics and record requests waiting and running, summed over servers."""
+    metrics_urls = [re.sub(r"/v1/?$", "", u.rstrip("/")) + "/metrics" for u in base_urls]
+    while True:
+        waiting = running = 0.0
+        reached = 0
+        for url in metrics_urls:
+            try:
+                resp = await request("GET", url, _max_num_tries=1, timeout=aiohttp.ClientTimeout(total=5))
+                w, r = _sum_vllm_queue(await resp.text())
+                waiting, running, reached = waiting + w, running + r, reached + 1
+            except Exception:
+                continue
+        if reached:
+            report.record_queue(waiting, running)
+        await asyncio.sleep(interval_s)
+
+
+def _print_on_sigterm(render: Callable[[], str]) -> Any:
+    """Print render() when Slurm's time limit sends SIGTERM, then terminate as before.
+
+    Python's default SIGTERM action exits without unwinding, so nothing printed in a ``finally``
+    survives a time-limit kill. Returns the previous handler for ``_restore_sigterm``, or
+    ``_NO_SIGTERM_HOOK`` when no hook could be installed.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+        previous = signal.getsignal(signal.SIGTERM)
+
+        def _on_sigterm() -> None:
+            try:
+                print(render(), flush=True)
+            finally:
+                loop.remove_signal_handler(signal.SIGTERM)
+                signal.signal(signal.SIGTERM, previous if previous is not None else signal.SIG_DFL)
+                os.kill(os.getpid(), signal.SIGTERM)
+
+        loop.add_signal_handler(signal.SIGTERM, _on_sigterm)
+        return previous
+    except (NotImplementedError, RuntimeError, ValueError):
+        return _NO_SIGTERM_HOOK
+
+
+def _restore_sigterm(previous: Any) -> None:
+    if previous is _NO_SIGTERM_HOOK:
+        return
+    try:
+        asyncio.get_running_loop().remove_signal_handler(signal.SIGTERM)
+        signal.signal(signal.SIGTERM, previous if previous is not None else signal.SIG_DFL)
+    except (NotImplementedError, RuntimeError, ValueError):
+        pass
+
+
 class DispatchLatencyTracker:
     """Per-task latency observed by the dispatcher, and the drain margin from it.
 
@@ -1574,6 +1782,71 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         ),
     )
 
+    dispatch_start_report_within_s: Optional[float] = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Enable the run timing summary: the share of rollouts started within this many seconds of "
+            "collection start, the last start, the share stopped by a per-rollout wall-clock limit and "
+            "the share of long rollouts, printed every timing_summary_interval_s, at the end and on "
+            "SIGTERM. Diagnostic only, nothing is aborted."
+        ),
+    )
+    dispatch_start_report_min_fraction: float = Field(
+        default=0.99,
+        ge=0,
+        le=1,
+        description="Share of rollouts expected to have started within dispatch_start_report_within_s; below it the report is a WARNING.",
+    )
+    dispatch_all_started_within_s: Optional[float] = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Seconds into collection by which every rollout is expected to have started; the timing "
+            "summary warns when the last start is later. Defaults to dispatch_start_report_within_s."
+        ),
+    )
+    server_queue_metrics_urls: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "Only used when dispatch_start_report_within_s is set. "
+            "vLLM base URLs (the policy model's base_url list) whose /metrics the run timing summary polls "
+            "for requests waiting and running, summed over servers."
+        ),
+    )
+    server_queue_max_waiting_ratio: float = Field(
+        default=0.1,
+        description="Healthy ceiling for summed waiting / summed running requests over the run.",
+    )
+    server_queue_sample_interval_s: float = Field(default=30.0, gt=0, description="Seconds between /metrics polls.")
+    long_rollout_s: Optional[float] = Field(
+        default=None,
+        ge=0,
+        description="Rollouts running longer than this many seconds are counted in the end-of-run timing summary.",
+    )
+    long_rollout_max_fraction: float = Field(
+        default=0.05,
+        ge=0,
+        le=1,
+        description="Share of rollouts longer than long_rollout_s above which the timing summary warns.",
+    )
+    timing_summary_interval_s: Optional[float] = Field(
+        default=600,
+        ge=0,
+        description=(
+            "Print the run timing summary every this many seconds while rollouts are collected. "
+            "Requires dispatch_start_report_within_s; 0 or null disables the periodic print."
+        ),
+    )
+    timed_out_max_fraction: float = Field(
+        default=0.01,
+        ge=0,
+        le=1,
+        description=(
+            "Share of rollouts ended by a per-rollout wall-clock limit (result field `timed_out`, or "
+            "failure class `timeout_exceeded`) above which the timing summary warns."
+        ),
+    )
     retry_terminal_timeouts: bool = Field(
         default=False,
         description=(
@@ -2545,6 +2818,21 @@ class RolloutCollectionHelper(BaseModel):
         persisted_count = len(persisted_success_keys)
         collection_succeeded = False
         latency_tracker = DispatchLatencyTracker()
+        run_timing: Optional[RunTimingReport] = None
+        if config.dispatch_start_report_within_s is not None:
+            run_timing = RunTimingReport(
+                total=len(input_rows),
+                start_within_s=config.dispatch_start_report_within_s,
+                start_min_fraction=config.dispatch_start_report_min_fraction,
+                all_started_within_s=config.dispatch_all_started_within_s,
+                long_rollout_s=config.long_rollout_s,
+                long_rollout_max_fraction=config.long_rollout_max_fraction,
+                timed_out_max_fraction=config.timed_out_max_fraction,
+                max_waiting_ratio=config.server_queue_max_waiting_ratio if config.server_queue_metrics_urls else None,
+            )
+        timing_heartbeat: Optional[asyncio.Task] = None
+        queue_sampler: Optional[asyncio.Task] = None
+        sigterm_previous: Any = _NO_SIGTERM_HOOK
         if config.dispatch_budget_s is not None:
             print(
                 f"Dispatch budget: {config.dispatch_budget_s / 60:.0f} min. New rollouts stop being "
@@ -2575,6 +2863,24 @@ class RolloutCollectionHelper(BaseModel):
                             if line.strip():
                                 upload_spool.write(orjson.dumps(_rollout_for_export(orjson.loads(line))) + b"\n")
 
+            if run_timing is not None:
+
+                async def _timing_heartbeat() -> None:
+                    while True:
+                        await asyncio.sleep(config.timing_summary_interval_s)
+                        # stdout is block-buffered when written to a log file; flush so the table shows up live.
+                        print(run_timing.table(), flush=True)
+
+                if config.timing_summary_interval_s:
+                    timing_heartbeat = asyncio.create_task(_timing_heartbeat())
+                if config.server_queue_metrics_urls:
+                    queue_sampler = asyncio.create_task(
+                        _sample_server_queues(
+                            run_timing, config.server_queue_metrics_urls, config.server_queue_sample_interval_s
+                        )
+                    )
+                sigterm_previous = _print_on_sigterm(run_timing.table)
+
             completion_iterator = self._run_examples_with_metadata(
                 input_rows,
                 semaphore=semaphore,
@@ -2583,6 +2889,7 @@ class RolloutCollectionHelper(BaseModel):
                 dispatch_budget_s=config.dispatch_budget_s,
                 drain_margin_s=config.drain_margin_s,
                 latency_tracker=latency_tracker,
+                **({"run_timing": run_timing} if run_timing is not None else {}),
             )
             for future in completion_iterator:
                 completed = await future
@@ -2837,6 +3144,13 @@ class RolloutCollectionHelper(BaseModel):
             collection_succeeded = True
         finally:
             try:
+                if timing_heartbeat is not None:
+                    timing_heartbeat.cancel()
+                if queue_sampler is not None:
+                    queue_sampler.cancel()
+                _restore_sigterm(sigterm_previous)
+                if run_timing is not None:
+                    print(run_timing.table(), flush=True)
                 if isinstance(completion_iterator, _BoundedCompletionIterator):
                     await completion_iterator.aclose()
             finally:
@@ -3350,6 +3664,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         dispatch_budget_s: Optional[float] = None,
         drain_margin_s: Optional[float] = None,
         latency_tracker: Optional["DispatchLatencyTracker"] = None,
+        run_timing: Optional[RunTimingReport] = None,
     ) -> Iterator[Future]:  # pragma: no cover
         """
         Internal dispatch shared by ``run_examples`` and Gym's own collection paths.
@@ -3420,12 +3735,16 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
                 started = time.monotonic()
                 started_at = time.time()
+                if run_timing is not None:
+                    run_timing.record_start(started)
                 res = None
                 try:
                     request_body = _native_episode_request_body(row) if _materialized_taskset(row) else row
                     res = await server_client.post(server_name=server_name, url_path="/run", json=request_body)
                     await raise_for_status(res)
                     result = await get_response_json(res)
+                    if run_timing is not None and isinstance(result, Mapping):
+                        run_timing.record_result(result, time.monotonic() - started)
                     # Independently-measured task wall-clock (ng_perf.total_latency_ms), not derived
                     # from summed model-call/tool latencies to account for additional overhead.
                     rollout_latency_ms = (time.time() - started_at) * 1000
