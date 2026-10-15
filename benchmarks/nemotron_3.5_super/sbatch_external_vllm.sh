@@ -17,6 +17,12 @@ set -euo pipefail
 # Four TP1 replicas per node: VLLM_MODE=aggregated VLLM_ENGINES_PER_NODE=4 NUM_NODES=1
 # Disaggregated pools also support two TP2 replicas per node with VLLM_ENGINES_PER_NODE=2.
 # Disaggregated TP1 pools: VLLM_ENGINES_PER_NODE=4 NUM_PREFILL_NODES=1 NUM_DECODE_NODES=1
+# SAVE_WARMED_CONTAINER=/shared/images/warmed.sqsh runs startup only (omit eval args),
+# collects all nodes' FlashInfer autotuning caches inside one image, exports it,
+# and exits. No autotuning-cache mount is used. Later runs with CONTAINER pointing
+# to that image automatically load the baked caches. Keep the same GPU type and
+# serving config; changed kernels/configs may need fresh tuning. Mounted model
+# weights, GPU memory and CUDA graphs are not captured. Output must not already exist.
 VLLM_MODE="${VLLM_MODE:-pd}"
 VLLM_ENGINES_PER_NODE="${VLLM_ENGINES_PER_NODE:-1}"
 case "$VLLM_MODE" in
@@ -47,6 +53,21 @@ MODEL_NAME="${MODEL_NAME:-$MODEL}"
 CONTAINER=$CONTAINER
 MOUNTS=$MOUNTS
 VLLM_CONFIG=$VLLM_CONFIG
+SAVE_WARMED_CONTAINER="${SAVE_WARMED_CONTAINER:-}"
+warm_cache_helper=""
+if [[ -n "$SAVE_WARMED_CONTAINER" ]]; then
+    if (( $# > 0 )); then
+        echo "ERROR: SAVE_WARMED_CONTAINER runs startup only; omit evaluation arguments." >&2
+        exit 1
+    fi
+    mkdir -p "$(dirname "$SAVE_WARMED_CONTAINER")" slurm-logs
+    SAVE_WARMED_CONTAINER="$(cd "$(dirname "$SAVE_WARMED_CONTAINER")" && pwd -P)/$(basename "$SAVE_WARMED_CONTAINER")"
+    if [[ -e "$SAVE_WARMED_CONTAINER" || -L "$SAVE_WARMED_CONTAINER" ]]; then
+        echo "ERROR: Refusing to overwrite $SAVE_WARMED_CONTAINER" >&2
+        exit 1
+    fi
+    warm_cache_helper=$(cat "$(dirname "${BASH_SOURCE[0]}")/save_warmed_vllm_container.py")
+fi
 ENABLE_MOONCAKE=${ENABLE_MOONCAKE:-0}
 if [[ "$VLLM_MODE" == aggregated && "$ENABLE_MOONCAKE" != 0 ]]; then
     echo "ENABLE_MOONCAKE requires VLLM_MODE=pd" >&2
@@ -240,6 +261,17 @@ export NCCL_NVLS_ENABLE=1
 
 export ENABLE_MOONCAKE=$ENABLE_MOONCAKE
 source "$VLLM_CONFIG"
+
+baked_cache=/opt/super-vl-evals/flashinfer-autotune-cache
+if [[ -n "$SAVE_WARMED_CONTAINER" || -f "\$baked_cache/.baked" ]]; then
+    export VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR="\$baked_cache"
+    mkdir -p "\$baked_cache"
+    echo "Using image-local FlashInfer autotune cache: \$baked_cache on \$(hostname)"
+fi
+if [[ -n "$SAVE_WARMED_CONTAINER" ]]; then
+    PROFILE_PREFILL=0
+    touch "\$baked_cache/.warmup-start"
+fi
 
 # Custom images contain patched AOT kernels and their build-time smoke check.
 # Do this once on every node before any prefill/decode/headless workers fork.
@@ -817,11 +849,16 @@ batch_command=$(cat <<EOF
 set -euo pipefail
 
 nodes=(\$(scontrol show hostnames "\$SLURM_JOB_NODELIST"))
+worker_container=container-on-node
+if [[ -n "$SAVE_WARMED_CONTAINER" ]]; then
+    worker_container="vllm-warm-\$SLURM_JOB_ID"
+fi
 
 ALL_NODES="\${nodes[*]}" \
 srun --nodes=$NUM_NODES --ntasks=$NUM_NODES --ntasks-per-node=1 --kill-on-bad-exit=1 \
     --container-image=$CONTAINER \
-    --container-name=container-on-node \
+    --container-name="\$worker_container" \
+    --container-writable \
     --container-mounts=$MOUNTS \
     --container-workdir=\$SLURM_SUBMIT_DIR \
     --no-container-mount-home \
@@ -831,18 +868,85 @@ srun --nodes=$NUM_NODES --ntasks=$NUM_NODES --ntasks-per-node=1 --kill-on-bad-ex
         exec "\$@"
     ' bash bash -c "\$vllm_command" &
 server_step=\$!
+cache_warmup_step=""
+cache_export_dir=""
 
 cleanup_server() {
     job_status=\$?
     trap - EXIT INT TERM
     set +e
-    kill "\$server_step" 2>/dev/null || true
-    wait "\$server_step" 2>/dev/null || true
+    if [[ -n "\$cache_warmup_step" ]]; then
+        kill "\$cache_warmup_step" 2>/dev/null || true
+        wait "\$cache_warmup_step" 2>/dev/null || true
+    fi
+    if [[ -n "\$server_step" ]]; then
+        kill "\$server_step" 2>/dev/null || true
+        wait "\$server_step" 2>/dev/null || true
+    fi
+    if [[ -n "\$cache_export_dir" ]]; then
+        rm -rf -- "\$cache_export_dir"
+    fi
     exit "\$job_status"
 }
 trap cleanup_server EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+if [[ -n "$SAVE_WARMED_CONTAINER" ]]; then
+    cache_urls=()
+    for (( node_index = 0; node_index < \${#nodes[@]}; node_index++ )); do
+        if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]] && \
+            (( node_index != 0 && node_index != $NUM_PREFILL_NODES )); then
+            continue
+        fi
+        for (( engine_index = 0; engine_index < $VLLM_ENGINES_PER_NODE; engine_index++ )); do
+            cache_urls+=("http://\${nodes[node_index]}:\$(( $WORKER_SERVER_PORT + engine_index ))")
+        done
+    done
+    python3 -c "\$warm_cache_helper" wait \
+        --timeout "$ROUTER_WORKER_STARTUP_TIMEOUT_SECONDS" "\${cache_urls[@]}" &
+    cache_warmup_step=\$!
+    completed_pid=""
+    completed_status=0
+    wait -n -p completed_pid "\$server_step" "\$cache_warmup_step" || completed_status=\$?
+    if [[ "\$completed_pid" == "\$server_step" ]]; then
+        echo "ERROR: vLLM exited before cache warmup completed (status=\$completed_status)." >&2
+        (( completed_status != 0 )) || completed_status=1
+    fi
+    (( completed_status == 0 )) || exit "\$completed_status"
+    cache_warmup_step=""
+
+    # Transfer cache JSON over stdout; no cache directory is bind-mounted.
+    # One complete cache per config hash is retained, including both PD roles.
+    cache_export_dir=\$(mktemp -d "$(dirname "$SAVE_WARMED_CONTAINER")/.vllm-warm.XXXXXX")
+    for (( node_index = 0; node_index < \${#nodes[@]}; node_index++ )); do
+        dump_args=()
+        if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]] && \
+            (( node_index != 0 && node_index != $NUM_PREFILL_NODES )); then
+            dump_args+=(--allow-empty)
+        fi
+        srun --overlap --exact --nodes=1 --ntasks=1 --cpus-per-task=1 --gpus=0 \
+            --nodelist="\${nodes[node_index]}" --container-name="\$worker_container" \
+            --container-writable --no-container-mount-home --container-workdir=/ \
+            python3 -c "\$warm_cache_helper" dump "\${dump_args[@]}" >> "\$cache_export_dir/caches.jsonl"
+    done
+
+    # Stop the serving step before exporting. The named rootfs persists for the
+    # final single-node step; do not set --container-save on the multi-node step.
+    kill "\$server_step"
+    wait "\$server_step" || true
+    server_step=""
+    srun --overlap --exact --nodes=1 --ntasks=1 --cpus-per-task=1 --gpus=0 \
+        --nodelist="\${nodes[0]}" --container-name="\$worker_container" \
+        --container-writable --no-container-mount-home --container-workdir=/ \
+        --container-save="\$cache_export_dir/warmed.sqsh" \
+        python3 -c "\$warm_cache_helper" install < "\$cache_export_dir/caches.jsonl"
+    test -s "\$cache_export_dir/warmed.sqsh"
+    # Publish only a successful export; a concurrent job must not overwrite it.
+    ln "\$cache_export_dir/warmed.sqsh" "$SAVE_WARMED_CONTAINER"
+    echo "Saved warmed vLLM image: $SAVE_WARMED_CONTAINER"
+    exit 0
+fi
 
 if (( $should_run_eval )); then
     # No need to wait for endpoint since Gym will wait for model endpoints to spin up before proceeding.
@@ -912,6 +1016,7 @@ main_job_id=$(
     vllm_command="$vllm_command" \
     eval_command="$eval_command" \
     batch_command="$batch_command" \
+    warm_cache_helper="$warm_cache_helper" \
     sbatch \
         --parsable \
         --nodes=$NUM_NODES \
