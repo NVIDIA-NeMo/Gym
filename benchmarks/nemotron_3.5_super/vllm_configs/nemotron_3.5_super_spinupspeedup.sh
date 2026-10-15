@@ -24,6 +24,8 @@ export VLLM_USE_V2_MODEL_RUNNER=1
 
 export VLLM_USE_RUST_FRONTEND=1
 
+export VLLM_ENABLE_STARTUP_PLAN=1
+
 # @bxyu-nvidia: `--skip-mm-profiling` Is needed to get Super VL checkpoint working, even with text benchmarks
 # @bxyu-nvidia: We set --prefix-match-unit 128 because the Mooncake store prefill lookup gets more expensive the smaller this number is
 # and caused prefill bottlenecks as a result when using Mooncake.
@@ -56,6 +58,7 @@ VLLM_COMMON_ARGS=(
     --prefix-match-unit 128
     --use-replayssm
     --replayssm-buffer-len 16
+    --safetensors-load-strategy eager
 )
 # @bxyu-nvidia: Lease duration is set to 180s since to give nodes a chance to pick up the request. Helps with resilience.
 # @bxyu-nvidia: We set num_speculative_tokens_per_batch_size to 0 here since prefill does not need to speculate any tokens, it just needs to know that we are speculating.
