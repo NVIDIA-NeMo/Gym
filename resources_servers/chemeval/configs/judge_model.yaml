@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.select:judge_base_url,http://unset.local/v1}
+      openai_api_key: ${oc.select:judge_api_key,unset}
+      openai_model: ${oc.select:judge_model_name,unset}
+chemeval:
+  resources_servers:
+    chemeval:
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+      verified: false

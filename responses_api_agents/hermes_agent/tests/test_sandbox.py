@@ -27,6 +27,7 @@ from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.hermes_agent import sandbox as hermes_sandbox
 from responses_api_agents.hermes_agent.app import (
+    AGENT_TIMEOUT_METADATA_KEY,
     HermesAgent,
     HermesAgentConfig,
     HermesAgentRunRequest,
@@ -611,7 +612,7 @@ async def test_receipt_download_failure_never_signals_a_reused_pid(agent, state,
         if confirmed:
             await state.session.stop_harness(timeout=agent.config.session_close_timeout_seconds)
         else:
-            with pytest.raises(RuntimeError, match="cleanup was not confirmed"):
+            with pytest.raises(RuntimeError, match="termination was not confirmed"):
                 await state.session.stop_harness(timeout=agent.config.session_close_timeout_seconds)
         await asyncio.sleep(0.05)
         assert not signaled.exists()
@@ -755,7 +756,7 @@ def test_cleanup_and_runtime_are_independent():
     runtime = HarnessProcessInfo.model_validate({"hostname": "sandbox", "pid": 123})
     assert runtime.hostname == "sandbox" and runtime.pid == 123
     assert runtime.python is None
-    with pytest.raises(ValueError, match="cleanup was not confirmed"):
+    with pytest.raises(ValueError, match="termination was not confirmed"):
         parse_cleanup_receipt(runtime.model_dump())
     with pytest.raises(ValidationError):
         HarnessProcessInfo.model_validate(cleanup)
@@ -868,7 +869,7 @@ async def test_invalid_cleanup_diagnostics_do_not_block_close(agent, state):
 async def test_runner_exit_without_cleanup_receipt_blocks_close(agent, state, receipt):
     state.session.launch_started = True
     download_json = mock_json_download(state.session.sandbox, return_value=receipt)
-    with pytest.raises(RuntimeError, match="cleanup was not confirmed"):
+    with pytest.raises(RuntimeError, match="termination was not confirmed"):
         await agent._close_agent_session_state(state)
     assert state.session.launch_started and state.session.cleanup is None and not state.session.sandbox_stopped
     state.session.sandbox.disconnect.assert_not_awaited()
@@ -907,9 +908,11 @@ async def test_session_prompt_and_limits_reach_runner(agent, state, overrides, t
     assert any(arg.endswith("/process_supervisor.py") for arg in launch_args)
     assert float(launch_args[launch_args.index("--timeout") + 1]) == agent.config.sandbox_runner_timeout_seconds
     cleanup_timeout = float(launch_args[launch_args.index("--cleanup-timeout") + 1])
-    assert cleanup_timeout == agent.config.session_close_timeout_seconds / 3
-    assert state.session.sandbox.exec.await_args_list[0].kwargs["timeout_s"] > (
-        agent.config.sandbox_runner_timeout_seconds + 3 * cleanup_timeout
+    assert cleanup_timeout * process_supervisor.CLEANUP_PHASE_COUNT == pytest.approx(
+        agent.config.session_close_timeout_seconds
+    )
+    assert state.session.sandbox.exec.await_args_list[0].kwargs["timeout_s"] == pytest.approx(
+        agent.config.sandbox_runner_timeout_seconds + agent.config.session_close_timeout_seconds + 30
     )
     # Execute the real launch prefix: cleanup must receive the shell's PID, not a literal "$".
     launch_prefix, separator, _ = launch_command.partition(" && exec ")
@@ -1003,6 +1006,7 @@ async def test_exec_reads_final_output_after_confirmed_cleanup(agent, state, out
         {"user": "user-id"},
         {"metadata": {"extra_body": '{"seed": 1}'}},
         {"metadata": {"chat_template_kwargs": '{"enable_thinking": true}'}},
+        {"metadata": {AGENT_TIMEOUT_METADATA_KEY: "900.0", "extra_body": '{"seed": 1}'}},
         {"prompt_cache_key": "cache"},
         {"reasoning": {"effort": "low"}},
         {"previous_response_id": "previous"},
@@ -1101,6 +1105,220 @@ async def test_host_and_sandbox_prepare_the_same_request(agent, state, monkeypat
     assert len(validations) == 2  # Exactly once per incoming request, not again in the runner.
 
 
+@pytest.mark.parametrize("sandbox", [False, True])
+async def test_task_timeout_metadata_is_accepted_on_both_paths(agent, state, sandbox):
+    """Task rows carry the agent budget as request metadata; it must reach the activation, not a 422."""
+    body = NeMoGymResponseCreateParamsNonStreaming(input="task", metadata={AGENT_TIMEOUT_METADATA_KEY: "900.0"})
+    agent._session_records["session"] = _AgentSessionRecord(state=state, episode_id=state.request.episode_id)
+    agent._run_sandbox_episode = AsyncMock(return_value=episode(agent))
+    agent._create_response = AsyncMock(return_value=episode(agent).response)
+
+    response = await agent.responses(request(state) if sandbox else SimpleNamespace(session={}), body)
+
+    assert response.status == "completed"
+    executed = agent._run_sandbox_episode if sandbox else agent._create_response
+    executed.assert_awaited_once()
+    validated = executed.await_args.kwargs["body"] if sandbox else executed.await_args.args[0]
+    assert validated.metadata == {AGENT_TIMEOUT_METADATA_KEY: "900.0"}
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("900.0", 900.0),
+        ("900", 900.0),
+        (None, 21600.0),
+        ("99999", 21600.0),  # The server ceiling still caps a generous task budget.
+        ("not-a-number", 21600.0),
+        ("0", 21600.0),
+        ("-5", 21600.0),
+        ("inf", 21600.0),
+    ],
+)
+def test_agent_timeout_is_the_task_budget_capped_by_the_ceiling(agent, raw, expected):
+    metadata = None if raw is None else {AGENT_TIMEOUT_METADATA_KEY: raw}
+    body = NeMoGymResponseCreateParamsNonStreaming(input="task", metadata=metadata)
+    assert agent.config.sandbox_runner_timeout_seconds == 21600
+    assert agent._agent_timeout_sec(body) == expected
+
+
+@pytest.mark.parametrize("budget", [None, "900.0"])
+async def test_task_timeout_bounds_the_sandbox_activation(agent, state, budget):
+    metadata = None if budget is None else {AGENT_TIMEOUT_METADATA_KEY: budget}
+    body = NeMoGymResponseCreateParamsNonStreaming(input="task", metadata=metadata)
+    state.execute = AsyncMock(
+        return_value={"result": {"completed": True, "messages": [{"role": "assistant", "content": "done"}]}}
+    )
+
+    result = await agent._run_sandbox_episode(body=body, agent_session_id="session", state=state)
+
+    expected = float(agent.config.sandbox_runner_timeout_seconds) if budget is None else 900.0
+    assert state.execute.await_args.kwargs["timeout"] == expected
+    assert result.response.status == "completed"
+    assert result.response.metadata[AGENT_TIMEOUT_METADATA_KEY] == str(expected)
+    assert "hermes_error_type" not in result.response.metadata
+
+
+async def test_task_timeout_reaches_the_sandbox_supervisor(agent, state, tmp_path, monkeypatch):
+    """The in-sandbox supervisor enforces the deadline, so it must be launched with the task's budget."""
+    state.session.session_dir = str(tmp_path)
+    monkeypatch.setattr(hermes_sandbox, "_SANDBOX_PYTHON", sys.executable)
+    state.session.sandbox.upload.side_effect = shutil.copyfile
+    state.upload_json = AsyncMock()
+    mock_json_download(
+        state.session.sandbox,
+        side_effect=[
+            {"cleanup_confirmed": True, "error": None},
+            {"result": {"completed": True, "messages": [{"role": "assistant", "content": "done"}]}},
+        ],
+    )
+    body = NeMoGymResponseCreateParamsNonStreaming(input="task", metadata={AGENT_TIMEOUT_METADATA_KEY: "900.0"})
+
+    await agent._run_sandbox_episode(body=body, agent_session_id="session", state=state)
+
+    launch_args = shlex.split(state.session.sandbox.exec.await_args_list[0].args[0])
+    assert float(launch_args[launch_args.index("--timeout") + 1]) == 900.0
+    assert (
+        state.session.sandbox.exec.await_args_list[0].kwargs["timeout_s"] < agent.config.sandbox_runner_timeout_seconds
+    )
+
+
+async def test_runner_stopped_at_the_deadline_is_a_partial_response(agent, state):
+    """The runner's interrupted transcript is graded as an incomplete response that records the timeout."""
+    state.execute = AsyncMock(
+        return_value={
+            "result": {
+                "completed": False,
+                "interrupted": True,
+                "stop_reason": "wall_time",
+                "messages": [{"role": "user", "content": "task"}, {"role": "assistant", "content": "Still working"}],
+            }
+        }
+    )
+    body = NeMoGymResponseCreateParamsNonStreaming(input="task", metadata={AGENT_TIMEOUT_METADATA_KEY: "900.0"})
+
+    result = await agent._run_sandbox_episode(body=body, agent_session_id="session", state=state)
+
+    assert result.response.status == "incomplete"
+    assert result.response.error is None
+    assert result.response.output[-1].content[0].text == "Still working"
+    assert result.response.metadata["interrupted"] == "true"
+    assert result.response.metadata["stop_reason"] == "wall_time"
+    assert result.response.metadata["hermes_error_type"] == "TimeoutError"
+    assert result.response.metadata[AGENT_TIMEOUT_METADATA_KEY] == "900.0"
+
+
+_CAPTURED_TRANSCRIPT = {
+    "result": {
+        "completed": True,
+        "messages": [{"role": "user", "content": "task"}, {"role": "assistant", "content": "Half done"}],
+    }
+}
+
+
+async def test_supervisor_overrun_with_a_captured_transcript_is_a_partial_response(agent, state, monkeypatch):
+    """Even when the supervisor itself misses the deadline, a captured transcript is graded, not a 500,
+    once the wall clock shows the agent budget was really used up."""
+    state.execute = AsyncMock(side_effect=TimeoutError("Hermes sandbox supervisor exceeded its execution deadline"))
+    state.session.artifacts = _CAPTURED_TRANSCRIPT
+    body = NeMoGymResponseCreateParamsNonStreaming(input="task", metadata={AGENT_TIMEOUT_METADATA_KEY: "900.0"})
+    clock = iter([0.0, 901.0])
+    monkeypatch.setattr("responses_api_agents.hermes_agent.app.monotonic", lambda: next(clock))
+
+    result = await agent._run_sandbox_episode(body=body, agent_session_id="session", state=state)
+
+    assert result.response.status == "incomplete"
+    assert result.response.error is None
+    assert result.response.metadata["interrupted"] == "true"
+    assert result.response.metadata["stop_reason"] == "wall_time"
+    assert result.response.metadata["hermes_error_type"] == "TimeoutError"
+    assistant = [item for item in result.response.output if getattr(item, "role", None) == "assistant"]
+    assert [item.content[0].text for item in assistant] == ["Half done"]
+
+
+async def test_early_provider_timeout_with_a_transcript_stays_a_failure(agent, state, monkeypatch):
+    """A provider TimeoutError long before the agent deadline is a transport failure, even with a saved
+    transcript: nothing says the agent ran out of time, so it is not a gradable wall_time outcome."""
+    state.execute = AsyncMock(side_effect=TimeoutError("Hermes sandbox supervisor exceeded its execution deadline"))
+    state.session.artifacts = _CAPTURED_TRANSCRIPT
+    body = NeMoGymResponseCreateParamsNonStreaming(input="task", metadata={AGENT_TIMEOUT_METADATA_KEY: "900.0"})
+    clock = iter([0.0, 12.0])
+    monkeypatch.setattr("responses_api_agents.hermes_agent.app.monotonic", lambda: next(clock))
+
+    with pytest.raises(TimeoutError, match="exceeded its execution deadline"):
+        await agent._run_sandbox_episode(body=body, agent_session_id="session", state=state)
+
+
+async def test_runner_recorded_deadline_is_deadline_evidence(agent, state, monkeypatch):
+    """The supervisor stopped Hermes at the deadline and the runner wrote a wall_time transcript; the
+    provider's own timeout then fired early. The runner's record is enough evidence."""
+    state.execute = AsyncMock(side_effect=TimeoutError("deadline"))
+    state.session.artifacts = {
+        "result": {
+            **_CAPTURED_TRANSCRIPT["result"],
+            "completed": False,
+            "interrupted": True,
+            "stop_reason": "wall_time",
+        }
+    }
+    body = NeMoGymResponseCreateParamsNonStreaming(input="task", metadata={AGENT_TIMEOUT_METADATA_KEY: "900.0"})
+    clock = iter([0.0, 3.0])
+    monkeypatch.setattr("responses_api_agents.hermes_agent.app.monotonic", lambda: next(clock))
+
+    result = await agent._run_sandbox_episode(body=body, agent_session_id="session", state=state)
+
+    assert result.response.metadata["stop_reason"] == "wall_time"
+    assert result.response.metadata["hermes_error_type"] == "TimeoutError"
+
+
+async def test_cleanup_cancellation_after_an_early_provider_timeout_stays_a_failure(agent, state, monkeypatch):
+    """An early provider TimeoutError triggers cleanup: close publishes stop.request and the runner records an
+    interrupted transcript with stop_reason "cancelled". That is a consequence of the failure, not evidence
+    that the agent deadline passed, so the failure stands."""
+    state.execute = AsyncMock(side_effect=TimeoutError("Hermes sandbox supervisor exceeded its execution deadline"))
+    state.session.artifacts = {
+        "result": {
+            **_CAPTURED_TRANSCRIPT["result"],
+            "completed": False,
+            "interrupted": True,
+            "stop_reason": "cancelled",
+        }
+    }
+    body = NeMoGymResponseCreateParamsNonStreaming(input="task", metadata={AGENT_TIMEOUT_METADATA_KEY: "900.0"})
+    clock = iter([0.0, 1.0])
+    monkeypatch.setattr("responses_api_agents.hermes_agent.app.monotonic", lambda: next(clock))
+
+    with pytest.raises(TimeoutError, match="exceeded its execution deadline"):
+        await agent._run_sandbox_episode(body=body, agent_session_id="session", state=state)
+
+
+@pytest.mark.parametrize("artifacts", [None, {"result": "garbled"}])
+async def test_supervisor_overrun_without_a_transcript_stays_a_failure(agent, state, artifacts):
+    """An overrun that left no gradable output is an infrastructure failure, not an empty score."""
+    state.execute = AsyncMock(side_effect=TimeoutError("Hermes sandbox supervisor exceeded its execution deadline"))
+    state.session.artifacts = artifacts
+    body = NeMoGymResponseCreateParamsNonStreaming(input="task", metadata={AGENT_TIMEOUT_METADATA_KEY: "900.0"})
+
+    with pytest.raises(TimeoutError, match="exceeded its execution deadline"):
+        await agent._run_sandbox_episode(body=body, agent_session_id="session", state=state)
+
+
+async def test_timed_out_activation_is_served_not_raised(agent, state, monkeypatch):
+    """The HTTP route returns the partial response; the environment server must not see a failure."""
+    state.execute = AsyncMock(side_effect=TimeoutError("deadline"))
+    state.session.artifacts = _CAPTURED_TRANSCRIPT
+    clock = iter([0.0, 901.0])
+    monkeypatch.setattr("responses_api_agents.hermes_agent.app.monotonic", lambda: next(clock))
+    agent._session_records["session"] = _AgentSessionRecord(state=state, episode_id=state.request.episode_id)
+    body = NeMoGymResponseCreateParamsNonStreaming(input="task", metadata={AGENT_TIMEOUT_METADATA_KEY: "900.0"})
+
+    response = await agent.responses(request(state), body)
+
+    assert response.status == "incomplete"
+    assert response.metadata["hermes_error_type"] == "TimeoutError"
+    assert state.observations is not None
+
+
 def test_future_schema_controls_are_rejected_unless_left_at_default(agent):
     class ExtendedRequest(NeMoGymResponseCreateParamsNonStreaming):
         future_control: str | None = None
@@ -1183,11 +1401,12 @@ async def test_failed_setup_retains_handle_until_cleanup_confirmed(
     monkeypatch.setattr(module, "get_global_config_dict", lambda: {})
     monkeypatch.setattr(module, "resolve_provider_config", lambda *args: {})
     monkeypatch.setattr(module, "create_provider", lambda config: AsyncMock())
-    monkeypatch.setattr(module.shutil, "which", lambda name: "/test/uv")
+    monkeypatch.setattr("nemo_gym.agent_utils.uv_bootstrap.shutil.which", lambda name: "/test/uv")
     ok = SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None)
     failed = SimpleNamespace(return_code=1, stdout="", stderr="installer failed")
-    # Prepare paths, detect a missing runtime, fail installation, then remove session files.
-    sandbox.exec.side_effect = [ok, failed, failed, ok]
+    # Prepare paths, detect a missing runtime, probe the architecture for uv, fail installation, then
+    # remove session files.
+    sandbox.exec.side_effect = [ok, failed, ok, failed, ok]
     cleanup = sandbox.stop if owns_sandbox else sandbox.disconnect
     if cleanup_fails:
         cleanup.side_effect = RuntimeError("cleanup unavailable")

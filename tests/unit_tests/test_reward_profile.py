@@ -17,6 +17,7 @@
 import sys
 from pathlib import Path
 
+import numpy as np
 import orjson
 import pandas as pd
 import pytest
@@ -50,6 +51,31 @@ def _result(task_idx: int, rollout_idx: int, reward: float = 1.0, total_tokens: 
 
 
 class TestRewardProfile:
+    def test_histogram_adjacent_floats(self) -> None:
+        pytest.importorskip("wandb")
+        data = pd.Series([1.0, np.nextafter(1.0, 2.0), float("nan")])
+        original = data.copy()
+        histogram = RewardProfiler().histogram(data)
+        assert histogram.histogram == [2]
+        assert histogram.bins[0] <= 1.0
+        assert histogram.bins[-1] >= np.nextafter(1.0, 2.0)
+        pd.testing.assert_series_equal(data, original)
+
+    def test_histogram_normal_range_unchanged(self) -> None:
+        wandb = pytest.importorskip("wandb")
+        data = pd.Series([0.0, 0.5, 1.0])
+        assert RewardProfiler().histogram(data).to_json() == wandb.Histogram(data).to_json()
+
+    def test_histogram_unrelated_error_propagates(self, monkeypatch) -> None:
+        wandb = pytest.importorskip("wandb")
+
+        def invalid_histogram(data):
+            raise ValueError("unrelated histogram failure")
+
+        monkeypatch.setattr(wandb, "Histogram", invalid_histogram)
+        with pytest.raises(ValueError, match="unrelated histogram failure"):
+            RewardProfiler().histogram(pd.Series([0.0, 1.0]))
+
     def _clean_metrics(self, metrics: list[dict]) -> None:
         for row in metrics:
             for key in list(row):

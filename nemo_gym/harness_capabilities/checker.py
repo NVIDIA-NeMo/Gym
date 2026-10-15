@@ -10,6 +10,8 @@ from dataclasses import dataclass
 
 from jsonschema import Draft202012Validator
 
+from nemo_gym.rollout_observability import NG_AGENT_OBSERVATIONS_KEY
+
 from .checks import SchemaCheck, SemanticCheck
 from .results import Results, gate_passes
 
@@ -144,7 +146,7 @@ class Inspector:
         self.invocations = _objects(self.trajectory.get("invocations"))
         self.turns = _objects(self.trajectory.get("turns"))
         self.tools = _objects(self.trajectory.get("tool_calls"))
-        self.observations = _objects(_mapping(self.record.get("ng_agent_observations")).get("records"))
+        self.observations = _objects(_mapping(self.record.get(NG_AGENT_OBSERVATIONS_KEY)).get("records"))
 
     def model_calls(self) -> None:
         self.results.run(
@@ -1003,15 +1005,25 @@ class Inspector:
             )
         )
         policy = set(range(len(self.calls))) - helpers
+        # The collector retains HTTP failures as invocation-owned attempts, not
+        # model turns (#4045). A producer may still link retries to a persisted
+        # assistant message, but absence of that optional link is not data loss.
+        http_errors = {
+            i
+            for i in policy
+            if type(status := _mapping(self.calls[i].get("response_metadata")).get("status_code")) is int
+            and status >= 400
+        }
         self.results.run(
             SemanticCheck(
                 id="steps.attempt_accounting",
                 tier="P0",
                 evidence=("TE-9",),
                 location="$.ng_trajectory.turns[*].model_calls",
-                reason="every policy attempt needs one step; compaction helper calls must remain separate",
+                reason="every policy response needs one step; HTTP errors may be unbound and compaction calls stay separate",
                 predicate=lambda: bool(policy)
-                and all((refs[i] == 1 for i in policy))
+                and all((refs[i] == 1 for i in policy - http_errors))
+                and all((refs[i] <= 1 for i in http_errors))
                 and (not any((refs[i] for i in helpers))),
                 available=self.available,
                 applies=self.scope.steps,

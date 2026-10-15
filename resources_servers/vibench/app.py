@@ -208,7 +208,6 @@ class VibenchVerifyResponse(BaseMultiRewardVerifyResponse):
 
 
 class VibenchResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: VibenchResourcesServerConfig
 
     # Derived once per server: env_creator is a subprocess and the result is identical for

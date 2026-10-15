@@ -110,7 +110,6 @@ def _initial_prompt(body: DomainGenerationRunRequest) -> str:
 
 
 class DomainGenerationAgent(SimpleResponsesAPIAgent):
-    ray_enabled = False
     config: DomainGenerationAgentConfig
 
     async def responses(

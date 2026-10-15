@@ -15,6 +15,8 @@ automationbench:
         toolset: api
         # Both metrics are reported; this selects which one carries the reward weight.
         reward_fn: aa_headline
+      # Opt in to per-assertion verdicts in every rollout (response.exported_state.assertion_results).
+      export_state_columns: []
       group_size: 1
       max_concurrent_generation: -1
       max_concurrent_scoring: -1
