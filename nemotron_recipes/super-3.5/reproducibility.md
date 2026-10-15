@@ -133,8 +133,8 @@ Changes for two recipes:
 
 Notes:
 
-- **Images.** The card's quick-start command allows one image per request. OSWorld sends 3 or
-  more and fails with it, so keep the image limit from the command above.
+- **Images.** The card's quick-start command allows one image per request. OSWorld sends up to
+  3 and fails with it, so keep the image limit from the command above.
 - **80 GB GPUs.** The command above was validated on 4× GB200 and does not start on 80 GB
   GPUs. There, use the card's memory settings: `--gpu-memory-utilization 0.85 --max-num-seqs 32`,
   without `--max-num-batched-tokens`. They change memory use and speed, not results.
