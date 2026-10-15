@@ -100,7 +100,6 @@ VLLM_PREFILL_ARGS=(
             ]
         }
     }'
-    --max-cudagraph-capture-size 1200
     --cudagraph-metrics
     --max-num-batched-tokens 67840
     --max-num-seqs 1024
