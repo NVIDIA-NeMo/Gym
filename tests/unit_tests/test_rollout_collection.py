@@ -16,6 +16,7 @@ import asyncio
 import gc
 import json
 import pickle
+import sys
 import warnings
 import weakref
 from asyncio import Future
@@ -6147,6 +6148,150 @@ class TestRunExamplesAclose:
             TASK_INDEX_KEY_NAME: task_index,
             ROLLOUT_INDEX_KEY_NAME: 0,
         }
+
+    @pytest.mark.parametrize("count", [32, 128, 1024])
+    async def test_concurrent_consumption_has_linear_wakeups(self, monkeypatch, count: int) -> None:
+        gates = [asyncio.Event() for _ in range(count)]
+        consumed = asyncio.Queue()
+        consumer_calls = 0
+
+        async def post(server_name, url_path, json):  # noqa: A002
+            index = json[TASK_INDEX_KEY_NAME]
+            await gates[index].wait()
+            return FakeResponse(200, {"task": index})
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        completions = RolloutCollectionHelper().run_examples([self._row(i) for i in range(count)])
+
+        async def consume(awaitable):
+            result = await awaitable
+            consumed.put_nowait(result)
+            return result
+
+        def profile(frame, event, arg):
+            nonlocal consumer_calls
+            # Python profiles each coroutine entry/resumption as a call. Count our own
+            # consumer, without depending on Gym's queue implementation or wall time.
+            if event == "call" and frame.f_code is consume.__code__:
+                consumer_calls += 1
+
+        previous_profile = sys.getprofile()
+        tasks = []
+        try:
+            sys.setprofile(profile)
+            tasks = [asyncio.create_task(consume(awaitable)) for awaitable in completions]
+            await asyncio.sleep(0)  # Every consumer parks before any rollout is released.
+            assert consumer_calls == count
+            async with asyncio.timeout(30):  # Deadlock watchdog, not a performance threshold.
+                for index in reversed(range(count)):
+                    gates[index].set()
+                    row, result = await consumed.get()
+                    assert row[TASK_INDEX_KEY_NAME] == index
+                    assert result == {"task": index}
+                results = await asyncio.gather(*tasks)
+            resumptions = consumer_calls - count
+            print(f"{count} individually arriving outcomes: {resumptions} consumer resumptions")
+            assert count <= resumptions <= 2 * count
+            assert sorted(row[TASK_INDEX_KEY_NAME] for row, _ in results) == list(range(count))
+        finally:
+            sys.setprofile(previous_profile)
+            await asyncio.wait_for(completions.aclose(), timeout=5)
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def test_cancelled_notified_consumer_does_not_lose_completion(self, monkeypatch) -> None:
+        gate = asyncio.Event()
+        finished = asyncio.Event()
+
+        async def post(server_name, url_path, json):  # noqa: A002
+            index = json[TASK_INDEX_KEY_NAME]
+            if index != 0:
+                await asyncio.Event().wait()
+            await gate.wait()
+            finished.set()
+            return FakeResponse(200, {"task": index})
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        completions = RolloutCollectionHelper().run_examples([self._row(i) for i in range(3)])
+        consumers = [asyncio.create_task(awaitable) for awaitable in completions]
+        try:
+            async with asyncio.timeout(5):
+                await asyncio.sleep(0)
+                gate.set()
+                await finished.wait()
+                # The done callback notifies the first consumer on this turn; cancel it
+                # before it resumes so another parked consumer must claim the outcome.
+                await asyncio.sleep(0)
+                assert all(not consumer.done() for consumer in consumers)
+                consumers[0].cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await consumers[0]
+                row, result = await consumers[1]
+                assert row[TASK_INDEX_KEY_NAME] == 0
+                assert result == {"task": 0}
+                await completions.aclose()
+                with pytest.raises(asyncio.CancelledError):
+                    await consumers[2]
+        finally:
+            await asyncio.wait_for(completions.aclose(), timeout=5)
+            for consumer in consumers:
+                consumer.cancel()
+            await asyncio.gather(*consumers, return_exceptions=True)
+
+    @pytest.mark.parametrize("max_resident_tasks", [None, 4])
+    @pytest.mark.parametrize("finish_before_drain", [False, True])
+    async def test_drain_wakes_multiple_parked_consumers(
+        self, monkeypatch, max_resident_tasks: int | None, finish_before_drain: bool
+    ) -> None:
+        gates = [asyncio.Event() for _ in range(8)]
+        finished = asyncio.Event()
+        started, cancelled = [], []
+
+        async def post(server_name, url_path, json):  # noqa: A002
+            index = json[TASK_INDEX_KEY_NAME]
+            started.append(index)
+            try:
+                await gates[index].wait()
+            except asyncio.CancelledError:
+                cancelled.append(index)
+                raise
+            if index == 1:
+                finished.set()
+            return FakeResponse(200, {"task": index})
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        completions = RolloutCollectionHelper().run_examples(
+            [self._row(i) for i in range(8)], max_resident_tasks=max_resident_tasks
+        )
+        consumers = [asyncio.create_task(awaitable) for awaitable in completions]
+        try:
+            async with asyncio.timeout(5):
+                while len(started) < (max_resident_tasks or 8):
+                    await asyncio.sleep(0)
+                assert all(not consumer.done() for consumer in consumers)
+                admitted = list(started)
+                if finish_before_drain:
+                    gates[0].set()
+                    gates[1].set()
+                    await finished.wait()  # Drain before a parked consumer can claim either result.
+                drained = await completions.aclose_and_drain()
+                outcomes = await asyncio.gather(*consumers, return_exceptions=True)
+                assert all(isinstance(outcome, asyncio.CancelledError) for outcome in outcomes)
+                results = [await future for future in drained]
+                expected = [0, 1] if finish_before_drain else []
+                assert sorted(row[TASK_INDEX_KEY_NAME] for row, _ in results) == expected
+                assert all(result == {"task": row[TASK_INDEX_KEY_NAME]} for row, result in results)
+                assert started == admitted
+                assert sorted(cancelled) == sorted(set(admitted) - set(expected))
+                assert await completions.aclose_and_drain() == []
+                with pytest.raises(StopIteration):
+                    next(completions)
+        finally:
+            await asyncio.wait_for(completions.aclose(), timeout=5)
+            for consumer in consumers:
+                consumer.cancel()
+            await asyncio.gather(*consumers, return_exceptions=True)
 
     @pytest.mark.parametrize("max_resident_tasks", [None, 4])
     async def test_drain_preserves_backlog_and_stops_admission(self, monkeypatch, max_resident_tasks) -> None:

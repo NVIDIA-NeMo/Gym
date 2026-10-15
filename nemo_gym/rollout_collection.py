@@ -2099,24 +2099,19 @@ class _EagerCompletionQueue:
     """Own undelivered outcomes independently of the iterator and its handed-out awaitables."""
 
     def __init__(self, progress):
-        self.ready: deque[Future] = deque()
-        self.available = asyncio.Event()
+        self.ready: asyncio.Queue[Future] = asyncio.Queue()
         self.drained = False
         self.progress = progress
 
     def put(self, task: Future) -> None:
         if not self.drained:
-            self.ready.append(task)
-            self.available.set()
+            self.ready.put_nowait(task)  # Wake one consumer for each available outcome.
 
     async def get(self):
-        while not self.ready and not self.drained:
-            await self.available.wait()
-        if self.drained:
-            raise asyncio.CancelledError
-        task = self.ready.popleft()
-        if not self.ready:
-            self.available.clear()
+        try:
+            task = await self.ready.get()
+        except asyncio.QueueShutDown:
+            raise asyncio.CancelledError from None
         self.progress.update(1)
         if self.progress.n == self.progress.total:
             self.progress.close()
@@ -2124,9 +2119,11 @@ class _EagerCompletionQueue:
 
     def drain(self) -> list[Future]:
         self.drained = True
-        tasks = list(self.ready)
-        self.ready.clear()
-        self.available.set()  # Wake issued awaitables that have not claimed an outcome.
+        tasks = []
+        while not self.ready.empty():
+            tasks.append(self.ready.get_nowait())
+        # Only drain wakes every consumer, including issued awaitables started later.
+        self.ready.shutdown()
         return tasks
 
 
