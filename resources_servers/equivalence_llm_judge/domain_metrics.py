@@ -1,9 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Question-clustered HLE domain summaries from scored verifier responses."""
+"""HLE domain summaries and repeat-level intervals from scored verifier responses."""
 
 import math
-import random
 from typing import Any
 from urllib.parse import quote
 
@@ -41,38 +40,6 @@ def repeat_confidence_interval(observations: list[tuple]) -> tuple[dict | None, 
         "sampling_unit": "evaluation repeat on the fixed benchmark",
         "repeat_count": len(means),
     }, None
-
-
-def question_bootstrap_interval(clusters: list[tuple[float, int]]) -> dict | None:
-    """95% percentile interval for a rollout mean, resampling whole questions.
-
-    Each pair is a question's sum and rollout count. Repeated generations stay
-    together. This estimates question-population uncertainty, not repeat noise.
-    """
-    if len(clusters) < 2:
-        return None
-    rng = random.Random(0)
-    estimates = []
-    for _ in range(2000):
-        sampled = rng.choices(clusters, k=len(clusters))
-        estimates.append(sum(value for value, _ in sampled) / sum(count for _, count in sampled))
-    estimates.sort()
-
-    def percentile(q: float) -> float:
-        index = q * (len(estimates) - 1)
-        low = math.floor(index)
-        return estimates[low] + (estimates[math.ceil(index)] - estimates[low]) * (index - low)
-
-    return {
-        "level": 0.95,
-        "lower": percentile(0.025),
-        "upper": percentile(0.975),
-        "method": "percentile bootstrap over question clusters",
-        "sampling_unit": "question (all repeated generations kept together)",
-        "resamples": 2000,
-        "seed": 0,
-        "question_count": len(clusters),
-    }
 
 
 def compute_domain_metrics(tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
@@ -136,11 +103,5 @@ def compute_domain_metrics(tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
                     metrics[prefix + f"repeat_count/{metric}"] = repeat_interval["repeat_count"]
                 else:
                     metrics[prefix + f"ci_unavailable_reason/{metric}"] = reason
-                interval = question_bootstrap_interval(clusters)
-                metrics[prefix + f"question_ci_available/{metric}"] = interval is not None
-                if interval:
-                    metrics[prefix + f"ci_low_95_question_bootstrap/{metric}"] = interval["lower"]
-                    metrics[prefix + f"ci_high_95_question_bootstrap/{metric}"] = interval["upper"]
     metrics["domains/ci_method"] = "Student t interval across repeat-level estimates (default)"
-    metrics["domains/question_ci_method"] = "percentile bootstrap over question clusters; 2000 resamples; seed 0"
     return metrics

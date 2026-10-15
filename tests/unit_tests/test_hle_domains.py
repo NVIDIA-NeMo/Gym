@@ -6,7 +6,7 @@ import pytest
 
 from nemo_gym.reward_profile import compute_aggregate_metrics
 from resources_servers.equivalence_llm_judge.app import LLMJudgeResourcesServer
-from resources_servers.equivalence_llm_judge.domain_metrics import compute_domain_metrics, question_bootstrap_interval
+from resources_servers.equivalence_llm_judge.domain_metrics import compute_domain_metrics
 
 
 def row(task, repeat, reward, tokens=100, category="Math"):
@@ -20,15 +20,6 @@ def row(task, repeat, reward, tokens=100, category="Math"):
     }
 
 
-def test_question_bootstrap_keeps_repeated_generations_together():
-    interval = question_bootstrap_interval([(1, 2), (1, 2)])
-    assert interval["lower"] == interval["upper"] == 0.5
-    assert question_bootstrap_interval([(1, 2)]) is None
-    varied = question_bootstrap_interval([(0, 2), (2, 2)])
-    assert (varied["lower"], varied["upper"]) == (0, 1)
-    assert varied == question_bootstrap_interval([(0, 2), (2, 2)])
-
-
 def test_domain_means_intervals_and_encoded_labels():
     result = compute_domain_metrics([[row(0, 0, 1, 100), row(0, 1, 1, 200)], [row(1, 0, 0, 300), row(1, 1, 0, 400)]])
     prefix = "domains/category/Math/"
@@ -36,8 +27,6 @@ def test_domain_means_intervals_and_encoded_labels():
     assert result[prefix + "mean/output_tokens"] == 250
     assert result[prefix + "question_count"] == 2
     assert result[prefix + "rollout_count"] == 4
-    assert result[prefix + "ci_low_95_question_bootstrap/output_tokens"] == 150
-    assert result[prefix + "ci_high_95_question_bootstrap/output_tokens"] == 350
     assert result["domains/raw_subject/Algebra%2FGeometry/mean/reward"] == 0.5
 
 
@@ -115,7 +104,7 @@ def test_hle_verified_preserves_domain_labels(vision, monkeypatch):
     assert record["raw_subject"] == "Algebra"
 
 
-def test_repeat_ci_is_default_and_question_ci_remains_separate():
+def test_repeat_ci_requires_matching_repeated_questions():
     prefix = "domains/category/Math/"
     tasks = [[row(q, 0, 0, 100), row(q, 1, 1, 300)] for q in (0, 1)]
     result = compute_domain_metrics(tasks)
@@ -123,14 +112,10 @@ def test_repeat_ci_is_default_and_question_ci_remains_separate():
     assert result[prefix + "ci_available/reward"] is True
     assert result[prefix + "ci_low_95_across_repeats/reward"] == pytest.approx(-5.853102368)
     assert result[prefix + "ci_high_95_across_repeats/reward"] == pytest.approx(6.853102368)
-    assert result[prefix + "ci_low_95_question_bootstrap/reward"] == 0.5
-    assert result[prefix + "ci_high_95_question_bootstrap/reward"] == 0.5
-    assert result[prefix + "ci_low_95_question_bootstrap/output_tokens"] == 200
     assert result[prefix + "ci_low_95_across_repeats/output_tokens"] < 100
     single = compute_domain_metrics([[row(q, 0, q)] for q in (0, 1)])
     assert single[prefix + "ci_available/reward"] is False
     assert prefix + "ci_low_95_across_repeats/reward" not in single
-    assert single[prefix + "question_ci_available/reward"] is True
     incomplete = compute_domain_metrics([tasks[0], tasks[1][:1]])
     assert incomplete[prefix + "ci_available/reward"] is False
     assert "coverage" in incomplete[prefix + "ci_unavailable_reason/reward"]

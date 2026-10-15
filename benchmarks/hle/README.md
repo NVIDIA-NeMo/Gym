@@ -137,8 +137,7 @@ HLE datasets need to be prepared again to retain these labels.
 Aggregation emits flat `domains/<field>/<URL-encoded-label>/...` keys in
 `agent_metrics`: question/rollout counts, `mean/reward` (accuracy as a fraction),
 `mean/output_tokens`, `ci_low_95_across_repeats/<metric>` /
-`ci_high_95_across_repeats/<metric>`, and separate
-`ci_low_95_question_bootstrap/<metric>` / `ci_high_95_question_bootstrap/<metric>`.
+`ci_high_95_across_repeats/<metric>`.
 Headline scores and grading are unchanged.
 Missing labels are counted; incomplete token usage suppresses the token mean and
 interval rather than silently averaging a subset. Masked outcomes are excluded
@@ -148,10 +147,3 @@ Default intervals use Student-t intervals across repeat-level means, with at
 least two repeats covering the same questions. `ci_available/<metric>` indicates
 availability; single-repeat evaluations have no default interval. Bounds are not
 clipped. These intervals measure generation variability on a fixed benchmark.
-
-Separate question intervals use a 95% percentile bootstrap over questions (2,000 resamples, seed 0),
-keeping every question's repeated generations together. These estimate variation
-across questions, not across generation repeats, and therefore have distinct
-names from the existing repeat-level intervals. At least two questions are
-required (`question_ci_available/<metric>`). Identical question means yield zero-width empirical intervals; these
-are not evidence of certainty. No correction for checkpoint selection is made.
