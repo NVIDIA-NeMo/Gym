@@ -386,13 +386,7 @@ def _bind_policy_call_views(
 ) -> tuple[_CallBindings, _CallBindings]:
     """Bind turn-only and turn-or-invocation references with shared indexes and resolutions."""
     turn_reference_items = _deduplicate_reference_items(_item_model_call_references(trajectory.get("turns")))
-    invocation_reference_items = _item_model_call_references(
-        [
-            inv
-            for inv in trajectory.get("invocations") or []
-            if isinstance(inv, dict) and inv.get("role", "agent") == "agent"
-        ]
-    )
+    invocation_reference_items = _item_model_call_references(trajectory.get("invocations"))
     owned_reference_items = _deduplicate_reference_items((*turn_reference_items, *invocation_reference_items))
 
     calls_by_call_id: dict[str, list[dict[str, Any]]] = defaultdict(list)

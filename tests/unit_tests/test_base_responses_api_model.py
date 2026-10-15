@@ -389,7 +389,7 @@ def test_capture_assistant_message_header_round_trip(tmp_path, headers, expected
     async def send(_message):
         pass
 
-    request_headers = [(b"x-session-id", b"opencode-session"), (b"x-ng-invocation-role", b"verifier"), *headers]
+    request_headers = [(b"x-session-id", b"opencode-session"), *headers]
     asyncio.run(
         _CaptureMiddleware(
             app, store=store, model_server_name="srv", assistant_message_header=b"x-assistant-message-id"
@@ -412,7 +412,6 @@ def test_capture_assistant_message_header_round_trip(tmp_path, headers, expected
         assert "client_assistant_message_id" not in exchange
     [call] = read_model_call_records(store, "header-round-trip")
     assert call.client_assistant_message_id == expected
-    assert call.client_invocation_role == "verifier"
     assert call.client_session_id == "opencode-session"
     assert call.response == {"output": []}
 
@@ -2206,3 +2205,70 @@ def test_capture_claim_is_visible_while_the_call_is_still_in_flight(tmp_path):
         assert len(store.read("r-inflight")) == 1
 
     asyncio.run(run())
+
+
+@pytest.mark.asyncio
+async def test_verifier_capture_keeps_retry_ownership_separate_from_agent_observations(tmp_path):
+    from nemo_gym.base_responses_api_model import _CaptureMiddleware, merge_model_call_capture_into_record
+
+    store = CaptureStore(tmp_path)
+    statuses = iter([400, 200])
+
+    async def app(scope, receive, send):
+        await receive()
+        status = next(statuses)
+        await send({"type": "http.response.start", "status": status, "headers": []})
+        body = b'{"error":"rejected"}' if status == 400 else b'{"id":"judge-response","output":[]}'
+        await send({"type": "http.response.body", "body": body, "more_body": False})
+
+    async def receive():
+        return {"type": "http.request", "body": b'{"input":"grade this"}', "more_body": False}
+
+    async def send(_message):
+        pass
+
+    middleware = _CaptureMiddleware(app, store=store, model_server_name="judge_model")
+    for _ in range(2):
+        await middleware(
+            {
+                "type": "http",
+                "path": "/ng-rollout/judge-retry/v1/responses",
+                "headers": [(b"x-ng-verifier-invocation-id", b"verification-1")],
+            },
+            receive,
+            send,
+        )
+    record = {"_ng_rollout_id": "judge-retry", "ng_agent_observations": {"source": "agent", "records": []}}
+    merge_model_call_capture_into_record(record, [tmp_path], include_payloads=True)
+    capture = record["ng_model_call_capture"]
+    calls = capture["calls"]
+    assert [call["status_code"] for call in calls] == [400, 200]
+    assert calls[0]["response_id"] is None
+    assert len(capture["verifier_invocations"]) == 1
+    verifier = capture["verifier_invocations"][0]
+    assert verifier["invocation_id"] == "verification-1"
+    assert {ref["model_call_id"] for ref in verifier["model_calls"]} == {call["model_call_id"] for call in calls}
+    assert verifier["status"] == "unknown"  # Capture does not establish the final grade.
+    assert record["ng_agent_observations"]["records"] == []
+    assert record["ng_agent_observations"]["gaps"] == []
+    assert all("client_invocation_role" not in call for call in calls)
+
+
+def test_invalid_verifier_observation_does_not_hide_the_captured_call(tmp_path):
+    from nemo_gym.base_responses_api_model import merge_model_call_capture_into_record
+
+    store = CaptureStore(tmp_path)
+    store.record(
+        "judge-invalid",
+        {
+            "model_call_id": "actual-call",
+            "status_code": 400,
+            "verifier_invocation": {"invocation_id": "judge", "model_calls": [{"model_call_id": "other-call"}]},
+        },
+    )
+    record = {"_ng_rollout_id": "judge-invalid"}
+    merge_model_call_capture_into_record(record, [tmp_path])
+    capture = record["ng_model_call_capture"]
+    assert [call["model_call_id"] for call in capture["calls"]] == ["actual-call"]
+    assert not capture.get("verifier_invocations")
+    assert "model_call_capture_records_unreadable" in {gap["code"] for gap in capture["gaps"]}

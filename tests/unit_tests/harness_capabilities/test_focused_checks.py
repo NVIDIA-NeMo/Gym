@@ -207,8 +207,8 @@ def test_missing_invocations_still_block_p0_step_and_tool_relationships():
         assert by_id[check_id]["status"] == "fail"
 
 
-@pytest.mark.parametrize("role", ["verifier", "agent", None])
-def test_only_explicit_verifier_calls_are_excluded_from_policy_steps(role):
+@pytest.mark.parametrize("collection", ["verifier_invocations", "invocations"])
+def test_only_explicit_verifier_calls_are_excluded_from_policy_steps(collection):
     record = evidence_record()
     trajectory = record["ng_trajectory"]
     judge = deepcopy(trajectory["model_calls"][0])
@@ -216,14 +216,18 @@ def test_only_explicit_verifier_calls_are_excluded_from_policy_steps(role):
     judge["response_metadata"]["response_id"] = "judge-response"
     trajectory["model_calls"].append(judge)
     invocation = {"invocation_id": "judge", "model_calls": [{"model_call_id": "judge-call"}]}
-    if role is not None:
-        invocation["role"] = role
-    trajectory["invocations"].append(invocation)
+    trajectory.setdefault(collection, []).append(invocation)
     result = checks(record)
     assert result["ownership.call_owner"]["status"] == "pass"
-    assert result["steps.attempt_accounting"]["status"] == ("pass" if role == "verifier" else "fail")
-    if role == "verifier":
+    assert result["steps.attempt_accounting"]["status"] == ("pass" if collection == "verifier_invocations" else "fail")
+    if collection == "verifier_invocations":
+        trajectory["invocations"].append(deepcopy(invocation))
+        assert checks(record)["ownership.call_owner"]["status"] == "fail"
+        trajectory["invocations"].pop()
+        invocation["model_calls"][0]["model_call_id"] = "missing-call"
+        assert checks(record)["ownership.call_target"]["status"] == "fail"
+        invocation["model_calls"][0]["model_call_id"] = "judge-call"
         trajectory["turns"][0]["model_calls"].append({"model_call_id": "judge-call"})
         assert checks(record)["steps.attempt_accounting"]["status"] == "fail"
-        trajectory["invocations"].pop()
+        trajectory[collection].pop()
         assert checks(record)["ownership.call_owner"]["status"] == "fail"

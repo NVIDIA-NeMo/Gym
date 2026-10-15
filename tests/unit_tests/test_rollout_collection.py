@@ -8682,17 +8682,18 @@ class TestTurnsFromModelCalls:
         }
 
         if declared_verifier:
-            result["ng_model_call_capture"]["calls"][1].update(
-                client_session_id="judge-invocation", client_invocation_role="verifier"
-            )
+            result["ng_model_call_capture"]["verifier_invocations"] = [
+                {"invocation_id": "judge-invocation", "model_calls": [{"model_call_id": "judge"}]}
+            ]
         _attach_trajectory_record(row, result)
 
         trajectory = result[NG_TRAJECTORY_KEY]
         assert [call["model_call_id"] for call in trajectory["model_calls"]] == ["policy", "judge"]
         assert [turn["model_calls"][0]["model_call_id"] for turn in trajectory["turns"]] == ["policy"]
         if declared_verifier:
-            assert trajectory["invocations"][1]["role"] == "verifier"
-            assert trajectory["invocations"][1]["model_calls"][0]["model_call_id"] == "judge"
+            assert len(trajectory["invocations"]) == 1
+            assert trajectory["verifier_invocations"][0]["kind"] == "verifier_invocation"
+            assert trajectory["verifier_invocations"][0]["model_calls"][0]["model_call_id"] == "judge"
         turns, owned = _bind_policy_call_views(trajectory, _normalized_trajectory_calls(trajectory))
         assert _rollout_token_count_mismatch(result, turns, {"task_index": 0}) == []
         assert _rollout_token_count_mismatch(result, owned, {"task_index": 0}) == []
@@ -8711,22 +8712,23 @@ def test_collector_owns_explicit_judge_attempt_without_provider_response_id(stat
             "calls": [
                 {
                     "model_call_id": "judge-call",
-                    "client_session_id": "judge-invocation",
-                    "client_invocation_role": "verifier",
                     "status_code": status,
                 }
-            ]
+            ],
+            "verifier_invocations": [
+                {"invocation_id": "judge-invocation", "model_calls": [{"model_call_id": "judge-call"}]}
+            ],
         }
     }
     trajectory = _build_trajectory_record(row, result)
     assert trajectory.turns == []
-    assert len(trajectory.invocations) == 1
-    invocation = trajectory.invocations[0]
-    assert invocation.invocation_id == "judge-invocation" and invocation.role == "verifier"
+    assert trajectory.invocations == []
+    invocation = trajectory.verifier_invocations[0]
+    assert invocation.invocation_id == "judge-invocation"
     assert invocation.model_calls[0].model_call_id == "judge-call"
     assert invocation.model_calls[0].response_id is None
     result[NG_TRAJECTORY_KEY] = trajectory.model_dump(mode="json")
-    assert _build_trajectory_record(row, result).invocations == trajectory.invocations
+    assert _build_trajectory_record(row, result).verifier_invocations == trajectory.verifier_invocations
 
 
 class TestMaskingStepMetrics:

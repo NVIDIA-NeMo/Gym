@@ -471,15 +471,3 @@ def test_capture_merge_joins_declared_message_ids_for_any_harness(tmp_path):
     assert [call.model_call_id for call in compaction.model_calls] == ["summary-call"]
     assert not observations.gaps
     assert all(not turn.model_calls for turn in trajectory.turns)
-
-
-@pytest.mark.parametrize("session_id", ["judge-invocation", None])
-def test_join_does_not_mark_explicit_verifier_ownership_as_missing_agent_evidence(session_id):
-    bundle = AgentObservationBundle(source="test", records=[AgentInvocation(invocation_id="root")])
-    call = ModelCallRecord(
-        model_call_id="judge-call", client_invocation_role="verifier", client_session_id=session_id, call_index=0
-    )
-    joined = join_model_call_observations(bundle, [call])
-    gaps = [gap for gap in joined.gaps if gap.code == "model_call_ownership_unavailable"]
-    assert len(gaps) == (0 if session_id else 1)
-    assert joined.records[0].model_calls == []  # Never assign a judge to the policy owner.

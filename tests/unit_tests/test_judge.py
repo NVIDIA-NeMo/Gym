@@ -159,9 +159,9 @@ async def test_judge_calls_declare_distinct_verifier_invocations_even_on_failure
     first = client.post.call_args.kwargs["headers"]
     await _call(client)
     second = client.post.call_args.kwargs["headers"]
-    assert first["x-ng-invocation-role"] == second["x-ng-invocation-role"] == "verifier"
-    assert first["x-session-id"] != second["x-session-id"]
+    assert set(first) == set(second) == {"x-ng-verifier-invocation-id"}
+    assert first["x-ng-verifier-invocation-id"] != second["x-ng-verifier-invocation-id"]
     client = _client(status=400, body=b'{"error":"rejected"}')
     with pytest.raises(JudgeError):
         await _call(client)
-    assert client.post.call_args.kwargs["headers"]["x-ng-invocation-role"] == "verifier"
+    assert client.post.call_args.kwargs["headers"]["x-ng-verifier-invocation-id"].startswith("judge-")

@@ -99,7 +99,7 @@ class TrajectoryTurn(ObservationModel):
 
 
 class AgentInvocation(ObservationModel):
-    """One agent conversation or explicitly identified verifier model invocation.
+    """One root Agent or subagent conversation observed by a harness.
 
     Harness adapters should report an iteration-limit event through an
     ``on_iteration_limit_reached(*, invocation_id: str) -> None`` observer hook.
@@ -110,9 +110,6 @@ class AgentInvocation(ObservationModel):
     """
 
     kind: Literal["agent_invocation"] = "agent_invocation"
-    role: Literal["agent", "verifier"] = Field(
-        default="agent", description="Whether this invocation executes the policy or evaluates its output."
-    )
     invocation_id: str
     parent_invocation_id: Optional[str] = None
     spawned_by_tool_call_id: Optional[str] = None
@@ -130,6 +127,19 @@ class AgentInvocation(ObservationModel):
         default_factory=list,
         description="Normalized conversation items supported by this producer; gaps describe unavailable evidence.",
     )
+
+
+class VerifierInvocation(ObservationModel):
+    """One verifier operation and its model attempts, distinct from agent decisions.
+
+    Capturing an exchange establishes ownership, not whether grading completed;
+    the outcome remains unknown unless reported by the verifier.
+    """
+
+    kind: Literal["verifier_invocation"] = "verifier_invocation"
+    invocation_id: str
+    status: Literal["completed", "failed", "incomplete", "unknown"] = "unknown"
+    model_calls: list[ModelCallRef] = Field(default_factory=list)
 
 
 class ToolCallObservation(ObservationModel):
@@ -282,6 +292,7 @@ class TrajectoryRecord(ObservationModel):
     task_id: str
     rollout_id: str
     invocations: list[AgentInvocation] = Field(default_factory=list)
+    verifier_invocations: list[VerifierInvocation] = Field(default_factory=list)
     turns: list[TrajectoryTurn] = Field(default_factory=list)
     model_calls: list[TrajectoryModelCall] = Field(default_factory=list)
     tool_calls: list[TrajectoryToolCall] = Field(default_factory=list)
@@ -289,7 +300,7 @@ class TrajectoryRecord(ObservationModel):
 
     @model_validator(mode="after")
     def validate_identity(self) -> "TrajectoryRecord":
-        invocation_ids = [invocation.invocation_id for invocation in self.invocations]
+        invocation_ids = [invocation.invocation_id for invocation in [*self.invocations, *self.verifier_invocations]]
         if len(invocation_ids) != len(set(invocation_ids)):
             raise ValueError("invocation_id must be unique within a trajectory")
         model_call_ids = [call.model_call_id for call in self.model_calls if call.model_call_id]
@@ -595,10 +606,7 @@ def join_model_call_observations(
 
     result.gaps.extend(join_gaps)
     for call in captured:
-        # Collection materializes these explicitly declared verifier owners in the
-        # trajectory; they are not missing Agent-owned observations.
-        verifier_owned = call.client_invocation_role == "verifier" and call.client_session_id and call.model_call_id
-        if id(call) not in owner_by_call and not verifier_owned:
+        if id(call) not in owner_by_call:
             result.gaps.append(
                 ObservationGap(
                     code="model_call_ownership_unavailable",

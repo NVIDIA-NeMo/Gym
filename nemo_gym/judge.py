@@ -92,7 +92,7 @@ async def call_judge(
             server_name=server_name,
             url_path=url_path,
             json=json,
-            headers={"x-session-id": f"judge-{uuid4().hex}", "x-ng-invocation-role": "verifier"},
+            headers={"x-ng-verifier-invocation-id": f"judge-{uuid4().hex}"},
         )
         await raise_for_status(http_response)
         return response_model.model_validate(await get_response_json(http_response))
