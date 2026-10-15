@@ -249,7 +249,7 @@ async def test_a_fresh_server_forks_the_snapshot_and_the_replacement_reseeds_int
         await fresh.post("/ng-control/v1/checkpoint/resume", json=control("r1"), headers=AUTH)
         # The replacement attempt re-seeds the session: it gets the fork, and no other sandbox is created.
         reseeded = await fresh.post("/ng-rollout/r-a2/seed_session", json=SEED)
-        access = await fresh.post("/sandbox_access")
+        access = await fresh.post("/ng-rollout/r-a2/sandbox_access")
         verified = await fresh.post("/ng-rollout/r-a2/verify", json=VERIFY)
 
     assert reseeded.status_code == 200, reseeded.text
