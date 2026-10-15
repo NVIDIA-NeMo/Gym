@@ -113,3 +113,24 @@ def test_hle_verified_preserves_domain_labels(vision, monkeypatch):
     )
     assert record["category"] == "Math"
     assert record["raw_subject"] == "Algebra"
+
+
+def test_repeat_ci_is_default_and_question_ci_remains_separate():
+    prefix = "domains/category/Math/"
+    tasks = [[row(q, 0, 0, 100), row(q, 1, 1, 300)] for q in (0, 1)]
+    result = compute_domain_metrics(tasks)
+    assert result[prefix + "repeat_count/reward"] == 2
+    assert result[prefix + "ci_available/reward"] is True
+    assert result[prefix + "ci_low_95_across_repeats/reward"] == pytest.approx(-5.853102368)
+    assert result[prefix + "ci_high_95_across_repeats/reward"] == pytest.approx(6.853102368)
+    assert result[prefix + "ci_low_95_question_bootstrap/reward"] == 0.5
+    assert result[prefix + "ci_high_95_question_bootstrap/reward"] == 0.5
+    assert result[prefix + "ci_low_95_question_bootstrap/output_tokens"] == 200
+    assert result[prefix + "ci_low_95_across_repeats/output_tokens"] < 100
+    single = compute_domain_metrics([[row(q, 0, q)] for q in (0, 1)])
+    assert single[prefix + "ci_available/reward"] is False
+    assert prefix + "ci_low_95_across_repeats/reward" not in single
+    assert single[prefix + "question_ci_available/reward"] is True
+    incomplete = compute_domain_metrics([tasks[0], tasks[1][:1]])
+    assert incomplete[prefix + "ci_available/reward"] is False
+    assert "coverage" in incomplete[prefix + "ci_unavailable_reason/reward"]
