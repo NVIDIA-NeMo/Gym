@@ -10,6 +10,7 @@ injects). With several keys it rotates round-robin per call and retries key-spec
 
 from __future__ import annotations
 
+import asyncio
 from html import escape
 from typing import List, Optional, Union
 
@@ -18,6 +19,8 @@ import httpx
 
 MAX_LENGTH = 40_000
 TIMEOUT = 60 * 3
+# A fetched page is cut at this many bytes before extraction.
+MAX_BODY_BYTES = 10 * 1024 * 1024
 
 # HTTP statuses that indicate the *current key* is the problem (auth or
 # quota). On these, we rotate to the next key and retry.
@@ -125,7 +128,10 @@ class TavilySearch:
             except httpx.HTTPError as exc:
                 return f"<error>{escape(str(exc))}</error>"
 
-            data = resp.json()
+            try:
+                data = resp.json()
+            except ValueError:
+                return "<error>Tavily returned a response that is not JSON</error>"
             parts: list[str] = []
             if data.get("answer"):
                 parts.append(f"<answer>{escape(data['answer'])}</answer>")
@@ -170,37 +176,47 @@ def _extract_page_text(html: str) -> str:
     return (trafilatura.extract(html, include_comments=True) or "").strip()
 
 
+async def _read_page(url: str, client: httpx.AsyncClient) -> str:
+    """The page body as text, cut at ``MAX_BODY_BYTES``."""
+    async with client.stream(
+        "GET",
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        },
+    ) as resp:
+        resp.raise_for_status()
+        body = bytearray()
+        async for chunk in resp.aiter_bytes():
+            body += chunk
+            if len(body) >= MAX_BODY_BYTES:
+                break
+        return bytes(body[:MAX_BODY_BYTES]).decode(resp.encoding or "utf-8", errors="replace")
+
+
 async def fetch_web_page(url: str, client: httpx.AsyncClient) -> str:
     try:
-        resp = await client.get(
-            url,
-            headers={
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            },
-        )
-        resp.raise_for_status()
+        html = await _read_page(url, client)
 
-        body_md = _extract_page_text(resp.text)
+        body_md = await asyncio.to_thread(_extract_page_text, html)
         if not body_md:
             # An empty <body> with no error reads to the model as "this page is blank",
             # and it will happily reason on from nothing. Say what happened instead.
             return (
                 f"<web_fetch><url>{url}</url>"
-                f"<error>fetched {len(resp.text)} bytes but no readable text could be extracted; "
+                f"<error>fetched {len(html)} bytes but no readable text could be extracted; "
                 f"the page is likely script-rendered. Try fetching a different URL, or retrieve it "
                 f"inside code_exec if you need the raw markup.</error></web_fetch>"
             )
-        if len(resp.text) >= _MIN_HTML_FOR_RATIO_CHECK and (
-            len(body_md) < _SUSPICIOUS_EXTRACTION_RATIO * len(resp.text)
-        ):
+        if len(html) >= _MIN_HTML_FOR_RATIO_CHECK and (len(body_md) < _SUSPICIOUS_EXTRACTION_RATIO * len(html)):
             # Extraction succeeded but returned a sliver. Without saying so, the model treats
             # the sliver as the whole page; with it, it can re-fetch the raw markup itself.
             body_md = (
                 f"[extracted only {len(body_md)} characters of readable text from a "
-                f"{len(resp.text)}-byte page; this is likely a fragment, so re-fetch the raw "
+                f"{len(html)}-byte page; this is likely a fragment, so re-fetch the raw "
                 f"markup inside code_exec if you need the rest]\n\n{body_md}"
             )
         return f"<web_fetch><url>{url}</url><body>{truncate_msg(body_md, MAX_LENGTH)}</body></web_fetch>"
-    except httpx.HTTPError as exc:
+    except (httpx.HTTPError, httpx.InvalidURL, LookupError) as exc:
         return f"<web_fetch><url>{url}</url><error>{escape(str(exc))}</error></web_fetch>"

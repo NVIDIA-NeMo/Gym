@@ -10,7 +10,11 @@ was worse: an empty ``<body>`` with no error, indistinguishable from a blank pag
 """
 
 import asyncio
+import threading
 
+import httpx
+
+from resources_servers.gdpval import tavily_search
 from resources_servers.gdpval.tavily_search import fetch_web_page
 
 
@@ -33,24 +37,15 @@ _LINK_HEAVY = """<html><body>
 _NO_TEXT = "<html><head><title>t</title></head><body><script>var a=1;</script></body></html>"
 
 
-class _Resp:
-    def __init__(self, text: str):
-        self.text = text
+def _fetch(html: str, status: int = 200, url: str = "https://example.test/p") -> str:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, text=html, headers={"content-type": "text/html; charset=utf-8"})
 
-    def raise_for_status(self) -> None:
-        return None
+    async def run() -> str:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await fetch_web_page(url, client)
 
-
-class _Client:
-    def __init__(self, text: str):
-        self._text = text
-
-    async def get(self, url, headers=None):  # noqa: ARG002 - signature mirrors httpx
-        return _Resp(self._text)
-
-
-def _fetch(html: str):
-    return asyncio.run(fetch_web_page("https://example.test/p", _Client(html)))
+    return asyncio.run(run())
 
 
 def test_a_sliver_of_a_large_page_is_flagged_as_a_fragment():
@@ -96,3 +91,36 @@ def test_normal_page_still_returns_a_body():
     assert "<error>" not in result
     assert "<body>" in result
     assert "Service tiers" in result
+
+
+def test_an_http_error_shows_the_model_the_status_and_url():
+    result = _fetch("not found", status=404)
+
+    assert "<error>Client error &#x27;404 Not Found&#x27; for url &#x27;https://example.test/p&#x27;" in result
+
+
+def test_an_invalid_url_is_reported_to_the_model_instead_of_raised():
+    result = _fetch("unused", url="http://[::1")
+
+    assert result.startswith("<web_fetch><url>http://[::1</url><error>")
+
+
+def test_extraction_runs_off_the_event_loop(monkeypatch):
+    threads = []
+    monkeypatch.setattr(
+        tavily_search, "_extract_page_text", lambda html: threads.append(threading.current_thread()) or "text"
+    )
+
+    _fetch(_LINK_HEAVY)
+
+    assert threads and threads[0] is not threading.main_thread()
+
+
+def test_a_page_over_the_size_cap_is_cut_before_extraction(monkeypatch):
+    seen = []
+    monkeypatch.setattr(tavily_search, "MAX_BODY_BYTES", 1000)
+    monkeypatch.setattr(tavily_search, "_extract_page_text", lambda html: seen.append(len(html)) or "text")
+
+    _fetch("x" * 5000)
+
+    assert seen == [1000]

@@ -277,6 +277,19 @@ class TestSearchExecutorRotation:
         assert result.startswith("<error>")
         assert seen_keys == ["Bearer k1"]
 
+    async def test_a_200_that_is_not_json_is_an_error_not_an_exception(self):
+        provider = TavilySearch(api_keys=["k1"])
+        response = _mock_response(200)
+
+        def not_json():
+            raise json.JSONDecodeError("Expecting value", "<html>", 0)
+
+        response.json = not_json
+        client = AsyncMock()
+        client.post = AsyncMock(return_value=response)
+
+        assert await provider.search("x", client) == "<error>Tavily returned a response that is not JSON</error>"
+
     async def test_network_error_does_NOT_trigger_rotation(self):
         provider = TavilySearch(api_keys=["k1", "k2"])
         seen_keys: list[str] = []
