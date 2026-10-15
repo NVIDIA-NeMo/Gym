@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Internal startup/cache-transfer helper for sbatch_external_vllm.sh.
 
-The launcher passes this source to Python on each node, so collecting the cache
-does not require a shared cache mount or an extra mount for this helper.
+The launcher passes this source to Python on each node. Archives are written to
+a shared temporary export directory; runtime caches remain container-local.
 """
 
 import argparse
@@ -14,7 +14,6 @@ import json
 import os
 import re
 import shutil
-import sys
 import tarfile
 import time
 import urllib.error
@@ -322,26 +321,31 @@ def main() -> None:
     wait.add_argument("urls", nargs="+")
     dump = commands.add_parser("dump")
     dump.add_argument("--allow-empty", action="store_true")
-    commands.add_parser("install")
+    dump.add_argument("--output", type=Path, required=True, help="Archive to append to; writers must run sequentially")
+    install = commands.add_parser("install")
+    install.add_argument("--input", type=Path, required=True, help="Archive containing all nodes' warmup artifacts")
     commands.add_parser("inspect")
     commands.add_parser("verify")
     args = parser.parse_args()
     if args.command == "wait":
         wait_for_engines(args.urls, args.timeout)
     elif args.command == "dump":
-        dump_warmup(
-            CACHE_ROOT,
-            JIT_WORKSPACE,
-            VLLM_CACHE_ROOT / "startup_plan",
-            sys.stdout.buffer,
-            allow_empty=args.allow_empty,
-        )
+        with args.output.open("ab") as output:
+            dump_warmup(
+                CACHE_ROOT,
+                JIT_WORKSPACE,
+                VLLM_CACHE_ROOT / "startup_plan",
+                output,
+                allow_empty=args.allow_empty,
+            )
+        print(f"Appended warmup artifacts to {args.output}", flush=True)
     elif args.command == "install":
         from flashinfer.jit import env as jit_env
 
-        libraries = install_warmup(
-            CACHE_ROOT, jit_env.FLASHINFER_AOT_DIR, VLLM_CACHE_ROOT / "startup_plan", sys.stdin.buffer
-        )
+        with args.input.open("rb") as source:
+            libraries = install_warmup(
+                CACHE_ROOT, jit_env.FLASHINFER_AOT_DIR, VLLM_CACHE_ROOT / "startup_plan", source
+            )
         verify_libraries(libraries)
         write_manifest(CACHE_ROOT, jit_env.FLASHINFER_AOT_DIR, VLLM_CACHE_ROOT / "startup_plan", libraries)
         # All collected libraries now live in the package. Leave no disposable

@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 import os
+import sys
 import tarfile
 from pathlib import Path
 from types import ModuleType
@@ -81,6 +82,39 @@ def test_headless_node_may_have_no_cache(helper: ModuleType, tmp_path: Path) -> 
     assert helper.collect_caches(tmp_path, allow_empty=True) == {}
     with pytest.raises(ValueError, match="No autotuning caches"):
         helper.collect_caches(tmp_path, allow_empty=False)
+
+
+def test_cli_transfers_node_archives_through_file(
+    helper: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    archive = tmp_path / "shared export" / "caches.tar"
+    archive.parent.mkdir()
+    for config in ("a" * 64, "b" * 64):
+        cache = tmp_path / config
+        (cache / config).mkdir(parents=True)
+        (cache / ".warmup-start").touch()
+        (cache / config / "autotune_configs.json").write_text('{"tactic": 1}')
+        monkeypatch.setattr(helper, "CACHE_ROOT", cache)
+        monkeypatch.setattr(helper, "JIT_WORKSPACE", tmp_path / "jit")
+        monkeypatch.setattr(helper, "VLLM_CACHE_ROOT", tmp_path / "vllm")
+        monkeypatch.setattr(sys, "argv", ["helper", "dump", "--output", str(archive)])
+        print("Unrelated launcher output must not enter the archive")
+        helper.main()
+    with tarfile.open(archive, ignore_zeros=True) as contents:
+        assert contents.getnames() == ["autotune.json", "autotune.json"]
+    target = tmp_path / "installed"
+    monkeypatch.setattr(helper, "CACHE_ROOT", target)
+    monkeypatch.setitem(sys.modules, "flashinfer", ModuleType("flashinfer"))
+    monkeypatch.setitem(sys.modules, "flashinfer.jit", MagicMock(env=MagicMock(FLASHINFER_AOT_DIR=tmp_path / "aot")))
+    monkeypatch.setitem(sys.modules, "tvm_ffi", MagicMock())
+    monkeypatch.setenv("FLASHINFER_DISABLE_JIT", "0")
+    monkeypatch.setattr(sys, "stdin", io.StringIO("Not an archive"))
+    monkeypatch.setattr(sys, "argv", ["helper", "install", "--input", str(archive)])
+    helper.main()
+    for config in ("a" * 64, "b" * 64):
+        assert (target / config / "autotune_configs.json").read_text() == '{"tactic": 1}'
+    assert (target / "warmed-manifest.json").is_file()
+    assert capsys.readouterr().out.count("Appended warmup artifacts") == 2
 
 
 def test_install_combines_roles_and_preserves_complete_files(helper: ModuleType, tmp_path: Path) -> None:
@@ -288,9 +322,9 @@ def test_baked_kernels_resolve_as_aot_before_load(
     load = MagicMock()
     env = MagicMock()
     env.get_aot_path.return_value = library
-    monkeypatch.setitem(helper.sys.modules, "tvm_ffi", MagicMock(load_module=load))
-    monkeypatch.setitem(helper.sys.modules, "flashinfer", ModuleType("flashinfer"))
-    monkeypatch.setitem(helper.sys.modules, "flashinfer.jit", MagicMock(env=env))
+    monkeypatch.setitem(sys.modules, "tvm_ffi", MagicMock(load_module=load))
+    monkeypatch.setitem(sys.modules, "flashinfer", ModuleType("flashinfer"))
+    monkeypatch.setitem(sys.modules, "flashinfer.jit", MagicMock(env=env))
     monkeypatch.setenv("FLASHINFER_DISABLE_JIT", "0")
     helper.verify_libraries([library])
     assert os.environ["FLASHINFER_DISABLE_JIT"] == "1"

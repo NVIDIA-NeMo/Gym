@@ -937,11 +937,12 @@ if [[ -n "$SAVE_WARMED_CONTAINER" ]]; then
     (( completed_status == 0 )) || exit "\$completed_status"
     cache_warmup_step=""
 
-    # Transfer binary archives over stdout; no cache directory is bind-mounted.
+    # Write archives directly to the shared export directory. Mount only this
+    # temporary transfer directory; runtime caches stay inside each container.
     # Include both PD roles and headless workers' compiled modules/startup plans.
     cache_export_dir=\$(mktemp -d "$(dirname "$SAVE_WARMED_CONTAINER")/.vllm-warm.XXXXXX")
     for (( node_index = 0; node_index < \${#nodes[@]}; node_index++ )); do
-        dump_args=()
+        dump_args=(--output "\$cache_export_dir/caches.tar")
         if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]] && \
             (( node_index != 0 && node_index != $NUM_PREFILL_NODES )); then
             dump_args+=(--allow-empty)
@@ -949,7 +950,8 @@ if [[ -n "$SAVE_WARMED_CONTAINER" ]]; then
         srun --overlap --exact --nodes=1 --ntasks=1 --cpus-per-task=1 --gpus=0 \
             --nodelist="\${nodes[node_index]}" --container-name="\$worker_container" \
             --container-writable --no-container-mount-home --container-workdir=/ \
-            python3 -c "\$warm_cache_helper" dump "\${dump_args[@]}" >> "\$cache_export_dir/caches.tar"
+            --container-mounts="\$cache_export_dir:\$cache_export_dir" \
+            python3 -c "\$warm_cache_helper" dump "\${dump_args[@]}"
     done
 
     # Stop the serving step before exporting. The named rootfs persists for the
@@ -961,8 +963,9 @@ if [[ -n "$SAVE_WARMED_CONTAINER" ]]; then
     srun --overlap --exact --nodes=1 --ntasks=1 --cpus-per-task=1 --gpus=1 \
         --nodelist="\${nodes[0]}" --container-name="\$worker_container" \
         --container-writable --no-container-mount-home --container-workdir=/ \
+        --container-mounts="\$cache_export_dir:\$cache_export_dir" \
         --container-save="\$cache_export_dir/warmed.sqsh" \
-        python3 -c "\$warm_cache_helper" install < "\$cache_export_dir/caches.tar"
+        python3 -c "\$warm_cache_helper" install --input "\$cache_export_dir/caches.tar"
     test -s "\$cache_export_dir/warmed.sqsh"
     # Verify the exported image in a fresh, unnamed container. Checking the
     # mutable warmup rootfs alone cannot prove the squashfs contains the caches.

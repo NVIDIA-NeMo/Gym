@@ -139,6 +139,33 @@ getent() { printf '10.0.0.1 node0\n'; }
                     names.append(name)
             self.assertEqual(len(set(names)), 3)
 
+    def test_warmup_archives_use_shared_files(self) -> None:
+        for mode in ("independent", "coupled"):
+            with self.subTest(mode=mode):
+                _, _, batch, _ = self.capture_submission(
+                    env={"SAVE_WARMED_CONTAINER": f"{self.workdir}/new.sqsh", "VLLM_PD_DEPLOYMENT_MODE": mode}
+                )
+                start = "    cache_export_dir=$(mktemp -d "
+                transfer = start + batch.split(start, 1)[1].split('    test -s "$cache_export_dir/warmed.sqsh"', 1)[0]
+                status, stdout, stderr = self.run_shell(
+                    "set -euo pipefail\nnodes=(node0 node1 node2 node3 node4 node5 node6 node7)\n"
+                    "worker_container=test\nserver_step=123\n"
+                    "kill() { :; }\nwait() { :; }\n"
+                    "srun() { printf '%s\\0' \"$@\" >&2; printf '\\0' >&2; printf 'launcher diagnostic\\n'; }\n"
+                    + transfer,
+                    env={"warm_cache_helper": "helper code"},
+                )
+                self.assertEqual(status, 0, stderr)
+                calls = [call.split("\0") for call in stderr.removesuffix("\0\0").split("\0\0")]
+                self.assertEqual(len(calls), 9)
+                self.assertEqual(stdout.count("launcher diagnostic"), 9)
+                for node, args in enumerate(calls):
+                    option = "--output" if node < 8 else "--input"
+                    path = args[args.index(option) + 1]
+                    self.assertIn(f"--container-mounts={Path(path).parent}:{Path(path).parent}", args)
+                    self.assertEqual(Path(path).name, "caches.tar")
+                    self.assertEqual("--allow-empty" in args, mode == "coupled" and node in (1, 2, 3, 5, 6, 7))
+
     def test_export_is_verified_in_fresh_container_before_publication(self) -> None:
         destination = Path(self.workdir) / "published.sqsh"
         _, _, batch, _ = self.capture_submission(env={"SAVE_WARMED_CONTAINER": str(destination)})
