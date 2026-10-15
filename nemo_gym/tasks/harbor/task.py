@@ -72,7 +72,11 @@ class HarborTask:
     """A task folder read into memory.
 
     ``task_id`` is the folder name: ``[task].name`` is an ``org/name`` label that is
-    not unique across a dataset. ``image`` is the prebuilt image when the task
+    not unique across a dataset. ``folder_digest`` is the folder's content hash alone
+    (:func:`~nemo_gym.tasks.harbor.digest.content_hash`, what ``manifest.toml`` records per task and
+    a fetch verifies); ``digest`` is the one rows carry and the server checks, that hash plus the
+    ``dataset.toml`` settings applied to the task (:func:`task_digest`), equal to ``folder_digest``
+    when the dataset has no ``[gym]`` table. ``image`` is the prebuilt image when the task
     declares one, else the base image of a pull-mode or overlay-mode Dockerfile pinned to
     the digest its recorded configuration was read at (the multi-arch index behind the
     written tag, see :mod:`nemo_gym.tasks.harbor.image_configs`; the written reference
@@ -149,6 +153,7 @@ class HarborTask:
     config: HarborTaskConfig
     instruction: str
     digest: str
+    folder_digest: str
     image: str | None
     workdir: str | None
     env: dict[str, str]
@@ -515,9 +520,10 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
                     raise HarborTaskError(f"{root / IMAGE_CONFIGS_FILE}: {verifier_image!r}: {exc}") from exc
 
     try:
-        digest = task_digest(content_hash(path), dataset, path.name)
+        folder_digest = content_hash(path)
     except (OSError, ValueError) as exc:
         raise HarborTaskError(f"{path}: {exc}") from exc
+    digest = task_digest(folder_digest, dataset, path.name)
 
     return HarborTask(
         path=path,
@@ -525,6 +531,7 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
         config=config,
         instruction=instruction,
         digest=digest,
+        folder_digest=folder_digest,
         image=image,
         workdir=workdir,
         env=env,
