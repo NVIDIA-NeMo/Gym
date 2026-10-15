@@ -595,6 +595,8 @@ class GDPValResourcesServer(SimpleResourcesServer):
             raise ValueError("GDPVal sessions are process-local and require num_workers=1")
         self._sessions: Dict[str, _TaskSession] = {}
         self._closed_sessions: Dict[str, EpisodeId] = {}
+        # (task_id, repeat) of the persisted directory each live session will write, to the session holding it.
+        self._claimed_directories: Dict[Tuple[str, int], str] = {}
         self._session_locks: Dict[str, asyncio.Lock] = {}
         # Normalize the reference-model set: prefer the multi-reference
         # ``reference_models`` mapping; fall back to the legacy single-reference
@@ -660,6 +662,15 @@ class GDPValResourcesServer(SimpleResourcesServer):
             if body.task_id.task_id != task.task_id:
                 raise ValueError("TaskId does not match the GDPVal task_id")
             repeat = persisted_layout.repeat_from_rollout_id(body.episode_id.rollout_id)
+            directory = (task.task_id, repeat)
+            owner = self._claimed_directories.get(directory)
+            if owner is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Session {owner} already holds task {task.task_id} repeat {repeat}; "
+                    "a second live session would overwrite its deliverables",
+                )
+            self._claimed_directories[directory] = session_id
             reference_dir = Path(tempfile.mkdtemp(prefix="gdpval_ref_files_"))
             try:
                 reference_files = await self._download_reference_files(task, reference_dir)
@@ -671,12 +682,14 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     reference_files=reference_files,
                 )
             except BaseException:
+                self._claimed_directories.pop(directory, None)
                 shutil.rmtree(reference_dir, ignore_errors=True)
                 raise
             session = _TaskSession(body.episode_id, body.task_id, repeat, sandbox, reference_dir)
             try:
                 response = await self._seed_response(session_id, session)
             except BaseException:
+                self._claimed_directories.pop(directory, None)
                 await self._release(session)
                 raise
             self._sessions[session_id] = session
@@ -717,6 +730,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                         raise ValueError("episode_id does not match the seeded resources session")
                     await self._release(session)
                     del self._sessions[session_id]
+                    self._claimed_directories.pop((session.task_id.task_id, session.repeat), None)
                 self._closed_sessions[session_id] = body.episode_id
             elif self._closed_sessions[session_id] != body.episode_id:
                 raise ValueError("episode_id does not match the closed resources session")
@@ -736,6 +750,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
             except Exception:
                 LOGGER.exception("Failed to stop the sandbox of GDPVal session %s", session_id)
         self._sessions.clear()
+        self._claimed_directories.clear()
 
     def _cached_deliverables_dir(self, body: GDPValVerifyRequest) -> str:
         directory = persisted_layout.repeat_dir(

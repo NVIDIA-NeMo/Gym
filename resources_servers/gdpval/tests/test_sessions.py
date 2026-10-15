@@ -341,10 +341,47 @@ def test_a_seed_for_another_task_than_its_data_is_rejected(server, root, tmp_pat
 def test_a_seed_whose_rollout_id_names_no_rollout_index_is_rejected(server, root, tmp_path):
     seed = _seed(tmp_path).model_copy(update={"episode_id": EpisodeId(rollout_id="explicit")})
 
-    with pytest.raises(ValueError, match="does not end with a rollout index"):
+    with pytest.raises(ValueError, match="is not '<task_index>-<rollout_index>' with two integers"):
         _post_seed(TestClient(server.setup_webserver()), seed)
 
     assert not root.exists()
+
+
+def test_a_second_live_session_for_the_same_task_and_repeat_is_refused_until_the_first_closes(
+    server, root, tmp_path, references
+):
+    client = TestClient(server.setup_webserver())
+    first = _seed(tmp_path, session_id="first", repeat=1)
+    second = _seed(tmp_path, session_id="second", repeat=1).model_copy(
+        update={"episode_id": EpisodeId(rollout_id="5-1")}
+    )
+    assert _post_seed(client, first).status_code == 200
+
+    refused = _post_seed(client, second)
+
+    assert refused.status_code == 409
+    assert "Session first already holds task task-1 repeat 1" in refused.json()["detail"]
+    assert _post_seed(client, first).status_code == 200, "seeding the holder again is idempotent"
+    close = ResourcesCloseSessionRequest(resources_session_id="first", episode_id=first.episode_id)
+    assert client.post("/close_session", json=close.model_dump(mode="json")).status_code == 200
+    assert _post_seed(client, second).status_code == 200
+
+
+def test_sessions_of_different_repeats_do_not_conflict(server, root, tmp_path, references):
+    client = TestClient(server.setup_webserver())
+
+    assert _post_seed(client, _seed(tmp_path, session_id="a", repeat=0)).status_code == 200
+    assert _post_seed(client, _seed(tmp_path, session_id="b", repeat=1)).status_code == 200
+
+
+def test_a_failed_seed_releases_its_claim(server, root, tmp_path, references):
+    client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+
+    failed = _post_seed(client, _seed(tmp_path, session_id="a", url=f"file://{tmp_path}/gone.txt"))
+    retried = _post_seed(client, _seed(tmp_path, session_id="b"))
+
+    assert failed.status_code == 500
+    assert retried.status_code == 200
 
 
 def test_a_session_is_bound_to_its_episode_and_task(server, root, tmp_path):
