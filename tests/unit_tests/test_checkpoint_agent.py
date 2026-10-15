@@ -143,6 +143,88 @@ async def test_legacy_run_steps_block_prepare_only_when_waited_on() -> None:
     assert record.episode == {"next": "verify"}
 
 
+async def test_a_park_request_stops_a_long_wait_step_which_parks_and_continues_after_resume() -> None:
+    participant = AgentSessionParticipant(Hooks())
+    entered = asyncio.Event()
+    interrupted: list[bool] = []
+
+    async with participant.legacy_run("run:r", EpisodeId(rollout_id="r")) as run:
+
+        async def long_step() -> None:
+            async with run.step("wait"):
+                entered.set()
+                work = asyncio.create_task(asyncio.sleep(30))
+                park = asyncio.create_task(run.wait_park_requested())
+                done, _ = await asyncio.wait({work, park}, return_when=asyncio.FIRST_COMPLETED)
+                interrupted.append(park in done)
+                work.cancel()
+                park.cancel()
+            # Recorded while admission is closed, this boundary parks the run until resume.
+            await run.boundary({"next": "work", "interrupted": True})
+
+        task = asyncio.create_task(long_step())
+        await entered.wait()
+        assert not run.park_requested
+        assert participant.readiness().blockers == ["r"], "inside the wait step the run blocks prepare"
+
+        await participant.close_admission(CLOSE)
+        assert run.park_requested
+        for _ in range(100):
+            if participant.readiness().ready:
+                break
+            await participant.wait_changed(timeout=0.05)
+        assert interrupted == [True]
+        assert participant.readiness().ready
+        [record] = await participant.export(None, checkpoint_id="c")
+        assert record.episode == {"next": "work", "interrupted": True}
+        assert not task.done(), "the run stays parked at its boundary until resume"
+
+        await participant.open_admission()
+        assert not run.park_requested
+        await asyncio.wait_for(task, timeout=5)
+
+
+async def test_reopening_admission_withdraws_the_park_request() -> None:
+    """A prepare that missed its deadline reopens admission: a step that has not stopped is no longer asked to."""
+    participant = AgentSessionParticipant(Hooks())
+    async with participant.legacy_run("run:r", EpisodeId(rollout_id="r")) as run:
+        async with run.step("wait"):
+            await participant.close_admission(CLOSE)
+            assert run.park_requested
+            await participant.open_admission()
+            assert not run.park_requested
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(run.wait_park_requested(), timeout=0.1)
+
+
+async def test_a_step_that_asks_after_admission_closed_is_answered_at_once() -> None:
+    participant = AgentSessionParticipant(Hooks())
+    async with participant.legacy_run("run:r", EpisodeId(rollout_id="r")) as run:
+        async with run.step("wait"):
+            await participant.close_admission(CLOSE)
+            await asyncio.wait_for(run.wait_park_requested(), timeout=1)
+        await participant.open_admission()
+
+
+async def test_a_restart_is_never_asked_to_park() -> None:
+    """No checkpoint waits for a restart, so its long step keeps running through every checkpoint."""
+    participant = AgentSessionParticipant(Hooks())
+    async with participant.legacy_run("run:r", EpisodeId(rollout_id="r")) as run:
+        await run.mark_restart()
+        async with run.step("wait"):
+            waiter = asyncio.create_task(run.wait_park_requested())
+            for _ in range(2):
+                await participant.close_admission(CLOSE)
+                assert participant.readiness().ready and not run.park_requested
+                await asyncio.sleep(0.05)
+                assert not waiter.done()
+                await participant.open_admission()
+                await asyncio.sleep(0.05)
+                assert not waiter.done()
+            waiter.cancel()
+            await asyncio.gather(waiter, return_exceptions=True)
+
+
 async def test_retire_stops_the_activation_before_it_replies() -> None:
     hooks = Hooks()
     participant = AgentSessionParticipant(hooks)

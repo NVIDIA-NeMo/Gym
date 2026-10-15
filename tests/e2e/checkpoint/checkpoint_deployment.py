@@ -171,6 +171,10 @@ class Deployment:
       in the fake sandbox backend, which outlives a Gym crash like the inference backend does.
       ``sandbox_lease`` (TTL, renewal interval) puts its sandboxes on a lease the server renews, as the
       OpenSandbox provider's ``create.renew_ttl_s`` and ``create.renew_interval_s`` do.
+    - ``harness``: the legacy relay over an OpenCode-shaped agent that runs a long, interruptible harness command
+      inside the sandboxed notes server's sandbox, and continues it after a checkpoint (``harness_lines`` and
+      ``harness_interval_s`` size the run; ``harness_refreshes_access=False`` relaunches it in the sandbox its
+      boundary names instead of asking the owner, as a negative control).
 
     With ``inference_url``,
     the policy model serves from that endpoint and the fake backend's control routes are unavailable.
@@ -192,6 +196,9 @@ class Deployment:
         server_workers: int = 1,
         resources_mcp: bool = False,
         sandbox_lease: Optional[tuple[float, float]] = None,
+        harness_lines: int = 6,
+        harness_interval_s: float = 0.5,
+        harness_refreshes_access: bool = True,
         extra_config: Optional[dict[str, Any]] = None,
     ) -> None:
         self.topology = topology
@@ -211,6 +218,9 @@ class Deployment:
         # Expose the counter resources server's tools over MCP, as a CLI agent harness calls them.
         self.resources_mcp = resources_mcp
         self.sandbox_lease = sandbox_lease
+        self.harness_lines = harness_lines
+        self.harness_interval_s = harness_interval_s
+        self.harness_refreshes_access = harness_refreshes_access
         self.external_inference = inference_url is not None
         self.procs: dict[str, subprocess.Popen] = {}
         self.dirs: dict[str, Path] = {}
@@ -244,7 +254,7 @@ class Deployment:
             # Log every request with its status, not only errors, so a failure can be traced in the logs.
             "uvicorn_logging_show_200_ok": True,
         }
-        if self.topology == "sandbox":
+        if self.topology in ("sandbox", "harness"):
             # The named sandbox block the notes server resolves its provider through, as a production server's
             # ``sandbox_provider`` names one.
             fake_remote: dict[str, Any] = {"base_url": f"http://127.0.0.1:{self.sandbox_port}"}
@@ -300,7 +310,7 @@ class Deployment:
                 expose_tools_over_mcp=self.resources_mcp,
             )
             add("resources", "resources_servers/example_session_state_mgmt", resources)
-        elif self.topology == "sandbox":
+        elif self.topology in ("sandbox", "harness"):
             resources = _server(
                 "resources_servers",
                 "example_session_state_mgmt",
@@ -325,13 +335,25 @@ class Deployment:
             )
             add("resources", "resources_servers/example_single_tool_call", resources)
 
-        agent = _server(
-            "responses_api_agents",
-            "simple_agent",
-            model_server=_ref("responses_api_models", "policy_model"),
-            resources_server=_ref("resources_servers", "resources"),
-        )
-        add("agent", "responses_api_agents/simple_agent", agent)
+        if self.topology == "harness":
+            agent = _server(
+                "responses_api_agents",
+                "simple_agent",
+                resources_server=_ref("resources_servers", "resources"),
+                sandbox_backend_url=f"http://127.0.0.1:{self.sandbox_port}",
+                lines=self.harness_lines,
+                interval_s=self.harness_interval_s,
+                refresh_sandbox_access=self.harness_refreshes_access,
+            )
+            add("agent", str(HERE / "fake_harness_agent"), agent)
+        else:
+            agent = _server(
+                "responses_api_agents",
+                "simple_agent",
+                model_server=_ref("responses_api_models", "policy_model"),
+                resources_server=_ref("resources_servers", "resources"),
+            )
+            add("agent", "responses_api_agents/simple_agent", agent)
 
         if self.topology in ("native", "slow", "mixed"):
             environment = _server(
@@ -371,7 +393,7 @@ class Deployment:
                     cleanup_timeout_seconds=30,
                 ),
             )
-        if self.topology in ("legacy", "counter", "sandbox"):
+        if self.topology in ("legacy", "counter", "sandbox", "harness"):
             environment = _server(
                 "environment_servers", "legacy_agent", agent_server=_ref("responses_api_agents", "agent")
             )
@@ -398,7 +420,7 @@ class Deployment:
             stderr=subprocess.STDOUT,
         )
         self._wait_healthy("backend", f"http://127.0.0.1:{self.backend_port}/v1/models")
-        if self.topology == "sandbox":
+        if self.topology in ("sandbox", "harness"):
             log = open(self.log_dir / "sandbox_backend.log", "a")
             self.procs["sandbox_backend"] = subprocess.Popen(
                 [sys.executable, str(HERE / "fake_sandbox_backend.py"), str(self.sandbox_port)],
@@ -650,6 +672,16 @@ def notes_row(rollout_id: str, attempt: int = 0, expected: tuple[str, ...] = ("o
             "tools": [NOTES_TOOL],
         },
         "expected_notes": list(expected),
+        "_ng_rollout_id": rollout_id,
+        "_ng_attempt_index": attempt,
+    }
+
+
+def harness_row(rollout_id: str, attempt: int = 0, lines: int = 6) -> dict:
+    """A legacy ``/run`` row for the harness agent; verify expects exactly ``line 1`` .. ``line <lines>``."""
+    return {
+        "responses_create_params": {"input": [{"role": "user", "content": "run the harness"}]},
+        "expected_notes": [f"line {index}" for index in range(1, lines + 1)],
         "_ng_rollout_id": rollout_id,
         "_ng_attempt_index": attempt,
     }
