@@ -109,8 +109,7 @@ Reproducing these numbers depends on the model being served the right way. Check
 for the authoritative serving guidance; the command below is what these recipes were
 validated with.
 
-The published runs served the model with vLLM 0.30.0 (public image: `vllm/vllm-openai:v0.30.0`;
-the model card's examples use `v0.31.0`), on one node of 4 GPUs per server:
+The published runs served the model with vLLM 0.30.0, on one node of 4 GPUs per server:
 
 ```bash
 vllm serve nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16 \
@@ -128,19 +127,12 @@ vllm serve nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16 \
   --skip-mm-profiling --mm-encoder-attn-backend TORCH_SDPA
 ```
 
-Every recipe except SWE-bench and Terminal-Bench 2.1 (below) was run against this. MMLU-ProX and
-WMT24++ were served with `--max-model-len 32768`, which also capped each answer; their recipes
-set `max_output_tokens: 32768` instead, so they need no change. Two recipes changed it:
+Use it for every recipe, with two changes:
 
 | Recipe | Change | Why it matters |
 |---|---|---|
 | GraphWalks | `--max-model-len 1048576 --max-num-batched-tokens 8192` | Needed: prompts are up to ~361,000 tokens |
 | OSWorld | `--max-num-batched-tokens 32768` | Optional: with the default above, the published setup repeatedly ran out of GPU memory on OSWorld; lower it if yours does. Does not change answers |
-
-The vision flags (`--limit-mm-per-prompt` and the rest) matter for HLE (full) and OSWorld,
-which send images; text-only recipes ignore them. SWE-bench and Terminal-Bench 2.1 were served
-with the same parsers, context and cache dtypes but without the vision flags, split across
-separate prefill and decode servers (2 to 8 nodes each) for throughput.
 
 CritPt asks for 245,760 output tokens per turn and needs `--max-model-len 262144`. With a
 shorter context its turns come back empty and score 0 without an error.
