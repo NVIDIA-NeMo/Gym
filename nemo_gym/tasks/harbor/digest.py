@@ -8,7 +8,10 @@ SHA256 over sorted ``relative_path NUL file_sha256 LF`` records covering
 ``task.toml``, ``instruction.md``, ``README.md``, ``trajectory.json`` and everything
 under ``environment/``, ``tests/``, ``solution/`` and ``steps/``. The digest travels in
 ``task_data`` under :data:`DIGEST_KEY` so the resources server can refuse a row whose
-folder changed after materialization. :func:`context_digest` is the second digest here: Harbor's environment
+folder changed after materialization. :func:`content_hash` refuses directory symlinks because
+this file-content format does not represent their targets.
+
+:func:`context_digest` is the second digest here: Harbor's environment
 id of a Dockerfile build context, which keys and names the images prepare builds. :func:`inputs_digest` is the
 third: everything a build of that context reads, recorded with the built image so a context whose Harbor id
 is unchanged but whose inputs are not (a mode, a symbolic link, an empty folder, a build setting) is rebuilt.
@@ -76,6 +79,19 @@ def archive_hash(path: Path) -> str:
 def content_hash(path: Path) -> str:
     """Digest the task folder at ``path``."""
     path = Path(path).resolve()
+    # rglob does not descend into directory links, so check links before filtering to files
+    # or ignoring cache paths. Reject unsupported links without changing the digest format.
+    for link in path.rglob("*"):
+        if not link.is_symlink():
+            continue
+        relative = link.relative_to(path).as_posix()
+        target = link.resolve(strict=True)
+        if not target.is_relative_to(path):
+            raise ValueError(f"Task symlink escapes the task folder: {relative}")
+        if target.is_dir():
+            raise ValueError(
+                f"Task directory symlinks are not supported: {relative}; replace it with a directory inside the task"
+            )
     digest = hashlib.sha256()
     for file in _covered_files(path):
         relative = file.relative_to(path).as_posix()
