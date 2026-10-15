@@ -302,8 +302,7 @@ def inspect_behavior(
     ]
     verifier_refs = {
         ref.get("model_call_id")
-        for inv in _objects(trajectory.get("invocations"))
-        if inv.get("role") == "verifier"
+        for inv in _objects(trajectory.get("verifier_invocations"))
         for ref in _objects(inv.get("model_calls"))
     }
     results.run(
