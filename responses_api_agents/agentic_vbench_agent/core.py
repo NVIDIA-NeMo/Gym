@@ -35,14 +35,35 @@ DOCKER_COMPOSE_VERSION = "v2.35.1"
 BACKEND_CLIENT_ENV = "client.env"
 
 
+CUSTOM_TASKS_MARKER = "custom_tasks.json"
+
+
+def custom_task_root(root: Path) -> bool:
+    """A task root carrying custom_tasks.json holds generated tasks in the benchmark layout.
+
+    Such roots are not the pinned benchmark checkout: the git revision and the
+    100-task completeness checks do not apply, only the per-family layout does.
+    """
+    return (root / CUSTOM_TASKS_MARKER).is_file()
+
+
+def custom_task_revision(root: Path) -> str:
+    """Stable identity for a custom task root: custom:<sha256 of its marker file>[:12]."""
+    return "custom:" + hashlib.sha256((root / CUSTOM_TASKS_MARKER).read_bytes()).hexdigest()[:12]
+
+
 def inventory(root: Path) -> dict[str, dict]:
     root = root.resolve(strict=True)
-    revision = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
-    if revision != REVISION:
-        raise ValueError(f"Expected Agentic-VBench {REVISION}, found {revision}")
-    changed = subprocess.check_output(["git", "-C", str(root), "status", "--porcelain", "--", "tasks"], text=True)
-    if changed.strip():
-        raise ValueError("Benchmark tasks differ from the pinned checkout")
+    custom = custom_task_root(root)
+    if custom:
+        revision = custom_task_revision(root)
+    else:
+        revision = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
+        if revision != REVISION:
+            raise ValueError(f"Expected Agentic-VBench {REVISION}, found {revision}")
+        changed = subprocess.check_output(["git", "-C", str(root), "status", "--porcelain", "--", "tasks"], text=True)
+        if changed.strip():
+            raise ValueError("Benchmark tasks differ from the pinned checkout")
     tasks = {}
     # The checkout also carries the separate "understanding" area; the benchmark is the four families.
     paths = (root / "tasks" / f"agentic_vbench_{family}" for family in FAMILIES)
@@ -57,10 +78,13 @@ def inventory(root: Path) -> dict[str, dict]:
             "family": family,
             "prompt": prompt,
             "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
-            "benchmark_revision": REVISION,
+            "benchmark_revision": revision,
         }
     counts = Counter(t["family"] for t in tasks.values())
-    if counts != FAMILIES:
+    if custom:
+        if not tasks:
+            raise ValueError(f"Custom task root holds no tasks: {root}")
+    elif counts != FAMILIES:
         raise ValueError(f"Expected complete 100-task inventory, got {dict(counts)}")
     return tasks
 
@@ -192,6 +216,8 @@ def _git(*args: str, cwd: Path) -> None:
 def ensure_checkout(root: Path | None = None, repo_url: str | None = None) -> Path:
     """Materialize the pinned benchmark revision; reuse an existing matching checkout."""
     root = (root or default_checkout_root()).expanduser()
+    if custom_task_root(root):
+        return root.resolve(strict=True)
     repo_url = repo_url or os.environ.get("AGENTIC_VBENCH_REPO_URL") or REPO_URL
     with _locked(root.parent / f"{root.name}.lock"):
         if (root / ".git").exists():
