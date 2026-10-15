@@ -14,17 +14,29 @@
 # limitations under the License.
 from abc import abstractmethod
 from enum import Enum
-from typing import TYPE_CHECKING, Any, ClassVar, Generic, Optional, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, Optional, TypeVar, get_args
 
-from fastapi import FastAPI
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
+from fastapi import FastAPI, Request
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, PrivateAttr, field_validator
+from starlette.middleware import Middleware
 
 
 if TYPE_CHECKING:
+    from itsdangerous import URLSafeSerializer
+
     # Type-only: importing MCPTool at runtime would be circular (mcp_auto_exposure imports this
     # module) and would pull the mcp SDK into agent/model processes that never need it.
     from nemo_gym.mcp_auto_exposure import MCPTool
 
+from nemo_gym._checkpoint.control import install_participant
+from nemo_gym._checkpoint.resources import (
+    MCPTokenClaims,
+    ResourcesCheckpointMiddleware,
+    ResourcesCheckpointMode,
+    ResourcesParticipant,
+)
+from nemo_gym._checkpoint.settings import checkpoint_settings
+from nemo_gym._checkpoint.steps import StepMode
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.failure_kinds import validate_failure_kind
@@ -36,15 +48,38 @@ from nemo_gym.openai_utils import (
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.rollout_correlation import RolloutContextMiddleware
 from nemo_gym.sandbox.access import SandboxAccess
-from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, SimpleServer
+from nemo_gym.server_utils import SESSION_ID_KEY, BaseRunServerInstanceConfig, BaseServer, SimpleServer
 from nemo_gym.telemetry.endpoints import traced_verify_endpoint
 
 
 NEMO_GYM_MCP_SESSION_TOKEN_HEADER = "X-NeMo-Gym-Session-Token"
 NEMO_GYM_MCP_METADATA_KEY = "mcp"
+# The MCP session token claim that names the attempt whose seed minted the token, by its capture key.
+# Only a server with checkpointing on adds it.
+MCP_TOKEN_EPISODE_CLAIM = "episode"
 # Salt namespacing the signed MCP session token, so it can't be confused with another signer
 # that happens to share the same session-middleware secret.
 _MCP_TOKEN_SALT = "nemo-gym-mcp-session-token"
+
+# The session hooks an ``exported`` resources server must implement.
+_SESSION_HOOKS = ("export_session_states", "restore_session_states", "retire_session_state")
+
+
+def mcp_session_token_serializer(secret: str) -> "URLSafeSerializer":
+    """The signer of Gym MCP session tokens; build it once per server."""
+    from itsdangerous import URLSafeSerializer
+
+    return URLSafeSerializer(secret, salt=_MCP_TOKEN_SALT)
+
+
+def mcp_session_token_payload(serializer: "URLSafeSerializer", token: str) -> Any:
+    """The payload of a Gym MCP session token whose signature verifies, or ``None`` if it does not."""
+    from itsdangerous import BadSignature
+
+    try:
+        return serializer.loads(token)
+    except BadSignature:
+        return None
 
 
 def normalize_tool_name(name: str, server_name: Optional[str] = None) -> str:
@@ -240,12 +275,28 @@ class ResourcesCloseSessionResponse(BaseModel):
 
 class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleServer):
     config: BaseResourcesServerConfig
+    # How this server's sessions take part in partial-rollout checkpoints. "exported" servers implement the
+    # ResourcesSessionHooks methods.
+    # The default fails closed: its sessions' rollouts are restarts, which never hold up a checkpoint,
+    # are left out of it, and start over after a crash.
+    checkpoint_mode: ClassVar[ResourcesCheckpointMode] = "restart_only"
+    # "replay" declares that /verify is safe to run again after a crash
+    # and does not change checkpointed session state, so a checkpoint need not wait for it.
+    # Callers learn it from the /seed_session reply.
+    checkpoint_verify: ClassVar[StepMode] = "wait"
+    # The routes that start a session for the request's rollout, such as a Gymnasium server's /reset.
+    # Each waits out a checkpoint before its handler runs, needs a rollout prefix,
+    # and binds the session to that rollout when it succeeds.
+    checkpoint_session_starts: ClassVar[tuple[str, ...]] = ("/seed_session",)
+    _checkpoint: Optional[ResourcesParticipant] = PrivateAttr(default=None)
+    _mcp_token_serializer: Any = PrivateAttr(default=None)
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
 
         self.setup_session_middleware(app)
         app.add_middleware(RolloutContextMiddleware)
+        self.setup_resources_checkpoint(app)
 
         app.post("/seed_session")(self.seed_session)
         app.post("/close_session")(self.close_resources_session)
@@ -260,6 +311,123 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         app.get("/reverify_mode")(self.get_reverify_mode)
 
         return app
+
+    def setup_resources_checkpoint(self, app: FastAPI) -> None:
+        # The declarations are class attributes nothing else checks: a typo would act as a mode of its own.
+        for name, allowed in (("checkpoint_mode", ResourcesCheckpointMode), ("checkpoint_verify", StepMode)):
+            if getattr(self, name) not in get_args(allowed):
+                raise ValueError(
+                    f"{type(self).__name__} declares {name}={getattr(self, name)!r}; expected one of {get_args(allowed)}"
+                )
+        if not all(isinstance(path, str) and path.startswith("/") for path in self.checkpoint_session_starts):
+            raise ValueError(
+                f"{type(self).__name__} declares checkpoint_session_starts={self.checkpoint_session_starts!r}; "
+                "expected a tuple of route paths"
+            )
+        settings = checkpoint_settings(getattr(self.server_client, "global_config_dict", None))
+        if settings is None:
+            return
+        if (self.config.num_workers or 1) != 1:
+            raise ValueError("resources checkpointing requires num_workers=1: sessions live in one process")
+        if self.checkpoint_mode == "exported":
+            # Hooks from an intermediate base class or a mixin count; only the stubs here do not.
+            missing = [
+                name for name in _SESSION_HOOKS if getattr(type(self), name) is getattr(SimpleResourcesServer, name)
+            ]
+            if missing:
+                raise ValueError(
+                    f"{type(self).__name__} declares checkpoint_mode='exported' but does not implement {missing}"
+                )
+        participant = ResourcesParticipant(self, self.checkpoint_mode, verify_mode=self.checkpoint_verify)
+        self._checkpoint = participant
+        install_participant(
+            app,
+            participant,
+            auth_token=settings.control_auth_token,
+            lease_grace_seconds=settings.lease_grace_seconds,
+            instance_name=self.config.name,
+        )
+        # Innermost, so the session middleware has already resolved the cookie session ID.
+        mcp_token_claims = self._mcp_token_claims if self.config.expose_tools_over_mcp else None
+        app.user_middleware.append(
+            Middleware(
+                ResourcesCheckpointMiddleware,
+                participant=participant,
+                mcp_token_claims=mcp_token_claims,
+                session_starts=frozenset(self.checkpoint_session_starts),
+            )
+        )
+        app.state.nemo_gym_resources_checkpoint_installed = True
+
+    def setup_checkpoint_participant(self, app: FastAPI) -> None:
+        # Fail closed rather than install the participant here:
+        # an app this class did not build may lack the middleware it relies on, and declares no session starts,
+        # so the participant would track nothing, and commits would go ahead without the server's live sessions.
+        if getattr(app.state, "nemo_gym_resources_checkpoint_installed", False):
+            return
+        if checkpoint_settings(getattr(self.server_client, "global_config_dict", None)) is not None:
+            raise ValueError(
+                f"{type(self).__name__}.setup_webserver did not install the checkpoint participant; "
+                "build the app with SimpleResourcesServer.setup_webserver, or call setup_resources_checkpoint on it"
+            )
+
+    @property
+    def checkpoint_participant(self) -> Optional[ResourcesParticipant]:
+        """The participant that takes part in partial-rollout checkpoints, or ``None`` with checkpointing off."""
+        return self._checkpoint
+
+    def _mcp_token_claims(self, scope: dict[str, Any]) -> Optional[MCPTokenClaims]:
+        """The session and attempt an MCP request's signed token names.
+
+        ``None`` without a token or for one that does not verify; the MCP endpoint rejects a bad token.
+        An attempt claim that does not decode counts as missing.
+        """
+        header = NEMO_GYM_MCP_SESSION_TOKEN_HEADER.lower().encode()
+        token = next((value for key, value in scope.get("headers", ()) if key.lower() == header), None)
+        if token is None:
+            return None
+        try:
+            text = token.decode()
+        except UnicodeDecodeError:
+            return None
+        if self._mcp_token_serializer is None:
+            self._mcp_token_serializer = mcp_session_token_serializer(self.get_session_middleware_key())
+        payload = mcp_session_token_payload(self._mcp_token_serializer, text)
+        if not isinstance(payload, dict) or not isinstance(payload.get("sid"), str):
+            return None
+        episode_id = None
+        capture_key = payload.get(MCP_TOKEN_EPISODE_CLAIM)
+        if isinstance(capture_key, str):
+            try:
+                episode_id = EpisodeId.from_capture_key(capture_key)
+            except ValueError:
+                pass
+        return MCPTokenClaims(session_id=payload["sid"], episode_id=episode_id)
+
+    def checkpoint_session_ended(self, request: Request) -> None:
+        """Report that the request's session ended; standard ``/close_session`` and ``/verify`` do this.
+
+        Call it from a protocol route that ends a session under another name, such as a terminal step.
+        """
+        session_id = request.session.get(SESSION_ID_KEY)
+        if self._checkpoint is not None and session_id is not None:
+            self._checkpoint.ended(session_id)
+
+    async def export_session_states(self, session_ids: list[str]) -> dict[str, JsonValue]:
+        """Return each session's state for a checkpoint, leaving out sessions this server no longer holds."""
+        raise NotImplementedError
+
+    async def restore_session_states(self, states: dict[str, JsonValue]) -> None:
+        """Validate every state, then install all of them; never install a partial set."""
+        raise NotImplementedError
+
+    async def retire_session_state(self, session_id: str) -> None:
+        """Discard a session whose attempt was retired; called in every checkpoint mode.
+
+        The default does nothing.
+        A server that keeps per-session state frees it here, since a retired session's late requests,
+        a terminal step among them, are refused.
+        """
 
     def normalize_tool_name(self, name: str) -> str:
         """Strip this server's MCP namespace from a trajectory tool-call name (see module function)."""

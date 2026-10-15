@@ -612,7 +612,7 @@ async def test_receipt_download_failure_never_signals_a_reused_pid(agent, state,
         if confirmed:
             await state.session.stop_harness(timeout=agent.config.session_close_timeout_seconds)
         else:
-            with pytest.raises(RuntimeError, match="cleanup was not confirmed"):
+            with pytest.raises(RuntimeError, match="termination was not confirmed"):
                 await state.session.stop_harness(timeout=agent.config.session_close_timeout_seconds)
         await asyncio.sleep(0.05)
         assert not signaled.exists()
@@ -756,7 +756,7 @@ def test_cleanup_and_runtime_are_independent():
     runtime = HarnessProcessInfo.model_validate({"hostname": "sandbox", "pid": 123})
     assert runtime.hostname == "sandbox" and runtime.pid == 123
     assert runtime.python is None
-    with pytest.raises(ValueError, match="cleanup was not confirmed"):
+    with pytest.raises(ValueError, match="termination was not confirmed"):
         parse_cleanup_receipt(runtime.model_dump())
     with pytest.raises(ValidationError):
         HarnessProcessInfo.model_validate(cleanup)
@@ -869,7 +869,7 @@ async def test_invalid_cleanup_diagnostics_do_not_block_close(agent, state):
 async def test_runner_exit_without_cleanup_receipt_blocks_close(agent, state, receipt):
     state.session.launch_started = True
     download_json = mock_json_download(state.session.sandbox, return_value=receipt)
-    with pytest.raises(RuntimeError, match="cleanup was not confirmed"):
+    with pytest.raises(RuntimeError, match="termination was not confirmed"):
         await agent._close_agent_session_state(state)
     assert state.session.launch_started and state.session.cleanup is None and not state.session.sandbox_stopped
     state.session.sandbox.disconnect.assert_not_awaited()
@@ -908,9 +908,11 @@ async def test_session_prompt_and_limits_reach_runner(agent, state, overrides, t
     assert any(arg.endswith("/process_supervisor.py") for arg in launch_args)
     assert float(launch_args[launch_args.index("--timeout") + 1]) == agent.config.sandbox_runner_timeout_seconds
     cleanup_timeout = float(launch_args[launch_args.index("--cleanup-timeout") + 1])
-    assert cleanup_timeout == agent.config.session_close_timeout_seconds / 3
-    assert state.session.sandbox.exec.await_args_list[0].kwargs["timeout_s"] > (
-        agent.config.sandbox_runner_timeout_seconds + 3 * cleanup_timeout
+    assert cleanup_timeout * process_supervisor.CLEANUP_PHASE_COUNT == pytest.approx(
+        agent.config.session_close_timeout_seconds
+    )
+    assert state.session.sandbox.exec.await_args_list[0].kwargs["timeout_s"] == pytest.approx(
+        agent.config.sandbox_runner_timeout_seconds + agent.config.session_close_timeout_seconds + 30
     )
     # Execute the real launch prefix: cleanup must receive the shell's PID, not a literal "$".
     launch_prefix, separator, _ = launch_command.partition(" && exec ")
