@@ -2748,7 +2748,6 @@ dependencies = [
     { name = "httptools" },
     { name = "hydra-core" },
     { name = "itsdangerous" },
-    { name = "jinja2" },
     { name = "jsonschema" },
     { name = "mcp" },
     { name = "omegaconf" },
@@ -2762,7 +2761,6 @@ dependencies = [
     { name = "pydot" },
     { name = "pyjwt" },
     { name = "python-multipart" },
-    { name = "ray", extra = ["default"] },
     { name = "rich" },
     { name = "scipy" },
     { name = "tqdm" },
@@ -2834,7 +2832,6 @@ sandbox = [
 ]
 telemetry = [
     { name = "nemo-lens", extra = ["sdk"] },
-    { name = "opentelemetry-instrumentation-aiohttp-client" },
     { name = "opentelemetry-instrumentation-fastapi" },
 ]
 vllm = [
@@ -2875,7 +2872,6 @@ requires-dist = [
     { name = "huggingface-hub", marker = "extra == 'dev'", specifier = "<2" },
     { name = "hydra-core" },
     { name = "itsdangerous" },
-    { name = "jinja2", specifier = ">=3.1" },
     { name = "jinja2", marker = "extra == 'ray'", specifier = ">=3.1" },
     { name = "jsonschema", specifier = ">=4.18,<5" },
     { name = "mcp", specifier = ">=1.28.1,<3" },
@@ -2888,7 +2884,6 @@ requires-dist = [
     { name = "openai", specifier = "==2.44.0" },
     { name = "opensandbox", marker = "extra == 'sandbox'", specifier = ">=0.1.15" },
     { name = "openshell", marker = "extra == 'openshell'", specifier = ">=0.0.92,<0.1" },
-    { name = "opentelemetry-instrumentation-aiohttp-client", marker = "extra == 'telemetry'", specifier = ">=0.60b0" },
     { name = "opentelemetry-instrumentation-fastapi", marker = "extra == 'telemetry'", specifier = ">=0.60b0" },
     { name = "orjson", specifier = ">=3.11.6" },
     { name = "packaging", specifier = ">=24.2" },
@@ -2905,7 +2900,6 @@ requires-dist = [
     { name = "pytest-cov", marker = "extra == 'dev'" },
     { name = "pytest-xdist", marker = "extra == 'dev'" },
     { name = "python-multipart", specifier = ">=0.0.27" },
-    { name = "ray", extras = ["default"], specifier = ">=2.58.0" },
     { name = "ray", extras = ["default"], marker = "extra == 'ray'", specifier = ">=2.58.0" },
     { name = "requests-mock", marker = "extra == 'dev'" },
     { name = "rich" },

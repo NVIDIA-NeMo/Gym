@@ -334,6 +334,27 @@ async def test_lost_agent_close_response_is_a_retryable_failure_before_verificat
     assert "/verify" not in [path for _, path, _ in client.calls]
 
 
+async def test_hung_agent_close_still_closes_resources_without_verifying() -> None:
+    environment_server, client = _environment_server()
+    environment_server.config.cleanup_timeout_seconds = 0.02
+    client.slow_path = "/v1/agent_sessions/close"
+    # Neither timed-out agent close consumes a response; Resources closes next.
+    client.responses[3:] = [_Response({"resources_session_id": "resources-session"})]
+
+    result = await environment_server.run_request(_request())
+
+    assert result.failure is not None
+    assert result.failure.stage == "cleanup"
+    assert [path for _, path, _ in client.calls] == [
+        "/seed_session",
+        "/v1/agent_sessions",
+        "/ng-rollout/rollout-a2/v1/responses",
+        "/v1/agent_sessions/close",
+        "/v1/agent_sessions/close",
+        "/close_session",
+    ]
+
+
 async def test_resources_close_failure_after_verification_keeps_result() -> None:
     environment_server, client = _environment_server()
     client.fail_path = "/close_session"

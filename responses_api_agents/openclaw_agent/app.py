@@ -708,13 +708,13 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             "prompt": f"{system}\n\n{prompt}" if system else prompt,
             "cwd": state.session.workdir,
             "env": {
-                "HOME": f"{state.session.session_dir}/home",
-                "XDG_CACHE_HOME": f"{state.session.session_dir}/home/.cache",
                 "OPENCLAW_STATE_DIR": f"{state.session.session_dir}/home/.openclaw",
                 "OPENCLAW_CONFIG_PATH": f"{state.session.session_dir}/home/.openclaw/openclaw.json",
                 "OPENCLAW_TELEMETRY": "0",
                 "CLAWHUB_DISABLE_TELEMETRY": "1",
                 "OPENCLAW_EXEC_SHELL_SNAPSHOT": "0",
+                # The supervisor must retain the CLI in its process group.
+                "OPENCLAW_NO_RESPAWN": "1",
             },
         }
         try:
