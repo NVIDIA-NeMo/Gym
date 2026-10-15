@@ -48,6 +48,24 @@ apply inside the sandbox; the sandbox only has to be large enough not to undercu
        ++code_gen.resources_servers.code_gen.sandbox_provider=sandbox
    ```
 
+   Or put the same settings in a config file passed after the server config:
+
+   ```yaml
+   # code_gen_sandbox.yaml
+   # gym env start --config resources_servers/code_gen/configs/code_gen.yaml --config code_gen_sandbox.yaml
+   config_paths:
+     - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+
+   code_gen:
+     resources_servers:
+       code_gen:
+         sandbox_provider: sandbox
+         sandbox_config:
+           image: <registry>/code-gen-verifier@sha256:<digest>
+   ```
+
+   Keys left out keep the server's defaults below.
+
    `num_processes` then caps concurrent sandboxes. The default `sandbox_config` uses 1 CPU, as a Ray
    task does, and 6 GiB of memory, above the 4 GiB `RLIMIT_DATA`, so a memory-hungry candidate
    fails its test instead of getting the whole sandbox killed. The default
