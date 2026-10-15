@@ -1027,7 +1027,7 @@ Before starting, the command checks each resources server's `GET /reverify_mode`
 | --- | --- |
 | `stateless` | Reverification is safe. The verifier is a pure function of `(request body, server config)`. |
 | `unsupported` | Reverification is not safe. The verifier reads per-rollout session state that is no longer present. |
-| `unknown` | The server has not declared its reverification behaviour. **This is the default.** Treated as potentially unsafe. |
+| `unknown` | The server has not declared its reverification behavior. **This is the default.** Treated as potentially unsafe. |
 
 Servers that report `unsupported` or `unknown` cause the command to abort unless `--force` is passed.
 
