@@ -11,6 +11,7 @@ from omegaconf import OmegaConf
 from benchmarks.indic.ifeval import prepare as module
 from nemo_gym.base_resources_server import BaseRunRequest
 from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.task_data import find_server_dir, load_task_data_schema, validate_jsonl_rows
 
 
 def source_row(key=1, *, tags=None):
@@ -50,6 +51,20 @@ def test_quality_selection_and_unmodified_source_fields():
     assert row["metadata"]["source_config"] == "indicifeval-trans"
     assert records == original
     assert row["uuid"] != module.build_rows(records, language="bn")[0]["uuid"]
+
+
+def test_prepared_rows_match_instruction_following_task_data_schema():
+    rows = [module.build_rows([source_row()], language=language)[0] for language in module.LANGUAGES]
+    adapter = load_task_data_schema(find_server_dir("instruction_following"))
+    report = validate_jsonl_rows("instruction_following", adapter, "prepared.jsonl", [json.dumps(row) for row in rows])
+
+    assert report.rows == 12
+    assert report.clean, report.summary()
+
+    misplaced = copy.deepcopy(rows[0])
+    misplaced["language"] = misplaced["verifier_metadata"].pop("language")
+    report = validate_jsonl_rows("instruction_following", adapter, "misplaced.jsonl", [json.dumps(misplaced)])
+    assert report.misplaced_keys == {"language": 1}
 
 
 @pytest.mark.parametrize(

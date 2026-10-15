@@ -8,6 +8,56 @@ SPDX-License-Identifier: Apache-2.0
 Validated on 2026-10-11 after merging Gym main at `4a9236e4`.
 This records integration checks, not a benchmark quality baseline.
 
+## PR #3695 follow-up validation (2026-10-14)
+
+The [review request](https://github.com/NVIDIA-NeMo/Gym/pull/3695#discussion_r4243058513)
+identified that instruction accuracies were present in `agent_metrics` but absent
+from `key_metrics`. The Indic backend now selects the four overall strict/loose
+prompt/instruction accuracies. The English backend retains its default `mean/*`
+selection. A regression through `verify()` and `aggregate_metrics()` checks an
+answer that satisfies one of two strict constraints: prompt strict is 0 and
+instruction strict is 0.5, while both loose accuracies are 1.
+
+The [core CI failure](https://github.com/NVIDIA-NeMo/Gym/actions/runs/38171481834/job/114565012701)
+was caused by undeclared Indic fields in the instruction-following task schema:
+`language`, `uuid`, `subset_for_metrics`, and `metadata`. These fields are now
+declared without requiring them on English rows. Only `language` is marked as
+read exclusively from `verifier_metadata`; the shared fields retain their
+legacy placement compatibility, as established in
+[PR #2827](https://github.com/NVIDIA-NeMo/Gym/pull/2827).
+
+Both the missing-summary regression and the exact CI schema failure were
+reproduced before the fixes. With Python 3.13.14, `PYTHONPATH=.`, and the existing
+NLTK/checker caches, final targeted validation passed:
+
+```bash
+python -m pytest tests/unit_tests/test_indic_ifeval.py \
+  tests/unit_tests/test_task_data.py tests/unit_tests/test_aggregate_metrics.py \
+  -q --tb=short
+python -m pytest resources_servers/instruction_following/tests -q --tb=short
+pre-commit run --all-files
+git diff --check
+```
+
+- **491 core tests passed**, including the full committed-data schema sweep,
+  schema import isolation, preparation, and shared aggregation.
+- **42 instruction-following tests passed**, including English compatibility
+  and the new summary regression.
+- **Pre-commit and diff whitespace checks passed.**
+- Re-aggregated **24 saved real Gnani responses across 12 languages**, containing
+  **48 instructions**, through the updated server. All four `key_metrics` equal
+  independently calculated pooled accuracies and their `agent_metrics` values;
+  all per-language metrics remain present. No checker errors were recorded.
+  This is a reporting/schema change, so no new inference was needed; the model
+  evidence below remains applicable to generation and scoring.
+
+The previous PR head `e57aa625` passed all eight remote server shards. Its
+separate [harness conformance failures](https://github.com/NVIDIA-NeMo/Gym/runs/114566215550)
+also occur on [unchanged upstream main `4a9236e4`](https://github.com/NVIDIA-NeMo/Gym/runs/114616856089):
+OpenCode reports two failed scenarios, Pi one, and Codex seven; Hermes passes.
+Those unrelated adapters are outside this change. New-head CI still needs to
+run; these local checks do not establish a green remote pipeline.
+
 ## Review feedback applied
 
 The applicable feedback from [Gym PR #3596](https://github.com/NVIDIA-NeMo/Gym/pull/3596)

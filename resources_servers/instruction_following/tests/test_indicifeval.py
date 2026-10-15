@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 from pydantic import ValidationError
 
+from nemo_gym.config_types import AggregateMetricsRequest
 from nemo_gym.server_utils import ServerClient
 from resources_servers.instruction_following.app import (
     InstructionFollowingResourcesServer,
@@ -162,6 +163,31 @@ def test_aggregate_uses_instruction_micro_average(server):
 def test_english_aggregation_remains_unchanged(server):
     english = server.model_copy(update={"config": server.config.model_copy(update={"instruction_backend": "english"})})
     assert english.compute_metrics([[{"reward": 1}]]) == {}
+
+
+async def test_aggregate_metrics_exposes_all_four_indic_accuracies(server):
+    response = await server.verify(request("<<शीर्षक>>\nउत्तर, शब्द"))
+    result = await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[response.model_dump()]))
+
+    expected = {
+        "prompt_level_strict_acc": 0.0,
+        "inst_level_strict_acc": 0.5,
+        "prompt_level_loose_acc": 1.0,
+        "inst_level_loose_acc": 1.0,
+    }
+    assert result.key_metrics == expected
+    assert {key: result.agent_metrics[key] for key in expected} == expected
+    assert result.agent_metrics["language/hi/inst_level_strict_acc"] == 0.5
+
+
+async def test_english_key_metrics_keep_default_mean_selection(server):
+    english = server.model_copy(update={"config": server.config.model_copy(update={"instruction_backend": "english"})})
+    response = await english.verify(request("<<शीर्षक>>\nउत्तर"))
+    result = await english.aggregate_metrics(AggregateMetricsRequest(verify_responses=[response.model_dump()]))
+
+    assert result.key_metrics["mean/reward"] == 1.0
+    assert result.key_metrics == {key: value for key, value in result.agent_metrics.items() if key.startswith("mean/")}
+    assert server.get_key_metrics({}) == {}
 
 
 def test_package_does_not_shadow_english_registry():

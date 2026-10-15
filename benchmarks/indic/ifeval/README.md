@@ -101,8 +101,9 @@ its fraction of strictly satisfied instructions, as in English IFEval.
 
 Verification returns `prompt_level_{strict,loose}_acc` booleans and
 `inst_level_{strict,loose}_acc` boolean lists. Aggregates include all four
-metrics overall and under `language/<code>/`. Instruction accuracy is total
-passed instructions divided by total instructions. Empty responses fail;
+metrics overall and under `language/<code>/`. The run summary's `key_metrics`
+selects the four overall accuracies. Instruction accuracy is total passed
+instructions divided by total instructions. Empty responses fail;
 checker exceptions fail the affected instruction and appear in
 `instruction_errors` and `checker_error_count`. Completed `<think>` and
 `<thinking>` blocks are removed before scoring. Other checker behavior follows

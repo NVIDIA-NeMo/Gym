@@ -210,6 +210,18 @@ class InstructionFollowingResourcesServer(SimpleResourcesServer):
             return aggregate_scores(tasks)
         return super().compute_metrics(tasks)
 
+    def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
+        """Expose the four Indic accuracies, including instruction micro-averages."""
+        if self.config.instruction_backend == "indicifeval_trans":
+            keys = (
+                "prompt_level_strict_acc",
+                "inst_level_strict_acc",
+                "prompt_level_loose_acc",
+                "inst_level_loose_acc",
+            )
+            return {key: agent_metrics[key] for key in keys if key in agent_metrics}
+        return super().get_key_metrics(agent_metrics)
+
 
 if __name__ == "__main__":
     InstructionFollowingResourcesServer.run_webserver()
