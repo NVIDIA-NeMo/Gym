@@ -72,6 +72,8 @@ from nemo_gym.rollout_collection import (
     AGGREGATION_ERROR_KEY,
     ENVIRONMENT_SERVER_FAILURE_CLASS,
     NG_AGENT_OBSERVATIONS_KEY,
+    NG_DATASET_DIGEST_KEY,
+    NG_DIGEST_KEY,
     NG_DISPATCH_DRAINED_KEY,
     NG_ENVIRONMENT_SERVER_KEY,
     NG_FAILURE_CLASS_KEY,
@@ -79,8 +81,10 @@ from nemo_gym.rollout_collection import (
     NG_FAILURE_MAX_ATTEMPTS_KEY,
     NG_NO_PERSIST_KEY,
     NG_PERF_KEY,
+    NG_RESULT_TYPE_KEY,
     NG_TERMINAL_KEY,
     NG_TRAJECTORY_KEY,
+    PROVENANCE_KEYS,
     DispatchLatencyTracker,
     E2ERolloutCollectionConfig,
     RolloutAggregationConfig,
@@ -10236,6 +10240,82 @@ class TestEnvironmentServerRouting:
 
         with pytest.raises(ValueError, match=r"reserved for rollout collection: \['ng_perf'\]"):
             nemo_gym.rollout_collection._episode_record(reply)
+
+    async def test_task_data_provenance_copies_only_the_digest_keys(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A dataset's task_data may not steer the collector: only the two digests reach the record.
+
+        task_data is dataset-controlled (a hub dataset is untrusted) and the collector reads ``_ng_*``
+        keys a success record does not carry, so copying every ``_ng_*`` key would let a row send a
+        reward=1.0 result to the failures file (``_ng_failure_class``), write it nowhere
+        (``_ng_no_persist``) or relabel its type (``_ng_result_type``).
+        """
+        from nemo_gym.tasks.harbor.digest import DATASET_DIGEST_KEY, DIGEST_KEY
+
+        assert PROVENANCE_KEYS == (DIGEST_KEY, DATASET_DIGEST_KEY)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_config_dict", lambda: {})
+        task_data = {
+            NG_DIGEST_KEY: "a" * 64,
+            NG_DATASET_DIGEST_KEY: "b" * 64,
+            NG_NO_PERSIST_KEY: True,
+            NG_FAILURE_CLASS_KEY: "x",
+            NG_RESULT_TYPE_KEY: "spoof",
+            "_ng_other": "ignored",
+        }
+        row = {
+            "task_id": {"taskset": "swe_pro", "task_id": "a"},
+            "task_input": {"responses_create_params": {"input": [{"role": "user", "content": "go"}]}},
+        }
+        row["task_input"]["task_data"] = task_data
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_bytes(orjson.dumps(row) + b"\n")
+        output_fpath = tmp_path / "rollouts.jsonl"
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(output_fpath),
+            environment_routing_mode="taskset",
+            environment_server_routes={"swe_pro": "environment"},
+            disable_aggregation=True,
+            disable_health_check=True,
+        )
+        mock_client = MagicMock()
+        mock_client.global_config_dict = _environment_server_config()
+
+        class Helper(RolloutCollectionHelper):
+            def setup_server_client(self, head_server_config=None):
+                return mock_client
+
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                futures = []
+                for example in examples:
+                    reply = {
+                        "episode_id": {"rollout_id": "0-a", "attempt": 0},
+                        "task_id": example["task_id"],
+                        "result": {"reward": 1.0},
+                    }
+                    future = Future()
+                    # No environment_server_type: the conditional stamp does not fire, so a copied
+                    # `_ng_result_type` would survive on the record.
+                    future.set_result(
+                        _CompletedRollout(
+                            row=example, result=reply, rollout_latency_ms=None, environment_server="environment"
+                        )
+                    )
+                    futures.append(future)
+                return futures
+
+        await Helper().run_from_config(config)
+
+        [record] = [orjson.loads(line) for line in output_fpath.read_bytes().splitlines()]
+        assert record["reward"] == 1.0
+        assert (record[NG_DIGEST_KEY], record[NG_DATASET_DIGEST_KEY]) == ("a" * 64, "b" * 64)
+        assert not {NG_NO_PERSIST_KEY, NG_FAILURE_CLASS_KEY, NG_RESULT_TYPE_KEY, "_ng_other"} & record.keys()
+        failures_fpath = _failures_path_for(output_fpath)
+        assert not failures_fpath.exists() or failures_fpath.read_bytes() == b""
+        # The materialized row keeps its task_data as written; only the record is filtered.
+        [materialized] = [orjson.loads(line) for line in config.materialized_jsonl_fpath.read_bytes().splitlines()]
+        assert materialized["task_input"]["task_data"] == task_data
 
     def test_episode_result_from_a_failed_judge_keeps_its_failure_class(self) -> None:
         """judge_failsafe's verify result stays a result and keeps the class that routes it to the failures file."""
