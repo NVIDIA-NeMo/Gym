@@ -1,6 +1,8 @@
 #!/bin/bash
 
 NUM_SPECULATIVE_TOKENS="${NUM_SPECULATIVE_TOKENS:-5}"
+# Use NIXL for prefill-to-decode transfer without a Mooncake store.
+ENABLE_MOONCAKE=0
 
 # Optional detailed Nsight Systems capture on PD prefill nodes only.
 # PROFILE_PREFILL=1 auto-installs nsys if needed in root Ubuntu containers.
@@ -25,8 +27,6 @@ export VLLM_USE_V2_MODEL_RUNNER=1
 export VLLM_USE_RUST_FRONTEND=1
 
 # @bxyu-nvidia: `--skip-mm-profiling` Is needed to get Super VL checkpoint working, even with text benchmarks
-# @bxyu-nvidia: We set --prefix-match-unit 128 because the Mooncake store prefill lookup gets more expensive the smaller this number is
-# and caused prefill bottlenecks as a result when using Mooncake.
 VLLM_COMMON_ARGS=(
     --trust-remote-code
     --disable-uvicorn-access-log
@@ -65,59 +65,25 @@ VLLM_PREFILL_ARGS=(
     # piecewise until that dynamic-speculation capture path supports Mamba.
     --compilation-config '{"cudagraph_mode":"PIECEWISE"}'
     --kv-transfer-config '{
-        "kv_connector": "MultiConnector",
+        "kv_connector": "NixlConnector",
         "kv_role": "kv_producer",
+        "kv_load_failure_policy": "fail",
         "kv_connector_extra_config": {
-            "connectors": [
-                {
-                    "kv_connector": "NixlConnector",
-                    "kv_role": "kv_producer",
-                    "kv_load_failure_policy": "fail",
-                    "kv_connector_extra_config": {
-                        "kv_lease_duration": 180
-                    }
-                },
-                {
-                    "kv_connector": "MooncakeStoreConnector",
-                    "kv_role": "kv_both",
-                    "kv_connector_extra_config": {
-                        "load_async": true,
-                        "lookup_async": true
-                    }
-                }
-            ]
+            "kv_lease_duration": 180
         }
     }'
     --max-cudagraph-capture-size 1200
     --max-num-batched-tokens 135680
     --max-num-seqs 1024
 )
-# @bxyu-nvidia: We set "enable_lookup": false for the Mooncake store connector because the prefill worker handles the prefix cache lookup and decode just needs to receive the transferred kv cache.
 VLLM_DECODE_ARGS=(
     --speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":${NUM_SPECULATIVE_TOKENS}}"
     --kv-transfer-config '{
-        "kv_connector": "MultiConnector",
+        "kv_connector": "NixlConnector",
         "kv_role": "kv_consumer",
+        "kv_load_failure_policy": "fail",
         "kv_connector_extra_config": {
-            "connectors": [
-                {
-                    "kv_connector": "NixlConnector",
-                    "kv_role": "kv_consumer",
-                    "kv_load_failure_policy": "fail",
-                    "kv_connector_extra_config": {
-                        "kv_lease_duration": 180
-                    }
-                },
-                {
-                    "kv_connector": "MooncakeStoreConnector",
-                    "kv_role": "kv_consumer",
-                    "kv_connector_extra_config": {
-                        "load_async": true,
-                        "lookup_async": true,
-                        "enable_lookup": false
-                    }
-                }
-            ]
+            "kv_lease_duration": 180
         }
     }'
     --compilation-config '{
