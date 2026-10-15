@@ -9,6 +9,7 @@ import json
 import posixpath
 import re
 import shutil
+import subprocess
 import tarfile
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -23,9 +24,10 @@ from yarl import URL
 
 import nemo_gym.sandbox.providers.base as sandbox_base
 from environment_servers.harbor.app import (
+    HarborEnvironmentServer,
     HarborEnvironmentServerConfig,
 )
-from environment_servers.harbor.sandboxes import SEED_CREATE_GRACE_S
+from environment_servers.harbor.sandboxes import SEED_CREATE_GRACE_S, _is_image_pull_failure
 from environment_servers.harbor.tests.conftest import (
     COMPOSE_YAML,
     IMAGE_CONFIGS,
@@ -42,14 +44,17 @@ from environment_servers.harbor.tests.conftest import (
     FakeSandbox,
     OverlaySandbox,
     _fails,
+    agent_response,
     archive_of,
     episode,
     make_server,
     record_verifier_build,
     run_episode,
     write_image_config,
+    write_task,
 )
 from environment_servers.harbor.verifier import (
+    COLLECT_HOOK_GRACE_S,
     EXIT_RECORD_NAME,
     TIMEOUT_WRAPPER_GUARD,
     _verifier_image,
@@ -60,6 +65,7 @@ from environment_servers.harbor.verifier import (
     select_reward,
     verifier_command,
 )
+from nemo_gym import failure_kinds
 from nemo_gym.base_environment_server import BaseEnvironmentServerConfig
 from nemo_gym.config_types import AggregateMetricsRequest
 from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxSpec
@@ -70,6 +76,29 @@ from nemo_gym.tasks.harbor.dockerfile import RECORD_VERSION
 from nemo_gym.tasks.harbor.errors import HarborTaskError
 from nemo_gym.tasks.harbor.models import HarborEnvironment
 from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE, IMAGE_CONFIGS_FILE
+
+
+def harness_trajectory(step_count: int) -> dict:
+    """A close's trajectory: one decision the harness took, with its model call and command-batch count."""
+    return {
+        "task_id": "hello",
+        "rollout_id": "r1",
+        "turns": [
+            {
+                "invocation_id": "harness_1",
+                "task_id": "hello",
+                "rollout_id": "r1",
+                "turn_no": 1,
+                "timestamp": 1.0,
+                "question": "do it",
+                "answer": [],
+                "step_count": step_count,
+                "model_calls": [
+                    {"model_ref": {"type": "responses_api_models", "name": "policy"}, "response_id": "resp_0"}
+                ],
+            }
+        ],
+    }
 
 
 def uploaded_file(sandbox, name: str) -> list[bytes]:
@@ -193,6 +222,20 @@ class TestEpisode:
         assert client.seed_bodies()[0]["task_id"] == {"taskset": "ds", "task_id": "hello"}
         # The task's own agent budget travels in the seed, so the harness can stop in time.
         assert client.seed_bodies()[0]["agent_timeout_sec"] == 300.0
+        # The transcript reached /logs/agent/trajectory.json before test.sh ran, and a copy sits with the logs.
+        (trajectory_bytes,) = uploaded_file(sandbox, "trajectory.json")
+        assert any("-C /logs/agent;" in c["command"] for c in sandbox.execs if "tar -xzf" in c["command"])
+        trajectory = json.loads(trajectory_bytes)
+        assert trajectory["schema_version"] == "ATIF-v1.7"
+        assert [step["source"] for step in trajectory["steps"]] == ["user", "agent"]
+        assert trajectory["steps"][1]["message"] == "echo hello > hello.txt"
+        assert trajectory["agent"] == {
+            "name": "agent",
+            "version": trajectory["agent"]["version"],
+            "model_name": "model",
+        }
+        assert (Path(result.verifier_logs_dir) / "trajectory.json").read_bytes() == trajectory_bytes
+        assert result.verifier_network == "public"
         # The turn's cookie jar, not the seed's, travels to the close.
         assert client.calls[2][2]["cookies"] == {"session": "cookie-value"}
         # Verification ran only after the harness let go of the sandbox, then the sandbox was stopped.
@@ -342,7 +385,12 @@ class TestEpisode:
 
         assert spec.image == "ubuntu:24.04"
         assert spec.workdir == "/app"
-        assert spec.ttl_s == 21600 + 10 + server.config.sandbox_ttl_slack_s
+        # The sandbox lives for the task's own budget (sandbox start, harness setup, agent, verifier and its
+        # grace), which is far below the run-wide deadline here, plus the cleanup budget and the slack.
+        assert server._task_budget_s(task) == 900 + 300 + 300 + 120 + 30
+        assert spec.ttl_s == server._task_budget_s(task) + 10 + server.config.sandbox_ttl_slack_s
+        server.config.enforce_task_timeouts = False
+        assert server._sandbox_spec(task, "/app").ttl_s == 21600 + 10 + server.config.sandbox_ttl_slack_s
         assert (spec.resources.cpu, spec.resources.memory_mib, spec.resources.disk_gib) == (1.0, 2048, 10)
         assert spec.metadata["sandbox-api"] == "osb"
         assert spec.metadata["harbor_task"] == "hello"
@@ -1099,21 +1147,38 @@ class TestAgentStage:
         assert sandbox.stopped and not server._sandboxes
 
     async def test_failed_turn_closes_the_session_and_keeps_the_agents_evidence(self, tmp_path, monkeypatch):
+        """A turn that fails after a decision keeps the harness's observations and the decisions it took.
+
+        The failure row carries the close's trajectory as a result does; without it rollout collection rebuilds
+        one turn per captured model call and loses the model-call references and command-batch counts.
+        """
         server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
         server.server_client.fail_path = "/ng-rollout/r1/v1/responses"
         server.server_client.observations = {"source": "harness", "records": [], "gaps": []}
+        server.server_client.trajectory = harness_trajectory(step_count=3)
 
         response = await run_episode(server, task)
 
         assert response.failure.stage == "agent" and not response.failure.terminal
         assert response.failure.agent_observations is not None
+        [turn] = response.failure.trajectory.turns
+        assert (turn.turn_no, turn.step_count, turn.model_calls[0].response_id) == (1, 3, "resp_0")
+        dumped = response.model_dump(mode="json")["failure"]
+        assert (
+            dumped["trajectory"]["turns"][0]["step_count"] == 3 and dumped["agent_observations"]["source"] == "harness"
+        )
         assert server.server_client.paths()[-1] == "/v1/agent_sessions/close"
         assert not any("test.sh" in call["command"] for call in sandbox.execs)
         assert sandbox.stopped
 
     async def test_failed_close_is_a_cleanup_failure_with_the_turn_attached(self, tmp_path, monkeypatch):
         server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
-        server.server_client.fail_path = "/v1/agent_sessions/close"
+        request_info = RequestInfo(
+            URL("http://agent/v1/agent_sessions/close"), "POST", CIMultiDictProxy(CIMultiDict())
+        )
+        server.server_client.fail_with["/v1/agent_sessions/close"] = ClientResponseError(
+            request_info, (), status=500, message="close exploded"
+        )
 
         response = await run_episode(server, task)
 
@@ -1124,6 +1189,22 @@ class TestAgentStage:
         # The final unwind retried the close, then stopped the sandbox.
         assert server.server_client.paths().count("/v1/agent_sessions/close") == 2
         assert sandbox.stopped
+
+    async def test_close_that_only_times_out_still_scores_the_turn(self, tmp_path, monkeypatch):
+        """A slow harness teardown must not discard a finished turn; its observations are lost with the reply."""
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
+        server.server_client.fail_path = "/v1/agent_sessions/close"
+        server.server_client.observations = {"source": "harness", "records": [], "gaps": []}
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert response.result.reward == 1.0 and response.result.response.id == "response"
+        assert response.result.ng_agent_observations is None
+        assert any("test.sh" in call["command"] for call in sandbox.execs)
+        # The final unwind retried the close (which then succeeded), then stopped the sandbox.
+        assert server.server_client.paths().count("/v1/agent_sessions/close") == 2
+        assert sandbox.stopped and not server._sandboxes
 
     async def test_observations_travel_with_the_result(self, tmp_path, monkeypatch):
         server, task, _, _ = make_server(tmp_path, monkeypatch)
@@ -1142,25 +1223,7 @@ class TestAgentStage:
         """
         server, task, _, _ = make_server(tmp_path, monkeypatch)
         server.server_client.observations = {"source": "harness", "records": [], "gaps": []}
-        server.server_client.trajectory = {
-            "task_id": "hello",
-            "rollout_id": "r1",
-            "turns": [
-                {
-                    "invocation_id": "harness_1",
-                    "task_id": "hello",
-                    "rollout_id": "r1",
-                    "turn_no": 1,
-                    "timestamp": 1.0,
-                    "question": "do it",
-                    "answer": [],
-                    "step_count": 3,
-                    "model_calls": [
-                        {"model_ref": {"type": "responses_api_models", "name": "policy"}, "response_id": "resp_0"}
-                    ],
-                }
-            ],
-        }
+        server.server_client.trajectory = harness_trajectory(step_count=3)
 
         response = await run_episode(server, task)
 
@@ -1222,6 +1285,49 @@ class TestVerify:
         assert any(remote.endswith(".tar.gz") for _, remote in sandbox.uploads)
         assert Path(result.verifier_logs_dir).is_absolute()
         assert (Path(result.verifier_logs_dir) / "reward.txt").read_text() == "1\n"
+
+    async def test_prepare_clears_the_reserved_trajectory_destination_before_the_upload(self, tmp_path, monkeypatch):
+        """Shared-mode preparation keeps the agent's logs, except the one path the server writes: an entry the
+        agent planted there (a link, a directory) would be followed by, or fail, the transcript upload."""
+        _, _, sandbox, response = await self.verified(tmp_path, monkeypatch)
+
+        assert response.result.reward == 1.0
+        commands = [call["command"] for call in sandbox.execs]
+        prepare = next(command for command in commands if "-mindepth 1 -delete" in command)
+        steps = prepare.split(" && ")
+        clear = steps.index("rm -rf -- /logs/agent/trajectory.json")
+        # After the roots exist as directories (a linked /logs/agent was unlinked and remade just before), and
+        # before the wipe of the verifier's folders; nothing else under /logs/agent is deleted.
+        assert steps[clear - 1] == "mkdir -p /tests /logs/verifier /logs/agent"
+        assert steps[clear + 1] == "find /tests /logs/verifier -mindepth 1 -delete"
+        assert not any("/logs/agent" in step and "delete" in step for step in steps)
+        trajectory_upload = next(i for i, c in enumerate(commands) if "tar -xzf" in c and "-C /logs/agent" in c)
+        assert commands.index(prepare) < trajectory_upload
+
+    @pytest.mark.parametrize("planted", ["dangling_symlink", "directory"])
+    async def test_prepare_removes_a_planted_trajectory_entry(self, tmp_path, monkeypatch, planted):
+        """The prepare line the server sends, run by a real shell against a temporary root."""
+        _, _, sandbox, _ = await self.verified(tmp_path, monkeypatch)
+        prepare = next(call["command"] for call in sandbox.execs if "-mindepth 1 -delete" in call["command"])
+        root = tmp_path / "fs"
+        agent_logs = root / "logs" / "agent"
+        agent_logs.mkdir(parents=True)
+        for folder in ("tests", "logs/verifier"):
+            (root / folder).mkdir(parents=True)
+            (root / folder / "stale").write_text("old")
+        (agent_logs / "agent.log").write_text("kept")
+        if planted == "dangling_symlink":
+            (agent_logs / "trajectory.json").symlink_to(root / "nowhere")
+        else:
+            (agent_logs / "trajectory.json" / "sub").mkdir(parents=True)
+        command = prepare.replace("/tests", str(root / "tests")).replace("/logs", str(root / "logs"))
+
+        subprocess.run(["sh", "-c", command], check=True)
+
+        planted_path = agent_logs / "trajectory.json"
+        assert not planted_path.exists() and not planted_path.is_symlink()
+        assert (agent_logs / "agent.log").read_text() == "kept"
+        assert list((root / "tests").iterdir()) == [] and list((root / "logs" / "verifier").iterdir()) == []
 
     async def test_prepare_runs_as_root_on_a_non_root_image(self, tmp_path, monkeypatch):
         class NonRootSandbox(FakeSandbox):
@@ -1472,8 +1578,8 @@ class TestSeparateVerification:
         assert (artifacts / "01" / "app" / "output" / "report.json").read_bytes() == b'{"ok": true}'
         # ...the agent sandbox was stopped before test.sh ran, and the verifier got tests plus artifacts back.
         assert agent.stopped
-        # tests/, /logs/artifacts and the report all travel as archives, so the report keeps its mode bits.
-        assert len(verifier.uploads) == 3 and all(remote.endswith(".tar.gz") for _, remote in verifier.uploads)
+        # tests/, /logs/artifacts, the report and the trajectory all travel as archives, so modes travel too.
+        assert len(verifier.uploads) == 4 and all(remote.endswith(".tar.gz") for _, remote in verifier.uploads)
         unpacked = [c["command"] for c in verifier.execs if "tar -xzf" in c["command"]]
         assert any("-C /logs/artifacts;" in c for c in unpacked) and any("-C /app/output;" in c for c in unpacked)
         # The two artifacts reach the verifier as the very archives the agent sandbox packed (the modes the agent
@@ -1503,6 +1609,148 @@ class TestSeparateVerification:
         assert verifier.stopped
         # The episode's final cleanup found nothing left to stop: the agent sandbox is no longer owned.
         assert not server._sandboxes and not server._sessions
+
+    CLEAR_TRAJECTORY = (
+        "if test -L /logs/agent; then rm -- /logs/agent; fi && mkdir -p /logs/agent "
+        "&& rm -rf -- /logs/agent/trajectory.json"
+    )
+
+    def with_artifacts(self, *sources: str) -> str:
+        entries = ", ".join(f'"{source}"' for source in sources)
+        return SEPARATE_TOML.replace(
+            'artifacts = ["/app/output/report.json", { source = "/var/log/api", service = "api" }]',
+            f"artifacts = [{entries}]",
+        )
+
+    @pytest.mark.parametrize(
+        ("source", "planted"),
+        [("/logs/agent", "trajectory.json/sub"), ("/logs", "agent/trajectory.json/sub")],
+        ids=["agent_logs", "logs"],
+    )
+    async def test_a_restored_artifact_over_the_agent_logs_does_not_carry_a_planted_trajectory_entry(
+        self, tmp_path, monkeypatch, source, planted
+    ):
+        """A task that collects /logs/agent (or /logs) restores the agent's tree into the fresh verifier before
+        the transcript goes up: a directory the agent planted at trajectory.json would make that upload's tar fail
+        and mask the sample. The reserved path is cleared between the restore and the upload."""
+        kept = planted.replace("trajectory.json/sub", "agent.log")
+        agent = AgentSandbox(
+            present={"/logs/artifacts": "dir", source: "dir"},
+            archives={
+                "/logs/artifacts": archive_of({"state.db": "db"}),
+                source: archive_of({planted: "planted", kept: "kept"}),
+            },
+        )
+        server, task, agent, verifier, _ = self.prepared(
+            tmp_path, monkeypatch, toml=self.with_artifacts(source), agent=agent
+        )
+
+        response = await run_episode(server, task)
+
+        result = response.result
+        assert result is not None, response.failure
+        assert result.mask_sample is False and result.failure_kind is None and result.reward == 1.0
+        # The planted directory travelled with the artifact and was restored at its source...
+        staged = Path(result.verifier_logs_dir) / "artifacts" / "01" / source.lstrip("/")
+        assert (staged / planted).is_file() and (staged / kept).read_text() == "kept"
+        commands = [c["command"] for c in verifier.execs]
+        restore = next(i for i, c in enumerate(commands) if "tar -xzf" in c and f"-C {source};" in c)
+        # ...then the reserved path was cleared, as root, before the transcript's own archive was unpacked there.
+        clear = commands.index(self.CLEAR_TRAJECTORY)
+        upload = next(i for i, c in enumerate(commands) if "tar -xzf" in c and "-C /logs/agent;" in c and i > clear)
+        assert restore < clear < upload
+        assert verifier.execs[clear]["user"] == "root"
+        assert commands.count(self.CLEAR_TRAJECTORY) == 1
+        assert len(uploaded_file(verifier, "trajectory.json")) == 1
+
+    @pytest.mark.parametrize("planted", ["directory", "dangling_symlink", "linked_agent_logs"])
+    def test_the_clear_line_removes_what_the_agent_planted_and_keeps_its_logs(self, tmp_path, planted):
+        """The clear line the server sends, run by a real shell against a temporary root."""
+        root = tmp_path / "fs"
+        agent_logs = root / "logs" / "agent"
+        if planted == "linked_agent_logs":
+            # /logs itself was the artifact: /logs/agent came back as a link to a folder the agent chose.
+            (root / "logs").mkdir(parents=True)
+            (root / "elsewhere").mkdir()
+            (root / "elsewhere" / "trajectory.json").write_text("planted")
+            agent_logs.symlink_to(root / "elsewhere")
+        else:
+            agent_logs.mkdir(parents=True)
+            (agent_logs / "agent.log").write_text("kept")
+            if planted == "directory":
+                (agent_logs / "trajectory.json" / "sub").mkdir(parents=True)
+            else:
+                (agent_logs / "trajectory.json").symlink_to(root / "nowhere")
+        command = self.CLEAR_TRAJECTORY.replace("/logs", str(root / "logs"))
+
+        subprocess.run(["sh", "-c", command], check=True)
+
+        destination = agent_logs / "trajectory.json"
+        assert not destination.exists() and not destination.is_symlink()
+        assert agent_logs.is_dir() and not agent_logs.is_symlink()
+        if planted == "linked_agent_logs":
+            # The link's target was not followed: the agent's folder is untouched.
+            assert (root / "elsewhere" / "trajectory.json").read_text() == "planted"
+        else:
+            assert (agent_logs / "agent.log").read_text() == "kept"
+
+    @pytest.mark.parametrize(
+        ("restored", "cleared"),
+        [
+            ((), False),
+            (("/logs/artifacts", "/app/output/report.json", "/var/log/api"), False),
+            (("/logs/agents",), False),
+            (("/logs/agent",), True),
+            (("/logs/agent/",), True),
+            (("/logs",), True),
+            (("//logs",), True),
+            (("/",), True),
+            (("/logs/agent/trajectory.json",), True),
+            (("/app", "/logs/agent"), True),
+        ],
+    )
+    async def test_the_trajectory_upload_clears_its_destination_only_after_a_restore_that_covers_it(
+        self, tmp_path, monkeypatch, restored, cleared
+    ):
+        """Separate mode's common case keeps its single round trip: the sandbox is fresh at /logs/agent unless a
+        restored artifact was that folder, an ancestor, or the file itself."""
+        server, _, _, _ = make_server(tmp_path, monkeypatch)
+        verifier = FakeSandbox()
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir()
+
+        await server._upload_trajectory(verifier, b"{}", logs_dir, restored=restored)
+
+        commands = [c["command"] for c in verifier.execs]
+        assert (self.CLEAR_TRAJECTORY in commands) is cleared
+        assert (logs_dir / "trajectory.json").read_bytes() == b"{}"
+        assert len(uploaded_file(verifier, "trajectory.json")) == 1
+        if cleared:
+            assert commands.index(self.CLEAR_TRAJECTORY) < next(i for i, c in enumerate(commands) if "tar -xzf" in c)
+
+    async def test_a_clear_the_sandbox_refuses_masks_the_sample_as_an_outage(self, tmp_path, monkeypatch):
+        clear_line = self.CLEAR_TRAJECTORY
+
+        class RefusingVerifier(FakeSandbox):
+            async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+                result = await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+                if command == clear_line:
+                    return _fails("rm: cannot remove '/logs/agent/trajectory.json': Read-only file system")
+                return result
+
+        agent = AgentSandbox(
+            present={"/logs/artifacts": "dir", "/logs/agent": "dir"},
+            archives={"/logs/artifacts": archive_of({}), "/logs/agent": archive_of({"agent.log": "x"})},
+        )
+        server, task, _, verifier, _ = self.prepared(
+            tmp_path, monkeypatch, toml=self.with_artifacts("/logs/agent"), agent=agent, verifier=RefusingVerifier()
+        )
+
+        result = (await run_episode(server, task)).result
+
+        assert result.mask_sample is True and result.failure_kind == failure_kinds.PROVIDER_UNAVAILABLE
+        assert "Could not clear the restored /logs/agent/trajectory.json" in result.failure_reason
+        assert not any("test.sh" in c["command"] and "timeout" in c["command"] for c in verifier.execs)
 
     def test_sandbox_spec_applies_dockerfile_env(self, tmp_path, monkeypatch):
         server, task, _, _ = make_server(
@@ -2809,6 +3057,11 @@ def test_server_config_holds_only_deployment_settings():
         "request_gpu_type",
         "verifier_grace_s",
         "artifacts_dir",
+        "secrets",
+        "enforce_task_timeouts",
+        "harness_setup_allowance_s",
+        "image_pull_retries",
+        "separate_verifier_for_artifacts",
     }
     source = inspect.getsource(HarborEnvironmentServerConfig).lower()
     assert not any(word in source for word in ("terminal", "tb4", "tb2", "swe", "nextjs", "hello-world"))
@@ -3042,10 +3295,11 @@ class TestBuiltVerifierImage:
         assert result.reward == 1.0 and result.verifier_mode == "separate", result
         assert result.mask_sample is False and result.failure_kind is None
         # The agent's sandbox took the overlay; the verifier's did not, and no tests archive went up: the image
-        # owns /tests, as Harbor's skip_tests_upload assumes.
+        # owns /tests, as Harbor's skip_tests_upload assumes. Only the ATIF trajectory the verifier reads goes up.
         assert any("apt-get" in c["command"] for c in agent.execs)
         assert not any("apt-get" in c["command"] for c in verifier.execs)
-        assert verifier.uploads == []
+        assert len(verifier.uploads) == 1 and len(uploaded_file(verifier, "trajectory.json")) == 1
+        assert not uploaded_file(verifier, "test.sh")
         run = next(c for c in verifier.execs if "test.sh" in c["command"] and "timeout" in c["command"])
         assert "bash /tests/test.sh" in run["command"]
         assert agent.stopped and verifier.stopped
@@ -3055,9 +3309,8 @@ class TestBuiltVerifierImage:
         with caplog.at_level("WARNING", logger="environment_servers.harbor.verifier"):
             assert (await run_episode(server, task)).result.reward == 1.0
             assert (await run_episode(server, task, rollout="r2")).result.reward == 1.0
-        # tests/ was uploaded both times; the image was named once.
-        archives = [remote for _, remote in verifier.uploads if remote.endswith(".tar.gz")]
-        assert len(archives) == 2
+        # tests/ was uploaded both times (the trajectory travels as its own archive); the image was named once.
+        assert len(uploaded_file(verifier, "test.sh")) == 2
         warnings = [r for r in caplog.records if "has no /tests/test.sh" in r.getMessage()]
         assert len(warnings) == 1 and self.BUILT in warnings[0].getMessage()
 
@@ -3078,7 +3331,8 @@ class TestBuiltVerifierImage:
         )
         assert spec.image == self.BUILT and spec.env == cpu_cap_env(3) | {"K": "v"} and spec.workdir == "/grade"
         assert spec.resources.cpu == 3
-        assert (await run_episode(server, task)).result.reward == 1.0 and verifier.uploads == []
+        assert (await run_episode(server, task)).result.reward == 1.0
+        assert len(verifier.uploads) == 1 and len(uploaded_file(verifier, "trajectory.json")) == 1
 
     @pytest.mark.parametrize("shape", ["no_block", "block_without_image"])
     async def test_without_a_record_the_task_is_refused_by_the_loader_and_at_seed(self, tmp_path, monkeypatch, shape):
@@ -3122,3 +3376,754 @@ class TestBuiltVerifierImage:
         assert "built-images.json" in response.failure.failure_reason
         assert "tests/Dockerfile" in response.failure.failure_reason
         assert agent.execs == []
+
+
+SECRET_TOML = (
+    TASK_TOML
+    + """
+[verifier.env]
+JUDGE = "${JUDGE_KEY}"
+MODE = "strict"
+"""
+)
+
+
+class TestGeneralization:
+    """M27: secrets, the ATIF transcript, pull retries, task deadlines, forced separate mode, nested tasks."""
+
+    async def test_secrets_reach_the_test_sh_process_only(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("JUDGE_KEY", raising=False)
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+        )
+        server, task, sandbox, _ = make_server(
+            tmp_path, monkeypatch, toml=SECRET_TOML, secrets={"JUDGE_KEY": "sk-judge", "OTHER": "o"}
+        )
+        server.config.tasksets["ds"].tasks["hello"] = (task := load_task(task.path)).digest
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        # The test.sh run itself, not the root `chmod +x` that precedes it.
+        verifier_exec = next(
+            call for call in sandbox.execs if "test.sh" in call["command"] and "timeout" in call["command"]
+        )
+        # Templates in [verifier].env resolve from the secrets block; a secret the task does not name is not
+        # passed, so a test.sh that dumps its environment cannot leak a secret set for another taskset.
+        assert verifier_exec["env"] == {"JUDGE": "sk-judge", "MODE": "strict"}
+        assert "OTHER" not in verifier_exec["env"] and "o" not in verifier_exec["env"].values()
+        # Nothing else saw them: the sandbox's own environment, the seed and the agent's turn.
+        assert "sk-judge" not in str(server._sandbox_spec(task, "/app").env)
+        assert "sk-judge" not in str([call[2] for call in server.server_client.calls])
+
+    async def test_secret_templates_outside_the_verifier_are_not_filled(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("JUDGE_KEY", raising=False)
+        toml = TASK_TOML + '\n[environment.env]\nTOKEN = "${JUDGE_KEY}"\n'
+        server, task, _, _ = make_server(tmp_path, monkeypatch, toml=toml, secrets={"JUDGE_KEY": "sk-judge"})
+        server.config.tasksets["ds"].tasks["hello"] = (task := load_task(task.path)).digest
+
+        response = await run_episode(server, task)
+
+        assert response.failure.stage == "seed" and response.failure.terminal
+        assert "JUDGE_KEY" in response.failure.failure_reason
+
+    async def test_a_configured_secret_wins_over_a_same_named_process_variable(self, tmp_path, monkeypatch):
+        """resolve_env_templates consults the server's secrets before os.environ: a judge key set for the
+        deployment is not shadowed by a stale one in the server process's environment."""
+        from environment_servers.harbor.session import resolve_env_templates
+
+        monkeypatch.setenv("JUDGE_KEY", "sk-from-the-process")
+        # Without a configured secret the process variable fills the template, so the next assertions are about
+        # precedence, not about the variable being ignored.
+        assert resolve_env_templates({"JUDGE": "${JUDGE_KEY}"}) == {"JUDGE": "sk-from-the-process"}
+        assert resolve_env_templates({"JUDGE": "${JUDGE_KEY}"}, {"JUDGE_KEY": "sk-judge"}) == {"JUDGE": "sk-judge"}
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+        )
+        server, task, sandbox, _ = make_server(
+            tmp_path, monkeypatch, toml=SECRET_TOML, secrets={"JUDGE_KEY": "sk-judge"}
+        )
+        server.config.tasksets["ds"].tasks["hello"] = (task := load_task(task.path)).digest
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        verifier_exec = next(
+            call for call in sandbox.execs if "test.sh" in call["command"] and "timeout" in call["command"]
+        )
+        assert verifier_exec["env"] == {"JUDGE": "sk-judge", "MODE": "strict"}
+        assert "sk-from-the-process" not in str(sandbox.execs)
+
+    async def test_failed_trajectory_export_masks_the_turn_before_test_sh(self, tmp_path, monkeypatch):
+        from nemo_gym.atif_export import AtifExportError
+
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
+
+        def broken_export(request, agent_response):
+            raise AtifExportError("transcript[3]: unsupported transcript item")
+
+        monkeypatch.setattr(server, "_export_trajectory", broken_export)
+        response = await run_episode(server, task)
+
+        result = response.result
+        assert result.mask_sample is True and result.failure_kind == "harbor:trajectory_export_failed"
+        assert "unsupported transcript item" in result.failure_reason
+        assert result.verifier_mode is None and result.response.id == "response"
+        assert not any("test.sh" in call["command"] for call in sandbox.execs)
+        assert sandbox.stopped and not server._sandboxes
+
+    async def test_a_refusal_turn_exports_as_text_and_the_episode_is_still_graded(self, tmp_path, monkeypatch):
+        """A refusal is model behaviour, not a converter defect: the Terminus loop goes on after one, and
+        the episode reaches test.sh with the refusal in the transcript instead of being masked."""
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
+        turn = agent_response().model_dump(mode="json")
+        answer = turn["output"][0]
+        turn["output"] = [
+            {**answer, "id": "message-1", "content": [{"type": "refusal", "refusal": "I can't help with that."}]},
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "(terminal unchanged)"}]},
+            answer,
+        ]
+        server.server_client.turn_response = turn
+
+        response = await run_episode(server, task)
+
+        result = response.result
+        assert result is not None, response.failure
+        assert result.mask_sample is False and result.failure_kind is None
+        assert result.reward == 1.0 and result.verifier_rewards == {"reward": 1.0}
+        assert any("test.sh" in call["command"] for call in sandbox.execs)
+        trajectory = json.loads((Path(result.verifier_logs_dir) / "trajectory.json").read_text())
+        steps = trajectory["steps"]
+        assert [step["source"] for step in steps] == ["user", "agent", "agent"]
+        assert steps[1]["message"] == "I can't help with that." and steps[1]["extra"]["nemo_gym"]["refusal"] is True
+        assert steps[1]["observation"]["results"][0]["content"] == "(terminal unchanged)"
+        assert steps[2]["message"] == "echo hello > hello.txt"
+        assert trajectory["extra"]["nemo_gym"]["conversion"]["reasons"] == ["refusal"]
+
+    async def test_terminus_shaped_transcript_exports_user_turns_as_observations(self, tmp_path, monkeypatch):
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
+        turn = agent_response().model_dump(mode="json")
+        turn["output"] = [
+            turn["output"][0],
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello.txt created"}]},
+            {
+                **turn["output"][0],
+                "id": "message-2",
+                "content": [{**turn["output"][0]["content"][0], "text": "Done."}],
+            },
+        ]
+        server.server_client.turn_response = turn
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        (trajectory_bytes,) = uploaded_file(sandbox, "trajectory.json")
+        steps = json.loads(trajectory_bytes)["steps"]
+        assert [step["source"] for step in steps] == ["user", "agent", "agent"]
+        assert steps[1]["observation"]["results"][0]["content"] == "hello.txt created"
+        assert steps[1]["extra"]["nemo_gym"]["observation_source"] == "user_turn"
+
+    async def test_sandbox_access_names_the_agent_user(self, tmp_path, monkeypatch):
+        server, task, _, _ = make_server(
+            tmp_path, monkeypatch, toml=TASK_TOML.replace("[agent]\n", '[agent]\nuser = "agent"\n')
+        )
+        server.config.tasksets["ds"].tasks["hello"] = (task := load_task(task.path)).digest
+        await run_episode(server, task)
+        assert server.server_client.seed_bodies()[0]["sandbox_access"]["user"] == "agent"
+
+    async def test_task_deadline_ends_an_overrunning_episode(self, tmp_path, monkeypatch):
+        toml = TASK_TOML.replace("timeout_sec = 300.0", "timeout_sec = 0.05").replace(
+            "timeout_sec = 120.0", "timeout_sec = 0.05"
+        )
+        server, task, sandbox, _ = make_server(
+            tmp_path,
+            monkeypatch,
+            toml=toml,
+            sandbox_ready_timeout_s=0.01,
+            harness_setup_allowance_s=0,
+            verifier_grace_s=0,
+        )
+        server.config.tasksets["ds"].tasks["hello"] = (task := load_task(task.path)).digest
+        assert server._task_budget_s(task) == pytest.approx(0.11)
+        # The deadline itself starts when the sandbox is ready and leaves the sandbox start out.
+        assert server._post_seed_budget_s(task) == pytest.approx(0.1)
+        server.server_client.slow_path = "/ng-rollout/r1/v1/responses"
+
+        response = await run_episode(server, task)
+
+        failure = response.failure
+        assert failure.stage == "agent" and failure.failure_kind == "harbor:task_deadline" and not failure.terminal
+        assert (
+            "time budget of task 'hello'" in failure.failure_reason
+            and "enforce_task_timeouts" in failure.failure_reason
+        )
+        assert not any("test.sh" in call["command"] for call in sandbox.execs)
+        # The final unwind still closed the agent session and stopped the sandbox.
+        assert server.server_client.paths()[-1] == "/v1/agent_sessions/close"
+        assert sandbox.stopped and not server._sandboxes and server._active == set()
+
+        # The same slow harness finishes when the run ignores task timeouts.
+        server.config.enforce_task_timeouts = False
+        server.server_client.slow_path = "/ng-rollout/r2/v1/responses"
+        assert (await run_episode(server, task, rollout="r2")).result.reward == 1.0
+
+    @pytest.mark.parametrize("mode", ["shared", "separate"])
+    async def test_collect_hooks_count_toward_the_task_deadline(self, tmp_path, monkeypatch, mode):
+        """A hook within its own `timeout_sec` must not trip the episode deadline: Harbor gives each hook its
+        declared time outside any trial-wide limit, so the budget counts the hooks' limits in both modes."""
+        toml = TASK_TOML.replace("timeout_sec = 300.0", "timeout_sec = 0.05").replace(
+            "timeout_sec = 120.0", "timeout_sec = 0.05"
+        )
+        toml += '\n[[verifier.collect]]\ncommand = "sleep 0.25"\ntimeout_sec = 1.0\n'
+        if mode == "separate":
+            toml = toml.replace("[verifier]\n", '[verifier]\nenvironment_mode = "separate"\n')
+            toml += '\n[verifier.environment]\ndocker_image = "org/verifier:1"\n'
+
+        # Separate mode collects /logs/artifacts from the agent's sandbox before the verifier starts.
+        @dataclass
+        class SlowHook(AgentSandbox if mode == "separate" else FakeSandbox):
+            async def exec(self, command, **kwargs):
+                if command.startswith("sleep "):
+                    await asyncio.sleep(0.25)
+                return await super().exec(command, **kwargs)
+
+        agent = SlowHook()
+        server, task, _, _ = make_server(
+            tmp_path,
+            monkeypatch,
+            agent,
+            toml=toml,
+            sandbox_ready_timeout_s=0.01,
+            harness_setup_allowance_s=0,
+            verifier_grace_s=0,
+        )
+        server.config.tasksets["ds"].tasks["hello"] = (task := load_task(task.path)).digest
+        verifier = FakeSandbox()
+
+        async def create_verifier(task, *, episode_key=None):
+            server._sandboxes[f"{episode_key}/verifier"] = verifier
+            return verifier
+
+        monkeypatch.setattr(server, "_create_verifier_sandbox", create_verifier)
+        # Agent and verifier limits, the hook's own limit with the exec grace, and a separate verifier's start.
+        separate_start = 0.01 if mode == "separate" else 0
+        assert server._post_seed_budget_s(task) == pytest.approx(0.1 + 1 + COLLECT_HOOK_GRACE_S + separate_start)
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert response.result.reward == 1.0 and response.result.verifier_mode == mode
+        hook = next(call for call in agent.execs if call["command"] == "sleep 0.25")
+        assert hook["timeout_s"] == 1 + COLLECT_HOOK_GRACE_S
+
+    async def test_task_deadline_covers_verification_too(self, tmp_path, monkeypatch):
+        toml = TASK_TOML.replace("timeout_sec = 300.0", "timeout_sec = 0.05").replace(
+            "timeout_sec = 120.0", "timeout_sec = 0.05"
+        )
+
+        @dataclass
+        class SlowVerifier(FakeSandbox):
+            async def exec(self, command, **kwargs):
+                if "test.sh" in command:
+                    await asyncio.sleep(0.5)
+                return await super().exec(command, **kwargs)
+
+        server, task, sandbox, _ = make_server(
+            tmp_path,
+            monkeypatch,
+            SlowVerifier(),
+            toml=toml,
+            sandbox_ready_timeout_s=0.01,
+            harness_setup_allowance_s=0,
+            verifier_grace_s=0,
+        )
+        server.config.tasksets["ds"].tasks["hello"] = (task := load_task(task.path)).digest
+
+        response = await run_episode(server, task)
+
+        assert response.failure.stage == "verification" and response.failure.failure_kind == "harbor:task_deadline"
+        assert response.failure.partial_response.id == "response"
+        assert sandbox.stopped and not server._sandboxes
+
+    def retrying_server(self, tmp_path, monkeypatch, failures):
+        """A server whose real `_create_sandbox` runs against a provider that fails `failures` starts in turn."""
+        from nemo_gym.sandbox.providers.base import SandboxCreateError
+
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, image_pull_retries=2)
+        monkeypatch.setattr(server, "_create_sandbox", HarborEnvironmentServer._create_sandbox.__get__(server))
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.resolve_provider_config", lambda ref, config: {"fake": {}}
+        )
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+        )
+        monkeypatch.setattr("environment_servers.harbor.sandboxes._pull_retry_delay", lambda attempt: 0)
+        starts: list[str] = []
+
+        class FlakyProvider:
+            def __init__(self, provider_config):
+                pass
+
+            async def start(self, spec):
+                starts.append(spec.image)
+                if len(starts) <= len(failures):
+                    raise SandboxCreateError(failures[len(starts) - 1])
+
+            def __getattr__(self, name):
+                return getattr(sandbox, name)
+
+        monkeypatch.setattr("environment_servers.harbor.sandboxes.AsyncSandbox", FlakyProvider)
+        return server, task, sandbox, starts
+
+    async def test_image_pull_failures_are_retried_in_the_server(self, tmp_path, monkeypatch):
+        server, task, sandbox, starts = self.retrying_server(
+            tmp_path, monkeypatch, ["pod failed: ErrImagePull", "create failed: ImagePullBackOff for ubuntu:24.04"]
+        )
+        response = await run_episode(server, task)
+        assert response.failure is None, response.failure
+        assert starts == ["ubuntu:24.04"] * 3 and response.result.reward == 1.0
+
+    async def test_exhausted_pull_retries_are_a_retryable_seed_failure(self, tmp_path, monkeypatch):
+        server, task, sandbox, starts = self.retrying_server(tmp_path, monkeypatch, ["ErrImagePull"] * 3)
+        response = await run_episode(server, task)
+        assert response.failure.stage == "seed" and not response.failure.terminal
+        assert "ErrImagePull" in response.failure.failure_reason and len(starts) == 3
+        assert not server._sandboxes
+
+    async def test_seed_time_is_not_charged_against_the_task_deadline(self, tmp_path, monkeypatch):
+        """A start that recovered on a pull retry begins the task with its whole budget (review fix).
+
+        The loop's clock is the test's: the seed jumps it by more than the whole task budget, so a deadline armed
+        before the sandbox was ready would have expired, while the post-seed path keeps its full budget in real
+        time. The second episode jumps the clock during the agent's turn instead and does hit the deadline.
+        """
+        from nemo_gym.sandbox.providers.base import SandboxCreateError
+
+        toml = TASK_TOML.replace("timeout_sec = 300.0", "timeout_sec = 10.0").replace(
+            "timeout_sec = 120.0", "timeout_sec = 10.0"
+        )
+        server, task, sandbox, _ = make_server(
+            tmp_path,
+            monkeypatch,
+            toml=toml,
+            image_pull_retries=2,
+            sandbox_ready_timeout_s=1,
+            harness_setup_allowance_s=0,
+            verifier_grace_s=0,
+        )
+        server.config.tasksets["ds"].tasks["hello"] = (task := load_task(task.path)).digest
+        assert server._post_seed_budget_s(task) == pytest.approx(20)
+        assert server._task_budget_s(task) == pytest.approx(21)
+        loop = asyncio.get_running_loop()
+        real_time, offset = loop.time, 0.0
+        monkeypatch.setattr(loop, "time", lambda: real_time() + offset)
+
+        def advance(seconds: float) -> None:
+            # asyncio.timeout and the loop's timers read loop.time(), so a jump expires every deadline it passes.
+            nonlocal offset
+            offset += seconds
+
+        monkeypatch.setattr(server, "_create_sandbox", HarborEnvironmentServer._create_sandbox.__get__(server))
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.resolve_provider_config", lambda ref, config: {"fake": {}}
+        )
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+        )
+        monkeypatch.setattr("environment_servers.harbor.sandboxes._pull_retry_delay", lambda attempt: 0)
+        starts: list[str] = []
+
+        class SlowFlakyProvider:
+            def __init__(self, provider_config):
+                pass
+
+            async def start(self, spec):
+                starts.append(spec.image)
+                if len(starts) == 1:
+                    # The provider's own create retries: longer than the whole task budget before the pull
+                    # failure surfaces (within the ready deadline, which bounds the whole create).
+                    advance(server._task_budget_s(task) + 1)
+                    raise SandboxCreateError("pod failed: ErrImagePull")
+                advance(server.config.sandbox_ready_timeout_s)
+
+            def __getattr__(self, name):
+                return getattr(sandbox, name)
+
+        monkeypatch.setattr("environment_servers.harbor.sandboxes.AsyncSandbox", SlowFlakyProvider)
+
+        response = await run_episode(server, task)
+
+        assert starts == ["ubuntu:24.04"] * 2
+        assert response.failure is None, response.failure
+        assert response.result.reward == 1.0 and sandbox.stopped and not server._sandboxes
+
+        # The same jump after the sandbox is ready is charged: the deadline ends the agent's turn.
+        async def overrun_the_turn():
+            advance(server._post_seed_budget_s(task) + 1)
+            await asyncio.sleep(1)  # Cancelled by the expired deadline at the loop's next pass, not slept.
+
+        server.server_client.turn_hooks.append(overrun_the_turn)
+        failure = (await run_episode(server, task, rollout="r2")).failure
+        assert failure.stage == "agent" and failure.failure_kind == "harbor:task_deadline" and not failure.terminal
+
+    async def test_other_start_failures_are_not_retried(self, tmp_path, monkeypatch):
+        server, task, sandbox, starts = self.retrying_server(tmp_path, monkeypatch, ["quota exceeded for namespace"])
+        response = await run_episode(server, task)
+        assert response.failure.stage == "seed" and not response.failure.terminal
+        assert len(starts) == 1 and not server._sandboxes
+
+    async def test_compose_group_pull_failures_are_retried_in_the_server(self, tmp_path, monkeypatch):
+        from nemo_gym.sandbox.providers.base import SandboxCreateError
+
+        server, task, _, _ = make_server(tmp_path, monkeypatch, image_pull_retries=2)
+        (task.path / "task.toml").write_text(COMPOSE_TOML)
+        (task.path / "environment" / "docker-compose.yaml").write_text(COMPOSE_YAML)
+        (task.path.parent / "compose-images.json").write_text(json.dumps(IMAGE_CONFIGS))
+        server.config.tasksets["ds"].tasks["hello"] = (task := load_task(task.path)).digest
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.resolve_provider_config", lambda ref, config: {"fake": {}}
+        )
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+        )
+        monkeypatch.setattr("environment_servers.harbor.sandboxes._pull_retry_delay", lambda attempt: 0)
+        groups: list = []
+        verifier = FakeSandbox()
+
+        class FlakyComposeGroup:
+            def __init__(self, provider_config, path, *, service_specs, timeout_s):
+                groups.append(self)
+                self.services: dict = {}
+                self.stopped = False
+
+            async def start(self):
+                if len(groups) == 1:
+                    # The first group fails on a sidecar's pull, half-started: it is stopped whole.
+                    self.services = {"main": HealthySandbox()}
+                    raise SandboxCreateError("create failed: ImagePullBackOff for org/kafka:1")
+                self.services = {"main": HealthySandbox(), "api": FakeSandbox(), "kafka": FakeSandbox()}
+
+            async def stop(self):
+                self.stopped = True
+
+        async def create_verifier(task, *, episode_key=None):
+            server._sandboxes[f"{episode_key}/verifier"] = verifier
+            return verifier
+
+        monkeypatch.setattr("environment_servers.harbor.sandboxes.AsyncSandboxCompose", FlakyComposeGroup)
+        monkeypatch.setattr(server, "_create_verifier_sandbox", create_verifier)
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert len(groups) == 2 and groups[0].stopped and groups[1].stopped
+        assert response.result.reward == 1.0 and not server._sandboxes
+
+    async def test_exhausted_compose_pull_retries_are_a_retryable_seed_failure(self, tmp_path, monkeypatch):
+        from nemo_gym.sandbox.providers.base import SandboxCreateError
+
+        server, task, _, _ = make_server(tmp_path, monkeypatch, image_pull_retries=1)
+        (task.path / "task.toml").write_text(COMPOSE_TOML)
+        (task.path / "environment" / "docker-compose.yaml").write_text(COMPOSE_YAML)
+        (task.path.parent / "compose-images.json").write_text(json.dumps(IMAGE_CONFIGS))
+        server.config.tasksets["ds"].tasks["hello"] = (task := load_task(task.path)).digest
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.resolve_provider_config", lambda ref, config: {"fake": {}}
+        )
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+        )
+        monkeypatch.setattr("environment_servers.harbor.sandboxes._pull_retry_delay", lambda attempt: 0)
+        starts = []
+
+        class FailingComposeGroup:
+            services: dict = {}
+
+            def __init__(self, provider_config, path, *, service_specs, timeout_s):
+                pass
+
+            async def start(self):
+                starts.append(1)
+                raise SandboxCreateError("ErrImagePull")
+
+            async def stop(self):
+                pass
+
+        monkeypatch.setattr("environment_servers.harbor.sandboxes.AsyncSandboxCompose", FailingComposeGroup)
+        response = await run_episode(server, task)
+        assert response.failure.stage == "seed" and not response.failure.terminal
+        assert "ErrImagePull" in response.failure.failure_reason and len(starts) == 2
+        assert not server._sandboxes
+
+    def test_pull_failure_is_found_inside_an_exception_group(self):
+        """A Compose group whose cleanup failed too raises an ExceptionGroup; the pull failure is still found."""
+        from nemo_gym.sandbox.providers.base import SandboxCreateError
+
+        pull = SandboxCreateError("create failed: ImagePullBackOff for org/kafka:1")
+        cleanup = RuntimeError("Shared volume cleanup failed: no space left")
+        assert _is_image_pull_failure(ExceptionGroup("Compose cleanup failed", [cleanup, pull]))
+        assert _is_image_pull_failure(ExceptionGroup("outer", [ExceptionGroup("inner", [pull])]))
+        # The live shape: the group of cleanup errors is raised while the pull failure is being handled.
+        try:
+            try:
+                raise pull
+            except SandboxCreateError:
+                raise ExceptionGroup("Compose cleanup failed", [cleanup])
+        except ExceptionGroup as group:
+            assert group.__context__ is pull and _is_image_pull_failure(group)
+        assert not _is_image_pull_failure(ExceptionGroup("Compose cleanup failed", [cleanup]))
+        assert not _is_image_pull_failure(ExceptionGroup("x", [RuntimeError("quota exceeded")]))
+
+    async def test_compose_pull_failure_whose_cleanup_also_failed_is_retried(self, tmp_path, monkeypatch):
+        from nemo_gym.sandbox.providers.base import SandboxCreateError
+
+        server, task, _, _ = make_server(tmp_path, monkeypatch, image_pull_retries=1)
+        (task.path / "task.toml").write_text(COMPOSE_TOML)
+        (task.path / "environment" / "docker-compose.yaml").write_text(COMPOSE_YAML)
+        (task.path.parent / "compose-images.json").write_text(json.dumps(IMAGE_CONFIGS))
+        server.config.tasksets["ds"].tasks["hello"] = (task := load_task(task.path)).digest
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.resolve_provider_config", lambda ref, config: {"fake": {}}
+        )
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+        )
+        monkeypatch.setattr("environment_servers.harbor.sandboxes._pull_retry_delay", lambda attempt: 0)
+        groups: list = []
+        verifier = FakeSandbox()
+
+        class FlakyComposeGroup:
+            def __init__(self, provider_config, path, *, service_specs, timeout_s):
+                groups.append(self)
+                self.services: dict = {}
+                self.stopped = 0
+
+            async def start(self):
+                if len(groups) == 1:
+                    # The group's own stop() after the failed pull failed too: the cleanup errors surface as a
+                    # group over the pull failure (docker_compose.py start/stop), not as the pull failure itself.
+                    raise ExceptionGroup(
+                        "Compose cleanup failed",
+                        [RuntimeError("Shared volume cleanup failed"), SandboxCreateError("ErrImagePull")],
+                    )
+                self.services = {"main": HealthySandbox(), "api": FakeSandbox(), "kafka": FakeSandbox()}
+
+            async def stop(self):
+                self.stopped += 1
+
+        async def create_verifier(task, *, episode_key=None):
+            server._sandboxes[f"{episode_key}/verifier"] = verifier
+            return verifier
+
+        monkeypatch.setattr("environment_servers.harbor.sandboxes.AsyncSandboxCompose", FlakyComposeGroup)
+        monkeypatch.setattr(server, "_create_verifier_sandbox", create_verifier)
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert len(groups) == 2 and [g.stopped for g in groups] == [1, 1]
+        assert response.result.reward == 1.0 and not server._sandboxes
+
+    def verifier_retrying_server(self, tmp_path, monkeypatch, failures):
+        """A separate-mode server whose real `_create_verifier_sandbox` runs against a provider that fails
+        `failures` verifier starts in turn; the agent's sandbox is the usual fake."""
+        from nemo_gym.sandbox.providers.base import SandboxCreateError
+
+        agent = AgentSandbox()
+        server, task, _, _ = make_server(tmp_path, monkeypatch, agent, image_pull_retries=2)
+        (task.path / "task.toml").write_text(SEPARATE_TOML)
+        server.config.tasksets["ds"].tasks["hello"] = (task := load_task(task.path)).digest
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.resolve_provider_config", lambda ref, config: {"fake": {}}
+        )
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+        )
+        monkeypatch.setattr("environment_servers.harbor.sandboxes._pull_retry_delay", lambda attempt: 0)
+        verifier = FakeSandbox()
+        starts: list[str] = []
+        gate_values: list[int] = []
+        providers: list = []
+
+        class FlakyProvider:
+            def __init__(self, provider_config):
+                providers.append(self)
+                self.stopped = 0
+
+            async def start(self, spec):
+                starts.append(spec.image)
+                gate_values.append(server._pull_retry_gate._value)
+                # Owned under the verifier key from before start(), so a half-started one is stopped whole.
+                assert server._sandboxes.get(f"{next(iter(server._sessions))}/verifier") is self
+                if len(starts) <= len(failures):
+                    raise SandboxCreateError(failures[len(starts) - 1])
+
+            async def stop(self):
+                self.stopped += 1
+                verifier.stopped = True
+
+            def __getattr__(self, name):
+                return getattr(verifier, name)
+
+        monkeypatch.setattr("environment_servers.harbor.sandboxes.AsyncSandbox", FlakyProvider)
+        return server, task, starts, gate_values, providers
+
+    async def test_verifier_sandbox_pull_failures_are_retried_in_the_server(self, tmp_path, monkeypatch):
+        server, task, starts, gates, providers = self.verifier_retrying_server(
+            tmp_path, monkeypatch, ["pod failed: ErrImagePull"]
+        )
+        response = await run_episode(server, task)
+        assert response.failure is None, response.failure
+        assert response.result.reward == 1.0 and response.result.verifier_mode == "separate"
+        # The first start is not gated; the retry queues behind the per-server gate.
+        assert starts == ["org/verifier:1"] * 2 and gates == [4, 3]
+        assert [p.stopped for p in providers] == [1, 1]
+        assert not server._sandboxes and server._pull_retry_gate._value == 4
+
+    async def test_exhausted_verifier_pull_retries_mask_and_leave_nothing_owned(self, tmp_path, monkeypatch):
+        server, task, starts, gates, providers = self.verifier_retrying_server(
+            tmp_path, monkeypatch, ["ErrImagePull"] * 3
+        )
+        response = await run_episode(server, task)
+        assert response.failure is None, response.failure
+        result = response.result
+        assert result.mask_sample is True and result.failure_kind == "provider_unavailable"
+        assert "ErrImagePull" in result.failure_reason
+        assert len(starts) == 3 and gates == [4, 3, 3]
+        # The last provider (not stopped by the helper) is released by the episode's own close.
+        assert [p.stopped for p in providers] == [1, 1, 1]
+        assert not server._sandboxes and server._pull_retry_gate._value == 4
+
+    async def test_verifier_sandbox_other_start_failures_are_not_retried(self, tmp_path, monkeypatch):
+        server, task, starts, _, _ = self.verifier_retrying_server(
+            tmp_path, monkeypatch, ["quota exceeded for namespace"]
+        )
+        response = await run_episode(server, task)
+        result = response.result
+        assert result.mask_sample is True and result.failure_kind == "provider_unavailable"
+        assert len(starts) == 1 and not server._sandboxes and server._pull_retry_gate._value == 4
+
+    def test_nested_compose_task_reads_image_configs_from_the_dataset_root(self, tmp_path, monkeypatch):
+        """prepare records compose-images.json at the dataset root; the snapshot of a nested task finds it there."""
+        server, _, _, _ = make_server(tmp_path, monkeypatch)
+        root = tmp_path / "datasets" / "ds"
+        web = write_task(root / "00-services" / "web", toml=COMPOSE_TOML)
+        (web / "environment" / "docker-compose.yaml").write_text(COMPOSE_YAML)
+        (root / "compose-images.json").write_text(json.dumps(IMAGE_CONFIGS))
+        task = load_task(web, root=root)
+        assert task.needs_compose
+
+        snapshot = server._snapshot_task(web, task.digest, root)
+
+        assert snapshot.path.parent != web.parent
+        assert server._compose_image_configs(snapshot) == IMAGE_CONFIGS
+
+    async def test_turn_cut_off_inside_reasoning_is_verified_not_masked(self, tmp_path, monkeypatch):
+        """The live Terminus shape after a reasoning-only max_output_tokens response: exported and graded."""
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
+        turn = agent_response().model_dump(mode="json")
+        answer = turn["output"][0]
+
+        def reasoning(item_id, text):
+            return {"type": "reasoning", "id": item_id, "summary": [{"type": "summary_text", "text": text}]}
+
+        def observed(text):
+            return {"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}
+
+        turn["output"] = [
+            reasoning("r1", "plan"),
+            answer,
+            observed("hello.txt created"),
+            reasoning("r2", "half a thou"),
+            observed("(no command)"),
+            reasoning("r3", "finish"),
+            {**answer, "id": "message-2", "content": [{**answer["content"][0], "text": "Done."}]},
+        ]
+        server.server_client.turn_response = turn
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        result = response.result
+        assert result.mask_sample is False and result.failure_kind is None and result.reward == 1.0
+        assert any("test.sh" in call["command"] for call in sandbox.execs)
+        (trajectory_bytes,) = uploaded_file(sandbox, "trajectory.json")
+        trajectory = json.loads(trajectory_bytes)
+        steps = trajectory["steps"]
+        assert [step["source"] for step in steps] == ["user", "agent", "agent", "agent"]
+        cut = steps[2]
+        assert cut["message"] == "" and cut["reasoning_content"] == "half a thou"
+        assert cut["extra"]["nemo_gym"] == {"incomplete": "max_output_tokens", "observation_source": "user_turn"}
+        assert cut["observation"]["results"][0]["content"] == "(no command)"
+        assert trajectory["extra"]["nemo_gym"]["conversion"]["reasons"] == ["trailing_reasoning"]
+
+    def test_runs_can_force_separate_mode_for_tasks_with_artifacts(self, tmp_path, monkeypatch):
+        with_artifacts = TASK_TOML.replace("[verifier]\n", 'artifacts = ["/app/out.txt"]\n\n[verifier]\n', 1)
+        server, task, _, _ = make_server(
+            tmp_path, monkeypatch, toml=with_artifacts, separate_verifier_for_artifacts=True
+        )
+        task = load_task(task.path)
+        assert task.config.is_shared_verifier
+        assert server._separate_verifier(task)
+        # Module helpers follow the forced mode: the verifier runs in the task's own image.
+        assert _verifier_image(task, True) == task.image == "ubuntu:24.04" and _verifier_image(task) is None
+        # The budget and the sandbox lifetime count the second sandbox start.
+        plain_server, plain_task, _, _ = make_server(tmp_path / "plain", monkeypatch, toml=with_artifacts)
+        assert (
+            server._task_budget_s(task)
+            == plain_server._task_budget_s(plain_task) + server.config.sandbox_ready_timeout_s
+        )
+        # A task without artifacts keeps Harbor's shared mode.
+        _, bare, _, _ = make_server(tmp_path / "bare", monkeypatch, separate_verifier_for_artifacts=True)
+        assert not server._separate_verifier(bare)
+
+    async def test_forced_separate_mode_verifies_in_a_fresh_sandbox(self, tmp_path, monkeypatch):
+        agent = AgentSandbox()
+        server, task, _, _ = make_server(
+            tmp_path,
+            monkeypatch,
+            agent,
+            toml=TASK_TOML.replace("[verifier]\n", 'artifacts = ["/app/output/report.json"]\n\n[verifier]\n', 1),
+            separate_verifier_for_artifacts=True,
+        )
+        server.config.tasksets["ds"].tasks["hello"] = (task := load_task(task.path)).digest
+        verifier = FakeSandbox()
+
+        async def create_verifier(task, *, episode_key=None):
+            server._sandboxes[f"{episode_key}/verifier"] = verifier
+            return verifier
+
+        monkeypatch.setattr(server, "_create_verifier_sandbox", create_verifier)
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert response.result.verifier_mode == "separate" and response.result.reward == 1.0
+        assert any("test.sh" in call["command"] for call in verifier.execs)
+        assert not any("test.sh" in call["command"] for call in agent.execs)
+        assert len(uploaded_file(verifier, "trajectory.json")) == 1
+        assert agent.stopped and verifier.stopped and not server._sandboxes
+
+    async def test_nested_tasks_resolve_through_the_mapping_path_and_the_dataset_root(self, tmp_path, monkeypatch):
+        server, _, _, _ = make_server(tmp_path, monkeypatch)
+        root = tmp_path / "datasets" / "ds"
+        (root / "dataset.toml").write_text("[gym.defaults]\ntimeout_multiplier = 2.0\n")
+        deep = write_task(root / "group" / "deep")
+        # The base-image record sits at the dataset root, where prepare writes it, not beside the nested task.
+        (root / "group" / IMAGE_CONFIGS_FILE).rename(tmp_path / "unused.json")
+        task = load_task(deep, root=root)
+        assert task.config.agent.timeout_sec == 600.0
+        server.config.tasksets["ds"].tasks["deep"] = task.digest
+        server.config.tasksets["ds"].paths["deep"] = "group/deep"
+
+        response = await run_episode(server, task, task_id="deep")
+
+        assert response.failure is None, response.failure
+        assert server.server_client.seed_bodies()[0]["agent_timeout_sec"] == 600.0
+        # A mapping path that escapes the taskset folder is refused before anything is provisioned.
+        server.config.tasksets["ds"].paths["deep"] = "../deep"
+        escaped = await run_episode(server, task, task_id="deep", rollout="r2")
+        assert (
+            escaped.failure.stage == "seed"
+            and escaped.failure.terminal
+            and "invalid path" in escaped.failure.failure_reason
+        )

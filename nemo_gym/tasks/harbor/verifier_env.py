@@ -213,10 +213,11 @@ def verifier_compose_main_overrides(task_folder: Path, *, prebuilt: bool) -> lis
     ]
 
 
-def _verifier_build_required(task_folder: Path) -> HarborTaskError:
+def _verifier_build_required(task_folder: Path, root: Path) -> HarborTaskError:
+    """``root`` is the dataset folder whose ``built-images.json`` the loader read (see ``_build_required``)."""
     return HarborTaskError(
         f"{task_folder / TESTS_DOCKERFILE} is the separate verifier's image (Harbor builds it from tests/) and no built "
-        f"image is recorded in {task_folder.parent / BUILT_IMAGES_FILE}. `gym eval run` and `gym dataset validate` "
+        f"image is recorded in {root / BUILT_IMAGES_FILE}. `gym eval run` and `gym dataset validate` "
         "build it when buildah, podman or docker is installed (configured by the `builds:` block, see "
         "environment_servers/harbor/README.md), or declare [verifier.environment].docker_image with a prebuilt image."
     )

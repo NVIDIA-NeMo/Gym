@@ -53,10 +53,11 @@ class TestOverlay:
         sandbox=None,
         image_config=None,
         provider="opensandbox",
+        **config_overrides,
     ):
         sandbox = sandbox or OverlaySandbox()
         server, task, _, created = make_server(
-            tmp_path, monkeypatch, sandbox, dockerfile=dockerfile, image_config=image_config
+            tmp_path, monkeypatch, sandbox, dockerfile=dockerfile, image_config=image_config, **config_overrides
         )
         (task.path / "task.toml").write_text(toml)
         task = load_task(task.path)
@@ -576,10 +577,15 @@ class TestOverlay:
     def test_sandbox_ttls_stay_episode_sized_when_there_is_an_overlay(self, tmp_path, monkeypatch):
         server, task, _, _ = self.overlay_server(tmp_path, monkeypatch)
         config, slack = task.config, server.config.sandbox_ttl_slack_s
-        assert config.environment.build_timeout_sec == 600 and task.overlay
-        episode = server.config.default_episode_timeout_seconds + server.config.cleanup_timeout_seconds
-        # The agent sandbox lives for the environment's whole episode, which already covers the overlay.
-        assert server._sandbox_spec(task, "/app").ttl_s == episode + slack
+        build, ready = config.environment.build_timeout_sec, server.config.sandbox_ready_timeout_s
+        cleanup = server.config.cleanup_timeout_seconds
+        assert build == 600 and task.overlay
+        # The agent sandbox lives for the task's whole episode budget: one sandbox start, the overlay, harness
+        # setup, the agent and the shared verifier with its grace; the overlay needs no budget of its own.
+        budget = ready + build + server.config.harness_setup_allowance_s
+        budget += config.agent.timeout_sec + config.verifier.timeout_sec + server.config.verifier_grace_s
+        assert server._task_budget_s(task) == budget
+        assert server._sandbox_spec(task, "/app").ttl_s == budget + cleanup + slack
 
         # A separate verifier in the task's own image: Harbor's effective verifier environment is a copy of
         # [environment] carrying its docker_image, a prebuilt image that resolves no overlay (the loader admits the
@@ -590,7 +596,10 @@ class TestOverlay:
         )
         server, task, _, _ = self.overlay_server(tmp_path, monkeypatch, toml=toml)
         assert not task.overlay and task.verifier_image is None
-        assert server._sandbox_spec(task, "/app").ttl_s == episode + slack
+        # No overlay, so no build budget anywhere; the separate verifier adds its own sandbox start.
+        separate_budget = budget - build + ready
+        assert server._task_budget_s(task) == separate_budget
+        assert server._sandbox_spec(task, "/app").ttl_s == separate_budget + cleanup + slack
         specs = []
 
         class RecordingSandbox:
@@ -606,9 +615,85 @@ class TestOverlay:
         # The verifier gets the same episode-sized lifetime: `timeout_sec + slack` would not clear a provider's
         # renew interval (TB4's 1800 s), which masks every separate-mode episode (M10 smVVP).
         agent_spec = server._sandbox_spec(task, "/app")
-        assert verifier_spec.ttl_s == agent_spec.ttl_s == episode + slack >= 1800 + config.verifier.timeout_sec
+        assert verifier_spec.ttl_s == agent_spec.ttl_s >= 1800 + config.verifier.timeout_sec
         assert verifier_spec.image == task.image == "debian:bookworm-slim"
         assert verifier_spec.env == agent_spec.env
+
+    def test_forced_separate_verifier_of_an_overlay_task_starts_without_the_workdir(self, tmp_path, monkeypatch):
+        """A provider pre-creates the spec's workdir root-owned. The agent's sandbox of an overlay task is created
+        without it so the overlay's WORKDIR step makes it for the USER in effect; the verifier sandbox that
+        replays the same overlay must be created the same way, or the RUN under USER node gets Permission denied."""
+        with_artifacts = TASK_TOML.replace("[verifier]\n", 'artifacts = ["/home/node/app/out.txt"]\n\n[verifier]\n', 1)
+        dockerfile = "FROM img\nUSER node\nWORKDIR /home/node/app\nRUN touch out.txt\n"
+        server, task, sandbox, created = self.overlay_server(
+            tmp_path, monkeypatch, dockerfile=dockerfile, toml=with_artifacts, separate_verifier_for_artifacts=True
+        )
+        assert task.overlay and task.workdir == "/home/node/app" and server._separate_verifier(task)
+        specs = []
+
+        class RecordingSandbox:
+            def __init__(self, provider_config):
+                pass
+
+            async def start(self, spec):
+                specs.append(spec)
+
+        monkeypatch.setattr("environment_servers.harbor.sandboxes.AsyncSandbox", RecordingSandbox)
+        asyncio.run(server._create_verifier_sandbox(task))
+        (verifier_spec,) = specs
+        assert verifier_spec.workdir is None and verifier_spec.image == task.image
+        # The fake provider would otherwise have made the directory root-owned before the overlay's WORKDIR step.
+        sandbox.created_in(verifier_spec.workdir)
+        assert "/home/node/app" not in sandbox.dirs
+        # A task without an overlay keeps the agent's working directory for its verifier, as before.
+        specs.clear()
+        toml = with_artifacts.replace(
+            "[environment]\n", '[environment]\ndocker_image = "org/app:1"\nworkdir = "/home/node/app"\n'
+        )
+        server, task, _, _ = self.overlay_server(
+            tmp_path / "plain", monkeypatch, dockerfile=dockerfile, toml=toml, separate_verifier_for_artifacts=True
+        )
+        assert not task.overlay and task.workdir == "/home/node/app"
+        asyncio.run(server._create_verifier_sandbox(task))
+        assert specs[0].workdir == "/home/node/app"
+
+    async def test_forced_separate_verifier_of_an_overlay_task_runs_test_sh_in_the_task_workdir(
+        self, tmp_path, monkeypatch
+    ):
+        """The verifier sandbox of a forced-separate overlay task is created without the task workdir (the test
+        above), so its default directory is the base image's own, `/` for `FROM ubuntu:24.04`, and replaying the
+        overlay does not change it. A test.sh that checks a relative path (`result.txt` under `WORKDIR /app`) would
+        score a correct artifact 0 unless test.sh is sent to the task's workdir, as the shared verifier's exec is."""
+        with_artifacts = TASK_TOML.replace("[verifier]\n", 'artifacts = ["/app/result.txt"]\n\n[verifier]\n', 1)
+        dockerfile = "FROM img\nWORKDIR /app\nRUN echo ok > result.txt\n"
+        server, task, _, _ = self.overlay_server(
+            tmp_path, monkeypatch, dockerfile=dockerfile, toml=with_artifacts, separate_verifier_for_artifacts=True
+        )
+        assert task.overlay and task.workdir == "/app" and server._separate_verifier(task)
+
+        class RelativeTestsVerifier(OverlaySandbox):
+            """Grades as a test.sh reading `result.txt` relative to where it runs would: 1 in /app, 0 anywhere else."""
+
+            async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+                if "test.sh" in command and "timeout" in command:
+                    self.verifier_files = {"reward.txt": "1\n" if cwd == "/app" else "0\n"}
+                return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+
+        verifier = RelativeTestsVerifier()
+
+        async def create_verifier(task, *, episode_key=None):
+            server._sandboxes[f"{episode_key}/verifier"] = verifier
+            return verifier
+
+        monkeypatch.setattr(server, "_create_verifier_sandbox", create_verifier)
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert response.result.verifier_mode == "separate" and response.result.reward == 1.0
+        (run,) = [c for c in verifier.execs if "test.sh" in c["command"] and "timeout" in c["command"]]
+        assert run["cwd"] == "/app"
+        # The overlay's WORKDIR step made the directory in the verifier sandbox before test.sh ran there.
+        assert verifier.run("echo ok > result.txt")["seen"]["cwd"] == "/app" and "/app" in verifier.dirs
 
     def separate_verifier(self, tmp_path, monkeypatch, *, toml=SEPARATE_IN_TASK_IMAGE_TOML, verifier=None):
         server, task, agent, _ = self.overlay_server(tmp_path, monkeypatch, toml=toml)
