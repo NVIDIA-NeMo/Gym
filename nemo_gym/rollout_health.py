@@ -33,6 +33,7 @@ from nemo_gym.health.checks import (
     _ended_on_failed_call,
     _is_context_overflow_rejection,
     _is_failed,
+    _is_failed_attempt,
     _is_successful,
     _normalized_trajectory_calls,
     _replay_identity,
@@ -79,6 +80,7 @@ __all__ = [
     "HealthCheckResult",
     "RolloutDigest",
     "Verdict",
+    "evaluate_record",
     "format_health_report",
     "health_check_run_dir",
     "normalize_ignored_checks",
@@ -108,8 +110,27 @@ def _read_record(line: _LineSlice) -> tuple[dict[str, Any], str | None]:
 
 def _worker(payload: _WorkerInput) -> RolloutDigest:
     record, parse_error = _read_record(payload.line)
-    unreadable_identity = f"__unreadable_record__:input-{payload.line.source_index}:line-{payload.line.line_number}"
-    task_index = record.get(TASK_INDEX_KEY, unreadable_identity if parse_error else payload.line.ordinal)
+    return evaluate_record(record, payload.ignored_checks, line=payload.line, parse_error=parse_error)
+
+
+def evaluate_record(
+    record: dict[str, Any],
+    ignored_checks: frozenset[str],
+    *,
+    line: _LineSlice | None = None,
+    parse_error: str | None = None,
+) -> RolloutDigest:
+    """Evaluate every rollout-level check on one rollout record.
+
+    The one code path behind both the post-run report (which reads ``record`` from a JSONL ``line``)
+    and live emission (which passes the in-memory result, so ``line`` is ``None``).
+    """
+    unreadable_identity = (
+        f"__unreadable_record__:input-{line.source_index}:line-{line.line_number}" if line is not None else None
+    )
+    task_index = record.get(
+        TASK_INDEX_KEY, unreadable_identity if parse_error else (line.ordinal if line is not None else 0)
+    )
     rollout_index = record.get(ROLLOUT_INDEX_KEY, 0)
     trajectory = record.get("ng_trajectory")
     trajectory_rollout_id = trajectory.get("rollout_id") if isinstance(trajectory, dict) else None
@@ -131,7 +152,7 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
     unobserved: list[str] = []
 
     for spec in _ROLLOUT_SPECS:
-        if spec.id in payload.ignored_checks:
+        if spec.id in ignored_checks:
             continue
         if parse_error:
             if spec.id == "record_unreadable":
@@ -139,7 +160,7 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
                     Finding(
                         check="record_unreadable",
                         subject=subject,
-                        locator={"source_file": payload.line.path, "line": payload.line.line_number},
+                        locator=({"source_file": line.path, "line": line.line_number} if line is not None else None),
                         detail={"reason": "rollout record is unreadable", "error": parse_error},
                     )
                 )
@@ -183,7 +204,10 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
             or not bindings.complete
             or not bindings.matched_calls
             or not _transcript_tokens(record)[2]
-            or any(call.get("tokens_in") is None or call.get("tokens_out") is None for call in bindings.matched_calls)
+            or any(
+                not _is_failed_attempt(call) and (call.get("tokens_in") is None or call.get("tokens_out") is None)
+                for call in bindings.matched_calls
+            )
         ):
             unobserved.append(spec.id)
             continue
@@ -199,7 +223,7 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
             findings.extend(_ROLLOUT_CHECKS[spec.id](record, trajectory, bindings, subject))
         except Exception as exc:
             unobserved.append(spec.id)
-            if "check_execution_error" not in payload.ignored_checks:
+            if "check_execution_error" not in ignored_checks:
                 findings.append(
                     Finding(
                         check="check_execution_error",
@@ -234,6 +258,10 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
         model_calls=len(calls),
         successful_model_calls=sum(_is_successful(call) for call in turn_bindings.matched_calls),
         model_call_errors=len(failed),
+        model_call_errors_usage_unknown=sum(
+            _is_failed_attempt(call) and (call.get("tokens_in") is None or call.get("tokens_out") is None)
+            for call in failed
+        ),
         errors_by_status=dict(errors_by_status),
         ended_on_error=_ended_on_failed_call(calls),
         duplicated_calls=duplicated,
@@ -415,6 +443,9 @@ def _reduce(digests: list[RolloutDigest], ignored_checks: frozenset[str]) -> dic
                     "by_status": dict(sorted(error_statuses.items())),
                     "rollouts_affected": sum(bool(digest.model_call_errors) for digest in digests),
                     "ended_on_error": sum(digest.ended_on_error for digest in digests),
+                    # Failed calls with no finished response and no usage: the token checks skip them,
+                    # and any tokens the server spent on them are counted nowhere else.
+                    "usage_unknown": sum(digest.model_call_errors_usage_unknown for digest in digests),
                 },
                 "duplicated_calls": {
                     "replayed": sum(digest.duplicated_calls for digest in digests),

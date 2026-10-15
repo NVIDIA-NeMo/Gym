@@ -1818,3 +1818,81 @@ class TestListEnvironmentsRouting:
         target, overrides = _dispatch_for(monkeypatch, ["list", "environments", "calendar"])
         assert target == "nemo_gym.cli.env:list_environments"
         assert overrides == ["+component_name=calendar"]
+
+
+@pytest.mark.parametrize("extra", [[], ["--no-serve"]])
+def test_eval_run_restores_positional_override_before_config_merge(monkeypatch, extra):
+    target, overrides = _dispatch_for(
+        monkeypatch, ["eval", "run", "+config_paths=[a.yaml]", "--config", "b.yaml", *extra]
+    )
+    assert target.endswith("collect_rollouts" if extra else "e2e_rollout_collection")
+    assert overrides == ["+config_paths=[b.yaml,a.yaml]"]
+
+
+@pytest.mark.parametrize("serve", [False, True])
+@pytest.mark.parametrize("deletion", ["~unused_server", "~unused_server@pkg", "~unused_group/option"])
+def test_eval_run_restores_equals_free_hydra_deletions(monkeypatch, serve, deletion):
+    target, overrides = _dispatch_for(
+        monkeypatch,
+        ["eval", "run", *([] if serve else ["--no-serve"]), deletion, "+limit=3", "~second_server"],
+    )
+    assert target.endswith("e2e_rollout_collection" if serve else "collect_rollouts")
+    assert overrides == [deletion, "+limit=3", "~second_server"]
+
+
+def test_eval_run_keeps_home_relative_target(monkeypatch):
+    import nemo_gym.tasks.harbor.cli as harbor_cli
+
+    captured = []
+    monkeypatch.setattr(harbor_cli, "run_target", lambda args, overrides: captured.append(args.target))
+    monkeypatch.setattr(sys, "argv", ["gym", "eval", "run", "~/tasks", "--agent", "hermes"])
+    cli_main.main()
+    assert captured == ["~/tasks"]
+
+
+@pytest.mark.parametrize(
+    "target", ["~", "~/tasks", "~harbor_test_user/tasks", "trial=1", "./trial=1", "../trial=1", "/missing/trial=1"]
+)
+def test_eval_run_ambiguous_folder_targets_take_precedence(tmp_path, monkeypatch, target):
+    import pwd
+    from types import SimpleNamespace
+
+    import nemo_gym.tasks.harbor.cli as harbor_cli
+
+    home = tmp_path / "home"
+    (home / "tasks").mkdir(parents=True)
+    (tmp_path / "trial=1").mkdir()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(home))
+    real_getpwnam = pwd.getpwnam
+    monkeypatch.setattr(
+        pwd,
+        "getpwnam",
+        lambda name: SimpleNamespace(pw_dir=str(home)) if name == "harbor_test_user" else real_getpwnam(name),
+    )
+    captured = []
+    monkeypatch.setattr(harbor_cli, "run_target", lambda args, overrides: captured.append((args.target, overrides)))
+    monkeypatch.setattr(sys, "argv", ["gym", "eval", "run", target, "--agent", "hermes", "+limit=3"])
+    cli_main.main()
+    assert captured == [(target, ["+agent_name=hermes", "+limit=3"])]
+
+
+@pytest.mark.parametrize("override", ["trial=1", "+folder=/tmp/tasks", "~unused_server=value"])
+def test_eval_run_ambiguous_nonfolders_remain_overrides(tmp_path, monkeypatch, override):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "trial=1").write_text("a file, not a task folder")
+    target, overrides = _dispatch_for(monkeypatch, ["eval", "run", override])
+    assert target.endswith("e2e_rollout_collection")
+    assert overrides == [override]
+
+
+@pytest.mark.parametrize("serve", [False, True])
+def test_eval_run_keeps_long_configuration_values(monkeypatch, serve):
+    value = "x" * 300
+    override = f"+policy_api_key={value}"
+    target, overrides = _dispatch_for(
+        monkeypatch, ["eval", "run", *([] if serve else ["--no-serve"]), override, "+limit=3"]
+    )
+    assert target.endswith("e2e_rollout_collection" if serve else "collect_rollouts")
+    assert overrides == [override, "+limit=3"]
+    assert OverridesParser.create().parse_override(overrides[0]).value() == value
