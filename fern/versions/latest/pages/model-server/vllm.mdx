@@ -139,7 +139,7 @@ If you want to run NeMo Gym on a separate machine from the one used to spin up t
 hostname -i
 ```
 
-Then set `policy_base_url=http://{hostname}:10240/v1` instead of `policy_base_url=http://0.0.0.0:10240/v1`.
+Then change `--model-url http://0.0.0.0:10240/v1` to `--model-url http://{hostname}:10240/v1`.
 
 </Tip>
 
