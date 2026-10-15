@@ -246,10 +246,14 @@ class TestReadTaskMeta:
 
 
 def _make_setup_agent(tmp_path: Path, model_server_url: str = "", **config_overrides) -> AnyTerminalAgent:
-    # model_post_init has heavy side effects (deps install, provider resolution) that
-    # _setup_params doesn't touch, so bypass it and set only what _setup_params reads.
-    with patch.object(AnyTerminalAgent, "model_post_init", lambda self, context: None):
-        agent = AnyTerminalAgent(config=_config(**config_overrides), server_client=MagicMock(spec=ServerClient))
+    # Keep Pydantic's private-attribute initialization; bypass only the harness install.
+    server_client = MagicMock(spec=ServerClient)
+    server_client.global_config_dict = {}
+    with patch.object(GymAgentHarnessProcessor, "setup", return_value=tmp_path):
+        agent = AnyTerminalAgent(
+            config=_config(model_server=None, results_dir=tmp_path / "results", **config_overrides),
+            server_client=server_client,
+        )
     agent._server = AnyTerminalServerConfig(
         run_session_id="test_session",
         base_results_dir=tmp_path / "results",
