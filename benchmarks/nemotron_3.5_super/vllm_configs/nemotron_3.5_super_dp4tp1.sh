@@ -48,9 +48,9 @@ VLLM_COMMON_ARGS=(
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'
     --enable-expert-parallel
     --skip-mm-profiling
-    --data-parallel-size 1
-    --data-parallel-size-local 1
-    --tensor-parallel-size 4
+    --data-parallel-size 4
+    --data-parallel-size-local 4
+    --tensor-parallel-size 1
     --api-server-count 1
     --enable-mamba-shared-prefix-checkpoint
     --prefix-match-unit 128
@@ -90,7 +90,7 @@ VLLM_PREFILL_ARGS=(
         }
     }'
     --max-cudagraph-capture-size 1200
-    --max-num-batched-tokens 67840
+    --max-num-batched-tokens 33920
     --max-num-seqs 1024
 )
 # @bxyu-nvidia: We set "enable_lookup": false for the Mooncake store connector because the prefill worker handles the prefix cache lookup and decode just needs to receive the transferred kv cache.
