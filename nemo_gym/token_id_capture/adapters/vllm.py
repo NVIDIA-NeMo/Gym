@@ -11,6 +11,7 @@ from typing import Any
 PREFIX_IDS_FIELD = "required_prefix_token_ids"
 PROMPT_IDS_FIELD = "prompt_token_ids"
 ROUTED_EXPERTS_FIELD = "routed_experts"
+ROUTED_EXPERTS_PREFIX_LEN_FIELD = "routed_experts_prefix_len"
 MEDIA_SPANS_FIELD = "media_spans"
 
 
@@ -74,6 +75,13 @@ class VLLMCaptureAdapter:
                 if not isinstance(routes, (str, dict, list)):
                     raise ValueError(f"vLLM {field} must use a JSON-compatible envelope")
                 extras[field] = routes
+        prefix_len = message.get(ROUTED_EXPERTS_PREFIX_LEN_FIELD)
+        if prefix_len is not None:
+            if type(prefix_len) is not int or prefix_len < 0:
+                raise ValueError(
+                    "vLLM routed_experts_prefix_len must be a non-negative integer"
+                )
+            extras[ROUTED_EXPERTS_PREFIX_LEN_FIELD] = prefix_len
         # Framework-owned context (CC) backpatches the predecessor's final-token
         # route from this field; it travels beside the unified-teacher prefix
         # boundary route above.

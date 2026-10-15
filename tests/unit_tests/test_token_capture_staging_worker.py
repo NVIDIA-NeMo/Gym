@@ -578,6 +578,41 @@ def test_vllm_extract_extras_keeps_spans_and_routes_without_a_media_summary(rout
         assert extras["routed_experts"] == routes
 
 
+def test_vllm_extract_extras_keeps_prefix_replacement_marker() -> None:
+    payload = {
+        "choices": [
+            {
+                "message": {
+                    "routed_experts": [[[1]]],
+                    "routed_experts_prefix_len": 3,
+                }
+            }
+        ]
+    }
+    assert VLLMCaptureAdapter().extract_extras(payload) == {
+        "routed_experts": [[[1]]],
+        "routed_experts_prefix_len": 3,
+    }
+
+
+@pytest.mark.parametrize("prefix_len", [True, -1, 1.5, "3"])
+def test_vllm_extract_extras_rejects_bad_prefix_replacement_marker(
+    prefix_len: Any,
+) -> None:
+    payload = {
+        "choices": [
+            {
+                "message": {
+                    "routed_experts": [[[1]]],
+                    "routed_experts_prefix_len": prefix_len,
+                }
+            }
+        ]
+    }
+    with pytest.raises(ValueError, match="non-negative integer"):
+        VLLMCaptureAdapter().extract_extras(payload)
+
+
 def test_vllm_text_call_has_no_extras() -> None:
     assert VLLMCaptureAdapter().extract_extras({"choices": [{"message": {}}]}) is None
 
