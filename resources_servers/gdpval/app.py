@@ -77,7 +77,7 @@ from resources_servers.gdpval.judge_panel import (
 )
 from resources_servers.gdpval.judge_telemetry import JudgeTelemetrySink, classify_judge_error
 from resources_servers.gdpval.reference_files import download_reference_files
-from resources_servers.gdpval.scoring import SCORING_ERROR_KEY
+from resources_servers.gdpval.scoring import SCORING_ERROR_KEY, is_permanent_judge_error
 from resources_servers.gdpval.task_data import TaskData
 from resources_servers.gdpval.task_sandbox import (
     WORKDIR,
@@ -516,11 +516,25 @@ class GDPValVerifyRequest(BaseVerifyRequest):
 REFERENCE_MISSING_FAILURE_CLASS = "reference_missing"
 EVAL_MISSING_FAILURE_CLASS = "eval_missing"
 TRANSPORT_INELIGIBLE_FAILURE_CLASS = "transport_ineligible"
+PERMANENT_JUDGE_ERROR_FAILURE_CLASS = "permanent_judge_error"
 
 
 def _gdpval_failure(failure_class: str) -> Dict[str, Any]:
     """Route a GDPVal-specific failure to the failures file as a masked, non-terminal sample."""
     return {NG_FAILURE_CLASS_KEY: failure_class, "failure_kind": f"gdpval:{failure_class}", "mask_sample": True}
+
+
+def _permanent_judge_failure(
+    body: "GDPValVerifyRequest", verify_mode: str, judge_response: Dict[str, Any]
+) -> "GDPValVerifyResponse":
+    """A masked terminal failure for a payload the judge will refuse every time (too large, context exceeded)."""
+    return GDPValVerifyResponse(
+        **body.model_dump(),
+        reward=0.0,
+        verify_mode=verify_mode,
+        judge_response=judge_response,
+        **{**_gdpval_failure(PERMANENT_JUDGE_ERROR_FAILURE_CLASS), NG_TERMINAL_KEY: True},
+    )
 
 
 # Recovered by `gym eval reverify --judge-failed-only`, which judges the persisted deliverable again.
@@ -945,7 +959,12 @@ class GDPValResourcesServer(SimpleResourcesServer):
         if self.config.reward_mode == "comparison":
             return await self._verify_comparison(body)
 
-        return await self._verify_rubric(body)
+        try:
+            return await self._verify_rubric(body)
+        except Exception as error:
+            if not is_permanent_judge_error(error):
+                raise
+            return _permanent_judge_failure(body, "rubric", {"error": "permanent_judge_error", "detail": repr(error)})
 
     async def _verify_rubric(self, body: GDPValVerifyRequest) -> GDPValVerifyResponse:
         if not (body.rubric_json or body.rubric_pretty):
@@ -1264,6 +1283,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
         ref_errors: Dict[str, List[str]] = {}
         attempted_matchups = 0
         transport_ineligible_matchups = 0
+        permanent_error_matchups = 0
         last_error: Optional[Exception] = None
         # Cache each semantic side independently by representation and DPI.
         # Native sections are also the exact source for provider-cap preflight.
@@ -1546,6 +1566,8 @@ class GDPValResourcesServer(SimpleResourcesServer):
                         )
                         if isinstance(e, TransportIneligibleError):
                             transport_ineligible_matchups += 1
+                        elif is_permanent_judge_error(e):
+                            permanent_error_matchups += 1
                         ref_errors.setdefault(ref_id, []).append(f"{ref_dir.name}: {e!r}")
                         print(
                             f"[gdpval] judge failed for task {body.task_id} ref {ref_id}/{ref_dir.name}: {e!r}",
@@ -1613,6 +1635,11 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     verify_mode="comparison",
                     judge_response={"error": "transport_ineligible", "ref_errors": ref_errors},
                     **_gdpval_failure(TRANSPORT_INELIGIBLE_FAILURE_CLASS),
+                )
+            if transport_ineligible_matchups + permanent_error_matchups == attempted_matchups:
+                # Every error is one the same payload will hit again, so a retry cannot succeed.
+                return _permanent_judge_failure(
+                    body, "comparison", {"error": "permanent_judge_error", "ref_errors": ref_errors}
                 )
             raise RuntimeError(
                 f"all {attempted_matchups} judge matchup(s) failed for task {body.task_id}; last error: {last_error!r}"
