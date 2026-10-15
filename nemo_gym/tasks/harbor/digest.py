@@ -8,7 +8,8 @@ SHA256 over sorted ``relative_path NUL file_sha256 LF`` records covering
 ``task.toml``, ``instruction.md``, ``README.md``, ``trajectory.json`` and everything
 under ``environment/``, ``tests/``, ``solution/`` and ``steps/``. The digest travels in
 ``task_data`` under :data:`DIGEST_KEY` so the resources server can refuse a row whose
-folder changed after materialization.
+folder changed after materialization. Directory symlinks are refused because this
+file-content format does not represent their targets.
 """
 
 import fnmatch
@@ -31,6 +32,19 @@ def _ignored(relative: str) -> bool:
 def content_hash(path: Path) -> str:
     """Digest the task folder at ``path``."""
     path = Path(path).resolve()
+    # rglob does not descend into directory links, so check links before filtering to files
+    # or ignoring cache paths. Reject unsupported links without changing the digest format.
+    for link in path.rglob("*"):
+        if not link.is_symlink():
+            continue
+        relative = link.relative_to(path).as_posix()
+        target = link.resolve(strict=True)
+        if not target.is_relative_to(path):
+            raise ValueError(f"Task symlink escapes the task folder: {relative}")
+        if target.is_dir():
+            raise ValueError(
+                f"Task directory symlinks are not supported: {relative}; replace it with a directory inside the task"
+            )
     files = [path / name for name in _SINGLE_FILES if (path / name).is_file()]
     for name in _DIRECTORIES:
         files.extend(p for p in (path / name).rglob("*") if p.is_file())
