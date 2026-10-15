@@ -16,6 +16,7 @@ import asyncio
 import gc
 import json
 import pickle
+import time
 import warnings
 import weakref
 from asyncio import Future
@@ -1747,6 +1748,54 @@ class TestRolloutCollection:
             await future
 
         assert started == [(row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]) for row in rows]
+
+    @pytest.mark.parametrize("entry_point", ["run_examples", "_run_examples_with_metadata"])
+    @pytest.mark.parametrize("max_resident_tasks", [None, 2])
+    async def test_dispatch_releases_a_taken_result_while_rollouts_are_pending(
+        self, monkeypatch: pytest.MonkeyPatch, entry_point: str, max_resident_tasks: int | None
+    ) -> None:
+        # NeMo RL calls run_examples, and gym eval run consumes _run_examples_with_metadata.
+        # With retain_results_in_memory=false, a result the consumer has taken and dropped must be freed.
+        # Nothing in the dispatcher may keep it alive until the last rollout finishes.
+        class Result(dict):
+            """A /run result that supports weak references."""
+
+        rows = [
+            {
+                AGENT_REF_KEY_NAME: {"name": "my_agent"},
+                TASK_INDEX_KEY_NAME: i,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+            }
+            for i in range(8)
+        ]
+        release = asyncio.Event()
+
+        async def post(*args, **kwargs):
+            # The first row finishes at once and every later row waits, so the run is still in progress.
+            if kwargs["json"][TASK_INDEX_KEY_NAME] != 0:
+                await release.wait()
+            return FakeResponse(200)
+
+        async def get_response_json(response: FakeResponse) -> Result:
+            return Result(reward=1)
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", get_response_json)
+
+        futures = getattr(RolloutCollectionHelper(), entry_point)(rows, max_resident_tasks=max_resident_tasks)
+        completed = await next(futures)
+        first_row, first_result = completed if entry_point == "run_examples" else (completed.row, completed.result)
+        assert first_row[TASK_INDEX_KEY_NAME] == 0
+        first_result_ref = weakref.ref(first_result)
+        del completed, first_row, first_result
+        gc.collect()
+
+        assert not release.is_set()
+        assert first_result_ref() is None
+
+        release.set()
+        for future in futures:
+            await future
 
     async def test_bounded_failure_propagates_with_concurrent_consumers(self) -> None:
         fail = asyncio.Event()
@@ -4586,6 +4635,150 @@ class TestRolloutCollection:
         assert aggregated["rows"] == aggregated["results"]
         run_health_checks.assert_called_once_with(output_fpath, workers=None, ignored_checks=[])
         format_health_report.assert_called_once_with(health_result)
+
+    async def test_run_from_config_non_retaining_reads_artifacts_off_the_event_loop(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        empty_global_config: MagicMock,
+    ) -> None:
+        """The whole-artifact scans after collection leave the event loop free to run other tasks.
+
+        The reloads that keep every row parse on the loop thread, which the `_read_jsonl` test covers.
+        """
+        ticks = 0
+
+        async def tick() -> None:
+            nonlocal ticks
+            while True:
+                ticks += 1
+                await asyncio.sleep(0)
+
+        loop_advanced: dict[str, list[bool]] = defaultdict(list)
+
+        def require_loop_progress(name: str, read):
+            # The read waits for the ticker before it starts.
+            # On the event loop thread the wait blocks the ticker, so it times out and records False.
+            def wrapper(*args, **kwargs):
+                start = ticks
+                deadline = time.monotonic() + 2
+                while ticks == start and time.monotonic() < deadline:
+                    time.sleep(0.001)
+                loop_advanced[name].append(ticks != start)
+                return read(*args, **kwargs)
+
+            return wrapper
+
+        reads = (
+            "_count_lines",
+            "_failure_rows_counted_as_zero",
+            "_missing_rollout_rows_counted_as_zero",
+            "_fill_task_fields",
+        )
+        for name in reads:
+            read = getattr(nemo_gym.rollout_collection, name, None)
+            if read is not None:
+                monkeypatch.setattr(nemo_gym.rollout_collection, name, require_loop_progress(name, read))
+
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_text(
+            "".join(
+                json.dumps(
+                    {"responses_create_params": {"input": []}, AGENT_REF_KEY_NAME: {"name": "agent"}, "subset": s}
+                )
+                + "\n"
+                for s in ("a", "b", "c")
+            )
+        )
+        output_fpath = tmp_path / "output.jsonl"
+        aggregated = {}
+
+        class Helper(RolloutCollectionHelper):
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                # Task 0 succeeds and reports its subset, task 1 fails into the sidecar, and task 2 never produces a row.
+                outcomes = [{"reward": 1.0, "subset": "a"}, {NG_FAILURE_CLASS_KEY: ENVIRONMENT_SERVER_FAILURE_CLASS}]
+                futures = []
+                for example, outcome in zip(examples, outcomes):
+                    future = Future()
+                    future.set_result(_CompletedRollout(row=example, result=outcome, rollout_latency_ms=None))
+                    futures.append(future)
+                return futures
+
+            async def _call_aggregate_metrics(self, results, rows, output_fpath, *, raise_on_error: bool = True):
+                aggregated["results"] = results
+                return None
+
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_exporters", lambda: [object()])
+        export_rollouts = MagicMock()
+        monkeypatch.setattr(nemo_gym.rollout_collection, "export_rollouts", export_rollouts)
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(output_fpath),
+            retain_results_in_memory=False,
+            route_failures_to_sidecar=True,
+            count_failure_classes_as_zero=[ENVIRONMENT_SERVER_FAILURE_CLASS],
+            count_missing_rollouts_as_zero=True,
+            upload_rollouts=True,
+            disable_health_check=True,
+        )
+
+        ticker = asyncio.create_task(tick())
+        try:
+            returned = await Helper().run_from_config(config)
+        finally:
+            ticker.cancel()
+
+        assert returned == []
+        assert loop_advanced == {
+            "_count_lines": [True],
+            "_failure_rows_counted_as_zero": [True],
+            "_missing_rollout_rows_counted_as_zero": [True],
+            "_fill_task_fields": [True],
+        }
+        assert [(r[TASK_INDEX_KEY_NAME], r["reward"], r["subset"]) for r in aggregated["results"]] == [
+            (0, 1.0, "a"),
+            (1, 0.0, "b"),
+            (2, 0.0, "c"),
+        ]
+        (uploaded,) = export_rollouts.call_args.args
+        assert [(r[TASK_INDEX_KEY_NAME], r.get("reward"), r.get(NG_FAILURE_CLASS_KEY)) for r in uploaded] == [
+            (0, 1.0, None),
+            (1, None, ENVIRONMENT_SERVER_FAILURE_CLASS),
+        ]
+
+    async def test_read_jsonl_yields_to_other_tasks_between_rows(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        rows = [{"i": i, "text": "x" * i} for i in range(20)]
+        path = tmp_path / "rows.jsonl"
+        path.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows) + b"\n")
+        monkeypatch.setattr(nemo_gym.rollout_collection, "_READ_JSONL_YIELD_INTERVAL_S", 0)
+        parsed_when_ticked: list[int] = []
+        parsed: list[dict] = []
+        loads = orjson.loads
+
+        def recording_loads(line: bytes) -> dict:
+            parsed.append(loads(line))
+            return parsed[-1]
+
+        monkeypatch.setattr(nemo_gym.rollout_collection.orjson, "loads", recording_loads)
+
+        async def tick() -> None:
+            while True:
+                parsed_when_ticked.append(len(parsed))
+                await asyncio.sleep(0)
+
+        ticker = asyncio.create_task(tick())
+        await asyncio.sleep(0)
+        try:
+            result = await nemo_gym.rollout_collection._read_jsonl(path)
+        finally:
+            ticker.cancel()
+
+        assert result == rows
+        # The ticker ran after every row, not only before the first or after the last.
+        assert set(range(1, len(rows))) <= set(parsed_when_ticked)
 
     async def test_a_failed_episode_with_agent_evidence_joins_its_model_calls(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
