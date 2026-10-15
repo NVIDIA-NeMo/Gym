@@ -104,12 +104,9 @@ benchmark setting there would silently replace the published one.
 
 ## Serving the model
 
-Reproducing these numbers depends on the model being served the right way. Check the
-[model card](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16)
-for the authoritative serving guidance; the command below is what these recipes were
-validated with.
-
-The published runs served the model with vLLM 0.30.0, on one node of 4 GPUs per server:
+The [model card](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16)
+is the authoritative serving guide. The published runs used vLLM 0.30.0, one node of 4 GPUs
+per server, and the command below, against which every recipe was validated.
 
 ```bash
 vllm serve nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16 \
@@ -127,15 +124,22 @@ vllm serve nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16 \
   --skip-mm-profiling --mm-encoder-attn-backend TORCH_SDPA
 ```
 
-Use it for every recipe, with two changes:
+Changes for two recipes:
 
 | Recipe | Change | Why it matters |
 |---|---|---|
 | GraphWalks | `--max-model-len 1048576 --max-num-batched-tokens 8192` | Needed: prompts are up to ~361,000 tokens |
 | OSWorld | `--max-num-batched-tokens 32768` | Optional: with the default above, the published setup repeatedly ran out of GPU memory on OSWorld; lower it if yours does. Does not change answers |
 
-CritPt asks for 245,760 output tokens per turn and needs `--max-model-len 262144`. With a
-shorter context its turns come back empty and score 0 without an error.
+Notes:
+
+- **Images.** The card's quick-start command allows one image per request. OSWorld sends 3 or
+  more and fails with it, so keep the image limit from the command above.
+- **80 GB GPUs.** The command above was validated on 4× GB200 and does not start on 80 GB
+  GPUs. There, use the card's memory settings: `--gpu-memory-utilization 0.85 --max-num-seqs 32`,
+  without `--max-num-batched-tokens`. They change memory use and speed, not results.
+- **CritPt** asks for 245,760 output tokens per turn and needs `--max-model-len 262144`. With a
+  shorter context its turns come back empty and score 0 without an error.
 
 ## Judges and graders
 
