@@ -22,7 +22,7 @@ export VLLM_SSM_CONV_STATE_LAYOUT=DS
 
 export VLLM_USE_V2_MODEL_RUNNER=1
 
-export VLLM_USE_RUST_FRONTEND=1
+export VLLM_USE_RUST_FRONTEND=0
 
 # @bxyu-nvidia: `--skip-mm-profiling` Is needed to get Super VL checkpoint working, even with text benchmarks
 # @bxyu-nvidia: We set --prefix-match-unit 128 because the Mooncake store prefill lookup gets more expensive the smaller this number is
@@ -90,6 +90,7 @@ VLLM_PREFILL_ARGS=(
         }
     }'
     --max-cudagraph-capture-size 1200
+    --cudagraph-metrics
     --max-num-batched-tokens 67840
     --max-num-seqs 1024
 )
