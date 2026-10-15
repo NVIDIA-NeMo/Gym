@@ -83,6 +83,7 @@ from nemo_gym.token_id_capture.fingerprint import (
     FINGERPRINT_VERSION,
     _content_of,
     _is_assistant_authored,
+    _tools_of,
     assistant_fingerprint,
     canonicalize_tool_arguments,
     tool_call_turn_fingerprint,
@@ -355,7 +356,7 @@ def _item_id_witness(entries: list[TokenEntry], response: dict, reasons: list[st
 def _content_witness(entries: list[TokenEntry], response: dict, reasons: list[str]) -> tuple[str, TokenEntry] | None:
     """The content witness: fingerprint the response's model-authored items.
 
-    Three readings of one response are possible and must compete, not race. A
+    The first three readings of one response must compete, not race. A
     full transcript matches an entry's cumulative fingerprint (the
     model-authored spine of request context + that call's output); a
     final-turn-only response matches the fingerprint of one entry's own
@@ -364,6 +365,13 @@ def _content_witness(entries: list[TokenEntry], response: dict, reasons: list[st
     first call's cumulative fingerprint IS its own-output fingerprint, because
     non-model turns never contribute — so candidates from all keys pool before
     the ambiguity decision.
+
+    If those readings find no candidates, the fourth compares the complete
+    trailing turn with each entry's output, ignoring only tool arguments.
+    A unique sequence reports ``content_tool_ids``; distinct matching sequences
+    abstain as ``tool_ids_ambiguous``. IDs reused in earlier transcript turns
+    abstain as ``tool_ids_reused`` because those IDs cannot identify a call.
+    Custody rows have no output items and cannot supply this fourth reading.
     """
     output = response.get("output")
     if not isinstance(output, list) or not output:
@@ -388,7 +396,7 @@ def _content_witness(entries: list[TokenEntry], response: dict, reasons: list[st
     # skips this reading rather than matching the wrong call.
     trailing: list[dict] = []
     for item in reversed(items):
-        if not _is_assistant_authored(item):
+        if not _is_assistant_authored(item) and item.get("type") != "reasoning":
             break
         trailing.append(item)
     trailing.reverse()
@@ -440,6 +448,16 @@ def _content_witness(entries: list[TokenEntry], response: dict, reasons: list[st
         # or an uncaptured final assistant message (the #3972 witness contract).
         target_turn = tool_call_turn_fingerprint(trailing)
         if target_turn:
+            trailing_ids = {call_id for item in trailing for call_id, _, _ in _tools_of(item)}
+            earlier_ids = {
+                call_id
+                for item in items[: len(items) - len(trailing)]
+                if _is_assistant_authored(item)
+                for call_id, _, _ in _tools_of(item)
+            }
+            if trailing_ids & earlier_ids:
+                reasons.append("tool_ids_reused")
+                return None
             id_matches: dict[str, TokenEntry] = {}
             for entry in entries:
                 if _is_custody_row(entry) or not entry.output_items:

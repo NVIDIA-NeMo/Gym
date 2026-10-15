@@ -294,8 +294,8 @@ def tool_call_turn_fingerprint(items: list[dict]) -> str:
     agree. Missing/duplicate IDs abstain; they cannot identify a served call.
     Chat/Anthropic bundled turns and Responses items use the same canonical
     fields as the strict fingerprint. Empty assistant items remain accounted for.
-    This is an in-memory fallback key, not a replacement for the versioned
-    content fingerprint or the request-context digest.
+    This fallback key supplements the versioned content fingerprint and the
+    request-context digest in both in-memory and durable lineage indexes.
     """
     hasher = hashlib.sha256(b"nemo-gym-tool-call-turn")
     seen_ids: set[str] = set()
@@ -321,13 +321,16 @@ def tool_call_turn_fingerprint(items: list[dict]) -> str:
 
 
 def trailing_assistant_turn(messages: list[dict]) -> list[dict]:
-    """Return the last model-authored turn of a request: the final run of consecutive assistant-authored items,
-    skipping any trailing user/tool items (tool results) that follow it."""
+    """Return the last model turn, skipping trailing user/tool results.
+
+    Standalone reasoning belongs to the turn even though fingerprints omit it.
+    It must not split interleaved text and tool calls into different turns.
+    """
     items = [m for m in messages or [] if isinstance(m, dict)]
     end = len(items)
-    while end > 0 and not _is_assistant_authored(items[end - 1]):
+    while end > 0 and not (_is_assistant_authored(items[end - 1]) or items[end - 1].get("type") == "reasoning"):
         end -= 1
     start = end
-    while start > 0 and _is_assistant_authored(items[start - 1]):
+    while start > 0 and (_is_assistant_authored(items[start - 1]) or items[start - 1].get("type") == "reasoning"):
         start -= 1
     return items[start:end]

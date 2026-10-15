@@ -187,3 +187,97 @@ def test_tool_fallback_rejects_model_turns_between_context_and_echo(index_path: 
     result = lineage.resolve(request)
 
     assert result.status == ParentResolutionStatus.UNRESOLVED
+
+
+@pytest.mark.parametrize("index_path", ["record", "add_entry", "terminal"])
+@pytest.mark.parametrize("reasoning_index", [1, 2])
+def test_tool_fallback_keeps_the_whole_turn_with_interleaved_reasoning(index_path, reasoning_index):
+    ctx = [{"role": "user", "content": "fix it"}]
+    served, echoed = _served(), _rewritten()
+    for turn in (served, echoed):
+        turn.insert(reasoning_index, {"type": "reasoning", "summary": []})
+    if index_path == "terminal":
+        result = resolve_terminal([_entry(served)], {"id": "harness", "output": ctx + echoed})
+        assert result.model_call_id == "served"
+        assert result.method == "content_tool_ids"
+    else:
+        lineage = RolloutLineage()
+        if index_path == "record":
+            lineage.record("served", ctx + served, [1, 2, 3], "digest", context_len=len(ctx))
+        else:
+            lineage.add_entry(_entry(served))
+        result = lineage.resolve(ctx + echoed + [{"type": "function_call_output", "call_id": "t2", "output": "ok"}])
+        assert result.status == ParentResolutionStatus.RESOLVED
+        assert result.match.model_call_id == "served"
+
+
+def _named_entry(call_id: str, output: list[dict], token: int) -> TokenEntry:
+    entry = _entry(output)
+    entry.model_call_id = call_id
+    entry.response_id = f"response-{call_id}"
+    entry.generation_token_ids = [token]
+    stamp_lineage(entry, None, parent_resolution=ParentResolutionStatus.ROOT)
+    return entry
+
+
+@pytest.mark.parametrize("dialect", ["responses", "chat", "anthropic"])
+def test_terminal_tool_fallback_refuses_an_id_reused_in_an_earlier_turn(dialect):
+    original = _tool("functions.Bash:0", "Bash", '{"command":"ls"}')
+    rewritten = _tool("functions.Bash:0", "Bash", '{"command":"rm -rf build"}')
+    if dialect == "chat":
+        original = {"role": "assistant", "tool_calls": [{"id": original["call_id"], "function": {
+            "name": "Bash", "arguments": original["arguments"]}}]}
+    elif dialect == "anthropic":
+        original = {"role": "assistant", "content": [{"type": "tool_use", "id": original["call_id"],
+            "name": "Bash", "input": {"command": "ls"}}]}
+    entry = _entry([_tool("functions.Bash:0", "Bash", '{"command":"ls"}')])
+    transcript = [original, {"type": "function_call_output", "call_id": "functions.Bash:0", "output": "ok"}, rewritten]
+    result = resolve_terminal([entry], {"id": "harness", "output": transcript})
+    assert result.model_call_id is None
+    assert "tool_ids_reused" in result.reason
+
+
+def test_terminal_strict_witnesses_precede_same_id_fallback_siblings():
+    a = _named_entry("a", [_tool("call_0", "Bash", '{"command":"ls"}')], 3)
+    b = _named_entry("b", [_tool("call_0", "Bash", '{"command":"pytest"}')], 4)
+    result = resolve_terminal([a, b], {"id": "harness", "output": a.output_items})
+    assert result.model_call_id == "a"
+    assert result.method == "item_id"
+    assert "tool_ids" not in result.reason
+
+
+def test_terminal_tool_fallback_disagrees_with_response_id():
+    a = _named_entry("a", _served(), 3)
+    b = _named_entry("b", [_message("Different response.")], 4)
+    result = resolve_terminal([a, b], {"id": b.response_id, "output": _rewritten()})
+    assert result.model_call_id is None
+    assert "witness_disagreement" in result.reason
+    assert "response_id=b" in result.reason
+    assert "content_tool_ids=a" in result.reason
+
+
+@pytest.mark.parametrize("unreadable", [[], [{"role": "assistant", "content": 123}]])
+def test_terminal_tool_fallback_skips_unreadable_entries(unreadable):
+    a = _named_entry("a", _served(), 3)
+    b = _named_entry("b", [], 4)
+    b.output_items = unreadable
+    result = resolve_terminal([b, a], {"id": "harness", "output": _rewritten()})
+    assert result.model_call_id == "a"
+    assert result.method == "content_tool_ids"
+
+
+@pytest.mark.parametrize("unique_tool_id", [False, True])
+@pytest.mark.parametrize("response_identifies_call", [False, True])
+def test_terminal_tool_fallback_preserves_finish_reason_identity(unique_tool_id, response_identifies_call):
+    a = _named_entry("a", [_tool("first" if unique_tool_id else "t1", "Bash", "{}")], 3)
+    b = _named_entry("b", [_tool("t1", "Bash", "{}")], 3)
+    a.finish_reason = "length"
+    b.finish_reason = "stop"
+    response = {
+        "id": b.response_id if response_identifies_call else "harness",
+        "output": [_tool("t1", "Bash", '{"rewritten": true}')],
+    }
+    result = resolve_terminal([a, b], response)
+    assert result.model_call_id == ("b" if unique_tool_id or response_identifies_call else "a")
+    assert result.method == ("response_id" if response_identifies_call else "content_tool_ids")
+    assert result.finish_reason_resolved is (unique_tool_id or response_identifies_call)
