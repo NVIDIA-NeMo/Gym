@@ -24,9 +24,6 @@ from responses_api_agents.stirrup_agent.sandbox_runner import InvocationStatus, 
 
 
 _TOOLS = json.loads((Path(__file__).resolve().parents[3] / "benchmarks" / "gdpval" / "tools.json").read_text())
-_CERTIFIED = json.loads(
-    (Path(__file__).resolve().parents[3] / "resources_servers/gdpval/tests/data/tool_definitions.json").read_text()
-)
 
 
 def _call(name: str, arguments: str) -> dict:
@@ -270,7 +267,10 @@ def test_the_model_sees_the_certified_tool_definitions(tmp_path, resources):
         "web_search",
         "fetch_web_page",
     ]
-    certified = {t["function"]["name"]: t for t in _CERTIFIED}
+    certified = {
+        t["name"]: {"type": "function", "function": {k: t[k] for k in ("name", "description", "parameters")}}
+        for t in _TOOLS
+    }
     assert [t for t in tools if t["function"]["name"] != "code_exec"] == [
         certified[name] for name in ("finish", "abandon_task_finish", "web_search", "fetch_web_page")
     ]
