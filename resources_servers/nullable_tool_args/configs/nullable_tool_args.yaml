@@ -1,0 +1,28 @@
+nullable_tool_args:
+  resources_servers:
+    nullable_tool_args:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: Required nullable tool arguments must be JSON null, not the string "None"
+nullable_tool_args_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: nullable_tool_args
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/nullable_tool_args/data/example.jsonl
+nullable_tool_args_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: nullable_tool_args_simple_agent

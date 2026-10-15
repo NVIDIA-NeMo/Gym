@@ -19,7 +19,7 @@ from responses_api_agents.openclaw_agent.sandbox import OpenClawSandboxSession
 from responses_api_agents.openclaw_agent.tests.test_sandbox import seed
 
 
-pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux child-subreaper and /proc required")
+pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux process supervision required")
 
 
 class ExecOnlySandbox:
@@ -96,14 +96,21 @@ def payload(state, code, timeout=0.5):
     }
 
 
-@pytest.mark.parametrize("ending", ["natural", "timeout", "cancel", "close"])
-async def test_exec_only_supervision_reaps_detached_child(tmp_path, ending):
+@pytest.mark.parametrize("ending", ["natural", "crash", "timeout", "cancel", "close"])
+async def test_exec_only_supervision_leaves_task_children_for_sandbox_owner(tmp_path, ending):
     state, provider, workdir = make_session(tmp_path)
+    # Complete the tool before interruption so its detached service is already adopted.
+    tool = (
+        "import pathlib,subprocess,sys; "
+        "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],"
+        "start_new_session=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); "
+        "pathlib.Path('child.pid').write_text(str(p.pid))"
+    )
     code = (
-        "import subprocess,sys,time,pathlib; "
-        "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],start_new_session=True); "
-        "pathlib.Path('child.pid').write_text(str(p.pid)); "
-        + ("print('{}')" if ending == "natural" else "time.sleep(60)")
+        "import os,subprocess,sys,time,pathlib; "
+        f"subprocess.run([sys.executable,'-c',{tool!r}],check=True); "
+        "pathlib.Path('ready').touch(); "
+        + {"natural": "print('{}')", "crash": "raise SystemExit(7)"}.get(ending, "time.sleep(60)")
     )
     deadline = 0.5 if ending == "timeout" else 60
     task = state.task = asyncio.create_task(
@@ -111,7 +118,7 @@ async def test_exec_only_supervision_reaps_detached_child(tmp_path, ending):
     )
     try:
         async with asyncio.timeout(5):
-            while not (workdir / "child.pid").exists():
+            while not (workdir / "ready").exists():
                 await asyncio.sleep(0.01)
         if ending == "cancel":
             task.cancel()
@@ -125,17 +132,26 @@ async def test_exec_only_supervision_reaps_detached_child(tmp_path, ending):
         assert state.session.cleanup["cleanup_confirmed"] is True
         if ending == "timeout":
             assert state.session.cleanup["timed_out"] is True
-        with pytest.raises(ProcessLookupError):
-            os.kill(int((workdir / "child.pid").read_text()), 0)
+        child_pid = int((workdir / "child.pid").read_text())
+        assert Path(f"/proc/{child_pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
         assert provider.cancelled_launch is False
-        assert provider.deadline > deadline + 3 * 1
+        assert provider.deadline == pytest.approx(deadline + 3 + 30)
         await state.close(3)
         await state.close(3)
         assert provider.disconnected
         assert not Path(state.session.session_dir).exists()
+        # Resources still owns the detached service after every ending.
+        assert Path(f"/proc/{child_pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
     finally:
-        if not state.session.closed:
-            await state.close(3)
+        try:
+            if not state.session.closed:
+                await state.close(3)
+        finally:
+            if (workdir / "child.pid").exists():
+                try:
+                    os.kill(int((workdir / "child.pid").read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
 
 async def test_lost_launch_is_fenced_even_after_directory_retirement(tmp_path):
@@ -154,25 +170,24 @@ async def test_lost_launch_is_fenced_even_after_directory_retirement(tmp_path):
     assert not Path(state.session.session_dir).exists()
 
 
-async def test_failed_receipt_keeps_files_and_can_retry(tmp_path):
+async def test_terminal_failed_receipt_releases_borrowed_session(tmp_path):
     state, provider, _ = make_session(tmp_path)
     state.session.launch_started = True
     receipt = {
         "return_code": 1,
         "timed_out": False,
         "cleanup_confirmed": False,
-        "error": "descendants remain",
+        "error": "harness termination unconfirmed",
     }
     path = Path(state.session.session_dir) / "cleanup.json"
     path.write_text(json.dumps(receipt))
-    with pytest.raises(RuntimeError, match="cleanup was not confirmed"):
-        await state.close(3)
-    assert not provider.disconnected
-    assert path.exists()
-    receipt.update(cleanup_confirmed=True, error=None)
-    path.write_text(json.dumps(receipt))
     await state.close(3)
     assert provider.disconnected
+    assert state.session.closed
+    assert state.session.cleanup is None
+    assert state.session.termination_error.receipt == receipt
+    assert state.session.capture_error is state.session.termination_error
+    assert not path.exists()
 
 
 async def test_confirmed_cleanup_cancels_stuck_transport(tmp_path):

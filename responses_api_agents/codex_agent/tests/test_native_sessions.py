@@ -205,6 +205,8 @@ def test_http_native_flow_runs_codex_in_borrowed_sandbox(setup):
             assert payload["prompt"] == "Fix the code"
             assert payload["command"][0].endswith("/node/bin/node")
             assert "PATH" not in payload["env"]
+            assert "HOME" not in payload["env"]
+            assert not any(key.startswith("XDG_") for key in payload["env"])
             config = tomllib.loads(sandbox.files[f"{sandbox.directory}/home/.codex/config.toml"])
             assert (
                 config["model_providers"]["gym"]["base_url"]
@@ -644,16 +646,16 @@ async def test_close_cancels_active_codex_before_detaching(setup):
     sandbox.stop.assert_not_awaited()
 
 
-async def test_failed_cleanup_keeps_handles_and_prevents_close(setup):
+async def test_terminal_termination_failure_releases_borrowed_session(setup):
     agent, sandbox = setup
     sandbox.result["cleanup_confirmed"] = False
     request, session_id, task = await activate(agent, sandbox)
-    with pytest.raises(RuntimeError, match="cleanup was not confirmed"):
+    with pytest.raises(RuntimeError, match="harness termination was not confirmed"):
         await task
-    with pytest.raises(RuntimeError, match="cleanup was not confirmed"):
-        await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
-    assert agent._session_records[session_id].state is not None
-    sandbox.disconnect.assert_not_awaited()
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    assert agent._session_records[session_id].state is None
+    sandbox.disconnect.assert_awaited_once()
+    sandbox.stop.assert_not_awaited()
 
 
 async def test_disconnect_failure_retains_session_for_retry(setup):
@@ -1568,10 +1570,18 @@ async def test_adapter_uses_shared_supervisor_and_captures_real_events(local_ses
 async def test_close_confirms_cleanup_before_provider_cancellation(local_session):
     state, _ = local_session
     processes_path = Path(state.session.session_dir).parent / "children.json"
+    # A completed tool leaves a service adopted before close. A direct child of
+    # the still-running CLI would instead be an in-flight tool and must be stopped.
+    service_tool = (
+        "import subprocess,sys; "
+        "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'], "
+        "start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); "
+        "print(child.pid)"
+    )
     code = (
         "import json,os,subprocess,sys,time; from pathlib import Path; "
-        "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],start_new_session=True); "
-        f"Path({str(processes_path)!r}).write_text(json.dumps([os.getpid(),child.pid])); time.sleep(60)"
+        f"service_pid=int(subprocess.check_output([sys.executable,'-c',{service_tool!r}],text=True)); "
+        f"Path({str(processes_path)!r}).write_text(json.dumps([os.getpid(),service_pid])); time.sleep(60)"
     )
     payload = {
         "directory": state.session.session_dir,
@@ -1590,16 +1600,17 @@ async def test_close_confirms_cleanup_before_provider_cancellation(local_session
         processes.append(json.loads((Path(state.session.session_dir) / "runtime.json").read_text())["pid"])
         await state.close(3)
         assert state.session.closed and state.session.cleanup["cleanup_confirmed"] is True
-        assert all(not Path(f"/proc/{pid}").exists() for pid in processes)
+        cli_pid, service_pid, wrapper_pid = processes
+        assert all(not Path(f"/proc/{pid}").exists() for pid in (cli_pid, wrapper_pid))
+        assert Path(f"/proc/{service_pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
         state.session.sandbox.disconnect.assert_awaited_once()
         state.session.sandbox.stop.assert_not_awaited()
     finally:
-        if not state.session.closed:
-            for pid in processes:
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+        for pid in processes:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
         if not state.task.done():
             state.task.cancel()
         await asyncio.gather(state.task, return_exceptions=True)

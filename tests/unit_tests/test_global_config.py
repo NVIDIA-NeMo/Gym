@@ -1985,6 +1985,17 @@ contested: second_inner
         GlobalConfigDictParser.parse_global_config_dict_from_cli(None)
 
 
+def _discover_repo_configs(repo_root: Path, config_dirs: tuple[str, ...]) -> list[Path]:
+    # Hidden directories under a server hold local tool checkouts, such as the ether0 clone in `.ether0/`.
+    # YAML files in those checkouts are not Gym configs, so the sweep skips them.
+    return [
+        p
+        for d in config_dirs
+        for p in (repo_root / d).rglob("*.yaml")
+        if not any(part.startswith(".") for part in p.relative_to(repo_root / d).parts)
+    ]
+
+
 class TestConfigLoadErrors:
     """Actionable, fail-fast errors for bad/malformed/empty config_paths (no raw traceback)."""
 
@@ -2619,7 +2630,7 @@ class TestConfigLoadErrors:
         # config in the repo so this fails fast in CI instead.
         repo_root = Path(__file__).resolve().parents[2]
         config_dirs = ("responses_api_agents", "resources_servers", "nemo_gym/sandbox/providers")
-        config_paths = [p for d in config_dirs for p in (repo_root / d).rglob("*.yaml")]
+        config_paths = _discover_repo_configs(repo_root, config_dirs)
         assert config_paths, "no config files discovered -- sweep dirs may have moved"
 
         failures = []
@@ -2630,6 +2641,16 @@ class TestConfigLoadErrors:
                 failures.append(f"{path.relative_to(repo_root)}: {e}")
 
         assert not failures, "malformed config(s) found:\n" + "\n".join(failures)
+
+    def test_repo_config_sweep_skips_hidden_directories(self, tmp_path: Path) -> None:
+        server_dir = tmp_path / "resources_servers" / "my_server"
+        (server_dir / "configs").mkdir(parents=True)
+        (server_dir / "configs" / "my_server.yaml").write_text("a: 1\n")
+        workflow_dir = server_dir / ".my_tool" / ".github" / "workflows"
+        workflow_dir.mkdir(parents=True)
+        (workflow_dir / "lint-test.yaml").write_text("run: ${{ matrix.python }}\n")
+
+        assert _discover_repo_configs(tmp_path, ("resources_servers",)) == [server_dir / "configs" / "my_server.yaml"]
 
 
 class TestOpenAIVersionMatchesNemoGymConstraint:
