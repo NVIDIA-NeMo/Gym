@@ -7,6 +7,8 @@ does not require a shared cache mount or an extra mount for this helper.
 """
 
 import argparse
+import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -17,6 +19,7 @@ import tarfile
 import time
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import BinaryIO
 
@@ -128,6 +131,22 @@ def dump_warmup(
             archive.add(library, arcname=f"jit/{library.name}", recursive=False)
         for plan in sorted(startup_root.glob("startup_plan_*.json")):
             archive.add(plan, arcname=f"startup/{plan.name}", recursive=False)
+        compile_root = startup_root.parent / "torch_compile_cache"
+        for path in sorted(compile_root.rglob("*")):
+            if path.is_symlink():
+                raise ValueError(f"Unexpected symlink in Torch compilation cache: {path}")
+            if path.is_file():
+                archive.add(path, arcname=f"compile/{path.relative_to(compile_root)}", recursive=False)
+
+
+def compile_cache_group(name: str) -> str:
+    """Validate a relative cache path and identify its complete per-rank cache."""
+    if any(part in ("", ".", "..") for part in name.split("/")):
+        raise ValueError(f"Invalid Torch compilation cache path: {name}")
+    match = re.fullmatch(r"((?:[0-9a-f]{10}|torch_aot_compile/[0-9a-f]{64})/rank_[0-9]+_[0-9]+)/.+", name)
+    if match is None:
+        raise ValueError(f"Invalid Torch compilation cache path: {name}")
+    return match[1]
 
 
 def install_warmup(cache_root: Path, aot_root: Path, startup_root: Path, source: BinaryIO) -> list[Path]:
@@ -135,6 +154,8 @@ def install_warmup(cache_root: Path, aot_root: Path, startup_root: Path, source:
     caches = []
     libraries: dict[str, Path] = {}
     plans: dict[str, dict] = {}
+    compile_groups: dict[str, int] = {}
+    compile_root = startup_root.parent / "torch_compile_cache"
     # Each dump is a standalone tar stream. ignore_zeros reads past its end
     # markers into the next node's stream without buffering large libraries.
     with tarfile.open(fileobj=source, mode="r|", ignore_zeros=True) as archive:
@@ -146,6 +167,20 @@ def install_warmup(cache_root: Path, aot_root: Path, startup_root: Path, source:
             with contents:
                 if entry.name == "autotune.json":
                     caches.append(contents.read().decode())
+                elif entry.name.startswith("compile/"):
+                    relative = entry.name.removeprefix("compile/")
+                    group = compile_cache_group(relative)
+                    # Keep a whole rank's cache from one replica. Mixing its
+                    # metadata with another replica's binaries is unsafe.
+                    if group not in compile_groups:
+                        compile_groups[group] = len(caches)
+                        shutil.rmtree(compile_root / group, ignore_errors=True)
+                    if compile_groups[group] != len(caches):
+                        continue
+                    destination = compile_root / relative
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    with destination.open("wb") as output:
+                        shutil.copyfileobj(contents, output)
                 elif match := re.fullmatch(r"jit/([A-Za-z0-9_][A-Za-z0-9_.-]*)\.so", entry.name):
                     name = match[1]
                     if entry.size == 0:
@@ -186,6 +221,7 @@ def install_warmup(cache_root: Path, aot_root: Path, startup_root: Path, source:
     if plans:
         (cache_root / ".startup-plans-baked").write_text("Loaded automatically by sbatch_external_vllm.sh\n")
     print(f"Installed {len(libraries)} FlashInfer JIT modules and {len(plans)} startup plans", flush=True)
+    print(f"Installed {len(compile_groups)} Torch compilation caches (configuration/rank pairs)", flush=True)
     return list(libraries.values())
 
 
@@ -202,6 +238,75 @@ def verify_libraries(libraries: list[Path]) -> None:
         print(f"Verified baked FlashInfer module: {library.stem}", flush=True)
 
 
+def write_manifest(cache_root: Path, aot_root: Path, startup_root: Path, libraries: list[Path]) -> None:
+    """Record what was baked so later jobs can identify and check the actual image."""
+    path = cache_root / "warmed-manifest.json"
+    previous = json.loads(path.read_text()) if path.exists() else {}
+    names = set(previous.get("jit_modules", {})) | {library.stem for library in libraries}
+    manifest = {
+        "schema": 1,
+        "build_id": uuid.uuid4().hex,
+        "autotune": {
+            cache.parent.name: hashlib.sha256(cache.read_bytes()).hexdigest()
+            for cache in sorted(cache_root.glob("*/autotune_configs.json"))
+        },
+        "startup_plans": {
+            plan.name: hashlib.sha256(plan.read_bytes()).hexdigest()
+            for plan in sorted(startup_root.glob("startup_plan_*.json"))
+        },
+        "jit_modules": {name: (aot_root / name / f"{name}.so").stat().st_size for name in sorted(names)},
+        "torch_compile_files": {
+            str(path.relative_to(startup_root.parent / "torch_compile_cache")): path.stat().st_size
+            for path in sorted((startup_root.parent / "torch_compile_cache").rglob("*"))
+            if path.is_file()
+        },
+    }
+    path.write_text(json.dumps(manifest, indent=2) + "\n")
+
+
+def inspect_manifest(cache_root: Path, aot_root: Path, startup_root: Path) -> list[Path]:
+    """Check baked artifacts before startup, without loading CUDA or compiling."""
+    manifest = json.loads((cache_root / "warmed-manifest.json").read_text())
+    if manifest.get("schema") != 1 or not manifest.get("autotune"):
+        raise ValueError("Invalid warmed-container manifest; rebuild with SAVE_WARMED_CONTAINER")
+    for name, digest in manifest["autotune"].items():
+        if not re.fullmatch(r"[0-9a-f]{64}", name):
+            raise ValueError(f"Invalid baked autotune hash: {name}")
+        path = cache_root / name / "autotune_configs.json"
+        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            raise ValueError(f"Baked autotune cache missing or changed: {path}")
+    for name, digest in manifest["startup_plans"].items():
+        if not re.fullmatch(r"startup_plan_[0-9a-f]{16}\.json", name):
+            raise ValueError(f"Invalid baked startup-plan name: {name}")
+        path = startup_root / name
+        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            raise ValueError(f"Baked startup plan missing or changed: {path}")
+    libraries = []
+    for name, size in manifest["jit_modules"].items():
+        if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", name):
+            raise ValueError(f"Invalid baked module name: {name}")
+        path = aot_root / name / f"{name}.so"
+        if size <= 0 or not path.is_file() or path.stat().st_size != size:
+            raise ValueError(f"Baked FlashInfer module missing or changed: {path}")
+        libraries.append(path)
+    compile_files = manifest.get("torch_compile_files", {})
+    for name, size in compile_files.items():
+        compile_cache_group(name)
+        path = startup_root.parent / "torch_compile_cache" / name
+        if not path.is_file() or path.stat().st_size != size:
+            raise ValueError(f"Baked Torch compilation cache missing or changed: {path}")
+    print(
+        f"Warmed image build={manifest['build_id']}: {len(manifest['autotune'])} autotune caches, "
+        f"{len(manifest['startup_plans'])} startup plans, {len(libraries)} baked JIT modules, "
+        f"{len(compile_files)} Torch compilation files",
+        flush=True,
+    )
+    print(f"Baked autotune hashes: {', '.join(sorted(manifest['autotune']))}", flush=True)
+    print(f"Baked startup plans: {', '.join(sorted(manifest['startup_plans']))}", flush=True)
+    print(f"Baked JIT modules: {', '.join(sorted(manifest['jit_modules']))}", flush=True)
+    return libraries
+
+
 def main() -> None:
     """Run the requested readiness or cache-transfer operation."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -212,6 +317,8 @@ def main() -> None:
     dump = commands.add_parser("dump")
     dump.add_argument("--allow-empty", action="store_true")
     commands.add_parser("install")
+    commands.add_parser("inspect")
+    commands.add_parser("verify")
     args = parser.parse_args()
     if args.command == "wait":
         wait_for_engines(args.urls, args.timeout)
@@ -223,16 +330,27 @@ def main() -> None:
             sys.stdout.buffer,
             allow_empty=args.allow_empty,
         )
-    else:
+    elif args.command == "install":
         from flashinfer.jit import env as jit_env
 
         libraries = install_warmup(
             CACHE_ROOT, jit_env.FLASHINFER_AOT_DIR, VLLM_CACHE_ROOT / "startup_plan", sys.stdin.buffer
         )
         verify_libraries(libraries)
+        write_manifest(CACHE_ROOT, jit_env.FLASHINFER_AOT_DIR, VLLM_CACHE_ROOT / "startup_plan", libraries)
         # All collected libraries now live in the package. Leave no disposable
         # compilation workspace (or object files) in the exported image.
         shutil.rmtree(JIT_WORKSPACE, ignore_errors=True)
+    else:
+        # Locating the package does not import FlashInfer/PyTorch or initialize
+        # CUDA. Normal serving jobs only perform cheap file checks here.
+        spec = importlib.util.find_spec("flashinfer")
+        if spec is None or spec.origin is None:
+            raise RuntimeError("Warmed image is missing the FlashInfer Python package")
+        aot_root = Path(spec.origin).parent / "data" / "aot"
+        libraries = inspect_manifest(CACHE_ROOT, aot_root, VLLM_CACHE_ROOT / "startup_plan")
+        if args.command == "verify":
+            verify_libraries(libraries)
 
 
 if __name__ == "__main__":

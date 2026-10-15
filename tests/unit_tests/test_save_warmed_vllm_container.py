@@ -165,6 +165,59 @@ def test_warmup_archive_merges_kernels_and_startup_plans_from_all_nodes(helper: 
     assert (target / "autotune" / ".startup-plans-baked").is_file()
 
 
+def test_compile_caches_include_both_roles_without_mixing_replicas(helper: ModuleType, tmp_path: Path) -> None:
+    stream = io.BytesIO()
+    for node, config in enumerate(("a", "b", "a")):
+        root = tmp_path / str(node)
+        cache = root / "cache"
+        (cache / (config * 64)).mkdir(parents=True)
+        (cache / ".warmup-start").touch()
+        (cache / (config * 64) / "autotune_configs.json").write_text('{"tactic": 1}')
+        for group in (f"{config * 10}/rank_0_0", f"torch_aot_compile/{config * 64}/rank_0_0"):
+            directory = root / "torch_compile_cache" / group
+            directory.mkdir(parents=True)
+            (directory / "metadata").write_text(str(node))
+            (directory / f"binary-{node}").write_text(str(node))
+        helper.dump_warmup(cache, root / "jit", root / "startup", stream, allow_empty=False)
+    stream.seek(0)
+    target = tmp_path / "image"
+    helper.install_warmup(target / "cache", target / "aot", target / "startup", stream)
+    for node, config in enumerate(("a", "b")):
+        for group in (f"{config * 10}/rank_0_0", f"torch_aot_compile/{config * 64}/rank_0_0"):
+            directory = target / "torch_compile_cache" / group
+            assert (directory / "metadata").read_text() == str(node)
+            assert (directory / f"binary-{node}").read_text() == str(node)
+            assert not (directory / "binary-2").exists()
+
+
+@pytest.mark.parametrize("damaged", [None, "autotune", "startup", "jit", "compile"])
+def test_manifest_checks_exported_artifacts(helper: ModuleType, tmp_path: Path, damaged: str | None) -> None:
+    cache_root, aot_root, startup_root = (tmp_path / name for name in ("cache", "aot", "startup"))
+    paths = {
+        "autotune": cache_root / ("a" * 64) / "autotune_configs.json",
+        "startup": startup_root / f"startup_plan_{'b' * 16}.json",
+        "jit": aot_root / "checkpointing_ssu" / "checkpointing_ssu.so",
+        "compile": tmp_path / "torch_compile_cache" / ("c" * 10) / "rank_0_0" / "model",
+    }
+    for path in paths.values():
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"original")
+    helper.write_manifest(cache_root, aot_root, startup_root, [paths["jit"]])
+    if damaged:
+        paths[damaged].write_bytes(b"changed artifact")
+        with pytest.raises(ValueError, match="missing or changed"):
+            helper.inspect_manifest(cache_root, aot_root, startup_root)
+    else:
+        assert helper.inspect_manifest(cache_root, aot_root, startup_root) == [paths["jit"]]
+        original = json.loads((cache_root / "warmed-manifest.json").read_text())
+        # Rewarming may reuse every AOT library without producing any new JIT files.
+        helper.write_manifest(cache_root, aot_root, startup_root, [])
+        rebuilt = json.loads((cache_root / "warmed-manifest.json").read_text())
+        assert rebuilt["build_id"] != original["build_id"]
+        assert rebuilt["jit_modules"] == original["jit_modules"]
+        assert helper.inspect_manifest(cache_root, aot_root, startup_root) == [paths["jit"]]
+
+
 def test_headless_warmup_exports_kernels_without_autotuning(helper: ModuleType, tmp_path: Path) -> None:
     (tmp_path / ".warmup-start").touch()
     library = tmp_path / "jit/version/100a/cached_ops/module/module.so"
@@ -177,7 +230,10 @@ def test_headless_warmup_exports_kernels_without_autotuning(helper: ModuleType, 
         assert archive.getnames() == ["autotune.json", "jit/module.so"]
 
 
-@pytest.mark.parametrize("name", ["jit/../../outside.so", "startup/../../outside.json", "unexpected"])
+@pytest.mark.parametrize(
+    "name",
+    ["jit/../../outside.so", "startup/../../outside.json", "unexpected", "compile/../../outside"],
+)
 def test_warmup_archive_rejects_unexpected_paths(helper: ModuleType, tmp_path: Path, name: str) -> None:
     stream = io.BytesIO()
     with tarfile.open(fileobj=stream, mode="w") as archive:
@@ -185,7 +241,7 @@ def test_warmup_archive_rejects_unexpected_paths(helper: ModuleType, tmp_path: P
         entry.size = 1
         archive.addfile(entry, io.BytesIO(b"x"))
     stream.seek(0)
-    with pytest.raises(ValueError, match="Unexpected warmup archive entry"):
+    with pytest.raises(ValueError, match="Unexpected warmup archive entry|Invalid Torch compilation cache path"):
         helper.install_warmup(tmp_path / "cache", tmp_path / "aot", tmp_path / "startup", stream)
     assert not (tmp_path / "cache/.baked").exists()
 

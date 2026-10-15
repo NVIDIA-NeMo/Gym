@@ -112,6 +112,59 @@ getent() { printf '10.0.0.1 node0\n'; }
         self.assertEqual(status, 0, stderr)
         return stdout.rstrip("\0").split("\0")
 
+    def test_container_image_is_imported_for_each_job_attempt(self) -> None:
+        for warmup in (False, True):
+            env = {"SAVE_WARMED_CONTAINER": f"{self.workdir}/new.sqsh"} if warmup else {}
+            _, _, batch, _ = self.capture_submission(env=env)
+            launch = batch.split("server_step=$!", 1)[0]
+            names = []
+            for job, restart in (("12345", "0"), ("12346", "0"), ("12346", "1")):
+                with self.subTest(warmup=warmup, job=job, restart=restart):
+                    status, _, stderr = self.run_shell(
+                        "scontrol() { printf 'node0\\n'; }\n"
+                        "srun() { printf '%s\\0' \"$@\" >&2; }\n" + launch + "\nwait\n",
+                        env={
+                            "SLURM_JOB_ID": job,
+                            "SLURM_RESTART_COUNT": restart,
+                            "SLURM_JOB_NODELIST": "node0",
+                            "SLURM_SUBMIT_DIR": self.workdir,
+                            "vllm_command": "true",
+                        },
+                    )
+                    self.assertEqual(status, 0, stderr)
+                    args = stderr.rstrip("\0").split("\0")
+                    self.assertIn("--container-image=/test/image.sqsh", args)
+                    name = next(arg for arg in args if arg.startswith("--container-name="))
+                    self.assertEqual(name, f"--container-name=vllm-{'warm-' if warmup else ''}{job}-{restart}")
+                    names.append(name)
+            self.assertEqual(len(set(names)), 3)
+
+    def test_export_is_verified_in_fresh_container_before_publication(self) -> None:
+        destination = Path(self.workdir) / "published.sqsh"
+        _, _, batch, _ = self.capture_submission(env={"SAVE_WARMED_CONTAINER": str(destination)})
+        start = '    test -s "$cache_export_dir/warmed.sqsh"'
+        verify_and_publish = start + batch.split(start, 1)[1].split('    echo "Saved warmed', 1)[0]
+        export_dir = Path(self.workdir) / "export"
+        export_dir.mkdir()
+        (export_dir / "warmed.sqsh").write_bytes(b"image")
+        for success in (False, True):
+            with self.subTest(success=success):
+                status, _, stderr = self.run_shell(
+                    "set -euo pipefail\nnodes=(node0)\n"
+                    'srun() { printf \'%s\\0\' "$@" >&2; return "$VERIFY_STATUS"; }\n' + verify_and_publish,
+                    env={
+                        "cache_export_dir": str(export_dir),
+                        "warm_cache_helper": "helper code",
+                        "VERIFY_STATUS": "0" if success else "1",
+                    },
+                )
+                self.assertEqual(status, 0 if success else 1, stderr)
+                args = stderr.rstrip("\0").split("\0")
+                self.assertIn(f"--container-image={export_dir}/warmed.sqsh", args)
+                self.assertFalse(any(arg.startswith("--container-name") for arg in args))
+                self.assertEqual(args[-4:], ["python3", "-c", "helper code", "verify"])
+                self.assertEqual(destination.exists(), success)
+
     def test_eval_arguments_survive_generated_shell(self) -> None:
         """Both Gym stages receive structured overrides and shell characters literally."""
         overrides = (

@@ -55,7 +55,7 @@ CONTAINER=$CONTAINER
 MOUNTS=$MOUNTS
 VLLM_CONFIG=$VLLM_CONFIG
 SAVE_WARMED_CONTAINER="${SAVE_WARMED_CONTAINER:-}"
-warm_cache_helper=""
+warm_cache_helper=$(cat "$(dirname "${BASH_SOURCE[0]}")/save_warmed_vllm_container.py")
 if [[ -n "$SAVE_WARMED_CONTAINER" ]]; then
     if (( $# > 0 )); then
         echo "ERROR: SAVE_WARMED_CONTAINER runs startup only; omit evaluation arguments." >&2
@@ -67,7 +67,6 @@ if [[ -n "$SAVE_WARMED_CONTAINER" ]]; then
         echo "ERROR: Refusing to overwrite $SAVE_WARMED_CONTAINER" >&2
         exit 1
     fi
-    warm_cache_helper=$(cat "$(dirname "${BASH_SOURCE[0]}")/save_warmed_vllm_container.py")
 fi
 ENABLE_MOONCAKE=${ENABLE_MOONCAKE:-0}
 if [[ "$VLLM_MODE" == aggregated && "$ENABLE_MOONCAKE" != 0 ]]; then
@@ -270,6 +269,10 @@ export NCCL_NVLS_ENABLE=1
 export ENABLE_MOONCAKE=$ENABLE_MOONCAKE
 export VLLM_ENGINES_PER_NODE=$VLLM_ENGINES_PER_NODE
 source "$VLLM_CONFIG"
+
+if [[ -f /opt/super-vl-evals/flashinfer-autotune-cache/warmed-manifest.json ]]; then
+    python3 -c "\$warm_cache_helper" inspect
+fi
 
 baked_cache=/opt/super-vl-evals/flashinfer-autotune-cache
 if [[ -n "$SAVE_WARMED_CONTAINER" || -f "\$baked_cache/.baked" ]]; then
@@ -867,10 +870,14 @@ batch_command=$(cat <<EOF
 set -euo pipefail
 
 nodes=(\$(scontrol show hostnames "\$SLURM_JOB_NODELIST"))
-worker_container=container-on-node
+# Pyxis ignores --container-image when a named container already exists.
+# Scope names to a job attempt so a new warmed image is actually imported.
+container_attempt="\$SLURM_JOB_ID-\${SLURM_RESTART_COUNT:-0}"
+worker_container="vllm-\$container_attempt"
 if [[ -n "$SAVE_WARMED_CONTAINER" ]]; then
-    worker_container="vllm-warm-\$SLURM_JOB_ID"
+    worker_container="vllm-warm-\$container_attempt"
 fi
+echo "Starting vLLM image $CONTAINER in container \$worker_container"
 
 ALL_NODES="\${nodes[*]}" \
 srun --nodes=$NUM_NODES --ntasks=$NUM_NODES --ntasks-per-node=1 --kill-on-bad-exit=1 \
@@ -961,6 +968,12 @@ if [[ -n "$SAVE_WARMED_CONTAINER" ]]; then
         --container-save="\$cache_export_dir/warmed.sqsh" \
         python3 -c "\$warm_cache_helper" install < "\$cache_export_dir/caches.tar"
     test -s "\$cache_export_dir/warmed.sqsh"
+    # Verify the exported image in a fresh, unnamed container. Checking the
+    # mutable warmup rootfs alone cannot prove the squashfs contains the caches.
+    srun --overlap --exact --nodes=1 --ntasks=1 --cpus-per-task=1 --gpus=1 \
+        --nodelist="\${nodes[0]}" --container-image="\$cache_export_dir/warmed.sqsh" \
+        --no-container-mount-home --container-workdir=/ \
+        python3 -c "\$warm_cache_helper" verify
     # Publish only a successful export; a concurrent job must not overwrite it.
     ln "\$cache_export_dir/warmed.sqsh" "$SAVE_WARMED_CONTAINER"
     echo "Saved warmed vLLM image: $SAVE_WARMED_CONTAINER"
@@ -983,7 +996,7 @@ if (( $should_run_eval )); then
     ALL_NODES="\${nodes[*]}" \
     srun --overlap --exact --nodes=1 --ntasks=1 --cpus-per-task=\$SLURM_CPUS_ON_NODE --nodelist="\$EVAL_NODE" --gpus=0 \
         --container-image=$CONTAINER \
-        --container-name=eval-container-on-node \
+        --container-name="eval-\$container_attempt" \
         --container-mounts=$MOUNTS \
         --container-workdir="\$SLURM_SUBMIT_DIR" \
         --no-container-mount-home \
