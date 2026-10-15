@@ -4,9 +4,9 @@
 import json
 from pathlib import Path
 
+from environment_servers.nemo_user_sim.episode_contracts import UserSimEpisodeRequest
 from nemo_gym.task_materialization import materialize_task
 from resources_servers.nemo_user_sim.app import UserSimResourcesServerConfig, _row_digest, _validate_resolved_row
-from resources_servers.nemo_user_sim.episode_contracts import UserSimEpisodeRequest
 
 
 DATA_DIR = Path(__file__).parents[1] / "data"

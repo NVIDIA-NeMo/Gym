@@ -11,11 +11,11 @@ from pathlib import Path
 import pytest
 from omegaconf import OmegaConf
 
+from environment_servers.nemo_user_sim.episode_contracts import UserSimEpisodeRequest
 from environments.nemo_user_sim import prepare as prepare_module
 from nemo_gym.config_types import DatasetConfig
 from nemo_gym.task_materialization import materialize_task
 from resources_servers.nemo_user_sim.app import UserSimResourcesServerConfig
-from resources_servers.nemo_user_sim.episode_contracts import UserSimEpisodeRequest
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
