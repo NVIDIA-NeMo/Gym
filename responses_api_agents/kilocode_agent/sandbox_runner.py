@@ -16,6 +16,19 @@ def main() -> int:
     workdir = sys.argv[2]
     (directory / "runtime.json").write_text(json.dumps({"hostname": os.uname().nodename, "pid": os.getpid()}))
     payload = json.loads((directory / "input.json").read_text())
+    # Never accept an initialization receipt left by an earlier invocation.
+    (directory / "task-environment.ready").unlink(missing_ok=True)
+    # Save the task's home and XDG directories for the shell.env hook, before Kilo's private overrides.
+    task_home = os.environ.get("HOME") or str(Path.home())
+    task_env = {"HOME": task_home}
+    for key, suffix in (
+        ("XDG_DATA_HOME", ".local/share"),
+        ("XDG_CONFIG_HOME", ".config"),
+        ("XDG_CACHE_HOME", ".cache"),
+        ("XDG_STATE_HOME", ".local/state"),
+    ):
+        task_env[key] = os.environ.get(key) or str(Path(task_home) / suffix)
+    (directory / "task-env.json").write_text(json.dumps(task_env))
     env = dict(os.environ)
     # Do not inherit provider credentials or configuration overrides from the image.
     for key in list(env):

@@ -21,6 +21,7 @@ from responses_api_agents.kilocode_agent.observability import read_kilo_observat
 
 LOG = logging.getLogger(__name__)
 LOG_TAIL_BYTES = 4096
+TASK_ENVIRONMENT_PLUGIN = "task_environment.mjs"
 
 
 def _sandbox_prepare_command(workdir: str, directory: str) -> str:
@@ -70,6 +71,8 @@ class KiloArtifacts:
     # Runner identity in the sandbox, for checking that the harness did not run on the host.
     runner_hostname: str | None = None
     runner_pid: int | None = None
+    # Whether the plugin that gives tool shells the task's HOME and XDG directories initialized.
+    task_environment_ready: bool = False
 
 
 @dataclass
@@ -88,6 +91,11 @@ class KiloSandboxSession(AgentSessionState):
         """Invoke the CLI through the private Node, so the task's PATH stays untouched."""
         runtime = f"{self.session.session_dir}/runtime"
         return [f"{runtime}/node/bin/node", f"{runtime}/kilo/node_modules/@kilocode/cli/bin/kilo"]
+
+    @property
+    def task_environment_plugin(self) -> str:
+        """The plugin, as a kilo.json entry, that restores the task's HOME and XDG directories for tools."""
+        return PurePosixPath(self.session.session_dir, TASK_ENVIRONMENT_PLUGIN).as_uri()
 
     async def install_runtime(self, *, version: str, timeout: float) -> None:
         """Install pinned Node and Kilo into the session directory with the bundled installer."""
@@ -114,6 +122,9 @@ class KiloSandboxSession(AgentSessionState):
                 f"error_type={installed.error_type}): {details[-16000:]}"
             )
         await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/sandbox_runner.py")
+        await sandbox.upload(
+            Path(__file__).with_name(TASK_ENVIRONMENT_PLUGIN), f"{directory}/{TASK_ENVIRONMENT_PLUGIN}"
+        )
 
     async def stage_activation(self, *, command: list[str], config: str) -> SandboxCommand:
         """Stage the isolated provider config and CLI argv without altering task files."""
@@ -149,6 +160,10 @@ class KiloSandboxSession(AgentSessionState):
             runtime = json.loads(await read_text(self.session.sandbox, path=f"{directory}/runtime.json"))
         except Exception:
             runtime = None
+        try:
+            ready = await read_text(self.session.sandbox, path=f"{directory}/task-environment.ready")
+        except Exception:
+            ready = None
         hostname = runtime.get("hostname") if isinstance(runtime, dict) else None
         pid = runtime.get("pid") if isinstance(runtime, dict) else None
         log_tail = ""
@@ -191,6 +206,7 @@ class KiloSandboxSession(AgentSessionState):
             log_tail=log_tail,
             runner_hostname=hostname if isinstance(hostname, str) else None,
             runner_pid=pid if type(pid) is int else None,
+            task_environment_ready=ready == "ready\n",
         )
 
     async def _read_log_tail(self) -> str:

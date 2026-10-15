@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -98,7 +99,11 @@ def test_native_session_capture_join_enables_health_checks(
 ) -> None:
     session = state()
     session.session.artifacts = KiloArtifacts(
-        stdout="", stderr="", exit_code=0, observations=persisted("ses-native", status="completed")
+        task_environment_ready=True,
+        stdout="",
+        stderr="",
+        exit_code=0,
+        observations=persisted("ses-native", status="completed"),
     )
     observations = _make_model_server_agent()._sandbox_observations(session)
     call = ModelCallRecord(
@@ -138,7 +143,9 @@ def test_native_session_capture_join_enables_health_checks(
 
 def test_missing_database_reports_gap_and_keeps_sandbox_outcome() -> None:
     session = state()
-    session.session.artifacts = KiloArtifacts(stdout="", stderr="", exit_code=0, wall_time_s=1.5)
+    session.session.artifacts = KiloArtifacts(
+        task_environment_ready=True, stdout="", stderr="", exit_code=0, wall_time_s=1.5
+    )
     observations = _make_model_server_agent()._sandbox_observations(session)
     [sandbox] = observations.records
     assert (sandbox.provider, sandbox.outcome, sandbox.wall_time_s) == (
@@ -160,7 +167,11 @@ def test_root_invocation_preserves_failure_and_length_stop(exit_code: int, reaso
     session = state()
     event = {"type": "step_finish", "sessionID": "ses-native", "part": {"reason": reason}}
     session.session.artifacts = KiloArtifacts(
-        stdout=json.dumps(event), stderr="", exit_code=exit_code, observations=persisted("ses-native")
+        task_environment_ready=True,
+        stdout=json.dumps(event),
+        stderr="",
+        exit_code=exit_code,
+        observations=persisted("ses-native"),
     )
     observations = _make_model_server_agent()._sandbox_observations(session)
     root, child, sandbox = observations.records
@@ -175,7 +186,9 @@ async def test_base_seed_and_close_retry_contract_preserves_partial_output() -> 
     session = state()
     partial = persisted("ses-native")
     partial.records[0].conversation = [NeMoGymEasyInputMessage(role="assistant", content="partial answer")]
-    session.session.artifacts = KiloArtifacts(stdout="", stderr="", exit_code=None, observations=partial)
+    session.session.artifacts = KiloArtifacts(
+        task_environment_ready=True, stdout="", stderr="", exit_code=None, observations=partial
+    )
     session.session.cleanup = receipt(return_code=-15, timed_out=True)
     with patch.object(agent, "_seed_agent_session_state", return_value=session) as setup:
         seeded_request = request(marker=None)
@@ -376,7 +389,7 @@ async def test_sandbox_output_and_failures(
     agent = _make_model_server_agent(model="m", system_prompt="configured")
     session = state()
     session.session.cleanup = cleanup
-    artifacts = KiloArtifacts(stdout=stdout, stderr="diagnostic", exit_code=exit_code)
+    artifacts = KiloArtifacts(task_environment_ready=True, stdout=stdout, stderr="diagnostic", exit_code=exit_code)
     session.session.execute = AsyncMock(return_value=artifacts)
     body = NeMoGymResponseCreateParamsNonStreaming(input="hi", instructions="requested")
     if expected == "error":
@@ -393,6 +406,9 @@ async def test_sandbox_output_and_failures(
         config = json.loads(staged["config"])
         assert config["provider"]["nemo"]["options"]["baseURL"].endswith("/ng-rollout/rollout-1-a2/v1")
         assert config["provider"]["nemo"]["models"]["m"]["interleaved"]["field"] == "reasoning_content"
+        # --pure would skip config plugins, including the one that gives tool shells the task's HOME.
+        assert "--pure" not in staged["command"]
+        assert config["plugin"] == [session.task_environment_plugin]
 
 
 CONNECT_ERROR = 'level=ERROR message="stream error" error.error="AI_APICallError: Cannot connect to API"'
@@ -407,7 +423,9 @@ async def test_timeout_before_any_model_call_is_an_execution_failure(stdout: str
     agent = _make_model_server_agent(model="m")
     session = state()
     session.session.cleanup = receipt(return_code=-15, timed_out=True)
-    artifacts = KiloArtifacts(stdout=stdout, stderr="migration done", exit_code=None, log_tail=CONNECT_ERROR)
+    artifacts = KiloArtifacts(
+        task_environment_ready=True, stdout=stdout, stderr="migration done", exit_code=None, log_tail=CONNECT_ERROR
+    )
     session.session.execute = AsyncMock(return_value=artifacts)
     with pytest.raises(RuntimeError, match="before any model call completed.*Cannot connect to API"):
         await agent._sandbox_response(
@@ -435,7 +453,8 @@ async def test_runner_identity_reaches_response_metadata() -> None:
     agent = _make_model_server_agent(model="m", kilo_version="7.4.15")
     session = state()
     with patch(
-        f"{TRANSPORT}.read_text", side_effect=[TEXT, "", "0", json.dumps({"hostname": "sandbox-7", "pid": 42})]
+        f"{TRANSPORT}.read_text",
+        side_effect=[TEXT, "", "0", json.dumps({"hostname": "sandbox-7", "pid": 42}), "ready\n"],
     ):
         artifacts = await session.collect_artifacts()
     assert (artifacts.runner_hostname, artifacts.runner_pid) == ("sandbox-7", 42)
@@ -523,7 +542,12 @@ def test_timeout_and_cli_errors_have_explicit_sandbox_outcomes() -> None:
     session = state()
     session.session.cleanup = {"cleanup_confirmed": True, "return_code": -15, "error": None, "timed_out": True}
     session.session.artifacts = KiloArtifacts(
-        stdout="", stderr="", exit_code=None, wall_time_s=2, observations=persisted("ses-native")
+        task_environment_ready=True,
+        stdout="",
+        stderr="",
+        exit_code=None,
+        wall_time_s=2,
+        observations=persisted("ses-native"),
     )
     observations = _make_model_server_agent()._sandbox_observations(session)
     assert observations.records[-1].outcome == "timeout"
@@ -531,6 +555,7 @@ def test_timeout_and_cli_errors_have_explicit_sandbox_outcomes() -> None:
     assert observations.records[0].status == "incomplete"
     session.session.cleanup = None
     session.session.artifacts = KiloArtifacts(
+        task_environment_ready=True,
         stdout=json.dumps({"type": "error", "error": {"name": "APIError"}}),
         stderr="",
         exit_code=0,
@@ -597,6 +622,88 @@ async def test_snapshot_requires_confirmed_cleanup_before_any_io() -> None:
 def test_missing_worker_exit_code_is_a_coverage_gap() -> None:
     session = state()
     session.session.cleanup = receipt(return_code=None, timed_out=True)
-    session.session.artifacts = KiloArtifacts(stdout="", stderr="", exit_code=None, observations=persisted("ses"))
+    session.session.artifacts = KiloArtifacts(
+        task_environment_ready=True, stdout="", stderr="", exit_code=None, observations=persisted("ses")
+    )
     observations = _make_model_server_agent()._sandbox_observations(session)
     assert "worker_exit_code_unavailable" in {gap.code for gap in observations.gaps}
+
+
+@pytest.mark.parametrize("timed_out", [False, True])
+async def test_unconfirmed_task_environment_fails_instead_of_grading(timed_out: bool) -> None:
+    """Kilo continues when a plugin fails; its tools then wrote to Kilo's private HOME, not the task's."""
+    agent = _make_model_server_agent(model="m")
+    session = state()
+    session.session.cleanup = receipt(return_code=None if timed_out else 0, timed_out=timed_out)
+    artifacts = KiloArtifacts(stdout=TEXT, stderr="", exit_code=None if timed_out else 0)
+    session.session.execute = AsyncMock(return_value=artifacts)
+    session.session.artifacts = artifacts
+    with pytest.raises(RuntimeError, match="task-environment plugin"):
+        await agent._sandbox_response(
+            session, NeMoGymResponseCreateParamsNonStreaming(input="hi"), rollout_id="rollout-1-a2"
+        )
+    sandbox_record = agent._sandbox_observations(session).records[-1]
+    assert (sandbox_record.outcome, sandbox_record.error_type) == ("failed", "task_environment_unconfirmed")
+
+
+async def test_install_uploads_the_task_environment_plugin() -> None:
+    session = state()
+    sandbox = session.session.sandbox
+    sandbox.exec.return_value = SandboxExecResult(stdout="", stderr="", return_code=0)
+    await session.install_runtime(version="7.4.15", timeout=60)
+    uploaded = {
+        destination: Path(source).name for source, destination in (c.args for c in sandbox.upload.await_args_list)
+    }
+    plugin = f"{session.session.session_dir}/task_environment.mjs"
+    assert uploaded[plugin] == "task_environment.mjs"
+    assert session.task_environment_plugin == f"file://{plugin}"
+
+
+async def test_owned_sandbox_whose_start_cleanup_fails_is_retained_for_close() -> None:
+    """start() can allocate a sandbox and then fail; close must still be able to stop it."""
+    agent = _make_model_server_agent(kilo_version="7.4.15", sandbox_provider="sandbox")
+    sandbox = AsyncMock()
+    sandbox.sandbox_id = None
+    sandbox.start.side_effect = RuntimeError("initial upload failed")
+    with (
+        patch(f"{APP}.resolve_provider_config", return_value={}),
+        patch(f"{APP}.get_global_config_dict", return_value={}),
+        patch(f"{APP}.create_provider", return_value=AsyncMock()),
+        patch(f"{APP}.AsyncSandbox", return_value=sandbox),
+        patch.object(KiloSandboxSession, "close", AsyncMock(side_effect=RuntimeError("stop failed"))),
+        pytest.raises(AgentSessionSetupError) as retained,
+    ):
+        await agent._seed_agent_session_state(seed(borrowed=False))
+    assert isinstance(retained.value.state, KiloSandboxSession)
+    assert retained.value.state.session.sandbox is sandbox
+    assert retained.value.state.session.owns_sandbox
+
+
+async def test_cancelled_local_install_is_shared_not_restarted() -> None:
+    """Cancelling a waiter must not let a retry start a second installer on the same paths."""
+    agent = _make_model_server_agent(kilo_version="7.4.15")
+    release, calls = threading.Event(), []
+
+    def install(version: str) -> None:
+        calls.append(version)
+        release.wait(timeout=10)
+
+    class Stop(Exception):
+        pass
+
+    with (
+        patch(f"{APP}.ensure_kilo", side_effect=install),
+        patch.object(agent, "_workspace_root", side_effect=Stop),
+    ):
+        first = asyncio.create_task(agent._run_kilo("task", None))
+        while not calls:
+            await asyncio.sleep(0.01)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        second = asyncio.create_task(agent._run_kilo("task", None))
+        await asyncio.sleep(0.05)
+        release.set()
+        with pytest.raises(Stop):
+            await asyncio.wait_for(second, timeout=10)
+    assert calls == ["7.4.15"]

@@ -21,7 +21,8 @@ def read_kilo_observations(
     database: Path, *, fallback_invocation_id: str
 ) -> tuple[AgentObservationBundle, NeMoGymResponseUsage | None]:
     """Reuse the pinned session-tree contract; sum usage over persisted provider steps once."""
-    observations = parse_opencode_observations(database, fallback_invocation_id)
+    # A child that stopped on "length" still has a completion time; only a terminal finish completes it.
+    observations = parse_opencode_observations(database, fallback_invocation_id, require_terminal_finish=True)
     observations.source = "kilocode"
     usages = []
     incomplete = False

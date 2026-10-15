@@ -64,6 +64,7 @@ def family() -> list[dict]:
                             "id": sid + "-assistant",
                             "role": "assistant",
                             "time": {"created": 1000, "completed": 2000},
+                            "finish": "stop",
                         },
                         "parts": parts,
                     },
@@ -120,6 +121,7 @@ async def test_response_keeps_root_output_and_family_usage(tmp_path: Path) -> No
     observations, usage = read_kilo_observations(path, fallback_invocation_id="gym")
     session = state()
     artifacts = KiloArtifacts(
+        task_environment_ready=True,
         stdout=json.dumps({"type": "text", "sessionID": "root", "part": {"text": "root answer"}}),
         stderr="",
         exit_code=0,
@@ -224,3 +226,18 @@ def test_bash_outcome_follows_exit_code_not_lifecycle(tmp_path: Path, metadata: 
     assert bash.status == status
     assert bash.error_type == ("tool_error" if status == "failed" else None)
     assert ("tool_outcome_unavailable" in {g.code for g in observations.gaps}) is gap
+
+
+@pytest.mark.parametrize("finish,status", [("stop", "completed"), ("length", "incomplete")])
+def test_child_status_follows_its_terminal_finish(tmp_path: Path, finish: str, status: str) -> None:
+    """A child stopped on the output limit has a completion time, but did not complete its task."""
+    sessions = family()
+    sessions[1]["messages"][1]["info"]["finish"] = finish
+    path = tmp_path / "kilo.db"
+    database(path, sessions)
+    observations, _ = read_kilo_observations(path, fallback_invocation_id="gym")
+    statuses = {
+        record.invocation_id: record.status for record in observations.records if isinstance(record, AgentInvocation)
+    }
+    assert statuses["child"] == status
+    assert statuses["grandchild"] == "completed"

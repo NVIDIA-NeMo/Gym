@@ -222,6 +222,9 @@ def _runtime_failure(artifacts: KiloArtifacts, cleanup: CleanupReceipt | None) -
         return "Kilo activation ended without a cleanup receipt"
     if cleanup["error"]:
         return f"Kilo supervision failed: {cleanup['error']}"
+    if not artifacts.task_environment_ready:
+        # Kilo continues when a plugin fails to load; its tools then ran with Kilo's private HOME.
+        return "Kilo did not confirm its task-environment plugin"
     if cleanup["timed_out"]:
         return None
     if cleanup["return_code"] not in (0, None):
@@ -240,6 +243,8 @@ def _run_outcome(
     error, _ = _scan_run_events(artifacts.stdout)
     if error is not None:
         return "failed", _error_name(error)
+    if not artifacts.task_environment_ready:
+        return "failed", "task_environment_unconfirmed"
     if cleanup is not None and cleanup["timed_out"]:
         return "timeout", "agent_timeout"
     if cancelled:
@@ -364,8 +369,7 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
     config: KiloCodeAgentConfig
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
-    _local_install_lock: asyncio.Lock = PrivateAttr(default_factory=asyncio.Lock)
-    _local_runtime_ready: bool = PrivateAttr(default=False)
+    _local_setup_task: asyncio.Task[None] | None = PrivateAttr(default=None)
 
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
@@ -400,18 +404,16 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
         if session_dir.startswith(workdir.rstrip("/") + "/") or workdir.startswith("/tmp/nemo-gym-kilo-sessions"):
             raise HTTPException(422, "Kilo task workdir must be disjoint from its session directory")
         provider = create_provider(resolve_provider_config(provider_ref, get_global_config_dict()))
-        try:
-            if owns_sandbox:
-                sandbox = AsyncSandbox(provider)
-                settings = self.config.sandbox_config.copy()
-                settings.setdefault("workdir", workdir)
-                settings.setdefault("ttl_s", self.config.setup_timeout + self.config.timeout + 600)
-                await sandbox.start(SandboxSpec(**settings))
-            else:
+        if owns_sandbox:
+            sandbox = AsyncSandbox(provider)
+        else:
+            try:
                 sandbox = await AsyncSandbox.connect(body.sandbox_access.connection.descriptor, provider=provider)
-        except BaseException:
-            await provider.aclose()
-            raise
+            except BaseException:
+                await provider.aclose()
+                raise
+        # Retain the session before starting an owned sandbox: start() can allocate it and then fail, and a
+        # retained session lets close stop it.
         state = KiloSandboxSession(
             request=body,
             provider_name=provider.name,
@@ -426,6 +428,11 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
         )
         try:
             if owns_sandbox:
+                settings = self.config.sandbox_config.copy()
+                settings.setdefault("workdir", workdir)
+                settings.setdefault("ttl_s", self.config.setup_timeout + self.config.timeout + 600)
+                await sandbox.start(SandboxSpec(**settings))
+                state.sandbox_id = sandbox.sandbox_id
                 # Providers need not create the workdir; borrowed task preparation belongs to Resources.
                 workspace = await sandbox.exec(f"mkdir -p -- {shlex.quote(workdir)}", cwd="/", timeout_s=30)
                 if workspace.return_code != 0 or workspace.error_type:
@@ -631,10 +638,18 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
         Returns (stdout, stderr, exit_code, timed_out, observations, usage). Observations and the database's
         usage are read only for rollout-prefixed calls, the only ones that report them.
         """
-        async with self._local_install_lock:
-            if not self._local_runtime_ready:
-                await asyncio.to_thread(ensure_kilo, self.config.kilo_version)
-                self._local_runtime_ready = True
+        # Share one installation across concurrent local calls. Cancelling a caller must not release
+        # another caller to start a second installer against the same Node/npm paths.
+        if self._local_setup_task is None:
+            self._local_setup_task = asyncio.create_task(asyncio.to_thread(ensure_kilo, self.config.kilo_version))
+        setup_task = self._local_setup_task
+        try:
+            await asyncio.shield(setup_task)
+        except Exception:
+            # A failed installation can be retried; a cancelled caller leaves the shared task running.
+            if self._local_setup_task is setup_task:
+                self._local_setup_task = None
+            raise
         prompt = instruction if not system_prompt else f"{system_prompt}\n\n{instruction}"
         work_dir = self._workspace_root()
         project_dir = self._repo_dir(work_dir)
@@ -771,12 +786,17 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
         )
         command = self._build_command(Path(state.session.workdir), prompt)
         command[:1] = state.kilo_argv
+        # --pure only skips plugins named in kilo.json; here that would skip the task-environment plugin.
+        command.remove("--pure")
+        config = self._build_kilo_config(self._resolve_model_base_url(rollout_id))
+        # Kilo's own HOME and XDG directories stay private; tool shells get the task's through this hook.
+        config.setdefault("plugin", []).append(state.task_environment_plugin)
         async with self.sem:
             state.started_at = perf_counter()
             artifacts = await state.session.execute(
                 stage_activation=lambda: state.stage_activation(
                     command=command,
-                    config=json.dumps(self._build_kilo_config(self._resolve_model_base_url(rollout_id))),
+                    config=json.dumps(config),
                 ),
                 collect=state.collect_artifacts,
                 timeout=self.config.timeout,

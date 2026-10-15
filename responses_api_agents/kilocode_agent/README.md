@@ -192,6 +192,13 @@ that private Node, so the task's `PATH` and runtimes are untouched, and nothing 
 task workdir except the agent's own edits. No Kilo CLI is installed on the agent-server host for
 sandbox sessions.
 
+Kilo's own home, config, data and cache directories stay in the session directory, but its tool
+shells use the task's `HOME` and `XDG_*` directories, as the verifier does: a plugin
+([task_environment.mjs](task_environment.mjs)) restores them for every shell command. Sandbox runs
+therefore omit `--pure`, which would skip that plugin; codebase indexing stays off because
+`kilo.json` names no indexing plugin. Kilo only logs a plugin that fails to load, so the plugin writes
+a receipt after it initializes, and a run without that receipt fails instead of being verified.
+
 Kilo borrows the sandbox when Resources passes `sandbox_access`, and never destroys it. Otherwise
 set `sandbox_provider` / `sandbox_config` for an agent-owned sandbox (default workdir `/app`); it
 is destroyed at close, so verifiers that inspect the repository need a Resources-owned sandbox.
