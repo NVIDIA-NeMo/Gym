@@ -49,16 +49,6 @@ def _extra_roots() -> List[Path]:
     return [Path(d) for d in os.environ.get(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, "").split(os.pathsep) if d]
 
 
-def _install_root_is_site_dir() -> bool:
-    """Whether ``PARENT_DIR`` is a site-packages directory (wheel install) rather than a source checkout."""
-    if PARENT_DIR.name in ("site-packages", "dist-packages"):
-        return True
-    import site
-
-    site_dirs = {Path(d).resolve() for d in [*site.getsitepackages(), site.getusersitepackages()]}
-    return PARENT_DIR.resolve() in site_dirs
-
-
 def component_search_roots(*, sys_path: List[Path] | None = None) -> List[Path]:
     """Ordered, de-duplicated roots to look for a Gym component/artifact under: the ``NEMO_GYM_EXTRA_ROOTS``
     roots first, then cwd and the install root (``PARENT_DIR``, the built-ins) last.
@@ -68,18 +58,21 @@ def component_search_roots(*, sys_path: List[Path] | None = None) -> List[Path]:
     looks for components — used by path resolution (:func:`_resolve_under_cwd_or_install`), module imports
     (:func:`_augment_sys_path`) and the ``gym list``/``gym search`` discovery functions.
 
-    ``sys_path`` weaves existing ``sys.path`` entries in for import precedence: they slot in after the extra
-    roots but before cwd/built-ins. Any entry that is itself cwd is dropped so cwd always comes after them.
-    The install root is moved last as well, except in a wheel install: there it *is* ``site-packages``, and
-    moving it behind cwd would let any package in the working directory shadow every installed dependency
-    (e.g. a checkout of ``numpy`` in cwd breaks ``import numpy``), so it keeps its ``sys.path`` position.
+    ``sys_path`` weaves existing import paths in after the extra roots. Editable installs move cwd and the
+    install root to the end. Non-editable installs preserve existing entry order and append cwd and the
+    install root only when missing: moving a shared install root behind cwd would shadow dependencies,
+    while demoting an explicit server path could break sibling imports. File lookup (no ``sys_path``)
+    remains extra roots, cwd, then the install root in either mode.
     """
-    # cwd and the built-ins are searched last; drop them from the woven sys.path entries so they can't get
-    # pinned mid-path. A site-packages install root (wheel install) is the exception and stays where it is.
-    trailing = [Path.cwd()] if _install_root_is_site_dir() else [Path.cwd(), PARENT_DIR]
-    trailing_resolved = {root.resolve() for root in trailing}
-    middle = [entry for entry in (sys_path or []) if entry.resolve() not in trailing_resolved]
-    candidates = [*_extra_roots(), *middle, *trailing, PARENT_DIR]
+    if _is_editable_install:
+        # Keep source-checkout precedence: cwd and built-ins are searched last, in that order.
+        trailing_resolved = {Path.cwd().resolve(), PARENT_DIR.resolve()}
+        middle = [entry for entry in (sys_path or []) if entry.resolve() not in trailing_resolved]
+    else:
+        # Wheels and --target installs share their root with dependencies. Preserve their position,
+        # including server directories explicitly placed ahead of them via PYTHONPATH.
+        middle = list(sys_path or [])
+    candidates = [*_extra_roots(), *middle, Path.cwd(), PARENT_DIR]
     roots: List[Path] = []
     seen: set[Path] = set()
     for root in candidates:
@@ -122,10 +115,10 @@ def _resolve_under_cwd_or_install(
 def _augment_sys_path() -> None:
     """Put the artifact roots on ``sys.path`` so plugin modules (e.g. a benchmark's ``prepare.py``) import.
 
-    Extra roots go to the front and cwd/``PARENT_DIR`` (the built-ins) to the end, so import precedence
-    matches file resolution under :func:`component_search_roots` (a plugin shadows a same-named Gym module).
-    In a wheel install ``PARENT_DIR`` is ``site-packages`` and keeps its position ahead of cwd, so the working
-    directory cannot shadow installed dependencies.
+    Extra roots go to the front. Editable installs move cwd/``PARENT_DIR`` (the built-ins) to the end;
+    non-editable installs preserve existing import order and append those roots only when missing.
+    Use explicit extra roots (or ``--search-dir``) to override both files and modules of an installed
+    built-in, since cwd-first file lookup does not necessarily match non-editable import precedence.
     Idempotent; reads ``NEMO_GYM_EXTRA_ROOTS`` at call time, so it can be re-run after ``--search-dir`` folds
     roots into the env (see nemo_gym.cli.main).
     """
