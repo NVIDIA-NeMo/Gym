@@ -47,6 +47,8 @@ VLLM_COMMON_ARGS=(
     --mamba-ssm-cache-dtype float16
     --enable-mamba-cache-stochastic-rounding
     --mamba-cache-philox-rounds 5
+    # ReplaySSM reserves two FP32 working states plus replay rings per request.
+    # Cap each engine at 512 sequences below: 1024 left no memory for KV blocks.
     --enable-mamba-fp32-active-state
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'
     --enable-expert-parallel
@@ -63,7 +65,7 @@ VLLM_COMMON_ARGS=(
 # @bxyu-nvidia: Lease duration is set to 180s since to give nodes a chance to pick up the request. Helps with resilience.
 # @bxyu-nvidia: We set num_speculative_tokens_per_batch_size to 0 here since prefill does not need to speculate any tokens, it just needs to know that we are speculating.
 VLLM_PREFILL_ARGS=(
-    --speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":${NUM_SPECULATIVE_TOKENS},\"num_speculative_tokens_per_batch_size\":[[1,1024,0]]}"
+    --speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":${NUM_SPECULATIVE_TOKENS},\"num_speculative_tokens_per_batch_size\":[[1,512,0]]}"
     # MRV2 captures a one-token graph for the zero-draft schedule, but Mamba's
     # full-graph capture requires 1 + num_speculative_tokens. Keep prefill
     # piecewise until that dynamic-speculation capture path supports Mamba.
@@ -94,7 +96,7 @@ VLLM_PREFILL_ARGS=(
     }'
     --max-cudagraph-capture-size 1200
     --max-num-batched-tokens 33920
-    --max-num-seqs 1024
+    --max-num-seqs 512
 )
 # @bxyu-nvidia: We set "enable_lookup": false for the Mooncake store connector because the prefill worker handles the prefix cache lookup and decode just needs to receive the transferred kv cache.
 VLLM_DECODE_ARGS=(
@@ -131,11 +133,10 @@ VLLM_DECODE_ARGS=(
             72, 96, 144, 192, 240, 288, 336, 384,
             480, 576, 672, 768,
             864, 960, 1056, 1152, 1248, 1344, 1440, 1536,
-            1728, 1920, 2112, 2304, 2496, 2688, 2880, 3072,
-            3456, 3840, 4224, 4608, 4992, 5376, 5760, 6144
+            1728, 1920, 2112, 2304, 2496, 2688, 2880, 3072
         ]
     }'
-    --max-cudagraph-capture-size 6144
+    --max-cudagraph-capture-size 3072
     --max-num-batched-tokens 33920
-    --max-num-seqs 1024
+    --max-num-seqs 512
 )
