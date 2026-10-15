@@ -22,7 +22,7 @@ from time import monotonic, time
 from traceback import format_exc
 from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple
 
-from fastapi import Request
+from fastapi import HTTPException, Request
 from pydantic import BaseModel, Field, JsonValue, PrivateAttr
 from swebench.harness.run_evaluation import make_test_spec
 from swebench.harness.test_spec.test_spec import LATEST, TestSpec
@@ -455,6 +455,15 @@ Stderr:
 
         test_spec = self._make_test_spec(body)
 
+        session_id = request.session[SESSION_ID_KEY]
+        original_sandbox = None
+        if not self.config.is_verifying_golden_patch:
+            original_sandbox = self._checkpointer().get(session_id)
+            if original_sandbox is None:
+                # A resent /verify after the first one graded and stopped the sandbox, or a session this process
+                # never seeded: grading an empty patch would record reward 0 as if the model had changed nothing.
+                raise HTTPException(409, f"session {session_id!r} has no sandbox to extract the patch from")
+
         verifier_sandbox_lifecycle_started_at = monotonic()
         eval_sandbox = await self._create_sandbox(test_spec)
         eval_sandbox_start_time_taken = monotonic() - verifier_sandbox_lifecycle_started_at
@@ -463,11 +472,7 @@ Stderr:
         if self.config.is_verifying_golden_patch:
             model_patch = body.patch
         else:
-            session_id = request.session[SESSION_ID_KEY]
             try:
-                original_sandbox = self._checkpointer().get(session_id)
-                if original_sandbox is None:
-                    raise KeyError(f"session {session_id!r} has no sandbox")
                 original_workdir = (await eval_sandbox.exec("pwd")).stdout.strip()
                 model_patch_result = await original_sandbox.exec(f"cd {original_workdir} && git --no-pager diff")
                 model_patch = model_patch_result.stdout

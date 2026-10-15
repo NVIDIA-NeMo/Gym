@@ -337,6 +337,24 @@ async def test_retiring_the_attempt_stops_its_sandbox_and_keeps_its_snapshots(
     assert len(provider.snapshots) == 1 and ops(provider, "delete_snapshot") == []
 
 
+async def test_a_verify_for_a_session_without_a_sandbox_is_refused_not_graded(
+    provider: SnapshotProvider, tmp_path: Path
+) -> None:
+    _, client = make_server(tmp_path / "state")
+    async with client:
+        await client.post("/ng-rollout/r-a1/seed_session", json=SEED)
+        first = await client.post("/ng-rollout/r-a1/verify", json=VERIFY)
+        creates_after_first = len(ops(provider, "create"))
+        # The client resends a /verify whose reply it lost: the first one already stopped the agent's sandbox.
+        again = await client.post("/ng-rollout/r-a1/verify", json=VERIFY)
+
+    assert first.status_code == 200 and first.json()["reward"] == 1, first.text
+    # An empty patch would grade as reward 0, as if the model had changed nothing; the resend fails instead.
+    assert again.status_code == 409, again.text
+    assert "has no sandbox" in again.json()["detail"]
+    assert len(ops(provider, "create")) == creates_after_first, "a refused verify starts no grading sandbox"
+
+
 async def test_sandbox_access_names_the_sessions_sandbox_and_checkout(
     provider: SnapshotProvider, tmp_path: Path
 ) -> None:
