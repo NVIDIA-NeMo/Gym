@@ -90,7 +90,6 @@ def test_minimax_overlay_repoints_the_default_judge_proxy(judge_env, monkeypatch
 
 
 def test_standalone_config_resolves_to_a_rubric_server_with_the_default_judge(judge_env, monkeypatch):
-    monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
     config = _resolved(STANDALONE)
     gdpval = _gdpval_config(config)
 
