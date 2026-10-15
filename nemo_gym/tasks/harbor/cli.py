@@ -344,6 +344,9 @@ def prepare_target(
     else:
         folder = Path(target).expanduser().resolve()
     taskset = folder.name
+    # Dataset-level files (dataset.toml, the recorded image configurations, the built images) live at the
+    # dataset root, which is where the loader and the environment server read them from for nested tasks.
+    dataset_root = folder.parent if is_task_folder(folder) else folder
     exclude = exclude or []
 
     def selected(task_id: str) -> bool:
@@ -353,7 +356,8 @@ def prepare_target(
     # before the tasks load; a base image the registry cannot resolve stops the preparation here. Only
     # the selected tasks' images are recorded, so an image a left-out task uses cannot stop it. A target
     # that is itself a task folder always loads (discover_tasks raises for it); selection applies after.
-    # A missing or unreadable target is reported by discover_tasks below, in its own words. Images are
+    # A missing or unreadable target is reported by discover_tasks below, in its own words. Duplicate
+    # task IDs are rejected by the folder walk itself, before any registry or docker work. Images are
     # recorded for the platform the sandboxes run, ``builds.platform`` (linux/amd64 unless set), as the
     # built ones are.
     images = (
@@ -398,7 +402,7 @@ def prepare_target(
         raise _no_runnable_task(folder, errors)
     # A Compose file that does not resolve leaves its task out the same way; the others' images are still recorded.
     unresolved: dict[str, str] = {}
-    images = record_compose_images(tasks, tasks[0].path.parent, skipped=unresolved, platform=build.platform)
+    images = record_compose_images(tasks, dataset_root, skipped=unresolved, platform=build.platform)
     if unresolved:
         for task_id, reason in unresolved.items():
             errors[task_id] = HarborTaskError(reason)
@@ -818,7 +822,7 @@ def summarize_validation(
     sidecar. A result supersedes failures for the same task/repeat, but never another repeat.
     ``expected`` contains the collector's selected, expanded input rows (after limit/repeats).
     """
-    lines = ["task_id\tstatus\treward"]
+    lines = ["task_id\tstatus\treward\tverify_s\tnetwork"]
     ok = True
     selected = {_validation_key(row): row for row in expected} if expected is not None else None
     results = {_validation_key(row): row for row in _validation_rows(rollouts)}
@@ -834,33 +838,39 @@ def summarize_validation(
             ok = False
             failure = failures.get(key)
             if failure is None:
-                lines.append(f"{label}\tmissing result\t-")
+                lines.append(f"{label}\tmissing result\t-\t-\t-")
             else:
                 message = failure.get("_ng_failure_message") or failure.get("_ng_failure_class") or "failed"
-                lines.append(f"{label}\tfailed: {str(message)[:120]}\t-")
+                lines.append(f"{label}\tfailed: {str(message)[:120]}\t-\t-\t-")
             continue
         oracle = _dig(row, "response", "metadata", "oracle")
         reward = row.get("reward")
+        # What the verifier cost and used, per task: its wall time and the network it ran under.
+        verify_s = row.get("verifier_seconds")
+        verify_note = (
+            f"{verify_s:.1f}" if isinstance(verify_s, (int, float)) and not isinstance(verify_s, bool) else "-"
+        )
+        network = row.get("verifier_network") or "-"
         if row.get("mask_sample"):
             ok = False
-            lines.append(f"{label}\tmasked ({row.get('failure_kind')})\t-")
+            lines.append(f"{label}\tmasked ({row.get('failure_kind')})\t-\t{verify_note}\t{network}")
         elif oracle == "unvalidated":
             # A selected reference solution disappearing is not a successful validation.
             if selected is not None:
                 ok = False
-            lines.append(f"{label}\tunvalidated (no solution/)\t-")
+            lines.append(f"{label}\tunvalidated (no solution/)\t-\t-\t-")
         else:
             if oracle == "failed" or not isinstance(reward, (int, float)) or not math.isfinite(reward) or reward < 1.0:
                 ok = False
             kind = row.get("failure_kind")
             note = f" ({kind})" if kind else ""
-            lines.append(f"{label}\toracle {oracle or 'ran'}{note}\t{reward}")
+            lines.append(f"{label}\toracle {oracle or 'ran'}{note}\t{reward}\t{verify_note}\t{network}")
     if selected is None and not rollouts.is_file():
         ok = False
-        lines.append(f"-\tno rollouts written at {rollouts}\t-")
+        lines.append(f"-\tno rollouts written at {rollouts}\t-\t-\t-")
     for task_id in unvalidated:
-        lines.append(f"{task_id}\tunvalidated (no solution/)\t-")
+        lines.append(f"{task_id}\tunvalidated (no solution/)\t-\t-\t-")
     for task_id, reason in (skipped or {}).items():
         ok = False
-        lines.append(f"{task_id}\tskipped: {reason}\t-")
+        lines.append(f"{task_id}\tskipped: {reason}\t-\t-\t-")
     return ValidationReport(text="\n".join(lines), ok=ok)

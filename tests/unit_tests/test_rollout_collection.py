@@ -9852,3 +9852,18 @@ class TestLiveHealthEvaluation:
         # The row was saved and the progress accounting for it had already run when the await was reached.
         assert len(Path(tmp_path / "output.jsonl").read_bytes().splitlines()) >= 1
         assert "rollouts for `my_agent`" in seen_at_await[0]
+
+
+def test_episode_record_forwards_the_failure_step_for_multi_step_environments() -> None:
+    """A Harbor multi-step failure names the step that failed; the sidecar row carries it next to the stage."""
+    import nemo_gym.rollout_collection as rollout_collection
+
+    reply = {
+        "episode_id": {"rollout_id": "r", "attempt": 0},
+        "task_id": {"taskset": "ds", "task_id": "a"},
+        "failure": {"failure_reason": "setup.sh failed", "terminal": True, "stage": "seed", "step": "step-2"},
+    }
+    record = rollout_collection._episode_record(reply)
+    assert record["_ng_failure_stage"] == "seed" and record["_ng_failure_step"] == "step-2"
+    del reply["failure"]["step"]
+    assert "_ng_failure_step" not in rollout_collection._episode_record(reply)

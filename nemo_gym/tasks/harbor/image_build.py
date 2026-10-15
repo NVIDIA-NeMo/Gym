@@ -133,6 +133,7 @@ from nemo_gym.tasks.harbor.task import (
     HarborTaskConfig,
     effective_verifier_environment,
     is_task_folder,
+    iter_task_folders,
     read_built_images,
     read_image_configs,
     record_lock,
@@ -383,10 +384,10 @@ def plan_builds(folder: Path, *, select: Callable[[str], bool] | None = None) ->
     """
     folder = Path(folder).resolve()
     single = is_task_folder(folder)
-    children = [folder] if single else sorted(child for child in folder.iterdir() if child.is_dir())
+    children = [folder] if single else iter_task_folders(folder)
     parent = folder.parent if single else folder
     try:
-        # dataset.toml sits beside the task folders, or one level up for datasets/<name>/tasks/.
+        # dataset.toml sits at the dataset root, which is also where the tasks were discovered from.
         dataset = read_dataset_config(parent)
     except ValueError:
         return []
@@ -398,7 +399,7 @@ def plan_builds(folder: Path, *, select: Callable[[str], bool] | None = None) ->
     # The digests of tests/ contexts: their `verifier` service is the separate verifier's image, not a sidecar.
     verifier_digests: set[str] = set()
     for child in children:
-        if not is_task_folder(child) or (select is not None and not select(child.name)):
+        if select is not None and not select(child.name):
             continue
         dockerfile = child / DOCKERFILE
         context = dockerfile.parent

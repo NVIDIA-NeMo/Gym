@@ -28,3 +28,5 @@ class SandboxAccess(BaseModel):
 
     connection: DirectSandboxConnection
     workdir: str
+    # The user the harness runs every command as (Harbor's ``[agent].user``); ``None`` keeps the sandbox's default.
+    user: str | int | None = None

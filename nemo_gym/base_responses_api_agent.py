@@ -84,6 +84,9 @@ class AgentSeedSessionRequest(BaseModel):
     task_id: TaskId
     tool_accesses: list[ToolAccess] = Field(default_factory=list)
     sandbox_access: SandboxAccess | None = None
+    # The task's own time budget for the harness's work, in seconds (Harbor's ``[agent].timeout_sec``).
+    # The environment server enforces it; a harness that reads it can stop cleanly and return a partial turn.
+    agent_timeout_sec: float | None = Field(default=None, gt=0)
 
     @field_validator("tool_accesses")
     @classmethod
