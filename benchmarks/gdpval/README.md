@@ -278,8 +278,11 @@ gym eval reverify \
 In rubric mode, a verification without a usable judgement goes to the failures
 file as `judge_failed`, and `gym eval reverify --judge-failed-only` judges it
 again. In comparison mode a judging failure is a retryable environment-server
-failure; a retry, in process with `multistage.retry_inprocess` or on `--resume`,
-judges the persisted deliverable again without the policy.
+failure. In a multi-stage run, a retry (in process with
+`multistage.retry_inprocess`, or on `--resume`) judges the persisted deliverable
+again without the policy. A single-pass `--resume` runs the policy again and
+replaces the persisted deliverable, and `--judge-failed-only` does not cover
+comparison mode.
 
 To collect deliverables without judging them, for example for a reference set,
 set `++gdpval_resources_server.resources_servers.gdpval.judge_deliverables=false`.
