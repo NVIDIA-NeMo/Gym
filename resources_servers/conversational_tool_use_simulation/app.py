@@ -1444,8 +1444,8 @@ Return type in JSON Schema format: {return_type}
         """Return a usable opening user message when the simulator could not produce one.
 
         Prefers the scenario's ``reason_for_contact`` and falls back to a generic
-        request. The reason is recorded in ``source_artifacts`` so the rate of
-        simulator failures stays visible without invalidating the trajectory.
+        request. The reason is recorded in ``source_artifacts`` so each fallback
+        stays visible in the rollout result without invalidating the trajectory.
         """
         text = (state.customer_scenario.reason_for_contact or "").strip()
         if not text or TRAJECTORY_COMPLETE_INDICATOR in text or AGENT_TRANSFER_INDICATOR in text:
