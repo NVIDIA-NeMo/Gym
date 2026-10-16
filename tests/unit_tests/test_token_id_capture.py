@@ -38,6 +38,7 @@ import pytest
 from fastapi import Body, Request
 from fastapi.responses import RedirectResponse, Response
 from fastapi.testclient import TestClient
+from openai.types.responses.response import IncompleteDetails
 from pydantic import BaseModel, ValidationError
 
 from nemo_gym.base_responses_api_model import (
@@ -86,6 +87,7 @@ from nemo_gym.token_id_capture.lineage import (
     RolloutLineage,
 )
 from nemo_gym.token_id_capture.protocols import TokenCaptureFrozenError, TokenCaptureRetiredError, TokenSource
+from nemo_gym.token_id_capture.records import response_finish_reason
 from nemo_gym.token_id_capture.store import make_token_store
 
 
@@ -157,6 +159,46 @@ def test_extract_token_fields_rejects_multiple_carriers():
     }
     with pytest.raises(ValueError, match="multiple response items"):
         extract_token_fields({"output": [carrier, carrier]})
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        # A chat payload states the reason directly.
+        ({"choices": [{"finish_reason": "length", "message": {}}]}, "length"),
+        ({"choices": [{"finish_reason": "tool_calls", "message": {}}]}, "tool_calls"),
+        ({"choices": [{"message": {}}]}, None),
+        # A Responses payload states only ``incomplete_details``; map it back to the chat vocabulary.
+        (
+            {
+                "output": [{"type": "message"}],
+                "status": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens"},
+            },
+            "length",
+        ),
+        (
+            {
+                "output": [{"type": "message"}],
+                "status": "incomplete",
+                "incomplete_details": {"reason": "content_filter"},
+            },
+            "content_filter",
+        ),
+        ({"output": [{"type": "message"}, {"type": "function_call"}], "status": "completed"}, "tool_calls"),
+        ({"output": [{"type": "message"}]}, "stop"),
+        ({"output": [{"type": "message"}], "status": "incomplete"}, None),
+        # An Anthropic Messages payload states ``stop_reason``; map it back through the converter's table.
+        ({"type": "message", "role": "assistant", "content": [], "stop_reason": "max_tokens"}, "length"),
+        ({"type": "message", "role": "assistant", "content": [], "stop_reason": "tool_use"}, "tool_calls"),
+        ({"type": "message", "role": "assistant", "content": [], "stop_reason": "end_turn"}, "stop"),
+        ({"type": "message", "role": "assistant", "content": [], "stop_reason": "refusal"}, "content_filter"),
+        ({"type": "message", "role": "assistant", "content": [], "stop_reason": None}, None),
+        ({}, None),
+    ],
+)
+def test_response_finish_reason_speaks_the_chat_vocabulary_for_every_served_payload_shape(payload, expected):
+    assert response_finish_reason(payload) == expected
 
 
 def test_token_entry_rejects_mismatched_generation_arrays():
@@ -993,8 +1035,29 @@ class _CapturingModel(SimpleResponsesAPIModel):
         return _training_chat_completion()
 
 
-def _server(global_config_dict, *, num_workers: int | None = None) -> SimpleResponsesAPIModel:
-    return _CapturingModel(
+class _TruncatedModel(_CapturingModel):
+    """Serve calls whose generation was cut at the output-token budget, on both dialects."""
+
+    async def responses(
+        self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
+    ) -> NeMoGymResponse:
+        # The Responses converter reports a chat ``length`` stop this way.
+        return _training_response("cut off").model_copy(
+            update={"status": "incomplete", "incomplete_details": IncompleteDetails(reason="max_output_tokens")}
+        )
+
+    async def chat_completions(
+        self, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
+    ) -> NeMoGymChatCompletion:
+        completion = _training_chat_completion()
+        completion.choices[0].finish_reason = "length"
+        return completion
+
+
+def _server(
+    global_config_dict, *, num_workers: int | None = None, model_cls: type = _CapturingModel
+) -> SimpleResponsesAPIModel:
+    return model_cls(
         config=BaseResponsesAPIModelConfig(
             host="0.0.0.0",
             port=8099,
@@ -1039,6 +1102,8 @@ def test_responses_call_captures_tokens_joined_to_eval_record(tmp_path):
     tokens = TokenCaptureStore(tmp_path).read_entries("task0-roll0")
     assert len(tokens) == 1
     assert tokens[0].generation_token_ids == GTOKS and tokens[0].prompt_token_ids == PTOKS
+    # A completed Responses payload without tool calls records the chat reason ``stop``.
+    assert tokens[0].finish_reason == "stop"
 
     records = read_model_call_records(CaptureStore(tmp_path), "task0-roll0")
     assert len(records) == 1
@@ -1098,6 +1163,24 @@ def test_chat_completions_call_captures_tokens(tmp_path):
     assert resp.status_code == 200
     tokens = TokenCaptureStore(tmp_path).read_entries("task0-roll2")
     assert len(tokens) == 1 and tokens[0].generation_token_ids == GTOKS
+    assert tokens[0].finish_reason == "stop"
+
+
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        ("/v1/responses", {"input": "hi"}),
+        ("/v1/chat/completions", {"messages": [{"role": "user", "content": "hi"}]}),
+    ],
+)
+def test_a_call_cut_at_the_output_budget_records_the_chat_finish_reason(tmp_path, path, body):
+    """Record ``length`` whether the served payload is a chat completion or its Responses conversion."""
+    client = TestClient(_server(_both_enabled(tmp_path), model_cls=_TruncatedModel).setup_webserver())
+    resp = client.post(f"/ng-rollout/task0-rollCut/training-token-capture{path}", json=body)
+    assert resp.status_code == 200
+    tokens = TokenCaptureStore(tmp_path).read_entries("task0-rollCut")
+    assert len(tokens) == 1
+    assert tokens[0].finish_reason == "length"
 
 
 def test_tokens_captured_even_when_eval_capture_disabled(tmp_path):
@@ -2728,6 +2811,23 @@ def test_omitted_optional_schema_fields_use_safe_defaults():
     assert entry.prompt_is_delta is False
     assert entry.prefix_requested is False
     assert entry.prefix_supplied is False
+    assert entry.finish_reason is None
+
+
+def test_the_finish_reason_round_trips_through_the_store_when_stated(tmp_path):
+    """Read back a stated finish reason; a record written without the field reads as ``None``."""
+    store = TokenCaptureStore(tmp_path)
+    store.append(TokenEntry(**_entry_fields(finish_reason="length")))
+    # An older writer never wrote the field.
+    older = TokenEntry(**_entry_fields()).model_dump(mode="json")
+    older["model_call_id"] = "older"
+    del older["finish_reason"]
+    with store.path_for("r0").open("ab") as handle:
+        handle.write(orjson.dumps(older) + b"\n")
+
+    by_id = {entry.model_call_id: entry for entry in store.read_entries("r0")}
+    assert by_id["c1"].finish_reason == "length"
+    assert by_id["older"].finish_reason is None
 
 
 def test_a_record_newer_than_this_reader_is_refused():
@@ -2948,3 +3048,69 @@ def test_the_fingerprint_still_ignores_tool_results():
     assert assistant_fingerprint(turn) == assistant_fingerprint(
         turn + [{"type": "function_call_output", "output": "42 files"}]
     )
+
+
+def _chat_tool_turn(call_id: str, arguments: str) -> dict:
+    return {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [{"id": call_id, "type": "function", "function": {"name": "Bash", "arguments": arguments}}],
+    }
+
+
+def test_lineage_falls_back_to_tool_call_ids_when_the_harness_rewrites_arguments():
+    """Claude Code echoes tool-call ids verbatim but rewrites arguments (drops `cd /testbed && `, adds defaults)."""
+    lineage = RolloutLineage()
+    ctx = [{"role": "user", "content": "fix it"}]
+    lineage.record("call-1", ctx + [_chat_tool_turn("t1", '{"command": "cd /testbed && pytest"}')], [1, 2, 3], "d1")
+    rewritten = ctx + [
+        _chat_tool_turn("t1", '{"command": "pytest", "description": "run tests"}'),
+        {"role": "tool", "tool_call_id": "t1", "content": "1 passed"},
+    ]
+    assert not lineage.by_fingerprint.get(assistant_fingerprint(rewritten))
+    resolved = lineage.resolve(rewritten)
+    assert resolved.status == ParentResolutionStatus.RESOLVED
+    assert resolved.match is not None and resolved.match.model_call_id == "call-1"
+
+
+def test_lineage_tool_call_id_fallback_still_requires_the_recorded_context():
+    lineage = RolloutLineage()
+    lineage.record(
+        "call-1", [{"role": "user", "content": "fix it"}, _chat_tool_turn("t1", '{"a": 1}')], [1, 2, 3], "d1"
+    )
+    compacted = [{"role": "user", "content": "summary"}, _chat_tool_turn("t1", '{"a": 2}')]
+    assert lineage.resolve(compacted).status == ParentResolutionStatus.UNRESOLVED
+
+
+def test_lineage_tool_call_id_fallback_refuses_ambiguous_ids():
+    lineage = RolloutLineage()
+    ctx = [{"role": "user", "content": "q"}]
+    lineage.record("call-a", ctx + [_chat_tool_turn("dup", "{}")], [1], "da")
+    lineage.record("call-b", ctx + [_chat_tool_turn("dup", "{}")], [2], "db")
+    assert lineage.resolve(ctx + [_chat_tool_turn("dup", '{"x": 1}')]).status == ParentResolutionStatus.UNRESOLVED
+
+
+def test_lineage_add_entry_indexes_responses_function_call_ids():
+    lineage = RolloutLineage()
+    ctx = [{"role": "user", "content": "q"}]
+    entry = TokenEntry(
+        rollout_id="r0",
+        model_call_id="c-fc",
+        prompt_token_ids=[1, 2],
+        generation_token_ids=[3],
+        generation_log_probs=[-0.1],
+        output_items=[{"type": "function_call", "call_id": "fc1", "name": "Edit", "arguments": '{"path": "a"}'}],
+    )
+    stamp_lineage(entry, None, parent_resolution=ParentResolutionStatus.ROOT)
+    lineage.add_entry(stamp_continuation(entry, ctx))
+    echoed = ctx + [
+        {
+            "type": "function_call",
+            "call_id": "fc1",
+            "name": "Edit",
+            "arguments": '{"path": "a", "replace_all": false}',
+        },
+        {"type": "function_call_output", "call_id": "fc1", "output": "ok"},
+    ]
+    resolved = lineage.resolve(echoed)
+    assert resolved.status == ParentResolutionStatus.RESOLVED and resolved.match.model_call_id == "c-fc"

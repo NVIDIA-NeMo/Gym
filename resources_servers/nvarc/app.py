@@ -189,6 +189,10 @@ class NVARCVerifyResponse(BaseVerifyResponse):
 
 
 class NVARCResourcesServer(SimpleResourcesServer):
+    # Each verification runs the candidate code in a short-lived subprocess: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     config: NVARCResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:

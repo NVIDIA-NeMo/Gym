@@ -18,7 +18,10 @@ import functools
 import glob as glob_module
 import json
 import logging
+import math
 import os
+import re
+import signal
 import tempfile
 import time
 import warnings
@@ -31,8 +34,10 @@ from datetime import timedelta
 from difflib import get_close_matches
 from itertools import repeat
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Callable, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
+import aiohttp
 import orjson
 from aiohttp import ClientError
 from omegaconf import DictConfig, OmegaConf
@@ -42,6 +47,7 @@ from tqdm.asyncio import tqdm
 from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.base_responses_api_model import (
+    await_model_call_capture_quiescence,
     clear_model_call_captures_for_rollouts,
     merge_model_call_capture_into_record,
     model_call_capture_dirs_from_config,
@@ -104,7 +110,9 @@ from nemo_gym.telemetry.gym_metrics import (
     UNREGISTERED_FAILURE_KIND,
     record_rollout_completed,
     record_rollout_health,
+    record_rollout_reward,
 )
+from nemo_gym.telemetry.observer import MeteredAdmission, count_resident, driver_metrics, observe_event_loop
 from nemo_gym.telemetry.setup import is_metrics_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 
@@ -114,6 +122,7 @@ from nemo_gym.server_utils import (
     ServerClient,
     get_response_json,
     raise_for_status,
+    request,
 )
 from nemo_gym.server_utils import (
     setup_server_client as setup_server_client_utils,
@@ -1048,7 +1057,11 @@ class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLICon
     )
     responses_create_params: Dict[str, Any] = Field(
         default_factory=dict,
-        description="Overrides for the responses_create_params e.g. temperature, max_output_tokens, etc.",
+        description=(
+            "Overrides for responses_create_params, e.g. temperature or max_output_tokens. "
+            "Metadata mappings merge by key with overrides winning; metadata=null clears row metadata. "
+            "Other fields and individual metadata values are replaced."
+        ),
     )
     disable_aggregation: bool = Field(
         default=False,
@@ -1226,6 +1239,210 @@ class E2ERolloutCollectionConfig(SharedRolloutCollectionConfig):
 NG_ELAPSED_KEY = "elapsed_seconds"
 
 
+class RunTimingReport:
+    """Health table for a collection whose rollouts have a per-rollout wall-clock limit.
+
+    A per-rollout limit (e.g. BrowseComp's ``rollout_timeout_s``) makes the score depend on the
+    deployment as well as the model: if the servers are too few or too slow, rollouts start late,
+    queue for the GPU, or run into the limit, and are scored 0 for reasons unrelated to the model.
+    This table shows whether a run stayed clear of that, so a score from a starved run is not
+    mistaken for a model result. Each row compares this run with a healthy bound:
+
+    - start coverage: rollouts started within ``start_within_s`` and all started by
+      ``all_started_within_s`` (late starts eat into a fixed job allocation);
+    - rollouts ended by the wall-clock limit (above the bound, the limit is shaping the score);
+    - rollouts longer than ``long_rollout_s`` (an early sign that the limit is too tight);
+    - summed waiting / running requests on the model servers, when their URLs are given
+      (requests queue instead of being served).
+
+    Diagnostic only: it prints a warning per unhealthy row and never stops the run.
+    """
+
+    def __init__(
+        self,
+        *,
+        total: int,
+        start_within_s: float,
+        start_min_fraction: float,
+        all_started_within_s: Optional[float],
+        long_rollout_s: Optional[float],
+        long_rollout_max_fraction: float,
+        timed_out_max_fraction: float,
+        max_waiting_ratio: Optional[float] = None,
+    ) -> None:
+        self._total = total
+        self._max_waiting_ratio = max_waiting_ratio
+        self._waiting_sum = 0.0
+        self._running_sum = 0.0
+        self._peak_ratio = 0.0
+        self._queue_samples = 0
+        self._start_within_s = start_within_s
+        self._start_min_fraction = start_min_fraction
+        self._all_started_within_s = all_started_within_s if all_started_within_s is not None else start_within_s
+        self._long_rollout_s = long_rollout_s
+        self._long_rollout_max_fraction = long_rollout_max_fraction
+        self._timed_out_max_fraction = timed_out_max_fraction
+        self._t0 = time.monotonic()
+        self._start_offsets: List[float] = []
+        self._durations: List[float] = []
+        self._timed_out = 0
+
+    def record_start(self, now: float) -> None:
+        self._start_offsets.append(now - self._t0)
+
+    def record_queue(self, waiting: float, running: float) -> None:
+        """One sample of requests waiting and running, summed over every server."""
+        self._queue_samples += 1
+        self._waiting_sum += waiting
+        self._running_sum += running
+        if running > 0:
+            self._peak_ratio = max(self._peak_ratio, waiting / running)
+
+    def record_result(self, result: Mapping[str, Any], seconds: float) -> None:
+        self._durations.append(seconds)
+        if result.get("timed_out") or result.get(NG_FAILURE_CLASS_KEY) == "timeout_exceeded":
+            self._timed_out += 1
+
+    def table(self) -> str:
+        elapsed = time.monotonic() - self._t0
+        started = len(self._start_offsets)
+        all_started = started >= self._total
+        window_min, all_by_min = self._start_within_s / 60, self._all_started_within_s / 60
+        rows: List[Tuple[str, str, str, bool]] = []
+        if all_started:
+            started_by = max(self._start_offsets) / 60
+            rows.append(
+                (
+                    "all rollouts started by",
+                    f"{started_by:.1f} min",
+                    f"<= {all_by_min:.0f} min",
+                    started_by <= all_by_min,
+                )
+            )
+        else:
+            # Judged only once the deadline has passed; until then the count is progress, not a failure.
+            rows.append(
+                (
+                    "rollouts started so far",
+                    f"{started}/{self._total}",
+                    f"all by {all_by_min:.0f} min",
+                    elapsed <= self._all_started_within_s,
+                )
+            )
+        within = sum(1 for o in self._start_offsets if o <= self._start_within_s) / self._total if self._total else 0.0
+        window_open = not all_started and elapsed <= self._start_within_s
+        rows.append(
+            (
+                f"started within {window_min:.0f} min" + (" (window open)" if window_open else ""),
+                f"{within:.1%}",
+                f">= {self._start_min_fraction:.0%}",
+                window_open or within >= self._start_min_fraction,
+            )
+        )
+        n = len(self._durations)
+        if n:
+            timed_out = self._timed_out / n
+            rows.append(
+                (
+                    "hit wall-clock limit",
+                    f"{timed_out:.1%} ({self._timed_out})",
+                    f"<= {self._timed_out_max_fraction:.0%}",
+                    timed_out <= self._timed_out_max_fraction,
+                )
+            )
+            if self._long_rollout_s is not None:
+                long = sum(1 for d in self._durations if d > self._long_rollout_s) / n
+                rows.append(
+                    (
+                        f"longer than {self._long_rollout_s / 60:.0f} min",
+                        f"{long:.1%}",
+                        f"<= {self._long_rollout_max_fraction:.0%}",
+                        long <= self._long_rollout_max_fraction,
+                    )
+                )
+        if self._queue_samples and self._max_waiting_ratio is not None:
+            ratio = self._waiting_sum / self._running_sum if self._running_sum else 0.0
+            rows.append(
+                (
+                    "waiting / running requests",
+                    f"{ratio:.2f} (peak {self._peak_ratio:.2f})",
+                    f"<= {self._max_waiting_ratio:.2f}",
+                    ratio <= self._max_waiting_ratio,
+                )
+            )
+        width = max(len(r[0]) for r in rows)
+        lines = ["Run timing summary (this run | healthy):"]
+        for label, value, healthy, ok in rows:
+            lines.append(f"  {label:<{width}} : {value:>12} | {healthy}" + ("" if ok else "   <-- WARNING"))
+        return "\n".join(lines)
+
+
+_NO_SIGTERM_HOOK = object()
+
+
+def _sum_vllm_queue(metrics_text: str) -> Tuple[float, float]:
+    waiting = running = 0.0
+    for line in metrics_text.splitlines():
+        if line.startswith("vllm:num_requests_waiting"):
+            waiting += float(line.rsplit(" ", 1)[1])
+        elif line.startswith("vllm:num_requests_running"):
+            running += float(line.rsplit(" ", 1)[1])
+    return waiting, running
+
+
+async def _sample_server_queues(report: "RunTimingReport", base_urls: List[str], interval_s: float) -> None:
+    """Poll every vLLM server's /metrics and record requests waiting and running, summed over servers."""
+    metrics_urls = [re.sub(r"/v1/?$", "", u.rstrip("/")) + "/metrics" for u in base_urls]
+    while True:
+        waiting = running = 0.0
+        reached = 0
+        for url in metrics_urls:
+            try:
+                resp = await request("GET", url, _max_num_tries=1, timeout=aiohttp.ClientTimeout(total=5))
+                w, r = _sum_vllm_queue(await resp.text())
+                waiting, running, reached = waiting + w, running + r, reached + 1
+            except Exception:
+                continue
+        if reached:
+            report.record_queue(waiting, running)
+        await asyncio.sleep(interval_s)
+
+
+def _print_on_sigterm(render: Callable[[], str]) -> Any:
+    """Print render() when Slurm's time limit sends SIGTERM, then terminate as before.
+
+    Python's default SIGTERM action exits without unwinding, so nothing printed in a ``finally``
+    survives a time-limit kill. Returns the previous handler for ``_restore_sigterm``, or
+    ``_NO_SIGTERM_HOOK`` when no hook could be installed.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+        previous = signal.getsignal(signal.SIGTERM)
+
+        def _on_sigterm() -> None:
+            try:
+                print(render(), flush=True)
+            finally:
+                loop.remove_signal_handler(signal.SIGTERM)
+                signal.signal(signal.SIGTERM, previous if previous is not None else signal.SIG_DFL)
+                os.kill(os.getpid(), signal.SIGTERM)
+
+        loop.add_signal_handler(signal.SIGTERM, _on_sigterm)
+        return previous
+    except (NotImplementedError, RuntimeError, ValueError):
+        return _NO_SIGTERM_HOOK
+
+
+def _restore_sigterm(previous: Any) -> None:
+    if previous is _NO_SIGTERM_HOOK:
+        return
+    try:
+        asyncio.get_running_loop().remove_signal_handler(signal.SIGTERM)
+        signal.signal(signal.SIGTERM, previous if previous is not None else signal.SIG_DFL)
+    except (NotImplementedError, RuntimeError, ValueError):
+        pass
+
+
 class DispatchLatencyTracker:
     """Per-task latency observed by the dispatcher, and the drain margin from it.
 
@@ -1303,6 +1520,42 @@ class DispatchLatencyTracker:
                 "These wrote no row and will be re-dispatched on resume."
             )
         return "\n".join(lines)
+
+
+def _record_output_write(started: float, serialized: bytes) -> None:
+    """Record how long one output row took to write and how large it was, while metrics are exporting."""
+    observer = driver_metrics()
+    if observer is not None:
+        observer.write_duration.record((perf_counter() - started) * 1000.0)
+        observer.write_bytes.record(len(serialized) + 1)
+
+
+def _record_rollout_shape(row: Mapping[str, Any], result: Mapping[str, Any]) -> None:
+    """Record the size of one completed rollout, while metrics are exporting.
+
+    Turns and tool calls come from the rollout's ``ng_perf`` when rollout observability produced it.
+    Without it, tool calls are counted from the final response's ``function_call`` items, and turns are not recorded.
+    """
+    observer = driver_metrics()
+    if observer is None:
+        return
+    try:
+        input_items = (row.get("responses_create_params") or {}).get("input")
+        if isinstance(input_items, list):
+            observer.input_items.record(len(input_items))
+        output_items = ((result.get("response") or {}).get("output")) or []
+        observer.output_items.record(len(output_items))
+        ng_perf = result.get(NG_PERF_KEY) or {}
+        if "num_turns" in ng_perf:
+            observer.turns.record(ng_perf["num_turns"])
+        tool_calls = ng_perf.get("num_tool_calls")
+        if tool_calls is None:
+            tool_calls = sum(
+                1 for item in output_items if isinstance(item, dict) and item.get("type") == "function_call"
+            )
+        observer.tool_calls.record(tool_calls)
+    except Exception:
+        logger.debug("Could not record rollout shape metrics", exc_info=True)
 
 
 def _dispatch_drained_result(remaining_s: float, margin_s: Optional[float]) -> Dict[str, Any]:
@@ -1683,6 +1936,71 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         ),
     )
 
+    dispatch_start_report_within_s: Optional[float] = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Enable the run timing summary: the share of rollouts started within this many seconds of "
+            "collection start, the last start, the share stopped by a per-rollout wall-clock limit and "
+            "the share of long rollouts, printed every timing_summary_interval_s, at the end and on "
+            "SIGTERM. Diagnostic only, nothing is aborted."
+        ),
+    )
+    dispatch_start_report_min_fraction: float = Field(
+        default=0.99,
+        ge=0,
+        le=1,
+        description="Share of rollouts expected to have started within dispatch_start_report_within_s; below it the report is a WARNING.",
+    )
+    dispatch_all_started_within_s: Optional[float] = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Seconds into collection by which every rollout is expected to have started; the timing "
+            "summary warns when the last start is later. Defaults to dispatch_start_report_within_s."
+        ),
+    )
+    server_queue_metrics_urls: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "Only used when dispatch_start_report_within_s is set. "
+            "vLLM base URLs (the policy model's base_url list) whose /metrics the run timing summary polls "
+            "for requests waiting and running, summed over servers."
+        ),
+    )
+    server_queue_max_waiting_ratio: float = Field(
+        default=0.1,
+        description="Healthy ceiling for summed waiting / summed running requests over the run.",
+    )
+    server_queue_sample_interval_s: float = Field(default=30.0, gt=0, description="Seconds between /metrics polls.")
+    long_rollout_s: Optional[float] = Field(
+        default=None,
+        ge=0,
+        description="Rollouts running longer than this many seconds are counted in the end-of-run timing summary.",
+    )
+    long_rollout_max_fraction: float = Field(
+        default=0.05,
+        ge=0,
+        le=1,
+        description="Share of rollouts longer than long_rollout_s above which the timing summary warns.",
+    )
+    timing_summary_interval_s: Optional[float] = Field(
+        default=600,
+        ge=0,
+        description=(
+            "Print the run timing summary every this many seconds while rollouts are collected. "
+            "Requires dispatch_start_report_within_s; 0 or null disables the periodic print."
+        ),
+    )
+    timed_out_max_fraction: float = Field(
+        default=0.01,
+        ge=0,
+        le=1,
+        description=(
+            "Share of rollouts ended by a per-rollout wall-clock limit (result field `timed_out`, or "
+            "failure class `timeout_exceeded`) above which the timing summary warns."
+        ),
+    )
     retry_terminal_timeouts: bool = Field(
         default=False,
         description=(
@@ -1728,7 +2046,10 @@ _MAX_FAILURE_BODY_CHARS = 2000
 
 
 def _record_rollout_outcome(result: Dict[str, Any], outcome: str, dispatch_name: str) -> None:
-    """One ``gym.rollout.completed_total`` increment, after the driver wrote or omitted the attempt."""
+    """One ``gym.rollout.completed_total`` increment, after the driver wrote or omitted the attempt.
+
+    A scored attempt with a numeric reward is also counted in ``gym.rollout.rewarded_total``.
+    """
     if not is_span_group_enabled(GymSpanGroup.ROLLOUT):
         return
     failure_class = result.get(NG_FAILURE_CLASS_KEY)
@@ -1742,6 +2063,15 @@ def _record_rollout_outcome(result: Dict[str, Any], outcome: str, dispatch_name:
         failure_kind=_metric_failure_kind(failure_kind),
         failure_type=failure_type if isinstance(failure_type, str) else None,
     )
+    reward = result.get("reward")
+    # A result without a numeric reward is unscored, not a zero.
+    if (
+        outcome == "scored"
+        and isinstance(reward, (int, float))
+        and not isinstance(reward, bool)
+        and math.isfinite(reward)
+    ):
+        record_rollout_reward(float(reward), dispatch_name=dispatch_name, masked=bool(result.get(MASK_SAMPLE_KEY)))
 
 
 def _metric_failure_kind(failure_kind: Any) -> Optional[str]:
@@ -2025,9 +2355,31 @@ def _missing_rollout_rows_counted_as_zero(
     return counted
 
 
-def _read_jsonl(path: Path) -> List[Dict]:
+_READ_JSONL_YIELD_INTERVAL_S = 0.01
+
+
+async def _read_jsonl(path: Path) -> List[Dict]:
+    """Parse a whole JSONL artifact, letting other tasks on the event loop run between rows.
+
+    Parsing stays on the event loop thread instead of a worker thread.
+    The loop thread then reuses the memory it freed during collection for these rows.
+    A worker thread allocates from its own malloc arena, so the process would hold both.
+    """
+    rows = []
+    yielded_at = time.monotonic()
     with path.open("rb") as f:
-        return [orjson.loads(line) for line in f if line.strip()]
+        for line in f:
+            if line.strip():
+                rows.append(orjson.loads(line))
+            if time.monotonic() - yielded_at >= _READ_JSONL_YIELD_INTERVAL_S:
+                await asyncio.sleep(0)
+                yielded_at = time.monotonic()
+    return rows
+
+
+def _count_lines(path: Path) -> int:
+    with path.open("rb") as f:
+        return sum(1 for _ in f)
 
 
 def _coverage_report(
@@ -2337,9 +2689,16 @@ class RolloutCollectionHelper(BaseModel):
                 if skills_ref_dict is not None:
                     raise ValueError("run-level skills are not supported for materialized task rows")
             else:
-                row[RESPONSES_CREATE_PARAMS_KEY_NAME] = (
-                    row[RESPONSES_CREATE_PARAMS_KEY_NAME] | responses_create_params_overrides
-                )
+                # Preserve row-specific media references and template controls when run-level
+                # sampling settings supply metadata. Values (including JSON strings) still replace
+                # by key, and an explicit metadata=null still clears the row's metadata.
+                row_params = row[RESPONSES_CREATE_PARAMS_KEY_NAME]
+                merged_params = row_params | responses_create_params_overrides
+                row_metadata = row_params.get("metadata")
+                override_metadata = responses_create_params_overrides.get("metadata")
+                if isinstance(row_metadata, Mapping) and isinstance(override_metadata, Mapping):
+                    merged_params["metadata"] = {**row_metadata, **override_metadata}
+                row[RESPONSES_CREATE_PARAMS_KEY_NAME] = merged_params
 
             # Stamp the run-level skills_ref onto the row so it is sent to the agent in the
             # /run request body and propagated to results. The source dataset stays untouched.
@@ -2583,10 +2942,11 @@ class RolloutCollectionHelper(BaseModel):
         preset but deliberately not in `per_rollout`, where each rollout is meant to be
         its own bounded root trace.
         """
-        if not is_span_group_enabled(GymSpanGroup.JOB):
-            return await self._run_from_config(config)
-        with managed_span(GymSpanGroup.JOB, "gym.job"):
-            return await self._run_from_config(config)
+        async with observe_event_loop("driver"):
+            if not is_span_group_enabled(GymSpanGroup.JOB):
+                return await self._run_from_config(config)
+            with managed_span(GymSpanGroup.JOB, "gym.job"):
+                return await self._run_from_config(config)
 
     async def _run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
         output_fpath = Path(config.output_jsonl_fpath)
@@ -2641,6 +3001,7 @@ class RolloutCollectionHelper(BaseModel):
             persisted_rows: List[Dict] = []
             persisted_results: List[Dict] = []
 
+            materialize_started = perf_counter()
             input_rows = self._preprocess_rows_from_config(config)
             # Returned rows are sorted by (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
 
@@ -2680,6 +3041,9 @@ class RolloutCollectionHelper(BaseModel):
             with config.materialized_jsonl_fpath.open("wb") as f:
                 for row in tqdm(input_rows, desc="Writing materialized rows"):
                     f.write(orjson.dumps(row) + b"\n")
+            observer = driver_metrics()
+            if observer is not None:
+                observer.materialize.record((perf_counter() - materialize_started) * 1000.0)
             output_fpath.unlink(missing_ok=True)
             # A fresh run must not inherit retry attempts or published metrics
             # from an older run that used the same output path.
@@ -2815,6 +3179,21 @@ class RolloutCollectionHelper(BaseModel):
         persisted_count = len(persisted_success_keys)
         collection_succeeded = False
         latency_tracker = DispatchLatencyTracker()
+        run_timing: Optional[RunTimingReport] = None
+        if config.dispatch_start_report_within_s is not None:
+            run_timing = RunTimingReport(
+                total=len(input_rows),
+                start_within_s=config.dispatch_start_report_within_s,
+                start_min_fraction=config.dispatch_start_report_min_fraction,
+                all_started_within_s=config.dispatch_all_started_within_s,
+                long_rollout_s=config.long_rollout_s,
+                long_rollout_max_fraction=config.long_rollout_max_fraction,
+                timed_out_max_fraction=config.timed_out_max_fraction,
+                max_waiting_ratio=config.server_queue_max_waiting_ratio if config.server_queue_metrics_urls else None,
+            )
+        timing_heartbeat: Optional[asyncio.Task] = None
+        queue_sampler: Optional[asyncio.Task] = None
+        sigterm_previous: Any = _NO_SIGTERM_HOOK
         if config.dispatch_budget_s is not None:
             print(
                 f"Dispatch budget: {config.dispatch_budget_s / 60:.0f} min. New rollouts stop being "
@@ -2845,6 +3224,24 @@ class RolloutCollectionHelper(BaseModel):
                             if line.strip():
                                 upload_spool.write(orjson.dumps(_rollout_for_export(orjson.loads(line))) + b"\n")
 
+            if run_timing is not None:
+
+                async def _timing_heartbeat() -> None:
+                    while True:
+                        await asyncio.sleep(config.timing_summary_interval_s)
+                        # stdout is block-buffered when written to a log file; flush so the table shows up live.
+                        print(run_timing.table(), flush=True)
+
+                if config.timing_summary_interval_s:
+                    timing_heartbeat = asyncio.create_task(_timing_heartbeat())
+                if config.server_queue_metrics_urls:
+                    queue_sampler = asyncio.create_task(
+                        _sample_server_queues(
+                            run_timing, config.server_queue_metrics_urls, config.server_queue_sample_interval_s
+                        )
+                    )
+                sigterm_previous = _print_on_sigterm(run_timing.table)
+
             completion_iterator = self._run_examples_with_metadata(
                 input_rows,
                 semaphore=semaphore,
@@ -2854,6 +3251,7 @@ class RolloutCollectionHelper(BaseModel):
                 dispatch_budget_s=config.dispatch_budget_s,
                 drain_margin_s=config.drain_margin_s,
                 latency_tracker=latency_tracker,
+                **({"run_timing": run_timing} if run_timing is not None else {}),
             )
             for future in completion_iterator:
                 completed = await future
@@ -2894,6 +3292,11 @@ class RolloutCollectionHelper(BaseModel):
                 # when capture is off). Never alters the harness output/reward already in `result`.
                 # A failed episode that returned agent evidence made model calls worth joining.
                 if capture_dirs and (not no_result or NG_AGENT_OBSERVATIONS_KEY in result):
+                    # A cancelled call's capture write runs detached, so drain the claims this
+                    # rollout still holds before snapshotting; otherwise a late row is lost.
+                    rollout_id_for_capture = maybe_rollout_id_from_run_body(result)
+                    if rollout_id_for_capture is not None:
+                        await await_model_call_capture_quiescence(rollout_id_for_capture, capture_dirs)
                     merge_model_call_capture_into_record(
                         result,
                         capture_dirs,
@@ -2980,6 +3383,7 @@ class RolloutCollectionHelper(BaseModel):
                         f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)} "
                         f"class={failure_class} error={detail}"
                     )
+                    write_started = perf_counter()
                     failures_file.write(serialized + b"\n")
                     failures_file.flush()
                     _record_rollout_outcome(result, "failed", dispatch_name)
@@ -2989,14 +3393,18 @@ class RolloutCollectionHelper(BaseModel):
                         and (NG_AGENT_OBSERVATIONS_KEY in result or NG_TRAJECTORY_KEY in result)
                     ):
                         health_outcome = "failed"
+                    _record_output_write(write_started, serialized)
                     if batch_tracker is not None:
                         batch_failure_rows.append(_batch_status_row(result, batch_agent_refs))
                 else:
                     # Success → main jsonl.
+                    write_started = perf_counter()
                     results_file.write(serialized + b"\n")
                     results_file.flush()
                     _record_rollout_outcome(result, "scored", dispatch_name)
                     health_outcome = "scored"
+                    _record_output_write(write_started, serialized)
+                    _record_rollout_shape(row, result)
                     persisted_count += 1
                     persisted_success_keys.add((result[TASK_INDEX_KEY_NAME], result[ROLLOUT_INDEX_KEY_NAME]))
                     if config.retain_results_in_memory:
@@ -3106,13 +3514,20 @@ class RolloutCollectionHelper(BaseModel):
                 if health_metrics_enabled and health_outcome is not None:
                     await asyncio.to_thread(_record_rollout_health, result, health_outcome, health_ignored_checks)
 
-            counted = _failure_rows_counted_as_zero(
-                [failures_fpath], config.count_failure_classes_as_zero, persisted_success_keys
+            # The scans of whole artifacts after collection run in a worker thread.
+            # On the event loop they would stall telemetry, other tasks, and shutdown.
+            # The reloads that keep every row use `_read_jsonl` instead.
+            counted = await asyncio.to_thread(
+                _failure_rows_counted_as_zero,
+                [failures_fpath],
+                config.count_failure_classes_as_zero,
+                persisted_success_keys,
             )
             # Opted-in missing rollouts are scored as well, so a run they fill still has a score. Only
             # when this run aggregates: otherwise it scores nothing, and an empty run must still fail.
             missing: List[Dict[str, Any]] = (
-                _missing_rollout_rows_counted_as_zero(
+                await asyncio.to_thread(
+                    _missing_rollout_rows_counted_as_zero,
                     [config.materialized_jsonl_fpath],
                     [failures_fpath],
                     persisted_success_keys
@@ -3137,6 +3552,13 @@ class RolloutCollectionHelper(BaseModel):
             collection_succeeded = True
         finally:
             try:
+                if timing_heartbeat is not None:
+                    timing_heartbeat.cancel()
+                if queue_sampler is not None:
+                    queue_sampler.cancel()
+                _restore_sigterm(sigterm_previous)
+                if run_timing is not None:
+                    print(run_timing.table(), flush=True)
                 if isinstance(completion_iterator, _BoundedCompletionIterator):
                     await completion_iterator.aclose()
             finally:
@@ -3160,8 +3582,7 @@ class RolloutCollectionHelper(BaseModel):
             else:
                 assert upload_spool is not None
                 try:
-                    with upload_spool_fpath.open("rb") as upload_spool_reader:
-                        upload_results = [orjson.loads(line) for line in upload_spool_reader if line.strip()]
+                    upload_results = await _read_jsonl(upload_spool_fpath)
                     export_rollouts(upload_results)
                     del upload_results
                 finally:
@@ -3169,7 +3590,7 @@ class RolloutCollectionHelper(BaseModel):
 
         if not config.retain_results_in_memory and not config.disable_aggregation:
             # Aggregation consumes only successful rows from the main artifact.
-            persisted_results = _read_jsonl(output_fpath)
+            persisted_results = await _read_jsonl(output_fpath)
 
         print("Sorting results to ensure consistent ordering")
         rows.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
@@ -3197,7 +3618,9 @@ class RolloutCollectionHelper(BaseModel):
                 print(f"Counting {len(imputed)} materialized rollout(s) with no row as scored zeros")
                 counted.extend(imputed)
             # One run never reuses a (task, rollout), so its rows need no server to tell them apart.
-            _fill_task_fields(counted, persisted_results, [config.materialized_jsonl_fpath], _routing_identity)
+            await asyncio.to_thread(
+                _fill_task_fields, counted, persisted_results, [config.materialized_jsonl_fpath], _routing_identity
+            )
             # Appending leaves a missing early repeat behind the repeats that did land. The two
             # lists are zipped positionally downstream, so they are reordered together.
             scored_rows = persisted_results + counted
@@ -3222,7 +3645,7 @@ class RolloutCollectionHelper(BaseModel):
         _raise_for_aggregation_errors(aggregate_metrics_fpath)
 
         expected_rollouts = (
-            sum(1 for _ in config.materialized_jsonl_fpath.open("rb"))
+            await asyncio.to_thread(_count_lines, config.materialized_jsonl_fpath)
             if config.materialized_jsonl_fpath.exists()
             else len(input_rows) + persisted_count
         )
@@ -3696,6 +4119,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         dispatch_budget_s: Optional[float] = None,
         drain_margin_s: Optional[float] = None,
         latency_tracker: Optional["DispatchLatencyTracker"] = None,
+        run_timing: Optional[RunTimingReport] = None,
     ) -> Iterator[Future]:  # pragma: no cover
         """
         Internal dispatch shared by ``run_examples`` and Gym's own collection paths.
@@ -3740,6 +4164,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             if isinstance(block, DictConfig) and isinstance(block.get(ENVIRONMENT_SERVER_TYPE_KEY_NAME), DictConfig)
         }
         semaphore = semaphore or nullcontext()
+        observer = driver_metrics()
+        if observer is not None:
+            semaphore = MeteredAdmission(semaphore, observer)
+            observer.driver.offered += len(examples)
         tracker = latency_tracker if latency_tracker is not None else DispatchLatencyTracker()
         # `is not None`, not truthiness: 0.0 is a real budget that is already
         # spent, and must drain rather than disable the check.
@@ -3771,6 +4199,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
                 started = time.monotonic()
                 started_at = time.time()
+                if run_timing is not None:
+                    run_timing.record_start(started)
                 res = None
                 succeeded = False
                 try:
@@ -3778,6 +4208,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     res = await server_client.post(server_name=server_name, url_path="/run", json=request_body)
                     await raise_for_status(res)
                     result = await get_response_json(res)
+                    if run_timing is not None and isinstance(result, Mapping):
+                        run_timing.record_result(result, time.monotonic() - started)
                     # Independently-measured task wall-clock (ng_perf.total_latency_ms), not derived
                     # from summed model-call/tool latencies to account for additional overhead.
                     rollout_latency_ms = (time.time() - started_at) * 1000
@@ -3820,6 +4252,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         tracker.record_failure(elapsed)
 
         awaitables = map(_post_subroutine, examples)
+        if observer is not None:
+            awaitables = (count_resident(awaitable, observer) for awaitable in awaitables)
         if max_resident_tasks is not None:
             return _BoundedCompletionIterator(
                 awaitables,
@@ -3829,7 +4263,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         def _start_in_input_order() -> Iterator[Future]:
             # asyncio.as_completed creates its tasks from a set, so create them here to start rollouts in input order.
-            tasks = [asyncio.ensure_future(awaitable) for awaitable in awaitables]
+            # It drains this generator in order before it builds that set, so tasks are still created in input order.
+            # A finished task keeps its result, so a list of tasks would keep every /run result until the run ends.
+            # A generator leaves the consumer holding the only reference to a result once it takes one.
+            tasks = (asyncio.ensure_future(awaitable) for awaitable in awaitables)
             yield from tqdm.as_completed(
                 tasks,
                 desc="Collecting rollouts",

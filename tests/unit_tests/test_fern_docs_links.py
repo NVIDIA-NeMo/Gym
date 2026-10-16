@@ -331,6 +331,29 @@ class TestFernDocsLinks(unittest.TestCase):
 
         self.assertEqual([], absolute_links)
 
+    def test_cited_resources_server_configs_exist(self):
+        """Every `resources_servers/<name>/configs/<file>.yaml` a latest page cites must exist on main.
+
+        `my_weather_tool` is skipped: the single-step environment tutorial has the reader create it.
+        Scoped to `latest`. The frozen versions cite paths that have since been renamed.
+        """
+        pages = REPO_ROOT / "fern/versions/latest/pages"
+        tutorial_created = {"my_weather_tool"}
+        cited = 0
+        missing = []
+
+        for page in pages.rglob("*.mdx"):
+            for line_number, line in enumerate(page.read_text().splitlines(), start=1):
+                for match in re.finditer(r"resources_servers/([a-z0-9_]+)/configs/[A-Za-z0-9_.-]+\.yaml", line):
+                    if match.group(1) in tutorial_created:
+                        continue
+                    cited += 1
+                    if not (REPO_ROOT / match.group(0)).is_file():
+                        missing.append(f"{page.relative_to(REPO_ROOT)}:{line_number}: {match.group(0)}")
+
+        self.assertEqual([], missing)
+        self.assertGreater(cited, 0)
+
     def test_private_cli_compat_api_link_redirects_to_the_public_cli_page(self):
         redirects = read("fern/docs.yml")
         expected_redirect = """  - source: "/nemo/gym/nemo-gym/nemo_gym/cli/_compat"
