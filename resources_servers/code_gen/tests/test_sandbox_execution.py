@@ -16,6 +16,7 @@
 
 import json
 import os
+import resource
 import shutil
 import sys
 from pathlib import Path
@@ -163,6 +164,10 @@ class TestLocalProvider:
         assert "FileNotFoundError" in metadata["error"]
 
     @pytest.mark.skipif(not Path("/proc/self/limits").exists(), reason="reads /proc/self/limits")
+    @pytest.mark.skipif(
+        resource.getrlimit(resource.RLIMIT_CORE)[1] == 0,
+        reason="the hard RLIMIT_CORE is 0, so the runner cannot set it to one byte",
+    )
     async def test_candidates_cannot_dump_core(self, tmp_path: Path) -> None:
         # A one-byte RLIMIT_CORE keeps piped core dumps from stalling a crashing candidate past its time limit.
         # The harness blocks `import resource`, so the candidate reads its limit from /proc.
