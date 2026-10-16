@@ -21,7 +21,7 @@ from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSee
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import NG_AGENT_SANDBOX_OBSERVATION_KEY, SandboxObservation
-from nemo_gym.sandbox import SandboxOOMKilledError
+from nemo_gym.sandbox import SandboxHandle, SandboxOOMKilledError
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.tasks.harbor.materialize import materialize_task
 from nemo_gym.tasks.harbor.task import load_task
@@ -97,6 +97,9 @@ class Sandbox:
         self.disconnect = AsyncMock()
         self.launch = AsyncMock(side_effect=self.create)
         self.request_stop = AsyncMock(side_effect=self.signal)
+
+    def _require_handle(self):
+        return SandboxHandle(sandbox_id=self.sandbox_id, provider_name=self.provider_name, raw=None)
 
     @property
     def pty(self):
@@ -175,9 +178,10 @@ def setup():
         ),
         patch(f"{module}.resolve_provider_config"),
         patch(f"{module}.get_global_config_dict", return_value={}),
-        patch(f"{module}.create_provider"),
+        patch(f"{module}.create_provider") as provider_factory,
         patch(f"{module}.AsyncSandbox.connect", AsyncMock(return_value=sandbox)),
     ):
+        provider_factory.return_value.name = "opensandbox"
         agent = OpenCodeAgent(config=config, server_client=client)
         yield agent, sandbox
 
@@ -313,7 +317,8 @@ def test_confirmed_agent_execution_oom_retains_sandbox_id_and_closes_dead_sessio
         sandbox.sandbox_id = "agent-owned"
         sandbox.start = AsyncMock()
     error = SandboxOOMKilledError(
-        f"Sandbox was OOM-killed. OpenSandbox status: reason='OOMKilled'; sandbox_id='{sandbox.sandbox_id}'"
+        f"Sandbox was OOM-killed. OpenSandbox status: reason='OOMKilled'; sandbox_id='{sandbox.sandbox_id}'",
+        sandbox_id=sandbox.sandbox_id,
     )
     sandbox.launch.side_effect = error
 

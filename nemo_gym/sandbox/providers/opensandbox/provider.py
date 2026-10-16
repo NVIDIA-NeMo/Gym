@@ -37,6 +37,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxEndpoint,
     SandboxExecResult,
     SandboxHandle,
+    SandboxIOTimeoutError,
     SandboxOOMKilledError,
     SandboxPtyError,
     SandboxPtySession,
@@ -689,6 +690,17 @@ class OpenSandboxOperationConfig:
 
 
 @dataclass(frozen=True)
+class OpenSandboxDiagnosticsConfig:
+    """Optional control-plane checks after a command loses backend status."""
+
+    inspect_oom: bool = True
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.inspect_oom, bool):
+            raise TypeError("diagnostics.inspect_oom must be a bool")
+
+
+@dataclass(frozen=True)
 class OpenSandboxProviderOptions:
     """Recognized per-sandbox create options read from ``SandboxSpec.provider_options``.
 
@@ -802,6 +814,7 @@ class OpenSandboxProvider:
         create: OpenSandboxCreateConfig | Mapping[str, Any] | None = None,
         probe: OpenSandboxProbeConfig | Mapping[str, Any] | None = None,
         operations: OpenSandboxOperationConfig | Mapping[str, Any] | None = None,
+        diagnostics: OpenSandboxDiagnosticsConfig | Mapping[str, Any] | None = None,
         attribution: OpenSandboxAttributionConfig | Mapping[str, Any] | None = None,
         networking: OpenSandboxNetworkingConfig | Mapping[str, Any] | None = None,
         shared_storage: OpenSandboxSharedStorageConfig | Mapping[str, Any] | None = None,
@@ -811,6 +824,7 @@ class OpenSandboxProvider:
         self._create = _coerce_config(create, OpenSandboxCreateConfig)
         self._probe = _coerce_config(probe, OpenSandboxProbeConfig)
         self._operations = _coerce_config(operations, OpenSandboxOperationConfig)
+        self._diagnostics = _coerce_config(diagnostics, OpenSandboxDiagnosticsConfig)
         self._attribution = _coerce_config(attribution, OpenSandboxAttributionConfig)
         self._networking = _coerce_config(networking, OpenSandboxNetworkingConfig)
         self._shared_storage = _coerce_config(shared_storage, OpenSandboxSharedStorageConfig)
@@ -1349,6 +1363,8 @@ class OpenSandboxProvider:
                     timeout_s=timeout_s,
                     retries=retries,
                 )
+            except TimeoutError as error:
+                raise SandboxIOTimeoutError(str(error)) from error
             except Exception as e:
                 if _exception_status_code(e) != 502:
                     raise
@@ -1783,7 +1799,7 @@ class OpenSandboxProvider:
             # asyncio.timeout instead of wait_for: since Python 3.11
             # asyncio.TimeoutError IS builtin TimeoutError, so a wait_for-based
             # cap would also catch timeouts raised INSIDE the dispatch (e.g. an
-            # exhausted status-poll budget) and relabel them as a hard-cap trip.
+            # SDK request timeout) and relabel them as a hard-cap trip.
             hard_cap = asyncio.timeout(hard_cap_s)
             try:
                 async with hard_cap:
@@ -1791,20 +1807,24 @@ class OpenSandboxProvider:
             except TimeoutError as e:
                 if not hard_cap.expired():
                     raise
-                raise TimeoutError(
-                    f"OpenSandbox exec exceeded hard cap of {hard_cap_s:g}s; the command wedged "
+                raise SandboxIOTimeoutError(
+                    f"OpenSandbox exec exceeded hard cap of {hard_cap_s:g}s; the command outcome is unknown "
                     f"(sandbox_id={handle.sandbox_id!r})"
                 ) from e
         except Exception as error:
             if isinstance(error, SandboxOOMKilledError):
                 raise
+            # Background status recovery already checked OOM on each failed read.
+            if isinstance(error, SandboxCommandStatusTimeoutError):
+                raise
             status_code = _exception_status_code(error)
-            if not isinstance(
-                error, (SandboxBackendUnreachableError, SandboxCommandStatusTimeoutError)
-            ) and status_code not in {410, 502}:
+            if not isinstance(error, (SandboxBackendUnreachableError, SandboxIOTimeoutError)) and status_code not in {
+                410,
+                502,
+            }:
                 raise
             if evidence := await self._confirmed_oom_death(handle, error):
-                raise SandboxOOMKilledError(evidence) from error
+                raise SandboxOOMKilledError(evidence, sandbox_id=handle.sandbox_id) from error
             if status_code in {410, 502}:
                 raise SandboxBackendUnreachableError(
                     f"OpenSandbox command backend unavailable without confirmed OOM; "
@@ -1820,8 +1840,24 @@ class OpenSandboxProvider:
         # A timed-out status read or ended sandbox can outlive get_info.
         # Inspect names the current user container, so it is sufficient OOM
         # evidence without relying on the exec route's error message.
-        if notice is not None or isinstance(error, TimeoutError) or _exception_status_code(error) in {410, 502}:
-            if evidence := await self._control_plane_inspect_oom_evidence(handle):
+        if self._diagnostics.inspect_oom and (
+            notice is not None
+            or isinstance(error, (TimeoutError, SandboxIOTimeoutError))
+            or _exception_status_code(error) in {410, 502}
+        ):
+            try:
+                evidence = await self._control_plane_inspect_oom_evidence(handle)
+            except Exception:
+                # Inspect is optional evidence collection after the original
+                # provider failure. A broken diagnostics route or SDK mismatch
+                # must not replace the unknown-outcome error with a scoreable one.
+                LOGGER.warning(
+                    "OpenSandbox OOM inspect failed after provider loss; sandbox_id=%r",
+                    handle.sandbox_id,
+                    exc_info=True,
+                )
+                evidence = None
+            if evidence:
                 message = notice.message if notice is not None else f"sandbox_id={handle.sandbox_id!r}"
                 return f"Sandbox was OOM-killed: inspect confirms {evidence}. {message}"
         return None
@@ -1855,12 +1891,18 @@ class OpenSandboxProvider:
             return None
         if len(body) > 65536:
             return None
-        return _inspect_oom_evidence(body.decode("utf-8", errors="replace"))
+        # OpenSandbox server 1.1.0 emits the plain-text container layout parsed here.
+        evidence = _inspect_oom_evidence(body.decode("utf-8", errors="replace"))
+        if evidence is None:
+            LOGGER.debug(
+                "OpenSandbox inspect returned no current-container OOM evidence; sandbox_id=%r", handle.sandbox_id
+            )
+        return evidence
 
     async def _sandbox_death_notice(
-        self, handle: SandboxHandle, *, any_death: bool = False
+        self, handle: SandboxHandle, *, any_death: bool = False, diagnostic_oom_match: bool = False
     ) -> _SandboxDeathNotice | None:
-        """Briefly poll the sandbox status; describe a terminal state, else None.
+        """Briefly poll sandbox status; describe terminal state or diagnostic OOM text.
 
         With ``any_death`` every terminal state is reported, not just an OOM
         kill — for callers that need to know whether the sandbox is gone at
@@ -1896,6 +1938,21 @@ class OpenSandboxProvider:
                 and re.fullmatch(r"oom[\s_-]*killed", reason.strip(), re.IGNORECASE)
             ):
                 return _SandboxDeathNotice(f"Sandbox was OOM-killed. {status_text}", outcome="oom")
+            # PTY diagnostics can use an affirmative user-container message
+            # before lifecycle status becomes terminal. Generic or negated text
+            # is insufficient, and this path is never used for scoring.
+            diagnostic_reason = isinstance(reason, str) and re.fullmatch(
+                r"oom[\s_-]*killed", reason.strip(), re.IGNORECASE
+            )
+            diagnostic_message = isinstance(message, str) and re.search(
+                r"\b(?:container\s+)?sandbox\s+(?:was\s+)?(?:terminated|killed)\s+"
+                r"(?:with|by|due to)\s+(?:oom[\s_-]*killed|out of memory)\b"
+                r"|\b(?:container\s+)?sandbox\s+out of memory\b",
+                message,
+                re.IGNORECASE,
+            )
+            if diagnostic_oom_match and (diagnostic_reason or diagnostic_message):
+                return _SandboxDeathNotice(f"Sandbox was OOM-killed. {status_text}", outcome="oom")
             if terminal:
                 return (
                     _SandboxDeathNotice(f"Sandbox is dead. {status_text}", outcome="other_terminal")
@@ -1906,7 +1963,7 @@ class OpenSandboxProvider:
         return None
 
     async def _oom_death_notice(self, handle: SandboxHandle, *, any_death: bool = False) -> str | None:
-        notice = await self._sandbox_death_notice(handle, any_death=any_death)
+        notice = await self._sandbox_death_notice(handle, any_death=any_death, diagnostic_oom_match=True)
         return notice.message if notice is not None else None
 
     async def _exec_background(
@@ -2003,7 +2060,7 @@ class OpenSandboxProvider:
                         status_failure_deadline = min(status_failure_deadline, deadline)
                 status_failure_error = error
                 if evidence := await self._confirmed_oom_death(handle, error):
-                    raise SandboxOOMKilledError(evidence) from error
+                    raise SandboxOOMKilledError(evidence, sandbox_id=handle.sandbox_id) from error
                 if loop.time() >= status_failure_deadline:
                     raise SandboxCommandStatusTimeoutError(
                         f"OpenSandbox command status unavailable beyond recovery deadline; "
@@ -2030,14 +2087,17 @@ class OpenSandboxProvider:
         # The execution has finished, so one call returns its whole buffer; the
         # cursor this endpoint reports back is the end offset rather than a
         # more-data flag, so there is no tail to follow.
-        logs = await self._await_sdk_operation(
-            lambda: handle.raw.commands.get_background_command_logs(execution_id),
-            operation="command logs",
-            sandbox_id=handle.sandbox_id,
-            timeout_s=poll_timeout_s,
-            retries=self._operations.retries,
-            is_retryable=_command_read_is_retryable,
-        )
+        try:
+            logs = await self._await_sdk_operation(
+                lambda: handle.raw.commands.get_background_command_logs(execution_id),
+                operation="command logs",
+                sandbox_id=handle.sandbox_id,
+                timeout_s=poll_timeout_s,
+                retries=self._operations.retries,
+                is_retryable=_command_read_is_retryable,
+            )
+        except TimeoutError as error:
+            raise SandboxIOTimeoutError(str(error)) from error
         stdout = getattr(logs, "content", None) or None
         status_error = getattr(status, "error", None)
         stderr = status_error or None
@@ -2085,30 +2145,45 @@ class OpenSandboxProvider:
         if timeout_s is not None and timeout_s < 0:
             raise ValueError("timeout_s must be nonnegative")
         commands = handle.raw.commands
-        session_id = await self._await_sdk_call(
-            commands.create_session(working_directory=cwd),
-            operation="create bash session",
-            sandbox_id=handle.sandbox_id,
-            timeout_s=self._connection.request_timeout_s,
-        )
+        try:
+            session_id = await self._await_sdk_call(
+                commands.create_session(working_directory=cwd),
+                operation="create bash session",
+                sandbox_id=handle.sandbox_id,
+                timeout_s=self._connection.request_timeout_s,
+            )
+        except TimeoutError as error:
+            raise SandboxIOTimeoutError(str(error)) from error
+
         # A nested shell keeps exit/exec in the command from replacing the SDK's
         # session wrapper. The client owns the deadline: the native timeout can
         # kill only the shell and then hang waiting for a child's output pipe.
-        task = asyncio.create_task(
-            commands.run_in_session(session_id, f"bash -c {shlex.quote(command)}", timeout=timedelta(0))
-        )
+        async def run_in_session() -> Any:
+            try:
+                return await commands.run_in_session(
+                    session_id, f"bash -c {shlex.quote(command)}", timeout=timedelta(0)
+                )
+            except TimeoutError as error:
+                raise SandboxIOTimeoutError(
+                    f"OpenSandbox run_in_session request timed out; sandbox_id={handle.sandbox_id!r}"
+                ) from error
+
+        task = asyncio.create_task(run_in_session())
 
         async def release_session() -> None:
             try:
                 # Delete while the request is still active: execd then knows the
                 # process group to kill. After normal completion it only drops
                 # session state; background services live until sandbox teardown.
-                await self._await_sdk_call(
-                    commands.delete_session(session_id),
-                    operation="delete bash session",
-                    sandbox_id=handle.sandbox_id,
-                    timeout_s=10,
-                )
+                try:
+                    await self._await_sdk_call(
+                        commands.delete_session(session_id),
+                        operation="delete bash session",
+                        sandbox_id=handle.sandbox_id,
+                        timeout_s=10,
+                    )
+                except TimeoutError as error:
+                    raise SandboxIOTimeoutError(str(error)) from error
                 if not task.done():
                     await asyncio.wait({task}, timeout=10)
             finally:
@@ -2127,6 +2202,10 @@ class OpenSandboxProvider:
                 await cleanup
                 raise
 
+        if task.done() and not task.cancelled():
+            task_error = task.exception()
+            if isinstance(task_error, SandboxIOTimeoutError):
+                raise task_error
         if timed_out and (task.cancelled() or task.exception() is not None):
             return SandboxExecResult(
                 None, f"Command timed out after {timeout_s:g}s; native session was deleted", 124, error_type="timeout"
@@ -2276,25 +2355,31 @@ class OpenSandboxProvider:
 
     async def _write_file(self, handle: SandboxHandle, target_path: str, data: str | bytes) -> None:
         """Write one file into an OpenSandbox sandbox."""
-        await self._await_sdk_operation(
-            lambda: handle.raw.files.write_file(target_path, data),
-            operation=f"write_file({target_path})",
-            sandbox_id=handle.sandbox_id,
-            timeout_s=float(self._connection.request_timeout_s)
-            if self._connection.request_timeout_s is not None
-            else None,
-        )
+        try:
+            await self._await_sdk_operation(
+                lambda: handle.raw.files.write_file(target_path, data),
+                operation=f"write_file({target_path})",
+                sandbox_id=handle.sandbox_id,
+                timeout_s=float(self._connection.request_timeout_s)
+                if self._connection.request_timeout_s is not None
+                else None,
+            )
+        except TimeoutError as error:
+            raise SandboxIOTimeoutError(str(error)) from error
 
     async def _read_file(self, handle: SandboxHandle, source_path: str) -> bytes:
         """Read one file from an OpenSandbox sandbox."""
-        return await self._await_sdk_operation(
-            lambda: handle.raw.files.read_bytes(source_path),
-            operation=f"read_file({source_path})",
-            sandbox_id=handle.sandbox_id,
-            timeout_s=float(self._connection.request_timeout_s)
-            if self._connection.request_timeout_s is not None
-            else None,
-        )
+        try:
+            return await self._await_sdk_operation(
+                lambda: handle.raw.files.read_bytes(source_path),
+                operation=f"read_file({source_path})",
+                sandbox_id=handle.sandbox_id,
+                timeout_s=float(self._connection.request_timeout_s)
+                if self._connection.request_timeout_s is not None
+                else None,
+            )
+        except TimeoutError as error:
+            raise SandboxIOTimeoutError(str(error)) from error
 
     async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
         """Upload one local file into an OpenSandbox sandbox."""

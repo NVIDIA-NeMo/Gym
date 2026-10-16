@@ -412,16 +412,6 @@ class AsyncSandbox:
         self._counted_active = False
         self.pty = SandboxPty(self)
 
-    @property
-    def sandbox_id(self) -> str | None:
-        """Provider-neutral ID of the open sandbox, if one is available."""
-        return _sandbox_id(self._handle) if self._handle is not None and not self._stopped else None
-
-    @property
-    def provider_name(self) -> str:
-        """Name of the runtime provider backing this sandbox."""
-        return self._telemetry_provider_name()
-
     def _telemetry_provider_name(self) -> str:
         """Provider name for span attributes (`docker`, `daytona`, `opensandbox`, ...)."""
         return getattr(self._provider, "name", type(self._provider).__name__)

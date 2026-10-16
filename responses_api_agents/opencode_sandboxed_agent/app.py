@@ -74,8 +74,8 @@ from nemo_gym.rollout_observability import (
 )
 from nemo_gym.sandbox import (
     AsyncSandbox,
-    SandboxBackendUnreachableError,
-    SandboxCommandStatusTimeoutError,
+    SandboxIOTimeoutError,
+    SandboxLostError,
     SandboxOOMKilledError,
     SandboxResources,
     SandboxSpec,
@@ -619,17 +619,18 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
     async def _stage_ripgrep(self, sandbox: AsyncSandbox, source_path: Path) -> str:
         """Retry an ambiguous upload timeout without reusing its remote path."""
         size_bytes = source_path.stat().st_size
+        sandbox_id = sandbox._handle.sandbox_id
         for attempt in range(1, _RIPGREP_UPLOAD_MAX_ATTEMPTS + 1):
             remote_path = f"/tmp/nemo-gym-ripgrep-{uuid4().hex}"
             try:
                 async with self._ripgrep_upload_sem:
                     started = monotonic()
                     await sandbox.upload(source_path, remote_path)
-            except TimeoutError:
+            except (TimeoutError, SandboxIOTimeoutError):
                 LOGGER.warning(
                     "OpenCode ripgrep upload timed out; sandbox_id=%s remote_path=%s "
                     "attempt=%d/%d size_bytes=%d duration_s=%.1f",
-                    sandbox.sandbox_id,
+                    sandbox_id,
                     remote_path,
                     attempt,
                     _RIPGREP_UPLOAD_MAX_ATTEMPTS,
@@ -643,7 +644,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 LOGGER.info(
                     "OpenCode ripgrep upload completed; sandbox_id=%s remote_path=%s "
                     "attempt=%d/%d size_bytes=%d duration_s=%.1f",
-                    sandbox.sandbox_id,
+                    sandbox_id,
                     remote_path,
                     attempt,
                     _RIPGREP_UPLOAD_MAX_ATTEMPTS,
@@ -962,10 +963,11 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         except SandboxOOMKilledError as exc:
             if not self.config.report_agent_sandbox_oom:
                 raise
+            handle = sandbox._handle
             observation = SandboxObservation(
                 role="agent",
-                provider=sandbox.provider_name,
-                sandbox_id=sandbox.sandbox_id,
+                provider=handle.provider_name,
+                sandbox_id=exc.sandbox_id,
                 phase="agent_execution",
                 outcome="oom",
                 error_type=type(exc).__name__,
@@ -1007,7 +1009,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 parallel_tool_calls=body.parallel_tool_calls,
                 metadata={NG_AGENT_SANDBOX_OBSERVATION_KEY: observation.model_dump_json()},
             )
-        except (SandboxBackendUnreachableError, SandboxCommandStatusTimeoutError):
+        except SandboxLostError:
             raise
         except Exception as exc:
             result = None
@@ -1047,7 +1049,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 env=session_env,
                 timeout_s=self.config.sandbox_timeout,
             )
-        except (SandboxBackendUnreachableError, SandboxCommandStatusTimeoutError):
+        except SandboxLostError:
             raise
         except Exception:
             export_result = None
@@ -1068,7 +1070,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 print(f"Downloading results from {export_remote_fpath} to {results_local_fpath}", file=sys.stderr)
             try:
                 await sandbox.download(export_remote_fpath, results_local_fpath)
-            except (SandboxBackendUnreachableError, SandboxCommandStatusTimeoutError):
+            except SandboxLostError:
                 raise
             except Exception:
                 results_local_fpath.unlink(missing_ok=True)
@@ -1114,7 +1116,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                         trajectory,
                         model_ref=self.config.model_server,
                     )
-            except (SandboxBackendUnreachableError, SandboxCommandStatusTimeoutError):
+            except SandboxLostError:
                 raise
             except Exception:
                 print("Failed to capture OpenCode session usage or observations", format_exc(), file=sys.stderr)

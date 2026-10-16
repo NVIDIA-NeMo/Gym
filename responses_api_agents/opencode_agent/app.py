@@ -661,13 +661,13 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             ),
             runtime=runtime,
             model_ref=self.config.model_server,
+            provider_name=provider.name,
         )
         prepared_directory = False
         try:
-            # Keep the ID before stop or disconnect releases the provider handle.
             if owns_sandbox:
                 await sandbox.start(spec)
-                state.session.sandbox_id = sandbox.sandbox_id
+                state.session.sandbox_id = sandbox._require_handle().sandbox_id
                 # Providers need not create SandboxSpec.workdir. Never prepare a borrowed task here.
                 workspace = await sandbox.exec(f"mkdir -p -- {shlex.quote(workdir)}", cwd="/", timeout_s=30)
                 if workspace.return_code != 0 or workspace.error_type:
@@ -675,9 +675,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                         f"Cannot create OpenCode sandbox workdir {workdir}: {workspace.stderr or workspace.stdout}"
                     )
             else:
-                state.session.sandbox_id = sandbox.sandbox_id or str(
-                    body.sandbox_access.connection.descriptor.get("sandbox_id", "unknown")
-                )
+                state.session.sandbox_id = body.sandbox_access.connection.descriptor["sandbox_id"]
             command = _sandbox_prepare_command(workdir, directory, runtime)
             result = await sandbox.exec(command, timeout_s=self.config.sandbox_install_timeout_seconds)
             self._check_sandbox_setup(command, result)
@@ -1005,7 +1003,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             state.observations.records.append(
                 SandboxObservation(
                     role="agent",
-                    provider=state.session.sandbox.provider_name,
+                    provider=state.provider_name,
                     sandbox_id=state.session.sandbox_id,
                     outcome="timeout" if result["timed_out"] else "failed" if error or failure else "completed",
                     exit_code=result["return_code"],
@@ -1021,8 +1019,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         if execution_oom is not None:
             observation = SandboxObservation(
                 role="agent",
-                provider=state.session.sandbox.provider_name,
-                sandbox_id=state.session.sandbox_id,
+                provider=state.provider_name,
+                sandbox_id=execution_oom.sandbox_id,
                 outcome="oom",
                 phase="agent_execution",
                 error_type=type(execution_oom).__name__,

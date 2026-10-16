@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -14,6 +15,8 @@ from nemo_gym.rollout_observability import NG_AGENT_SANDBOX_OBSERVATION_KEY, San
 from nemo_gym.sandbox import (
     SandboxBackendUnreachableError,
     SandboxCommandStatusTimeoutError,
+    SandboxHandle,
+    SandboxIOTimeoutError,
     SandboxOOMKilledError,
     SandboxResources,
 )
@@ -380,7 +383,8 @@ async def test_agent_sandbox_oom_zero_requires_matching_sandbox(task_assets: Pat
 
 @pytest.mark.parametrize("failure_phase", ["patch_collection", "verification"])
 @pytest.mark.parametrize(
-    "failure_type", [SandboxOOMKilledError, SandboxBackendUnreachableError, SandboxCommandStatusTimeoutError]
+    "failure_type",
+    [SandboxOOMKilledError, SandboxBackendUnreachableError, SandboxCommandStatusTimeoutError, SandboxIOTimeoutError],
 )
 async def test_sandbox_loss_without_agent_execution_proof_fails_instead_of_scoring(
     task_assets: Path, monkeypatch: MonkeyPatch, failure_phase: str, failure_type: type[Exception]
@@ -434,6 +438,61 @@ async def test_verifier_status_timeout_propagates_without_scoring(
     sandbox.exec.assert_awaited_once_with(
         "bash /tests/test.sh", cwd="/app", timeout_s=task.config.verifier.timeout_sec
     )
+
+
+async def test_verifier_completed_command_with_log_timeout_remains_ungraded(
+    task_assets: Path, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    from nemo_gym.sandbox.api import AsyncSandbox
+    from nemo_gym.sandbox.providers.opensandbox import provider as opensandbox_provider
+
+    class FakeCommands:
+        def __init__(self) -> None:
+            self.submissions = 0
+            self.status_reads = 0
+            self.log_reads = 0
+
+        async def run(self, command: str, *, opts: dict) -> SimpleNamespace:
+            assert command == "bash /tests/test.sh"
+            assert opts["background"] is True
+            self.submissions += 1
+            return SimpleNamespace(id="verifier-exec")
+
+        async def get_command_status(self, execution_id: str) -> SimpleNamespace:
+            assert execution_id == "verifier-exec"
+            self.status_reads += 1
+            return SimpleNamespace(running=False, exit_code=0, error=None)
+
+        async def get_background_command_logs(self, execution_id: str) -> None:
+            assert execution_id == "verifier-exec"
+            self.log_reads += 1
+            raise TimeoutError("log route timed out")
+
+    monkeypatch.setattr(
+        opensandbox_provider, "_require_opensandbox_sdk", lambda: (object, object, dict, object, object)
+    )
+    provider = opensandbox_provider.OpenSandboxProvider(
+        probe={"command": None}, operations={"background_exec": True, "retries": 0}, diagnostics={"inspect_oom": False}
+    )
+    commands = FakeCommands()
+    handle = SandboxHandle(
+        sandbox_id="verifier-sandbox", provider_name="opensandbox", raw=SimpleNamespace(commands=commands)
+    )
+    sandbox = AsyncSandbox(provider)
+    sandbox._handle = handle
+    sandbox._stopped = False
+    server = DeepSWEResourcesServer(
+        config=_config(task_assets, golden=False), server_client=MagicMock(spec=ServerClient)
+    )
+    monkeypatch.setattr(server, "_stage_verifier", AsyncMock())
+    task = server._task_store.get("example-task")
+
+    with pytest.raises(SandboxIOTimeoutError, match="command logs"):
+        await server._run_verifier(sandbox, task, b"valid patch\n", tmp_path)
+
+    assert commands.submissions == 1
+    assert commands.status_reads == 1
+    assert commands.log_reads == 1
 
 
 async def test_verifier_execution_timeout_remains_a_zero_result(

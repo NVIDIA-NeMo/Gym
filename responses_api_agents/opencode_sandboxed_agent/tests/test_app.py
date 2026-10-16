@@ -57,6 +57,7 @@ from nemo_gym.sandbox import (
     SandboxBackendUnreachableError,
     SandboxCommandStatusTimeoutError,
     SandboxHandle,
+    SandboxIOTimeoutError,
     SandboxOOMKilledError,
 )
 from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS
@@ -356,7 +357,9 @@ class TestOpenCodeSandboxedAgent:
         )
         sandbox_mock.download = AsyncMock()
         sandbox_mock.upload = AsyncMock()
-        sandbox_mock.sandbox_id = "responses-sanity-sandbox"
+        sandbox_mock._handle = SandboxHandle(
+            sandbox_id="responses-sanity-sandbox", provider_name="opensandbox", raw=None
+        )
         monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox_mock})
         monkeypatch.setattr(
             server, "_create_opencode_config", AsyncMock(return_value={"plugin": ["file:///user-plugin.js"]})
@@ -556,12 +559,14 @@ class TestOpenCodeSandboxedAgent:
                 self._create_config().model_dump() | {"local_ripgrep_binary_path": str(tmp_path / "missing-rg")}
             )
 
+    @mark.parametrize("error_type", [TimeoutError, SandboxIOTimeoutError])
     async def test_ripgrep_upload_timeout_retries_at_new_path_before_agent_execution(
         self,
         tmp_path: Path,
         monkeypatch: MonkeyPatch,
         opencode_export_test_data: Dict[str, Any],
         caplog: LogCaptureFixture,
+        error_type: type[Exception],
     ) -> None:
         binary = tmp_path / "rg"
         binary.write_bytes(b"#!/bin/sh\necho ripgrep test\n")
@@ -573,7 +578,7 @@ class TestOpenCodeSandboxedAgent:
         client = MagicMock(spec=ServerClient)
         client.global_config_dict = {"observability_enabled": False}
         server = OpenCodeSandboxedAgent(config=config, server_client=client)
-        timeout = TimeoutError("Timed out during OpenSandbox write_file after 300s")
+        timeout = error_type("Timed out during OpenSandbox write_file after 300s")
         sandbox = MagicMock(
             upload=AsyncMock(side_effect=[timeout, None]),
             exec=AsyncMock(
@@ -588,7 +593,7 @@ class TestOpenCodeSandboxedAgent:
             ),
             download=AsyncMock(),
         )
-        sandbox.sandbox_id = "upload-retry-sandbox"
+        sandbox._handle = SandboxHandle(sandbox_id="upload-retry-sandbox", provider_name="opensandbox", raw=None)
         server._sandbox_id_to_sandbox[""] = sandbox
         monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value={}))
         monkeypatch.setattr(app_module, "uniform", lambda *_: 0.0)
@@ -650,7 +655,7 @@ class TestOpenCodeSandboxedAgent:
                 active_uploads -= 1
 
         sandbox = MagicMock(upload=AsyncMock(side_effect=upload))
-        sandbox.sandbox_id = "concurrency-test-sandbox"
+        sandbox._handle = SandboxHandle(sandbox_id="concurrency-test-sandbox", provider_name="opensandbox", raw=None)
         tasks = [asyncio.create_task(server._stage_ripgrep(sandbox, binary)) for _ in range(3)]
         try:
             await asyncio.wait_for(two_uploads_started.wait(), timeout=1)
@@ -666,10 +671,11 @@ class TestOpenCodeSandboxedAgent:
         assert len(set(remote_paths)) == 3
 
     @mark.parametrize(
-        "error_type,expected_attempts", [(TimeoutError, 2), (PermissionError, 1), (FileNotFoundError, 1)]
+        "error_type,expected_attempts",
+        [(TimeoutError, 2), (SandboxIOTimeoutError, 2), (PermissionError, 1), (FileNotFoundError, 1)],
     )
     async def test_ripgrep_upload_failure_propagates_without_export_and_cleans_up(
-        self, tmp_path: Path, monkeypatch: MonkeyPatch, error_type: type[OSError], expected_attempts: int
+        self, tmp_path: Path, monkeypatch: MonkeyPatch, error_type: type[Exception], expected_attempts: int
     ) -> None:
         binary = tmp_path / "rg"
         binary.write_bytes(b"readable upload")
@@ -1333,12 +1339,13 @@ class TestBenchmarkLifecycle:
             exec=AsyncMock(
                 side_effect=[
                     SimpleNamespace(stdout="Installed OpenCode", stderr="", return_code=0, error_type=None),
-                    SandboxOOMKilledError("Sandbox was OOM-killed. sandbox_id='agent-sandbox'"),
+                    SandboxOOMKilledError(
+                        "Sandbox was OOM-killed. sandbox_id='agent-sandbox'", sandbox_id="agent-sandbox"
+                    ),
                 ]
             ),
         )
-        sandbox.provider_name = "opensandbox"
-        sandbox.sandbox_id = "agent-sandbox"
+        sandbox._handle = SandboxHandle(sandbox_id="agent-sandbox", provider_name="opensandbox", raw=None)
         server._start_sandbox = AsyncMock(return_value=sandbox)
         server._create_opencode_config = AsyncMock(return_value={})
         monkeypatch.setattr(app_module, "raise_for_status", AsyncMock())
@@ -1400,7 +1407,7 @@ class TestBenchmarkLifecycle:
         assert client.post.await_count == 2
         sandbox.stop.assert_awaited_once()
 
-    @mark.parametrize("failure_phase", ["setup_oom", "agent_transport", "status_timeout"])
+    @mark.parametrize("failure_phase", ["setup_oom", "agent_transport", "status_timeout", "io_timeout"])
     async def test_unconfirmed_agent_oom_does_not_produce_a_scored_response(
         self, monkeypatch, tmp_path, failure_phase
     ):
@@ -1416,7 +1423,11 @@ class TestBenchmarkLifecycle:
             else (
                 SandboxBackendUnreachableError("backend disappeared without OOM status")
                 if failure_phase == "agent_transport"
-                else SandboxCommandStatusTimeoutError("status stayed unavailable after recovery window")
+                else (
+                    SandboxCommandStatusTimeoutError("status stayed unavailable after recovery window")
+                    if failure_phase == "status_timeout"
+                    else SandboxIOTimeoutError("SDK request timed out; command outcome unknown")
+                )
             )
         )
         sandbox = MagicMock(

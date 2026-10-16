@@ -79,41 +79,46 @@ From the client this is an ordinary command failure:
 
 ### The whole sandbox died
 
-Kubernetes group-OOM kills the entire cgroup, so the next operation cannot reach the exec daemon.
-The provider recognises this, polls the sandbox status for up to 5 seconds to learn *why*, and
-raises a typed error with the reason attached:
+Kubernetes group-OOM can kill the sandbox's user container, so the next operation cannot reach the exec daemon.
+The provider briefly polls sandbox status and, when enabled, checks authenticated control-plane inspect output.
+It raises `SandboxOOMKilledError` only after confirming `OOMKilled` for the current sandbox:
 
 ```python
-from nemo_gym.sandbox.providers.opensandbox.provider import SandboxBackendUnreachableError
+from nemo_gym.sandbox import (
+    SandboxBackendUnreachableError,
+    SandboxCommandStatusTimeoutError,
+    SandboxIOTimeoutError,
+    SandboxOOMKilledError,
+)
 
 try:
     result = await sandbox.exec(cmd, timeout_s=120)
-except SandboxBackendUnreachableError as e:
-    if "OOM-killed" in str(e):
-        # message quotes the server's record: state=..., reason='OOMKilled', message=..., sandbox_id=...
-        ...  # record as OOM; recreate the sandbox or fail the rollout
-    else:
-        ...  # backend gone for another reason (node loss, TTL); same handling, different tag
+except SandboxOOMKilledError as error:
+    ...  # confirmed current-sandbox OOM; error.sandbox_id identifies it
+except (SandboxBackendUnreachableError, SandboxCommandStatusTimeoutError, SandboxIOTimeoutError):
+    ...  # outcome unknown; preserve as an ungraded infrastructure failure
 ```
 
-Afterwards `await sandbox.status()` returns `SandboxStatus.ERROR` or `SandboxStatus.STOPPED` — that
-is the provider-neutral check if you do not want to import the provider's exception type. The same
-notice surfaces on the PTY path as
-`SandboxPtyError("PTY attach takeover kept being refused: Sandbox was OOM-killed. ...")`.
+`await sandbox.status()` can show `SandboxStatus.ERROR` or `SandboxStatus.STOPPED`, but a terminal
+status alone does not establish OOM. PTY diagnostics may include an OOM notice based on status text;
+that notice is useful for debugging but is not the strict evidence used to score an OOM.
 
 <Note>
-Do not confuse OOM with a timeout. A command that exceeds its `timeout_s` raises `TimeoutError`; a
-wedged command raises `TimeoutError` mentioning the hard cap. Neither is an OOM — when in doubt,
-read `memory.events` before deciding.
+Do not confuse OOM with a timeout. A command that exceeds its `timeout_s` raises `TimeoutError`;
+losing the status of an already-submitted command raises `SandboxCommandStatusTimeoutError` after
+recovery is exhausted. An expired provider request with an unknown outcome raises `SandboxIOTimeoutError`.
+None of these establish OOM.
 </Note>
 
 ### Counting OOMs across a run
 
-Rollout records carry sandbox observations under `ng_agent_observations`: each record has
-`outcome` (`completed`, `failed`, `timeout`, `sandbox_error`), `exit_code`, and `error_type`.
-`outcome: sandbox_error` with `error_type: SandboxBackendUnreachableError`, or `exit_code: 137`, is
-your OOM census. Join it on the task id: OOMs clustered on a few tasks mean fan-out or runaway code
-in those repos; OOMs spread evenly mean the limit is genuinely too small.
+When agent OOM reporting is enabled, rollout sandbox observations under `ng_agent_observations`
+record confirmed agent OOMs as `outcome: oom`, `phase: agent_execution`, and
+`error_type: SandboxOOMKilledError`, with the provider and sandbox ID. Count those confirmed records
+for the agent OOM census. `SandboxBackendUnreachableError`, `SandboxCommandStatusTimeoutError`,
+`SandboxIOTimeoutError`,
+and exit code 137 alone do not prove that the current sandbox was OOM-killed. Check container
+termination evidence separately for failures outside agent execution.
 
 ## Cluster-side checks
 
@@ -125,7 +130,7 @@ kubectl top pod <sandbox-id>-0 -n <namespace>          # live CPU/memory as the 
 kubectl get pod <sandbox-id>-0 -n <namespace> \
   -o jsonpath='{.spec.containers[0].resources}'        # requests AND limits actually applied
 kubectl describe pod <sandbox-id>-0 -n <namespace> | grep -A3 'Last State'
-#   "Reason: OOMKilled, Exit Code: 137" = whole-sandbox OOM
+#   Confirm Reason: OOMKilled on the current sandbox user container, not a sidecar or old state.
 ```
 
 The `resources` jsonpath is the fastest way to confirm you did not accidentally set the same map
@@ -138,5 +143,5 @@ for requests and limits.
 | `throttled_usec` ≫ 0, memory fine | CPU limit binding — usually fan-out | Fix parallelism caps before raising the limit. |
 | `memory.peak` near `memory.max`, many `max` events | Memory ceiling, thrashing | Find the fan-out or runaway code; raise the limit only if the peak is legitimate. |
 | `oom_kill > 0`, sandbox alive | A child process was killed | Command output is probably truncated; safe to retry a smaller step. |
-| Pod `OOMKilled` / `137`, no in-sandbox data | Group OOM kill | Same causes; add a bash timeout so the agent fails fast. |
+| Current sandbox user container terminated with `OOMKilled` | Confirmed sandbox OOM | Inspect memory use and parallelism before rerunning. |
 | `nproc` ≠ CPUs in `cpu.max` | This cluster does not overlay CPU counts | Rely on `derive_cpu_env`; cap environment-blind runners in the image. |

@@ -232,16 +232,28 @@ class SandboxCreateVerificationError(SandboxCreateError):
     """Raised when a newly-created sandbox fails provider readiness checks."""
 
 
-class SandboxBackendUnreachableError(RuntimeError):
+class SandboxLostError(RuntimeError):
+    """A sandbox runtime failure prevents a trustworthy command result."""
+
+
+class SandboxBackendUnreachableError(SandboxLostError):
     """The sandbox backend became unreachable while submitting or running a command."""
 
 
-class SandboxCommandStatusTimeoutError(TimeoutError):
-    """Status reads for an already-submitted command exhausted its deadline."""
+class SandboxCommandStatusTimeoutError(SandboxLostError):
+    """Status reads for an already-submitted command exhausted recovery; its result is unknown."""
 
 
-class SandboxOOMKilledError(SandboxBackendUnreachableError):
-    """The provider confirmed that the sandbox was OOM-killed."""
+class SandboxIOTimeoutError(SandboxLostError):
+    """Provider I/O timed out before a command or file operation's outcome was known."""
+
+
+class SandboxOOMKilledError(SandboxLostError):
+    """The provider confirmed that the current sandbox was OOM-killed."""
+
+    def __init__(self, message: str, *, sandbox_id: str | None = None) -> None:
+        super().__init__(message)
+        self.sandbox_id = sandbox_id
 
 
 class SandboxProvider(Protocol):

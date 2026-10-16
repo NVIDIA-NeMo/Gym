@@ -37,8 +37,7 @@ from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.rollout_observability import NG_AGENT_SANDBOX_OBSERVATION_KEY, SandboxObservation
 from nemo_gym.sandbox import (
     AsyncSandbox,
-    SandboxBackendUnreachableError,
-    SandboxCommandStatusTimeoutError,
+    SandboxLostError,
     SandboxOOMKilledError,
     SandboxResources,
     SandboxSpec,
@@ -342,8 +341,6 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 cwd="/app",
                 timeout_s=task.config.verifier.timeout_sec,
             )
-        except SandboxCommandStatusTimeoutError:
-            raise
         except TimeoutError:
             return VerifierResult(
                 evaluation_completed=False,
@@ -516,10 +513,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                     else:
                         model_patch = await self._collect_model_patch(agent_session.sandbox, task)
                 except Exception as error:
-                    if agent_oom_observation is not None or isinstance(
-                        error,
-                        (SandboxOOMKilledError, SandboxBackendUnreachableError, SandboxCommandStatusTimeoutError),
-                    ):
+                    if agent_oom_observation is not None or isinstance(error, SandboxLostError):
                         raise
                     print(
                         f"Failed to collect DeepSWE model patch for {current_task_id}: {format_exc()}",
@@ -546,7 +540,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 started = monotonic()
                 result = await self._run_verifier(sandbox, task, model_patch, log_dir)
                 verification_time_s = monotonic() - started
-            except (SandboxOOMKilledError, SandboxBackendUnreachableError, SandboxCommandStatusTimeoutError):
+            except SandboxLostError:
                 raise
             except Exception as error:
                 print(f"DeepSWE verifier failed for {current_task_id}: {format_exc()}", file=sys.stderr)
