@@ -19,7 +19,7 @@ import re
 import time
 import traceback
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import aiohttp
 from fastapi import Request, Response
@@ -606,24 +606,17 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                             "system prompt across context resets." % len(progress_board)
                         )
                 else:
-
-                    async def _tool_call():
-                        response = await self.server_client.post(
-                            server_name=self.config.resources_server.name,
-                            url_path=f"/{output_function_call.name}",
-                            json=tool_args,
-                            cookies=resources_server_cookies,
-                        )
-                        return response, (await response.content.read()).decode()
-
                     try:
-                        api_response, tool_output = await _before_deadline(deadline, _tool_call())
+                        tool_status, tool_cookies, tool_output = await _before_deadline(
+                            deadline,
+                            self._call_resources_tool(output_function_call.name, tool_args, resources_server_cookies),
+                        )
                     except _RolloutDeadline:
                         print(f"[browsecomp][timeout][{qid}] step={step} in=tool_call", flush=True)
                         timed_out = True
                         break
                     # We don't raise for status here since it's a valid return for the API to error e.g. if the model outputs an invalid call or something.
-                    resources_server_cookies = api_response.cookies
+                    resources_server_cookies = tool_cookies
                     # reference-harness parity: the resources server wraps every tool result in a one-field
                     # JSON envelope ({"results_string": "..."}), which JSON-escapes newlines — the
                     # model then sees a single escaped line instead of raw multi-line text. This was
@@ -640,10 +633,10 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                             tool_output = parsed_tool_output["results_string"]
                     except json.JSONDecodeError:
                         pass
-                    if api_response.status >= 400:
+                    if tool_status >= 400:
                         print(
                             f"[browsecomp][tool_fail][{qid}] step={step} tool={output_function_call.name} "
-                            f"status={api_response.status} body={tool_output[:300]}",
+                            f"status={tool_status} body={tool_output[:300]}",
                             flush=True,
                         )
                 if self.config.nudge_steps:
@@ -1094,6 +1087,19 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             )
             for msg in list(input_messages) + full_trajectory:
                 f.write(msg.model_dump_json() + "\n")
+
+    async def _call_resources_tool(self, name: str, tool_args: dict, cookies) -> tuple[int, Any, str]:
+        """Run one tool call on the resources server; return (status, cookies, raw body).
+
+        The sandboxed subclass overrides this to run some tools in its sandbox.
+        """
+        response = await self.server_client.post(
+            server_name=self.config.resources_server.name,
+            url_path=f"/{name}",
+            json=tool_args,
+            cookies=cookies,
+        )
+        return response.status, response.cookies, (await response.content.read()).decode()
 
     async def _count_prompt_tokens(self, body) -> int:
         """Hit the policy model's vLLM /tokenize endpoint and return the prompt
