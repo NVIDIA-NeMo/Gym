@@ -6,6 +6,7 @@
 import copy
 import dataclasses
 import json
+import os
 import subprocess
 import sys
 
@@ -82,8 +83,8 @@ def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, use_agent_
             assert "cwd" not in agent and "extra_config" not in agent
         if harness == "opencode":
             assert "agent" not in agent["opencode_config"]
-    # Validate available adapters without invoking their auto-install hooks.
-    if harness != "hermes":
+    # A CI job installs only its own adapter's dependencies, so only that adapter can be imported there.
+    if os.environ.get("HARNESS") == harness:
         import importlib
 
         module = importlib.import_module(f"responses_api_agents.{harness}_agent.app")
