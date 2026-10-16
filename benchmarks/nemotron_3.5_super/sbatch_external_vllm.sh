@@ -109,6 +109,15 @@ if (( should_run_eval )); then
     printf -v eval_arguments '%q ' "$@"
 fi
 
+# A Harbor target (`harbor:<dataset>`, first argument) prepares its own rows and runs on their split,
+# and `gym eval prepare` rejects its TARGET and --agent/--sandbox flags.
+prepare_command="gym eval prepare $eval_arguments +use_cached_prepared_benchmarks=true"
+split_arguments="++split=benchmark ++reuse_existing_data_preparation=true"
+if [[ "${1:-}" == harbor:* ]]; then
+    prepare_command=":"
+    split_arguments=""
+fi
+
 eval_command=$(cat <<EOF
 set -euo pipefail
 
@@ -121,7 +130,7 @@ export NEMO_GYM_USER="\${NEMO_GYM_USER:-\$SLURM_JOB_USER}"
 
 source "$VLLM_CONFIG"
 
-gym eval prepare $eval_arguments +use_cached_prepared_benchmarks=true
+$prepare_command
 
 experiment_name=$EXPERIMENT_NAME/slurm_job_id_\$SLURM_JOB_ID/date_\$(date +%Y%m%d_%H%M%S)
 # export_to_csv.py derives <base>_aggregate_metrics.json from this, so the
@@ -176,9 +185,8 @@ gym eval run \
     +skip_venv_if_present=true \
     ++output_jsonl_fpath=\$rollouts_fpath \
     ++overwrite_metrics_conflicts=true \
-    ++split=benchmark \
+    $split_arguments \
     ++use_absolute_ip=true \
-    ++reuse_existing_data_preparation=true \
     ++policy_base_url=http://\$(getent hosts "\$ROUTER_NODE" | awk 'NR == 1 {print \$1}'):$ROUTER_SERVER_PORT/v1 \
     ++policy_api_key=dummy_api_key \
     ++policy_model_name=$MODEL_NAME \
