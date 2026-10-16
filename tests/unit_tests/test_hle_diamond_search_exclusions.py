@@ -49,7 +49,7 @@ SYNTHETIC_UPSTREAM = {
         "",
         "   ",
     ],
-    "serp_url_patterns": ["^google\\.com/search"],
+    "serp_url_patterns": ["^google\\.com/search", r"^([a-z0-9-]+\.)*bing\.com/search"],
     "url_patterns": ["hle", "last exam"],
     "new_family": ["x", "y", "z"],
 }
@@ -69,21 +69,56 @@ SYNTHETIC_HLE = {
     ]
 }
 EXPECTED_DOMAINS = ["example.com", "sub.example.com", "xn--bcher-kva.de", "extra.net"]
-EXPECTED_SUBSTRINGS = ["example.com/path", "other.org/x", "news.site/a?b=1", "://scale.com", "hle-exam"]
+EXPECTED_SUBSTRINGS = [
+    "example.com/path",
+    "other.org/x",
+    "news.site/a?b=1",
+    "bing.com/search",
+    "://scale.com",
+    "hle-exam",
+]
+# One search-engine result page per emitted SERP substring, as the with-tools pilot saw agents fetch them.
+SERP_URLS = [
+    "https://www.google.com/search?q=humanity%27s+last+exam",
+    "https://scholar.google.com/scholar?q=hle+diamond",
+    "https://www.bing.com/search?q=hle",
+    "https://duckduckgo.com/html/?q=hle",
+    "https://duckduckgo.com/lite/?q=hle",
+    "https://duckduckgo.com/?q=hle&t=h_",
+    "https://html.duckduckgo.com/html/?q=hle",
+    "https://search.yahoo.com/search?p=hle",
+    "https://www.baidu.com/s?wd=hle",
+    "https://yandex.ru/search/?text=hle",
+    "https://www.startpage.com/sp/search?query=hle",
+    "https://search.brave.com/search?q=hle",
+    "https://www.ecosia.org/search?q=hle",
+    "https://www.mojeek.com/search?q=hle",
+]
+NON_SERP_URLS = [
+    "https://www.google.com/maps/place/Berlin",
+    "https://duckduckgo.com/about",
+    "https://www.ecosia.org/",
+    "https://en.wikipedia.org/wiki/Yandex",
+]
 
 
 @pytest.fixture
-def url_exclusion_policy(monkeypatch):
-    """The real Tavily parser; the tavily SDK is a resource-server extra the parser itself never uses."""
+def tavily_app(monkeypatch):
+    """The real Tavily server module; the tavily SDK is a resource-server extra the policy code never uses."""
     try:
         import tavily  # noqa: F401
     except ModuleNotFoundError:
         stub = types.ModuleType("tavily")
         stub.AsyncTavilyClient = type("AsyncTavilyClient", (), {})
         monkeypatch.setitem(sys.modules, "tavily", stub)
-    from resources_servers.tavily_search.app import URLExclusionPolicy
+    from resources_servers.tavily_search import app
 
-    return URLExclusionPolicy
+    return app
+
+
+@pytest.fixture
+def url_exclusion_policy(tavily_app):
+    return tavily_app.URLExclusionPolicy
 
 
 def _properties(policy_json: dict) -> list[dict]:
@@ -116,6 +151,7 @@ def test_build_policy_drops_and_reports_entries_the_parser_rejects_or_never_matc
         ("upstream domains", 42),
         ("upstream url_prefixes", ""),
         ("upstream url_prefixes", "   "),
+        ("upstream serp_url_patterns", "^google\\.com/search"),
         ("benchmarks/hle/search_exclusions.json", ""),
         ("benchmarks/hle/search_exclusions.json", "Someone"),
     ]
@@ -124,17 +160,44 @@ def test_build_policy_drops_and_reports_entries_the_parser_rejects_or_never_matc
     assert reasons["has/path.com"] == "not a hostname"
     assert reasons[""] == "empty"
     assert "author_name" in reasons["Someone"]
+    assert "SERP_PATTERN_SUBSTRINGS" in reasons["^google\\.com/search"]
 
 
 def test_unrepresented_upstream_rule_families_are_counted_including_unknown_ones():
     policy = module.build_policy(SYNTHETIC_UPSTREAM)
-    assert policy.unrepresented == {"serp_url_patterns": 1, "url_patterns": 2, "new_family": 3}
-    assert module.render(policy)["unrepresented_upstream_rules"] == policy.unrepresented
+    assert policy.unrepresented == {"url_patterns": 2, "new_family": 3}
+    assert policy.approximated == {"serp_url_patterns": {"upstream_rules": 2, "url_substring_rules": 1}}
+    rendered = module.render(policy)
+    assert rendered["unrepresented_upstream_rules"] == policy.unrepresented
+    assert rendered["approximated_upstream_rules"] == policy.approximated
+    assert (
+        "approximated_upstream_rules" not in module.render(module.build_policy({"domains": ["a.test"]}))["notices"][0]
+    )
+    assert module.render(module.build_policy({"domains": ["a.test"]}))["approximated_upstream_rules"] == {}
+
+
+@pytest.mark.parametrize("url", SERP_URLS)
+def test_serp_approximation_is_sound_on_result_page_urls_and_the_committed_policy_blocks_them(
+    url, url_exclusion_policy
+):
+    """Upstream matches its anchored regexes on the lower-cased URL without scheme or leading www.; every such
+    page must contain one of the substrings emitted for a regex that matches it, and the committed list blocks it."""
+    stripped = re.sub(r"^https?://(www\.)?", "", url.lower())
+    matching = [regex for regex in module.SERP_PATTERN_SUBSTRINGS if re.match(regex, stripped)]
+    assert matching, url
+    emitted = {substring for regex in matching for substring in module.SERP_PATTERN_SUBSTRINGS[regex]}
+    assert any(substring in url.lower() for substring in emitted), (url, emitted)
+    assert url_exclusion_policy(DIAMOND_POLICY).blocked(url)
+
+
+@pytest.mark.parametrize("url", NON_SERP_URLS)
+def test_committed_policy_leaves_non_result_pages_of_search_engines_alone(url, url_exclusion_policy):
+    assert not url_exclusion_policy(DIAMOND_POLICY).blocked(url)
 
 
 def test_rendered_policy_loads_through_gym_parser_which_ignores_metadata_keys(tmp_path, url_exclusion_policy):
     rendered = module.render(module.build_policy(SYNTHETIC_UPSTREAM, SYNTHETIC_HLE))
-    assert set(rendered) == {"source", "unrepresented_upstream_rules", "notices"}
+    assert set(rendered) == {"source", "unrepresented_upstream_rules", "approximated_upstream_rules", "notices"}
     assert module.UPSTREAM_COMMIT[:8] in rendered["source"]["upstream_commit"]
     path = tmp_path / "search_exclusions.json"
     path.write_text(json.dumps(rendered))
@@ -160,6 +223,9 @@ def test_committed_policy_contains_only_non_empty_normalised_rules(diamond_polic
     assert len(rules) == len(set(rules))
     assert all(value == value.lower() for _, value in rules)
     assert set(diamond_policy_json["unrepresented_upstream_rules"]) == set(module.UNREPRESENTED_RULE_FAMILIES)
+    assert diamond_policy_json["approximated_upstream_rules"] == {
+        "serp_url_patterns": {"upstream_rules": 12, "url_substring_rules": 14}
+    }
     assert module.UPSTREAM_COMMIT[:8] in diamond_policy_json["source"]["upstream_commit"]
 
 
@@ -188,6 +254,45 @@ def test_committed_policy_loads_through_gym_parser_and_blocks_load_bearing_hosts
         assert policy.blocked(url), url
     assert not policy.blocked("https://en.wikipedia.org/wiki/Riemann_hypothesis")
     assert not policy.blocked("https://arxiv.org/abs/1706.03762")
+
+
+def test_committed_policy_provider_subset_is_capped_priority_first_and_the_tail_stays_local(tavily_app):
+    """Tavily's /search accepts at most 150 exclude_domains (HTTP 400 beyond; with-tools pilot P-T1). The server
+    sends the priority block then file order; the 70 domains it cannot send are enforced locally only."""
+    policy = tavily_app.URLExclusionPolicy(DIAMOND_POLICY)
+    assert len(policy.domains) == 220
+    sent = tavily_app.select_provider_domains(
+        policy.domains, tavily_app.TAVILY_EXCLUDE_DOMAINS_LIMIT, tavily_app.DEFAULT_EXCLUDE_DOMAINS_PRIORITY
+    )
+    assert len(sent) == 150
+    assert sent[:15] == [
+        "huggingface.co",
+        "hf.co",
+        "lastexam.ai",
+        "agi.safe.ai",
+        "safe.ai",
+        "scale.com",
+        "github.com",
+        "githubusercontent.com",
+        "archive.today",
+        "archive.ph",
+        "archive.is",
+        "archive.md",
+        "archive.li",
+        "archive.vn",
+        "archive.fo",
+    ]
+    assert sent[15:] == [domain for domain in policy.domains if domain not in sent[:15]][:135]
+    not_sent = [domain for domain in policy.domains if domain not in sent]
+    assert len(not_sent) == 70
+    local_only = {"facebook.com", "x.com", "reddit.com", "stackexchange.com", "stackoverflow.com", "quora.com"}
+    assert local_only <= set(not_sent)
+    for url in (
+        "https://www.reddit.com/r/singularity/comments/abc/hle_answers/",
+        "https://x.com/someone/status/1",
+        "https://math.stackexchange.com/questions/1",
+    ):
+        assert policy.blocked(url), url
 
 
 def test_committed_policy_is_at_least_as_strict_as_the_hle_policy(diamond_policy_json):

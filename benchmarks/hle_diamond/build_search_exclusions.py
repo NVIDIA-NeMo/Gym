@@ -23,14 +23,18 @@ seven rule families for its ``web_search``/``web_fetch`` wrapper. NeMo Gym's Tav
 
 This script maps upstream ``domains`` to ``domain`` rules (IDNA-normalised, lower-cased, validated as a
 hostname, deduplicated) and upstream ``url_prefixes`` to ``url_substring`` rules (lower-cased, scheme and
-leading ``www.`` removed as upstream's matching does, deduplicated), then unions the result with
-``benchmarks/hle/search_exclusions.json`` so the Diamond policy is at least as strict as Gym's HLE policy.
-Prefix rules become substring rules, so the Gym policy is a superset of upstream's for these two families.
+leading ``www.`` removed as upstream's matching does, deduplicated), approximates upstream's
+``serp_url_patterns`` (anchored regexes naming search-engine result pages) by the ``url_substring`` rules in
+``SERP_PATTERN_SUBSTRINGS``, then unions the result with ``benchmarks/hle/search_exclusions.json`` so the Diamond
+policy is at least as strict as Gym's HLE policy. Prefix rules become substring rules, so the Gym policy is a
+superset of upstream's for the two represented families; the SERP approximation is narrower for engines with
+many top-level domains (only ``google.com``) and wider where the path cannot be expressed (``yandex.``,
+``startpage.com``).
 
-The regex-based upstream families (``serp_url_patterns``, ``url_patterns``, ``patterns_case_sensitive``,
-``answer_title_patterns``, ``answer_title_allow_hosts``) have no equivalent in Gym's format. They are listed by
-name and count under the top-level ``unrepresented_upstream_rules`` key, which the Tavily parser ignores
-because it reads only ``notices``.
+The remaining regex families (``url_patterns``, ``patterns_case_sensitive``, ``answer_title_patterns``,
+``answer_title_allow_hosts``) have no equivalent in Gym's format. They are listed by name and count under the
+top-level ``unrepresented_upstream_rules`` key, and the SERP approximation is accounted for under
+``approximated_upstream_rules``; the Tavily parser ignores both because it reads only ``notices``.
 
 Usage::
 
@@ -72,9 +76,31 @@ OUTPUT_PATH = Path(__file__).resolve().with_name("search_exclusions.json")
 
 # Upstream rule families that map onto a Gym property type.
 REPRESENTED_UPSTREAM_KEYS = {"domains": "domain", "url_prefixes": "url_substring"}
-# Upstream regex families known at the pinned revision; any other non-represented key is reported as well.
+# Upstream ``serp_url_patterns`` are anchored regexes over the scheme-less URL. Each is approximated by the
+# ``url_substring`` rules naming the engine host and search path it describes. Keyed by the exact upstream regex,
+# so a changed or new pattern is dropped with a report instead of being approximated silently.
+SERP_PATTERN_SUBSTRINGS: dict[str, tuple[str, ...]] = {
+    r"^([a-z0-9-]+\.)*google\.[a-z.]+/search": ("google.com/search",),  # narrower: google.com only
+    r"^scholar\.google\.[a-z.]+/scholar\?": ("scholar.google.com/scholar",),  # narrower: .com only
+    r"^([a-z0-9-]+\.)*bing\.com/search": ("bing.com/search",),
+    r"^([a-z0-9-]+\.)*duckduckgo\.com/(html|lite|\?q=)": (
+        "duckduckgo.com/html",
+        "duckduckgo.com/lite",
+        "duckduckgo.com/?q=",
+    ),
+    r"^html\.duckduckgo\.com": ("html.duckduckgo.com",),
+    r"^([a-z0-9-]+\.)*search\.yahoo\.com/search": ("search.yahoo.com/search",),
+    r"^([a-z0-9-]+\.)*baidu\.com/s\?": ("baidu.com/s?",),
+    r"^([a-z0-9-]+\.)*yandex\.[a-z.]+/search": ("yandex.",),  # wider: every yandex host and path
+    r"^([a-z0-9-]+\.)*startpage\.com/.*/search": ("startpage.com",),  # wider: the whole host
+    r"^search\.brave\.com/search": ("search.brave.com/search",),
+    r"^([a-z0-9-]+\.)*ecosia\.org/search": ("ecosia.org/search",),
+    r"^([a-z0-9-]+\.)*mojeek\.com/search": ("mojeek.com/search",),
+}
+APPROXIMATED_UPSTREAM_KEYS = {"serp_url_patterns": SERP_PATTERN_SUBSTRINGS}
+# Upstream regex families with no Gym equivalent at the pinned revision; any other non-represented key is
+# reported as well.
 UNREPRESENTED_RULE_FAMILIES = (
-    "serp_url_patterns",
     "url_patterns",
     "patterns_case_sensitive",
     "answer_title_patterns",
@@ -136,6 +162,7 @@ class ExclusionPolicy:
     url_substrings: list[str] = field(default_factory=list)
     dropped: list[tuple[str, Any, str]] = field(default_factory=list)  # (source, original value, reason)
     unrepresented: dict[str, int] = field(default_factory=dict)
+    approximated: dict[str, dict[str, int]] = field(default_factory=dict)  # family -> upstream and Gym rule counts
 
     def add(self, property_type: str, value: Any, source: str) -> None:
         normalizer = _NORMALIZERS.get(property_type)
@@ -162,8 +189,31 @@ def build_policy(upstream: dict[str, Any], hle_exclusions: dict[str, Any] | None
             raise ValueError(f"upstream {key!r} must be a list")
         for value in entries:
             policy.add(property_type, value, f"upstream {key}")
+    for key, mapping in APPROXIMATED_UPSTREAM_KEYS.items():
+        if key not in upstream:
+            continue
+        entries = upstream[key]
+        if not isinstance(entries, list):
+            raise ValueError(f"upstream {key!r} must be a list")
+        emitted = 0
+        for pattern in entries:
+            substrings = mapping.get(pattern) if isinstance(pattern, str) else None
+            if substrings is None:
+                policy.dropped.append(
+                    (
+                        f"upstream {key}",
+                        pattern,
+                        "no url_substring approximation in SERP_PATTERN_SUBSTRINGS; review it",
+                    )
+                )
+                continue
+            for substring in substrings:
+                before = len(policy.url_substrings)
+                policy.add("url_substring", substring, f"upstream {key}")
+                emitted += len(policy.url_substrings) - before
+        policy.approximated[key] = {"upstream_rules": len(entries), "url_substring_rules": emitted}
     for key, entries in upstream.items():
-        if key not in REPRESENTED_UPSTREAM_KEYS:
+        if key not in REPRESENTED_UPSTREAM_KEYS and key not in APPROXIMATED_UPSTREAM_KEYS:
             policy.unrepresented[key] = len(entries) if isinstance(entries, (list, dict)) else 1
     if hle_exclusions is not None:
         for notice in hle_exclusions["notices"]:
@@ -175,8 +225,9 @@ def build_policy(upstream: dict[str, Any], hle_exclusions: dict[str, Any] | None
 def render(policy: ExclusionPolicy) -> dict[str, Any]:
     """Serialise the policy in the Tavily resource's ``exclude_domains_file_path`` format.
 
-    ``URLExclusionPolicy`` reads only ``notices[*].properties``; ``source`` and ``unrepresented_upstream_rules``
-    are attribution and audit metadata it ignores (verified by tests/unit_tests/test_hle_diamond_search_exclusions.py).
+    ``URLExclusionPolicy`` reads only ``notices[*].properties``; ``source``, ``unrepresented_upstream_rules`` and
+    ``approximated_upstream_rules`` are attribution and audit metadata it ignores (verified by
+    tests/unit_tests/test_hle_diamond_search_exclusions.py).
     """
     properties = [{"type": "domain", "value": domain} for domain in policy.domains]
     properties += [{"type": "url_substring", "value": substring} for substring in policy.url_substrings]
@@ -184,7 +235,8 @@ def render(policy: ExclusionPolicy) -> dict[str, Any]:
         "source": {
             "description": (
                 "Search exclusions for the HLE-Diamond with-tools presets: the upstream HLE blocklist's 'domains' "
-                "and 'url_prefixes' (the two rule families NeMo Gym's Tavily resource can express) unioned with "
+                "and 'url_prefixes' (the two rule families NeMo Gym's Tavily resource can express), its "
+                "'serp_url_patterns' approximated as url_substring rules, unioned with "
                 "benchmarks/hle/search_exclusions.json. Generated by benchmarks/hle_diamond/build_search_exclusions.py; "
                 "do not edit by hand."
             ),
@@ -196,6 +248,7 @@ def render(policy: ExclusionPolicy) -> dict[str, Any]:
             "upstream_license": UPSTREAM_LICENSE,
         },
         "unrepresented_upstream_rules": dict(policy.unrepresented),
+        "approximated_upstream_rules": {family: dict(counts) for family, counts in policy.approximated.items()},
         "notices": [{"properties": properties}],
     }
 
@@ -210,6 +263,12 @@ def report(policy: ExclusionPolicy, output: Path) -> None:
         f"wrote {output}: {len(policy.domains)} domain rules, {len(policy.url_substrings)} url_substring rules",
         file=sys.stderr,
     )
+    for name, counts in policy.approximated.items():
+        print(
+            f"approximated upstream rule family {name}: {counts['upstream_rules']} regexes -> "
+            f"{counts['url_substring_rules']} url_substring rules",
+            file=sys.stderr,
+        )
     families = ", ".join(f"{name}={count}" for name, count in policy.unrepresented.items()) or "none"
     print(f"unrepresented upstream rule families (not expressible in Gym's format): {families}", file=sys.stderr)
     for name in policy.unrepresented:
