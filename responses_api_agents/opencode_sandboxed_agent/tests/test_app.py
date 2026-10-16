@@ -1358,9 +1358,11 @@ async def test_prompt_delivery_to_opencode(tmp_path: Path, monkeypatch: MonkeyPa
     config.verbatim_prompt = verbatim_prompt
     server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
     uploads: Dict[str, bytes] = {}
+    upload_modes: Dict[str, int] = {}
 
     async def upload(source: Any, target: str) -> None:
         uploads[target] = Path(source).read_bytes()
+        upload_modes[target] = Path(source).stat().st_mode & 0o777
 
     sandbox = MagicMock(
         upload=AsyncMock(side_effect=upload),
@@ -1374,12 +1376,16 @@ async def test_prompt_delivery_to_opencode(tmp_path: Path, monkeypatch: MonkeyPa
     )
     monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox})
     monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value={}))
-    prompt = "Run `python3 -c \"print(1)\"`, then\n-- report $HOME and 'quotes'."
+    prompt = "Run `python3 -c \"print(1)\"`, then\n-- report $HOME and 'quotes' — naïve 日本語 ✓."
 
-    await server.responses(
-        request=MagicMock(session={SESSION_ID_KEY: "s"}, cookies={"sandbox_id": ""}, state=SimpleNamespace()),
-        body=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": prompt}]),
-    )
+    previous_umask = os.umask(0o077)
+    try:
+        await server.responses(
+            request=MagicMock(session={SESSION_ID_KEY: "s"}, cookies={"sandbox_id": ""}, state=SimpleNamespace()),
+            body=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": prompt}]),
+        )
+    finally:
+        os.umask(previous_umask)
 
     command = sandbox.exec.await_args_list[0].kwargs["command"]
     prompt_paths = [path for path in uploads if path.startswith("/tmp/nemo-gym-prompt-")]
@@ -1399,6 +1405,9 @@ async def test_prompt_delivery_to_opencode(tmp_path: Path, monkeypatch: MonkeyPa
     local_command = command.replace("/tmp/nemo-gym-mcp-setup-error", shlex.quote(str(tmp_path / "mcp-error")))
     if verbatim_prompt:
         [prompt_path] = prompt_paths
+        # A non-root sandbox user must be able to read the upload even when the host umask is restrictive.
+        assert upload_modes[prompt_path] == 0o644
+        assert uploads[prompt_path] == prompt.encode("utf-8")
         local_prompt = tmp_path / "prompt.txt"
         local_prompt.write_bytes(uploads[prompt_path])
         local_command = local_command.replace(prompt_path, shlex.quote(str(local_prompt)))

@@ -910,6 +910,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             with TemporaryDirectory() as directory:
                 prompt_local_fpath = Path(directory) / "prompt.txt"
                 prompt_local_fpath.write_text(query, encoding="utf-8")
+                prompt_local_fpath.chmod(0o644)
                 await sandbox.upload(prompt_local_fpath, prompt_remote_fpath)
         if ripgrep_remote_path is not None:
             await sandbox.upload(self.config.local_ripgrep_binary_path, ripgrep_remote_path)
