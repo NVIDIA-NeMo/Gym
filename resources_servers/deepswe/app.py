@@ -172,7 +172,6 @@ def _resolve_task(body: DeepSWEInstanceRequest, task_store: DeepSWETaskStore) ->
 
 
 class DeepSWEResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: DeepSWEResourcesServerConfig
 
     def model_post_init(self, context: Any, /) -> None:

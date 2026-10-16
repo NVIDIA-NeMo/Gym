@@ -33,6 +33,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
+from nemo_gym.rollout_observability import AgentObservationBundle
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.codex_agent.app import (
     CodexAgent,
@@ -340,7 +341,7 @@ class TestRunForwardsSkillsPath:
 
     def test_skills_ref_path_forwarded(self) -> None:
         agent = _make_agent()
-        run_codex = AsyncMock(return_value=("", "codex-default"))
+        run_codex = AsyncMock(return_value=("", "codex-default", None, False))
         body = CodexAgentRunRequest.model_validate(
             {
                 "responses_create_params": {"input": []},
@@ -354,12 +355,59 @@ class TestRunForwardsSkillsPath:
 
     def test_no_skills_ref_forwards_none(self) -> None:
         agent = _make_agent()
-        run_codex = AsyncMock(return_value=("", "codex-default"))
+        run_codex = AsyncMock(return_value=("", "codex-default", None, False))
         body = CodexAgentRunRequest.model_validate({"responses_create_params": {"input": []}})
 
         self._run(agent, body, run_codex)
 
         assert run_codex.call_args.kwargs["skills_path"] is None
+
+
+class TestRunTimeout:
+    """A run stopped by `timeout` must not be reported as finished naturally."""
+
+    def _run(self, stdout: str, *, timed_out: bool = False, observations: AgentObservationBundle | None = None):
+        agent = _make_agent()
+        verify_bodies = []
+
+        async def _post(server_name, url_path, json=None, cookies=None, **kw):
+            if url_path == "/verify":
+                verify_bodies.append(json)
+                return _FakeHttpResp(
+                    {"responses_create_params": {"input": []}, "response": _gym_response(), "reward": 0.5}
+                )
+            return _FakeHttpResp({})
+
+        agent.server_client.post = AsyncMock(side_effect=_post)
+        req = MagicMock()
+        req.cookies = {}
+        body = CodexAgentRunRequest.model_validate({"responses_create_params": {"input": []}})
+        with patch.object(
+            CodexAgent, "_run_codex", AsyncMock(return_value=(stdout, "codex-default", observations, timed_out))
+        ):
+            result = asyncio.run(agent.run(req, body))
+        return result, verify_bodies[0]
+
+    def test_timed_out_run_is_not_finished_naturally(self) -> None:
+        result, verify_body = self._run("", timed_out=True)
+
+        assert result.finished_naturally is False
+        assert result.agent_timed_out is True
+        assert result.reward == 0.5
+        assert "_ng_agent_timed_out" not in verify_body["response"]
+
+    def test_observations_reach_rollout_without_stdout_events(self) -> None:
+        observations = AgentObservationBundle(source="codex")
+        result, verify_body = self._run("", observations=observations)
+
+        assert result.ng_agent_observations == observations
+        assert "_ng_agent_observations" not in verify_body["response"]
+
+    def test_completed_run_is_finished_naturally(self) -> None:
+        result, _ = self._run("")
+
+        assert result.finished_naturally is True
+        assert result.agent_timed_out is False
 
 
 class TestRunCodex:
@@ -394,7 +442,7 @@ class TestRunCodex:
             patch("responses_api_agents.codex_agent.app.Path.home", return_value=tmp_path),
             patch("responses_api_agents.codex_agent.app.asyncio.create_subprocess_exec", fake_exec),
         ):
-            stdout, model = asyncio.run(agent._run_codex("hello", system_prompt="be terse"))
+            stdout, model, observations, timed_out = asyncio.run(agent._run_codex("hello", system_prompt="be terse"))
 
         assert captured["cmd"][0] == "codex"
         assert captured["cmd"][-1] == "hello"
@@ -408,6 +456,8 @@ class TestRunCodex:
         assert not Path(captured["codex_home"]).exists()
         assert not Path(captured["scratch_cwd"]).exists()
         assert "turn.completed" in stdout
+        assert observations is None
+        assert timed_out is False
         assert model == "codex-default"
 
     def test_explicit_cwd_is_used_and_kept(self, tmp_path: Path) -> None:
@@ -475,9 +525,11 @@ class TestRunCodex:
             patch("responses_api_agents.codex_agent.app.asyncio.create_subprocess_exec", fake_exec),
             patch("responses_api_agents.codex_agent.app.asyncio.wait_for", fake_wait_for),
         ):
-            stdout, model = asyncio.run(agent._run_codex("hello"))
+            stdout, model, observations, timed_out = asyncio.run(agent._run_codex("hello"))
 
         assert stdout == ""
+        assert timed_out is True
+        assert observations is None
         assert killed["called"] is True
         assert model == "codex-default"
 
@@ -547,9 +599,14 @@ class TestRolloutMCPServers:
             captured["instruction"] = instruction
             captured["mcp_servers"] = mcp_servers
             captured["config"] = agent._build_config("http://x/v1", mcp_servers=mcp_servers)
-            return _item_completed(
-                {"id": "item_1", "type": "agent_message", "text": "The weather in Paris is sunny and 72 F."}
-            ), "codex-default"
+            return (
+                _item_completed(
+                    {"id": "item_1", "type": "agent_message", "text": "The weather in Paris is sunny and 72 F."}
+                ),
+                "codex-default",
+                None,
+                False,
+            )
 
         agent.server_client.post.side_effect = fake_post
         object.__setattr__(agent, "_run_codex", fake_run_codex)
@@ -593,7 +650,12 @@ class TestRolloutMCPServers:
 
         async def fake_run_codex(instruction, system_prompt=None, mcp_servers=None, **kwargs):
             captured["mcp_servers"] = mcp_servers
-            return _item_completed({"id": "item_1", "type": "agent_message", "text": "ok"}), "codex-default"
+            return (
+                _item_completed({"id": "item_1", "type": "agent_message", "text": "ok"}),
+                "codex-default",
+                None,
+                False,
+            )
 
         agent.server_client.post.side_effect = fake_post
         object.__setattr__(agent, "_run_codex", fake_run_codex)
@@ -626,11 +688,22 @@ class TestRolloutCorrelation:
         return FakeProc()
 
     def _run_and_capture_base_url(self, agent, tmp_path: Path, **run_kwargs) -> str:
+        from contextlib import asynccontextmanager
+
         captured: dict = {}
+
+        @asynccontextmanager
+        async def proxy(base_url, invocation_id):
+            assert invocation_id == run_kwargs["rollout_id"]
+            captured["upstream"] = base_url
+            yield base_url
 
         async def fake_exec(*cmd, **kwargs):
             config = tomllib.loads((Path(kwargs["env"]["CODEX_HOME"]) / "config.toml").read_text())
             captured["base_url"] = config["model_providers"]["gym"]["base_url"]
+            if run_kwargs.get("rollout_id"):
+                assert "--ephemeral" not in cmd
+                assert config["model_providers"]["gym"]["http_headers"]["x-session-id"] == run_kwargs["rollout_id"]
             return self._fake_proc()
 
         def fake_resolve(name, rollout_id=None):
@@ -641,8 +714,10 @@ class TestRolloutCorrelation:
             patch("responses_api_agents.codex_agent.app.Path.home", return_value=tmp_path),
             patch.object(type(agent), "resolve_model_base_url", side_effect=fake_resolve),
             patch("responses_api_agents.codex_agent.app.asyncio.create_subprocess_exec", fake_exec),
+            patch("responses_api_agents.codex_agent.app.rate_limit_proxy", proxy),
         ):
             asyncio.run(agent._run_codex("hi", **run_kwargs))
+        assert captured["upstream"] == captured["base_url"]
         return captured["base_url"]
 
     def test_base_url_correlation(self, tmp_path: Path) -> None:
@@ -893,3 +968,24 @@ class TestConfigYaml:
         assert inner["entrypoint"] == "app.py"
         assert inner["concurrency"] == 32
         assert inner["sandbox_mode"] == "danger-full-access"
+
+
+@pytest.mark.parametrize("budget,expected", [(None, 1800), ("12.5", 12.5), ("3600", 1800), ("invalid", 1800)])
+async def test_task_timeout_reaches_local_subprocess_wait(tmp_path: Path, budget: str | None, expected: float) -> None:
+    agent = _make_agent(timeout=1800, cwd=str(tmp_path))
+    body = NeMoGymResponseCreateParamsNonStreaming(
+        input="task", metadata=None if budget is None else {"agent_timeout_sec": budget}
+    )
+    process = MagicMock(returncode=0)
+    process.communicate = AsyncMock(return_value=(b"", b""))
+    module = "responses_api_agents.codex_agent.app"
+    with (
+        patch(f"{module}.asyncio.create_subprocess_exec", AsyncMock(return_value=process)),
+        patch(f"{module}.asyncio.wait_for", wraps=asyncio.wait_for) as wait,
+        patch(f"{module}.Path.home", return_value=tmp_path),
+    ):
+        response = await agent._create_response(body)
+    wait.assert_awaited_once()
+    assert wait.await_args.kwargs["timeout"] == expected
+    assert response.metadata == {"agent_timeout_sec": str(float(expected))}
+    assert agent.config.timeout == 1800

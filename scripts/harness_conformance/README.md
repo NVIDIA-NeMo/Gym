@@ -30,41 +30,38 @@ probe job fails or is cancelled, making the result visible in the workflow job l
 
 To enforce P0 before merging, add the fixed **Harness conformance P0** check name to
 the repository's required checks. Until configured, it remains optional. It is
-independent of the existing `Nemo_CICD_Test` gate. This workflow does not regenerate
-documentation.
+independent of the existing `Nemo_CICD_Test` gate. Completed scheduled/manual main
+runs trigger the Fern publisher, which consumes the same retained measurements.
 
 Use the diagnostic command below to reproduce a warning at the reported commit.
 When registering another harness in `registry.HARNESSES`, provide its pinned runtime
 installation in `ci.install_runtime` as well as its episode configuration.
 
-## Regenerate the documentation table
+## Automatically published documentation
 
-From a checkout matching a full Gym commit SHA, rebuild the TE table in
-[`reference/trajectory-capabilities`](../../fern/versions/latest/pages/reference/trajectory-capabilities.mdx):
+Scheduled CI runs every four hours. A separate job with read-only credentials
+renders the measured checks with the shared table renderer and uploads one `harness-conformance-docs-<run>-<attempt>`
+artifact. Fern inserts that block into the main capability matrix; the page and
+table are the published output. No generation report is retained for this job.
+
+Periodic publication uses the triggering run and attempt, independently of its P0
+conclusion. An unavailable artifact stops that update. Ordinary docs pushes, tags,
+and manual publications warn and show an unavailable measurement instead, so an
+artifact outage does not block other docs work. Released pages stay pinned.
+
+To insert the same CI-rendered block locally (Python and authenticated `gh`):
 
 ```bash
-python -m scripts.harness_conformance.table \
-    --commit <40-character-gym-commit-sha> \
-    --output /absolute/path/to/new-conformance-results
+python -m scripts.harness_conformance.publish --run-id <main-ci-run-id> --strict
 ```
 
-The command runs runner unit tests, each selected harness's adapter unit tests,
-checker unit tests, and then the full live scenario suite. The checkout must match
-the source commit before and after validation (Git and jj are supported). There is
-no test-skip switch. Failed, empty, or entirely skipped test suites, dependency or
-execution errors, and checker errors leave the previous table unchanged. Evidence
-FAILs are valid results and appear in the generated table.
-
-All four harnesses are selected by default. Repeat `--harness NAME` to select a
-subset; omitted harnesses show **Not run**, and no previous row is reused. Runtime
-versions/source hashes, test results, scenario results, and artifact hashes are
-saved in a content-addressed JSON report under `fern/assets/trajectory-capabilities/`.
-Test logs and full probe artifacts are retained in the new `--output` directory.
-Commit the generated page and report after the source commit to keep its pin stable.
-
-Checker and runner unit tests use the synthetic contracts in
-`tests/unit_tests/harness_capabilities/synthetic.py`. Actual harness capabilities
-are measured by probes; expected harness verdicts do not belong in library tests.
+For a local preview with fresh tests and probes, install the selected harnesses
+and use `python -m scripts.harness_conformance.table --commit <full-source-sha>
+--output <new-directory>`. The checkout must match that revision; validation or
+execution errors preserve the previous table, while measured failures are shown.
+The local command retains diagnostic logs and `generation_report.json` in
+`--output`. Generated page changes are for preview; the docs publisher supplies
+current results at build time.
 
 ## Run diagnostic probes
 
@@ -78,27 +75,39 @@ python scripts/run_harness_conformance.py \
 ```
 
 Run from a Gym checkout with Gym and the selected agents' Python requirements
-installed. Put the selected `codex`, `pi`, and `opencode` executables on `PATH`;
-Hermes must be importable in the same Python environment. The versions pinned in
-`responses_api_agents/*/configs/` are the recommended starting point. The runner
-requires installed runtimes; missing dependencies are execution failures.
+installed. Probes using agent sessions require Linux and install the adapter's
+pinned runtime during session setup, using Gym's local subprocess sandbox provider.
+Legacy probes require the selected `codex`, `pi`, and `opencode` executables on
+`PATH`; Hermes must be importable in the same Python environment. Missing
+dependencies or unsuccessful runtime installation are execution failures.
 Omitting `--harness` selects all four.
 
 No model service or model credentials are needed. Each scenario starts fresh
 local model, resources, agent, and compatibility environment servers on dynamically assigned loopback ports.
-The existing Gym adapter runs its real harness and normal seed/verify lifecycle;
+The runner prefers the agent session interface whenever the adapter implements
+session setup and close, including inherited implementations. It uses
+`single_agent_turn_legacy` to translate the probe's flat rows into Resources seed,
+Agent seed, correlated `/v1/responses`, Agent close, verification, and Resources
+close. The agent owns its local workspace because verification only reads retained
+output. An adapter with unimplemented session handlers uses `legacy_agent`, which
+relays to the agent's `/run`. Setup, execution, or cleanup failures during an agent
+session never trigger legacy fallback. Migrating an adapter to the shared session
+contract automatically switches its probes without changing the runner.
+
+The existing Gym adapter runs its real harness and normal lifecycle;
 `RolloutCollectionHelper` produces the rollout and capture payloads. The runner
 never supplies canonical steps, joins, or tool observations on the harness's
 behalf. All implementation remains under `scripts/` for eventual CI integration.
 
-The OpenCode preset disables its auxiliary title and summary agents through
+The legacy OpenCode preset disables its auxiliary title and summary agents through
 [agent configuration](https://opencode.ai/docs/agents/#disable), so scripted
 failures reach policy requests. This configuration is saved with the run.
 
 The suite uses each harness's local shell tool to print a unique marker, write it
 inside the output directory, and return a prescribed exit code. Local execution
 must be allowed (the Codex preset uses `danger-full-access` in a fresh working
-directory). These probes qualify the local adapter path; they do not exercise a
+directory). During an agent session, the subprocess sandbox provider uses the same
+local filesystem. These probes qualify the local adapter path; they do not exercise a
 remote sandbox deployment.
 
 ## Scenarios
@@ -139,8 +148,9 @@ rejected, so previous rollouts cannot accidentally qualify a new run.
 - `suite.json`: selected scenarios and runner source hashes.
 - `<harness>/<scenario>/requests.jsonl`, `launch.json`, and `episode.log`: input,
   resolved launch configuration, and process diagnostics.
-- `<harness>/<scenario>/runtime.json`: executable version or Hermes source hash,
-  plus the Gym adapter source hash.
+- `<harness>/<scenario>/runtime.json`: selected agent interface, version pins for
+  agent session runtimes or legacy executable version/Hermes source hash, plus the
+  Gym adapter source hash.
 - `<harness>/<scenario>/rollouts.jsonl` and `capture/`: ordinary Gym outputs,
   directly consumable by `scripts/inspect_harness_conformance.py`.
 - `<harness>/<scenario>/witness.json`: independent endpoint attempts, actual tool

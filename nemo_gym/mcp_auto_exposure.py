@@ -55,6 +55,9 @@ PER-CALL (runs on every MCP ``tools/call``):
     a POST /mcp request -> ``session_claims`` reads the token (session id + any allow-list) ->
     ``call_direct(binding)`` runs the route's own handler exactly once with a fabricated ``Request``
     and returns its JSON-able payload.
+    With checkpointing on, the token also names the attempt whose seed minted it.
+    The checkpoint middleware reads that claim before the request reaches /mcp,
+    and refuses the call once a retire or a restore has fenced the attempt.
 
 Reading order: start with the dataclasses ``DirectBinding``, ``BindResult``, and ``MCPTool``, then ``bind_route``
 (startup classify), then ``call_direct`` (per-call dispatch), then ``harvest_tools`` (startup build),
@@ -79,7 +82,7 @@ from aiohttp import ClientResponseError
 from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.routing import APIRoute
-from itsdangerous import BadSignature, URLSafeSerializer
+from itsdangerous import URLSafeSerializer
 from mcp.server.lowlevel import Server as _LowLevelMCPServer
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.server.transport_security import TransportSecuritySettings
@@ -89,14 +92,18 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Mount, Route
 
+from nemo_gym._checkpoint.errors import RolloutIdRequiredError
 from nemo_gym.base_resources_server import (
-    _MCP_TOKEN_SALT,
+    MCP_TOKEN_EPISODE_CLAIM,
     NEMO_GYM_MCP_METADATA_KEY,
     NEMO_GYM_MCP_SESSION_TOKEN_HEADER,
     RESERVED_MCP_TOOL_NAMES,
     MCPServerMetadata,
     ResourcesSeedSessionResponse,
+    mcp_session_token_payload,
+    mcp_session_token_serializer,
 )
+from nemo_gym.rollout_correlation import current_episode_id
 from nemo_gym.server_utils import SESSION_ID_KEY
 
 
@@ -107,6 +114,7 @@ LOG = logging.getLogger(__name__)
 TOKEN_HEADER = NEMO_GYM_MCP_SESSION_TOKEN_HEADER
 
 MCP_URL_PATH = "/mcp"
+CONTROL_ROUTE_PREFIX = "/ng-control/"
 
 PERMISSIVE_SCHEMA: dict = {"type": "object", "additionalProperties": True}
 
@@ -443,6 +451,8 @@ def harvest_tools(app: FastAPI, server: Any) -> dict[str, MCPTool]:
             continue  # Correlation prefixes are handled before resource routes; direct MCP dispatch has no prefix.
         if f"{cls.__module__}.{cls.__name__}" == ("nemo_gym.server_utils.ClientDisconnectCancellationMiddleware"):
             continue  # Direct MCP dispatch has no client connection to monitor.
+        if getattr(cls, "applies_to_mcp_requests", False):
+            continue  # It does its job on the /mcp request as a whole (for example, checkpoint admission).
         dispatch = m.kwargs.get("dispatch")
         if dispatch is not None and getattr(dispatch, "__module__", None) in _GYM_MIDDLEWARE_MODULES:
             continue  # Gym's add_session_id / exception middleware
@@ -460,6 +470,9 @@ def harvest_tools(app: FastAPI, server: Any) -> dict[str, MCPTool]:
             continue
         # Never tools. GET docs/openapi are excluded by the POST filter above; /mcp by path.
         if route.path.lstrip("/") in RESERVED_MCP_TOOL_NAMES or route.path == MCP_URL_PATH:
+            continue
+        # Gym's control plane (checkpoint control) is for the controller, never for the model.
+        if route.path.startswith(CONTROL_ROUTE_PREFIX):
             continue
         if "{" in route.path:
             catchall_routes.append(route)
@@ -694,6 +707,8 @@ def _mint_session_metadata(server: Any, serializer: URLSafeSerializer, request: 
 
     Assigns the rollout its session id, asks the server for any per-session tool narrowing, and
     signs ``sid`` + allow-list into the token the agent replays on every ``tools/call``.
+    With checkpointing on, the token also names the attempt whose seed minted it,
+    so the resources server refuses its calls once a retire or a restore has fenced that attempt.
     """
     session_id = request.session.get(SESSION_ID_KEY)
     if not session_id:
@@ -702,6 +717,15 @@ def _mint_session_metadata(server: Any, serializer: URLSafeSerializer, request: 
     # A raising hook propagates and fails the seed request — no token is minted past a broken hook.
     session_allowed = server.mcp_allowed_tools_for_session(seed_body)
     payload = {"sid": session_id, "tools": session_allowed}
+    if getattr(server, "checkpoint_participant", None) is not None:
+        episode_id = current_episode_id()
+        if episode_id is None:
+            # The checkpoint middleware refuses a seed without a rollout prefix before its handler runs.
+            # A seed that reaches this point without one would mint a token the middleware refuses on every call.
+            raise RolloutIdRequiredError(
+                "with checkpointing on, a seed that mints an MCP token needs a rollout prefix"
+            )
+        payload[MCP_TOKEN_EPISODE_CLAIM] = episode_id.capture_key
     return MCPServerMetadata(
         server_name=server.config.name or type(server).__name__,
         url_path=MCP_URL_PATH,
@@ -722,10 +746,9 @@ def _parse_session_token(
         if required:
             raise ValueError(f"Missing {NEMO_GYM_MCP_SESSION_TOKEN_HEADER} for Gym MCP tool call.")
         return None, None
-    try:
-        # Verified per call: caching claims per token would grow one entry per rollout with nothing to evict it.
-        payload = serializer.loads(token)
-    except BadSignature:
+    # Verified per call: caching claims per token would grow one entry per rollout with nothing to evict it.
+    payload = mcp_session_token_payload(serializer, token)
+    if payload is None:
         if required:
             raise ValueError("Invalid Gym MCP session token.")
         return None, None
@@ -771,7 +794,7 @@ def install_auto_exposure(server: Any, app: FastAPI) -> dict[str, MCPTool]:
         )
 
     secret = server.get_session_middleware_key()
-    serializer = URLSafeSerializer(secret, salt=_MCP_TOKEN_SALT)
+    serializer = mcp_session_token_serializer(secret)
     tools = harvest_tools(app, server)
 
     mint_metadata = functools.partial(_mint_session_metadata, server, serializer)

@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+nooa_agent:
+  responses_api_agents:
+    nooa_agent:
+      entrypoint: app.py
+      num_workers: 1
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      nooa:
+        agent_class: nooa_bench.bench_agent:BenchAgent
+        invocation_adapter: responses_api_agents.nooa_agent.bench_agent_adapter:invoke_bench_agent
+        init_kwargs: {}
+        execution_mode: embedded
+      max_policy_calls: null
+
+# Recipes bind Resources and rename this instance through _inherit_from.
+nooa_environment_server:
+  environment_servers:
+    single_agent_turn:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: ???
+      agent_server:
+        type: responses_api_agents
+        name: nooa_agent
+      default_episode_timeout_seconds: 21600
+      cleanup_timeout_seconds: 180

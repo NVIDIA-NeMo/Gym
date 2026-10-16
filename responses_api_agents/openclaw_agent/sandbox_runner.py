@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Capture OpenClaw output; the shared process supervisor owns deadlines and cleanup."""
+"""Capture OpenClaw output; the supervisor bounds execution; the sandbox owner stops task services."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ class RunnerInput(TypedDict):
 
 
 def run(params: RunnerInput) -> int:
-    """Run the harness with isolated files and let the supervisor reap descendants."""
+    """Run the CLI with isolated files and wait for it before returning captured output."""
     directory = Path(params["directory"])
     (directory / "runtime.json").write_text(json.dumps({"hostname": os.uname().nodename, "pid": os.getpid()}))
     (directory / "prompt.txt").write_text(params["prompt"])
@@ -49,14 +49,21 @@ def run(params: RunnerInput) -> int:
             stdout=stdout,
             stderr=stderr,
         )
-        while True:
-            if stopping:
-                process.terminate()
-                stopping = False
-            try:
-                return process.wait(timeout=0.05)
-            except subprocess.TimeoutExpired:
-                pass
+        try:
+            while True:
+                if stopping:
+                    process.terminate()
+                    stopping = False
+                try:
+                    return process.wait(timeout=0.05)
+                except subprocess.TimeoutExpired:
+                    pass
+        finally:
+            # An I/O/capture error must not leave the CLI changing the task.
+            # Only stop our direct CLI; task services belong to the sandbox owner.
+            if process.poll() is None:
+                process.kill()
+            process.wait()
 
 
 def main() -> None:

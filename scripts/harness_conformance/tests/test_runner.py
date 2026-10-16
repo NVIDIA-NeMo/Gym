@@ -11,7 +11,7 @@ import sys
 import psutil
 import pytest
 from fastapi.testclient import TestClient
-from scripts.harness_conformance.episode import HARNESSES, _config
+from scripts.harness_conformance.episode import HARNESSES, _config, _supports_agent_sessions
 from scripts.harness_conformance.provider import Probe
 from scripts.harness_conformance.runner import _fingerprint, inspect_episode, main, run_process, run_suite
 from scripts.harness_conformance.scenarios import SCENARIOS
@@ -39,9 +39,10 @@ def test_catalog_covers_p0_without_exposing_expectations():
     assert main(["--list-scenarios"]) == 0
 
 
+@pytest.mark.parametrize("use_agent_sessions", [False, True])
 @pytest.mark.parametrize("harness", HARNESSES)
-def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, tmp_path):
-    config = _config(harness, tmp_path, [10001, 10002, 10003, 10004], 12)
+def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, use_agent_sessions, tmp_path):
+    config = _config(harness, tmp_path, [10001, 10002, 10003, 10004], 12, use_agent_sessions=use_agent_sessions)
     from omegaconf import OmegaConf
 
     from nemo_gym.rollout_collection import _environment_server_for_agent, _environment_servers_by_agent
@@ -53,12 +54,187 @@ def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, tmp_path):
     agent = config["probe_agent"]["responses_api_agents"][f"{harness}_agent"]
     assert agent["model_server"] == {"type": "responses_api_models", "name": "policy_model"}
     assert config["model_call_capture_dir"] == str(tmp_path / "capture")
+    environment_type = "single_agent_turn_legacy" if use_agent_sessions else "legacy_agent"
+    assert set(config["probe_environment"]["environment_servers"]) == {environment_type}
+    if use_agent_sessions:
+        from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
+
+        SingleAgentTurnEnvironmentServerConfig.model_validate(
+            config["probe_environment"]["environment_servers"][environment_type]
+        )
+        assert agent["sandbox_config"]["workdir"] == str(tmp_path / "workspace")
+        assert "resources_server" not in agent
+        assert config[agent["sandbox_provider"]] == {"local": {"concurrency": 1}}
+        if harness == "codex":
+            assert "cwd" not in agent and "extra_config" not in agent
+        if harness == "opencode":
+            assert "agent" not in agent["opencode_config"]
     # Validate available adapters without invoking their auto-install hooks.
     if harness != "hermes":
         import importlib
 
         module = importlib.import_module(f"responses_api_agents.{harness}_agent.app")
         getattr(module, HARNESSES[harness] + "Config").model_validate(agent)
+
+
+def test_session_detection_distinguishes_base_stubs_and_inherited_implementations():
+    from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
+
+    class LegacyAgent(SimpleResponsesAPIAgent):
+        pass
+
+    class SeedOnlyAgent(LegacyAgent):
+        async def _seed_agent_session_state(self, body):
+            raise RuntimeError("setup failed")
+
+    class SessionAgent(SeedOnlyAgent):
+        async def _close_agent_session_state(self, state):
+            raise RuntimeError("cleanup failed")
+
+    class InheritedSessionAgent(SessionAgent):
+        pass
+
+    class PublicSessionAgent(LegacyAgent):
+        async def seed_agent_session(self, body, request):
+            raise RuntimeError("setup failed")
+
+        async def close_agent_session(self, body, request):
+            raise RuntimeError("cleanup failed")
+
+    assert not _supports_agent_sessions(LegacyAgent)
+    assert not _supports_agent_sessions(SeedOnlyAgent)
+    assert _supports_agent_sessions(SessionAgent)
+    assert _supports_agent_sessions(InheritedSessionAgent)
+    assert _supports_agent_sessions(PublicSessionAgent)
+
+
+def test_session_runtime_does_not_require_host_cli(monkeypatch):
+    from scripts.harness_conformance import episode
+
+    monkeypatch.setattr(episode.shutil, "which", lambda _: None)
+    assert episode.check_runtime("pi", use_agent_sessions=True) == {"installation": "agent_session"}
+    with pytest.raises(RuntimeError, match="install the pi runtime"):
+        episode.check_runtime("pi")
+
+
+@pytest.mark.parametrize(
+    "interface", ["legacy", "session", "session_setup_error", "session_response_error", "session_close_error"]
+)
+async def test_episode_selects_interface_and_collects_through_environment(tmp_path, monkeypatch, interface):
+    from types import SimpleNamespace
+
+    from fastapi import HTTPException, Request
+    from scripts.harness_conformance import episode
+
+    import nemo_gym.global_config
+    import nemo_gym.server_utils
+    from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
+    from nemo_gym.base_responses_api_agent import (
+        AgentCloseSessionResponse,
+        AgentSessionState,
+        BaseResponsesAPIAgentConfig,
+        SimpleResponsesAPIAgent,
+    )
+    from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+    from nemo_gym.rollout_observability import AgentObservationBundle
+
+    calls = []
+    response = NeMoGymResponse(
+        id="response",
+        created_at=0,
+        model="conformance-model",
+        object="response",
+        output=[
+            {
+                "type": "message",
+                "role": "assistant",
+                "id": "message",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "CONFORMANCE_DONE", "annotations": []}],
+            }
+        ],
+        tool_choice="auto",
+        parallel_tool_calls=True,
+        tools=[],
+    )
+
+    class LegacyAgent(SimpleResponsesAPIAgent):
+        async def responses(self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
+            raise AssertionError("legacy responses should be called by the agent's run")
+
+        async def run(self, request: Request, body: BaseRunRequest) -> BaseVerifyResponse:
+            calls.append("run")
+            return BaseVerifyResponse(**body.model_dump(), response=response, reward=1.0)
+
+    class SessionAgent(LegacyAgent):
+        async def _seed_agent_session_state(self, body):
+            calls.append("seed")
+            assert body.sandbox_access is None
+            if interface == "session_setup_error":
+                raise HTTPException(422, "controlled setup failure")
+            return AgentSessionState(request=body)
+
+        async def responses(self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
+            state = self._require_agent_session(self._agent_session_id_from_request(request))
+            assert state.request.episode_id.capture_key in request.url.path
+            calls.append("responses")
+            if interface == "session_response_error":
+                raise HTTPException(422, "controlled activation failure")
+            return response
+
+        async def _close_agent_session_state(self, state):
+            calls.append("close")
+            if interface == "session_close_error":
+                raise HTTPException(422, "controlled cleanup failure")
+            return AgentCloseSessionResponse(
+                agent_session_id=state.request.agent_session_id,
+                agent_observations=AgentObservationBundle(source="test"),
+            )
+
+    module = SimpleNamespace(
+        TestAgent=LegacyAgent if interface == "legacy" else SessionAgent, TestAgentConfig=BaseResponsesAPIAgentConfig
+    )
+    monkeypatch.setitem(episode.HARNESSES, "codex", "TestAgent")
+    monkeypatch.setattr(episode, "importlib", SimpleNamespace(import_module=lambda _: module))
+    monkeypatch.setattr(episode, "sys", SimpleNamespace(platform="linux"))
+    monkeypatch.setattr(episode, "check_runtime", lambda *args, **kwargs: {})
+    monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
+    monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+    monkeypatch.setenv("NEMO_GYM_CONFIG_DICT", "{}")
+    if interface.endswith("error"):
+        with pytest.raises(RuntimeError, match="None of the 1 dispatched rollouts produced a result"):
+            await episode.run_episode(harness="codex", scenario_name="tool_success", directory=tmp_path, timeout=10)
+    else:
+        await episode.run_episode(harness="codex", scenario_name="tool_success", directory=tmp_path, timeout=10)
+
+    runtime = json.loads((tmp_path / "runtime.json").read_text())
+    witness = json.loads((tmp_path / "witness.json").read_text())
+    if interface == "legacy":
+        assert calls == ["run"]
+        assert runtime["agent_interface"] == "legacy_run"
+    else:
+        assert runtime["agent_interface"] == "agent_sessions"
+        assert witness["seeded"] == 1 and witness["closed"] == 1
+        if interface == "session_setup_error":
+            assert calls == ["seed"]
+        elif interface == "session_close_error":
+            assert calls[:2] == ["seed", "responses"]
+            assert calls[2:] and set(calls[2:]) == {"close"}
+        else:
+            assert calls == ["seed", "responses", "close"]
+    if interface.endswith("error"):
+        assert witness["verifications"] == []
+        failures = list(json_rows(tmp_path / "rollouts_failures.jsonl"))
+        assert len(failures) == 1
+        assert failures[0][1]["_ng_failure_stage"] == ("cleanup" if interface == "session_close_error" else "agent")
+        assert not list(json_rows(tmp_path / "rollouts.jsonl"))
+    else:
+        [(_, rollout)] = list(json_rows(tmp_path / "rollouts.jsonl"))
+        assert rollout["reward"] == 1.0
+        assert rollout["response"]["id"] == response.id
+        if interface == "session":
+            assert rollout["ng_agent_observations"]["source"] == "test"
+            assert witness["verifications"] == [{"reward": 1.0, "answer_seen": True}]
 
 
 @pytest.mark.parametrize("scenario_name", ["tool_success", "retry_429"])
@@ -214,6 +390,47 @@ def retained_episode(tmp_path):
     (tmp_path / "capture").mkdir()
     (tmp_path / "capture/0-0.capture.jsonl").write_text("".join(json.dumps(c) + "\n" for c in calls))
     return tmp_path, witness
+
+
+@pytest.mark.parametrize(
+    "mutation,failed_check",
+    [
+        (None, None),
+        ("skipped_verifier", "verifier.outcome"),
+        ("wrong_reward", "verifier.saved_reward"),
+        ("masked", "verifier.saved_outcome"),
+        ("incomplete", "verifier.saved_outcome"),
+        ("missing_completion", "evaluation.evaluation_completed"),
+    ],
+)
+def test_terminal_model_error_still_requires_completed_unmasked_verification(retained_episode, mutation, failed_check):
+    directory, witness = retained_episode
+    bundle = directory / "rollouts.jsonl"
+    record = json.loads(bundle.read_text())
+    # A rejected policy call produces no final answer; grading must still happen.
+    witness["verifications"][0]["answer_seen"] = False
+    if mutation == "skipped_verifier":
+        witness["verifications"] = []
+    elif mutation == "wrong_reward":
+        record["reward"] = 1.0
+    elif mutation == "masked":
+        record.update(mask_sample=True, failure_kind="agent_request_failed", failure_reason="HTTP 400")
+    elif mutation == "incomplete":
+        record.update(evaluation_completed=False, failure_kind="verifier_error", failure_reason="not graded")
+    elif mutation == "missing_completion":
+        del record["evaluation_completed"]
+    bundle.write_text(json.dumps(record) + "\n")
+    (directory / "witness.json").write_text(json.dumps(witness))
+    result = inspect_episode(SCENARIO["model_error"], directory, {"returncode": 0, "timed_out": False})
+    checks = {c["id"]: c for c in result["checks"]}
+    assert checks["verifier.answer"]["status"] == "not_applicable"
+    if failed_check:
+        assert checks[failed_check]["status"] == "fail"
+        assert result["verdict"] == "not_fulfilled"
+    else:
+        assert result["evidence"]["TE-6"]["artifact_verdict"] == "fulfilled"
+        for check_id in ("verifier.outcome", "verifier.saved_reward", "verifier.saved_outcome"):
+            assert checks[check_id]["status"] == "pass"
 
 
 def test_behavior_failure_does_not_erase_artifact_success(retained_episode):
@@ -483,7 +700,7 @@ def test_missing_rollout_fails_required_checks_and_preserves_exclusions(tmp_path
     assert checks["calls.outcome"]["status"] == "fail"
     assert checks["calls.outcome"]["reasons"][0].startswith("required input is unavailable")
     assert checks["tool_calls.present"]["status"] == "not_applicable"
-    assert checks["evaluation.reward"]["status"] == "not_applicable"
+    assert checks["evaluation.reward"]["status"] == "fail"
     assert checks["turns.present"]["status"] == "not_applicable"
     assert checks["steps.attempt_accounting"]["status"] == "not_applicable"
     assert result["evidence"]["TE-1"]["verdict"] == "not_fulfilled"

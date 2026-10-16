@@ -31,6 +31,7 @@ from nemo_gym.telemetry.setup import (
     is_metrics_exporter_active,
     is_telemetry_env_enabled,
     is_telemetry_metrics_enabled,
+    is_trace_exporter_active,
     shutdown_telemetry,
 )
 from tests.unit_tests.telemetry.conftest import import_without_lens, no_lens, requires_lens
@@ -131,6 +132,18 @@ def test_init_builds_an_exporting_handle(enabled_console_env):
     assert handle.is_exporting is True
     assert get_telemetry() is handle
     assert is_metrics_exporter_active() is True
+
+
+def test_trace_exporter_follows_traces_enabled(enabled_console_env):
+    assert init_telemetry(server_name="weather") is not None
+    assert is_trace_exporter_active() is True
+
+
+def test_trace_exporter_is_inactive_when_traces_are_disabled(enabled_console_env):
+    enabled_console_env.setenv("NEMO_GYM_OTEL_TRACES_ENABLED", "0")
+    handle = init_telemetry(server_name="weather")
+    assert handle is not None and handle.is_exporting is True
+    assert is_trace_exporter_active() is False
 
 
 def test_metrics_exporter_is_inactive_when_metrics_are_disabled(enabled_console_env):
@@ -355,6 +368,21 @@ def test_reused_lens_with_metrics_enables_pool_metrics(lens_initialised_elsewher
     assert is_metrics_exporter_active() is True
 
 
+@pytest.mark.parametrize("owner_traces", [True, False])
+def test_reused_lens_exports_traces_only_with_an_sdk_tracer_provider(
+    lens_initialised_elsewhere, monkeypatch, owner_traces
+):
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.trace import NoOpTracerProvider
+
+    provider = TracerProvider(shutdown_on_exit=False) if owner_traces else NoOpTracerProvider()
+    monkeypatch.setattr("opentelemetry.trace.get_tracer_provider", lambda: provider)
+
+    init_telemetry(server_name="weather")
+
+    assert is_trace_exporter_active() is owner_traces
+
+
 def test_shutdown_leaves_providers_gym_does_not_own(lens_initialised_elsewhere, monkeypatch):
     """Shutting down borrowed providers would end the owning library's telemetry too."""
     handle = init_telemetry(server_name="weather")
@@ -496,3 +524,25 @@ def test_a_failing_logging_bridge_does_not_break_startup(clean_otel_env, monkeyp
 
     monkeypatch.setattr("nemo.lens.logging_bridge.setup_logging_bridge", boom)
     assert init_telemetry(server_name="weather") is not None
+
+
+@pytest.mark.parametrize("traces_exporting", [True, False])
+def test_the_fastapi_instrumentor_is_installed_only_while_traces_export(monkeypatch, traces_exporting):
+    """The instrumentor costs every request tens of microseconds even when no span is exported."""
+    from types import SimpleNamespace
+
+    from fastapi import FastAPI
+
+    from nemo_gym import server_utils
+    from nemo_gym.telemetry import contrib
+
+    instrumented = []
+    monkeypatch.setattr(contrib, "instrument_fastapi_app", instrumented.append)
+    monkeypatch.setattr(server_utils, "is_span_group_enabled", lambda _group: True)
+    monkeypatch.setattr(telemetry_setup, "_TELEMETRY_HANDLE", SimpleNamespace(is_exporting=True))
+    monkeypatch.setattr(telemetry_setup, "_TRACES_EXPORTING", traces_exporting)
+    app = FastAPI()
+
+    server_utils.SimpleServer.instrument_app_for_telemetry(None, app)
+
+    assert instrumented == ([app] if traces_exporting else [])
