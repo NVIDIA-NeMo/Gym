@@ -58,17 +58,21 @@ def component_search_roots(*, sys_path: List[Path] | None = None) -> List[Path]:
     looks for components — used by path resolution (:func:`_resolve_under_cwd_or_install`), module imports
     (:func:`_augment_sys_path`) and the ``gym list``/``gym search`` discovery functions.
 
-    ``sys_path`` weaves existing ``sys.path`` entries in for import precedence: they slot in after the extra
-    roots but before cwd/built-ins. Any entry that is itself cwd or the install root is dropped so those two
-    always stay last — matching the file-lookup order even in a wheel install, where the install root is
-    already on ``sys.path`` as ``site-packages``.
+    ``sys_path`` weaves existing import paths in after the extra roots. Editable installs move cwd and the
+    install root to the end. Non-editable installs preserve existing entry order and append cwd and the
+    install root only when missing: moving a shared install root behind cwd would shadow dependencies,
+    while demoting an explicit server path could break sibling imports. File lookup (no ``sys_path``)
+    remains extra roots, cwd, then the install root in either mode.
     """
-    # cwd and the built-ins are always searched last; drop them from the woven sys.path entries so they
-    # can't get pinned mid-path (e.g. site-packages == PARENT_DIR in a wheel install).
-    trailing = [Path.cwd(), PARENT_DIR]
-    trailing_resolved = {root.resolve() for root in trailing}
-    middle = [entry for entry in (sys_path or []) if entry.resolve() not in trailing_resolved]
-    candidates = [*_extra_roots(), *middle, *trailing]
+    if _is_editable_install:
+        # Keep source-checkout precedence: cwd and built-ins are searched last, in that order.
+        trailing_resolved = {Path.cwd().resolve(), PARENT_DIR.resolve()}
+        middle = [entry for entry in (sys_path or []) if entry.resolve() not in trailing_resolved]
+    else:
+        # Wheels and --target installs share their root with dependencies. Preserve their position,
+        # including server directories explicitly placed ahead of them via PYTHONPATH.
+        middle = list(sys_path or [])
+    candidates = [*_extra_roots(), *middle, Path.cwd(), PARENT_DIR]
     roots: List[Path] = []
     seen: set[Path] = set()
     for root in candidates:
@@ -111,8 +115,10 @@ def _resolve_under_cwd_or_install(
 def _augment_sys_path() -> None:
     """Put the artifact roots on ``sys.path`` so plugin modules (e.g. a benchmark's ``prepare.py``) import.
 
-    Extra roots go to the front and cwd/``PARENT_DIR`` (the built-ins) to the end, so import precedence
-    matches file resolution under :func:`component_search_roots` (a plugin shadows a same-named Gym module).
+    Extra roots go to the front. Editable installs move cwd/``PARENT_DIR`` (the built-ins) to the end;
+    non-editable installs preserve existing import order and append those roots only when missing.
+    Use explicit extra roots (or ``--search-dir``) to override both files and modules of an installed
+    built-in, since cwd-first file lookup does not necessarily match non-editable import precedence.
     Idempotent; reads ``NEMO_GYM_EXTRA_ROOTS`` at call time, so it can be re-run after ``--search-dir`` folds
     roots into the env (see nemo_gym.cli.main).
     """

@@ -16,6 +16,13 @@ from aiohttp import ClientError, ClientResponseError
 from fastapi import Body
 from pydantic import ConfigDict, Field
 
+from environment_servers.nemo_user_sim.episode_contracts import (
+    UserSimEpisodeFailure,
+    UserSimEpisodeRequest,
+    UserSimEpisodeResponse,
+    UserSimEpisodeResult,
+)
+from nemo_gym._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER
 from nemo_gym.base_environment_server import (
     BaseEnvironmentServer,
     BaseEnvironmentServerConfig,
@@ -55,10 +62,6 @@ from nemo_gym.rollout_observability import AgentObservationBundle, ToolCallObser
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from nemo_gym.server_utils import request as http_request
 from resources_servers.nemo_user_sim.episode_contracts import (
-    UserSimEpisodeFailure,
-    UserSimEpisodeRequest,
-    UserSimEpisodeResponse,
-    UserSimEpisodeResult,
     UserSimInvocation,
     UserSimSeedResponse,
     UserSimSimulationResult,
@@ -347,7 +350,6 @@ class _ConversationBridge:
 class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, UserSimEpisodeResponse]):
     """Run one UserSim ConversationLoop as a Gym episode."""
 
-    ray_enabled = False
     config: UserSimEnvironmentServerConfig
     request_model = UserSimEpisodeRequest
     response_model = UserSimEpisodeResponse
@@ -525,6 +527,8 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
                     ),
                 ),
                 cookies=bridge.resources_cookies,
+                # The resources cleanup closes the session, so the Resources Server keeps tracking it until then.
+                headers={CHECKPOINT_CLOSE_FOLLOWS_HEADER: "1"},
             )
             await raise_for_status(verify_http_response)
             verification = UserSimVerification.model_validate(await get_response_json(verify_http_response))

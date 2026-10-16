@@ -961,7 +961,7 @@ async def test_run_real_timeout(fake_binary: str) -> None:
 
 
 @pytest.mark.skipif(shutil.which("sh") is None, reason="sh not available")
-async def test_run_daemonizing_returns_despite_lingering_child(fake_binary: str) -> None:
+async def test_run_daemonizing_returns_despite_lingering_child(fake_binary: str, tmp_path: Path) -> None:
     """Regression: a backgrounded child inheriting stdout must not wedge the read.
 
     Mirrors ``apptainer instance start``, which forks a long-lived instance that
@@ -969,10 +969,15 @@ async def test_run_daemonizing_returns_despite_lingering_child(fake_binary: str)
     until timeout; the daemonizing path waits only for the foreground process.
     """
     provider = apptainer_provider.ApptainerProvider()
-    # Foreground prints and exits immediately; the backgrounded `sleep` holds the
-    # inherited stdout fd open well past the (generous) timeout.
-    argv = [shutil.which("sh"), "-c", "sleep 30 & printf started"]
-    code, out, _err = await provider._run(argv, timeout_s=10, daemonize=True)
+    # Foreground prints and exits immediately.
+    # The backgrounded loop holds the inherited stdout fd open until the test releases it, well past the timeout.
+    release = tmp_path / "release"
+    lingering = f"while [ ! -e {shlex.quote(str(release))} ]; do sleep 0.05; done"
+    argv = [shutil.which("sh"), "-c", f"{lingering} & printf started"]
+    try:
+        code, out, _err = await provider._run(argv, timeout_s=10, daemonize=True)
+    finally:
+        release.touch()
     assert code == 0
     assert out == "started"
 
