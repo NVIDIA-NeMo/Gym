@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import re
 import sys
 import types
 from pathlib import Path
@@ -87,6 +88,15 @@ def url_exclusion_policy(monkeypatch):
 
 def _properties(policy_json: dict) -> list[dict]:
     return [prop for notice in policy_json["notices"] for prop in notice["properties"]]
+
+
+def test_pinned_upstream_revision_is_a_full_sha1_that_the_download_url_uses():
+    """A truncated pin resolves nowhere (GitHub answers 404 for a 39-character revision), so --download breaks."""
+    assert re.fullmatch(r"[0-9a-f]{40}", module.UPSTREAM_COMMIT)
+    assert re.fullmatch(r"[0-9a-f]{64}", module.UPSTREAM_BLOCKLIST_SHA256)
+    assert module.UPSTREAM_BLOCKLIST_URL == (
+        f"https://raw.githubusercontent.com/centerforaisafety/hle/{module.UPSTREAM_COMMIT}/docs/blocklist.json"
+    )
 
 
 def test_build_policy_normalises_deduplicates_and_unions_with_hle_policy():

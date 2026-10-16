@@ -56,7 +56,7 @@ from urllib.request import urlopen
 
 
 UPSTREAM_REPOSITORY = "https://github.com/centerforaisafety/hle"
-UPSTREAM_COMMIT = "22ed3074b1e7134bcbc09028d0ba320839b0655"  # pragma: allowlist secret
+UPSTREAM_COMMIT = "22ed3074b1e7b134bcbc09028d0ba320839b0655"  # pragma: allowlist secret
 UPSTREAM_BLOCKLIST_PATH = "docs/blocklist.json"
 UPSTREAM_BLOCKLIST_SHA256 = (
     "3abaf35e03d6d5d361d2611746683a32315fe73ef851ec5f33c54b3c6a526575"  # pragma: allowlist secret
