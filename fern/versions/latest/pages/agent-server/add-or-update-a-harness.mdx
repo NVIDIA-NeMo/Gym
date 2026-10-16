@@ -20,7 +20,7 @@ Session support varies by adapter. Check the adapter's README for supported feat
 | --- | --- |
 | Harness | The agent runtime (SDK or CLI) that runs the model and tool loop. |
 | Adapter | The Gym Agent Server under `responses_api_agents/<harness>/` that maps Gym requests to the harness. It runs outside the task sandbox. |
-| Environment Server | The Gym server that runs one episode in order: Resources Server seed, agent session, verification, and cleanup. The examples use `single_agent_turn`. |
+| [Environment Server](/main/about/architecture#environment-server) | The Gym server that runs one episode in order: Resources Server seed, agent session, verification, and cleanup. The examples use `single_agent_turn`. |
 | Resources Server | The benchmark server. It prepares tasks, owns task sandboxes, verifies results, and can expose tools. |
 | Task sandbox | The isolated environment that contains the task repository. The harness and its tools run here. |
 | Borrowed or owned sandbox | A sandbox is *borrowed* when the Resources Server creates it and passes it to the agent, and *owned* when the agent creates it. Only the owner destroys a sandbox. |
@@ -89,7 +89,7 @@ An [Environment Server](https://github.com/NVIDIA-NeMo/Gym/tree/main/environment
 
 ### Episode lifecycle
 
-The following diagram shows one episode in which the Resources Server supplies the task sandbox. All Gym servers are FastAPI applications that exchange JSON over HTTP. Sandbox execution and file transfer use the configured provider's transport. The model calls shown are those of Hermes, which uses Chat Completions.
+[Architecture](/main/about/architecture#how-an-agent-runs-a-task-in-nemo-gym-environments) gives the general episode flow. The following diagram adds the sandbox and adapter details for one episode in which the Resources Server supplies the task sandbox. All Gym servers are FastAPI applications that exchange JSON over HTTP. Sandbox execution and file transfer use the configured provider's transport. The model calls shown are those of Hermes, which uses Chat Completions.
 
 ```mermaid
 sequenceDiagram
