@@ -20,11 +20,19 @@ def _objects(value: object) -> list[dict]:
 
 
 def tool_checks(
-    record: dict | None, witnessed: list[dict], *, applies: bool = True, available: bool = True
+    record: dict | None,
+    witnessed: list[dict],
+    *,
+    finish_id: str | None = None,
+    applies: bool = True,
+    available: bool = True,
 ) -> list[dict]:
     results = Results()
     trajectory = _mapping((record or {}).get("ng_trajectory"))
-    tools = _objects(trajectory.get("tool_calls"))
+    # The scripted finish call ends the episode; it is witnessed by the model exchange, not by a shell marker.
+    tools = [
+        t for t in _objects(trajectory.get("tool_calls")) if finish_id is None or t.get("tool_call_id") != finish_id
+    ]
     invocations = _objects(trajectory.get("invocations"))
     wanted = Counter(t.get("id") for t in witnessed)
     identities = (
@@ -294,7 +302,13 @@ def inspect_behavior(
     return (
         results.dump()
         + model_checks(record, attempts, fingerprint=fingerprint, available=available)
-        + tool_checks(record, tools, applies=tool_steps > 0, available=available)
+        + tool_checks(
+            record,
+            tools,
+            finish_id=((witness or {}).get("finish_call") or {}).get("id"),
+            applies=tool_steps > 0,
+            available=available,
+        )
     )
 
 
