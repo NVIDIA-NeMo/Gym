@@ -377,6 +377,20 @@ def test_verifier_records_actual_final_answer(tmp_path, name, reward):
     assert probe.seeded == 1
 
 
+@pytest.mark.parametrize("name,exercised", [("model_error", True), ("tool_success", False)])
+def test_only_a_terminal_error_episode_is_inspected_from_its_failure_record(tmp_path, name, exercised):
+    (tmp_path / "rollouts.jsonl").write_text("")
+    (tmp_path / "rollouts_failures.jsonl").write_text(
+        json.dumps({"_ng_task_index": 0, "_ng_rollout_index": 0, "_ng_failure_class": "environment_server_failed"})
+        + "\n"
+    )
+
+    result = inspect_episode(SCENARIO[name], tmp_path, {"returncode": 1, "timed_out": False})
+
+    assert result["exercised"] is exercised
+    assert result["delivery"] == "failure_record"
+
+
 @pytest.fixture
 def retained_episode(tmp_path):
     # Contract fixture only: used to prove a green artifact cannot hide a missing live probe.
@@ -698,7 +712,9 @@ def test_missing_rollout_fails_required_checks_and_preserves_exclusions(tmp_path
     result = inspect_episode(SCENARIO["model_error"], tmp_path, {"returncode": 1, "timed_out": False})
     checks = {c["id"]: c for c in result["checks"]}
     assert checks["calls.outcome"]["status"] == "fail"
-    assert checks["calls.outcome"]["reasons"][0].startswith("required input is unavailable")
+    # A failure record is inspected, so the evidence it lacks blocks the check rather than its absence.
+    reason = "required input is unavailable" if delivery == "missing" else "blocked by model_calls.present"
+    assert checks["calls.outcome"]["reasons"][0].startswith(reason)
     assert checks["tool_calls.present"]["status"] == "not_applicable"
     assert checks["evaluation.reward"]["status"] == "fail"
     assert checks["turns.present"]["status"] == "not_applicable"
