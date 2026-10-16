@@ -1118,7 +1118,11 @@ class TestSeparateVerifierFields:
         assert HarborTaskConfig.model_validate({"verifier": {"timeout_sec": 30}}).is_shared_verifier
 
     def test_separate_mode_without_artifacts_loads_with_a_warning(self, tmp_path, caplog):
-        separate = HELLO_TOML.replace("[verifier]\n", '[verifier]\nenvironment_mode = "separate"\n')
+        # A prebuilt image: Harbor's effective verifier environment (a copy of [environment]) carries it, so the task
+        # loads without a tests/Dockerfile; without either, the loader refuses it as Harbor does.
+        separate = HELLO_TOML.replace("[verifier]\n", '[verifier]\nenvironment_mode = "separate"\n').replace(
+            "[environment]\n", '[environment]\ndocker_image = "org/hello:1"\n'
+        )
         with caplog.at_level("WARNING", logger="nemo_gym.tasks.harbor.task"):
             task = load_task(write_task(tmp_path / "t", toml=separate))
         assert not task.config.is_shared_verifier
