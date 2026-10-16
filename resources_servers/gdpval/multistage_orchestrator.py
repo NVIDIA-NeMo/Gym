@@ -177,6 +177,7 @@ class StageResume:
 # decision, pending evidence that an *immediate* re-dispatch recovers them
 # rather than reproducing the same outcome at full rollout cost.
 _IN_PROCESS_RETRYABLE_CLASSES = frozenset({"timeout_exceeded", "transient"})
+_TRANSPORT_INELIGIBLE_FAILURE_CLASS = "transport_ineligible"
 
 # Stamped on every row of a stage accepted by its partial-completion policy, so
 # aggregation can tell an accepted partial final stage from a degraded one.
@@ -527,6 +528,7 @@ def compute_fingerprint(
         "seed": multistage_config.seed,
         "nested_tasks": multistage_config.nested_tasks,
         "reuse_cached_deliverables": multistage_config.reuse_cached_deliverables,
+        "replace_transport_ineligible_tasks": multistage_config.replace_transport_ineligible_tasks,
         "column": list(multistage_config.column),
         "reference_elos": {k: reference_elos[k] for k in sorted(reference_elos)},
         "distribution": {
@@ -616,6 +618,12 @@ class MultiStageRunConfig:
     # Off by default: without it the attempt cap only advances across resumes,
     # so a timed-out row is lost whenever a run exits cleanly.
     retry_inprocess: bool = False
+    # Keep a strict non-final calibration stage at its requested size when the
+    # judge's deterministic transport preflight excludes every panel member for
+    # a task. The failed task is replaced from the same distribution bucket and
+    # the replacement inherits its reference slot. Final/full stages are never
+    # rewritten; their coverage policy remains authoritative.
+    replace_transport_ineligible_tasks: bool = False
 
 
 # Failure classes a partial-calibration policy may newly waive. A waived row is
@@ -748,6 +756,7 @@ def parse_multistage_config(raw: Mapping[str, Any]) -> MultiStageRunConfig:
         seed=raw.get("seed"),
         reuse_cached_deliverables=bool(raw.get("reuse_cached_deliverables", True)),
         retry_inprocess=bool(raw.get("retry_inprocess", False)),
+        replace_transport_ineligible_tasks=bool(raw.get("replace_transport_ineligible_tasks", False)),
     )
 
 
@@ -800,6 +809,22 @@ def index_rows_by_task(rows: Sequence[Mapping[str, Any]]) -> Dict[str, List[Dict
         if task_id is not None:
             by_task.setdefault(task_id, []).append(dict(row))
     return by_task
+
+
+def _same_bucket_replacement(
+    task_id: str,
+    distribution: Mapping[str, Mapping[str, object]],
+    unavailable: AbstractSet[str],
+    available_rows: AbstractSet[str],
+) -> Optional[str]:
+    """Return the first unused task in the failed task's distribution bucket."""
+    for group in sorted(distribution):
+        group_task_ids = {str(value) for value in (distribution[group] or {}).get("task_ids", []) or []}
+        if task_id not in group_task_ids:
+            continue
+        candidates = sorted((group_task_ids & available_rows) - unavailable)
+        return candidates[0] if candidates else None
+    return None
 
 
 def build_stage_rows(
@@ -1050,7 +1075,7 @@ async def run_multistage_stages(
                 stage_index: keys for stage_index, keys in sidecar_produced_by_stage.items() if stage_index <= index
             }
 
-        reference_ids, task_ids, task_reference_ids, replayed = _plan_stage(
+        reference_ids, task_ids, task_reference_ids, replayed, stage_plan = _plan_stage(
             index,
             stage,
             reference_elos,
@@ -1243,6 +1268,117 @@ async def run_multistage_stages(
                 new_tagged = [
                     r for r in new_tagged if (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) not in superseded
                 ] + dispatched
+
+        # A deterministic transport rejection contains no model-quality signal
+        # and cannot recover on retry. For a strict, sampled calibration stage,
+        # replace the whole affected task from the same distribution bucket and
+        # preserve its reference slot. The updated plan is journaled before the
+        # replacement dispatch, so a crash resumes the replacement rather than
+        # replaying the rejected task. Full/final stages keep their original task
+        # universe and let their explicit coverage policy report exclusions.
+        transport_replacements: List[Dict[str, Any]] = list(stage_plan.get("transport_replacements") or [])
+        may_replace_transport = (
+            multistage_config.replace_transport_ineligible_tasks
+            and index < total_stages - 1
+            and stage.partial_completion is None
+            and len(task_ids) < len(rows_by_task)
+        )
+        if may_replace_transport:
+            unavailable_task_ids = set(task_ids)
+            unavailable_task_ids.update(str(item["before"]) for item in transport_replacements)
+            available_task_ids = set(rows_by_task)
+            while True:
+                successful_keys = {_stage_key(row) for row in [*cached_rows, *new_tagged] if _is_success_row(row)}
+                known_failures = dict(resume.latest_failures_by_stage.get(index, {})) if resume is not None else {}
+                known_failures.update({_stage_key(row): row for row in new_tagged if not _is_success_row(row)})
+                blocked_task_ids: List[str] = []
+                for task_id in task_ids:
+                    task_rows = [row for row in stage_rows if row_task_id(row) == task_id]
+                    task_keys = {_stage_key(row) for row in task_rows}
+                    if not task_keys or task_keys & successful_keys:
+                        continue
+                    if all(
+                        known_failures.get(key, {}).get(NG_FAILURE_CLASS_KEY) == _TRANSPORT_INELIGIBLE_FAILURE_CLASS
+                        for key in task_keys
+                    ):
+                        blocked_task_ids.append(task_id)
+                if not blocked_task_ids:
+                    break
+
+                round_replacements: List[Dict[str, Any]] = []
+                for blocked_task_id in blocked_task_ids:
+                    replacement_task_id = _same_bucket_replacement(
+                        blocked_task_id,
+                        distribution,
+                        unavailable_task_ids,
+                        available_task_ids,
+                    )
+                    if replacement_task_id is None:
+                        continue
+                    reference_id = task_reference_ids[blocked_task_id]
+                    task_ids[task_ids.index(blocked_task_id)] = replacement_task_id
+                    task_reference_ids = {
+                        task_id: (reference_id if task_id == replacement_task_id else task_reference_ids[task_id])
+                        for task_id in task_ids
+                    }
+                    unavailable_task_ids.add(replacement_task_id)
+                    replacement = {
+                        "before": blocked_task_id,
+                        "after": replacement_task_id,
+                        "reference_id": reference_id,
+                    }
+                    round_replacements.append(replacement)
+                    transport_replacements.append(replacement)
+
+                    if multistage_config.nested_tasks:
+                        for later_task_ids in stage_task_sets[index + 1 :]:
+                            if replacement_task_id not in later_task_ids and blocked_task_id in later_task_ids:
+                                later_task_ids[later_task_ids.index(blocked_task_id)] = replacement_task_id
+
+                if not round_replacements:
+                    break
+
+                stage_rows = build_stage_rows(
+                    rows_by_task,
+                    task_reference_ids,
+                    index,
+                    produced=produced if multistage_config.reuse_cached_deliverables else None,
+                )
+                current_keys = {_stage_key(row) for row in stage_rows}
+                new_tagged = [row for row in new_tagged if _stage_key(row) in current_keys]
+                pending_rows = [
+                    row
+                    for row in stage_rows
+                    if (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]) not in gated_keys
+                ]
+
+                stage_plan = {
+                    **stage_plan,
+                    "task_ids": list(task_ids),
+                    "task_reference_ids": dict(task_reference_ids),
+                    "transport_replacements": list(transport_replacements),
+                }
+                if resume is not None:
+                    resume.on_plan(index, stage_plan)
+
+                replacement_ids = {item["after"] for item in round_replacements}
+                replacement_rows = [row for row in stage_rows if row_task_id(row) in replacement_ids]
+                replacement_pairs = await run_rollouts(replacement_rows)
+                replacement_tagged = tag_results(
+                    replacement_pairs,
+                    index,
+                    expected_final_stage_index=total_stages - 1,
+                    expected_stage_row_count=len(stage_rows),
+                )
+                if resume is not None:
+                    resume.on_rows(index, replacement_tagged)
+                new_tagged.extend(replacement_tagged)
+                _emit(
+                    "stage_transport_replacement",
+                    index=index,
+                    total_stages=total_stages,
+                    replacements=round_replacements,
+                )
         # A verify-side failure can still carry a complete, reusable policy
         # artifact. Make it available immediately to later stages in this same
         # process; startup-only sidecar loading covers only resumed runs.
@@ -1364,6 +1500,8 @@ async def run_multistage_stages(
             "normalized_elo": normalized,
             "num_references": num_references,
         }
+        if transport_replacements:
+            summary["transport_replacements"] = list(transport_replacements)
         if partial_outcome is not None:
             summary.update(
                 partial=True,
@@ -1445,8 +1583,8 @@ def _plan_stage(
     multistage_config: MultiStageRunConfig,
     resume: Optional[StageResume],
     assignment_repair: Optional[AssignmentRepair] = None,
-) -> Tuple[List[str], List[str], Dict[str, str], bool]:
-    """Return ``(reference_ids, task_ids, task_reference_ids, replayed)`` for a stage.
+) -> Tuple[List[str], List[str], Dict[str, str], bool, Dict[str, Any]]:
+    """Return references, tasks, assignments, replay status, and the durable plan.
 
     ``reference_ids`` is the stage's included reference set (all references, or
     the ``num_models`` closest to the running ELO estimate). ``task_ids`` is the
@@ -1463,14 +1601,14 @@ def _plan_stage(
     sets so it matches the rows that were originally dispatched.
     """
     if resume is not None and index in resume.plans:
-        recorded = resume.plans[index]
+        recorded = dict(resume.plans[index])
         reference_ids = list(recorded["reference_ids"])
         task_ids = list(recorded["task_ids"])
         task_reference_ids = {str(k): v for k, v in (recorded.get("task_reference_ids") or {}).items()}
         if not task_reference_ids and reference_ids:
             rng = stage_assignment_rng(multistage_config.seed, recorded.get("seed"), index)
             task_reference_ids = assign_task_references(task_ids, reference_ids, rng=rng)
-        return reference_ids, task_ids, task_reference_ids, True
+        return reference_ids, task_ids, task_reference_ids, True, recorded
 
     reference_ids = select_references(reference_elos, eval_elo, stage.num_models)
     task_ids = list(stage_task_sets[index])
@@ -1492,20 +1630,20 @@ def _plan_stage(
             raise ValueError("transport assignment repair changed the stage task set")
         if any(reference_id not in reference_ids for reference_id in task_reference_ids.values()):
             raise ValueError("transport assignment repair selected a reference outside the stage")
+    plan = {
+        "stage_index": index,
+        "status": "planned",
+        "reference_ids": list(reference_ids),
+        "task_ids": list(task_ids),
+        "task_reference_ids": dict(task_reference_ids),
+        "seed": stage.seed,
+        "prior_eval_elo": eval_elo,
+    }
+    if repair_receipt is not None:
+        plan["transport_assignment_repair"] = repair_receipt
     if resume is not None:
-        plan = {
-            "stage_index": index,
-            "status": "planned",
-            "reference_ids": list(reference_ids),
-            "task_ids": list(task_ids),
-            "task_reference_ids": task_reference_ids,
-            "seed": stage.seed,
-            "prior_eval_elo": eval_elo,
-        }
-        if repair_receipt is not None:
-            plan["transport_assignment_repair"] = repair_receipt
         resume.on_plan(index, plan)
-    return list(reference_ids), task_ids, task_reference_ids, False
+    return list(reference_ids), task_ids, task_reference_ids, False, plan
 
 
 def _resume_complete_stage(
@@ -2419,6 +2557,14 @@ def _log_event(name: str, data: dict) -> None:  # pragma: no cover
             f"{data.get('num_selected')} rollout(s) selected, {data.get('num_dispatched')} re-dispatched, "
             f"{data.get('num_drained')} drained without dispatch, "
             f"{data.get('num_recovered')} recovered",
+            file=sys.stderr,
+            flush=True,
+        )
+    elif name == "stage_transport_replacement":
+        swaps = ", ".join(f"{item['before']} -> {item['after']}" for item in data.get("replacements", []))
+        print(
+            f"[multistage-elo] stage {data['index'] + 1}/{data['total_stages']} replaced "
+            f"transport-ineligible calibration task(s): {swaps}",
             file=sys.stderr,
             flush=True,
         )
