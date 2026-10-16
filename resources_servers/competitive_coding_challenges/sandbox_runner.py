@@ -46,8 +46,10 @@ class ProcessSandbox:
 
     Like Skills' ``execute_shell``: runs ``/bin/bash`` on a script file in a new session
     with the memory rlimits above, reports ``completed`` only for exit code 0, and cuts
-    stdout/stderr at ``max_output_characters``. Unlike it, a timeout kills the whole
-    session instead of only bash; the result is the same.
+    stdout/stderr at ``max_output_characters``. On a timeout it returns without waiting for
+    processes that left bash's process group, such as a submission under run.sh's ``timeout``.
+    Unlike Skills, a timeout kills bash's whole process group instead of only bash, and output
+    that is not valid UTF-8 is decoded with ``errors="replace"`` where Skills fails the command.
     """
 
     async def execute_code(
@@ -75,7 +77,11 @@ class ProcessSandbox:
                 stdout, stderr = process.communicate(timeout=timeout)
             except subprocess.TimeoutExpired:
                 os.killpg(process.pid, signal.SIGKILL)
-                process.communicate()
+                # Reap bash without waiting for its pipes, as Skills' subprocess.run does: run.sh's `timeout` puts
+                # the submission in its own process group, out of killpg's reach, and it may still hold them open.
+                process.wait()
+                process.stdout.close()
+                process.stderr.close()
                 return {
                     "process_status": "timeout",
                     "stdout": "",

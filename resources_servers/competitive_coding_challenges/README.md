@@ -117,7 +117,9 @@ still come from each problem's `run.sh`.
    `["<problem_dir>:/data/ccc:ro"]`) or a layer of the image. For large sets, put `<problem_dir>` in
    object storage the provider can mount, as in the example below. If the provider mounts shared
    storage into every sandbox by default, turn that off, so submissions cannot browse other data
-   for answers. The server still loads `test_file` itself to compute rewards and metrics.
+   for answers. The server still loads `test_file` itself to compute rewards and metrics, so re-run
+   this split whenever `test_file` changes: a stale copy grades with the old points and tests, and
+   nothing reports the mismatch.
 
 3. Enable the sandbox path, with command-line overrides:
 
@@ -170,7 +172,8 @@ still come from each problem's `run.sh`.
    submission per test, so about half the CPUs keeps them from competing. The default
    `sandbox_config.provider_options.network_policy` is an OpenSandbox option that denies all
    egress. Other providers need their own setting (Docker's `network: none`), and Daytona, E2B and
-   OpenShell reject the key, so remove it for them.
+   OpenShell reject the key, so remove it for them. Submissions can still read `problem_data_dir`,
+   which holds the expected output of every test of every problem mounted there.
 
    The sandbox must let `run.sh` raise the stack limit (`ulimit -s unlimited`): its hard
    `RLIMIT_STACK` must be unlimited, or the process needs `CAP_SYS_RESOURCE`. Otherwise
