@@ -160,7 +160,9 @@ After you have filtered, high-quality rollouts, format them for your chosen trai
 
 ### SFT Data Processing
 
-Rollouts store the conversation as Responses API items: the prompt in `responses_create_params.input` and the model's turns in `response.output`. Training libraries expect Chat Completions messages, so convert both with NeMo Gym's `ResponsesConverter`, the same converter its model servers use. It turns `function_call` items into assistant `tool_calls`, `function_call_output` items into `tool` messages, and `reasoning` items into `<think>` blocks in the assistant content. Filter out items whose `type` is `reasoning` first if you don't want to train on them.
+Rollouts store the conversation as Responses API items: the prompt in `responses_create_params.input` and the model's turns in `response.output`. Training libraries expect Chat Completions messages, so convert both with NeMo Gym's `ResponsesConverter`, the same converter its model servers use. It turns `function_call` items into assistant `tool_calls`, `function_call_output` items into `tool` messages, and `reasoning` items into `<think>` blocks in the assistant content. Filter out items whose `type` is `reasoning` first if you don't want to train on them. The task's `instructions`, when set, become the leading system message.
+
+Some Responses fields have no Chat Completions equivalent, and the converter raises `NotImplementedError` on them. `to_chat` drops them first: a message's `phase` and a reasoning item's `encrypted_content`. Readable reasoning `content` is kept as the `<think>` text.
 
 Run these snippets in the NeMo Gym environment, in one Python session:
 
@@ -173,10 +175,23 @@ from nemo_gym.responses_converter import ResponsesConverter
 converter = ResponsesConverter(return_token_id_information=False)
 
 
-def to_chat(items: list, tools: list | None = None) -> dict:
-    """Convert Responses API items (and tools) to Chat Completions messages (and tools)."""
+def chat_representable(item: dict) -> dict:
+    """Drop the Responses-only fields that Chat Completions messages cannot hold."""
+    item = {key: value for key, value in item.items() if key != "phase"}
+    if item.get("type") == "reasoning":
+        if not item.get("summary") and item.get("content"):
+            item["summary"] = [{"type": "summary_text", "text": part["text"]} for part in item["content"]]
+        item.pop("content", None)
+        item.pop("encrypted_content", None)
+    return item
+
+
+def to_chat(items: list, tools: list | None = None, instructions: str | None = None) -> dict:
+    """Convert Responses API items (and tools and instructions) to Chat Completions messages (and tools)."""
     params = converter.responses_to_chat_completion_create_params(
-        NeMoGymResponseCreateParamsNonStreaming(input=items, tools=tools or [])
+        NeMoGymResponseCreateParamsNonStreaming(
+            input=[chat_representable(item) for item in items], tools=tools or [], instructions=instructions
+        )
     )
     return params.model_dump(exclude_none=True)
 
@@ -191,9 +206,11 @@ def process_sft_data(filtered_rollout_file: str, output_file: str) -> None:
     with open(filtered_rollout_file) as f, open(output_file, "w") as out:
         for line in f:
             rollout = json.loads(line)
+            task = rollout["responses_create_params"]
             chat = to_chat(
                 prompt_items(rollout) + rollout["response"]["output"],
-                rollout["responses_create_params"].get("tools"),
+                task.get("tools"),
+                task.get("instructions"),
             )
             example = {"messages": chat["messages"], "reward": rollout["reward"]}
             if chat.get("tools"):
@@ -229,12 +246,16 @@ def create_dpo_pairs(rollout_file: str, output_file: str, min_margin: float = 0.
             margin = chosen["reward"] - rejected["reward"]
             if len(rollouts) < 2 or margin < min_margin:
                 continue
+            task = chosen["responses_create_params"]
+            prompt = to_chat(prompt_items(chosen), task.get("tools"), task.get("instructions"))
             pair = {
-                "prompt": to_chat(prompt_items(chosen))["messages"],
+                "prompt": prompt["messages"],
                 "chosen": to_chat(chosen["response"]["output"])["messages"],
                 "rejected": to_chat(rejected["response"]["output"])["messages"],
                 "reward_margin": margin,
             }
+            if prompt.get("tools"):
+                pair["tools"] = prompt["tools"]
             out.write(json.dumps(pair) + "\n")
             pairs += 1
     print(f"Created {pairs} preference pairs from {len(by_task)} tasks")
