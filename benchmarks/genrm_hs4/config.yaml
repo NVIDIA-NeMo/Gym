@@ -1,0 +1,31 @@
+config_paths:
+  - resources_servers/genrm_eval/configs/genrm_eval.yaml
+
+genrm_hs4_resources_server:
+  _inherit_from: genrm_eval
+  resources_servers:
+    genrm_eval:
+      scoring_module: resources_servers.genrm_eval.preferences
+      metric_key: overall/accuracy
+
+genrm_hs4_benchmark_agent:
+  _inherit_from: genrm_eval_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: genrm_hs4_resources_server
+      datasets:
+        - name: genrm_hs4
+          type: benchmark
+          jsonl_fpath: benchmarks/genrm_hs4/data/hs4_validation.jsonl
+          prepare_script: benchmarks/genrm_hs4/prepare.py
+          prompt_config: null
+          num_repeats: 1
+          license: NVIDIA Internal Use Only, Do Not Distribute
+
+genrm_hs4_environment_server:
+  _inherit_from: genrm_eval_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: genrm_hs4_benchmark_agent

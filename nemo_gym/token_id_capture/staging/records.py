@@ -414,6 +414,14 @@ class CallRecord(_DigestWireModel):
     # and the calls made before the checkpoint stay staged under the earlier attempt's key.
     # ``None`` means the receipt's own rollout staged the call.
     capture_key: Identifier | None = None
+    # Why the served response stopped, in the Chat Completions vocabulary (``stop``, ``length``,
+    # ``tool_calls``, ``content_filter``), read from the served payload when the row is committed;
+    # ``None`` when the payload stated none or the row predates the column. The rebuild reports the
+    # terminal row's value so a framework can mark a ``length`` or ``content_filter`` ending incomplete.
+    # Like every column of this wire model, it binds the model server and the framework to one Gym
+    # version: the manifest route serializes it on every row, and a framework whose Gym predates the
+    # column rejects each row (``extra="forbid"``) as ``invalid_manifest_row``, as with ``capture_key``.
+    finish_reason: StrictStr | None = None
 
     @model_validator(mode="after")
     def _validate_lengths(self) -> Self:

@@ -88,9 +88,11 @@ from nemo_gym.token_id_capture.records import (
     EngineRefusalRecord,
     ParentResolutionStatus,
     TokenEntry,
+    apply_capture_incomplete_verdict,
     compute_digest,
     cumulative_tokens,
     extract_token_fields,
+    incomplete_reason_for_finish_reason,
     stamp_lineage,
 )
 from nemo_gym.token_id_capture.sink import (
@@ -127,6 +129,8 @@ __all__ = [
     "compute_digest",
     "cumulative_tokens",
     "stamp_lineage",
+    "incomplete_reason_for_finish_reason",
+    "apply_capture_incomplete_verdict",
     "TokenCaptureStore",
     "validate_rollout_id",
     "make_token_store",

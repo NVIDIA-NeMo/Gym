@@ -1340,7 +1340,7 @@ class TestApp:
                 )
             return result
 
-        async def post(*, server_name, url_path, json, cookies):
+        async def post(*, server_name, url_path, json, cookies, headers=None):
             if server_name == "model":
                 result = model_client.post(url_path, json=json.model_dump(exclude_none=True))
                 return reply(result.json(), result.status_code)

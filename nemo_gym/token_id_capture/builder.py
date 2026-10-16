@@ -46,6 +46,7 @@ from nemo_gym.token_id_capture.records import (
     ParentResolutionStatus,
     TokenEntry,
     compute_digest,
+    incomplete_reason_for_finish_reason,
 )
 
 
@@ -620,12 +621,6 @@ def project_chain_to_output_items(chain: Chain) -> list[dict]:
     return items
 
 
-# The Responses ``incomplete_details.reason`` the rebuilt response reports for the terminal
-# call's Chat Completions finish reason, the same mapping the Responses converter applies to a
-# served chat completion. ``stop`` and ``tool_calls`` are complete endings and map to nothing.
-_INCOMPLETE_REASON_BY_FINISH_REASON = {"length": "max_output_tokens", "content_filter": "content_filter"}
-
-
 def _engine_refusal_ended_the_chain(refusal: EngineRefusalRecord, terminal: TokenEntry, out: BuildOutput) -> bool:
     """Whether ``refusal`` was the harness's next request after the delivered terminal call and did not fit.
 
@@ -690,11 +685,11 @@ def project_main_chain_response(
     payload carries ``status: "incomplete"`` with the matching ``incomplete_details.reason``
     (``max_output_tokens`` or ``content_filter``), the verdict the Responses converter gives a
     chat completion that ended the same way. The finish reason is recorded by the local capture
-    path (``capture_tokens``); a call staged under worker custody carries none, so a chain built
-    from externally staged records reports no verdict. ``finish_reason_resolved=False`` withholds
-    the verdict as well: terminal attribution passes it when the terminal call was chosen among
-    token-identical retries that recorded different finish reasons, so the status would otherwise
-    depend on which twin drew the smaller call id.
+    path (``capture_tokens``); under worker custody the ledger row carries it and
+    ``staging.rebuild.LinearizedRow.incomplete_reason`` applies the same mapping.
+    ``finish_reason_resolved=False`` withholds the verdict: terminal attribution passes it when
+    the terminal call was chosen among token-identical retries that recorded different finish
+    reasons, so the status would otherwise depend on which twin drew the smaller call id.
 
     ``engine_refusals`` are the frozen snapshot's engine refusals. A refusal of the request that
     continued the delivered terminal call, refused for the context window, also makes the payload
@@ -731,9 +726,7 @@ def project_main_chain_response(
     # chain, because a later call extended it. A complete ending, or an unrecorded finish
     # reason, leaves ``status`` unset unless a context-window refusal continued the terminal call.
     terminal = mains[0].links[-1].entry
-    incomplete_reason = (
-        _INCOMPLETE_REASON_BY_FINISH_REASON.get(terminal.finish_reason) if finish_reason_resolved else None
-    )
+    incomplete_reason = incomplete_reason_for_finish_reason(terminal.finish_reason) if finish_reason_resolved else None
     if incomplete_reason is None and any(
         _engine_refusal_ended_the_chain(refusal, terminal, out) for refusal in engine_refusals
     ):
