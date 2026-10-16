@@ -53,6 +53,11 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, raise_for_status, request
+from resources_servers.browsecomp_advanced_harness.bash_guard import (
+    _bash_allowlisted,
+    _bash_denylisted,
+    format_bash_output,
+)
 from resources_servers.browsecomp_advanced_harness.judge_prompt import JUDGE_PROMPT_TEMPLATE
 
 
@@ -213,6 +218,21 @@ class BashCommandRequest(BaseModel):
 
 class BashCommandResponse(BaseModel):
     results_string: str
+
+
+class WorkspaceFilesRequest(BaseModel):
+    since: int = 0  # number of pages the caller already holds
+
+
+class WorkspaceFile(BaseModel):
+    path: str  # relative to the session workspace
+    content: str
+
+
+class WorkspaceFilesResponse(BaseModel):
+    enabled: bool
+    files: List[WorkspaceFile] = Field(default_factory=list)
+    next: int = 0  # pass back as `since` on the next call
 
 
 class TavilySearchRunRequest(BaseRunRequest):
@@ -576,9 +596,6 @@ class ExaAIOHTTPClient(BaseModel):
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 _URL_RE = re.compile(r"https?://([^/]+)(/.*)?")
 
-_BASH_HEAD_BYTES = 8192
-_BASH_TAIL_BYTES = 4096
-
 
 def _slugify(text: str, max_len: int = 40) -> str:
     s = (text or "").lower()
@@ -594,244 +611,6 @@ def _slug_from_url(url: str) -> str:
     host = (m.group(1) or "").replace("www.", "")
     tail = (m.group(2) or "").rstrip("/").rsplit("/", 1)[-1]
     return _slugify(f"{host} {tail}")
-
-
-def _bash_truncate(s: str) -> str:
-    if len(s) <= _BASH_HEAD_BYTES + _BASH_TAIL_BYTES + 64:
-        return s
-    omitted = len(s) - _BASH_HEAD_BYTES - _BASH_TAIL_BYTES
-    return (
-        f"{s[:_BASH_HEAD_BYTES]}\n"
-        f"[...truncated {omitted} bytes; head shown above, tail follows...]\n"
-        f"{s[-_BASH_TAIL_BYTES:]}"
-    )
-
-
-# --- bash_command guards (ported byte-for-byte from an internal reference
-# harness: _bash_denylisted + _bash_allowlisted). Layered deny-first,
-# then default-deny allow-list. NOT a security boundary (the ulimit -f 0 in
-# _run_bash_readonly is the kernel backstop); these block destructive/network/
-# interpreter commands + command/process substitution + find -exec / sed -i. ---
-_BASH_DENY_COMMANDS = {
-    # destructive file ops / writes
-    "rm",
-    "rmdir",
-    "unlink",
-    "shred",
-    "srm",
-    "wipe",
-    "mv",
-    "cp",
-    "dd",
-    "truncate",
-    "install",
-    "ln",
-    "tee",
-    "mkfs",
-    "mke2fs",
-    "mkswap",
-    "fsck",
-    # permissions / metadata
-    "chmod",
-    "chown",
-    "chgrp",
-    "chattr",
-    "touch",
-    # privilege / escape / process / system control
-    "sudo",
-    "su",
-    "doas",
-    "pkexec",
-    "chroot",
-    "unshare",
-    "nsenter",
-    "mount",
-    "umount",
-    "kill",
-    "pkill",
-    "killall",
-    "reboot",
-    "shutdown",
-    "halt",
-    "poweroff",
-    "init",
-    "systemctl",
-    "service",
-    "crontab",
-    "at",
-    "batch",
-    # network / exfiltration
-    "curl",
-    "wget",
-    "nc",
-    "ncat",
-    "netcat",
-    "telnet",
-    "ssh",
-    "scp",
-    "sftp",
-    "rsync",
-    "ftp",
-    "tftp",
-    "socat",
-    # interpreters / shells / arbitrary-code engines & wrappers
-    "bash",
-    "sh",
-    "zsh",
-    "ksh",
-    "dash",
-    "csh",
-    "tcsh",
-    "fish",
-    "python",
-    "python2",
-    "python3",
-    "perl",
-    "ruby",
-    "node",
-    "nodejs",
-    "php",
-    "lua",
-    "rscript",
-    "awk",
-    "gawk",
-    "mawk",
-    "eval",
-    "exec",
-    "command",
-    "builtin",
-    "source",
-    "xargs",
-    "nohup",
-    "setsid",
-    "timeout",
-    "nice",
-    "watch",
-    "stdbuf",
-    "ionice",
-    # environment / secret disclosure
-    "env",
-    "printenv",
-    "export",
-    "set",
-    "declare",
-    "typeset",
-}
-
-# Patterns blocked anywhere (evaluated on the quote-stripped command).
-_BASH_DENY_GLOBAL_PATTERNS = [
-    (r"`", "backtick command substitution"),
-    (r"\$\((?!\()", "$(...) command substitution"),
-    (r"[<>]\(", "process substitution"),
-    (r":\s*\(\s*\)\s*\{", "fork bomb"),
-    (r"(?:^|[;|&])\s*\.\s+\S", "sourcing a script with '.'"),
-]
-
-_FIND_WRITE_RE = re.compile(r"-(delete|exec|execdir|fprintf|fprint|fls|ok|okdir)\b")
-_SED_INPLACE_RE = re.compile(r"(?:^|\s)-i\b")
-
-
-def _bash_denylisted(keystrokes):
-    """Return a reason string if the command is denied, else None.
-
-    Pragmatic speed-bump only — NOT a security boundary. See _BASH_DENY_*.
-    """
-    s = keystrokes or ""
-    # Strip quoted strings so search terms (grep ">" / grep "rm") don't trip rules.
-    unq = re.sub(r"'[^']*'", " ", s)
-    unq = re.sub(r'"[^"]*"', " ", unq)
-
-    for pat, why in _BASH_DENY_GLOBAL_PATTERNS:
-        if re.search(pat, unq):
-            return why
-
-    # Output redirection to a real file (allow /dev/null and fd dups like 2>&1).
-    redir = re.sub(r"(?:\d*|&)>{1,2}\s*(?:/dev/null|&\s*\d+|&\s*-)", " ", unq)
-    if re.search(r">{1,2}", redir):
-        return "output redirection to a file (writes blocked)"
-
-    # Command-position check on each pipeline / list segment.
-    for seg in re.split(r"[;\n|&]+", unq):
-        words = seg.split()
-        idx = 0
-        while idx < len(words) and re.match(r"^[A-Za-z_]\w*=", words[idx]):
-            idx += 1  # skip leading VAR=val assignments
-        if idx >= len(words):
-            continue
-        prog = Path(words[idx].lstrip("\\")).name
-        if prog in _BASH_DENY_COMMANDS:
-            return f"command '{prog}' is blocked"
-        if prog == "find" and _FIND_WRITE_RE.search(seg):
-            return "find write/exec action (-delete/-exec/...) is blocked"
-        if prog == "sed" and _SED_INPLACE_RE.search(seg):
-            return "sed -i (in-place file edit) is blocked"
-    return None
-
-
-# Default-deny companion: a command passes only if EVERY command-position program
-# is in this read-only set. Closes the denylist's gap for unenumerated binaries.
-_BASH_ALLOW_COMMANDS = {
-    "grep",
-    "cat",
-    "head",
-    "tail",
-    "sed",
-    "ls",
-    "wc",
-    "sort",
-    "uniq",
-    "cut",
-    "tr",
-    "nl",
-    "strings",
-    "file",
-    "find",
-    "diff",
-    "echo",
-    "printf",
-    "cd",
-}
-
-# Shell keywords permitted as structural glue (pipelines, for-loops, conditionals).
-_BASH_KEYWORD_SKIP = {"if", "elif", "then", "else", "while", "until", "do", "!", "time", "{", "(", "[["}
-_BASH_KEYWORD_STANDALONE = {"done", "fi", "esac", "}", ")"}
-_BASH_KEYWORD_HEADER = {"for", "case", "select", "function"}
-
-# fd-dups / &-redirections contain '&' which would otherwise phantom-split a segment.
-_BASH_FD_DUP_RE = re.compile(r"\d*[<>]&\s*[-\d]+")
-_BASH_AMP_REDIR_RE = re.compile(r"&>>?\s*\S+")
-
-
-def _bash_allowlisted(keystrokes):
-    """Return a reason string if any command-position program is NOT read-only,
-    else None. Default-deny companion to _bash_denylisted."""
-    s = keystrokes or ""
-    # Strip quoted strings so search terms (grep ">" / grep "rm") don't trip rules.
-    unq = re.sub(r"'[^']*'", " ", s)
-    unq = re.sub(r'"[^"]*"', " ", unq)
-    # Neutralize &-bearing redirections so they don't split segments.
-    unq = _BASH_FD_DUP_RE.sub(" ", unq)
-    unq = _BASH_AMP_REDIR_RE.sub(" ", unq)
-
-    for seg in re.split(r"[;\n|&]+", unq):
-        words = seg.split()
-        idx = 0
-        while idx < len(words):
-            w = words[idx]
-            if re.match(r"^[A-Za-z_]\w*=", w):
-                idx += 1  # leading VAR=val assignment
-            elif w in _BASH_KEYWORD_HEADER:
-                idx = len(words)  # loop/case header: no command to check
-            elif w in _BASH_KEYWORD_SKIP or w in _BASH_KEYWORD_STANDALONE:
-                idx += 1  # structural keyword; real command (if any) follows
-            else:
-                break
-        if idx >= len(words):
-            continue
-        prog = Path(words[idx].lstrip("\\")).name
-        if prog not in _BASH_ALLOW_COMMANDS:
-            return f"command '{prog}' not in read-only allow-list"
-    return None
 
 
 class _PageWriter:
@@ -854,6 +633,7 @@ class _PageWriter:
         self.manifest_path.write_text(self.MANIFEST_HEADER)
         self._lock = threading.Lock()
         self._counter = 0
+        self.written: List[str] = []  # page paths relative to workspace, in write order
 
     def _next_idx(self) -> int:
         with self._lock:
@@ -874,7 +654,7 @@ class _PageWriter:
         body = f"[Query]: {query}\n[URL]: {url}\n[Title]: {title}\n\n{content}"
         (self.pages_dir / fname).write_text(body, errors="replace")
         self._append_manifest(idx, "search", query, title, len(content))
-        return f"pages/{fname}"
+        return self._record(f"pages/{fname}")
 
     def write_browse_page(self, url, title, content) -> str:
         idx = self._next_idx()
@@ -882,7 +662,12 @@ class _PageWriter:
         body = f"[URL]: {url}\n[Title]: {title}\n\n{content}"
         (self.pages_dir / fname).write_text(body, errors="replace")
         self._append_manifest(idx, "browse", url, title, len(content))
-        return f"pages/{fname}"
+        return self._record(f"pages/{fname}")
+
+    def _record(self, rel_path: str) -> str:
+        with self._lock:
+            self.written.append(rel_path)
+        return rel_path
 
 
 # Judge retry backoff cap. The 2026-07-15 inference-api 529 outage outlasted the old
@@ -984,6 +769,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         app.post("/search")(self.search)
         app.post("/browse")(self.browse)
         app.post("/bash_command")(self.bash_command)
+        app.post("/workspace_files")(self.workspace_files)
 
         main_app_lifespan = app.router.lifespan_context
 
@@ -1035,6 +821,24 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         out = await self._run_bash_readonly(body.keystrokes or "", duration, str(page_writer.workspace))
         return BashCommandResponse(results_string=out)
 
+    async def workspace_files(self, request: Request, body: WorkspaceFilesRequest) -> WorkspaceFilesResponse:
+        """Pages written after the first `since`, plus the current manifest.
+
+        A sandboxed agent calls this before each bash_command to copy new pages
+        into its sandbox, where bash_command then runs.
+        """
+        page_writer = self._get_page_writer(request.session[SESSION_ID_KEY])
+        if page_writer is None:
+            return WorkspaceFilesResponse(enabled=False)
+        new_paths = page_writer.written[body.since :]
+        if not new_paths:
+            return WorkspaceFilesResponse(enabled=True, next=len(page_writer.written))
+        files = [
+            WorkspaceFile(path=p, content=(page_writer.workspace / p).read_text(errors="replace"))
+            for p in [*new_paths, "manifest.tsv"]
+        ]
+        return WorkspaceFilesResponse(enabled=True, files=files, next=body.since + len(new_paths))
+
     async def _run_bash_readonly(self, keystrokes: str, duration: float, cwd: str) -> str:
         """Run the command IN-PROCESS via pocketshell -- no subprocess, no sandbox.
 
@@ -1076,17 +880,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             print(f"🚨 [browsecomp][bash] pocketshell error: {e!r}", flush=True)
             return f"[bash error: {e}]\n[exit_code=-2]"
 
-        stdout = _bash_truncate(result.stdout)
-        stderr = _bash_truncate(result.stderr)
-        truncated = (len(result.stdout) + len(result.stderr)) > (_BASH_HEAD_BYTES + _BASH_TAIL_BYTES) * 2
-        parts = []
-        if stdout:
-            parts.append(stdout)
-        if stderr:
-            parts.append("--- stderr ---")
-            parts.append(stderr)
-        parts.append(f"[exit_code={result.exit_code}{' truncated' if truncated else ''}]")
-        return "\n".join(parts)
+        return format_bash_output(result.stdout, result.stderr, result.exit_code)
 
     def _select_tavily_client(self) -> AsyncTavilyClient:
         client = self._async_tavily_clients[self._num_requests % len(self._async_tavily_clients)]
