@@ -1,0 +1,186 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""``nemo_gym._checkpoint.harness`` against real processes: real bash, real /proc, real signals.
+
+Each launch runs through a local stand-in for a sandbox's exec daemon (bash in a process group of its own, stderr
+returned inside stdout, as OpenSandbox's background executions do). The tests signal only processes their own
+launches started, so they are safe on any Linux host.
+"""
+
+import asyncio
+import re
+import shutil
+import sys
+from pathlib import Path
+from shlex import quote
+from typing import Optional
+
+import pytest
+
+from nemo_gym._checkpoint import harness
+from nemo_gym._checkpoint.harness import (
+    LAUNCH_TAG,
+    HarnessInterrupted,
+    HarnessLaunch,
+    run_until_park_requested,
+    stdout_only,
+)
+from nemo_gym.sandbox import SandboxExecResult
+
+
+pytestmark = pytest.mark.skipif(
+    sys.platform != "linux" or shutil.which("bash") is None, reason="the stop walks /proc from bash"
+)
+
+
+class LocalShell:
+    """Runs each command with bash in a process group of its own and returns stderr inside stdout."""
+
+    def __init__(self) -> None:
+        self.commands: list[str] = []
+
+    async def exec(self, command: str, *, timeout_s: Optional[float] = None) -> SandboxExecResult:
+        self.commands.append(command)
+        process = await asyncio.create_subprocess_exec(
+            "bash",
+            "-c",
+            command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True,
+        )
+        stdout, _ = await asyncio.wait_for(process.communicate(), timeout_s)
+        return SandboxExecResult(stdout=stdout.decode(errors="replace"), stderr=None, return_code=process.returncode)
+
+
+class ParkRequest:
+    """What ``run_until_park_requested`` awaits of a ``LegacyRun``."""
+
+    def __init__(self) -> None:
+        self.requested = asyncio.Event()
+
+    async def wait_park_requested(self) -> None:
+        await self.requested.wait()
+
+
+def alive(pid: int) -> bool:
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return False
+    return stat.rsplit(") ", 1)[1].split()[0] != "Z"
+
+
+def launch_id(shell: LocalShell) -> str:
+    match = re.search(rf"{LAUNCH_TAG}=([0-9a-f]+)", shell.commands[0])
+    assert match, "the launch carries its tag"
+    return match.group(1)
+
+
+async def until(condition, timeout_s: float = 10.0) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout_s
+    while not condition():
+        assert asyncio.get_running_loop().time() < deadline, "timed out"
+        await asyncio.sleep(0.05)
+
+
+@pytest.fixture(autouse=True)
+def short_graces(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(harness, "_GRACEFUL_S", 2.0)
+    monkeypatch.setattr(harness, "_KILL_S", 10.0)
+    monkeypatch.setattr(harness, "_SURVIVOR_CHECK_INTERVAL_S", 0.2)
+
+
+# What a launch is doing when the checkpoint asks the run to park, and what must be gone afterwards.
+PHASES = {
+    # The install is still running: nothing after it may start.
+    "installing": "sleep 300 && touch {started}",
+    # The harness runs a command in a session of its own, out of reach of the launch's process group.
+    "running_a_command": (
+        "touch {started} && {python} -c \"import subprocess, time; c = subprocess.Popen(['sleep', '300'], "
+        "start_new_session=True); open('{pids}', 'w').write(str(c.pid)); time.sleep(300)\""
+    ),
+    # A background process detached at once: PID 1's child, found only by its tag.
+    "with_a_detached_process": (
+        "touch {started} && bash -c 'nohup sleep 300 >/dev/null 2>&1 & echo $! > {pids}' && sleep 300"
+    ),
+    # A child that cleared its environment and ignores SIGINT; the SIGINT pass orphans it by killing its parent,
+    # and only the pass's record names it for the SIGKILL pass.
+    "with_an_untagged_child": 'touch {started}; env -i "$(command -v sleep)" 300 & echo $! > {pids}; wait',
+    # The harness ignores SIGINT: the SIGKILL pass ends it.
+    "ignoring_sigint": "trap '' INT; touch {started} && sleep 300",
+}
+
+
+@pytest.mark.parametrize("phase", sorted(PHASES))
+async def test_a_park_request_stops_the_launch_and_everything_it_started(tmp_path: Path, phase: str) -> None:
+    started, pids = tmp_path / "started", tmp_path / "pids"
+    shell, park = LocalShell(), ParkRequest()
+    run = asyncio.create_task(
+        run_until_park_requested(
+            shell, PHASES[phase].format(started=started, pids=pids, python=quote(sys.executable)), park, timeout_s=600
+        )  # type: ignore[arg-type]
+    )
+    if phase == "installing":
+        await asyncio.sleep(0.5)
+    else:
+        await until(lambda: started.exists() and (phase == "ignoring_sigint" or (pids.exists() and pids.read_text())))
+
+    park.requested.set()
+    with pytest.raises(HarnessInterrupted, match="SIG(INT|KILL) ended it after"):
+        await asyncio.wait_for(run, timeout=30)
+
+    if phase == "installing":
+        await asyncio.sleep(0.5)
+        assert not started.exists(), "nothing after the install started"
+    if pids.exists():
+        assert not alive(int(pids.read_text())), "the process the launch started is gone"
+    found = await shell.exec(f"grep -l {LAUNCH_TAG}={launch_id(shell)} /proc/[0-9]*/environ 2>/dev/null; true")
+    assert not [line for line in (found.stdout or "").split() if alive(int(line.split("/")[2]))], "no process is left"
+    assert not list(Path("/tmp").glob(f"nemo-gym-harness-{launch_id(shell)}.*")), "the stop leaves no file"
+
+
+async def test_a_stop_that_arrives_before_the_launch_starts_nothing(tmp_path: Path) -> None:
+    shell, launch, started = LocalShell(), HarnessLaunch(), tmp_path / "started"
+    await shell.exec(launch.stop_command("INT"))
+
+    result = await shell.exec(launch.command(f"touch {started}"), timeout_s=30)
+
+    assert result.return_code == 130 and not started.exists()
+    await shell.exec(launch.cleanup_command())
+    assert not list(Path("/tmp").glob(f"nemo-gym-harness-{launch.id}.*"))
+
+
+async def test_a_stop_leaves_other_launches_alone() -> None:
+    shell, stopped, other = LocalShell(), HarnessLaunch(), HarnessLaunch()
+    runs = [asyncio.create_task(shell.exec(launch.command("sleep 300"))) for launch in (stopped, other)]
+    try:
+        await asyncio.sleep(0.5)
+        for signal_name in ("INT", "KILL"):
+            await shell.exec(stopped.stop_command(signal_name))
+        await asyncio.wait_for(runs[0], timeout=10)
+
+        assert not runs[1].done(), "the other launch still runs"
+        assert (await shell.exec(other.survivors_command())).stdout, "and its process is alive"
+    finally:
+        await shell.exec(other.stop_command("KILL"))
+        await asyncio.gather(*runs, return_exceptions=True)
+        for launch in (stopped, other):
+            await shell.exec(launch.cleanup_command())
+
+
+async def test_a_launch_that_ends_first_returns_its_result_and_writes_no_file() -> None:
+    shell = LocalShell()
+
+    result = await run_until_park_requested(shell, "echo done", ParkRequest(), timeout_s=30)  # type: ignore[arg-type]
+
+    assert (result.return_code, result.stdout) == (0, "done\n")
+    assert not list(Path("/tmp").glob(f"nemo-gym-harness-{launch_id(shell)}.*"))
+    unchecked = await run_until_park_requested(shell, "echo plain", None, timeout_s=30)  # type: ignore[arg-type]
+    assert unchecked.stdout == "plain\n" and shell.commands[-1] == "echo plain", "without checkpointing: as given"
+
+
+async def test_stdout_only_keeps_progress_on_stderr_out_of_parsed_output() -> None:
+    result = await LocalShell().exec(stdout_only("echo 'Exporting session: ses_1' >&2; echo '{\"id\": 1}'"))
+
+    assert result.stdout == '{"id": 1}\n'
