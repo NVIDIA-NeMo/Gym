@@ -14,6 +14,7 @@
 # limitations under the License.
 import warnings
 from argparse import ArgumentParser
+from collections.abc import Mapping
 from enum import Enum
 from pathlib import Path
 from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional, Set, Tuple, Union
@@ -850,6 +851,28 @@ class ExporterConfig(BaseModel):
     def is_available(self) -> bool:
         """Whether every field the backend needs to connect is set."""
         raise NotImplementedError
+
+
+REMOVED_ROLLOUT_OPTIONS = {
+    "retry_invalid_judge_responses": (
+        "A verifier that cannot produce a usable judgement now returns a `judge_failed` row; recover those "
+        "with `gym eval reverify --judge-failed-only`."
+    ),
+}
+
+
+class RemovedRolloutOptionsMixin(BaseModel):
+    """Reject rollout options that no longer exist, which pydantic would otherwise drop without a word."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_removed_rollout_options(cls, data):
+        # The CLI passes an OmegaConf DictConfig, which is a Mapping but not a dict.
+        if isinstance(data, Mapping):
+            for name, hint in REMOVED_ROLLOUT_OPTIONS.items():
+                if name in data:
+                    raise ConfigError(f"`{name}` was removed. {hint}")
+        return data
 
 
 DEPRECATED_UPLOAD_ROLLOUTS_KEY = "upload_rollouts_to_wandb"

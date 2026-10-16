@@ -93,6 +93,7 @@ from nemo_gym.rollout_collection import (
     loads_jsonl_line,
 )
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
+from nemo_gym.rollout_reverification import RolloutReverificationConfig
 from nemo_gym.telemetry.gym_metrics import ROLLOUT_COMPLETED_INSTRUMENT
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.token_id_capture import (
@@ -273,14 +274,24 @@ class TestUploadRolloutsDeprecation:
 
 
 class TestRemovedRetryInvalidJudgeResponses:
-    @pytest.mark.parametrize("config_cls", [RolloutCollectionConfig, E2ERolloutCollectionConfig])
-    def test_it_is_rejected(self, config_cls):
-        extra = (
-            {"split": "benchmark"} if config_cls is E2ERolloutCollectionConfig else {"input_jsonl_fpath": "in.jsonl"}
+    @pytest.mark.parametrize(
+        ("config_cls", "required"),
+        [
+            (RolloutCollectionConfig, {"input_jsonl_fpath": "in.jsonl"}),
+            (E2ERolloutCollectionConfig, {"split": "benchmark"}),
+            (RolloutReverificationConfig, {"materialized_inputs_jsonl_fpath": "materialized.jsonl"}),
+        ],
+    )
+    def test_it_is_rejected(self, config_cls, required):
+        with pytest.raises(ConfigError, match="`retry_invalid_judge_responses` was removed"):
+            config_cls(output_jsonl_fpath="out.jsonl", retry_invalid_judge_responses=True, **required)
+
+    def test_reverification_without_it_is_unaffected(self):
+        config = RolloutReverificationConfig(
+            materialized_inputs_jsonl_fpath="m.jsonl", rollouts_jsonl_fpath="r.jsonl", output_jsonl_fpath="o.jsonl"
         )
 
-        with pytest.raises(ConfigError, match="`retry_invalid_judge_responses` was removed"):
-            config_cls(output_jsonl_fpath="out.jsonl", retry_invalid_judge_responses=True, **extra)
+        assert config.output_jsonl_fpath == "o.jsonl"
 
 
 class TestGetMaxRolloutAttempts:

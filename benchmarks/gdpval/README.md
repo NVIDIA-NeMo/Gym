@@ -779,7 +779,7 @@ that used to skip the policy (`JUDGE_ONLY=true`) now runs it.
   (default 12600) replaces it. The environment server also sets `default_episode_timeout_seconds: 18000`,
   `max_concurrent_episodes: 32` and `queue_timeout_seconds: 86400`.
 - **Rollout options:** the benchmark config no longer sets `retry_terminal_timeouts` or
-  `retry_invalid_judge_responses`. `+retry_invalid_judge_responses` no longer exists in core; passing it fails.
+  `retry_invalid_judge_responses`. `+retry_invalid_judge_responses` no longer exists in core; passing it to `gym eval run` or `gym eval reverify` fails.
 - **Failure labels:** a rubric verification without a usable judgement is reported as `judge_failed` (it was
   `judge_invalid`), and `gym eval reverify --judge-failed-only` recovers it.
 - **Multi-stage runs:** a reused deliverable is now judged through the resources server's `/verify` instead of

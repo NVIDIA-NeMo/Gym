@@ -36,7 +36,12 @@ from nemo_gym.atif_reverification import (
     project_atif_manifest_entries,
 )
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest, ReverifyMode
-from nemo_gym.config_types import BaseNeMoGymCLIConfig, ConfigError, UploadRolloutsConfigMixin
+from nemo_gym.config_types import (
+    BaseNeMoGymCLIConfig,
+    ConfigError,
+    RemovedRolloutOptionsMixin,
+    UploadRolloutsConfigMixin,
+)
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
@@ -85,7 +90,7 @@ _RECOVERY_TWO_SOURCES_WARNING = (
 )
 
 
-class RolloutReverificationConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLIConfig):
+class RolloutReverificationConfig(RemovedRolloutOptionsMixin, UploadRolloutsConfigMixin, BaseNeMoGymCLIConfig):
     input_format: Literal["gym", "atif"] = Field(
         default="gym",
         description=(

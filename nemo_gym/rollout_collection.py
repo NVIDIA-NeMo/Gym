@@ -60,6 +60,7 @@ from nemo_gym.config_types import (
     BaseServerConfig,
     ConfigError,
     ConfigPathNotFoundError,
+    RemovedRolloutOptionsMixin,
     UploadRolloutsConfigMixin,
 )
 from nemo_gym.episode_types import EpisodeId, is_materialized_task_row
@@ -1017,7 +1018,7 @@ def _normalize_health_check_ignored_checks(value) -> List[str]:
     return list(normalize_ignored_checks(value))
 
 
-class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLIConfig):
+class SharedRolloutCollectionConfig(RemovedRolloutOptionsMixin, UploadRolloutsConfigMixin, BaseNeMoGymCLIConfig):
     output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
     batch_manifest_fpath: Optional[str] = Field(
         default=None,
@@ -1155,16 +1156,6 @@ class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLICon
         default_factory=dict,
         description="Environment server deployments keyed by materialized TaskId.taskset.",
     )
-
-    @model_validator(mode="before")
-    @classmethod
-    def _reject_retry_invalid_judge_responses(cls, data):
-        if isinstance(data, Mapping) and "retry_invalid_judge_responses" in data:
-            raise ConfigError(
-                "`retry_invalid_judge_responses` was removed. A verifier that cannot produce a usable judgement "
-                "now returns a `judge_failed` row; recover those with `gym eval reverify --judge-failed-only`."
-            )
-        return data
 
     @model_validator(mode="after")
     def validate_environment_routing(self) -> "SharedRolloutCollectionConfig":
