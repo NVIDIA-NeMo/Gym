@@ -1,0 +1,38 @@
+# BrowsecompAgent with bash_command executed in a per-rollout OpenSandbox sandbox.
+# Search, browse, the model calls and verification stay on the host.
+config_paths:
+- nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+browsecomp_sandboxed_agent:
+  responses_api_agents:
+    browsecomp_sandboxed_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: ???
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      sandbox_provider: sandbox
+      sandbox_root: /tmp/ng_browsecomp
+      sandbox_python: python3
+      bash_timeout_s: 60.0
+      sandbox_config:
+        # pod_bash.py needs only the stdlib (python >= 3.10).
+        image: python:3.12-slim
+        ttl_s: 14400
+        ready_timeout_s: 1200
+        # The image's default command (python3) exits at once without a TTY.
+        entrypoint:
+        - sleep
+        - infinity
+        resources:
+          cpu: 0.5
+          memory_mib: 1024
+        env:
+          # execd holds each finished command open for this long (default 1s).
+          EXECD_API_GRACE_SHUTDOWN: 50ms
+        provider_options:
+          # The sandbox makes no outbound calls: pages arrive by upload, the model and tools stay on the host.
+          network_policy:
+            defaultAction: deny
+            egress: []
