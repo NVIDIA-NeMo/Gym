@@ -124,7 +124,8 @@ class OracleAgent(SimpleResponsesAPIAgent):
     def _load_task(self, taskset: str, task_id: str) -> HarborTask:
         folder, digest = self._task_folder(taskset, task_id)
         try:
-            task = load_task(folder)
+            # The run's timeout_multiplier, if any, as the environment server loads the task.
+            task = load_task(folder, timeout_multiplier=self._tasksets()[taskset].get("timeout_multiplier"))
         except HarborTaskError as exc:
             raise HTTPException(422, str(exc)) from exc
         if task.digest != digest:

@@ -2068,6 +2068,108 @@ class TestDatasetInit:
             init_dataset(tmp_path, "my-dataset")
 
 
+@pytest.mark.usefixtures("fake_registry")
+class TestRunTimeoutMultiplier:
+    """A run's top-level `timeout_multiplier` replaces the dataset's `[gym.defaults]` one, for rows and servers."""
+
+    def test_load_task_replaces_the_dataset_default(self, tmp_path):
+        folder = tmp_path / "ds"
+        write_task(folder / "hello")
+        (folder / "dataset.toml").write_text("[gym.defaults]\ntimeout_multiplier = 2.0\n")
+        assert load_task(folder / "hello").config.agent.timeout_sec == 240.0
+        task = load_task(folder / "hello", timeout_multiplier=3.0)
+        assert (task.config.agent.timeout_sec, task.config.verifier.timeout_sec) == (360.0, 360.0)
+        # 1.0 replaces the dataset's 2.0 as well: the task's own limits.
+        assert load_task(folder / "hello", timeout_multiplier=1.0).config.agent.timeout_sec == 120.0
+        with pytest.raises(HarborTaskError, match="timeout_multiplier"):
+            load_task(folder / "hello", timeout_multiplier=0)
+
+    def test_prepare_and_build_run_carry_it_to_the_rows_and_the_server(self, tmp_path):
+        folder = tmp_path / "ds"
+        write_task(folder / "a")
+        (folder / "dataset.toml").write_text("[gym.defaults]\ntimeout_multiplier = 2.0\n")
+        agent = AgentSelection(tmp_path / "t.yaml", "terminus_2_sandboxed_agent", "terminus_2_sandboxed_agent")
+        for multiplier, agent_timeout in ((3.0, "360.0"), (None, "240.0")):
+            prepared = prepare_target(
+                str(folder), output_root=tmp_path / str(multiplier), timeout_multiplier=multiplier
+            )
+            (row,) = [json.loads(line) for line in prepared.rows_path.read_text().splitlines()]
+            assert row["task_input"]["responses_create_params"]["metadata"]["agent_timeout_sec"] == agent_timeout
+            config_path, _ = build_run(prepared, agent, sandbox=None, overrides=[])
+            server = yaml.safe_load(config_path.read_text())["harbor_ds_environment"]["environment_servers"]["harbor"]
+            assert server["tasksets"]["ds"].get("timeout_multiplier") == multiplier
+
+    def test_run_reads_it_from_the_command_line_configuration(self, tmp_path, monkeypatch):
+        import argparse
+
+        import nemo_gym.tasks.harbor.cli as harbor_cli
+
+        # No env.yaml of the repository's: only the sources named here.
+        monkeypatch.setattr(harbor_cli, "_resolve_under_cwd_or_install", lambda rel: tmp_path / rel)
+        assert harbor_cli.timeout_multiplier_from_overrides(["+split=validation"]) is None
+        assert harbor_cli.timeout_multiplier_from_overrides(["++timeout_multiplier=2"]) == 2.0
+        config = tmp_path / "run.yaml"
+        config.write_text("timeout_multiplier: 1.5\n")
+        assert harbor_cli.timeout_multiplier_from_overrides([f'+config_paths=["{config}"]']) == 1.5
+        for bad in ("0", "-1", "true", "fast"):
+            with pytest.raises(ValueError, match="`timeout_multiplier` must be a positive number"):
+                harbor_cli.timeout_multiplier_from_overrides([f"++timeout_multiplier={bad}"])
+
+        seen: list = []
+
+        def fake_prepare(target, **kwargs):
+            seen.append(kwargs.get("timeout_multiplier"))
+            raise harbor_cli.HubError("stop here")
+
+        def fail(message):
+            raise SystemExit(message)
+
+        monkeypatch.setattr(harbor_cli, "prepare_target", fake_prepare)
+        monkeypatch.setattr(harbor_cli, "resolve_agent", lambda name: None)
+        args = argparse.Namespace(target="ds", agent="terminus_2_sandboxed_agent", _parser=SimpleNamespace(error=fail))
+        with pytest.raises(SystemExit, match="stop here"):
+            harbor_cli.run_target(args, ["++timeout_multiplier=2"])
+        assert seen == [2.0]
+
+    def test_run_reads_builds_and_timeouts_from_one_preparation_config(self, tmp_path, monkeypatch):
+        import argparse
+
+        import nemo_gym.global_config as global_config
+        import nemo_gym.tasks.harbor.cli as harbor_cli
+
+        dotenv = tmp_path / "env.yaml"
+        dotenv.write_text("builds:\n  tool: podman\nfactor: 3\n")
+        config = tmp_path / "run.yaml"
+        config.write_text(
+            "builds:\n  tool: buildah\n  platform: linux/arm64\n"
+            "factor: 2\ntimeout_multiplier: ${factor}\nunused: ${runtime_only}\n"
+        )
+        monkeypatch.setattr(harbor_cli, "_resolve_under_cwd_or_install", lambda rel: tmp_path / rel)
+        monkeypatch.delenv("NEMO_GYM_BUILD_REPOSITORY", raising=False)
+        reads = []
+        load_yaml = global_config._load_config_yaml
+
+        def read_yaml(path):
+            reads.append(path)
+            return load_yaml(path)
+
+        def prepare(target, **kwargs):
+            assert kwargs["build"] == harbor_cli.BuildOptions(tool="docker", platform="linux/arm64")
+            assert kwargs["timeout_multiplier"] == 3.0
+            raise harbor_cli.HubError("stop before execution")
+
+        def fail(message):
+            raise SystemExit(message)
+
+        monkeypatch.setattr(global_config, "_load_config_yaml", read_yaml)
+        monkeypatch.setattr(harbor_cli, "prepare_target", prepare)
+        monkeypatch.setattr(harbor_cli, "resolve_agent", lambda name: None)
+        args = argparse.Namespace(target="ds", agent="a", _parser=SimpleNamespace(error=fail))
+        with pytest.raises(SystemExit, match="stop before execution"):
+            harbor_cli.run_target(args, [f'+config_paths=["{config}"]', "++builds.tool=docker"])
+        assert reads == [dotenv, config]
+
+
 def test_harbor_task_data_schema_names_the_digest_key():
     """The schema module may import only pydantic, so the key is spelled out; keep it equal to DIGEST_KEY."""
     from environment_servers.harbor.task_data import TaskData

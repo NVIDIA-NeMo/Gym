@@ -289,11 +289,11 @@ def test_task_hashing_runs_outside_the_request_event_loop(tmp_path, monkeypatch)
     original_load = module.load_task
     loads = []
 
-    def load_without_event_loop(path):
+    def load_without_event_loop(path, **kwargs):
         with pytest.raises(RuntimeError, match="no running event loop"):
             asyncio.get_running_loop()
         loads.append(path)
-        return original_load(path)
+        return original_load(path, **kwargs)
 
     monkeypatch.setattr(module, "load_task", load_without_event_loop)
     client = TestClient(agent.setup_webserver())
@@ -340,3 +340,10 @@ def test_transfer_failure_is_an_oracle_failure_not_a_500(tmp_path, monkeypatch):
     assert payload["metadata"] == {"oracle": "failed", "oracle_error_type": "transfer"}
     assert "operation not permitted" in payload["output"][0]["content"][0]["text"]
     assert not any("solve.sh" in call["command"] for call in sandbox.execs)
+
+
+def test_load_task_applies_the_runs_timeout_multiplier(tmp_path, monkeypatch):
+    agent, task, _, _ = make_agent(tmp_path, monkeypatch)
+    taskset = module.get_global_config_dict()["harbor_env"]["environment_servers"]["harbor"]["tasksets"]["ds"]
+    taskset["timeout_multiplier"] = 3.0
+    assert agent._load_task("ds", "hello").config.agent.timeout_sec == task.config.agent.timeout_sec * 3

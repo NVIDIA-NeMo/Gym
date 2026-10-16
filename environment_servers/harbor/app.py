@@ -164,6 +164,8 @@ class HarborTasksetConfig(BaseModel):
 
     folder: Path
     tasks: dict[str, str]
+    # The run's `timeout_multiplier`, in place of the dataset's [gym.defaults] one, as the rows were materialized.
+    timeout_multiplier: float | None = Field(default=None, gt=0)
 
 
 class HarborEnvironmentServerConfig(BaseEnvironmentServerConfig):
@@ -416,7 +418,7 @@ class HarborEnvironmentServer(
         self._sessions: dict[str, HarborSession] = {}
         # Ownership starts before sandbox.start(), and ends only after stop() succeeds.
         self._sandboxes: dict[str, AsyncSandbox | AsyncSandboxCompose] = {}
-        self._tasks: dict[tuple[Path, str], asyncio.Task[HarborTask]] = {}
+        self._tasks: dict[tuple[Path, str, float | None], asyncio.Task[HarborTask]] = {}
         self._snapshots = tempfile.TemporaryDirectory(prefix="nemo-gym-harbor-tasks-")
         self._shutting_down = False
         artifacts = self.config.artifacts_dir
@@ -480,7 +482,7 @@ class HarborEnvironmentServer(
             await asyncio.to_thread(self._snapshots.cleanup)
             self._tasks.clear()
 
-    def _snapshot_task(self, folder: Path, expected: str) -> HarborTask:
+    def _snapshot_task(self, folder: Path, expected: str, timeout_multiplier: float | None = None) -> HarborTask:
         snapshot_root = Path(tempfile.mkdtemp(dir=self._snapshots.name))
         try:
             snapshot = snapshot_root / folder.name
@@ -492,7 +494,7 @@ class HarborEnvironmentServer(
                 sidecar = folder.parent / name
                 if sidecar.is_file():
                     shutil.copy2(sidecar, snapshot_root / name)
-            task = load_task(snapshot)
+            task = load_task(snapshot, timeout_multiplier=timeout_multiplier)
             if task.digest != expected:
                 raise HTTPException(
                     409, f"Task folder {folder} changed since materialization; re-materialize the taskset"
@@ -521,11 +523,13 @@ class HarborEnvironmentServer(
                 f"Row digest for {task_id.task_id!r} does not match the taskset mapping; re-materialize the taskset",
             )
         folder = Path(taskset.folder) / task_id.task_id
-        key = (folder, expected)
+        key = (folder, expected, taskset.timeout_multiplier)
         pending = self._tasks.get(key)
         if pending is None:
             # Concurrent first episodes share the same copy/hash, including if a caller is cancelled.
-            pending = asyncio.create_task(asyncio.to_thread(self._snapshot_task, folder, expected))
+            pending = asyncio.create_task(
+                asyncio.to_thread(self._snapshot_task, folder, expected, taskset.timeout_multiplier)
+            )
             self._tasks[key] = pending
 
             def remove_failed_load(done: asyncio.Task[HarborTask]) -> None:

@@ -70,18 +70,25 @@ def write_rows(tasks: list[HarborTask], taskset: str, path: Path) -> list[dict[s
     return rows
 
 
-def taskset_mapping(tasks: list[HarborTask], folder: Path) -> dict[str, Any]:
+def taskset_mapping(tasks: list[HarborTask], folder: Path, timeout_multiplier: float | None = None) -> dict[str, Any]:
     """Where a taskset's folders live and which digest each task had at materialization.
 
     Servers resolve a task as ``<folder>/<task_id>``. For a folder of task folders that is
     the folder itself; for a single task folder it is the task's parent, so ``folder`` is
-    always the tasks' common parent directory.
+    always the tasks' common parent directory. A run's ``timeout_multiplier`` goes with them,
+    so servers load the tasks as the rows were materialized.
     """
     _validate_task_ids(tasks)
     parents = {task.path.parent for task in tasks}
     if len(parents) != 1:
         raise ValueError(f"Tasks of one taskset must share a parent folder, got {sorted(map(str, parents))}")
-    return {"folder": str(parents.pop().resolve()), "tasks": {task.task_id: task.digest for task in tasks}}
+    mapping: dict[str, Any] = {
+        "folder": str(parents.pop().resolve()),
+        "tasks": {task.task_id: task.digest for task in tasks},
+    }
+    if timeout_multiplier is not None:
+        mapping["timeout_multiplier"] = timeout_multiplier
+    return mapping
 
 
 def run_config(
@@ -94,6 +101,7 @@ def run_config(
     agent_impl: str,
     agent_overrides: dict[str, Any] | None = None,
     sandbox_provider: str = "sandbox",
+    timeout_multiplier: float | None = None,
 ) -> dict[str, Any]:
     """The run-config blocks that bind one taskset to the ``harbor`` environment server.
 
@@ -133,7 +141,7 @@ def run_config(
                     # Verifier logs sit beside the run's rollouts, as an absolute path: the server
                     # process runs from its own folder, so a relative default would land there.
                     "artifacts_dir": str(Path(rows_path).resolve().parent / "verifier"),
-                    "tasksets": {taskset: taskset_mapping(tasks, folder)},
+                    "tasksets": {taskset: taskset_mapping(tasks, folder, timeout_multiplier)},
                     "agent_server": {"type": "responses_api_agents", "name": agent_name},
                 }
             },

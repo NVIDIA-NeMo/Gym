@@ -192,8 +192,11 @@ def read_instruction(path: Path) -> str:
     return "\n".join(lines)
 
 
-def load_task(path: Path) -> HarborTask:
-    """Read ``path`` as one task. Raises :class:`HarborTaskError` when it is not one."""
+def load_task(path: Path, *, timeout_multiplier: float | None = None) -> HarborTask:
+    """Read ``path`` as one task. Raises :class:`HarborTaskError` when it is not one.
+
+    ``timeout_multiplier``, a run's setting, replaces the dataset's ``[gym.defaults] timeout_multiplier``.
+    """
     path = Path(path)
     if path.is_symlink():
         raise HarborTaskError(f"Task folder must not be a symlink: {path}")
@@ -209,7 +212,10 @@ def load_task(path: Path) -> HarborTask:
         raise HarborTaskError(f"{path / TASK_FILE}: {exc}") from exc
     # The dataset's own settings sit beside the task folders and shape the effective task.toml.
     try:
-        config = apply_dataset_config(config, path.name, read_dataset_config(path.parent))
+        dataset = read_dataset_config(path.parent)
+        if timeout_multiplier is not None:
+            dataset = dataset.with_timeout_multiplier(timeout_multiplier)
+        config = apply_dataset_config(config, path.name, dataset)
     except ValueError as exc:
         raise HarborTaskError(str(exc)) from exc
 
@@ -339,27 +345,29 @@ def load_task(path: Path) -> HarborTask:
     )
 
 
-def discover_tasks(root: Path, *, skipped: dict[str, HarborTaskError] | None = None) -> list[HarborTask]:
+def discover_tasks(
+    root: Path, *, skipped: dict[str, HarborTaskError] | None = None, timeout_multiplier: float | None = None
+) -> list[HarborTask]:
     """A folder with ``task.toml`` is one task; otherwise its direct children are the tasks.
 
     With ``skipped``, a child that fails to load is recorded there under its folder name
     and the others still load; without it the first failure raises. A root that is
-    itself a task always raises.
+    itself a task always raises. ``timeout_multiplier`` is passed to :func:`load_task`.
     """
     root = Path(root).resolve()
     if not root.is_dir():
         raise HarborTaskError(f"{root} is not a directory")
     if is_task_folder(root):
-        return [load_task(root)]
+        return [load_task(root, timeout_multiplier=timeout_multiplier)]
     children = sorted(child for child in root.iterdir() if child.is_dir() and is_task_folder(child))
     if not children:
         raise HarborTaskError(f"{root} is neither a task folder nor a folder of task folders (no {TASK_FILE} found)")
     if skipped is None:
-        return [load_task(child) for child in children]
+        return [load_task(child, timeout_multiplier=timeout_multiplier) for child in children]
     tasks: list[HarborTask] = []
     for child in children:
         try:
-            tasks.append(load_task(child))
+            tasks.append(load_task(child, timeout_multiplier=timeout_multiplier))
         except HarborTaskError as exc:
             skipped[child.name] = exc
     if not tasks:
