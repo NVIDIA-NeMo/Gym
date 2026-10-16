@@ -37,8 +37,9 @@ from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxSpec
 from nemo_gym.server_utils import BaseServerConfig, ServerClient
 from nemo_gym.single_agent_turn_types import SingleAgentTurnRequest
 from nemo_gym.tasks.harbor import DIGEST_KEY, load_task
+from nemo_gym.tasks.harbor.digest import context_digest
 from nemo_gym.tasks.harbor.dockerfile import RECORD_VERSION
-from nemo_gym.tasks.harbor.records import IMAGE_CONFIGS_FILE
+from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE, IMAGE_CONFIGS_FILE
 
 
 TASK_TOML = """
@@ -544,70 +545,6 @@ class AgentSandbox(FakeSandbox):
     async def download(self, remote_path, local_path):
         Path(local_path).write_bytes(self.archives[self.archived[-1]])
 
-    async def test_a_probe_the_sandbox_cannot_answer_masks_but_absence_does_not(self, tmp_path, monkeypatch):
-        server, task, agent, verifier, created = self.prepared(tmp_path, monkeypatch)
-        agent.probe_result = SandboxExecResult(
-            stdout="", stderr="container gone", return_code=125, error_type="sandbox"
-        )
-        result = (await run_episode(server, task)).result
-        # The outage is Gym's, not an empty artifact: masked, and no verifier was started for it.
-        assert result.mask_sample is True and result.failure_kind == "provider_unavailable"
-        assert "SandboxUnavailableError" in result.failure_reason and "container gone" in result.failure_reason
-        assert created == [] and verifier.execs == [] and agent.stopped
-
-        server, task, agent, verifier, _ = self.prepared(tmp_path, monkeypatch)
-        agent.probe_result = SandboxExecResult(stdout="none\n", stderr="", return_code=0)
-        result = (await run_episode(server, task)).result
-        # A plain "none" is still absence: nothing restored, the verifier runs and scores.
-        assert result.reward == 1.0 and not result.mask_sample
-        assert not any("tar -xzf" in c["command"] and "/logs/artifacts" in c["command"] for c in verifier.execs)
-
-    async def test_artifact_exclusions_reach_the_archive_command(self, tmp_path, monkeypatch):
-        toml = SEPARATE_TOML.replace(
-            'artifacts = ["/app/output/report.json", { source = "/var/log/api", service = "api" }]',
-            'artifacts = [{ source = "/app/build", exclude = ["node_modules", "./cache", "*.log"] }]',
-        )
-        agent = AgentSandbox(
-            present={"/logs/artifacts": "dir", "/app/build": "dir"},
-            archives={"/logs/artifacts": archive_of({}), "/app/build": archive_of({"a.out": "elf"})},
-        )
-        server, task, _, _, _ = self.prepared(tmp_path, monkeypatch, toml=toml, agent=agent)
-        result = (await run_episode(server, task)).result
-        assert result.reward == 1.0, result.failure_reason
-        build = next(c["command"] for c in agent.execs if "tar -czf" in c["command"] and "/app/build" in c["command"])
-        # Verbatim, unanchored, as Harbor passes them: `node_modules` at any depth, `./cache` at the top only.
-        assert " --exclude=node_modules --exclude=./cache --exclude='*.log' -C /app/build ." in build
-        artifacts_archive = next(
-            c["command"] for c in agent.execs if "tar -czf" in c["command"] and "/logs/artifacts" in c["command"]
-        )
-        assert "--exclude" not in artifacts_archive
-
-    async def test_each_artifact_stages_under_its_own_root(self, tmp_path, monkeypatch):
-        """A link kept from one artifact is never a path component of another artifact's destination."""
-        victim = tmp_path / "victim"
-        victim.mkdir()
-        buffer = io.BytesIO()
-        with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
-            link = tarfile.TarInfo(name="./output")
-            link.type, link.linkname = tarfile.SYMTYPE, str(victim)
-            tar.addfile(link)
-        toml = SEPARATE_TOML.replace(
-            'artifacts = ["/app/output/report.json", { source = "/var/log/api", service = "api" }]',
-            'artifacts = ["/app", "/app/output/report.json"]',
-        )
-        agent = AgentSandbox(
-            present={"/logs/artifacts": "none", "/app": "dir", "/app/output/report.json": "file"},
-            archives={"/app": buffer.getvalue(), "/app/output": archive_of({"report.json": '{"ok": true}'})},
-        )
-        server, task, _, _, _ = self.prepared(tmp_path, monkeypatch, toml=toml, agent=agent)
-        result = (await run_episode(server, task)).result
-        assert result.reward == 1.0, result.failure_reason
-        artifacts = Path(result.verifier_logs_dir) / "artifacts"
-        # The link travelled as a link under the first artifact's root; the report landed under the second.
-        assert (artifacts / "01" / "app" / "output").is_symlink()
-        assert (artifacts / "02" / "app" / "output" / "report.json").read_bytes() == b'{"ok": true}'
-        assert list(victim.iterdir()) == []
-
 
 COMPOSE_YAML = """
 services:
@@ -633,6 +570,7 @@ IMAGE_CONFIGS = {
         "architecture": "amd64",
         "image": "org/api@sha256:" + "b" * 64,
         "config": {"Cmd": ["serve"]},
+        "record_version": RECORD_VERSION,
     },
     "org/kafka:1": {
         "os": "linux",
@@ -651,3 +589,24 @@ class FakeCompose:
 
     async def stop(self):
         self.stopped = True
+
+
+VERIFIER_TESTS_DOCKERFILE = "FROM python:3.13-slim-bookworm\nRUN pip install pytest==8.4.1\nCOPY . /tests/\n"
+
+
+def record_verifier_build(task_folder: Path, image: str, **config) -> str:
+    """Record ``image`` as the verifier image prepare built from ``tests/Dockerfile``: under Harbor's hash of ``tests/``
+    as service ``verifier`` in ``built-images.json``, its configuration in ``compose-images.json``."""
+    parent = task_folder.parent
+    digest = context_digest(task_folder / "tests")
+    path = parent / BUILT_IMAGES_FILE
+    built = json.loads(path.read_text()) if path.is_file() else {}
+    built[digest] = {
+        "tasks": [task_folder.name],
+        "tool": "buildah",
+        "pushed": True,
+        "services": {"verifier": {"image": image, "tool": "buildah", "pushed": True}},
+    }
+    path.write_text(json.dumps(built))
+    write_image_config(parent, image, **(config or {"Env": [f"PATH={IMAGE_PATH}"], "WorkingDir": "/tests"}))
+    return digest

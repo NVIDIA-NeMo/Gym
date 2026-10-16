@@ -26,21 +26,21 @@ import yaml
 
 from environment_servers.harbor.session import _task_sandbox_env, resolve_env_templates
 from environment_servers.harbor.users import _creation_user
-from environment_servers.harbor.verifier import _verifier_image, _verifier_key
+from environment_servers.harbor.verifier import _verifier_image, _verifier_key, _verifier_runs_task_image
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox, AsyncSandboxCompose, SandboxSpec, clamp_resource_requests
-from nemo_gym.sandbox.compose_config import adapt_non_root_sidecars, opensandbox_shm_labels, resolve_compose
+from nemo_gym.sandbox.compose_config import (
+    adapt_non_root_sidecars,
+    opensandbox_shm_labels,
+    resolve_compose,
+    sandbox_platform,
+)
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.providers.base import ORPHAN_REAP_TIMEOUT_S
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.tasks.harbor import HarborTask
 from nemo_gym.tasks.harbor.errors import HarborTaskError
-from nemo_gym.tasks.harbor.image_configs import (
-    load_compose_document,
-    without_main_build,
-    without_pull_policy,
-    without_restated_main_build,
-)
+from nemo_gym.tasks.harbor.image_configs import load_compose_document, without_pull_policy, without_restated_main_build
 from nemo_gym.tasks.harbor.models import HarborEnvironment
 
 
@@ -258,21 +258,25 @@ class HarborSandboxMixin:
     def _compose_document(self, task: HarborTask) -> dict[str, Any]:
         """The published overlay resolved against recorded image metadata, ready for the Compose adapter."""
         image_configs = self._compose_image_configs(task)
-        # The same reader prepare used: env_file inlined and ${VAR} resolved from the task, not the process.
+        # The same reader prepare used: env_file inlined, ${VAR} resolved from the task, not the process, and the
+        # images prepare built standing in for the sidecars it built (and main when the task runs from its built
+        # image), their build: and a pull_policy: build dropped. The record was read once by load_task: no hashing here.
         document = load_compose_document(task)
-        # The sandbox has no pull step to configure, so ``pull_policy`` is dropped from every service. Prepare
-        # ran the adapter's field check on this same document (``nemo_gym.tasks.harbor.cli``).
+        # The sandbox has no pull step to configure, so ``pull_policy`` is dropped from every service (the loader
+        # dropped it, with ``build:``, from the services prepare built). Prepare ran the adapter's field check on
+        # this same document (``nemo_gym.tasks.harbor.cli``).
         document = without_pull_policy(document)
-        if task.built_image is not None:
-            # Prepare built main from this file; the recorded image stands in for its build: section.
-            document = without_main_build(document)
-        else:
+        if task.built_image is None:
             # A pull or overlay task's main build: that only restates Harbor's own build of the Dockerfile is
             # dropped; a key that would change the image is the task's error, which prepare already reported.
             document, reason = without_restated_main_build(task, document)
             if reason is not None:
                 raise HarborTaskError(f"{task.task_id}: {reason}")
-        document = resolve_compose(document, task.image, image_configs)
+        # Every service of the group, GPU-routed or not, starts with the one configured set of provider options,
+        # so the platform they request (OpenSandbox ``platform: {os, arch}``; linux/amd64 when unset) is the one
+        # each recorded image has to be for.
+        platform = sandbox_platform(self.config.sandbox_provider_options)
+        document = resolve_compose(document, task.image, image_configs, platform=platform)
         adapt_non_root_sidecars(document, image_configs)
         provider = resolve_provider_config(self._provider_ref(task), get_global_config_dict())
         if "opensandbox" in provider:
@@ -322,8 +326,15 @@ class HarborSandboxMixin:
         # `_create_sandbox_within_deadline`); the sidecars derive from it and start in their images' own.
         main_spec = self._sandbox_spec(task, None if task.overlay else task.workdir)
         # Sidecars keep their own image's default user; the task's USER belongs to the main image only.
+        # A sidecar keeps its own image's working directory (the adapter applies the recorded WorkingDir); main's
+        # workdir is a path that exists only in main's image.
         sidecar_spec = replace(
-            main_spec, resources={}, env={}, user=None, provider_options=dict(self.config.sandbox_provider_options)
+            main_spec,
+            resources={},
+            env={},
+            user=None,
+            workdir=None,
+            provider_options=dict(self.config.sandbox_provider_options),
         )
         # Harbor's order for main: image ENV (baked in, or the Dockerfile ENV the loader folded into task.env for a
         # pull or overlay task) < the task's Compose file < Harbor's env override file, which holds only the
@@ -354,28 +365,29 @@ class HarborSandboxMixin:
     async def _create_verifier_sandbox(self, task: HarborTask, *, episode_key: str | None = None) -> AsyncSandbox:
         """A separate verifier runs in its own sandbox, sized by ``[verifier.environment]``.
 
-        Without a ``[verifier.environment]`` the verifier runs in the task's own image, so it is
-        created like the agent's sandbox: the Dockerfile's resolved ``ENV`` under ``task.toml``'s.
+        Without a ``[verifier.environment]`` and a built verifier image the verifier runs in the task's own prebuilt
+        image, so it is created like the agent's sandbox: the Dockerfile's resolved ``ENV`` under ``task.toml``'s.
 
         Its lifetime is the episode-sized default the agent's sandbox gets, not ``timeout_sec`` plus
-        slack: the sandbox also has to come up, run the overlay when it gets one, receive ``/tests``
-        and the artifacts, run ``test.sh`` with its grace and hand back the reward, and a provider's
-        renew interval must fit under it. The default covers the overlay for the agent, so it does
-        for the verifier too.
+        slack: the sandbox also has to come up, receive ``/tests`` and the artifacts, run ``test.sh``
+        with its grace and hand back the reward, and a provider's renew interval must fit under it.
         """
         environment = task.config.verifier.environment
-        spec = self._sandbox_spec(
-            task,
-            # The task image keeps the task's working directory, as the agent had it; an explicit
-            # verifier image starts in its `[verifier.environment].workdir`, else its own WORKDIR.
-            # An overlay task's verifier starts without the directory, as the agent's sandbox does: the
-            # overlay's WORKDIR step makes it owned by the user in effect, where a provider pre-creating
-            # `task.workdir` would hand the USER's RUN lines a root-owned one.
-            (None if task.overlay else task.workdir) if environment is None else environment.workdir,
-            environment=environment,
-            image=_verifier_image(task),
-            role="verifier",
-        )
+        if _verifier_runs_task_image(task):
+            # The task image keeps the task's working directory, as the agent had it, and the agent's resolved
+            # environment (Dockerfile ENV under task.toml's). An overlay task starts without it, as the agent's
+            # sandbox does: the overlay's WORKDIR step makes the directory owned by the user in effect, where a
+            # provider pre-creating `task.workdir` would hand the USER's RUN lines a root-owned one.
+            workdir = None if task.overlay else task.workdir
+        elif environment is None:
+            # Built from tests/Dockerfile under Harbor's copy of [environment]: that block's settings and
+            # `workdir` (else the image's own WORKDIR), not the agent image's Dockerfile ENV and WORKDIR.
+            environment = task.config.environment
+            workdir = environment.workdir
+        else:
+            # An explicit verifier image starts in its `[verifier.environment].workdir`, else its own WORKDIR.
+            workdir = environment.workdir
+        spec = self._sandbox_spec(task, workdir, environment=environment, image=_verifier_image(task), role="verifier")
         provider_config = resolve_provider_config(self._provider_ref(task), get_global_config_dict())
         sandbox = AsyncSandbox(provider_config)
         if episode_key is not None:
