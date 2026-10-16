@@ -176,24 +176,22 @@ def timeout_multiplier_from_config(config: Mapping[str, Any] | None) -> float | 
 
 def build_options_from_overrides(overrides: list[str]) -> BuildOptions:
     """Read the ``builds:`` block from the configuration the command line names, before the run config exists."""
-    return BuildOptions.from_config({BUILDS_KEY: _command_line_setting(overrides, BUILDS_KEY)})
+    return BuildOptions.from_config(_command_line_settings(overrides, BUILDS_KEY))
 
 
 def timeout_multiplier_from_overrides(overrides: list[str]) -> float | None:
     """Read the top-level ``timeout_multiplier`` from the configuration the command line names."""
-    return timeout_multiplier_from_config(
-        {TIMEOUT_MULTIPLIER_KEY: _command_line_setting(overrides, TIMEOUT_MULTIPLIER_KEY)}
-    )
+    return timeout_multiplier_from_config(_command_line_settings(overrides, TIMEOUT_MULTIPLIER_KEY))
 
 
-def _command_line_setting(overrides: list[str], key: str) -> Any:
-    """One top-level setting of the configuration the command line names, before the run config exists.
+def _command_line_settings(overrides: list[str], *keys: str) -> dict[str, Any]:
+    """Read preparation settings together from the configuration the command line names.
 
     Preparation builds images and loads tasks before the run config can be written, so the global
     configuration is not composed yet. This merges the sources the user controls, in the global config's
     order (the files the ``+config_paths`` tokens name, from ``--config`` and the asset selectors, then
-    ``env.yaml``, then the ``+``/``++`` overrides), and reads the setting from the result. The full global
-    config is still parsed once, at dispatch, with the run config added.
+    ``env.yaml``, then the ``+``/``++`` overrides), and resolves only the requested settings. Other fields
+    may refer to the run config, which is added for the full parse at dispatch.
     """
     from omegaconf import OmegaConf
     from omegaconf.errors import InterpolationResolutionError
@@ -221,8 +219,11 @@ def _command_line_setting(overrides: list[str], key: str) -> Any:
     _, extra_configs = parser.load_extra_config_paths([str(path) for path in config_paths])
     merged = OmegaConf.merge(*extra_configs, dotenv, cli)
     try:
-        value = merged.get(key)
-        return OmegaConf.to_container(value, resolve=True) if OmegaConf.is_config(value) else value
+        settings = {}
+        for key in keys:
+            value = merged.get(key)
+            settings[key] = OmegaConf.to_container(value, resolve=True) if OmegaConf.is_config(value) else value
+        return settings
     except InterpolationResolutionError as exc:
         raise translate_interpolation_error(exc) from exc
 
@@ -540,14 +541,13 @@ def run_target(args: argparse.Namespace, overrides: list[str]) -> None:
     except (ValueError, OSError, yaml.YAMLError) as exc:
         args._parser.error(str(exc))
     try:
-        # The `builds:` block comes from the configuration the command names; the run config does not exist yet.
-        build = build_options_from_overrides(overrides)
+        settings = _command_line_settings(overrides, BUILDS_KEY, TIMEOUT_MULTIPLIER_KEY)
         prepared = prepare_target(
             args.target,
             exclude=_patterns(args, "exclude_tasks"),
             only=_patterns(args, "only_tasks"),
-            build=build,
-            timeout_multiplier=timeout_multiplier_from_overrides(overrides),
+            build=BuildOptions.from_config(settings),
+            timeout_multiplier=timeout_multiplier_from_config(settings),
         )
     except (HarborTaskError, HubError, BuildError, ConfigError, ValueError, OSError) as exc:
         args._parser.error(str(exc))

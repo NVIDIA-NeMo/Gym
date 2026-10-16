@@ -2131,6 +2131,44 @@ class TestRunTimeoutMultiplier:
             harbor_cli.run_target(args, ["++timeout_multiplier=2"])
         assert seen == [2.0]
 
+    def test_run_reads_builds_and_timeouts_from_one_preparation_config(self, tmp_path, monkeypatch):
+        import argparse
+
+        import nemo_gym.global_config as global_config
+        import nemo_gym.tasks.harbor.cli as harbor_cli
+
+        dotenv = tmp_path / "env.yaml"
+        dotenv.write_text("builds:\n  tool: podman\nfactor: 3\n")
+        config = tmp_path / "run.yaml"
+        config.write_text(
+            "builds:\n  tool: buildah\n  platform: linux/arm64\n"
+            "factor: 2\ntimeout_multiplier: ${factor}\nunused: ${runtime_only}\n"
+        )
+        monkeypatch.setattr(harbor_cli, "_resolve_under_cwd_or_install", lambda rel: tmp_path / rel)
+        monkeypatch.delenv("NEMO_GYM_BUILD_REPOSITORY", raising=False)
+        reads = []
+        load_yaml = global_config._load_config_yaml
+
+        def read_yaml(path):
+            reads.append(path)
+            return load_yaml(path)
+
+        def prepare(target, **kwargs):
+            assert kwargs["build"] == harbor_cli.BuildOptions(tool="docker", platform="linux/arm64")
+            assert kwargs["timeout_multiplier"] == 3.0
+            raise harbor_cli.HubError("stop before execution")
+
+        def fail(message):
+            raise SystemExit(message)
+
+        monkeypatch.setattr(global_config, "_load_config_yaml", read_yaml)
+        monkeypatch.setattr(harbor_cli, "prepare_target", prepare)
+        monkeypatch.setattr(harbor_cli, "resolve_agent", lambda name: None)
+        args = argparse.Namespace(target="ds", agent="a", _parser=SimpleNamespace(error=fail))
+        with pytest.raises(SystemExit, match="stop before execution"):
+            harbor_cli.run_target(args, [f'+config_paths=["{config}"]', "++builds.tool=docker"])
+        assert reads == [dotenv, config]
+
 
 def test_harbor_task_data_schema_names_the_digest_key():
     """The schema module may import only pydantic, so the key is spelled out; keep it equal to DIGEST_KEY."""
