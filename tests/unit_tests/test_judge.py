@@ -150,3 +150,18 @@ class TestJudgeFailsafe:
         assert len(data["failure_reason"]) == 2000
         assert data["_ng_failure_judge_error"] == data["failure_reason"]
         assert request.model_dump() == original
+
+
+@pytest.mark.asyncio
+async def test_judge_calls_declare_distinct_verifier_invocations_even_on_failure():
+    client = _client(status=200, body=b'{"verdict":"CORRECT"}')
+    await _call(client)
+    first = client.post.call_args.kwargs["headers"]
+    await _call(client)
+    second = client.post.call_args.kwargs["headers"]
+    assert set(first) == set(second) == {"x-ng-verifier-invocation-id"}
+    assert first["x-ng-verifier-invocation-id"] != second["x-ng-verifier-invocation-id"]
+    client = _client(status=400, body=b'{"error":"rejected"}')
+    with pytest.raises(JudgeError):
+        await _call(client)
+    assert client.post.call_args.kwargs["headers"]["x-ng-verifier-invocation-id"].startswith("judge-")

@@ -129,6 +129,19 @@ class AgentInvocation(ObservationModel):
     )
 
 
+class VerifierInvocation(ObservationModel):
+    """One verifier operation and its model attempts, distinct from agent decisions.
+
+    Capturing an exchange establishes ownership, not whether grading completed;
+    the outcome remains unknown unless reported by the verifier.
+    """
+
+    kind: Literal["verifier_invocation"] = "verifier_invocation"
+    invocation_id: str
+    status: Literal["completed", "failed", "incomplete", "unknown"] = "unknown"
+    model_calls: list[ModelCallRef] = Field(default_factory=list)
+
+
 class ToolCallObservation(ObservationModel):
     """Timing observed for one tool call at an Agent-owned boundary."""
 
@@ -279,6 +292,7 @@ class TrajectoryRecord(ObservationModel):
     task_id: str
     rollout_id: str
     invocations: list[AgentInvocation] = Field(default_factory=list)
+    verifier_invocations: list[VerifierInvocation] = Field(default_factory=list)
     turns: list[TrajectoryTurn] = Field(default_factory=list)
     model_calls: list[TrajectoryModelCall] = Field(default_factory=list)
     tool_calls: list[TrajectoryToolCall] = Field(default_factory=list)
@@ -286,7 +300,7 @@ class TrajectoryRecord(ObservationModel):
 
     @model_validator(mode="after")
     def validate_identity(self) -> "TrajectoryRecord":
-        invocation_ids = [invocation.invocation_id for invocation in self.invocations]
+        invocation_ids = [invocation.invocation_id for invocation in [*self.invocations, *self.verifier_invocations]]
         if len(invocation_ids) != len(set(invocation_ids)):
             raise ValueError("invocation_id must be unique within a trajectory")
         model_call_ids = [call.model_call_id for call in self.model_calls if call.model_call_id]

@@ -104,6 +104,7 @@ from nemo_gym.rollout_observability import (
     TrajectoryTokenStats,
     TrajectoryToolCall,
     TrajectoryTurn,
+    VerifierInvocation,
 )
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span
 from nemo_gym.telemetry.gym_metrics import (
@@ -591,6 +592,7 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
     task_id, rollout_id = _trajectory_identity(row)
     gaps: list[ObservationGap] = []
     invocations: list[AgentInvocation] = []
+    verifier_invocations: list[VerifierInvocation] = []
     turns: list[TrajectoryTurn] = []
     tools: list[TrajectoryToolCall] = []
     model_calls: list[TrajectoryModelCall] = []
@@ -618,6 +620,7 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
                 turns = trajectory.turns
             gaps.extend(trajectory.gaps)
             invocations = trajectory.invocations
+            verifier_invocations = trajectory.verifier_invocations
             tools = trajectory.tool_calls
             model_calls = trajectory.model_calls
         except Exception as exc:
@@ -728,6 +731,18 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
             projected = TrajectoryModelCall.model_validate(merged)
             model_calls[position] = projected
 
+    # Verifier operations own judge attempts without becoming agents or policy turns.
+    for raw_invocation in capture.get("verifier_invocations") or []:
+        try:
+            invocation = VerifierInvocation.model_validate(raw_invocation)
+            existing = next((i for i in verifier_invocations if i.invocation_id == invocation.invocation_id), None)
+            if existing is None:
+                verifier_invocations.append(invocation)
+            else:
+                existing.model_calls.extend(ref for ref in invocation.model_calls if ref not in existing.model_calls)
+        except Exception:
+            gaps.append(ObservationGap(code="verifier_invocation_invalid"))
+
     for raw_gap in capture.get("gaps") or []:
         if isinstance(raw_gap, dict):
             try:
@@ -753,6 +768,7 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
         task_id=task_id,
         rollout_id=rollout_id,
         invocations=invocations,
+        verifier_invocations=verifier_invocations,
         turns=turns,
         model_calls=model_calls,
         tool_calls=tools,
@@ -763,6 +779,8 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
 def _strip_capture_payloads(result: dict[str, Any]) -> None:
     capture = result.get("ng_model_call_capture")
     calls = capture.get("calls") if isinstance(capture, dict) else None
+    if isinstance(capture, dict):
+        capture.pop("verifier_invocations", None)
     for call in calls if isinstance(calls, list) else []:
         if isinstance(call, dict):
             for key in _MODEL_CALL_PAYLOAD_KEYS:

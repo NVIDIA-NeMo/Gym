@@ -88,8 +88,10 @@ from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body, rollout
 from nemo_gym.rollout_observability import (
     NG_AGENT_OBSERVATIONS_KEY,
     AgentObservationBundle,
+    ModelCallRef,
     ObservationGap,
     TrajectoryRecord,
+    VerifierInvocation,
     join_assistant_message_calls,
     join_model_call_observations,
 )
@@ -1205,14 +1207,34 @@ def read_model_call_records(store: CaptureStore, rollout_id: str) -> list[ModelC
 
 def read_available_model_call_records(store: CaptureStore, rollout_id: str) -> tuple[list[ModelCallRecord], int]:
     """Read valid call records and count damaged records."""
+    calls, _, invalid_count = _read_capture_records(store, rollout_id)
+    return calls, invalid_count
+
+
+def _read_capture_records(
+    store: CaptureStore, rollout_id: str
+) -> tuple[list[ModelCallRecord], list[VerifierInvocation], int]:
     exchanges, invalid_count = store.read_available(rollout_id)
     calls = []
+    verifiers: dict[str, VerifierInvocation] = {}
     for index, exchange in exchanges:
         try:
-            calls.append(build_model_call_record(exchange, call_index=index))
+            call = build_model_call_record(exchange, call_index=index)
+            calls.append(call)
+            if "verifier_invocation" in exchange:
+                invocation = VerifierInvocation.model_validate(exchange["verifier_invocation"])
+                if not invocation.invocation_id.strip() or invocation.model_calls != [
+                    ModelCallRef(model_call_id=call.model_call_id)
+                ]:
+                    raise ValueError("verifier observation must reference its captured attempt")
+                existing = verifiers.get(invocation.invocation_id)
+                if existing is None:
+                    verifiers[invocation.invocation_id] = invocation
+                else:
+                    existing.model_calls.extend(invocation.model_calls)
         except Exception:
             invalid_count += 1
-    return calls, invalid_count
+    return calls, list(verifiers.values()), invalid_count
 
 
 def aggregate_model_call_records(calls: list[ModelCallRecord]) -> dict[str, Any]:
@@ -1578,6 +1600,7 @@ def _record(
     model_server_name: Optional[str],
     request_bytes: bytes,
     *,
+    verifier_invocation_id: Optional[str] = None,
     client_session_id: Optional[str] = None,
     client_assistant_message_id: Optional[str] = None,
     rollout_id: str,
@@ -1631,6 +1654,11 @@ def _record(
             exchange["request_raw"] = request_raw
         if response_raw is not None:
             exchange["response_raw"] = response_raw
+        if verifier_invocation_id:
+            # Persist the operation beside the exchange, not as a role on ModelCallRecord.
+            exchange["verifier_invocation"] = VerifierInvocation(
+                invocation_id=verifier_invocation_id, model_calls=[ModelCallRef(model_call_id=model_call_id)]
+            ).model_dump(mode="json")
         store.record(rollout_id, exchange)
     except Exception:
         logger.warning("Model-call capture failed for one %s call.", dialect, exc_info=True)
@@ -1822,6 +1850,7 @@ class _CaptureMiddleware:
 
         rollout_id = rollout_from_path
         model_call_id = uuid4().hex
+        verifier_invocation_id = _unique_request_header(scope.get("headers") or [], b"x-ng-verifier-invocation-id")
         client_session_id = _unique_request_header(scope.get("headers") or [], _CLIENT_SESSION_HEADER)
         client_assistant_message_id = (
             _unique_request_header(scope.get("headers") or [], self._assistant_message_header)
@@ -1947,6 +1976,7 @@ class _CaptureMiddleware:
                     dialect,
                     self._model_server_name,
                     bytes(request_body),
+                    verifier_invocation_id=verifier_invocation_id,
                     client_session_id=client_session_id,
                     client_assistant_message_id=client_assistant_message_id,
                     rollout_id=rollout_id,
@@ -2020,6 +2050,7 @@ class _CaptureMiddleware:
                     dialect,
                     model_server_name,
                     request_bytes,
+                    verifier_invocation_id=verifier_invocation_id,
                     client_session_id=client_session_id,
                     client_assistant_message_id=client_assistant_message_id,
                     rollout_id=rollout_id,
@@ -2258,13 +2289,14 @@ def merge_model_call_capture_into_record(
     if rollout_id is None:
         return record
     gaps: list[ObservationGap] = []
+    verifier_invocations: list[VerifierInvocation] = []
     store = _store_for_rollout(rollout_id, capture_dirs)
     if store is None:
         calls = []
         gaps.append(ObservationGap(code="model_call_capture_no_records"))
     else:
         try:
-            calls, invalid_count = read_available_model_call_records(store, rollout_id)
+            calls, verifier_invocations, invalid_count = _read_capture_records(store, rollout_id)
             if invalid_count:
                 gaps.append(
                     ObservationGap(
@@ -2300,7 +2332,9 @@ def merge_model_call_capture_into_record(
                         exc_info=True,
                     )
                     bundle.gaps.append(ObservationGap(code="compaction_model_call_join_failed"))
-            bundle = join_model_call_observations(bundle, calls)
+            verifier_call_ids = {ref.model_call_id for inv in verifier_invocations for ref in inv.model_calls}
+            agent_calls = [call for call in calls if call.model_call_id not in verifier_call_ids]
+            bundle = join_model_call_observations(bundle, agent_calls)
             if any(call.client_assistant_message_id for call in calls):
                 try:
                     raw_trajectory = record.get("ng_trajectory")
@@ -2310,7 +2344,7 @@ def merge_model_call_capture_into_record(
                     if trajectory is not None and trajectory.rollout_id != rollout_id:
                         bundle.gaps.append(ObservationGap(code="assistant_message_call_rollout_mismatch"))
                     else:
-                        bundle, trajectory = join_assistant_message_calls(bundle, trajectory, calls)
+                        bundle, trajectory = join_assistant_message_calls(bundle, trajectory, agent_calls)
                         if trajectory is not None:
                             record["ng_trajectory"] = trajectory.model_dump(mode="json")
                 except Exception:
@@ -2328,6 +2362,8 @@ def merge_model_call_capture_into_record(
         "metrics": aggregate_model_call_records(calls),
         "calls": [call.model_dump(exclude=exclude) for call in calls],
     }
+    if verifier_invocations:
+        capture["verifier_invocations"] = [inv.model_dump(mode="json") for inv in verifier_invocations]
     if gaps:
         capture["gaps"] = [gap.model_dump(mode="json", exclude_none=True) for gap in gaps]
     record["ng_model_call_capture"] = capture
