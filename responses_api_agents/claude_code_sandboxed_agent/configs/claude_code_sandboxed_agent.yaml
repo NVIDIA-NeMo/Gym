@@ -1,0 +1,74 @@
+claude_code_sandboxed_agent:
+  responses_api_agents:
+    claude_code_sandboxed_agent:
+      entrypoint: app.py
+      num_workers: 4
+      resources_server:
+        type: resources_servers
+        name: ???
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      # Claude Code drives its own model calls and returns no token ids.
+      token_id_capture: true
+
+      debug: false
+
+      claude_code_version: 2.1.287
+      # Staged binaries inside the sandbox; null runs the official installer in the sandbox.
+      remote_claude_code_binary_path: null
+      remote_claude_code_musl_binary_path: null
+      remote_work_dir: /tmp
+
+      model: policy
+      auto_compact: true
+      # No notes across sessions: each rollout starts from an empty config directory.
+      auto_memory: false
+      # --bare is Claude Code's minimal mode (one-line system prompt, Bash/Read/Edit only).
+      bare: false
+      # Only this rollout's empty user settings: a task repository's .claude/ cannot change the run.
+      setting_sources: user
+      allowed_tools: null
+      # Tools that do not fit a one-shot run in a task sandbox. No web access and no skills, as for
+      # the OpenCode agent. Worktrees would move the edits out of the repository the verifier diffs.
+      # Scheduled prompts, wakeups, workflows and agent messaging outlive or bypass a single `-p` run;
+      # ReportFindings is the code-review report tool. Agent (subagents), Bash, Read, Edit, Write,
+      # NotebookEdit and TaskStop stay.
+      disallowed_tools: >-
+        WebFetch,WebSearch,Skill,EnterWorktree,ExitWorktree,CronCreate,CronDelete,CronList,ScheduleWakeup,Workflow,SendMessage,ListAgents,ReportFindings
+      max_turns: null
+      append_system_prompt: null
+      # Claude Code's ceiling for models it does not recognize (128k as of 2.1.287). The model
+      # server still clamps each call to the context that remains.
+      max_output_tokens: 128000
+      # A Gym model server sends the headers of a streamed reply only after generation finishes,
+      # so Claude Code's default 3-5 minute wait for headers would abort and retry long calls.
+      # 30 minutes is the most Claude Code accepts.
+      api_timeout_ms: 3600000
+      stream_first_byte_timeout_ms: 1800000
+      harness_timeout_margin_s: 120
+      claude_code_settings: {}
+      claude_code_env: {}
+
+      sandbox_timeout: 10800  # 3hr default for harness execution
+
+      sandbox_provider: sandbox
+      sandbox_config:
+        ttl_s: 18000
+        ready_timeout_s: 1200
+        env:
+          # execd holds each finished command's response open for this long (default 1s);
+          # a short grace keeps every command and the readiness probe from paying that tail.
+          EXECD_API_GRACE_SHUTDOWN: "50ms"
+        resources:
+          cpu: 0.25
+          memory_mib: 512
+          # 30 GiB works on every provider: within Fargate's 21-200 GiB ephemeral range
+          # (an explicit 20 is rejected there) and fine as an ephemeral request elsewhere.
+          disk_gib: 30
+        provider_options: {}
+        metadata:
+          benchmark: swebench-verified
+          harness: claude-code
+
+      datasets: []
