@@ -21,6 +21,7 @@ import logging
 import math
 import re
 import shlex
+from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
@@ -86,6 +87,14 @@ class SandboxBackendUnreachableError(RuntimeError):
 
     A submission 502 means the command never started. A status or log polling
     502 can mean the backend died while the command was running.
+    """
+
+
+class SandboxUnresponsiveError(SandboxBackendUnreachableError):
+    """Raised when a background command's status reads keep failing between successful ones.
+
+    The sandbox still answers some requests, so per-read retries never run out,
+    but the command's outcome can no longer be followed reliably.
     """
 
 
@@ -630,6 +639,13 @@ class OpenSandboxOperationConfig:
     # unreachable sandbox hangs for the shared request timeout (tuned for long
     # submits) before failing. None falls back to that shared budget.
     status_poll_timeout_s: float | None = 10.0
+    # End a background command once status_failure_limit of its status reads
+    # fail within this many seconds, even when successful reads interleave: a
+    # saturated sandbox can answer some reads and time out on others, which
+    # per-read retries never catch, so the command would hold its rollout until
+    # its own timeout. None keeps only the per-read retry budget.
+    status_failure_window_s: float | None = None
+    status_failure_limit: int = 5
 
     def __post_init__(self) -> None:
         if self.retries < 0:
@@ -650,6 +666,12 @@ class OpenSandboxOperationConfig:
             raise ValueError("operations.background_poll_initial_s must be > 0")
         if self.status_poll_timeout_s is not None and self.status_poll_timeout_s <= 0:
             raise ValueError("operations.status_poll_timeout_s must be > 0")
+        if self.status_failure_window_s is not None and (
+            not math.isfinite(self.status_failure_window_s) or self.status_failure_window_s <= 0
+        ):
+            raise ValueError("operations.status_failure_window_s must be finite and > 0")
+        if self.status_failure_limit < 1:
+            raise ValueError("operations.status_failure_limit must be >= 1")
 
 
 @dataclass(frozen=True)
@@ -1927,18 +1949,40 @@ class OpenSandboxProvider:
                 return True
             return _is_retryable_sdk_operation_error(exception)
 
+        failure_window_s = self._operations.status_failure_window_s
+        recent_failures: deque[float] = deque()
+
+        def _status_read_is_retryable(exception: BaseException) -> bool:
+            # Counts every failed read, including ones a later retry recovers.
+            retryable = _command_read_is_retryable(exception)
+            if retryable and failure_window_s is not None:
+                now = loop.time()
+                recent_failures.append(now)
+                while now - recent_failures[0] > failure_window_s:
+                    recent_failures.popleft()
+                retryable = len(recent_failures) < self._operations.status_failure_limit
+            return retryable
+
         # Poll fast at first so the many short commands an agent issues are
         # detected promptly, then back off so long ones do not spam requests.
         poll_interval = min(self._operations.background_poll_initial_s, self._operations.background_poll_interval_s)
         while True:
-            status = await self._await_sdk_operation(
-                lambda: handle.raw.commands.get_command_status(execution_id),
-                operation="command status",
-                sandbox_id=handle.sandbox_id,
-                timeout_s=status_timeout_s,
-                retries=self._operations.retries,
-                is_retryable=_command_read_is_retryable,
-            )
+            try:
+                status = await self._await_sdk_operation(
+                    lambda: handle.raw.commands.get_command_status(execution_id),
+                    operation="command status",
+                    sandbox_id=handle.sandbox_id,
+                    timeout_s=status_timeout_s,
+                    retries=self._operations.retries,
+                    is_retryable=_status_read_is_retryable,
+                )
+            except Exception as error:
+                if failure_window_s is None or len(recent_failures) < self._operations.status_failure_limit:
+                    raise
+                raise SandboxUnresponsiveError(
+                    f"OpenSandbox background command status unresponsive: {len(recent_failures)} failed reads "
+                    f"within {failure_window_s:g}s; sandbox_id={handle.sandbox_id!r}, execution_id={execution_id!r}"
+                ) from error
             # A renamed SDK field must not degrade silently: a missing `running`
             # would end the poll at once, a missing `exit_code` would score a
             # failed command as a success.
