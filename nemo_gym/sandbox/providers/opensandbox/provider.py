@@ -1817,10 +1817,10 @@ class OpenSandboxProvider:
         notice = await self._sandbox_death_notice(handle, any_death=True)
         if notice is not None and notice.outcome == "oom":
             return notice.message
-        # An ended sandbox can return 410 even when get_info is unavailable.
+        # A timed-out status read or ended sandbox can outlive get_info.
         # Inspect names the current user container, so it is sufficient OOM
         # evidence without relying on the exec route's error message.
-        if notice is not None or _exception_status_code(error) in {410, 502}:
+        if notice is not None or isinstance(error, TimeoutError) or _exception_status_code(error) in {410, 502}:
             if evidence := await self._control_plane_inspect_oom_evidence(handle):
                 message = notice.message if notice is not None else f"sandbox_id={handle.sandbox_id!r}"
                 return f"Sandbox was OOM-killed: inspect confirms {evidence}. {message}"

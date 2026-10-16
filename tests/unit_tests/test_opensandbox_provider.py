@@ -1298,9 +1298,7 @@ async def test_exec_background_retries_timed_out_status_then_checks_ended_sandbo
             return None
 
     no_oom = FakeResponse(200, "Pod Name: sandbox-pod\nContainers:\n  sandbox:\n    State: Running\n")
-    request = AsyncMock(
-        side_effect=[no_oom] * (2 if control_status == "container_failed" else 1) + [FakeResponse(200, inspect)]
-    )
+    request = AsyncMock(side_effect=[no_oom, no_oom, FakeResponse(200, inspect)])
     monkeypatch.setattr(server_utils, "request", request)
     monkeypatch.setattr(
         opensandbox_provider,
@@ -1341,8 +1339,108 @@ async def test_exec_background_retries_timed_out_status_then_checks_ended_sandbo
     assert commands.run_calls == 1
     assert commands.status_calls == ["exec-oom", "exec-oom", "exec-oom"]
     assert commands.log_calls == 0
-    assert request.await_count == (3 if control_status == "container_failed" else 2)
+    assert request.await_count == 3
     assert request.await_args.args[1].endswith("/sandboxes/sandbox-oom/diagnostics/inspect")
+
+
+@pytest.mark.parametrize(
+    ("inspect", "oom_confirmed"),
+    [
+        (
+            "Pod Name: sandbox-pod\nContainers:\n  sandbox:\n"
+            "    State:          Terminated (exit=137, reason=OOMKilled)\n",
+            True,
+        ),
+        (
+            "Pod Name: sandbox-pod\nContainers:\n  sandbox:\n    State:          Running\n",
+            False,
+        ),
+        (
+            "Pod Name: sandbox-pod\nContainers:\n  sandbox:\n"
+            "    State:          Terminated (exit=137, reason=Error)\n"
+            "  egress:\n    State:          Terminated (exit=137, reason=OOMKilled)\n",
+            False,
+        ),
+    ],
+)
+async def test_exec_background_inspects_current_container_after_persistent_status_timeout(
+    monkeypatch: pytest.MonkeyPatch, inspect: str, oom_confirmed: bool
+) -> None:
+    """A status-only timeout can prove an OOM when get_info is unavailable, but cannot infer one."""
+    from nemo_gym import server_utils
+
+    class FakeCommands:
+        def __init__(self) -> None:
+            self.run_calls = 0
+            self.status_calls: list[str] = []
+            self.log_calls = 0
+
+        async def run(self, command: str, *, opts: Any) -> Any:
+            self.run_calls += 1
+            return SimpleNamespace(id="exec-timeout")
+
+        async def get_command_status(self, execution_id: str) -> Any:
+            self.status_calls.append(execution_id)
+            raise TimeoutError("command status route timed out")
+
+        async def get_background_command_logs(self, execution_id: str) -> Any:
+            self.log_calls += 1
+            pytest.fail("logs cannot be fetched without a final status")
+
+    class FakeConnectionConfig:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+        def get_base_url(self) -> str:
+            return "https://sandbox.example/v1"
+
+        def get_api_key(self) -> str:
+            return "key"
+
+    class FakeResponse:
+        status = 200
+
+        def __init__(self) -> None:
+            self.content = SimpleNamespace(read=AsyncMock(return_value=inspect.encode()))
+
+        async def __aenter__(self) -> Any:
+            return self
+
+        async def __aexit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+            return None
+
+    request = AsyncMock(return_value=FakeResponse())
+    monkeypatch.setattr(server_utils, "request", request)
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (object, FakeConnectionConfig, dict, object, object),
+    )
+    monkeypatch.setattr(opensandbox_provider, "BACKGROUND_STATUS_RECOVERY_WINDOW_S", 0.02)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"domain": "sandbox.example", "api_key": "key", "request_timeout_s": 5},
+        probe={"command": None},
+        operations={"background_exec": True, "retries": 0, "background_poll_interval_s": 0.001},
+    )
+    commands = FakeCommands()
+    raw = SimpleNamespace(commands=commands, get_info=AsyncMock(side_effect=RuntimeError("status unavailable")))
+    handle = opensandbox_provider.SandboxHandle(sandbox_id="sandbox-timeout", provider_name="opensandbox", raw=raw)
+
+    if oom_confirmed:
+        with pytest.raises(opensandbox_provider.SandboxOOMKilledError, match="inspect confirms") as exc_info:
+            await provider.exec(handle, "agent command", timeout_s=10_800)
+        assert isinstance(exc_info.value.__cause__, TimeoutError)
+        assert "sandbox_id='sandbox-timeout'" in str(exc_info.value)
+    else:
+        with pytest.raises(opensandbox_provider.SandboxCommandStatusTimeoutError, match="unavailable beyond"):
+            await provider.exec(handle, "agent command", timeout_s=10_800)
+        assert len(commands.status_calls) >= 2
+
+    assert commands.run_calls == 1
+    assert set(commands.status_calls) == {"exec-timeout"}
+    assert commands.log_calls == 0
+    assert request.await_count >= 1
+    assert request.await_args.args[1].endswith("/sandboxes/sandbox-timeout/diagnostics/inspect")
 
 
 @pytest.mark.parametrize(
@@ -2677,10 +2775,30 @@ async def test_exec_background_retries_timed_out_reads(
     monkeypatch: pytest.MonkeyPatch, read_operation: str, failures: int
 ) -> None:
     """Status read retries preserve the submitted command; log reads use one retry batch."""
+    from nemo_gym import server_utils
 
     class FakeRunCommandOpts:
         def __init__(self, **kwargs: Any) -> None:
             self.kwargs = kwargs
+
+    class FakeConnectionConfig:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+        def get_base_url(self) -> str:
+            return "https://sandbox.example/v1"
+
+        def get_api_key(self) -> None:
+            return None
+
+    class FakeResponse:
+        status = 404
+
+        async def __aenter__(self) -> Any:
+            return self
+
+        async def __aexit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+            return None
 
     class FakeCommands:
         def __init__(self) -> None:
@@ -2709,9 +2827,11 @@ async def test_exec_background_retries_timed_out_reads(
     monkeypatch.setattr(
         opensandbox_provider,
         "_require_opensandbox_sdk",
-        lambda: (object, object, FakeRunCommandOpts, object, object),
+        lambda: (object, FakeConnectionConfig, FakeRunCommandOpts, object, object),
     )
     monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    request = AsyncMock(return_value=FakeResponse())
+    monkeypatch.setattr(server_utils, "request", request)
 
     provider = opensandbox_provider.OpenSandboxProvider(
         connection={"request_timeout_s": 120},
@@ -2741,9 +2861,11 @@ async def test_exec_background_retries_timed_out_reads(
     if read_operation == "status":
         assert commands.status_calls == ["exec-slowpoll"] * expected_attempts
         assert commands.log_calls == ["exec-slowpoll"]
+        assert request.await_count == (1 if failures == 3 else 0)
     else:
         assert commands.status_calls == ["exec-slowpoll"]
         assert commands.log_calls == ["exec-slowpoll"] * expected_attempts
+        request.assert_not_awaited()
 
 
 def test_tls_verify_reaches_transports(fake_opensandbox_sdk: None) -> None:
