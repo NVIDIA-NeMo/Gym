@@ -408,7 +408,7 @@ class JupyterNotebook:
             if output_type == "stream":
                 rendered.append(str(output.get("text", "")))
             elif output_type in {"execute_result", "display_data"}:
-                data = output.get("data", {})
+                data = dict(output.get("data", {}))
 
                 if "text/plain" in data:
                     rendered.append(str(data.pop("text/plain")))
