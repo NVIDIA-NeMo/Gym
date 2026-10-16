@@ -233,14 +233,18 @@ class TestJuryRoundCancellation:
     """A failed panel must not leave its other judge calls running."""
 
     @staticmethod
+    async def _until(condition):
+        while not condition():
+            await asyncio.sleep(0)
+
+    @staticmethod
     def _server_with_blocked_judges(failing_round):
         started, cancelled = [], []
         server, _ = make_server({})
 
         async def judge(judge_ref, prompt, round_idx):
             if judge_ref.name == "judge_c" and round_idx == failing_round:
-                while len(started) < 2:
-                    await asyncio.sleep(0)
+                await TestJuryRoundCancellation._until(lambda: len(started) == 2)
                 raise JudgeError("judge_c failed")
             started.append(judge_ref.name)
             try:
@@ -257,19 +261,18 @@ class TestJuryRoundCancellation:
         server, started, cancelled = self._server_with_blocked_judges(round_idx)
 
         with pytest.raises(JudgeError, match="judge_c failed"):
-            await server._round("prompt", round_idx)
+            await asyncio.wait_for(server._round("prompt", round_idx), timeout=5)
 
         assert sorted(started) == sorted(cancelled) == ["judge_a", "judge_b"]
 
     async def test_cancelling_the_caller_cancels_every_judge(self):
         server, started, cancelled = self._server_with_blocked_judges(failing_round=None)
         round_task = asyncio.create_task(server._round("prompt", 0))
-        while len(started) < 3:
-            await asyncio.sleep(0)
+        await asyncio.wait_for(self._until(lambda: len(started) == 3), timeout=5)
 
         round_task.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await round_task
+            await asyncio.wait_for(round_task, timeout=5)
 
         assert sorted(cancelled) == sorted(JUDGES)
 
