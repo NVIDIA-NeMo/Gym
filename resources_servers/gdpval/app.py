@@ -732,9 +732,12 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 if session is not None:
                     if session.episode_id != body.episode_id:
                         raise ValueError("episode_id does not match the seeded resources session")
-                    await self._release(session)
+                    try:
+                        await self._release(session)
+                    finally:
+                        # A failed stop must not hold the directory: every later seed of it would get a terminal 409.
+                        self._claimed_directories.pop((session.task_id.task_id, session.repeat), None)
                     del self._sessions[session_id]
-                    self._claimed_directories.pop((session.task_id.task_id, session.repeat), None)
                 self._closed_sessions[session_id] = body.episode_id
             elif self._closed_sessions[session_id] != body.episode_id:
                 raise ValueError("episode_id does not match the closed resources session")

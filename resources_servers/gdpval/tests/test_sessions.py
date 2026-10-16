@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """The task sandbox lifecycle, run on the local sandbox provider in a temporary directory."""
 
+import asyncio
 import functools
 import json
 import tempfile
@@ -410,6 +411,28 @@ def test_a_second_live_session_for_the_same_task_and_repeat_is_refused_until_the
     close = ResourcesCloseSessionRequest(resources_session_id="first", episode_id=first.episode_id)
     assert client.post("/close_session", json=close.model_dump(mode="json")).status_code == 200
     assert _post_seed(client, second).status_code == 200
+
+
+@pytest.mark.parametrize("failure", [RuntimeError("stop failed"), asyncio.CancelledError()])
+def test_a_close_whose_stop_fails_still_frees_the_directory_for_a_retry(
+    server, root, tmp_path, references, monkeypatch, failure
+):
+    client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+    first = _seed(tmp_path, session_id="first", repeat=1)
+    assert _post_seed(client, first).status_code == 200
+    real_stop = AsyncSandbox.stop
+    monkeypatch.setattr(AsyncSandbox, "stop", AsyncMock(side_effect=failure))
+    close = ResourcesCloseSessionRequest(resources_session_id="first", episode_id=first.episode_id)
+    try:
+        assert client.post("/close_session", json=close.model_dump(mode="json")).status_code == 500
+    except BaseException:  # a cancellation can surface through the test client
+        pass
+    monkeypatch.setattr(AsyncSandbox, "stop", real_stop)
+    retry = _seed(tmp_path, session_id="retry", repeat=1).model_copy(
+        update={"episode_id": EpisodeId(rollout_id="0-1", attempt=1)}
+    )
+
+    assert _post_seed(client, retry).status_code == 200
 
 
 def test_sessions_of_different_repeats_do_not_conflict(server, root, tmp_path, references):
