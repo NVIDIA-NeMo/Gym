@@ -59,6 +59,7 @@ terminal_bench_4:
                   << 19))) -ne 0; }
         sandbox_metadata:
           nemo.nvidia.com/resources: custom
+          nemo.nvidia.com/oom-kill: process
         sandbox_ttl_s: 28800
         sandbox_ready_timeout_s: 1200
         default_exec_timeout_s: 64800
