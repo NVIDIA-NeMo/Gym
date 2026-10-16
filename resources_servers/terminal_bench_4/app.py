@@ -63,6 +63,10 @@ class TerminalBench4Config(BaseResourcesServerConfig):
     # contract (``sandbox_handle`` in the seed, row fields + ``response`` at ``/verify``); see opencode.py.
     harness: Literal["miniswe", "opencode"] = "miniswe"
     opencode: OpenCodeHarnessConfig = Field(default_factory=OpenCodeHarnessConfig)
+    # How an attempt whose agent ran out of time is scored. ``graded`` (TB4's rule): the separate verifier checks what
+    # the attempt left behind. ``zero``: reward 0 without running the verifier, reported as a completed evaluation, so
+    # training treats it as a valid failed attempt rather than an incomplete one. Setup timeouts stay errors.
+    agent_timeout_reward: Literal["graded", "zero"] = "graded"
 
 
 def atomic_json(path, value):
@@ -390,8 +394,15 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                     )
                 except Exception as exc:
                     session.diagnostics.append({"operation": "opencode_quiesce_user", "error": str(exc)})
+            zero_timeout = (
+                self.config.agent_timeout_reward == "zero"
+                and body.agent_started
+                and session.termination.reason == "timeout"
+            )
+            if zero_timeout:
+                session.result["reward_rule"] = "agent_timeout_zero"
             await lifecycle.finalize_session(
-                session, grade=body.agent_started and session.seed_response.termination is None
+                session, grade=body.agent_started and session.seed_response.termination is None and not zero_timeout
             )
             session.verified_response = self._verified_response(session, body.harness_metadata)
             session.persist()
@@ -399,6 +410,8 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
     def _verified_response(self, session, extra):
         result = session.result or {}
         rewards = (result.get("verifier_result") or {}).get("rewards") or {}
+        if result.get("reward_rule") == "agent_timeout_zero":
+            rewards = {"reward": 0.0}
         completed = "reward" in rewards
         failure = None
         if not completed:
@@ -425,6 +438,8 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                 key: result.get(key) for key in ("environment_setup", "agent_setup", "agent_execution", "verifier")
             },
         )
+        if result.get("reward_rule"):
+            data["reward_rule"] = result["reward_rule"]
         if failure:
             data["_ng_failure_class"] = "infrastructure_error"
         return SandboxedVerifyResponse(**data)

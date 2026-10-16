@@ -921,3 +921,62 @@ async def test_cleanup_records_a_failed_discard_and_still_closes(tmp_path, monke
     await lifecycle.cleanup(session)
     assert (trial / "artifacts" / "app" / "a.txt").exists() and session.phase == "closed"
     assert session.diagnostics == [{"operation": "artifacts_discarded", "error": "lustre hiccup"}]
+
+
+# --- agent timeout reward (agent_timeout_reward) --------------------------------------------------------------------
+
+
+async def finalized_miniswe_session(tmp_path, monkeypatch, *, rule, reason, agent_started=True, verified_reward=1.0):
+    manifest, ref = local_manifest(tmp_path)
+    server = TerminalBench4ResourcesServer(
+        config=config(tmp_path, manifest, harness="miniswe", agent_timeout_reward=rule),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    session = server._new_session("identity", "owner", TerminalBench4RunRequest.model_validate(row(ref)), "tb4-x")
+    session.seed_response = SimpleNamespace(termination=None)
+    session.environment = SimpleNamespace(main=None, closed=True)
+    session.persist = lambda: None  # persistence is not under test here
+    session.verify_body = SandboxedVerifyRequest.model_validate(
+        row(ref)
+        | {
+            "response": RESPONSE,
+            "session_id": "tb4-x",
+            "termination": {"reason": reason, "detail": "budget"},
+            "agent_started": agent_started,
+        }
+    )
+    graded = []
+
+    async def fake_finalize(session, *, grade):
+        graded.append(grade)
+        if grade:
+            session.result["verifier_result"] = {"rewards": {"reward": verified_reward}}
+
+    monkeypatch.setattr(app_module.lifecycle, "finalize_session", fake_finalize)
+    await server._finalize_session(session)
+    return session.verified_response, graded
+
+
+async def test_zero_rule_scores_an_agent_timeout_zero_without_the_verifier(tmp_path, monkeypatch):
+    response, graded = await finalized_miniswe_session(tmp_path, monkeypatch, rule="zero", reason="timeout")
+    assert graded == [False]  # the verifier sandbox is never started
+    assert response.reward == 0.0 and response.evaluation_completed and response.infrastructure_error is None
+    assert response.termination.reason == "timeout" and response.model_extra["reward_rule"] == "agent_timeout_zero"
+    assert "_ng_failure_class" not in response.model_extra
+
+
+async def test_graded_rule_keeps_tb4_grading_of_an_agent_timeout(tmp_path, monkeypatch):
+    response, graded = await finalized_miniswe_session(tmp_path, monkeypatch, rule="graded", reason="timeout")
+    assert graded == [True] and response.reward == 1.0 and response.evaluation_completed
+    assert "reward_rule" not in response.model_extra
+
+
+async def test_zero_rule_leaves_finished_attempts_and_setup_timeouts_alone(tmp_path, monkeypatch):
+    response, graded = await finalized_miniswe_session(tmp_path / "a", monkeypatch, rule="zero", reason="completed")
+    assert graded == [True] and response.reward == 1.0 and "reward_rule" not in response.model_extra
+    # A timeout before the agent started is a setup failure: not graded, not a policy attempt, still an error.
+    response, graded = await finalized_miniswe_session(
+        tmp_path / "b", monkeypatch, rule="zero", reason="timeout", agent_started=False
+    )
+    assert graded == [False] and not response.evaluation_completed and response.infrastructure_error
+    assert "reward_rule" not in response.model_extra
