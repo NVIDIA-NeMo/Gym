@@ -97,12 +97,12 @@ def format_entry(row: dict, prompt_config: Any = None) -> dict:
         # Metadata for analysis; not used for grading.
         "answer_type": row.get("answer_type"),
         "uuid": row["id"],
+        "has_image": bool(row.get("image")),
         "category": row.get("category"),
         "raw_subject": row.get("raw_subject"),
         "verified_class": VERIFIED_CLASSES_MAP.get(row.get("Verified_Classes"), row.get("Verified_Classes")),
     }
     if prompt_config is not None:
-        entry["has_image"] = bool(row.get("image"))
         entry["responses_create_params"] = {
             "input": build_image_input(prompt_config, row["question"], row.get("image") or "")
         }

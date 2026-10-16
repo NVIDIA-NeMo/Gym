@@ -46,6 +46,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.verifier_fixture import VerifierFixture
+from resources_servers.equivalence_llm_judge.domain_metrics import compute_domain_metrics
 from resources_servers.equivalence_llm_judge.verifier_fixture import create_hle_verified_server, invoke_hle_verified
 
 
@@ -121,6 +122,7 @@ class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
 
     # Default logical name for this resources server
     name: str = "equivalence_llm_judge"
+    report_hle_domains: bool = False
     judge_model_server: ModelServerRef
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
 
@@ -640,9 +642,10 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
                     rollouts_with_issues += bool(issues)
                     kind_counts.update(issues)
 
+        metrics = compute_domain_metrics(tasks) if self.config.report_hle_domains else {}
         if not judged:
-            return {}
-        metrics: dict[str, Any] = {JUDGEMENT_PARSING_ISSUE_RATE: rollouts_with_issues / judged}
+            return metrics
+        metrics[JUDGEMENT_PARSING_ISSUE_RATE] = rollouts_with_issues / judged
         for kind, count in sorted(kind_counts.items()):
             metrics[f"{JUDGEMENT_PARSING_ISSUE_RATE}/{kind}"] = count / judged
         return metrics
