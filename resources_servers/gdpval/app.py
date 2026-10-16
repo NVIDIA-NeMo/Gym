@@ -302,6 +302,15 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     # read tables/charts. Costs ~5-30s per Office file.
     preconvert_office_to_pdf: bool = True
     preconvert_max_concurrent: int = 4
+    # Command that runs LibreOffice for every Office->PDF conversion (comparison
+    # preconvert and rubric rendering), e.g. a container prefix
+    # [apptainer, exec, --bind, /path/to/data, --bind, /tmp, /path/to/gdpval.sif, libreoffice]
+    # or a wrapper script. It must see persist_deliverables_dir, the reference
+    # deliverables and the temp directory at the same absolute paths. When set,
+    # startup checks it with --version and a probe conversion and fails if the
+    # check fails; the host javaldx check and apt install are skipped. None uses
+    # `libreoffice` on PATH.
+    libreoffice_command: Optional[List[str]] = Field(default=None, min_length=1)
 
     # How deliverable/reference files are presented to the judge:
     # - ``"native_pdf"`` (default): PDFs and (preconverted) Office docs are sent
@@ -620,7 +629,20 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 raise ValueError(
                     "reward_mode=comparison requires reference_deliverables_dir or reference_models to be set"
                 )
-        if self.config.preconvert_office_to_pdf:
+        if self.config.libreoffice_command is not None:
+            from resources_servers.gdpval.setup_libreoffice import ensure_libreoffice
+
+            # Also probe where /verify persists the deliverables it converts: a command that cannot see that
+            # directory fails the first conversion attempt of every Office file.
+            persist_dir = self.config.persist_deliverables_dir
+            probe_dirs = [Path(persist_dir)] if persist_dir else []
+            if not ensure_libreoffice(self.config.libreoffice_command, probe_dirs=probe_dirs):
+                raise RuntimeError(
+                    f"libreoffice_command {self.config.libreoffice_command} failed its startup check "
+                    "(--version and a probe conversion; see the warning above). The command must see "
+                    "persist_deliverables_dir, the reference deliverables and the temp directory at the same paths."
+                )
+        elif self.config.preconvert_office_to_pdf:
             from resources_servers.gdpval.setup_libreoffice import ensure_libreoffice
 
             if not ensure_libreoffice() and self.config.reward_mode == "comparison":
@@ -1047,6 +1069,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 include_text=self.config.judge_pdf_include_text,
                 audio_capable=audio_capable,
                 video_capable=video_capable,
+                libreoffice_command=self.config.libreoffice_command,
             )
             if blocks:
                 deliverable_content_blocks = blocks
@@ -1112,7 +1135,9 @@ class GDPValResourcesServer(SimpleResourcesServer):
         from resources_servers.gdpval.preconvert import preconvert_dir_async
 
         n_ok, n_fail, errors = await preconvert_dir_async(
-            target_dir, max_concurrent=self.config.preconvert_max_concurrent
+            target_dir,
+            max_concurrent=self.config.preconvert_max_concurrent,
+            libreoffice_command=self.config.libreoffice_command,
         )
         if n_ok or n_fail:
             LOGGER.info("preconvert %s: ok=%d fail=%d", label, n_ok, n_fail)
