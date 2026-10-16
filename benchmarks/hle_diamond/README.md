@@ -8,8 +8,8 @@ HLE-Diamond is a 1000-question subset of
 [Humanity's Last Exam](https://huggingface.co/datasets/cais/hle) split into two partitions of 500
 questions each: `reasoning` (the answer has to be derived) and `knowledge` (the answer has to be
 recalled). 272 questions include an image; 796 are exact-match and 204 multiple choice. The model
-must produce an explanation, a succinct final answer and a confidence; an LLM judge compares the
-extracted final answer with the reference answer.
+must produce an explanation, a final answer and a confidence; an LLM judge compares the extracted
+final answer with the reference answer.
 
 Preparation pins revision `04eeb7efa7e3e4f83a00cbd5ce436a38fd5dda23` <!-- pragma: allowlist secret -->
 of the `test` split and downloads it at run time. Nothing from the dataset is committed.
@@ -18,10 +18,15 @@ of the `test` split and downloads it at run time. Nothing from the dataset is co
 
 | Benchmark | Rows | Prompt | Use |
 | --- | --- | --- | --- |
-| `hle_diamond` (default) | 1000 (272 with an image) | prepared at prepare time (`prompt_config: null`) | the published no-tools setting; needs a vision-capable policy model |
-| `hle_diamond/text` | 728 (no image) | `benchmarks/hle/prompts/default.yaml` at rollout time | text-only policy models |
-| `hle_diamond/opencode`, `hle_diamond/pi` | 728 | `benchmarks/hle/prompts/opencode.yaml` | sandboxed code tools, no search |
-| `hle_diamond/opencode_search`, `hle_diamond/pi_search` | 728 | `benchmarks/hle/prompts/opencode.yaml` | sandboxed code tools plus Tavily search |
+| `hle_diamond` (default) | 1000 (272 with an image) | `prompts/default.yaml`, baked at prepare time (`prompt_config: null`) | the published no-tools setting; needs a vision-capable policy model |
+| `hle_diamond/text` | 728 (no image) | `prompts/default.yaml` at rollout time | text-only policy models |
+| `hle_diamond/opencode`, `hle_diamond/pi` | 728 | `prompts/opencode.yaml` | sandboxed code tools, no search |
+| `hle_diamond/opencode_search`, `hle_diamond/pi_search` | 728 | `prompts/opencode.yaml` | sandboxed code tools plus Tavily search |
+
+Two composable overrides live next to the presets and are not benchmarks (no dataset, not listed by
+`gym list benchmarks`): [`judge_openai.yaml`](judge_openai.yaml) (dedicated judge, see Scoring) and
+[`sandbox_docker_local.yaml`](sandbox_docker_local.yaml) (sandboxed presets on a local Docker host,
+see Quickstart).
 
 **Why the default inverts `hle`'s convention.** `benchmarks/hle` defaults to the text subset and
 exposes images as the `hle/config_vision` variant, because HLE's headline figures are text-only.
@@ -41,28 +46,43 @@ The `image` data URI appears only inside the materialized `input_image` block of
 
 ## Prompting
 
-The prompts are Gym's shared HLE prompts, referenced from `benchmarks/hle/prompts/` so that no
-prompt file lives in this directory. They are adaptations of the
-[`centerforaisafety/hle`](https://github.com/centerforaisafety/hle) harness, not verbatim copies:
+The prompt files live in [`prompts/`](prompts/) and carry the HLE authors' `SYSTEM_PROMPT` from
+`hle_eval/run_model_predictions.py` in
+[`centerforaisafety/hle`](https://github.com/centerforaisafety/hle) (MIT; each file names the
+commit) byte for byte:
 
-- `default.yaml`: Gym's HLE system prompt (Explanation / Answer / Confidence) with the bare question
-  as the user turn, the placement upstream's `run_model_predictions.py` uses. The wording differs:
-  upstream's `SYSTEM_PROMPT` asks for `{your explanation for your answer choice}` and
-  `{your chosen answer}`; Gym's file asks for `{your explanation for your final answer}` and
-  `{your succinct, final answer}`. The default set bakes this text into
-  `responses_create_params.input` with `nemo_gym.vision_input.build_image_input`; the text variant
-  applies the same file at rollout time. Every prepared row and every sandboxed preset therefore
-  carries the paraphrase, which is a comparability caveat to state next to any number compared with
-  the published table. Keeping the shared file is deliberate (one HLE prompt across `hle`,
-  `hle_verified` and `hle_diamond`); a verbatim-upstream prompt would be a separate decision.
-- `opencode.yaml`: the same instructions folded into one user message for the sandboxed harnesses,
-  whose native system prompts stay intact.
-- `judge.txt`: the HLE judge prompt adapted for the `equivalence_llm_judge` label parser. Upstream's
-  `run_judge_results.py` parses a structured object
-  (`extracted_final_answer, reasoning, correct: yes|no, confidence, strict`); Gym's file renames the
-  fields to `Reasoning:` / `Judgement:` / `Confidence:` and the verdict is the `Judgement: yes|no`
-  string found in free text, with unparseable judge output tracked by `judgement_parsing_issue_rate`.
-  The grading criteria are the same.
+```text
+Your response should be in the following format:
+Explanation: {your explanation for your answer choice}
+Answer: {your chosen answer}
+Confidence: {your confidence score between 0% and 100% for your answer}
+```
+
+This is a deliberate departure from `benchmarks/hle` and `benchmarks/hle_verified`, which share
+Gym's `benchmarks/hle/prompts/default.yaml`, a paraphrase (`{your explanation for your final answer}`,
+`{your succinct, final answer}`). The sole purpose of this benchmark is comparison with the published
+table, so the measured prompt has to be upstream's; one prompt shared across the three HLE benchmarks
+loses to that. Do not "fix" the wording back to the shared file.
+
+- `prompts/default.yaml`: the verbatim text as the system message with the bare question as the user
+  message, the placement upstream uses (upstream moves the instruction into the user role only for
+  `o1` models; this benchmark always sends it as the system message). The braces are doubled in the
+  file because `nemo_gym.prompt` fills `{placeholders}` with `str.format_map`; the rendered message
+  carries the single braces, and `tests/unit_tests/test_hle_diamond.py` asserts that the rendered
+  string and the prepared rows equal the upstream text. The default set bakes it into
+  `responses_create_params.input` at prepare time (`nemo_gym.vision_input.build_image_input`); the
+  text variant applies the same file at rollout time.
+- `prompts/opencode.yaml`: the same verbatim instruction folded after the question into the single
+  user message the OpenCode and Pi adapters accept; the harnesses' native system prompts stay intact.
+  Two departures from upstream's placement are inherent to these harnesses and belong next to every
+  with-tools number: the instruction arrives as user text rather than as the system message, and the
+  harness's own system prompt (several thousand tokens for OpenCode) precedes it.
+- Judge: `benchmarks/hle/prompts/judge.txt`, the HLE judge prompt adapted for the
+  `equivalence_llm_judge` label parser, is reused unchanged. Upstream's `run_judge_results.py` parses
+  a structured object (`extracted_final_answer, reasoning, correct: yes|no, confidence, strict`);
+  Gym's file renames the fields to `Reasoning:` / `Judgement:` / `Confidence:` and the verdict is the
+  `Judgement: yes|no` string found in free text, with unparseable judge output tracked by
+  `judgement_parsing_issue_rate`. The grading criteria are the same.
 
 Image questions: upstream attaches the image as `image_url` with no `detail` setting (the provider
 default); Gym's shared builder requests `detail: high`, which changes image tiling and token counts
@@ -72,6 +92,41 @@ on the 272 image rows for OpenAI-family models. Making `detail` configurable wou
 The upstream harness sends no temperature and no output-token cap. When comparing with the published
 table, send `++responses_create_params.reasoning.effort=high` and nothing else; on this gateway a
 `temperature` is dropped by some models and rejected by others.
+
+### Reasoning effort
+
+The published no-tools table was collected at "reasoning high". What that means through this gateway
+was probed per model (Responses API, `reasoning.effort` low against high on the same items):
+
+1. GPT-6 Astra, GPT-6.1 Sol and Gemini 4 Argon honour `reasoning.effort`: reasoning tokens rise
+   several-fold from low to high, and the GPT models echo the effort in the response. Label such a
+   run "reasoning high".
+2. Claude Opus 5.5, Claude Sonnet 5.5 and Claude Opus 5 show no measurable effect of the parameter
+   through this gateway: adaptive thinking is always on and Anthropic's `output_config` is dropped by
+   the gateway. Label such a run "effort not controllable via this gateway (adaptive default)" and
+   never call a Claude run "reasoning high".
+3. Every model is still run with the one request shape (`++responses_create_params.reasoning.effort=high`,
+   no temperature, top-p or output cap), so runs differ only in what the gateway does with it. Check
+   `response.usage.output_tokens_details.reasoning_tokens` on the pilot rows and record which label
+   applies before comparing with the published mean output tokens.
+
+On the no-tools path the effort travels on Gym's Responses request. On the sandboxed path it does
+not: `++responses_create_params.reasoning.effort` decorates only Gym's run request, while OpenCode
+and Pi build their own model calls inside the sandbox (a model-call capture of the stock preset
+showed no `reasoning_effort`, so the gateway default, medium, applied). The presets therefore carry
+each harness's own knob:
+
+- `opencode.yaml` (inherited by `opencode_search.yaml`):
+  `opencode_config.provider.nemo_gym.models.dummy_model.options.reasoningEffort: high`, which
+  OpenCode 1.17.11 maps to `reasoning_effort: high` in its chat-completions body (verified in a
+  capture). Override per run with
+  `++hle_diamond_opencode_agent.responses_api_agents.opencode_sandboxed_agent.opencode_config.provider.nemo_gym.models.dummy_model.options.reasoningEffort=<level>`.
+- `pi.yaml` (inherited by `pi_search.yaml`): `thinking: high`, passed to Pi as `--thinking high`
+  (Pi's levels: `off, minimal, low, medium, high, xhigh, max`). **Caveat:** the Pi adapter registers
+  its provider with `compat.supportsReasoningEffort: false`, and Pi's `openai-completions` path emits
+  `reasoning_effort` only when that flag is true, so Pi runs through this adapter do not transmit
+  the level today. The knob is the right value and takes effect once the adapter exposes the flag;
+  until then label Pi runs "effort not transmitted (adapter)".
 
 ## Dataset format
 
@@ -106,6 +161,12 @@ upstream's structured output). An empty final answer scores 0 without a judge ca
 (`failure_reason: empty_final_answer`). The judge defaults to the policy model, as in
 `benchmarks/hle`, so the model under test grades itself unless `judge_openai.yaml` is composed in;
 self-judged numbers are not comparable with the published table (see Quickstart).
+
+Judge request: the judge call carries no `max_output_tokens` and no reasoning parameter
+(`judge_responses_create_params: {input: []}`), so the judge model runs at its default effort and its
+verdict is never truncated. Upstream caps the judge at `max_completion_tokens=4096`. The divergence is
+deliberate: a long reasoning trace from an o3-mini-class judge must not cut the verdict off and turn
+a graded row into a parsing failure.
 
 Headline metric: `mean/reward`, accuracy over every evaluated row. Additional metrics:
 
@@ -142,7 +203,7 @@ policy gateway (`policy_base_url` / `policy_api_key` from `env.yaml`) serving
 the single `hle_diamond_equivalence_llm_judge_resources_server` that every preset shares:
 
 ```bash
-gym eval run --benchmark hle_diamond '+config_paths=[benchmarks/hle_diamond/judge_openai.yaml]' ...
+gym eval run --benchmark hle_diamond --config benchmarks/hle_diamond/judge_openai.yaml ...
 ```
 
 ## Harness validation
@@ -152,18 +213,23 @@ Model-free checks that have been run (commands below, from the repository root):
 - `tests/unit_tests/test_hle_diamond.py`: preparation against an in-memory arrow fixture (field set,
   the `input_image` block, the text filter, fail-closed on a wrong row count / partition split /
   image count / duplicated id, `--limit` truncation after the text filter and above the corpus size,
-  the `prepare_text.py` script form, no download on invalid arguments), config discovery and
-  composition, the judge prompt path, manifests, the partition slices through
-  `compute_aggregate_metrics`, and the production row shape (`/verify` reply through
-  `SimpleAgentVerifyResponse` into the slices). The count check, the limit truncation, the response
-  field echo and the slice hook were mutation-checked: breaking any of them makes tests fail.
+  the `prepare_text.py` script form, no download on invalid arguments); the shipped prompt files
+  rendering exactly the upstream `SYSTEM_PROMPT` and `prepare.py` baking exactly it; config
+  discovery and composition, the judge prompt path, manifests, the reasoning-effort knobs of all
+  four sandboxed presets, `sandbox_docker_local.yaml` resolving to exactly the Docker provider with
+  inherited networking while the unused harness's block stays inert; the partition slices through
+  `compute_aggregate_metrics`; and the production row shape (`/verify` reply through
+  `SimpleAgentVerifyResponse` into the slices). Mutation-checked: changing one word of the prompt,
+  lowering either effort knob to `medium`, breaking the count check, the limit truncation, the
+  response field echo or the slice hook each makes tests fail.
 - `tests/unit_tests/test_hle_diamond_search_exclusions.py`: the generator's normalisation, dedup and
   audit trail; the rendered and the committed list loading through the real Tavily parser and
   blocking load-bearing hosts; the committed list being at least as strict as `benchmarks/hle`'s;
   and the upstream pin being a full 40-character revision (the `--download` URL depends on it).
 - Real preparation printed `Wrote 1000 problems ... (272 with an image)` and
   `Wrote 728 problems ... (skipped 272 image questions)`; the written rows were re-counted
-  (500 / 500 partitions, 272 `input_image` blocks, 1000 and 728 unique ids, no dropped field leaked).
+  (500 / 500 partitions, 272 `input_image` blocks, 1000 and 728 unique ids, no dropped field leaked)
+  and every one of the 1000 materialized system messages equals the upstream text byte for byte.
 - Both manifests validate against the prepared files:
 
   ```bash
@@ -190,45 +256,113 @@ gym list benchmarks | grep hle_diamond          # hle_diamond, hle_diamond/text,
 cached `huggingface-cli login` / `HF_TOKEN` credentials (verified: the gated parquet resolves with
 `token=None` and fails with `401` for `token=False`).
 
-Rollout collection has **not** been run while writing this README. The comparable no-tools command
-(reasoning effort high, no temperature, no token cap, one repeat, dedicated judge) is:
+### No-tools runs
+
+**Not run as written** while writing this README: rollout collection belongs to the pilot. Every
+part of the command is load-bearing:
+
+- `--split benchmark` is required: the dataset is `type: benchmark` and the CLI has no default split
+  (without it: `gym eval run: error: missing required configuration: split`).
+- `--config benchmarks/hle_diamond/judge_openai.yaml` makes the dedicated judge grade; without it
+  the policy grades itself and the number must be labelled self-judged. `--config` composes the file
+  after the preset (it is `+config_paths=[...]`), so the override's keys win.
+- `++responses_create_params.reasoning.effort=high` is the one sampling setting; no `--temperature`,
+  `--top-p` or `--max-output-tokens` (see Prompting > Reasoning effort for how to label the run).
+- `--num-repeats 1`; `--limit 20` for the pilot, then the full set.
 
 ```bash
 gym eval run --benchmark hle_diamond --split benchmark --model-type openai_model \
-    '+config_paths=[benchmarks/hle_diamond/judge_openai.yaml]' \
+    --config benchmarks/hle_diamond/judge_openai.yaml \
+    --num-repeats 1 --limit 20 \
     ++policy_model_name=<gateway model id> \
     ++responses_create_params.reasoning.effort=high \
-    --num-repeats 1 --output results/hle_diamond_rollouts.jsonl
+    --output results/hle_diamond_pilot.jsonl
 ```
 
-`--split benchmark` is required: the dataset is `type: benchmark` and the CLI has no default split
-(without it: `gym eval run: error: missing required configuration: split`). Without
-`judge_openai.yaml` the policy grades itself; such numbers are not comparable with the published
-table and must be labelled self-judged. Use `--benchmark hle_diamond/text` for a text-only policy
-model; its 728/1000 coverage is not comparable either.
+Use `--benchmark hle_diamond/text` with the same flags for a text-only policy model; its 728/1000
+coverage is not comparable with the published table.
 
 Before treating a run as comparable, check on the pilot rows:
 
-- Reasoning effort was honoured: in gateway probes every model tried accepted `reasoning.effort=high`,
-  but not every one acted on it (some returned zero reasoning tokens at any effort, others the same
-  count at `low` and `high`). Confirm `response.usage.output_tokens_details.reasoning_tokens` is above zero
-  and compare the run's mean output tokens with the per-model token-usage table in the
-  announcement; label a run whose effort was ignored as such.
+- Reasoning effort was honoured or is not controllable (Prompting > Reasoning effort): confirm
+  `response.usage.output_tokens_details.reasoning_tokens` and label the run accordingly.
 - The judge is the dedicated one (`judge_evaluations[*].response.model`) and
   `judgement_parsing_issue_rate` is near zero.
 - Coverage: rows evaluated / 1000, or `coverage/imputed` with the upstream denominator (see Scoring).
+
+### Sandboxed presets on a local Docker host
+
+**Not run as written** for `hle_diamond`. The same recipe (Docker provider, host networking, the
+OpenCode effort knob, the dedicated-judge composition aside) was run end to end on `hle/opencode`
+for two rows before these presets existed, which is where the facts below come from. Every run
+through this recipe is **comparison infrastructure only: egress is unrestricted**, and its results
+must carry the label "local Docker; egress not restricted".
+
+```bash
+# The presets always compose nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml, whose
+# ${oc.env:...} values must resolve even though the Docker provider is used: placeholders suffice.
+export OPENSANDBOX_API_KEY=unused-local-docker
+export OPENSANDBOX_DOMAIN=unused.invalid
+export OPENCODE_SANDBOX_IMAGE=gym-opencode-science:local      # PI_SANDBOX_IMAGE=gym-pi-science:local for the pi presets
+export OPENCODE_ARTIFACTS_DIR=/abs/path/oc-artifacts          # PI_ARTIFACTS_DIR for pi: the harness's native transcripts
+mkdir -p /abs/path/model-calls
+
+gym eval run --benchmark hle_diamond/opencode --split benchmark --model-type openai_model \
+    --config benchmarks/hle_diamond/judge_openai.yaml \
+    --config benchmarks/hle_diamond/sandbox_docker_local.yaml \
+    --num-repeats 1 --limit 20 \
+    ++policy_model_name=<gateway model id> \
+    ++responses_create_params.reasoning.effort=high \
+    ++observability_enabled=true ++model_call_capture_dir=/abs/path/model-calls \
+    --output results/hle_diamond_opencode_pilot.jsonl
+```
+
+- `sandbox_docker_local.yaml` defines a second provider block, `sandbox_docker` (the content of
+  `nemo_gym/sandbox/providers/docker/configs/docker.yaml`), because the composed `sandbox:` block
+  cannot be removed or re-typed by an override, and repoints `hle_diamond_opencode_agent` and
+  `hle_diamond_pi_agent` at it with `network_access: inherit` (restricted policies fail closed on
+  any provider but OpenSandbox). Only the agent the preset defines is started; the other block stays
+  a partial, inert entry. It also replaces the presets' environment note, which says internet is
+  disabled, with the truth.
+- Uncomment `network: host` in the override on hosts whose firewall drops bridge (docker0) to host
+  traffic or whose hostname resolves to a loopback alias such as `127.0.1.1` under the presets'
+  `use_absolute_ip: true`: the container must reach the Gym model server at the advertised address.
+  Host networking also lets the container reach every service on the host; where the firewall allows
+  it, prefer bridge networking with `++use_absolute_ip=false ++default_host=<routable host IP>`.
+- The Docker provider ignores `sandbox_config.ttl_s` when an entrypoint is set, and the presets set
+  `entrypoint: [sleep, infinity]`, so container lifetime relies on the agent's cleanup. Check
+  `docker ps -a --filter label=nemo-gym.sandbox` after every run.
+- The first run builds per-server `uv` virtual environments and needs PyPI access from the host.
+- The search presets additionally need `TAVILY_API_KEY`.
+
+### Reading sandboxed results
+
+- `response.status` is `null` on sandboxed rows (the adapter synthesises the response). Read the
+  outcome from `opencode_finished`, `opencode_failed`, `opencode_exit_code` and
+  `opencode_export_found` (OpenCode) or `finished_naturally`, `pi_failed`, `pi_exit_code` and
+  `pi_error_type` (Pi); the aggregate metrics carry `mean/opencode_failed` and `mean/opencode_finished`.
+- `ng_trajectory`, `ng_perf` and `ng_model_call_capture` are attached only with
+  `++observability_enabled=true ++model_call_capture_dir=<absolute dir>`; without them every
+  trajectory health check reports "unobserved". Use a distinct capture directory per run.
+- Confirm tool use: at least one pilot row must show `ng_perf.num_tool_calls > 0` (or a `tool` part
+  in the harness transcript under the artifacts directory). Otherwise the sandbox was never
+  exercised and the run is a no-tools run through a different prompt path, not a with-tools result.
+- Confirm effort: the captured OpenCode request body carries `reasoning_effort: high`; a captured Pi
+  request does not (Prompting > Reasoning effort).
+- Token and latency figures are not comparable with the announcement's mean output tokens: the
+  harness's system prompt and tool schema dominate the input, and the call is chat-completions.
 
 ## Sandboxed agents (with tools)
 
 `hle_diamond/opencode` and `hle_diamond/pi` give the model sandboxed Python tools without search;
 `hle_diamond/opencode_search` and `hle_diamond/pi_search` add Tavily search and page tools. All four
-run the 728 text rows with the Explanation / Answer / Confidence instructions in a single user
-message and one repeat; keep collection repeats at one. The published with-tools column was produced
-under upstream's `docs/evaluation-with-tools.md` protocol, from which these presets depart in
-concrete ways, so they support a **comparison, not a reproduction**, of that column:
+run the 728 text rows with the verbatim HLE instructions in a single user message and one repeat;
+keep collection repeats at one. The published with-tools column was produced under upstream's
+`docs/evaluation-with-tools.md` protocol, from which these presets depart in concrete ways, so they
+support a **comparison, not a reproduction**, of that column:
 
 - Harness: OpenCode or Pi inside Gym's sandbox instead of each vendor's own agent (Claude Code,
-  Codex CLI, Gemini CLI, Muse Code).
+  Codex CLI, Gemini CLI, Muse Code), with the harness's own system prompt ahead of the instruction.
 - Sandbox: the `gym-*-science` images carry Python 3.13 with SageMath and Lean/Mathlib preinstalled,
   and the environment note tells the model so; upstream requires Python 3.11.16 with pinned
   requirements and forbids specialist solvers, chess engines, OCR and other task libraries.
@@ -237,6 +371,8 @@ concrete ways, so they support a **comparison, not a reproduction**, of that col
   at 60,000 characters, no media).
 - Leakage policy: two of upstream's seven blocklist families are enforced (see Search exclusions).
 - Rows: 728/1000 text rows; image questions cannot be sent through these adapters.
+- Reasoning effort: requested through the harness's own knob; transmitted by OpenCode, not by Pi
+  (see Prompting > Reasoning effort).
 
 State these departures next to every number collected with these presets.
 
@@ -251,8 +387,9 @@ these presets:
   not start.
 - Egress: the presets request `network_access: model_only` (code-only) or `model_and_tools`
   (search). Only the OpenSandbox provider enforces those policies; the Docker provider has no
-  network policy, so a local Docker run needs `network_access: inherit` and its egress is **not**
-  blocked. Label any such run accordingly.
+  network policy, so a local Docker run goes through `sandbox_docker_local.yaml`, which switches to
+  `network_access: inherit`, and its egress is **not** blocked (verified: an HTTPS request to a
+  public site succeeds inside such a sandbox). Label any such run accordingly.
 - Answer exposure: the search presets supply the HLE-Diamond
   [exclusion list](search_exclusions.json), derived from the upstream `docs/blocklist.json` domains
   and URL prefixes by `build_search_exclusions.py` (see Search exclusions below for what is and is
@@ -321,6 +458,7 @@ pytest tests/unit_tests/test_hle_diamond.py tests/unit_tests/test_hle_diamond_se
 Code: Apache 2.0.
 
 `cais/hle-diamond` data: MIT, with the dataset card's request not to publicly share, re-upload or
-redistribute it; the data is downloaded at run time and never committed. Prompts are reused from
-`benchmarks/hle/prompts/` and are adapted from the HLE authors'
-[`centerforaisafety/hle`](https://github.com/centerforaisafety/hle) harness (MIT).
+redistribute it; the data is downloaded at run time and never committed. The prompt files in
+`prompts/` reproduce the HLE authors' `SYSTEM_PROMPT` from
+[`centerforaisafety/hle`](https://github.com/centerforaisafety/hle) (MIT) verbatim; the judge prompt
+is reused from `benchmarks/hle/prompts/judge.txt`, adapted from the same harness.
