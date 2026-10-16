@@ -1,0 +1,39 @@
+# Prefix pass@K agent: replays a captured trajectory, hands over at the decisive turn.
+#
+# The container comes from the resources server (`/seed_session` returns a
+# handle), so this agent only needs the provider name to attach to it. Include a
+# provider config that defines a `sandbox` block, e.g.
+# nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+prefix_pass_k_agent:
+  responses_api_agents:
+    prefix_pass_k_agent:
+      entrypoint: app.py
+      domain: coding
+      description: Prefix pass@K — replay a trajectory to its decisive turn, then let the candidate finish.
+      value: Measure per-state capability and diversity (mean reward vs true pass@K) on SWE-bench.
+
+      resources_server:
+        type: resources_servers
+        name: ???
+      model_server:
+        type: responses_api_models
+        name: policy_model
+
+      # Declared empty so benchmark configs can inherit and fill it in; the
+      # config merge rejects undeclared keys.
+      datasets: []
+
+      sandbox_provider: sandbox
+
+      # Turns the candidate may take after the handover. The reference arms use
+      # 3: the decisive turn plus room to recover from one format error.
+      max_forwards: 3
+      # Matches the captured harness's per-command timeout.
+      step_timeout: 60
+
+      # Gold check. Replays 1..T INCLUSIVE and takes no model turns, which must
+      # reproduce the trajectory's own resolving patch. Run this before trusting
+      # any score: a pass@K of 0 is more often a broken replay than a weak model.
+      replay_through_target: false
+
+      debug: false
