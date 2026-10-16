@@ -10,7 +10,7 @@ from typing import Any
 from nemo_gym.episode_types import MaterializedTask, TaskId
 from nemo_gym.single_agent_turn_types import SingleAgentTurnTaskInput
 from nemo_gym.tasks.harbor.digest import DIGEST_KEY
-from nemo_gym.tasks.harbor.task import HarborTask, HarborTaskError
+from nemo_gym.tasks.harbor.task import HarborTask, HarborTaskError, is_task_folder
 
 
 AGENT_TIMEOUT_METADATA_KEY = "agent_timeout_sec"
@@ -73,15 +73,27 @@ def write_rows(tasks: list[HarborTask], taskset: str, path: Path) -> list[dict[s
 def taskset_mapping(tasks: list[HarborTask], folder: Path) -> dict[str, Any]:
     """Where a taskset's folders live and which digest each task had at materialization.
 
-    Servers resolve a task as ``<folder>/<task_id>``. For a folder of task folders that is
-    the folder itself; for a single task folder it is the task's parent, so ``folder`` is
-    always the tasks' common parent directory.
+    Servers resolve a task as ``<folder>/<task_id>``, or ``<folder>/<paths[task_id]>`` for a task
+    found below the first level (see :func:`nemo_gym.tasks.harbor.task.discover_tasks`). For a
+    folder of task folders ``folder`` is the folder itself; for a single task folder it is the
+    task's parent, so ``folder`` is always the root the tasks were discovered under.
     """
     _validate_task_ids(tasks)
-    parents = {task.path.parent for task in tasks}
-    if len(parents) != 1:
-        raise ValueError(f"Tasks of one taskset must share a parent folder, got {sorted(map(str, parents))}")
-    return {"folder": str(parents.pop().resolve()), "tasks": {task.task_id: task.digest for task in tasks}}
+    root = Path(folder).resolve()
+    if is_task_folder(root):
+        root = root.parent
+    paths: dict[str, str] = {}
+    for task in tasks:
+        try:
+            relative = task.path.relative_to(root)
+        except ValueError:
+            raise ValueError(f"Task {task.path} is not under the taskset folder {root}") from None
+        if relative.as_posix() != task.task_id:
+            paths[task.task_id] = relative.as_posix()
+    mapping: dict[str, Any] = {"folder": str(root), "tasks": {task.task_id: task.digest for task in tasks}}
+    if paths:
+        mapping["paths"] = paths
+    return mapping
 
 
 def run_config(

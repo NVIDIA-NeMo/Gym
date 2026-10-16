@@ -97,7 +97,11 @@ async def test_live_folder_edits_do_not_change_seeded_verifier(tmp_path, monkeyp
     snapshots: list[Path] = []
     during_turn(server, lambda: snapshots.append(server._sessions["r2"].task.path))
     assert (await run_episode(server, task, rollout="r2")).result.reward == 1
-    with tarfile.open(fileobj=io.BytesIO(sandbox.uploaded_archives[-1])) as archive:
+    # The last archive upload is tests/ (the trajectory upload that follows it is a plain file).
+    tests_archive = [
+        a for (_, remote), a in zip(sandbox.uploads, sandbox.uploaded_archives) if remote.endswith(".tar.gz")
+    ][-1]
+    with tarfile.open(fileobj=io.BytesIO(tests_archive)) as archive:
         script = next(name for name in archive.getnames() if name.lstrip("./") == "test.sh")
         assert archive.extractfile(script).read() == original
     # Both episodes ran from the one snapshot taken at the first seed.
@@ -110,11 +114,11 @@ async def test_concurrent_first_seeds_share_snapshot_even_if_one_is_cancelled(tm
     copies = []
     original = server._snapshot_task
 
-    def snapshot(folder, expected):
+    def snapshot(folder, expected, root=None):
         copies.append(folder)
         entered.set()
         assert release.wait(10)
-        return original(folder, expected)
+        return original(folder, expected, root)
 
     monkeypatch.setattr(server, "_snapshot_task", snapshot)
     first = asyncio.create_task(server.run_request(episode(task)))
@@ -264,6 +268,7 @@ async def test_hung_agent_close_does_not_pin_episode_key(tmp_path, monkeypatch):
 
     Each cleanup callback has its own budget (``CleanupContext.aclose``); under one shared budget the hung
     close starved both, the sandbox ran until its TTL and every redelivery of the episode was refused forever.
+    The finished turn is still scored: a close that fails only by timeout does not discard it.
     """
     from environment_servers.harbor.tests import test_app
 
@@ -278,7 +283,7 @@ async def test_hung_agent_close_does_not_pin_episode_key(tmp_path, monkeypatch):
 
     monkeypatch.setattr(test_app.FakeAgentClient, "post", hanging_close)
     response = await asyncio.wait_for(run_episode(server, task), 10)
-    assert response.failure.stage == "cleanup"
+    assert response.failure is None and response.result.reward == 1 and response.result.ng_agent_observations is None
     assert sandbox.stopped and not server._sandboxes and not server._sessions and server._active == set()
     # The client's redelivery of the episode is admitted again, not refused as "still running".
     again = await asyncio.wait_for(run_episode(server, task), 10)

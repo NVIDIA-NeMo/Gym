@@ -17,6 +17,10 @@ from environment_servers.harbor.tests.test_review_regressions import during_turn
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 
 
+# What run() hands the verifier: the exported ATIF transcript, written to /logs/agent before test.sh runs.
+TRAJECTORY = b'{"schema_version": "ATIF-v1.7"}\n'
+
+
 class LocalSandbox:
     """Run production transfer and verifier commands on a pytest-owned filesystem tree."""
 
@@ -80,7 +84,7 @@ async def test_linked_verifier_roots_cannot_preserve_planted_success(tmp_path, m
         f"> {shlex.quote(str(logs / 'verifier' / 'reward.txt'))}\n"
     )
     outcome = await server._run_verifier(
-        SimpleNamespace(task=task, sandbox=LocalSandbox(), workdir=str(root), entrypoint=None)
+        SimpleNamespace(task=task, sandbox=LocalSandbox(), workdir=str(root), entrypoint=None), TRAJECTORY
     )
     assert outcome["reward"] == 0
     assert not outcome.get("mask_sample", False)
@@ -112,7 +116,7 @@ async def test_unsafe_diagnostic_link_does_not_mask_valid_reward(tmp_path, monke
         "echo useful-output\n"
     )
     outcome = await server._run_verifier(
-        SimpleNamespace(task=task, sandbox=LocalSandbox(), workdir=str(root), entrypoint=None)
+        SimpleNamespace(task=task, sandbox=LocalSandbox(), workdir=str(root), entrypoint=None), TRAJECTORY
     )
     assert outcome["reward"] == 1 and not outcome.get("mask_sample", False)
     artifacts = Path(outcome["verifier_logs_dir"])
@@ -140,6 +144,9 @@ def test_sandbox_lifetime_covers_episode_and_cleanup(tmp_path, monkeypatch):
     server, task, _, _ = make_server(tmp_path, monkeypatch)
     monkeypatch.setattr(harbor, "get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}})
     spec = server._sandbox_spec(task, "/app")
+    assert spec.ttl_s >= server._episode_budget_s(task) + server.config.cleanup_timeout_seconds
+    server.config.enforce_task_timeouts = False
+    spec = server._sandbox_spec(task, "/app")
     assert spec.ttl_s >= server.config.default_episode_timeout_seconds + server.config.cleanup_timeout_seconds
 
 
@@ -156,7 +163,9 @@ async def test_optional_diagnostic_transfer_failure_preserves_score(tmp_path, mo
         await download(source, target)
 
     monkeypatch.setattr(sandbox, "download", fail_diagnostics)
-    outcome = await server._run_verifier(SimpleNamespace(task=task, sandbox=sandbox, workdir="/app", entrypoint=None))
+    outcome = await server._run_verifier(
+        SimpleNamespace(task=task, sandbox=sandbox, workdir="/app", entrypoint=None), TRAJECTORY
+    )
     assert calls == 2
     assert outcome["reward"] == 1 and not outcome.get("mask_sample", False)
     await server.shutdown()
@@ -172,7 +181,7 @@ async def test_unsafe_reward_link_still_masks_transfer_failure(tmp_path, monkeyp
         f"ln -s {shlex.quote(str(outside))} {shlex.quote(str(logs / 'verifier/reward.txt'))}\n"
     )
     outcome = await server._run_verifier(
-        SimpleNamespace(task=task, sandbox=LocalSandbox(), workdir=str(root), entrypoint=None)
+        SimpleNamespace(task=task, sandbox=LocalSandbox(), workdir=str(root), entrypoint=None), TRAJECTORY
     )
     assert outcome["reward"] == 0 and outcome["mask_sample"] is True
     assert not list(server._artifacts_dir.rglob("reward.txt"))
@@ -245,7 +254,7 @@ async def test_verifier_logs_preserve_directory_permissions_after_transfers(
         expected = server._artifacts_dir / "ordinary-directory"
         expected.mkdir()
         outcome = await server._run_verifier(
-            SimpleNamespace(task=task, sandbox=LocalSandbox(), workdir=str(root), entrypoint=None)
+            SimpleNamespace(task=task, sandbox=LocalSandbox(), workdir=str(root), entrypoint=None), TRAJECTORY
         )
     finally:
         os.umask(previous_umask)

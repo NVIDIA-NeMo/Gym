@@ -289,11 +289,11 @@ def test_task_hashing_runs_outside_the_request_event_loop(tmp_path, monkeypatch)
     original_load = module.load_task
     loads = []
 
-    def load_without_event_loop(path):
+    def load_without_event_loop(path, **kwargs):
         with pytest.raises(RuntimeError, match="no running event loop"):
             asyncio.get_running_loop()
         loads.append(path)
-        return original_load(path)
+        return original_load(path, **kwargs)
 
     monkeypatch.setattr(module, "load_task", load_without_event_loop)
     client = TestClient(agent.setup_webserver())

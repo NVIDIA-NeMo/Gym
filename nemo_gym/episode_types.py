@@ -90,6 +90,8 @@ class EpisodeFailure(BaseModel):
     terminal: bool = Field(description="Whether rollout collection must not attempt this episode again.")
     failure_kind: str | None = None
     stage: FailureStage | None = None
+    # The environment's own step name within the stage, when it has several (a Harbor ``[[steps]]`` entry).
+    step: str | None = None
 
     @field_validator("failure_kind")
     @classmethod
@@ -102,7 +104,7 @@ class EpisodeFailure(BaseModel):
         # Omit metadata when the producer cannot classify the failure.
         # Protocol subclasses still serialize their own diagnostic fields.
         result = handler(self)
-        for key in ("failure_kind", "stage"):
+        for key in ("failure_kind", "stage", "step"):
             if result.get(key) is None:
                 result.pop(key, None)
         return result

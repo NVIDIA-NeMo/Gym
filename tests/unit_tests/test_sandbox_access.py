@@ -49,3 +49,15 @@ def test_sandbox_access_rejects_unspecified_connection_fields() -> None:
                 "workdir": "/workspace",
             }
         )
+
+
+def test_sandbox_access_carries_the_agent_user() -> None:
+    """Harnesses run every command as the task's `[agent].user`; absent, the sandbox's default user applies."""
+    connection = DirectSandboxConnection(provider_config_ref="sandbox", descriptor={"sandbox_id": "sandbox-1"})
+    assert SandboxAccess(connection=connection, workdir="/app").user is None
+    named = SandboxAccess(connection=connection, workdir="/app", user="agent")
+    numeric = SandboxAccess(connection=connection, workdir="/app", user=1000)
+    assert SandboxAccess.model_validate(named.model_dump()).user == "agent"
+    assert SandboxAccess.model_validate(numeric.model_dump()).user == 1000
+    with pytest.raises(ValidationError):
+        SandboxAccess(connection=connection, workdir="/app", user=["agent"])

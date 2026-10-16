@@ -111,20 +111,22 @@ class OracleAgent(SimpleResponsesAPIAgent):
             tasksets.update(server.get("tasksets") or {})
         return tasksets
 
-    def _task_folder(self, taskset: str, task_id: str) -> tuple[Path, str]:
-        """The task folder and materialized digest from the environment server's taskset mapping."""
+    def _task_folder(self, taskset: str, task_id: str) -> tuple[Path, Path, str]:
+        """The taskset root, the task folder and the materialized digest from the environment server's mapping."""
         mapping = self._tasksets().get(taskset)
         if mapping is None:
             raise HTTPException(404, f"Taskset {taskset!r} is not in the environment server's taskset mapping")
         digest = (mapping.get("tasks") or {}).get(task_id)
         if digest is None:
             raise HTTPException(404, f"Task {task_id!r} is not in taskset {taskset!r}")
-        return Path(mapping["folder"]) / task_id, str(digest)
+        root = Path(mapping["folder"])
+        # A task found below the first level of the dataset keeps its own relative path in the mapping.
+        return root, root / (mapping.get("paths") or {}).get(task_id, task_id), str(digest)
 
     def _load_task(self, taskset: str, task_id: str) -> HarborTask:
-        folder, digest = self._task_folder(taskset, task_id)
+        root, folder, digest = self._task_folder(taskset, task_id)
         try:
-            task = load_task(folder)
+            task = load_task(folder, root=root)
         except HarborTaskError as exc:
             raise HTTPException(422, str(exc)) from exc
         if task.digest != digest:

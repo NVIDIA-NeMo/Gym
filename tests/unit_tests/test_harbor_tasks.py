@@ -734,12 +734,31 @@ class TestDiscovery:
     def test_single_task_folder(self, tmp_path):
         assert [t.task_id for t in discover_tasks(write_task(tmp_path / "solo"))] == ["solo"]
 
-    def test_folder_of_task_folders_one_level(self, tmp_path):
+    def test_folder_of_task_folders_is_searched_recursively(self, tmp_path):
         write_task(tmp_path / "ds" / "b")
         write_task(tmp_path / "ds" / "a")
         write_task(tmp_path / "ds" / "nested" / "deep")
+        write_task(tmp_path / "ds" / ".hidden" / "never")
         (tmp_path / "ds" / "README.md").write_text("dataset readme")
-        assert [t.task_id for t in discover_tasks(tmp_path / "ds")] == ["a", "b"]
+        tasks = discover_tasks(tmp_path / "ds")
+        assert [t.task_id for t in tasks] == ["a", "b", "deep"]
+        # A nested task reads the dataset's own files from the root, not from its parent folder.
+        (tmp_path / "ds" / "dataset.toml").write_text("[gym.defaults]\ntimeout_multiplier = 2.0\n")
+        deep = discover_tasks(tmp_path / "ds")[2]
+        assert deep.path == (tmp_path / "ds" / "nested" / "deep").resolve()
+        assert deep.config.agent.timeout_sec == 240.0
+
+    def test_duplicate_task_ids_across_folders_are_rejected(self, tmp_path):
+        from nemo_gym.tasks.harbor.image_build import plan_builds
+        from nemo_gym.tasks.harbor.image_configs import dockerfile_base_images
+        from nemo_gym.tasks.harbor.task import iter_task_folders
+
+        write_task(tmp_path / "ds" / "a")
+        write_task(tmp_path / "ds" / "nested" / "a")
+        # The folder walk itself rejects them, so every scan keyed by task name fails before doing work.
+        for scan in (discover_tasks, iter_task_folders, plan_builds, dockerfile_base_images):
+            with pytest.raises(HarborTaskError, match="Duplicate Harbor task ID 'a'"):
+                scan(tmp_path / "ds")
 
     def test_empty_folder_is_an_error(self, tmp_path):
         (tmp_path / "empty").mkdir()
@@ -1455,6 +1474,27 @@ class TestCli:
         # A second prepare finds everything recorded and asks the registry for nothing.
         prepare_target(str(folder), output_root=tmp_path / "out")
         assert FakeRegistryClient.resolved == ["ubuntu:24.04", "debian:bookworm-slim"]
+
+    def test_prepare_rejects_duplicate_task_ids_before_registry_or_build_work(self, tmp_path):
+        folder = tmp_path / "ds"
+        write_task(folder / "v1" / "x")
+        write_task(folder / "v2" / "x", dockerfile=TB21_DEBIAN_DOCKERFILE)
+        with pytest.raises(HarborTaskError, match="Duplicate Harbor task ID 'x'"):
+            prepare_target(str(folder), output_root=tmp_path / "out")
+        assert FakeRegistryClient.resolved == []
+        assert not (folder / IMAGE_CONFIGS_FILE).exists()
+
+    def test_prepare_records_compose_images_at_the_dataset_root_for_nested_tasks(self, tmp_path):
+        folder = tmp_path / "ds"
+        web = write_task(folder / "00-services" / "web")
+        (web / "environment" / "docker-compose.yaml").write_text("services:\n  api:\n    image: redis:7-alpine\n")
+        write_task(folder / "zeta")
+        prepared = prepare_target(str(folder), output_root=tmp_path / "out")
+        assert [task.task_id for task in prepared.tasks] == ["web", "zeta"]
+        # Where the loader and the environment server read it from: the dataset root, not the group folder.
+        recorded = json.loads((folder / "compose-images.json").read_text())
+        assert "redis:7-alpine" in recorded
+        assert not (folder / "00-services" / "compose-images.json").exists()
 
     def test_prepare_fails_clearly_when_a_base_image_cannot_be_fetched(self, tmp_path):
         from nemo_gym.tasks.harbor.image_configs import ImageConfigError
@@ -2178,13 +2218,13 @@ class TestValidationSummary:
         report = summarize_validation(rollouts, ["never_ran"])
 
         lines = report.text.splitlines()
-        assert lines[0] == "task_id\tstatus\treward"
-        assert "solved\toracle solved\t1.0" in lines
-        assert "wrong\toracle solved (harbor:missing_reward)\t0.0" in lines
-        assert "skipped\tunvalidated (no solution/)\t-" in lines
-        assert "broken\tfailed: seed exploded\t-" in lines
-        assert "masked\tmasked (provider_unavailable)\t-" in lines
-        assert "never_ran\tunvalidated (no solution/)\t-" in lines
+        assert lines[0] == "task_id\tstatus\treward\tverify_s\tnetwork"
+        assert "solved\toracle solved\t1.0\t-\t-" in lines
+        assert "wrong\toracle solved (harbor:missing_reward)\t0.0\t-\t-" in lines
+        assert "skipped\tunvalidated (no solution/)\t-\t-\t-" in lines
+        assert "broken\tfailed: seed exploded\t-\t-\t-" in lines
+        assert "masked\tmasked (provider_unavailable)\t-\t-\t-" in lines
+        assert "never_ran\tunvalidated (no solution/)\t-\t-\t-" in lines
         assert report.ok is False
 
     def test_all_good_is_ok(self, tmp_path):
@@ -2770,3 +2810,120 @@ class TestRecordFiles:
         released.set()
         worker.join(timeout=5)
         assert not worker.is_alive()
+
+
+class TestDatasetTaskAdditions:
+    """`[gym.tasks."<id>"]` gains `verifier` overrides and `artifacts` additions, applied like `environment`."""
+
+    def test_verifier_fields_override_and_env_merges(self, tmp_path):
+        folder = tmp_path / "ds"
+        write_task(folder / "a", toml=HELLO_TOML + '\n[verifier.env]\nMODE = "fast"\nKEEP = "1"\n')
+        (folder / "dataset.toml").write_text(
+            '[gym.tasks."a".verifier]\ntimeout_sec = 900.0\nuser = "root"\n'
+            '[gym.tasks."a".verifier.env]\nMODE = "strict"\nJUDGE = "${JUDGE_KEY}"\n'
+        )
+        verifier = load_task(folder / "a").config.verifier
+        assert verifier.timeout_sec == 900.0 and verifier.user == "root"
+        assert verifier.env == {"MODE": "strict", "KEEP": "1", "JUDGE": "${JUDGE_KEY}"}
+        # The task's own file is untouched and the digest, which covers it, is unchanged by dataset.toml.
+        assert "900" not in (folder / "a" / "task.toml").read_text()
+
+    def test_verifier_environment_override_merges_env_like_the_agents(self, tmp_path):
+        folder = tmp_path / "ds"
+        write_task(
+            folder / "a",
+            toml=HELLO_TOML + '\n[verifier.environment]\ndocker_image = "org/verifier:1"\nenv = { A = "1" }\n',
+        )
+        (folder / "dataset.toml").write_text('[gym.tasks."a".verifier.environment]\ncpus = 4\nenv = { B = "2" }\n')
+        environment = load_task(folder / "a").config.verifier.environment
+        assert environment.docker_image == "org/verifier:1" and environment.cpus == 4
+        assert environment.env == {"A": "1", "B": "2"}
+
+    def test_artifacts_are_added_after_the_tasks_own(self, tmp_path):
+        folder = tmp_path / "ds"
+        write_task(folder / "a", toml=HELLO_TOML.replace("[task]\n", 'artifacts = ["/app/out.txt"]\n\n[task]\n', 1))
+        (folder / "dataset.toml").write_text(
+            '[gym.tasks."a"]\nartifacts = ["/var/log/app", { source = "/data/db", service = "db" }]\n'
+        )
+        artifacts = load_task(folder / "a").config.artifacts
+        assert [(a.source, a.service) for a in artifacts] == [
+            ("/app/out.txt", None),
+            ("/var/log/app", None),
+            ("/data/db", "db"),
+        ]
+        # Timeout multipliers still apply on top of the per-task verifier override.
+        (folder / "dataset.toml").write_text(
+            '[gym.defaults]\ntimeout_multiplier = 2.0\n[gym.tasks."a".verifier]\ntimeout_sec = 100.0\n'
+        )
+        assert load_task(folder / "a").config.verifier.timeout_sec == 200.0
+
+    @pytest.mark.parametrize(
+        ("table", "message"),
+        [
+            ('[gym.tasks."a".verifier]\ntimeout = 5\n', r"verifier\] has unknown keys: timeout"),
+            ('[gym.tasks."a".verifier]\ntimeout_sec = -1\n', r"verifier\]:"),
+            ('[gym.tasks."a"]\nartifacts = ["../escape"]\n', r"artifacts\]:"),
+        ],
+    )
+    def test_bad_additions_are_named(self, tmp_path, table, message):
+        folder = tmp_path / "ds"
+        write_task(folder / "a")
+        (folder / "dataset.toml").write_text(table)
+        with pytest.raises(HarborTaskError, match=message):
+            load_task(folder / "a")
+
+
+def test_taskset_mapping_records_the_relative_path_of_nested_tasks(tmp_path):
+    from nemo_gym.tasks.harbor.materialize import taskset_mapping
+
+    folder = tmp_path / "ds"
+    write_task(folder / "a")
+    write_task(folder / "group" / "sub" / "deep")
+    tasks = discover_tasks(folder)
+    mapping = taskset_mapping(tasks, folder)
+    assert mapping["folder"] == str(folder.resolve())
+    assert set(mapping["tasks"]) == {"a", "deep"}
+    # Only tasks below the first level need a path; the server resolves the others as <folder>/<task_id>.
+    assert mapping["paths"] == {"deep": "group/sub/deep"}
+    assert Path(mapping["folder"]) / mapping["paths"]["deep"] == tasks[1].path
+    # Prepare writes the same mapping into the run config.
+    config = run_config(
+        taskset="ds",
+        folder=folder,
+        tasks=tasks,
+        rows_path=tmp_path / "out" / "tasks.jsonl",
+        agent_instance_name="hermes_agent",
+        agent_impl="hermes_agent",
+    )
+    assert config["harbor_ds_environment"]["environment_servers"]["harbor"]["tasksets"]["ds"]["paths"] == {
+        "deep": "group/sub/deep"
+    }
+
+
+def test_validation_summary_reports_verify_time_and_network_per_task(tmp_path):
+    from nemo_gym.tasks.harbor.cli import summarize_validation
+
+    rollouts = tmp_path / "rollouts.jsonl"
+    rows = [
+        {
+            "_ng_task_id": {"taskset": "ds", "task_id": "timed"},
+            "response": {"metadata": {"oracle": "solved"}},
+            "reward": 1.0,
+            "verifier_seconds": 12.345,
+            "verifier_network": "public",
+        },
+        {
+            "_ng_task_id": {"taskset": "ds", "task_id": "masked"},
+            "response": {"metadata": {"oracle": "solved"}},
+            "reward": 0.0,
+            "mask_sample": True,
+            "failure_kind": "provider_unavailable",
+            "verifier_seconds": 3,
+            "verifier_network": "no-network",
+        },
+    ]
+    rollouts.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    lines = summarize_validation(rollouts, []).text.splitlines()
+    assert lines[0] == "task_id\tstatus\treward\tverify_s\tnetwork"
+    assert "timed\toracle solved\t1.0\t12.3\tpublic" in lines
+    assert "masked\tmasked (provider_unavailable)\t-\t3.0\tno-network" in lines

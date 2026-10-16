@@ -20,7 +20,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from nemo_gym.tasks.harbor.models import HarborEnvironment, HarborTaskConfig
+from nemo_gym.tasks.harbor.models import HarborArtifact, HarborEnvironment, HarborTaskConfig, HarborVerifier
 
 
 DATASET_FILE = "dataset.toml"
@@ -42,14 +42,19 @@ class GymDatasetDefaults(BaseModel):
 
 
 class GymTaskOverride(BaseModel):
-    """``[gym.tasks."<task_id>"]``: per-task overrides, written with Harbor ``[environment]`` fields.
+    """``[gym.tasks."<task_id>"]``: per-task overrides, written with Harbor's own fields.
 
-    ``env`` merges over the task's own; every other field replaces the task's value.
+    ``environment`` and ``verifier`` take any key of the task's ``[environment]`` and ``[verifier]``
+    tables; ``env`` merges over the task's own and every other field replaces the task's value.
+    ``artifacts`` are added after the task's own ``artifacts`` entries, in Harbor's shape (a path, or a
+    table with ``source``, ``destination`` and ``service``).
     """
 
     model_config = ConfigDict(extra="forbid")
 
     environment: dict[str, Any] = Field(default_factory=dict)
+    verifier: dict[str, Any] = Field(default_factory=dict)
+    artifacts: list[Any] = Field(default_factory=list)
 
 
 class GymDatasetConfig(BaseModel):
@@ -113,6 +118,35 @@ def _override_environment(
     return HarborEnvironment.model_validate(merged)
 
 
+def _override_verifier(verifier: HarborVerifier, override: dict[str, Any], *, task_id: str) -> HarborVerifier:
+    if not override:
+        return verifier
+    unknown = HarborVerifier.unknown_keys(override)
+    if unknown:
+        raise ValueError(f'[gym.tasks."{task_id}".verifier] has unknown keys: {", ".join(unknown)}')
+    merged = verifier.model_dump(exclude_unset=True)
+    for key, value in override.items():
+        if key == "env":
+            merged["env"] = dict(merged.get("env") or {}) | dict(value)
+        elif key == "environment" and isinstance(value, dict) and isinstance(merged.get("environment"), dict):
+            # The verifier's own sandbox is overridden like the agent's: `env` merges, other fields replace.
+            base = HarborEnvironment.model_validate(merged["environment"])
+            merged["environment"] = _override_environment(base, value, task_id=task_id).model_dump(exclude_unset=True)
+        else:
+            merged[key] = value
+    try:
+        return HarborVerifier.model_validate(merged)
+    except ValueError as exc:
+        raise ValueError(f'[gym.tasks."{task_id}".verifier]: {exc}') from exc
+
+
+def _added_artifacts(entries: list[Any], *, task_id: str) -> list[HarborArtifact]:
+    try:
+        return [HarborArtifact.model_validate(entry) for entry in entries]
+    except ValueError as exc:
+        raise ValueError(f'[gym.tasks."{task_id}".artifacts]: {exc}') from exc
+
+
 def apply_dataset_config(config: HarborTaskConfig, task_id: str, dataset: GymDatasetConfig) -> HarborTaskConfig:
     """The effective ``task.toml`` for ``task_id``: overrides first, then the dataset defaults."""
     if dataset.is_empty:
@@ -121,7 +155,8 @@ def apply_dataset_config(config: HarborTaskConfig, task_id: str, dataset: GymDat
     override = dataset.tasks.get(task_id)
     environment = _override_environment(config.environment, override.environment if override else {}, task_id=task_id)
     environment = _scale_environment(environment, defaults.resource_multiplier)
-    verifier = config.verifier
+    verifier = _override_verifier(config.verifier, override.verifier if override else {}, task_id=task_id)
+    artifacts = config.artifacts + (_added_artifacts(override.artifacts, task_id=task_id) if override else [])
     verifier_update: dict[str, Any] = {}
     if defaults.timeout_multiplier != 1:
         verifier_update["timeout_sec"] = verifier.timeout_sec * defaults.timeout_multiplier
@@ -132,4 +167,6 @@ def apply_dataset_config(config: HarborTaskConfig, task_id: str, dataset: GymDat
     agent = config.agent
     if defaults.timeout_multiplier != 1:
         agent = agent.model_copy(update={"timeout_sec": agent.timeout_sec * defaults.timeout_multiplier})
-    return config.model_copy(update={"environment": environment, "agent": agent, "verifier": verifier})
+    return config.model_copy(
+        update={"environment": environment, "agent": agent, "verifier": verifier, "artifacts": artifacts}
+    )

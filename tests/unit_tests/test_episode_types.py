@@ -126,3 +126,11 @@ def test_unknown_execution_stage_is_optional_but_stage_aliases_are_rejected() ->
 )
 def test_materialized_task_row_identifies_routing_shape(row: dict[str, object], expected: bool) -> None:
     assert is_materialized_task_row(row) is expected
+
+
+def test_failure_step_is_optional_and_omitted_when_absent() -> None:
+    plain = EpisodeFailure(failure_reason="setup failed", terminal=True, stage="seed")
+    assert "step" not in plain.model_dump(mode="json")
+    stepped = EpisodeFailure(failure_reason="setup failed", terminal=True, stage="seed", step="step-2")
+    assert stepped.model_dump(mode="json")["step"] == "step-2"
+    assert EpisodeFailure.model_validate(stepped.model_dump(mode="json")) == stepped
