@@ -50,7 +50,6 @@ gym eval run --resume --concurrency 8 \
 | `policy_model_name` | Hydra value | Model name passed to the OpenCode agent. Must use OpenCode provider in [opencode.json](./harbor/task-template/environment/opencode.json). Automatically set when using `-m/--model` flag in the script above. |
 | `SINGULARITY_CACHEDIR` | Environment variable | Singularity image cache directory; `/harbor` is appended. |
 | `SINGULARITY_TMPDIR` | Environment variable | Singularity temp directory; Must already exist on host. |
-| `SINGULARITY_FORCE_PULL` | Environment variable | Whether Singularity should force-pull images. Defaults to `false`. |
 | `NVINF_API_KEY` | Environment variable | NVIDIA Inference API key for OpenCode provider in [opencode.json](./harbor/task-template/environment/opencode.json) |
 | `VLLM_API_BASE` | Environment variable | vLLM API base for OpenCode provider in [opencode.json](./harbor/task-template/environment/opencode.json) |
 | `JUDGE_MODEL` | Environment variable | Judge model used to score the agent's response. This must use [LiteLLM](https://docs.litellm.ai/) provider prefixes. |
@@ -74,8 +73,6 @@ are no dataset splits. Each generated task starts from
 [`task-template/`](./harbor/task-template); `task.toml`, the instruction, and the
 judge prompt are rendered with task-specific values. The matching source
 archive is extracted into `environment/data/`.
-
-All tasks use `gitlab-master.nvidia.com/nemotron-life-science/benchmarks/bmb:latest`. This image is built automatically by CI from the [`Dockerfile`](./Dockerfile).
 
 ```text
 harbor-bmb/
