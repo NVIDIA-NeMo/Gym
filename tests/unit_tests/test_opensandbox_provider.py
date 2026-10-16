@@ -1105,6 +1105,53 @@ async def test_exec_file_operations_and_reference_validation(monkeypatch: pytest
     assert await provider.status(bare_handle) == SandboxStatus.UNKNOWN
 
 
+async def test_file_transfers_retry_unanswered_requests(tmp_path: Path) -> None:
+    """An upload or download the server never answers is retried; one that is never answered still fails."""
+
+    class UnansweredFiles:
+        def __init__(self, unanswered: int) -> None:
+            self.unanswered = unanswered
+            self.writes: list[tuple[str, str | bytes]] = []
+
+        async def _wait_for_answer(self) -> None:
+            if self.unanswered > 0:
+                self.unanswered -= 1
+                await asyncio.Event().wait()
+
+        async def write_file(self, target_path: str, data: str | bytes) -> None:
+            await self._wait_for_answer()
+            self.writes.append((target_path, data))
+
+        async def read_bytes(self, source_path: str) -> bytes:
+            await self._wait_for_answer()
+            return f"bytes:{source_path}".encode()
+
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 0.05},
+        probe={"command": None},
+        operations={"retries": 2, "retry_delay_s": 0, "retry_max_delay_s": 0},
+    )
+    files = UnansweredFiles(unanswered=1)
+    handle = opensandbox_provider.SandboxHandle(
+        sandbox_id="sandbox-1", provider_name="opensandbox", raw=SimpleNamespace(files=files)
+    )
+    upload_path = tmp_path / "process_supervisor.py"
+    upload_path.write_bytes(b"supervisor")
+
+    await provider.upload_file(handle, upload_path, "/session/process_supervisor.py")
+    assert files.writes == [("/session/process_supervisor.py", b"supervisor")]
+
+    files.unanswered = 1
+    download_path = tmp_path / "export.json"
+    await provider.download_file(handle, "/session/export.json", download_path)
+    assert download_path.read_bytes() == b"bytes:/session/export.json"
+
+    files.unanswered = 3
+    with pytest.raises(TimeoutError, match=r"write_file\(/session/process_supervisor\.py\)"):
+        await provider.upload_file(handle, upload_path, "/session/process_supervisor.py")
+    assert len(files.writes) == 1
+
+
 async def _no_sleep(_seconds: float) -> None:
     return None
 
