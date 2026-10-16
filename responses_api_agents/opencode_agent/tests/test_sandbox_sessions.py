@@ -733,11 +733,7 @@ def test_invalid_seed_never_connects(setup, option):
     else:
         agent.config.opencode_config = {"provider": {"other": {"apiKey": "must-not-copy"}}}
     with TestClient(agent.setup_webserver()) as client:
-        if option == "worker":
-            with pytest.raises(ValueError, match="num_workers=1"):
-                client.post("/v1/agent_sessions", json=body)
-        else:
-            assert client.post("/v1/agent_sessions", json=body).status_code == 422
+        assert client.post("/v1/agent_sessions", json=body).status_code == 422
     sandbox.exec.assert_not_awaited()
 
 

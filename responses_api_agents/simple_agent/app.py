@@ -45,6 +45,7 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.base_responses_api_agent import (
     AGENT_ACTIVATION_HEADER,
     AgentCloseSessionResponse,
+    AgentSeedRejectedError,
     AgentSeedSessionRequest,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
@@ -208,16 +209,18 @@ class SimpleAgent(SimpleResponsesAPIAgent):
     def _new_session_state(self, body: AgentSeedSessionRequest) -> SimpleAgentSessionState:
         """Validate a seed request's grants and build its session state; a restore rebuilds sessions the same way."""
         if body.sandbox_access is not None:
-            raise ValueError("Simple Agent does not support sandbox access")
+            raise AgentSeedRejectedError("Simple Agent does not support sandbox access")
 
         accesses = self.effective_tool_accesses(body)
         unsupported = [access.name for access in accesses if isinstance(access, MCPToolAccess) and access.required]
         if unsupported:
-            raise ValueError(f"Simple Agent does not support required MCP tool access: {', '.join(unsupported)}")
+            raise AgentSeedRejectedError(
+                f"Simple Agent does not support required MCP tool access: {', '.join(unsupported)}"
+            )
 
         direct_accesses = [access for access in accesses if isinstance(access, DirectHTTPToolAccess)]
         if len(direct_accesses) > 1:
-            raise ValueError("Simple Agent supports at most one direct HTTP tool access per session")
+            raise AgentSeedRejectedError("Simple Agent supports at most one direct HTTP tool access per session")
         direct_access = direct_accesses[0] if direct_accesses else None
         return SimpleAgentSessionState(
             request=body,

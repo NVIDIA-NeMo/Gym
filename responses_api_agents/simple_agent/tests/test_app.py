@@ -65,6 +65,7 @@ from nemo_gym.openai_utils import (
 from nemo_gym.rollout_collection import _attach_trajectory_record
 from nemo_gym.rollout_observability import TrajectoryRecord
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+from nemo_gym.testing.agent_session_conformance import check_agent_seed_rejected
 from nemo_gym.tool_access import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
 from responses_api_agents.simple_agent.app import (
     ModelServerRef,
@@ -556,6 +557,25 @@ class TestApp:
 
         with pytest.raises(ValueError, match="does not support required MCP"):
             await server.seed_agent_session(request, body)
+
+    def test_unsupported_seed_is_refused_with_a_final_422(self) -> None:
+        server, _ = _make_agent(False)
+        body = AgentSeedSessionRequest(
+            agent_session_id="agent-session",
+            episode_id=EpisodeId(rollout_id="rollout", attempt=0),
+            task_id=TaskId(taskset="example", task_id="0"),
+            tool_accesses=[
+                MCPToolAccess(
+                    name="resources",
+                    required=True,
+                    connection=MCPStreamableHTTPConnection(url="http://resources:8000/mcp"),
+                )
+            ],
+        )
+
+        detail = check_agent_seed_rejected(server.setup_webserver(), body)
+
+        assert detail == "Simple Agent does not support required MCP tool access: resources"
 
     async def test_several_workers_are_allowed_but_reject_sessions(self) -> None:
         """The legacy /run path keeps no session, so only session seeding needs a single worker."""

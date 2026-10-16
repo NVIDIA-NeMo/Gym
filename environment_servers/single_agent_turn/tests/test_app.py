@@ -401,6 +401,16 @@ def test_retry_requires_a_transient_dependency_error() -> None:
     assert _is_retryable_dependency_error(ValueError("invalid response")) is False
 
 
+@pytest.mark.parametrize(("status", "retryable"), [(422, False), (409, False), (429, True), (500, True)])
+def test_an_agent_seed_refusal_is_final_but_a_server_error_is_retried(status: int, retryable: bool) -> None:
+    # An agent refuses a seed it cannot serve with AgentSeedRejectedError, which answers 422.
+    refusal = ClientResponseError(
+        request_info=SimpleNamespace(real_url="http://agent/v1/agent_sessions"), history=(), status=status
+    )
+
+    assert _is_retryable_dependency_error(refusal) is retryable
+
+
 async def test_verifier_only_episode_does_not_expose_resource_tools() -> None:
     environment, client = _environment_server()
     seed = orjson.loads(client.responses[0].body)
