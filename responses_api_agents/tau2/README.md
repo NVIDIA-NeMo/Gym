@@ -51,9 +51,9 @@ python -m benchmarks.tau2.prepare_utils.runtime terminal_use
 python -m benchmarks.tau2.prepare_utils.runtime alltools
 ```
 
-By default the bridge installs runtime Tau from
-`https://github.com/bxyu-nvidia/tau2-bench@bxyu/nemo_gym_stable`
-and fetches the Tau `data/` tree from the same ref. Override with
+The bridge installs runtime Tau from the repository and commit pinned in
+`requirements.txt`. It fetches the Tau `data/` tree from
+`https://github.com/bxyu-nvidia/tau2-bench@bxyu/nemo_gym_stable`. Override with
 `NEMO_GYM_TAU2_BENCH_REPO_URL` and `NEMO_GYM_TAU2_BENCH_REF` when testing a
 different PR branch or commit.
 
