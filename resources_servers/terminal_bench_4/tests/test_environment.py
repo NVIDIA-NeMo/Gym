@@ -506,6 +506,52 @@ def test_public_tasks_keep_the_provider_default_network_policy(tmp_path, monkeyp
     assert "network_policy" not in env.build_spec().provider_options
 
 
+NO_NETWORK = {
+    "environment": {"network_mode": "no-network"},
+    "verifier": {"environment": {"docker_image": "public/verifier", "network_mode": "no-network"}},
+}
+
+
+@pytest.mark.parametrize("verifier", [False, True])
+def test_model_server_egress_resolves_at_sandbox_creation_for_the_agent_only(tmp_path, monkeypatch, verifier):
+    urls = {"policy_model": "http://10.109.30.182:5765"}
+    monkeypatch.setattr(module, "get_server_url", lambda name: urls[name])
+    env, *_ = make_environment(
+        tmp_path,
+        monkeypatch,
+        verifier=verifier,
+        config={"agent_egress_allow": ["10.109.22.242"], "agent_egress_allow_model_servers": ["policy_model"]},
+        task_config=NO_NETWORK,
+    )
+    policy = env.build_spec().provider_options["network_policy"]
+    expected = (
+        []
+        if verifier
+        else [{"action": "allow", "target": "10.109.22.242"}, {"action": "allow", "target": "10.109.30.182"}]
+    )
+    assert policy == {"defaultAction": "deny", "egress": expected}
+    # A server restarted on another node is picked up by the next sandbox.
+    urls["policy_model"] = "http://10.109.31.7:6001"
+    if not verifier:
+        assert env.build_spec().provider_options["network_policy"]["egress"][-1]["target"] == "10.109.31.7"
+
+
+@pytest.mark.parametrize("url", ["http://127.0.0.1:5765", "http://0.0.0.0:5765", "http://gym-node:5765"])
+def test_model_server_egress_refuses_addresses_a_remote_sandbox_cannot_use(tmp_path, monkeypatch, url):
+    monkeypatch.setattr(module, "get_server_url", lambda name: url)
+    env, *_ = make_environment(
+        tmp_path, monkeypatch, config={"agent_egress_allow_model_servers": ["policy_model"]}, task_config=NO_NETWORK
+    )
+    with pytest.raises(ValueError, match="policy_model"):
+        env.build_spec()
+
+
+def test_model_server_egress_leaves_public_tasks_alone(tmp_path, monkeypatch):
+    monkeypatch.setattr(module, "get_server_url", lambda name: pytest.fail("public tasks resolve no server"))
+    env, *_ = make_environment(tmp_path, monkeypatch, config={"agent_egress_allow_model_servers": ["policy_model"]})
+    assert "network_policy" not in env.build_spec().provider_options
+
+
 @pytest.mark.parametrize("invalid", ["", " ", "image with spaces", 42, True, ["image"]])
 def test_reference_solution_image_key_must_be_an_image_reference(invalid):
     with pytest.raises(ValueError):

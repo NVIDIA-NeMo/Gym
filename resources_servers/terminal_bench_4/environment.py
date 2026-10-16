@@ -12,9 +12,11 @@ import re
 import shlex
 from copy import deepcopy
 from dataclasses import replace
+from ipaddress import ip_address
 from pathlib import Path, PurePosixPath
 from time import monotonic
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 import yaml
 from pydantic import Field
@@ -28,6 +30,7 @@ from nemo_gym.sandbox import (
     resolve_provider_metadata,
     rewrite_image,
 )
+from nemo_gym.server_utils import get_server_url
 from resources_servers.terminal_bench_4.archive_workers import ArchiveWorkers
 from resources_servers.terminal_bench_4.compose_config import MAIN_COMMAND, resolve_compose, resolve_image_startup
 from resources_servers.terminal_bench_4.task import Settings, Task, resolve_env
@@ -60,6 +63,25 @@ class EnvironmentConfig(Settings):
     # Egress targets (IPs/CIDRs the OpenSandbox policy accepts) allowed for the AGENT role of no-network tasks only,
     # e.g. the model gateway an in-sandbox harness (OpenCode, mini-SWE) must reach. The verifier stays deny-all.
     agent_egress_allow: list[str] = Field(default_factory=list)
+    # Gym model servers (by name) whose host the agent role of a no-network task may also reach, resolved when each
+    # sandbox is created. For runs where the model server's address is known only at start-up (for example NeMo RL,
+    # which advertises its Gym servers on the node that hosts them). The host must be a concrete IP.
+    agent_egress_allow_model_servers: list[str] = Field(default_factory=list)
+
+
+def model_server_egress_targets(names: list[str]) -> list[str]:
+    """The IP each named Gym model server advertises, as an egress target for an in-sandbox harness."""
+    targets = []
+    for name in names:
+        host = urlsplit(get_server_url(name)).hostname
+        try:
+            address = ip_address(host or "")
+        except ValueError as exc:
+            raise ValueError(f"Model server {name!r} must advertise an IP address, got {host!r}") from exc
+        if address.is_loopback or address.is_unspecified or address.is_multicast:
+            raise ValueError(f"Model server {name!r} advertises {host!r}, which a remote sandbox cannot reach")
+        targets.append(str(address))
+    return targets
 
 
 class HealthcheckError(RuntimeError):
@@ -237,7 +259,11 @@ class Environment:
         if settings.network_mode == "no-network":
             egress = []
             if self.log_role == "agent":
-                egress = [{"action": "allow", "target": target} for target in config.agent_egress_allow]
+                targets = [
+                    *config.agent_egress_allow,
+                    *model_server_egress_targets(config.agent_egress_allow_model_servers),
+                ]
+                egress = [{"action": "allow", "target": target} for target in dict.fromkeys(targets)]
             options["network_policy"] = {"defaultAction": "deny", "egress": egress}
         image = rewrite_image(settings.docker_image, config.image_rewrites)
         return SandboxSpec(
