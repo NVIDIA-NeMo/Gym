@@ -7,5 +7,8 @@
   "prompt_source_sha256": "e90b11d4d738d79ec03aa6a4a63681a30d3e6e0215ab765ecb631a878f6bc95c",
   "note": "Golden outputs generated from the specified modified source checkout for all dataset rubrics and generic scoring. Strict-category and custom strict-ceiling modes are excluded. No sibling repository is needed at runtime or test time.",
   "generic_source_sha256": "f433faff7fefc160eeed478d4cf6dc253fbfe61229917c4fe69b6ab7e2f5c6bd",
-  "generic_rubric_version": "generic_recreation_rubric_v1_equal_weight"
+  "generic_rubric_version": "generic_recreation_rubric_v1_equal_weight",
+  "image_metrics_source": "vision2code/evaluation/image_metrics.py",
+  "image_metrics_source_sha256": "9d6b487e325d4ad7ad941140fddfe75948b7a60edf5c0c8e337bfc53771d6ebe",
+  "image_metrics_golden": "image-metrics-golden.json: upstream image_metrics and apply_blend_a outputs for test_image_metrics.write_images cases"
 }

@@ -29,6 +29,7 @@ from resources_servers.vision2code.evaluation import (
     rating_to_reward,
     system_prompt,
 )
+from resources_servers.vision2code.image_metrics import apply_blend_a, image_metrics
 from resources_servers.vision2code.prepare import Reference, read_reference
 from resources_servers.vision2code.render import RenderResult, render
 from resources_servers.vision2code.rubrics import inspect_candidate_image, parse_json_object
@@ -43,6 +44,10 @@ class Vision2CodeConfig(BaseResourcesServerConfig):
     execution_timeout: float = Field(default=60, gt=0)
     render_concurrency: int = Field(default=4, ge=1)
     reward_power: float = Field(default=2.0, ge=1, allow_inf_nan=False)
+    use_blended_reward: bool = Field(
+        default=False,
+        description="Use reference Blend A / 5: 10% foreground RGB, 40% mean F1, 50% raw LLM / 5; ignores reward_power.",
+    )
     artifact_dir: str = "artifacts/vision2code"
 
     @model_validator(mode="after")
@@ -75,6 +80,7 @@ class Vision2CodeVerifyResponse(BaseVerifyResponse):
     render: RenderResult | None = None
     rubric_result: dict[str, JsonValue] | None = None
     reward_power: float = 2.0
+    use_blended_reward: bool = False
     judge_diagnostics: dict[str, JsonValue] = Field(default_factory=dict)
     artifacts: dict[str, str] = Field(default_factory=dict)
     timings: dict[str, float] = Field(default_factory=dict)
@@ -121,7 +127,8 @@ class Vision2CodeServer(SimpleResourcesServer):
         result = Vision2CodeVerifyResponse(
             **body.model_dump(exclude=derived | {"_ng_failure_class", "_ng_failure_judge_error"}),
             reward=0.0,
-            reward_power=self.config.reward_power,
+            reward_power=1.0 if self.config.use_blended_reward else self.config.reward_power,
+            use_blended_reward=self.config.use_blended_reward,
         )
         instance = result.model_extra.get("instance_config")
         if isinstance(instance, dict):
@@ -176,6 +183,8 @@ class Vision2CodeServer(SimpleResourcesServer):
                 return result
             if result.render.status != "ok":
                 result.rubric_result = build_render_failure_rating(result.render.status, dataset_name=ref.rubric)
+                if self.config.use_blended_reward:
+                    result.rubric_result = apply_blend_a(result.rubric_result)
                 return result
             candidate = directory / "output.png"
             result.artifacts["image"] = str(candidate)
@@ -223,9 +232,11 @@ class Vision2CodeServer(SimpleResourcesServer):
                 reference_image_path=str(reference_path),
                 candidate_image_path=str(candidate),
             )
-            result.reward = rating_to_reward(
-                result.rubric_result["final_rating_0_to_5"], power=self.config.reward_power
-            )
+            if self.config.use_blended_reward:
+                stage = "image_metrics"
+                metrics = await asyncio.to_thread(image_metrics, reference_path, candidate)
+                result.rubric_result = apply_blend_a(result.rubric_result, metrics)
+            result.reward = rating_to_reward(result.rubric_result["final_rating_0_to_5"], power=result.reward_power)
             return result
         except asyncio.CancelledError:
             mask_failure(result, kind="cancelled", reason=f"Cancelled during {stage}")
