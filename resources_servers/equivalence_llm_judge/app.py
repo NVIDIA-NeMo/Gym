@@ -115,7 +115,8 @@ def _compute_slice_metrics(tasks: list[list[dict[str, Any]]], fields: list[str])
 
     Emits ``slices/<field>/<label>/{question_count,rollout_count,mean/reward}`` plus the number of
     rollouts whose label is missing. Masked rollouts never reach here, so slices share the headline's
-    denominator semantics. Empty ``fields`` emits nothing.
+    denominator semantics. Empty ``fields`` emits nothing, and a run in which no rollout was judged
+    emits no metrics at all (``compute_metrics`` returns early, as it did before this hook).
     """
     metrics: dict[str, Any] = {}
     for field in fields:
@@ -685,12 +686,12 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
                     rollouts_with_issues += bool(issues)
                     kind_counts.update(issues)
 
-        metrics: dict[str, Any] = _compute_slice_metrics(tasks, self.config.report_slice_fields)
         if not judged:
-            return metrics
-        metrics[JUDGEMENT_PARSING_ISSUE_RATE] = rollouts_with_issues / judged
+            return {}
+        metrics: dict[str, Any] = {JUDGEMENT_PARSING_ISSUE_RATE: rollouts_with_issues / judged}
         for kind, count in sorted(kind_counts.items()):
             metrics[f"{JUDGEMENT_PARSING_ISSUE_RATE}/{kind}"] = count / judged
+        metrics.update(_compute_slice_metrics(tasks, self.config.report_slice_fields))
         return metrics
 
     def get_key_metrics(self, agent_metrics: dict[str, Any]) -> dict[str, Any]:

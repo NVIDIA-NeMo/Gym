@@ -446,8 +446,11 @@ class TestPartitionSlices:
         assert not any(key.startswith("slices/") for key in result.agent_metrics)
         assert result.key_metrics["mean/reward"] == 0.5
         assert result.key_metrics["judgement_parsing_issue_rate"] == 0.0
-        # Unjudged rows still produce no custom metrics at all, exactly as before the hook.
+        # Unjudged rows still produce no custom metrics at all, exactly as before the hook, whether or
+        # not slices are configured: the hook runs after the early return, so it never fights the
+        # `if not judged` block that other metric hooks (PR #4658) also edit.
         assert server.compute_metrics([[{"reward": 1.0, "partition": "reasoning"}]]) == {}
+        assert _judge_server(["partition"]).compute_metrics([[{"reward": 1.0, "partition": "reasoning"}]]) == {}
 
 
 def _response(text: str) -> NeMoGymResponse:
