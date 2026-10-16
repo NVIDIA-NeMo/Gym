@@ -215,6 +215,10 @@ class ClawEvalAgent(AgenticVBenchAgent):
             ]
             if self.config.agent_timeout_multiplier is not None:
                 command.extend(["--agent-timeout-multiplier", str(self.config.agent_timeout_multiplier)])
+            if self.config.opencode_tool_output_max_lines is not None:
+                command.extend(["--tool-output-max-lines", str(self.config.opencode_tool_output_max_lines)])
+            if self.config.opencode_tool_output_max_bytes is not None:
+                command.extend(["--tool-output-max-bytes", str(self.config.opencode_tool_output_max_bytes)])
             if self.config.max_turns is not None:
                 command.extend(["--max-turns", str(self.config.max_turns)])
             if self.config.credentials_file:

@@ -43,6 +43,8 @@ def main() -> None:
     parser.add_argument("--verifier-timeout-multiplier", type=float, default=1.0)
     parser.add_argument("--agent-timeout-multiplier", type=float, default=None)
     parser.add_argument("--model-timeout-ms", type=int, default=None)
+    parser.add_argument("--tool-output-max-lines", type=int, default=None)
+    parser.add_argument("--tool-output-max-bytes", type=int, default=None)
     parser.add_argument("--compaction-auto", choices=("true", "false"), default=None)
     parser.add_argument("--compaction-prune", choices=("true", "false"), default=None)
     parser.add_argument("--disable-title", action="store_true")
@@ -96,6 +98,8 @@ def main() -> None:
         verifier_timeout_multiplier=args.verifier_timeout_multiplier,
         agent_timeout_multiplier=args.agent_timeout_multiplier,
         model_timeout_ms=args.model_timeout_ms,
+        tool_output_max_lines=args.tool_output_max_lines,
+        tool_output_max_bytes=args.tool_output_max_bytes,
         compaction_auto=_bool(args.compaction_auto),
         compaction_prune=_bool(args.compaction_prune),
         disable_title=args.disable_title,

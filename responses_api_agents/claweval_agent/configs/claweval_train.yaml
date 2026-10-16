@@ -31,6 +31,8 @@ claweval_agent:
       model_context_tokens: ${oc.env:CLAW_EVAL_CONTEXT_TOKENS,49152}
       model_output_capability_tokens: ${oc.env:CLAW_EVAL_OUTPUT_TOKENS,8192}
       model_call_timeout_ms: ${oc.env:CLAW_EVAL_MODEL_CALL_TIMEOUT_MS,3600000}
+      opencode_tool_output_max_lines: ${oc.env:CLAW_EVAL_TOOL_OUTPUT_MAX_LINES,null}
+      opencode_tool_output_max_bytes: ${oc.env:CLAW_EVAL_TOOL_OUTPUT_MAX_BYTES,null}
       opencode_compaction_auto: ${oc.env:CLAW_EVAL_COMPACTION_AUTO,null}
       opencode_compaction_prune: ${oc.env:CLAW_EVAL_COMPACTION_PRUNE,null}
       opencode_disable_title: ${oc.env:CLAW_EVAL_DISABLE_TITLE,true}
