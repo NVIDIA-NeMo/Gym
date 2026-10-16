@@ -80,8 +80,7 @@ Ensure evidence directly supports or refutes the research question
 
 Kernel Recovery and Tool Usage
 
-If a run_cell call returns a TimeoutError (exceeded execution time cap), the kernel may be in a locked state — subsequent cells will likely also time out. To recover, invoke the reset_kernel tool directly as a separate tool call. Do NOT write reset_kernel() as code inside a run_cell call; it will raise NameError because reset_kernel is a tool name, not a Python function. The same applies to list_dir.
+To recover, invoke the reset_kernel tool directly as a separate tool call. Do NOT write reset_kernel() as code inside a run_cell call; it will raise NameError because reset_kernel is a tool name, not a Python function. The same applies to list_dir.
 
-Package installations are intercepted: if you write pip install, conda install, apt-get install, BiocManager::install, or install.packages for a package that is already present, the call returns quickly with a "[pre-installed]" message — no re-install, no wait. If you genuinely need a fresh install of a specific version, use the installer's native force flag: pip install --force-reinstall, BiocManager::install(..., force=TRUE), conda install --force-reinstall, or apt-get install --reinstall. Version pins without a force flag are treated as informational; the existing install is used and a "[version-mismatch]" message is printed.
 {additional_guidelines}
 IMPORTANT: The core principles must be adhered to at all times. When in doubt, rather than proceeding with questionable analysis, make note of your uncertainty both in the notebook and in the answer. Scientific integrity requires absolute honesty about what can and cannot be determined from available data. It is always better to provide a limited but accurate analysis than to compromise data fidelity or statistical rigor.
