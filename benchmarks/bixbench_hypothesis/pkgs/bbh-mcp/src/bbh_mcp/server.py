@@ -365,12 +365,18 @@ class MCPServer:
                         )
                         + "\n"
                     )
+                    (self.config.log_dir / "judge_error.json").unlink(missing_ok=True)
 
                 self._submitted = True
 
                 return "Incorrect answer!" if reward < 1.0 else "Correct answer!"
-            except Exception:
+            except Exception as error:
                 logger.exception("Rubric model call failed.")
+                if self.config.log_dir is not None:
+                    self.config.log_dir.mkdir(parents=True, exist_ok=True)
+                    (self.config.log_dir / "judge_error.json").write_text(
+                        json.dumps({"status": "judge_failed", "error_type": type(error).__name__}) + "\n"
+                    )
                 return "Internal server error while judging the submitted answer."
 
 
