@@ -181,8 +181,14 @@ def prepare(text_only: bool = False, limit: Optional[int] = None) -> Path:
         for row in rows:
             f.write(json.dumps(format_row(row, prompt_config), ensure_ascii=False) + "\n")
 
-    n_image = sum(1 for row in rows if row["image"])
-    detail = f"skipped {len(source_rows) - len(rows)} image questions" if text_only else f"{n_image} with an image"
+    if text_only:
+        # Count from the source rows: after --limit, len(source_rows) - len(rows) would also include the
+        # text rows the limit trimmed.
+        detail = f"skipped {sum(1 for row in source_rows if row['image'])} image questions"
+    else:
+        detail = f"{sum(1 for row in rows if row['image'])} with an image"
+    if limit is not None:
+        detail += f", limited to {limit}"
     print(f"Wrote {len(rows)} problems to {output_fpath} ({detail})")
     return output_fpath
 

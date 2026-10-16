@@ -226,12 +226,31 @@ class TestPrepare:
 
     def test_limit_is_the_only_subset_mechanism_and_bypasses_the_check_loudly(self, prepared_env, capsys):
         state, _ = prepared_env
-        state["rows"] = _source_rows()[:-1]  # incomplete corpus: only --limit may write it
+        state["rows"] = _source_rows()[:-1]  # incomplete corpus (2 text + 1 image rows): only --limit may write it
 
-        output = prepare_text_module.prepare(limit=2)
+        output = prepare_text_module.prepare(limit=1)
 
-        assert [row["uuid"] for row in _read_rows(output)] == ["q-reasoning-text", "q-knowledge-mc"]
-        assert "skipping the corpus completeness check" in capsys.readouterr().out
+        # The limit applies after the text filter, so the two text rows truncate to the first one.
+        assert [row["uuid"] for row in _read_rows(output)] == ["q-reasoning-text"]
+        out = capsys.readouterr().out
+        assert "skipping the corpus completeness check" in out
+        # Skipped images are counted from the source rows, not inflated by the limit-trimmed text row.
+        assert "Wrote 1 problems" in out and "(skipped 1 image questions, limited to 1)" in out
+
+    def test_limit_truncates_the_full_set_and_a_limit_above_the_corpus_writes_every_row(self, prepared_env, capsys):
+        full = _read_rows(prepare_module.prepare(limit=1))
+        assert [row["uuid"] for row in full] == ["q-reasoning-text"]
+        assert list(full[0]) == ROW_FIELDS + ["responses_create_params"]
+        assert "(0 with an image, limited to 1)" in capsys.readouterr().out
+
+        text = _read_rows(prepare_text_module.prepare(limit=10))
+        assert [row["uuid"] for row in text] == ["q-reasoning-text", "q-knowledge-mc", "q-knowledge-text"]
+        out = capsys.readouterr().out
+        assert (
+            "writing a SUBSET" in out
+            and "Wrote 3 problems" in out
+            and "(skipped 1 image questions, limited to 10)" in out
+        )
 
     @pytest.mark.parametrize("limit", [0, -1, True, 2.5, "3"], ids=["zero", "negative", "bool", "float", "str"])
     def test_invalid_limit_is_rejected_before_any_download(self, monkeypatch, limit):
