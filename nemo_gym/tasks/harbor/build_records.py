@@ -22,7 +22,7 @@ from typing import Any
 from nemo_gym.tasks.harbor.build_compose import (
     compose_build_env,
     image_name,
-    main_build_settings,
+    service_build_settings,
     validate_task_compose,
 )
 from nemo_gym.tasks.harbor.build_plan import BuildError, BuildPlanEntry, BuildResult
@@ -30,34 +30,39 @@ from nemo_gym.tasks.harbor.digest import inputs_digest
 from nemo_gym.tasks.harbor.records import (
     BUILT_IMAGES_FILE,
     IMAGE_CONFIGS_FILE,
+    MAIN_SERVICE,
     read_built_images,
     read_image_configs,
     record_lock,
+    recorded_service_records,
     write_json_record,
 )
 
 
 def settle_entry(entry: BuildPlanEntry, *, repository: str | None, platform: str | None) -> BuildPlanEntry:
-    """``entry`` with ``main``'s ``build`` section of the task's Compose file applied, as :meth:`ImageBuilder.build`
-    applies it before the build command: the file is checked and interpolated against the build's own
-    environment (:func:`compose_build_env`, for the image name and platform a builder with ``repository`` and
-    ``platform`` uses), and its settings fill the entry (:func:`main_build_settings`). Raises :class:`BuildError`
-    where the build would."""
+    """``entry`` with its service's ``build`` section of the task's Compose file applied, as
+    :meth:`ImageBuilder.build_many` applies it before the build command: the file is checked and interpolated
+    against the build's own environment (:func:`compose_build_env`, for the image name and platform a builder with
+    ``repository`` and ``platform`` uses), and its settings fill the entry (:func:`service_build_settings`). Raises
+    :class:`BuildError` where the build would."""
     env = compose_build_env(entry, image_name(entry.digest, repository), platform)
-    document = validate_task_compose(entry.context, env, tasks=entry.tasks)
-    return replace(entry, **main_build_settings(entry, document, env))
+    document = validate_task_compose(
+        entry.context, env, tasks=entry.tasks, builds_main=entry.compose_service == MAIN_SERVICE
+    )
+    return replace(entry, **service_build_settings(entry, document, env))
 
 
 def build_inputs_digest(entry: BuildPlanEntry) -> str:
     """The inputs digest of a settled entry (:func:`settle_entry`): :func:`~nemo_gym.tasks.harbor.digest.inputs_digest`
     of its context (every entry of the tree with its mode, content or link target, nothing skipped) plus what the
-    build reads outside the tree: ``main``'s ``build`` section of the task's Compose file as a whole, as it stands
-    after interpolation (Compose interpolates every string of the file against the build's environment, so an
-    inline Dockerfile, a label or a cache setting changes the image while no file does), its two paths by their
+    build reads outside the tree: the service's ``build`` section of the task's Compose file as a whole, as it
+    stands after interpolation (Compose interpolates every string of the file against the build's environment, so
+    an inline Dockerfile, a label or a cache setting changes the image while no file does), its two paths by their
     resolved forms relative to the context (the text may spell them through ``CONTEXT_DIR``, an absolute path that
     differs between hosts holding the same folder) and the build arguments as resolved (a ``null`` or bare argument
-    is read from the environment, which the section does not show). Recorded in the built image's configuration
-    record and compared before a recorded image is reused (:func:`build_inputs_mismatch`)."""
+    is read from the environment, which the section does not show). The services of one context share the tree and
+    differ in the section, so each image carries its own. Recorded in the built image's configuration record and
+    compared before a recorded image is reused (:func:`build_inputs_mismatch`)."""
     section = {
         key: value for key, value in (entry.compose_build or {}).items() if key not in ("context", "dockerfile")
     }
@@ -94,8 +99,8 @@ def build_inputs_mismatch(
     repository: str | None,
     platform: str | None,
 ) -> str | None:
-    """Why the image the ``built-images.json`` entry ``record`` names was built from other inputs than ``entry``'s
-    context holds now, or ``None`` when the inputs match and the recorded image may be reused.
+    """Why the image the ``built-images.json`` entry ``record`` holds for ``entry``'s service was built from other
+    inputs than the context holds now, or ``None`` when the inputs match and the recorded image may be reused.
 
     The context's Harbor hash names the image and keys the record, but it covers file names and bytes only; the
     ``inputs_digest`` in the image's ``compose-images.json`` record (``image_configs``, written by the build with
@@ -109,7 +114,8 @@ def build_inputs_mismatch(
         current = build_inputs_digest(settle_entry(entry, repository=repository, platform=platform))
     except BuildError as exc:
         return f"its build inputs cannot be checked: {exc}"
-    recorded = (image_configs.get(record.get("image") or "") or {}).get("inputs_digest")
+    image = recorded_service_records(record).get(entry.service, {}).get("image")
+    recorded = (image_configs.get(image or "") or {}).get("inputs_digest")
     if recorded is None:
         return "its configuration records no inputs digest (it was written before build inputs were recorded)"
     if recorded != current:
@@ -127,16 +133,28 @@ def platform_key(platform: str | None) -> str:
 
 
 def recorded_image_mismatch(
-    entry: dict[str, Any], image_configs: dict[str, Any], *, repository: str | None, platform: str
+    entry: dict[str, Any],
+    image_configs: dict[str, Any],
+    *,
+    repository: str | None,
+    platform: str,
+    service: str = MAIN_SERVICE,
 ) -> str | None:
-    """Why a recorded built image cannot serve this builder, or ``None`` when it can.
+    """Why the image a ``built-images.json`` entry records for ``service`` cannot serve this builder, or ``None``
+    when it can.
 
-    A local (unpushed) image serves only local builds; a pushed one serves both. The recorded
-    platform has to be the one asked for.
+    A service the entry does not record is missing. A local (unpushed) image serves only local builds; a pushed
+    one serves both, judged by that service's own ``pushed`` flag (:func:`recorded_service_records`: the entry's
+    flag stands in for a record written before the flags were kept per service), since the services of one
+    context may have been built by differently configured runs. The recorded platform has to be the one asked for.
     """
-    if not entry.get("pushed") and repository is not None:
+    service_record = recorded_service_records(entry).get(service)
+    if service_record is None:
+        return f"no image is recorded for service {service}"
+    if not service_record.get("pushed") and repository is not None:
         return "it was built locally and this run pushes to a repository"
-    record = image_configs.get(entry.get("image") or "")
+    image = service_record["image"]
+    record = image_configs.get(image)
     if record is None:
         return "its configuration is missing from compose-images.json"
     recorded = f"{record.get('os')}/{record.get('architecture')}"
@@ -146,8 +164,15 @@ def recorded_image_mismatch(
 
 
 def record_built_image(folder: Path, result: BuildResult, *, overwrite: bool = False) -> Path:
-    """Record one built image next to the task folders: its context digest in ``built-images.json``
-    and its configuration in ``compose-images.json``. Existing entries are kept unless ``overwrite``.
+    """Record one built image next to the task folders: under its context digest and service in
+    ``built-images.json`` and by image in ``compose-images.json``. Existing entries are kept unless ``overwrite``.
+
+    The digest's entry is merged, not replaced: ``services[<service>]`` is set to this build's ``image``, ``tool``
+    and ``pushed`` (the other services keep theirs: one context's services may be built by differently configured
+    runs, and a pushed ``main`` must not vouch for a local sidecar or the reverse), ``tasks`` unioned, and the
+    top-level keys older readers use kept equal to ``main``'s: ``image`` (absent while ``main`` is not recorded)
+    with ``tool`` and ``pushed`` (the first recorded service's while ``main`` is not recorded). A service recorded
+    once keeps its image unless ``overwrite``, like ``compose-images.json`` keeps its entries.
 
     Both files are merged and replaced under their sidecar locks (:func:`record_lock`), the built-images
     lock first and the compose-images lock inside it, always in that order; :func:`record_image_configs`
@@ -160,15 +185,23 @@ def record_built_image(folder: Path, result: BuildResult, *, overwrite: bool = F
     configs_path = folder / IMAGE_CONFIGS_FILE
     with record_lock(built_path):
         built = read_built_images(folder)
-        if result.digest in built and not overwrite:
-            # Pinned: a context recorded once keeps its image, like compose-images.json keeps its entries.
+        existing = built.get(result.digest) if isinstance(built.get(result.digest), dict) else {}
+        services = recorded_service_records(existing)
+        if result.service in services and not overwrite:
+            # Pinned: a service recorded once keeps its image, like compose-images.json keeps its entries.
             return built_path
-        built[result.digest] = {
-            "image": result.image,
-            "tasks": sorted(result.tasks),
-            "tool": result.tool,
-            "pushed": result.pushed,
+        services[result.service] = {"image": result.image, "tool": result.tool, "pushed": result.pushed}
+        tasks = sorted(set(result.tasks) | {str(task) for task in existing.get("tasks") or []})
+        lead = services.get(MAIN_SERVICE) or next(iter(services.values()))
+        entry: dict[str, Any] = {
+            "tasks": tasks,
+            "tool": lead.get("tool", result.tool),
+            "pushed": lead.get("pushed", result.pushed),
+            "services": services,
         }
+        if MAIN_SERVICE in services:
+            entry["image"] = services[MAIN_SERVICE]["image"]
+        built[result.digest] = entry
         with record_lock(configs_path):
             configs = read_image_configs(folder)
             if overwrite:
@@ -178,26 +211,3 @@ def record_built_image(folder: Path, result: BuildResult, *, overwrite: bool = F
             write_json_record(configs_path, configs)
         write_json_record(built_path, built)
     return built_path
-
-
-def pop_stale_build_inputs(
-    recorded: dict[str, Any],
-    plan: list[BuildPlanEntry],
-    image_configs: dict[str, Any],
-    *,
-    repository: str | None,
-    platform: str | None,
-) -> list[tuple[BuildPlanEntry, dict[str, Any], str]]:
-    """Remove from ``recorded`` (``built-images.json`` as read) the entries of ``plan``'s contexts whose build inputs
-    no longer match (:func:`build_inputs_mismatch` against ``image_configs``), and return them as
-    ``(entry, record, why)`` for the caller to report: a stale record is treated as none, so the context is rebuilt
-    under the same name and its records replaced."""
-    stale: list[tuple[BuildPlanEntry, dict[str, Any], str]] = []
-    for entry in plan:
-        record = recorded.get(entry.digest)
-        if not isinstance(record, dict):
-            continue
-        why = build_inputs_mismatch(entry, record, image_configs, repository=repository, platform=platform)
-        if why is not None:
-            stale.append((entry, recorded.pop(entry.digest), why))
-    return stale
