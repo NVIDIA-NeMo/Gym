@@ -131,8 +131,9 @@ python scripts/run_harness_conformance.py --harness codex \
 Both Chat Completions and Responses are supported, including streaming. Supplied
 usage includes prompt, completion, reasoning, total, and cached counts. Chat
 replies also include reasoning text. Requests adapt only the shell-tool name and
-argument schema advertised by the harness. Unsupported tool protocols are
-reported as exercise failures.
+argument schema advertised by the harness. The final answer is a text reply, or a
+call to an advertised `finish` or `submit` tool for harnesses that end an episode on
+a tool call. Unsupported tool protocols are reported as exercise failures.
 
 The runner observes actual retry behavior. A runtime that does not retry the
 injected error leaves that scenario incomplete. For `model_error`, the harness
@@ -193,5 +194,6 @@ python -m pytest scripts/harness_conformance/tests tests/unit_tests/harness_capa
 
 To add another local harness, add its adapter class to `registry.HARNESSES`, supply
 its launch settings in `episode._config`, and make its advertised shell-tool
-schema consumable by `provider.Probe._tool`. Keep expectations and witnesses out
+schema consumable by `provider.Probe._tool` and, if it ends episodes on a finish tool, that
+tool's schema consumable by `provider.Probe._finish`. Keep expectations and witnesses out
 of the task input and preserve the normal Gym collection path.
