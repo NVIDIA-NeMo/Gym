@@ -270,12 +270,15 @@ Model-free checks that have been run (commands below, from the repository root):
   matches return the configured labels; legacy rollouts are re-parsed with the same setting; labels
   differing only in case are rejected when the knob is on. Mutation-checked: removing the folding,
   either call-site pass-through, the validator or the knob in `config.yaml` each fails a test.
-- `responses_api_models/openai_model/tests/test_reasoning_item_normalizer.py`: the two response bodies
-  captured from the gateway (Claude Opus 5.5 and Gemini 4 Argon; ids, encrypted content and long
-  texts shortened, structure untouched) fail `NeMoGymResponse` validation with exactly the two
-  documented errors (`output.0.reasoning.summary` not a list, `output.0.reasoning.content.0.type` not
-  `reasoning_text`), validate through `openai_model` with usage intact, and fail again with
-  `normalize_reasoning_items: false`; message items and well-formed bodies pass through unchanged.
+- `responses_api_models/openai_model/tests/test_reasoning_item_normalizer.py`: the two gateway
+  response bodies for Claude Opus 5.5 and Gemini 4 Argon as the `openai` client dumped them during
+  the effort probes (`summary: null` plus the client's default top-level keys; ids, encrypted
+  content and long texts shortened, structure otherwise untouched) fail `NeMoGymResponse`
+  validation with exactly the two documented errors (`output.0.reasoning.summary` not a list,
+  `output.0.reasoning.content.0.type` not `reasoning_text`), validate through `openai_model` with
+  usage intact, and fail again with `normalize_reasoning_items: false`; a body with `summary`
+  absent, which is how Gym's own client saw it in the pilot (`Field required`), is covered by its
+  own case; message items and well-formed bodies pass through unchanged.
   Mutation-checked: skipping the summary repair or the part rename, ignoring or bypassing the knob,
   renaming message parts too, or mutating the input each fails a test.
 - `tests/unit_tests/test_hle_diamond_search_exclusions.py`: the generator's normalisation, dedup and
@@ -307,8 +310,14 @@ is measured:
 | the reference answer | 1000/1000 (reasoning 500/500, knowledge 500/500; exactMatch 796/796, multipleChoice 204/204) |
 | empty final answer | 0/1000 (`failure_reason: empty_final_answer`, no judge call) |
 | `Answer: None` | 0/1000 |
-| a wrong answer | 0/1000 |
+| a wrong answer (`<gold>_wrong` on exactMatch rows, another letter on multiple-choice rows) | 0/1000 |
 | the reference followed by a contradicting second `Answer:` line | 0/1000 |
+
+The last two rows show plumbing only: the oracle grades the last `Answer:` line, so the 0/1000 on
+the double-answer control proves that both lines reach the judge intact and the verdict flows back,
+not how a real judge treats a contradicting second answer (not measured with o3-mini); and the
+oracle's "wrong answer" is the same `_wrong` decoration whose weakness against a real judge is
+stated under Judge agreement on gold.
 
 On the gold file `slices/partition/reasoning/mean/reward` and `slices/partition/knowledge/mean/reward`
 were 1.0 and 1.0 with `question_count` 500 each; a mixed file (gold on the reasoning rows, wrong on
@@ -333,12 +342,18 @@ wall at concurrency 32. The three misses:
 Negative controls through the same judge on a stratified 100-row sample (80 exactMatch, 20
 multipleChoice):
 
-- `Answer: None`: 2/100 scored 1.0, both multiple-choice items whose correct option literally begins
-  with "None" (Known limitations); the control is confounded on such items and clean on the rest.
+- `Answer: None`: 2/100 scored 1.0, both multiple-choice items whose correct option begins with
+  "None" / "none" (Known limitations); the control is confounded on such items and clean on the
+  rest.
+- another sampled row's reference of the same answer type (rows grouped by `answer_type`, the donor
+  being the next row by `uuid` whose reference differs from the row's own): 0/100 scored 1.0
+  (exactMatch 0/80, multipleChoice 0/20; reasoning 0/50, knowledge 0/50), 100 judge calls with
+  `judge_labels_case_insensitive` on, 0 parsing issues, mean judge output 241 tokens, 22 s wall at
+  concurrency 16 (2026-10-16). This is the judge's false-positive rate on genuinely wrong answers
+  for this sample.
 - the reference with a `_wrong` suffix: 14/100 scored 1.0, all on exactMatch rows (14/80); o3-mini
-  treats the suffix as an annotation of the right answer. This is a weak control: 14/80 is an upper
-  bound on the judge's leniency towards decorated right answers, not a false-positive rate for
-  genuinely wrong answers. A control that substitutes another row's reference has not been run.
+  treats the suffix as an annotation of the right answer. A weak control, kept because 14/80 bounds
+  the judge's leniency towards decorated right answers from above; it is not a wrong-answer rate.
 - a different option letter on the multiple-choice rows: 0/20 scored 1.0.
 
 ## Known limitations
@@ -347,15 +362,22 @@ multipleChoice):
   headwords ..."): the judge prompt asks whether the extracted answer matches `[correct_answer]`, so
   even the reference fed back verbatim scores 0 with o3-mini. The row is kept because upstream keeps
   it; expect at most 999/1000 on gold with that judge.
-- At least 11 of the 204 multiple-choice rows have a correct option that literally begins with
-  "None" (read from the prepared rows: the option line of the reference letter starts with "None";
-  9 reasoning, 2 knowledge: `6736c2e82db9d8cc7cd8e607`, `69a738a50a19a2f7b803ca97`,
+- At least 11 of the 204 multiple-choice rows have a correct option that begins with "None",
+  matched case-insensitively (read from the prepared rows: the option line of the reference letter
+  starts with "None" on ten rows and with "none" on `66ebefa090db075818df99a9`; the judge treats
+  both alike; 9 reasoning, 2 knowledge: `6736c2e82db9d8cc7cd8e607`, `69a738a50a19a2f7b803ca97`,
   `66fb75ded83ed7a299fdd136`, `67c133211c3841e3c6b8d938`, `66fde2de0b21f205c121aca7`,
   `672422631fac8550679c4bd6`, `66e8e1056c0b8ace336996ea`, `67253c33ad98e94b47ea3477`,
   `66ebefa090db075818df99a9`, `670d122102e9032e4a224628`, `67cbde9e89f4b433f1de1ada`). A model
   answering "None" on them is right, so an `Answer: None` control over the whole set has a floor of
   about 11/1000, and the two false positives of the 100-row control were two of these rows. The
   carried `answer_type` and `uuid` let you separate them.
+- On the sandboxed presets (`opencode`, `opencode_search`, `pi`, `pi_search`) the aggregate carries
+  neither the partition slices nor `judgement_parsing_issue_rate`: the adapters' inherited
+  `aggregate_metrics` never calls the judge resources server's `compute_metrics`. The rollouts carry
+  `partition` and `judge_evaluations`, so compute both post hoc (Reading sandboxed results); the
+  durable fix is for those adapters to proxy aggregation to their resources server, a Gym
+  shared-component change outside this benchmark.
 - The Pi presets do not transmit the thinking level: the Pi adapter registers its provider with
   `compat.supportsReasoningEffort: false`, so Pi's own request carries no `reasoning_effort` whatever
   `thinking:` says (Prompting > Reasoning effort). Label Pi runs "effort not transmitted (adapter)";
@@ -425,14 +447,17 @@ Before treating a run as comparable, check on the pilot rows:
 
 ### Sandboxed presets on a local Docker host
 
-**Not run as written** for `hle_diamond`. The same recipe (Docker provider, the OpenCode effort knob;
-the dedicated-judge composition aside) was run end to end on `hle/opencode` for two rows before these
-presets existed, which is where the facts below come from, and only with `network: host` uncommented:
-on the verifying workstation bridge networking timed out (ufw drops docker0 to host traffic and the
-hostname resolves to `127.0.1.1`). The committed override keeps bridge networking as the default
-because it exposes the least, but that form is unverified; if the first rollout hangs on the model
-call, uncomment `network: host`. Every run through this recipe is **comparison infrastructure only:
-egress is unrestricted**, and its results must carry the label "local Docker; egress not restricted".
+**Run on 2026-10-16 for `hle_diamond/opencode`** with this recipe plus a third composed file that
+uncommented `network: host` and pointed the dataset at 5 text rows (GPT-6 Astra, judge o3-mini,
+exit 0, 187 s wall; 5/5 rows scored, 3/5 made real tool calls, all 15 OpenCode requests carried
+`reasoning_effort: high`, and `urlopen("https://example.com")` from inside the image returned HTTP
+200, hence the label below). The bridge-networking default and the 20-row form are **not run as
+written**: on the verifying workstation bridge networking timed out (ufw drops docker0 to host
+traffic and the hostname resolves to `127.0.1.1`). The committed override keeps bridge networking
+as the default because it exposes the least, but that form is unverified; if the first rollout
+hangs on the model call, uncomment `network: host`. Every run through this recipe is **comparison
+infrastructure only: egress is unrestricted**, and its results must carry the label "local Docker;
+egress not restricted".
 
 ```bash
 # The presets always compose nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml, whose
@@ -482,17 +507,26 @@ gym eval run --benchmark hle_diamond/opencode --split benchmark --model-type ope
   `opencode_finished`, `opencode_failed`, `opencode_exit_code` and
   `opencode_export_found` (OpenCode) or `finished_naturally`, `pi_failed`, `pi_exit_code` and
   `pi_error_type` (Pi); the aggregate metrics carry `mean/opencode_failed` and `mean/opencode_finished`.
+- The aggregate of a sandboxed run carries neither `slices/partition/...` nor
+  `judgement_parsing_issue_rate`, although every rollout row carries `partition` and
+  `judge_evaluations`: the collector posts `/aggregate_metrics` to the agent server, and the
+  OpenCode and Pi adapters inherit `BaseResponsesAPIAgent.aggregate_metrics`, which never calls
+  the judge resources server's `compute_metrics` where both live (observed on the 5-row
+  `hle_diamond/opencode` pilot: no `slices/*` and no parsing key in its aggregate). Compute them
+  post hoc from the rollouts with the slice hook's rule (rewards grouped by `partition` with their
+  counts; rows with `judgement_parsing_issues`) until the adapters proxy aggregation to their
+  resources server (Known limitations).
 - `ng_trajectory`, `ng_perf` and `ng_model_call_capture` are attached only with
   `++observability_enabled=true ++model_call_capture_dir=<absolute dir>`; without them every
   trajectory health check reports "unobserved". Use a distinct capture directory per run.
 - Confirm tool use: at least one pilot row must show `ng_perf.num_tool_calls > 0` (or a `tool` part
   in the harness transcript under the artifacts directory). Otherwise the sandbox was never
   exercised and the run is a no-tools run through a different prompt path, not a with-tools result.
-- Confirm effort: the captured OpenCode request body carries `reasoning_effort: high` (seen in the
-  `hle/opencode` smoke capture). Pi's request will not carry it, by inspection of the adapter's
-  `compat.supportsReasoningEffort: false` and Pi 0.85.1's `openai-completions` path rather than from
-  a capture (no Pi run has been captured yet); confirm on the first Pi capture (Prompting > Reasoning
-  effort).
+- Confirm effort: the captured OpenCode request body carries `reasoning_effort: high` (all 15
+  requests of the 5-row `hle_diamond/opencode` pilot capture). Pi's request will not carry it, by
+  inspection of the adapter's `compat.supportsReasoningEffort: false` and Pi 0.85.1's
+  `openai-completions` path rather than from a capture (no Pi run has been captured yet); confirm
+  on the first Pi capture (Prompting > Reasoning effort).
 - Token and latency figures are not comparable with the announcement's mean output tokens: the
   harness's system prompt and tool schema dominate the input, and the call is chat-completions.
 
@@ -504,8 +538,14 @@ for the whole run and the judge override composes with `--config`: under `gym en
 `config.yaml` and wins, whereas the `--benchmark ... --split benchmark` form of the Quickstart needs
 the raw `+config_paths=[...]` token (Scoring > Dedicated judge). Under `--no-serve` the dataset is
 named by `--input`, `--split` is not read, and the servers must already be up. Run as written on
-2026-10-16 for the 20-row pilot (`--input` pointing at the sample, `--concurrency 20`); the full-set
-collection was launched with this shape:
+2026-10-16 for the Claude Opus 5.5 and Gemini 4 Argon 20-row pilot collections (`--input` pointing
+at the sample, `--concurrency 20`); the GPT-6 Astra pilot ran the same shape without
+`++route_failures_to_sidecar=true`, which is why one gateway timeout ended it and why the flag is
+part of the shape. The GPT-6 Astra full-set collection ran to completion with exactly this shape
+(946 of 1000 rows scored, 54 routed to the sidecar) from Gym commit `6421f1457`, before
+`judge_labels_case_insensitive` and `normalize_reasoning_items` existed: servers load code and
+configuration once at start, so that run's verdicts are byte-exact and its policy server had no
+normaliser (Reporting a full run):
 
 ```bash
 RUN=/abs/path/hle-diamond-runs/<model-slug>/<UTC timestamp>   # outside the repository
@@ -535,11 +575,14 @@ gym eval run --no-serve \
 For the 728-row text variant (not run as written) pass `text.yaml` in place of `config.yaml`,
 `--agent hle_diamond_text_equivalence_llm_judge_simple_agent` and the text file as `--input`.
 
-Claude and Gemini models through LiteLLM-style gateways return reasoning items with `summary: null`
-and `output_text` parts, which `NeMoGymResponse` rejects; `openai_model` repairs exactly that shape
-before validation (`normalize_reasoning_items`, on by default, see its README). Without it every such
-rollout was lost to a validation error (0/20 scored for both families in the pilot), so the policy
-server for those families must run code that has the knob.
+Claude and Gemini models through LiteLLM-style gateways return reasoning items whose `summary` is
+null or absent (the pilot's wire error was `output.0.reasoning.summary Field required`; the `openai`
+client's dump of the same bodies shows `summary: null`) with `output_text` parts, which
+`NeMoGymResponse` rejects; `openai_model` repairs exactly that shape before validation
+(`normalize_reasoning_items`, on by default, see its README). Without it every such rollout that
+reached Gym was lost to a validation error (pilot: Claude 20/20 and Gemini 16/20 rows rejected;
+Gemini's other 4 were gateway timeouts, Known limitations), so the policy server for those families
+must run code that has the knob.
 
 ### Reporting a full run
 
@@ -554,7 +597,19 @@ every number:
   so the over-scored accuracy is biased upward and the mean output tokens downward; say so beside
   each figure.
 - The judge alias and run date (Scoring > Dedicated judge), the effort label by model family
-  (Prompting > Reasoning effort), and the partition slices with their `question_count`.
+  (Prompting > Reasoning effort), and the partition slices with their `question_count` (from the
+  aggregate on the no-tools path; computed post hoc from the rollouts on the sandboxed presets, see
+  Reading sandboxed results).
+- The Gym commit the servers loaded, because servers read code and configuration once at start: it
+  decides whether `judge_labels_case_insensitive` (verdicts matched case-insensitively, otherwise
+  byte-exact) and `normalize_reasoning_items` were in effect. The GPT-6 Astra full run launched on
+  2026-10-16 from `6421f1457` had neither.
+- When rows lost to the gateway timeout are rescued outside the collector (the identical request
+  from `rollouts_materialized_inputs.jsonl` sent with `background: true` and polled, then scored
+  through the same `/verify` endpoint and merged before `gym eval aggregate`), report a third view
+  next to the two above: accuracy over all 1000 with the rescued rows included, stating that a
+  rescued row differs only in transport; a row still `incomplete` or `failed` after two background
+  attempts stays lost and is listed.
 
 ## Sandboxed agents (with tools)
 
