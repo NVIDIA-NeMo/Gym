@@ -252,6 +252,14 @@ class TestPrepare:
             and "(skipped 1 image questions, limited to 10)" in out
         )
 
+    def test_prepare_text_script_parses_limit_and_refuses_other_arguments(self, prepared_env, capsys):
+        output = prepare_text_module.main(["--limit", "1"])
+        assert [row["uuid"] for row in _read_rows(output)] == ["q-reasoning-text"]
+
+        with pytest.raises(SystemExit):
+            prepare_text_module.main(["--text-only"])
+        assert "unrecognized arguments: --text-only" in capsys.readouterr().err
+
     @pytest.mark.parametrize("limit", [0, -1, True, 2.5, "3"], ids=["zero", "negative", "bool", "float", "str"])
     def test_invalid_limit_is_rejected_before_any_download(self, monkeypatch, limit):
         def refuse(*args, **kwargs):

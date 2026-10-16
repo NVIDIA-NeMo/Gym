@@ -20,9 +20,11 @@ the 728 questions without an image are written as raw fields to
 templating via ``prompt_config`` (``text.yaml`` and the sandboxed presets).
 """
 
+import argparse
 from pathlib import Path
 from typing import Optional
 
+from benchmarks.hle_diamond.prepare import add_limit_argument
 from benchmarks.hle_diamond.prepare import prepare as _prepare_hle_diamond
 
 
@@ -31,5 +33,13 @@ def prepare(limit: Optional[int] = None) -> Path:
     return _prepare_hle_diamond(text_only=True, limit=limit)
 
 
+def main(argv: Optional[list[str]] = None) -> Path:
+    """Script entry point: only ``--limit N`` is accepted; anything else is an error, never ignored."""
+    parser = argparse.ArgumentParser(description="Prepare the text-only HLE-Diamond benchmark data.")
+    add_limit_argument(parser)
+    args = parser.parse_args(argv)
+    return prepare(limit=args.limit)
+
+
 if __name__ == "__main__":
-    prepare()
+    main()

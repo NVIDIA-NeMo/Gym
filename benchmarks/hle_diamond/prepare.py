@@ -203,6 +203,16 @@ def _positive_int(value: str) -> int:
     return parsed
 
 
+def add_limit_argument(parser: argparse.ArgumentParser) -> None:
+    """``--limit N``, shared with ``prepare_text.py`` so the script form of the text variant honours it too."""
+    parser.add_argument(
+        "--limit",
+        type=_positive_int,
+        default=None,
+        help="Prepare only the first N emitted rows (bypasses the corpus completeness check).",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Prepare HLE-Diamond benchmark data.")
     parser.add_argument(
@@ -210,12 +220,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Keep only questions without an image, as raw fields for prompt_config (writes the _text file).",
     )
-    parser.add_argument(
-        "--limit",
-        type=_positive_int,
-        default=None,
-        help="Prepare only the first N emitted rows (bypasses the corpus completeness check).",
-    )
+    add_limit_argument(parser)
     return parser
 
 
