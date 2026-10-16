@@ -263,6 +263,15 @@ def test_env_file_values_are_literal_with_compose_quoting_and_inline_comments():
     assert _compose_literals(substitute_compose(parsed["PW"], {"cd": "never"})) == "ab$cd"
 
 
+def test_env_file_entries_report_the_quoting_compose_decides_interpolation_by():
+    from nemo_gym.sandbox.compose_config import env_file_entries
+
+    text = "A='$x'\nB=\"\\$x $$y\"\nexport C=$x # c\n"
+    assert env_file_entries(text) == [("A", "$x", "'"), ("B", "$x $$y", '"'), ("C", "$x", "")]
+    # A double-quoted ``\$`` is a literal dollar; a caller that interpolates asks for it as ``$$``.
+    assert env_file_entries(text, escaped_dollar="$$") == [("A", "$x", "'"), ("B", "$$x $$y", '"'), ("C", "$x", "")]
+
+
 def test_residual_interpolation_reports_what_is_left():
     from nemo_gym.sandbox.compose_config import residual_interpolation
 

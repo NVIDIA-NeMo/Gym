@@ -126,10 +126,11 @@ def substitute_compose(value: Any, variables: dict[str, str]) -> Any:
     return value
 
 
-def _unquote_env_value(value: str) -> str:
-    """One env_file value after ``=``: a quoted value ends at its closing quote and the rest is a comment;
-    an unquoted value ends at the first ``#`` that follows whitespace. Double quotes honour the escapes
-    ``\\n``, ``\\t``, ``\\"``, ``\\\\`` and ``\\$``; single quotes are literal."""
+def _unquote_env_value(value: str, escaped_dollar: str = "$") -> tuple[str, str]:
+    """One env_file value after ``=`` and the quote it came in (``'``, ``"`` or ``""`` for none): a quoted value
+    ends at its closing quote and the rest is a comment; an unquoted value ends at the first ``#`` that follows
+    whitespace. Double quotes honour the escapes ``\\n``, ``\\t``, ``\\"``, ``\\\\`` and ``\\$`` (the last one
+    becoming ``escaped_dollar``); single quotes are literal."""
     value = value.lstrip()
     if value[:1] in ("'", '"'):
         quote = value[0]
@@ -139,26 +140,27 @@ def _unquote_env_value(value: str) -> str:
             char = value[index]
             if quote == '"' and char == "\\" and index + 1 < len(value):
                 escaped = value[index + 1]
-                chars.append({"n": "\n", "t": "\t"}.get(escaped, escaped))
+                chars.append({"n": "\n", "t": "\t", "$": escaped_dollar}.get(escaped, escaped))
                 index += 2
                 continue
             if char == quote:
-                return "".join(chars)
+                return "".join(chars), quote
             chars.append(char)
             index += 1
         raise ComposeSubstitutionError("value", "env_file value has no closing quote")
-    return re.split(r"\s+#", value, maxsplit=1)[0].rstrip()
+    return re.split(r"\s+#", value, maxsplit=1)[0].rstrip(), ""
 
 
-def parse_env_file(text: str) -> dict[str, str]:
-    """``KEY=value`` lines of a Compose ``env_file``, taken literally.
-
-    Blank lines and ``#`` comments are skipped, an optional ``export`` prefix dropped, quotes and inline
-    comments handled as :func:`_unquote_env_value` says. Values are not interpolated: a ``$`` in a value
-    is escaped as ``$$`` so the document's later interpolation and literal checks leave it as one ``$``.
-    """
-    values: dict[str, str] = {}
-    for number, raw in enumerate(text.lstrip("﻿").splitlines(), start=1):
+def env_file_entries(text: str, escaped_dollar: str = "$") -> list[tuple[str, str, str]]:
+    """The ``KEY=value`` lines of a Compose env file in file order, as ``(key, value, quote)``. ``quote`` is
+    ``'``, ``"`` or ``""`` for an unquoted value, which is how Compose's dotenv reader decides what to do with
+    it: a single-quoted value is literal, the other two it interpolates. Blank lines and ``#`` comments are
+    skipped, an optional ``export`` prefix dropped, quotes and inline comments handled as
+    :func:`_unquote_env_value` says, a double-quoted ``\\$`` becoming ``escaped_dollar``; otherwise values are
+    returned as written, ``$`` included. A line that is not ``KEY=value`` raises
+    :class:`ComposeSubstitutionError` naming the line number only, as env files hold secrets."""
+    entries: list[tuple[str, str, str]] = []
+    for number, raw in enumerate(text.lstrip("\ufeff").splitlines(), start=1):
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
@@ -169,8 +171,18 @@ def parse_env_file(text: str) -> dict[str, str]:
         if not separator or not _NAME.fullmatch(key):
             # The line itself is not echoed: env files hold secrets.
             raise ComposeSubstitutionError(f"line {number}", f"env_file line {number} is not KEY=value")
-        values[key] = _unquote_env_value(value).replace("$", "$$")
-    return values
+        unquoted, quote = _unquote_env_value(value, escaped_dollar)
+        entries.append((key, unquoted, quote))
+    return entries
+
+
+def parse_env_file(text: str) -> dict[str, str]:
+    """``KEY=value`` lines of a Compose ``env_file``, taken literally.
+
+    Lines are read as :func:`env_file_entries` reads them. Values are not interpolated: a ``$`` in a value
+    is escaped as ``$$`` so the document's later interpolation and literal checks leave it as one ``$``.
+    """
+    return {key: value.replace("$", "$$") for key, value, _ in env_file_entries(text)}
 
 
 def _env_file_path(base_dir: Path, path: str, service: str) -> Path:

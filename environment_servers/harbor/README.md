@@ -54,8 +54,139 @@ the task folders, written by `gym dataset fetch`; on OpenSandbox the provider bl
 `benchmarks/terminal_bench_4/resources.yaml` shows. `[environment.healthcheck]` is polled at seed.
 Tasks that declare GPUs run on the `gpu_sandbox_provider` block when one is set. The task's
 `[[environment.mcp_servers]]` and `skills_dir` are written to `/tmp/.nemo-gym/task.json` in the agent's
-sandbox for harnesses that drive task MCP servers from inside it (mini-SWE does). Dockerfile builds and
-multi-step tasks come in later milestones.
+sandbox for harnesses that drive task MCP servers from inside it (mini-SWE does). Dockerfiles outside pull
+and overlay mode are built at prepare, see below. Multi-step tasks come in a later milestone.
+
+## Dockerfile builds
+
+Prepare decides one of three image modes per distinct Dockerfile.
+
+- Pull. A base-image-only file (`FROM` plus `WORKDIR`, `ENV`, `USER`, `LABEL`). The sandbox starts from the
+  base image.
+- Overlay. A pullable `FROM` plus `RUN` lines. The server runs the lines in the pulled base image at seed.
+  No build and no registry.
+- Build. Everything else: `COPY`, `ADD`, heredocs, BuildKit flags, multi-stage files. The task's
+  `environment/` folder is the build context. Prepare builds it once, records it, and the task then runs in
+  pull mode from the built image. A `build:` or `pull_policy` the task's Compose file gives `main` (build args,
+  a target, a `dockerfile_inline`) applies to that build; at seed the recorded image stands in for them, so the
+  server drops the two keys from `main` before the Compose adapter, which starts images only, sees the
+  document. A task in pull or overlay mode keeps whatever its file says.
+
+The image is named the way Harbor names it, `hb__<hash>`, where the hash is Harbor's 32-character content
+hash of the `environment/` folder, its environment id (vendored from Harbor v0.22.0 in
+`nemo_gym/tasks/harbor/harbor_compat.py`), so identical contexts get the same image name in Harbor and in
+Gym. Builds are configured by a top-level `builds:` block in the merged configuration (`env.yaml`, a
+`--config` file, or `++builds.<setting>=<value>` on the command line; explicit settings apply over the
+defaults below):
+
+```yaml
+builds:
+  tool: buildah            # buildah, podman or docker (docker compose build); default: the first on PATH that fits
+  repository: registry/path  # push built images under this path; default: $NEMO_GYM_BUILD_REPOSITORY
+  platform: linux/amd64    # the platform asked of the tool; default linux/amd64
+  enabled: true            # false never builds; tasks that need a build are skipped with a message
+```
+
+With `builds.repository` (or the `NEMO_GYM_BUILD_REPOSITORY` variable) the image is named
+`registry/path/hb__<hash>` and pushed, which is what OpenSandbox needs. The build then runs with the first
+of `buildah`, `podman` and `docker` found on PATH, or the tool named by `builds.tool`.
+buildah runs rootless, with the `vfs` storage driver and `chroot` isolation, under a node-local storage
+root (`/raid/scratch/<user>/nemo-gym-buildah` when that disk exists, else the system temp folder). Without
+a repository the image stays local as `hb__<hash>`, and only `docker` can build it: the Docker
+daemon is the one local store a sandbox provider starts images from, so buildah and podman are refused
+without a repository. That is the laptop path with the Docker provider.
+
+buildah and podman run with a `containers.conf` override. The host's containers configuration may give every
+container a default bind mount (this deployment's `/etc/containers/containers.conf.d/30-mounts.conf` mounts
+`/etc/localtime` read-only into each one), and both tools apply those mounts to build steps too, so any
+Dockerfile that installs `tzdata` (Ubuntu with `python3` pulls it in) fails with
+`mv: cannot move '/etc/localtime.dpkg-new' to '/etc/localtime': Device or resource busy`. The builder writes
+`containers.conf` with `[containers]` `volumes = []` under its storage root, once, and sets
+`CONTAINERS_CONF_OVERRIDE` to it for every buildah and podman command, the layer containers-common applies over
+the host's files. A `CONTAINERS_CONF_OVERRIDE` already set in the environment is left as it is, so a deployment
+that needs its own override keeps it.
+
+A proxy the build tool inherits can break the registry push. The tool reads `http_proxy`, `https_proxy`,
+`no_proxy` and their upper-case forms from its environment and from its own configuration
+(`containers.conf` `[engine].env`, `~/.docker/config.json` `proxies`, the Docker daemon), and a proxy that
+answers 403 to the registry ping fails the push even when the gym process itself has no proxy variables.
+`no_proxy` (and `NO_PROXY`) has to include the registry host, or the proxy variables have to be cleared for the
+build. Nothing is hard-coded: when a build, push or ping fails with a 403, the builder logs the names of the
+proxy variables present in the tool's environment (names only, never values), or says that there are none and
+that the tool's own configuration is the place to look, so the cause is visible in the failure.
+
+With `docker`, the build is Harbor's build step. Prepare writes the Compose file Harbor's Docker environment
+builds a task with (service `main`, `build.context` the task's `environment/` folder, Harbor's
+`pull_policy: build` and keep-alive `command`), adds the task's own `environment/docker-compose.yaml` after it
+when the task ships one, and runs
+`docker compose --project-directory <environment/> -f <harbor file> [-f <task file>] build`, as
+`DockerEnvironment.start()` does (`harbor/environments/docker/docker.py` at v0.22.0, cited by permalink in
+`nemo_gym/tasks/harbor/image_build.py`). The command's environment is merged as Harbor merges it: the process
+environment, then the task's `[environment].env` (a whole value `${VAR}` or `${VAR:-default}` read from the
+host, as Harbor's `resolve_env_vars` reads it; an unset `${VAR}` with no default fails the build), then Harbor's
+infrastructure variables, which win: `MAIN_IMAGE_NAME`, `CONTEXT_DIR`, `CPUS` and `MEMORY` (`<n>M`) from the
+task's resources, and the `HOST_*_PATH` / `ENV_*_PATH` log mounts. So `main`'s build args and target in the
+task file, interpolated or literal, apply as they do in Harbor. Two deliberate additions over Harbor's literal
+file and command: Harbor's template sets no `image` (its build is tagged `<session>-main` unless the task file
+says `image: ${MAIN_IMAGE_NAME}`), and Gym sets `image: hb__<hash>`, the `MAIN_IMAGE_NAME` value, so the result
+can be inspected, pushed and recorded; and `DOCKER_DEFAULT_PLATFORM` carries `builds.platform`. `main`'s
+`image`, when the task file sets it, has to be `${MAIN_IMAGE_NAME}`.
+
+The task's Compose file is third-party content that `docker compose build` runs on the build host, which often
+holds the push credentials, so prepare checks it before the command runs. The check reads the file as Compose
+reads it: interpolated against the build's own environment (the merged environment above, with
+`environment/.env` under it, as Compose reads `.env` from the project directory), with Compose's `${VAR}`,
+`${VAR:-default}`, `${VAR-default}`, `${VAR:?error}`, `${VAR:+alt}` and `$VAR` forms, so `network: ${X:-host}` is
+refused like `network: host` and `cache_to: [type=gha,${X:-token}=abc]` like a literal token. `.env` values are
+read as Compose's dotenv reader reads them: an unquoted or double-quoted value is itself interpolated against
+the build's environment and the lines above it (so `NET=${X:-host}` in `.env` is `host`), a single-quoted value
+is literal, and `COMPOSE_ENV_FILES` set in the build's environment fails the build, as it would point Compose at
+files the check does not read. A variable the
+build cannot resolve is refused rather than left to Compose's empty default, so the file checked is the file
+built. Build-time-only variables, the build host's environment and `environment/.env`, do not exist at seed,
+where the server interpolates the file from the task's `[environment].env` and Harbor's infrastructure
+variables only, so a Compose file must not rely on them outside `main`'s build section. Prepare refuses, naming the service and key: build `secrets`, `ssh`, `extra_hosts`, `network: host`, `additional_contexts` other than `service:`
+references, `cache_from` / `cache_to` entries carrying credentials, a `build.context` or `dockerfile` that does
+not resolve under `environment/` (symlinks resolved; `${CONTEXT_DIR}` is allowed), a top-level `include` and an
+`extends` with a `file`. A sidecar with a `build:` section is refused too: sidecars name a prebuilt `image:`
+(the loader records it from the registry and refuses one without), and no provider starts a locally built
+sidecar, so only `main` is built, from `environment/Dockerfile` or the task file's `dockerfile_inline`. Harbor
+reads a task's Compose file from `environment/docker-compose.yaml` only; the loader also accepts
+`docker-compose.yml`, `compose.yaml` and `compose.yml` at run time, and the build refuses those spellings so the
+file a task builds with is the file it runs with. `docker build` is never called, so the Compose v2 plugin
+(`docker-compose-plugin`) is required and its absence fails prepare with a message that names it. buildah and
+podman are the OpenSandbox path: they build the Dockerfile directly and push it.
+
+Images are built for `linux/amd64`, the platform the sandboxes run. The tool is asked for that platform
+(`docker compose` through `DOCKER_DEFAULT_PLATFORM`), and an image that comes out for another one is
+refused before it is pushed or recorded. Building on an
+arm64 host therefore needs qemu with binfmt registered, or an x86 node. `builds.platform: OS/ARCH` overrides
+the target. `builds.enabled: false` never builds. Tasks that need a build and have none recorded are then
+skipped with a message that says so.
+
+The hash is SHA-256 over the sorted relative paths and bytes of the regular files in the build context,
+exactly as Harbor computes it: symbolic links and anything under `__pycache__`, `.git` or `.DS_Store` are
+skipped, and file modes are not part of it. Two tasks with identical `environment/` folders share one
+image and a changed file gets a new one. `built-images.json` next to the task folders maps each context
+hash to the image, the tasks that use it, the tool and whether it was pushed. Deleting a context's entry
+from that file forces a rebuild of it at the next prepare; there is no flag for that, since a changed
+Dockerfile or context is a new hash and builds on its own. The built image's
+configuration lands in `compose-images.json` beside it, so the loader reads the Dockerfile's final
+`WORKDIR`, `ENV` and `USER` from it like any pulled image. A recorded image is reused when it fits the run:
+a pushed image serves every run, a local one only runs that push nothing, and the platform has to match.
+Otherwise it is rebuilt and the record replaced, and prepare says why. An image is recorded only after it
+was built, pushed and inspected, and each one as soon as it is done, so an interrupted prepare resumes
+where it stopped. A failed build stops the preparation and names the tasks. Prepare also writes the
+distinct images of the prepared tasks to `results/harbor/<taskset>/images.json`, for pre-pulling.
+
+The build tool pushes with its own login. Pulling a pushed image into a sandbox uses the registry
+credentials of the sandbox provider block (`images.auth`), the same way as any private image. The sandbox
+is created with the Dockerfile's final `USER` (or `[agent].user`) as the default for every command, on every
+provider, not only for the overlay `RUN` lines. An overlay task starts without that default, because its
+`RUN` lines may be what creates the user, and switches to it once they have run. A numeric `USER 1000` is
+resolved to its name in the image with `getent` first, because OpenSandbox and PTY sessions switch user by
+name. When the uid names no user, the number stays and the seed logs a warning: Docker accepts a uid as
+it is, the other providers cannot run commands as it.
 
 | Setting or feature | Behavior in this layer |
 | --- | --- |
