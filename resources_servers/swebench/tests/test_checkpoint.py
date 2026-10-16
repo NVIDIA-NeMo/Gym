@@ -409,6 +409,29 @@ async def test_a_release_deletes_the_snapshots_of_dropped_checkpoints_even_after
     assert provider.snapshots == {} and restarted._checkpointer().indexed_snapshots == {}
 
 
+def test_a_golden_patch_instance_lends_no_sandbox_and_starts_restart_only_with_eight_workers(
+    provider: SnapshotProvider,
+) -> None:
+    """Training configs load the whole swebench yaml, so its grade-only golden-patch instance starts with
+    checkpointing on too: it holds no session state and needs neither a state_dir nor a single worker."""
+    server_client = MagicMock(spec=ServerClient)
+    server_client.global_config_dict = DictConfig({"checkpoint": {"enabled": True, "control_auth_token": "t"}})
+    config = SwebenchResourcesServerConfig(
+        host="",
+        port=0,
+        entrypoint="",
+        name="swebench_golden",
+        sandbox_provider="sandbox",
+        sandbox_config={},
+        is_verifying_golden_patch=True,
+        num_workers=8,
+    )
+
+    server = SwebenchResourcesServer(config=config, server_client=server_client)
+
+    assert server.checkpoint_mode_in_effect() == "restart_only"
+
+
 def test_checkpointing_without_a_state_dir_fails_at_startup(provider: SnapshotProvider) -> None:
     server_client = MagicMock(spec=ServerClient)
     server_client.global_config_dict = DictConfig({"checkpoint": {"enabled": True, "control_auth_token": "t"}})
