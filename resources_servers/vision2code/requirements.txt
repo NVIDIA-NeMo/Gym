@@ -1,2 +1,4 @@
 -e nemo-gym[dev] @ ../../
 Pillow==12.3.0
+numpy==2.5.3
+scipy==1.18.1

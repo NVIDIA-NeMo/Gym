@@ -126,6 +126,49 @@ async def test_reward_curve_applies_after_rubric_caps(setup):
     assert not result.mask_sample
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("power", [1, 2, 3])
+async def test_blend_uses_raw_llm_and_bypasses_power(setup, power):
+    server, body, _, judge = setup
+    server.config.use_blended_reward = True
+    server.config.reward_power = power
+    ref = Path(body.verifier_metadata.image_path)
+    im = Image.new("RGB", (80, 60), "white")
+    ImageDraw.Draw(im).rectangle((10, 10, 40, 40), fill="black")
+    im.save(ref)
+    body.verifier_metadata.sha256 = hashlib.sha256(ref.read_bytes()).hexdigest()
+    scores = {c["id"]: 5 for c in DATASET_RUBRICS["ChartQA"]["categories"]}
+    scores["numeric_information_fidelity"] = 1
+    judge.return_value = response(json.dumps({"category_scores": scores, "rationales": {}}))
+    result = await server.verify(body)
+    # Perfect pixels contribute 0.5; raw 3.8/5 contributes 0.38, despite the 2.5 cap.
+    assert result.reward == pytest.approx(0.88)
+    assert not result.mask_sample and result.use_blended_reward and result.reward_power == 1
+    assert result.rubric_result["llm_final_rating_0_to_5"] == 2.5
+    assert result.rubric_result["raw_score_0_to_5"] == 3.8
+    assert result.rubric_result["final_rating_0_to_5"] == 4.4
+    assert result.rubric_result["deterministic_scores"]["foreground_rgb_similarity"] == 1
+    saved = json.loads(Path(result.artifacts["result"]).read_text())
+    assert saved["use_blended_reward"] and saved["reward"] == pytest.approx(0.88)
+
+
+@pytest.mark.asyncio
+async def test_undefined_blend_is_masked(setup):
+    server, body, renderer, judge = setup
+    server.config.use_blended_reward = True
+
+    async def blank_render(**kwargs):
+        Image.new("RGB", (80, 60), "white").save(kwargs["artifact_dir"] / "output.png")
+        return RenderResult(status="ok")
+
+    renderer.side_effect = blank_render
+    judge.return_value = judge_result("ChartQA")
+    result = await server.verify(body)
+    assert result.reward == 0 and result.mask_sample
+    assert result.failure_kind == "verifier_error"
+    assert "image_metrics" in result.failure_reason and "weights were not redistributed" in result.failure_reason
+
+
 @pytest.mark.parametrize("power", [0, -1, 0.5, float("nan"), float("inf")])
 def test_invalid_reward_power(setup, power):
     server, *_ = setup
@@ -167,8 +210,10 @@ async def test_same_environment_all_rubrics(setup, name):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("name", get_args(RubricName))
 @pytest.mark.parametrize("status", ["code_error", "timeout", "missing_output", "invalid_output"])
-async def test_policy_failure_is_unmasked_zero(setup, status, name):
+@pytest.mark.parametrize("blend", [False, True])
+async def test_policy_failure_is_unmasked_zero(setup, status, name, blend):
     server, body, renderer, judge = setup
+    server.config.use_blended_reward = blend
     body.verifier_metadata.rubric = name
     renderer.side_effect = None
     renderer.return_value = RenderResult(status=status)

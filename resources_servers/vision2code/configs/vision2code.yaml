@@ -21,6 +21,9 @@ vision2code:
       execution_timeout: 60
       render_concurrency: 4
       reward_power: 2.0
+      # Opt in to reference Blend A / 5; uses raw LLM scores and ignores reward_power.
+      # 0.1 * foreground_RGB + 0.2 * foreground_F1 + 0.2 * edge_F1 + 0.5 * raw_LLM/5.
+      use_blended_reward: false
       artifact_dir: ${oc.env:VISION2CODE_ARTIFACTS,artifacts/vision2code}
       datasets:
         - name: example
