@@ -23,11 +23,15 @@ from fastapi import Body, FastAPI, HTTPException, Request
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
+    AgentSessionSetupError,
     AgentSessionState,
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_correlation import rollout_context
+from nemo_gym.sandbox import AsyncSandbox
+from nemo_gym.sandbox.config import resolve_provider_config
+from nemo_gym.sandbox.providers import create_provider
 from nemo_gym.tool_access import DirectHTTPToolAccess
 from responses_api_agents.nooa_agent.config import NOOAAgentConfig
 from responses_api_agents.nooa_agent.result import finalize_run_result, is_transient_infrastructure_error
@@ -38,6 +42,8 @@ from responses_api_agents.nooa_agent.runner import (
     NOOARunRequest,
     NOOARunResult,
 )
+from responses_api_agents.nooa_agent.sandbox_runner import SandboxNOOARunner
+from responses_api_agents.nooa_agent.sandbox_runtime import prepare_nooa_runtime
 from responses_api_agents.nooa_agent.termination import NOOATerminationReason
 
 
@@ -80,12 +86,43 @@ class NOOAAgent(SimpleResponsesAPIAgent):
             tool_access=access,
             resources_cookies=dict(access.cookies) if access else {},
         )
-        state.runner = InProcessNOOARunner(
-            invocation=self.config.nooa,
-            server_client=self.server_client,
-            model_server_name=self.config.model_server.name,
-            max_policy_calls=self.config.max_policy_calls,
-        )
+        if self.config.nooa.execution_mode == "embedded":
+            state.runner = InProcessNOOARunner(
+                invocation=self.config.nooa,
+                server_client=self.server_client,
+                model_server_name=self.config.model_server.name,
+                max_policy_calls=self.config.max_policy_calls,
+            )
+        else:
+            if body.sandbox_access is None:
+                raise HTTPException(422, "Sandboxed NOOA requires Resources-provided sandbox_access")
+            model_base_url = self.server_client._resolve_base_url(self.config.model_server.name)
+            connection = body.sandbox_access.connection
+            provider = create_provider(
+                resolve_provider_config(connection.provider_config_ref, self.server_client.global_config_dict)
+            )
+            try:
+                sandbox = await AsyncSandbox.connect(connection.descriptor, provider=provider)
+            except BaseException:
+                await provider.aclose()
+                raise
+            runner = SandboxNOOARunner(
+                sandbox=sandbox,
+                workdir=body.sandbox_access.workdir,
+                python="",
+                invocation=self.config.nooa,
+                model_base_url=model_base_url,
+                model_server_name=self.config.model_server.name,
+                max_policy_calls=self.config.max_policy_calls,
+            )
+            state.runner = runner
+            try:
+                runner.python = await prepare_nooa_runtime(sandbox)
+                await runner.prepare()
+            except BaseException as error:
+                # Main retains this state for close while rejecting activation
+                # and seed retries against an incompletely initialized runtime.
+                raise AgentSessionSetupError(state, error=error) from error
         return state
 
     async def responses(
@@ -154,10 +191,14 @@ class NOOAAgent(SimpleResponsesAPIAgent):
             if not execution.done():
                 execution.cancel()
             await asyncio.gather(execution, return_exceptions=True)
+        if isinstance(state.runner, SandboxNOOARunner):
+            await state.runner.close()
+            if state.runner.artifact is not None and state.runner.artifact.response is not None:
+                state.result = state.runner.artifact.run_result()
         return self._session_evidence(state)
 
     def _session_evidence(self, state: NOOASessionState) -> AgentCloseSessionResponse:
-        observations = None
+        observations = state.runner.observations if isinstance(state.runner, SandboxNOOARunner) else None
         if state.result is not None:
             _, observations = finalize_run_result(state.result)
         return AgentCloseSessionResponse(
