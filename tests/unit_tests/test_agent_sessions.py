@@ -5,14 +5,18 @@ import asyncio
 from unittest.mock import MagicMock
 
 import pytest
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionRequest,
+    AgentSeedRejectedError,
     AgentSeedSessionRequest,
+    AgentSessionState,
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.episode_types import EpisodeId, TaskId
+from nemo_gym.testing.agent_session_conformance import check_agent_seed_rejected
 from nemo_gym.tool_access import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
 
 
@@ -89,3 +93,61 @@ def test_base_agent_exposes_unimplemented_session_routes() -> None:
     paths = agent.setup_webserver().openapi()["paths"]
     assert "/v1/agent_sessions" in paths
     assert "/v1/agent_sessions/close" in paths
+
+
+class _GrantCheckingAgent(_Agent):
+    """Serves sessions without tool grants and refuses a seed that requires one."""
+
+    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> AgentSessionState:
+        if body.tool_accesses:
+            raise AgentSeedRejectedError("this agent cannot use tool grants")
+        return AgentSessionState(request=body)
+
+
+class _PlainValueErrorAgent(_Agent):
+    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> AgentSessionState:
+        raise ValueError("this agent cannot use tool grants")
+
+
+_REQUIRED_GRANT = [
+    MCPToolAccess(
+        name="resources",
+        required=True,
+        connection=MCPStreamableHTTPConnection(url="http://resources:8000/mcp"),
+    )
+]
+
+
+def test_a_rejected_seed_is_still_a_value_error() -> None:
+    rejected = AgentSeedRejectedError("unsupported")
+
+    assert isinstance(rejected, ValueError)
+    assert rejected.status_code == 422
+    assert rejected.detail == "unsupported"
+
+
+def test_an_unsupported_seed_fails_with_a_final_422_and_keeps_no_session() -> None:
+    agent = _GrantCheckingAgent.model_construct(config=MagicMock(num_workers=1), server_client=MagicMock())
+    app = agent.setup_webserver()
+
+    detail = check_agent_seed_rejected(app, _seed_request(tool_accesses=_REQUIRED_GRANT))
+
+    assert detail == "this agent cannot use tool grants"
+    assert agent._session_records == {}
+    # The refusal bound nothing, so the same ID can still be seeded with a request the agent supports.
+    assert TestClient(app).post("/v1/agent_sessions", json=_seed_request().model_dump(mode="json")).status_code == 200
+
+
+def test_the_check_catches_a_seed_refusal_that_would_be_retried() -> None:
+    agent = _PlainValueErrorAgent.model_construct(config=MagicMock(num_workers=1), server_client=MagicMock())
+
+    with pytest.raises(AssertionError, match="final 4xx, got 500"):
+        check_agent_seed_rejected(agent.setup_webserver(), _seed_request(tool_accesses=_REQUIRED_GRANT))
+
+
+def test_sessions_on_several_workers_fail_with_a_final_422() -> None:
+    agent = _GrantCheckingAgent.model_construct(config=MagicMock(num_workers=2), server_client=MagicMock())
+
+    detail = check_agent_seed_rejected(agent.setup_webserver(), _seed_request())
+
+    assert detail == "Agent sessions require num_workers=1"

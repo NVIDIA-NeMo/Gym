@@ -191,6 +191,19 @@ class AgentSessionState:
     request: AgentSeedSessionRequest
 
 
+class AgentSeedRejectedError(HTTPException, ValueError):
+    """Refuse an agent session seed this agent cannot serve, such as a grant or sandbox it does not support.
+
+    FastAPI answers it with HTTP 422, which an Environment Server treats as terminal, so a configuration error
+    fails the episode once with this message instead of being retried as if it were transient. It is also a
+    ``ValueError``, so code that validates a seed outside a request (a checkpoint restore, a direct call in a test)
+    keeps catching it as before.
+    """
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(422, detail)
+
+
 class AgentSessionSetupError(Exception):
     """Retain incomplete setup for close while propagating the original setup error."""
 
@@ -383,7 +396,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             # This agent cannot capture the session, so the episode that seeds it starts over after a crash.
             response.headers[CHECKPOINT_RESTART_HEADER] = "1"
         if self.config.num_workers not in (None, 1):
-            raise ValueError("Agent sessions require num_workers=1")
+            raise AgentSeedRejectedError("Agent sessions require num_workers=1")
         current = self._agent_session_id_from_request(request)
         if current is not None and current != body.agent_session_id:
             raise HTTPException(409, "agent_session_id does not match the session cookie")

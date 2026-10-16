@@ -354,8 +354,9 @@ def test_shared_seed_rejects_multiple_workers_before_initialization(setup):
     agent.config.num_workers = 2
     with TestClient(agent.setup_webserver()) as client:
         # Worker count is server configuration, checked by the shared route before seed.
-        with pytest.raises(ValueError, match="Agent sessions require num_workers=1"):
-            client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        refused = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert refused.status_code == 422
+        assert refused.json()["detail"] == "Agent sessions require num_workers=1"
     assert not agent._session_records
     sandbox.exec.assert_not_awaited()
 
