@@ -172,8 +172,7 @@ still come from each problem's `run.sh`.
    submission per test, so about half the CPUs keeps them from competing. The default
    `sandbox_config.provider_options.network_policy` is an OpenSandbox option that denies all
    egress. Other providers need their own setting (Docker's `network: none`), and Daytona, E2B and
-   OpenShell reject the key, so remove it for them. Submissions can still read `problem_data_dir`,
-   which holds the expected output of every test of every problem mounted there.
+   OpenShell reject the key, so remove it for them.
 
    The sandbox must let `run.sh` raise the stack limit (`ulimit -s unlimited`): its hard
    `RLIMIT_STACK` must be unlimited, or the process needs `CAP_SYS_RESOURCE`. Otherwise
