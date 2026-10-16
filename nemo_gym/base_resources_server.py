@@ -12,11 +12,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 from abc import abstractmethod
+from collections import OrderedDict
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from enum import Enum
+from time import monotonic
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Optional, TypeVar, get_args
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, PrivateAttr, field_validator
 from starlette.middleware import Middleware
 
@@ -221,8 +227,9 @@ class ResourcesSeedSessionRequest(BaseModel):
 
     Repeating the same identifier and episode must return the existing session.
     Closing an unknown identifier must prevent a racing seed from creating it later.
-    External resources should use provider TTLs when available. Current process-local
-    session records may remain until the server shuts down.
+    ``ResourcesSessionFence`` keeps that record for ``CLOSED_SESSION_RETENTION_S``;
+    callers must use unique IDs and finish seed retries within that window.
+    External resources should use provider TTLs when available.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -271,6 +278,80 @@ class ResourcesCloseSessionResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     resources_session_id: str
+
+
+# How long a closed resources session is remembered, so a late seed for it is refused.
+CLOSED_SESSION_RETENTION_S = 3600.0
+
+
+class ResourcesSessionFence:
+    """Serialize seed and close per resources session, and remember closed sessions for a bounded time.
+
+    A seed that arrives after its session closed (a retry, or a reply that raced the close) must not create the
+    session again, so a server remembers each closed ``resources_session_id``. Each record expires
+    ``retention_seconds`` after its close, which keeps memory bounded over a long training run. A per-session lock
+    exists only while a request holds or waits for it.
+    """
+
+    def __init__(
+        self,
+        *,
+        retention_seconds: float = CLOSED_SESSION_RETENTION_S,
+        clock: Callable[[], float] = monotonic,
+    ) -> None:
+        self._retention_seconds = retention_seconds
+        self._clock = clock
+        self._locks: dict[str, _FenceLock] = {}
+        # Records share one retention, so insertion order is expiry order.
+        self._closed: OrderedDict[str, tuple[EpisodeId, float]] = OrderedDict()
+
+    @asynccontextmanager
+    async def locked(self, resources_session_id: str) -> AsyncIterator[None]:
+        """Hold the lock for ``resources_session_id`` so its seed and close never interleave."""
+        entry = self._locks.setdefault(resources_session_id, _FenceLock())
+        entry.users += 1
+        try:
+            async with entry.lock:
+                yield
+        finally:
+            entry.users -= 1
+            if entry.users == 0:
+                del self._locks[resources_session_id]
+
+    def closed_episode(self, resources_session_id: str) -> EpisodeId | None:
+        """Return the episode that closed ``resources_session_id`` within the retention window, else ``None``."""
+        self._expire()
+        record = self._closed.get(resources_session_id)
+        return record[0] if record is not None else None
+
+    def raise_if_closed(self, resources_session_id: str) -> None:
+        """Refuse a seed for a closed session with 409, which the Environment Server does not retry."""
+        if self.closed_episode(resources_session_id) is not None:
+            raise HTTPException(409, f"Resources session is already closed: {resources_session_id}")
+
+    def mark_closed(self, resources_session_id: str, episode_id: EpisodeId) -> None:
+        """Record ``resources_session_id`` as closed; call it only after its state was released."""
+        self._expire()
+        self._closed.pop(resources_session_id, None)
+        self._closed[resources_session_id] = (episode_id, self._clock() + self._retention_seconds)
+
+    def clear(self) -> None:
+        """Forget every record, for a server that drops all of its sessions at shutdown."""
+        self._closed.clear()
+
+    def _expire(self) -> None:
+        now = self._clock()
+        while self._closed:
+            resources_session_id, (_, expires_at) = next(iter(self._closed.items()))
+            if expires_at > now:
+                return
+            del self._closed[resources_session_id]
+
+
+@dataclass
+class _FenceLock:
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    users: int = 0
 
 
 class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleServer):
@@ -472,12 +553,15 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         An override must:
 
         - succeed when the session is already closed or was never seeded;
-        - keep a seed that arrives after the close from creating the session again;
+        - keep a seed that arrives after the close from creating the session again, for a bounded time
+          (``ResourcesSessionFence`` does this for ``CLOSED_SESSION_RETENTION_S``);
+        - release the session's state by ``resources_session_id`` even when the request carries no session cookie;
         - raise when releasing fails rather than recording the session as closed, so the caller can retry.
 
-        The default seed does not tie the session cookie to ``resources_session_id``. A server that keys state
-        by the cookie's ``SESSION_ID_KEY`` releases it by that key, from ``request.session``, or sets
-        ``request.session[SESSION_ID_KEY] = body.resources_session_id`` in its own seed.
+        A close can arrive without the cookie: the Environment Server registers the close before it sends the seed,
+        so when the seed's reply is lost it closes with an empty cookie jar. A server that keys state by the cookie's
+        ``SESSION_ID_KEY`` must therefore also map ``resources_session_id`` to that state in its seed, or set
+        ``request.session[SESSION_ID_KEY] = body.resources_session_id`` there.
 
         ``nemo_gym.testing.session_conformance.check_resources_session_contract`` checks these rules from a server's tests.
         """

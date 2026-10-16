@@ -15,20 +15,27 @@
 import asyncio
 from unittest.mock import MagicMock
 
+import pytest
+from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
+from pydantic import PrivateAttr
 
 from nemo_gym.base_resources_server import (
     BaseMultiRewardVerifyResponse,
     BaseResourcesServerConfig,
     BaseVerifyResponse,
+    ResourcesCloseSessionRequest,
+    ResourcesCloseSessionResponse,
     ResourcesSeedSessionRequest,
+    ResourcesSeedSessionResponse,
+    ResourcesSessionFence,
     ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.failure_kinds import JUDGE_FAILED, SESSION_LOST
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from nemo_gym.testing.session_conformance import check_resources_session_contract
 
 
@@ -204,3 +211,144 @@ class TestFailureKindOnTheContract:
 
         assert response.failure_kind == "lexmount_browser:quota_exhausted"
         assert caplog.records == []
+
+
+EPISODE = EpisodeId(rollout_id="rollout", attempt=0)
+
+
+class TestResourcesSessionFence:
+    def test_a_closed_session_is_refused_until_its_record_expires(self) -> None:
+        clock = [100.0]
+        fence = ResourcesSessionFence(retention_seconds=10.0, clock=lambda: clock[0])
+        fence.mark_closed("closed", EPISODE)
+
+        assert fence.closed_episode("closed") == EPISODE
+        with pytest.raises(HTTPException) as refused:
+            fence.raise_if_closed("closed")
+        assert refused.value.status_code == 409
+        fence.raise_if_closed("open")
+
+        clock[0] += 10.0
+        assert fence.closed_episode("closed") is None
+        fence.raise_if_closed("closed")
+
+    def test_records_stay_bounded_by_the_retention_window(self) -> None:
+        clock = [0.0]
+        fence = ResourcesSessionFence(retention_seconds=5.0, clock=lambda: clock[0])
+        for index in range(1000):
+            fence.mark_closed(f"session-{index}", EPISODE)
+            clock[0] += 1.0
+
+        # Only the sessions closed within the last five seconds are still remembered.
+        assert fence.closed_episode("session-995") is None
+        assert fence.closed_episode("session-996") == EPISODE
+        assert list(fence._closed) == [f"session-{index}" for index in range(996, 1000)]
+
+    def test_closing_again_restarts_the_retention_window(self) -> None:
+        clock = [0.0]
+        fence = ResourcesSessionFence(retention_seconds=10.0, clock=lambda: clock[0])
+        fence.mark_closed("first", EPISODE)
+        fence.mark_closed("second", EPISODE)
+        clock[0] = 8.0
+        fence.mark_closed("first", EPISODE)
+
+        clock[0] = 12.0
+        assert fence.closed_episode("second") is None
+        assert fence.closed_episode("first") == EPISODE
+
+    def test_the_lock_serializes_one_session_and_is_dropped_when_unused(self) -> None:
+        fence = ResourcesSessionFence()
+        order: list[str] = []
+
+        async def hold(name: str) -> None:
+            async with fence.locked("session"):
+                order.append(f"{name} in")
+                await asyncio.sleep(0)
+                order.append(f"{name} out")
+
+        async def main() -> None:
+            await asyncio.gather(hold("seed"), hold("close"))
+
+        asyncio.run(main())
+
+        assert order == ["seed in", "seed out", "close in", "close out"]
+        assert fence._locks == {}
+
+    def test_a_cancelled_waiter_releases_its_lock_entry(self) -> None:
+        fence = ResourcesSessionFence()
+
+        async def main() -> None:
+            async with fence.locked("session"):
+                waiter = asyncio.create_task(fence.locked("session").__aenter__())
+                await asyncio.sleep(0)
+                waiter.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await waiter
+
+        asyncio.run(main())
+
+        assert fence._locks == {}
+
+
+def _cookie_keyed_server(*, releases_by_resources_session_id: bool) -> SimpleResourcesServer:
+    """A server that keys per-rollout state by the session cookie, as several servers do."""
+    config = BaseResourcesServerConfig(host="", port=0, entrypoint="", name="")
+
+    class CookieKeyedResourcesServer(SimpleResourcesServer):
+        _fence: ResourcesSessionFence = PrivateAttr(default_factory=ResourcesSessionFence)
+        _held: dict[str, str] = PrivateAttr(default_factory=dict)
+
+        async def verify(self, body):
+            pass
+
+        async def seed_session(
+            self, request: Request, body: ResourcesSeedSessionRequest
+        ) -> ResourcesSeedSessionResponse:
+            async with self._fence.locked(body.resources_session_id):
+                self._fence.raise_if_closed(body.resources_session_id)
+                self._held[request.session[SESSION_ID_KEY]] = body.resources_session_id
+            return ResourcesSeedSessionResponse(resources_session_id=body.resources_session_id)
+
+        async def close_resources_session(
+            self, request: Request, body: ResourcesCloseSessionRequest
+        ) -> ResourcesCloseSessionResponse:
+            async with self._fence.locked(body.resources_session_id):
+                if releases_by_resources_session_id:
+                    for key in [key for key, held in self._held.items() if held == body.resources_session_id]:
+                        del self._held[key]
+                else:
+                    self._held.pop(request.session[SESSION_ID_KEY], None)
+                self._fence.mark_closed(body.resources_session_id, body.episode_id)
+            return ResourcesCloseSessionResponse(resources_session_id=body.resources_session_id)
+
+    return CookieKeyedResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+
+class TestLostSeedReplyConformance:
+    SEED = ResourcesSeedSessionRequest(
+        resources_session_id="contract-session",
+        episode_id=EPISODE,
+        task_id=TaskId(taskset="tasks", task_id="task"),
+        task_data={},
+    )
+
+    def test_a_close_without_the_cookie_must_release_the_session(self) -> None:
+        server = _cookie_keyed_server(releases_by_resources_session_id=False)
+
+        with pytest.raises(AssertionError, match="close left state for contract-session-lost-seed-reply"):
+            check_resources_session_contract(
+                server.setup_webserver(),
+                self.SEED,
+                keeps_state=True,
+                holds_state=lambda resources_session_id: resources_session_id in server._held.values(),
+            )
+
+    def test_a_server_that_releases_by_resources_session_id_passes(self) -> None:
+        server = _cookie_keyed_server(releases_by_resources_session_id=True)
+
+        check_resources_session_contract(
+            server.setup_webserver(),
+            self.SEED,
+            keeps_state=True,
+            holds_state=lambda resources_session_id: resources_session_id in server._held.values(),
+        )
