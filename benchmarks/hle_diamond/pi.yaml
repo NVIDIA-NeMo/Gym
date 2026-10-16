@@ -13,7 +13,7 @@ hle_diamond_pi_agent:
       - name: hle_diamond_text
         type: benchmark
         jsonl_fpath: benchmarks/hle_diamond/data/hle_diamond_benchmark_text.jsonl
-        prompt_config: benchmarks/hle/prompts/opencode.yaml
+        prompt_config: benchmarks/hle_diamond/prompts/opencode.yaml
         prepare_script: benchmarks/hle_diamond/prepare_text.py
         num_repeats: 1
 equivalence_llm_judge_simple_agent: null

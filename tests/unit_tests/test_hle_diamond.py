@@ -37,6 +37,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
+from nemo_gym.prompt import fill_prompt, load_prompt_config
 from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.server_utils import ServerClient
 from resources_servers.equivalence_llm_judge.app import (
@@ -51,6 +52,15 @@ from responses_api_agents.simple_agent.app import SimpleAgentVerifyResponse
 REPO_ROOT = Path(__file__).parents[2]
 HLE_DIAMOND_DIR = REPO_ROOT / "benchmarks" / "hle_diamond"
 HLE_JUDGE_PROMPT = REPO_ROOT / "benchmarks" / "hle" / "prompts" / "judge.txt"
+HLE_DIAMOND_PROMPTS = HLE_DIAMOND_DIR / "prompts"
+# SYSTEM_PROMPT of hle_eval/run_model_predictions.py in centerforaisafety/hle at the commit named in
+# prompts/default.yaml: the string the published table was measured with, single braces included.
+UPSTREAM_SYSTEM_PROMPT = (
+    "Your response should be in the following format:\n"
+    "Explanation: {your explanation for your answer choice}\n"
+    "Answer: {your chosen answer}\n"
+    "Confidence: {your confidence score between 0% and 100% for your answer}"
+)
 IMAGE_DATA_URI = "data:image/png;base64,iVBORw0KGgo="
 ROW_FIELDS = [
     "question",
@@ -281,16 +291,52 @@ class TestPrepare:
         assert prepare_module.build_parser().parse_args([]).limit is None
 
 
+class TestPrompts:
+    def test_default_prompt_renders_the_upstream_system_prompt_verbatim(self):
+        prompt = load_prompt_config(str(HLE_DIAMOND_PROMPTS / "default.yaml"))
+
+        system, user = fill_prompt(prompt, {"question": "What is 2+2?"})
+
+        assert system == {"role": "system", "content": UPSTREAM_SYSTEM_PROMPT}
+        assert user == {"role": "user", "content": "What is 2+2?"}
+        # The file holds nothing but the two templates; its braces are doubled only for str.format_map.
+        shipped = yaml.safe_load((HLE_DIAMOND_PROMPTS / "default.yaml").read_text(encoding="utf-8"))
+        assert shipped == {
+            "system": UPSTREAM_SYSTEM_PROMPT.replace("{", "{{").replace("}", "}}"),
+            "user": "{question}",
+        }
+
+    def test_opencode_prompt_folds_the_verbatim_instruction_after_the_question(self):
+        prompt = load_prompt_config(str(HLE_DIAMOND_PROMPTS / "opencode.yaml"))
+
+        assert prompt.system is None
+        (user,) = fill_prompt(prompt, {"question": "What is 2+2?"})
+        assert user == {"role": "user", "content": "What is 2+2?\n\n" + UPSTREAM_SYSTEM_PROMPT}
+
+    def test_prepare_bakes_exactly_the_upstream_system_prompt(self, prepared_env):
+        assert prepare_module.PROMPT_CONFIG_FPATH == HLE_DIAMOND_PROMPTS / "default.yaml"
+
+        rows = _read_rows(prepare_module.prepare())
+
+        assert [row["responses_create_params"]["input"][0] for row in rows] == [
+            {"role": "system", "content": UPSTREAM_SYSTEM_PROMPT}
+        ] * 4
+
+
 # benchmark name -> (dataset name, agent, prompt_config)
 LISTED_BENCHMARKS = {
     "hle_diamond": ("hle_diamond", "hle_diamond_equivalence_llm_judge_simple_agent", None),
     "hle_diamond/text": (
         "hle_diamond_text",
         "hle_diamond_text_equivalence_llm_judge_simple_agent",
-        "benchmarks/hle/prompts/default.yaml",
+        "benchmarks/hle_diamond/prompts/default.yaml",
     ),
-    "hle_diamond/opencode": ("hle_diamond_text", "hle_diamond_opencode_agent", "benchmarks/hle/prompts/opencode.yaml"),
-    "hle_diamond/pi": ("hle_diamond_text", "hle_diamond_pi_agent", "benchmarks/hle/prompts/opencode.yaml"),
+    "hle_diamond/opencode": (
+        "hle_diamond_text",
+        "hle_diamond_opencode_agent",
+        "benchmarks/hle_diamond/prompts/opencode.yaml",
+    ),
+    "hle_diamond/pi": ("hle_diamond_text", "hle_diamond_pi_agent", "benchmarks/hle_diamond/prompts/opencode.yaml"),
 }
 JUDGE_SERVER = "hle_diamond_equivalence_llm_judge_resources_server"
 

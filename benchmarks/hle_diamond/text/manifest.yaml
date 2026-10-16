@@ -25,9 +25,9 @@ datasets:
   type: benchmark
   jsonl_fpath: benchmarks/hle_diamond/data/hle_diamond_benchmark_text.jsonl
   prepare_script: benchmarks/hle_diamond/prepare_text.py
-  prompt_config: benchmarks/hle/prompts/default.yaml
+  prompt_config: benchmarks/hle_diamond/prompts/default.yaml
   num_repeats: 1
 model_server: policy_model
 canonical_split: benchmark
-standard_prompt_config: benchmarks/hle/prompts/default.yaml
+standard_prompt_config: benchmarks/hle_diamond/prompts/default.yaml
 lifecycle: active
