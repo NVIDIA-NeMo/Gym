@@ -6,8 +6,9 @@
 Docker reads an image's environment, user, working directory, entrypoint, command and
 exposed ports from the image itself. A sandbox platform without Docker cannot, so Gym
 records them from the registry into ``compose-images.json`` next to the task folders,
-one entry per image reference exactly as the task wrote it, pinned to the linux/amd64
-manifest digest it resolved to. Two readers depend on the file:
+one entry per image reference exactly as the task wrote it, pinned to the manifest digest it
+resolved to for the platform the sandboxes run (linux/amd64 unless ``builds.platform`` names
+another). Two readers depend on the file:
 
 - the harbor resources server, for the sidecar images a Compose task starts (see
   ``nemo_gym.sandbox.compose_config.resolve_compose``);
@@ -46,8 +47,10 @@ from nemo_gym.tasks.harbor.dataset_config import apply_dataset_config, read_data
 from nemo_gym.tasks.harbor.digest import context_digest
 from nemo_gym.tasks.harbor.models import HarborTaskConfig
 from nemo_gym.tasks.harbor.task import (
+    COMPOSE_FILE_NAMES,
     DOCKERFILE,
     IMAGE_CONFIGS_FILE,
+    MAIN_SERVICE,
     TASK_FILE,
     HarborTask,
     dockerfile_base_image,
@@ -61,7 +64,6 @@ from nemo_gym.tasks.harbor.task import (
 LOGGER = logging.getLogger(__name__)
 
 COMPOSE_IMAGES_FILE = IMAGE_CONFIGS_FILE
-COMPOSE_FILE_NAMES = ("docker-compose.yaml", "docker-compose.yml", "compose.yaml", "compose.yml")
 # The fields Compose would read from the image to start it, plus the build-time state (environment,
 # user, working directory) a Dockerfile's instructions resolve from; the rest of the config is not recorded.
 RECORDED_CONFIG_KEYS = ("Cmd", "Entrypoint", "Env", "ExposedPorts", "Healthcheck", "User", "WorkingDir")
@@ -81,8 +83,19 @@ DOCKER_HUB_REGISTRY = "registry-1.docker.io"
 PLATFORM = ("linux", "amd64")
 
 
+def platform_pair(platform: str | None) -> tuple[str, str]:
+    """``(os, architecture)`` of an ``os/arch[/variant]`` platform string such as ``builds.platform``; ``None``
+    (or an empty string) is linux/amd64, the default platform sandboxes run."""
+    parts = [part for part in (platform or "").lower().split("/") if part]
+    if not parts:
+        return PLATFORM
+    if len(parts) < 2:
+        raise ImageConfigError(f"Not a platform: {platform!r} (expected os/arch, for example linux/arm64)")
+    return parts[0], parts[1]
+
+
 class ImageConfigError(RuntimeError):
-    """An image reference could not be resolved to a linux/amd64 configuration."""
+    """An image reference could not be resolved to a configuration for the platform the sandboxes run."""
 
 
 @dataclass(frozen=True)
@@ -128,15 +141,23 @@ class RegistryClient:
     """Read manifests and configuration blobs over the OCI distribution API with the standard library.
 
     ``credentials`` maps a registry host to ``(username, password)`` for private repositories;
-    public ones use the anonymous token the registry hands out.
+    public ones use the anonymous token the registry hands out. ``platform`` is the ``(os, architecture)``
+    an image reference is resolved for (linux/amd64 by default): the manifest an index names for it, and
+    the only one a single-platform reference may be.
     """
 
     def __init__(
-        self, credentials: dict[str, tuple[str, str]] | None = None, *, timeout_s: float = 60, retries: int = 3
+        self,
+        credentials: dict[str, tuple[str, str]] | None = None,
+        *,
+        timeout_s: float = 60,
+        retries: int = 3,
+        platform: tuple[str, str] = PLATFORM,
     ) -> None:
         self.credentials = credentials or {}
         self.timeout_s = timeout_s
         self.retries = retries
+        self.platform = tuple(platform)
         self._tokens: dict[tuple[str, str], str] = {}
 
     def image_config(self, reference: str) -> dict[str, Any]:
@@ -148,9 +169,9 @@ class RegistryClient:
             manifest, _ = self._manifest(ref, manifest_digest)
         config_digest = manifest["config"]["digest"]
         blob = json.loads(self._get(ref, f"blobs/{config_digest}", accept="*/*")[0])
-        if (blob.get("os"), blob.get("architecture")) != PLATFORM:
+        if (blob.get("os"), blob.get("architecture")) != self.platform:
             raise ImageConfigError(
-                f"{reference}: resolved to {blob.get('os')}/{blob.get('architecture')}, not linux/amd64"
+                f"{reference}: resolved to {blob.get('os')}/{blob.get('architecture')}, not {'/'.join(self.platform)}"
             )
         config = blob.get("config") or {}
         return {
@@ -166,9 +187,9 @@ class RegistryClient:
             platform = entry.get("platform") or {}
             if (entry.get("annotations") or {}).get("vnd.docker.reference.type") == "attestation-manifest":
                 continue
-            if (platform.get("os"), platform.get("architecture")) == PLATFORM and not platform.get("variant"):
+            if (platform.get("os"), platform.get("architecture")) == self.platform and not platform.get("variant"):
                 return entry["digest"]
-        raise ImageConfigError(f"{ref.pinned_repository}: the image index has no linux/amd64 manifest")
+        raise ImageConfigError(f"{ref.pinned_repository}: the image index has no {'/'.join(self.platform)} manifest")
 
     def _manifest(self, ref: ImageRef, manifest_ref: str) -> tuple[dict[str, Any], str]:
         body, headers = self._get(ref, f"manifests/{manifest_ref}", accept=MANIFEST_ACCEPT)
@@ -303,7 +324,7 @@ def compose_variables(task: HarborTask, *, unset: set[str] | None = None) -> dic
     if context.is_dir():
         # Not the runtime project name (Harbor: the trial session id; Gym: the adapter's compose-<uuid>). A stable
         # per-task value, so files like o11y-bench's `o11y-stack-${COMPOSE_PROJECT_NAME}` alias and URL agree.
-        infra["COMPOSE_PROJECT_NAME"] = f"hb__{context_digest(context)}"
+        infra["COMPOSE_PROJECT_NAME"] = f"hb__{task.context_id or context_digest(context)}"
     if environment.docker_image:
         infra["PREBUILT_IMAGE_NAME"] = environment.docker_image
     if environment.cpus:
@@ -410,13 +431,17 @@ def _warn_unset(task: HarborTask, unset: set[str]) -> None:
 
 
 def load_compose_document(task: HarborTask) -> dict[str, Any] | None:
-    """The task's Compose overlay with ``env_file`` entries inlined and ``${VAR}`` references resolved.
+    """The task's Compose overlay with ``env_file`` entries inlined, ``${VAR}`` references resolved and the images
+    prepare built standing in for the services it built (:func:`with_built_images`), ``main`` only when the loader
+    resolved the task to its built image.
 
     Returns ``None`` for a task without a Compose file. Prepare and the resources server both read the
     file through this function, so the document the sandbox starts is the one prepare validated, provided
     both run with the same process environment (see :func:`compose_variables`). A required variable
     (``${VAR:?msg}``) without a value, a task variable the host does not set or a missing ``env_file``
     raises :class:`ImageConfigError` naming it; a variable nobody sets is an empty string, with a warning.
+    The record is the one :func:`~nemo_gym.tasks.harbor.task.load_task` read (``task.built_images``): nothing is
+    hashed here, which runs once per episode on the server.
     """
     path = compose_file(task)
     if path is None:
@@ -438,30 +463,44 @@ def load_compose_document(task: HarborTask) -> dict[str, Any] | None:
     if residual is not None:
         # The key path only: the value next to it may be a host secret.
         raise ImageConfigError(f"{task.task_id}: {path.name}: unresolved interpolation left at {residual}")
-    return document
+    images = dict(task.built_images)
+    if task.built_image is None:
+        # The loader resolved main elsewhere (docker_image declared, or pull/overlay mode): a recorded main is
+        # another task's build of the same context, or a build that predates the override. Harbor runs the
+        # prebuilt image then, so main keeps ${MAIN_IMAGE_NAME} = task.image. Sidecars are built whatever main's
+        # mode and are always substituted.
+        images.pop(MAIN_SERVICE, None)
+    return with_built_images(document, images)
 
 
-# The keys of ``main`` that describe how Harbor builds its image, meaningless once the image is built and recorded.
-MAIN_BUILD_KEYS = ("build", "pull_policy")
+# The keys of a service that describe how Harbor builds its image, meaningless once the image is built and recorded.
+BUILD_KEYS = ("build", "pull_policy")
 
 
-def without_main_build(document: dict[str, Any]) -> dict[str, Any]:
-    """``document`` with ``main``'s ``build`` and ``pull_policy`` removed, for a task that runs from the image
-    prepare built and recorded.
+def with_built_images(document: dict[str, Any], images: Mapping[str, str]) -> dict[str, Any]:
+    """``document`` with the recorded image of every service in ``images`` (service name to image, as
+    ``built-images.json`` records them) set as its ``image`` and its ``build`` and ``pull_policy`` removed.
 
-    Harbor builds ``main`` from the task's Compose file at every start, so the file may give ``main`` a
-    ``build:`` (args, a target, a ``dockerfile_inline``) and Harbor's own template sets ``pull_policy: build``.
-    Gym builds that image once at prepare, with the same file, and the loader then substitutes the recorded
-    ``hb__<hash>`` image for ``main`` (``MAIN_IMAGE_NAME`` resolves to it). The two keys describe a build that
-    already happened; the sandbox Compose adapter starts images only and refuses them as unsupported fields,
-    so they are dropped here rather than failing every episode of a task prepare accepted. Nothing else is
-    touched: a sidecar's ``build:`` is refused at prepare, and a task in pull or overlay mode goes through
-    :func:`without_restated_main_build` instead.
+    Harbor builds every service with a ``build:`` section from the task's Compose file at every start (``main``
+    with args, a target or a ``dockerfile_inline``, and the sidecars from their own contexts), and Harbor's own
+    template sets ``pull_policy: build``. Gym builds those images once at prepare, with the same file, and
+    records them by service name; here each recorded image stands in for its service's build, so a sidecar's own
+    ``image:`` spelling (kumo's ``${MAIN_IMAGE_NAME}_verifier``, a local tag under Harbor) is replaced by the name
+    Gym built and recorded. The two keys describe a build that already happened; the sandbox Compose adapter
+    starts images only and refuses them as unsupported fields, so they are dropped here rather than failing every
+    episode of a task prepare accepted. Services not in ``images`` are untouched: a task in pull or overlay mode
+    keeps whatever its file gives ``main``, so an unsupported field there is still reported, and a sidecar
+    prepare recorded no build for (with or without an ``image:`` of its own) is reported by
+    :func:`compose_image_references`.
     """
     services = document.get("services") if isinstance(document, dict) else None
-    main = services.get("main") if isinstance(services, dict) else None
-    if isinstance(main, dict) and any(key in main for key in MAIN_BUILD_KEYS):
-        services["main"] = {key: value for key, value in main.items() if key not in MAIN_BUILD_KEYS}
+    if not isinstance(services, dict):
+        return document
+    for name, image in images.items():
+        if name not in services:
+            continue
+        service = services[name] if isinstance(services[name], dict) else {}
+        services[name] = {**{key: value for key, value in service.items() if key not in BUILD_KEYS}, "image": image}
     return document
 
 
@@ -480,7 +519,7 @@ def without_restated_main_build(task: HarborTask, document: dict[str, Any]) -> t
     so a task file that repeats ``context``, ``dockerfile: Dockerfile`` or ``pull`` changes nothing there;
     orca-bench, terminal_bench_aai and data-eng-bench do, some 600 hub tasks. Gym runs such a Dockerfile without
     a build (the loader folded it into the task in pull mode, or runs its ``RUN`` lines at seed in overlay mode),
-    so the restatement is dropped as a built task's section is (:func:`without_main_build`). ``args``,
+    so the restatement is dropped as a built task's section is (:func:`with_built_images`). ``args``,
     ``target``, ``dockerfile_inline``, another ``dockerfile`` or another ``context`` would change the image
     Harbor builds and have no equivalent without one, so the task is reported, not started on the wrong image.
     """
@@ -516,8 +555,9 @@ def without_pull_policy(document: dict[str, Any]) -> dict[str, Any]:
     starts the recorded image it is given and has no pull step of its own to configure, so the key is dropped
     from the document the sandbox receives, in every image mode, instead of being refused as an unsupported
     field. ``build:`` is not touched here: a sidecar's is still refused (no provider starts a locally built
-    sidecar) and ``main``'s is dropped by :func:`without_main_build` for a task that runs from its recorded
-    built image, or by :func:`without_restated_main_build` when it only restates Harbor's build.
+    sidecar), a built service's is dropped by :func:`with_built_images` (the loader applies it for every service
+    prepare built, ``pull_policy`` included) and ``main``'s by :func:`without_restated_main_build` when it only
+    restates Harbor's build.
     """
     services = document.get("services") if isinstance(document, dict) else None
     if isinstance(services, dict):
@@ -534,16 +574,24 @@ def compose_image_references(task: HarborTask) -> list[str]:
         return []
     services = document.get("services") or {}
     references: list[str] = []
-    main_image = (services.get("main") or {}).get("image") or task.image
+    main_image = (services.get(MAIN_SERVICE) or {}).get("image") or task.image
     if main_image:
         references.append(main_image)
     for name, service in services.items():
-        if name == "main":
+        if name == MAIN_SERVICE:
             continue
-        image = (service or {}).get("image")
+        service = service or {}
+        if "build" in service:
+            # Still carrying its build section after with_built_images: no record. Under Compose and Harbor a
+            # service with build: is built, never pulled, so its image: (when it has one) is only a tag and is not
+            # resolved from the registry.
+            raise ImageConfigError(
+                f"{task.task_id}: Compose service {name!r} has a build section and prepare recorded no build for it"
+            )
+        image = service.get("image")
         if not image:
             raise ImageConfigError(
-                f"{task.task_id}: Compose service {name!r} names no image; builds are not supported"
+                f"{task.task_id}: Compose service {name!r} names no image and prepare recorded no build for it"
             )
         references.append(image)
     return list(dict.fromkeys(references))
@@ -586,7 +634,12 @@ def dockerfile_base_images(folder: Path, *, select: Callable[[str], bool] | None
 
 
 def record_image_configs(
-    references: dict[str, list[str]], folder: Path, *, client: RegistryClient | None = None, what: str = "image"
+    references: dict[str, list[str]],
+    folder: Path,
+    *,
+    client: RegistryClient | None = None,
+    what: str = "image",
+    platform: str | None = None,
 ) -> Path | None:
     """Record the configuration of ``references`` (image reference to the tasks using it) into ``folder``.
 
@@ -594,7 +647,8 @@ def record_image_configs(
     under a completed run; only references missing from the file are resolved. Returns
     the file's path, or ``None`` when there is nothing to record. A reference the registry
     cannot resolve raises :class:`ImageConfigError` naming the image, the tasks and the
-    registry's answer.
+    registry's answer. ``platform`` (``os/arch``, ``builds.platform``; linux/amd64 when ``None``) is
+    the platform the default client resolves references for; a ``client`` given carries its own.
 
     The registry is asked outside the file's sidecar lock (:func:`record_lock`), so a slow
     registry never holds up another process; the file is then read again, merged and replaced
@@ -608,7 +662,8 @@ def record_image_configs(
     missing = [ref for ref in references if ref not in read_image_configs(folder)]
     if not missing:
         return path
-    client = client or RegistryClient()
+    if client is None:
+        client = RegistryClient() if platform is None else RegistryClient(platform=platform_pair(platform))
     LOGGER.info(f"Recording the configuration of {len(missing)} {what}(s) into {path}")
     resolved: dict[str, Any] = {}
     for reference in missing:
@@ -633,6 +688,7 @@ def record_compose_images(
     *,
     client: RegistryClient | None = None,
     skipped: dict[str, str] | None = None,
+    platform: str | None = None,
 ) -> Path | None:
     """Write ``compose-images.json`` in ``folder`` for the Compose tasks among ``tasks``.
 
@@ -656,20 +712,24 @@ def record_compose_images(
         raise ImageConfigError(f"{len(failures)} Compose task(s) do not resolve: " + "; ".join(failures.values()))
     if failures:
         skipped.update(failures)
-    return record_image_configs(references, folder, client=client, what="Compose image")
+    return record_image_configs(references, folder, client=client, what="Compose image", platform=platform)
 
 
 def record_base_images(
-    folder: Path, *, client: RegistryClient | None = None, select: Callable[[str], bool] | None = None
+    folder: Path,
+    *,
+    client: RegistryClient | None = None,
+    select: Callable[[str], bool] | None = None,
+    platform: str | None = None,
 ) -> Path | None:
     """Record the base image of every Dockerfile under ``folder`` next to the task folders, before they load.
 
     ``select`` limits the scan to the tasks whose folder name it accepts (see
     :func:`dockerfile_base_images`). Returns the file's path, or ``None`` when no task has a
-    Dockerfile the loader resolves.
+    Dockerfile the loader resolves. ``platform`` is as :func:`record_image_configs` takes it.
     """
     folder = Path(folder).resolve()
     parent = folder.parent if is_task_folder(folder) else folder
     return record_image_configs(
-        dockerfile_base_images(folder, select=select), parent, client=client, what="base image"
+        dockerfile_base_images(folder, select=select), parent, client=client, what="base image", platform=platform
     )

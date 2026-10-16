@@ -369,8 +369,30 @@ def _bytes(value: str | int) -> int:
     return int(float(match[1]) * 1024 ** " kmgt".index(match[2] or " "))
 
 
-def resolve_compose(document: dict, main_image: str, image_configs: dict) -> dict:
-    """Apply Harbor's prebuilt-image base and normalize the published task overlay."""
+DEFAULT_SANDBOX_PLATFORM = ("linux", "amd64")
+
+
+def sandbox_platform(provider_options: Mapping[str, Any] | None) -> tuple[str, str]:
+    """The ``(os, architecture)`` the sandboxes run: the OpenSandbox ``platform`` provider option
+    (``{os, arch}``, see ``nemo_gym.sandbox.providers.opensandbox``) when a deployment sets one, otherwise
+    linux/amd64, the default of every provider.
+    """
+    platform = (provider_options or {}).get("platform")
+    if not isinstance(platform, Mapping):
+        return DEFAULT_SANDBOX_PLATFORM
+    os_name = str(platform.get("os") or DEFAULT_SANDBOX_PLATFORM[0]).lower()
+    architecture = str(platform.get("arch") or DEFAULT_SANDBOX_PLATFORM[1]).lower()
+    return os_name, architecture
+
+
+def resolve_compose(
+    document: dict, main_image: str, image_configs: dict, platform: tuple[str, str] = DEFAULT_SANDBOX_PLATFORM
+) -> dict:
+    """Apply Harbor's prebuilt-image base and normalize the published task overlay.
+
+    ``platform`` is the ``(os, architecture)`` the sandboxes run (:func:`sandbox_platform`); a service whose
+    recorded image is for another platform is refused, naming both.
+    """
     resolved = _compose_literals(deepcopy(document))
     if not isinstance(resolved, dict) or not isinstance(resolved.get("services"), dict):
         raise ValueError("Compose requires a services mapping")
@@ -392,8 +414,12 @@ def resolve_compose(document: dict, main_image: str, image_configs: dict) -> dic
         if image not in image_configs:
             raise ValueError(f"Service {name!r} has no recorded OCI startup metadata for {image!r}")
         record = image_configs[image]
-        if (record["os"], record["architecture"]) != ("linux", "amd64"):
-            raise ValueError(f"Service {name!r} requires a supported Linux/amd64 image")
+        recorded = (str(record.get("os") or "").lower(), str(record.get("architecture") or "").lower())
+        if recorded != tuple(platform):
+            raise ValueError(
+                f"Service {name!r}: the recorded image {image!r} is {'/'.join(recorded)}, not "
+                f"{'/'.join(platform)}, the platform the sandbox runs; prepare the dataset for that platform"
+            )
         config = record["config"]
         service["image"] = record["image"]
         explicit_entrypoint = service.get("entrypoint") is not None

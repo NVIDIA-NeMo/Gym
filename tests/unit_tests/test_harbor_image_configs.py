@@ -23,8 +23,9 @@ from nemo_gym.tasks.harbor.image_configs import (
     parse_image_ref,
     record_base_images,
     record_compose_images,
+    with_built_images,
 )
-from nemo_gym.tasks.harbor.task import HarborTaskError, discover_tasks, write_json_record
+from nemo_gym.tasks.harbor.task import BUILT_IMAGES_FILE, HarborTaskError, discover_tasks, write_json_record
 
 
 MAIN_IMAGE = "harborframework/terminal-bench:ctr-environment-abc@sha256:" + "a" * 64
@@ -237,6 +238,33 @@ class TestRegistryClient:
         with pytest.raises(ImageConfigError, match="linux/arm64, not linux/amd64"):
             RegistryClient().image_config("redis@sha256:m-arm64")
 
+    def test_resolves_for_the_platform_asked_for(self, registry):
+        """``builds.platform: linux/arm64`` deployments record the arm64 manifest, so arm64 pods run it."""
+        client = RegistryClient(platform=("linux", "arm64"))
+        entry = client.image_config("redis:7-alpine")
+        assert entry["image"] == "library/redis@sha256:m-arm64" and entry["architecture"] == "arm64"
+        assert client.image_config("redis:arm-only")["config_digest"] == "sha256:cfg-arm64"
+        with pytest.raises(ImageConfigError, match="linux/amd64, not linux/arm64"):
+            client.image_config("redis@sha256:m-amd64")
+
+    def test_record_image_configs_resolves_for_builds_platform(self, tmp_path, monkeypatch):
+        platforms = []
+
+        class Recording:
+            def __init__(self, *args, **kwargs):
+                platforms.append(kwargs.get("platform"))
+
+            def image_config(self, reference):
+                return {"os": "linux", "architecture": "arm64", "image": reference, "config": {}}
+
+        monkeypatch.setattr(image_configs, "RegistryClient", Recording)
+        image_configs.record_image_configs({"redis:7": ["a"]}, tmp_path, platform="linux/arm64/v8")
+        image_configs.record_image_configs({"redis:8": ["a"]}, tmp_path)
+        assert platforms == [("linux", "arm64"), None], "the default client keeps its own default platform"
+        assert image_configs.platform_pair(None) == image_configs.platform_pair("") == ("linux", "amd64")
+        with pytest.raises(ImageConfigError, match="Not a platform: 'arm64'"):
+            image_configs.platform_pair("arm64")
+
     def test_http_errors_carry_the_repository_and_status(self, registry):
         with pytest.raises(ImageConfigError, match="library/redis: registry returned HTTP 404"):
             RegistryClient().image_config("redis:missing")
@@ -271,11 +299,111 @@ class TestComposeImageReferences:
         (task,) = discover_tasks(tmp_path)
         assert compose_image_references(task) == []
 
-    def test_a_sidecar_that_builds_is_rejected(self, tmp_path):
-        write_task(tmp_path, "ctr", compose="services:\n  api:\n    build: ./api\n")
+    @pytest.mark.parametrize(
+        ("service", "message"),
+        [
+            ("    build: ./api\n", "service 'api' has a build section and prepare recorded no build for it"),
+            (
+                "    image: skillsbench-visual-stability-api\n    build: ./api\n",
+                "service 'api' has a build section and prepare recorded no build for it",
+            ),
+            ("    expose: ['1']\n", "service 'api' names no image and prepare recorded no build for it"),
+        ],
+        ids=["build-only", "image-and-build", "neither"],
+    )
+    def test_a_sidecar_with_a_build_and_no_record_is_refused_naming_it(self, tmp_path, service, message):
+        # Under Compose and Harbor a service with build: is built, never pulled, so its image: (when it has one) is
+        # a local tag: it is not resolved from the registry, and without a record the task is refused by name. A
+        # service with neither key is a different task defect, reported in its own words.
+        write_task(tmp_path, "ctr", compose="services:\n  api:\n" + service)
         (task,) = discover_tasks(tmp_path)
-        with pytest.raises(ImageConfigError, match="service 'api' names no image"):
+        with pytest.raises(ImageConfigError, match=message):
             compose_image_references(task)
+
+    def test_a_recorded_main_is_not_substituted_for_a_task_pinned_to_a_prebuilt_image(self, tmp_path):
+        # The context's main was built (for another task sharing environment/, or before the override) and the
+        # record names it; this task declares a docker_image, so Harbor runs the prebuilt image and so does Gym:
+        # main keeps ${MAIN_IMAGE_NAME} = task.image, and the sidecar is substituted as it always is.
+        compose = "services:\n  main:\n    image: ${MAIN_IMAGE_NAME}\n  db:\n    build: ./db\n"
+        task_dir = write_task(
+            tmp_path, "t", image=None, compose=compose, dockerfile="FROM ubuntu:24.04\nCOPY . /app\n"
+        )
+        (tmp_path / "dataset.toml").write_text('[gym.tasks."t".environment]\ndocker_image = "org/pinned:2"\n')
+        built = "reg.example/r/hb__" + "0" * 32 + "@sha256:" + "d" * 64
+        db = "reg.example/r/hb__" + "0" * 32 + "-db@sha256:" + "e" * 64
+        record = {"image": built, "tasks": ["t"], "services": {"main": {"image": built}, "db": {"image": db}}}
+        (tmp_path / BUILT_IMAGES_FILE).write_text(json.dumps({context_digest(task_dir / "environment"): record}))
+        config = {"os": "linux", "architecture": "amd64", "config": {"WorkingDir": "/app"}}
+        (tmp_path / "compose-images.json").write_text(
+            json.dumps({image: {**config, "image": image} for image in (built, db, "org/pinned:2")})
+        )
+        (task,) = discover_tasks(tmp_path)
+        assert task.image == "org/pinned:2" and task.built_image is None
+        assert task.built_images == {"main": built, "db": db}
+        document = load_compose_document(task)
+        assert document["services"]["main"] == {"image": "org/pinned:2"}
+        assert document["services"]["db"] == {"image": db}
+        assert compose_image_references(task) == ["org/pinned:2", db]
+        # The complementary case: the override names another task, so this one runs from its built main.
+        (tmp_path / "dataset.toml").write_text('[gym.tasks."other".environment]\ndocker_image = "org/pinned:2"\n')
+        (task,) = discover_tasks(tmp_path)
+        assert task.built_image == built == task.image
+        assert load_compose_document(task)["services"]["main"] == {"image": built}
+        assert compose_image_references(task) == [built, db]
+
+    def test_a_sidecar_prepare_built_is_listed_by_its_recorded_image_and_not_resolved_again(self, tmp_path):
+        # G2: prepare built `api` from ./api and recorded it under the context digest by service name; the loader
+        # substitutes that image, so the reference is the recorded one and the registry is never asked for it.
+        compose = (
+            "services:\n  main: {}\n  api:\n    build: ./api\n    pull_policy: build\n    expose: ['3080']\n"
+            "  cache:\n    image: redis:7-alpine\n"
+        )
+        task_dir = write_task(tmp_path, "ctr", compose=compose)
+        built = "reg.example/r/hb__" + "0" * 32 + "-api@sha256:" + "e" * 64
+        (tmp_path / BUILT_IMAGES_FILE).write_text(
+            json.dumps(
+                {context_digest(task_dir / "environment"): {"tasks": ["ctr"], "services": {"api": {"image": built}}}}
+            )
+        )
+        (tmp_path / "compose-images.json").write_text(
+            json.dumps({built: {"os": "linux", "architecture": "amd64", "image": built, "config": {"Cmd": ["api"]}}})
+        )
+        (task,) = discover_tasks(tmp_path)
+        assert compose_image_references(task) == [MAIN_IMAGE, built, "redis:7-alpine"]
+        document = load_compose_document(task)
+        assert document["services"]["api"] == {"image": built, "expose": ["3080"]}
+        assert document["services"]["main"] == {}
+        client = FakeClient()
+        record_compose_images([task], tmp_path, client=client)
+        assert client.resolved == [MAIN_IMAGE, "redis:7-alpine"]
+        recorded = json.loads((tmp_path / "compose-images.json").read_text())
+        assert recorded[built]["config"] == {"Cmd": ["api"]}
+
+    def test_with_built_images_drops_build_keys_only_on_named_services(self):
+        document = {
+            "services": {
+                "main": {"image": "x", "build": {"context": "."}, "pull_policy": "build", "cpus": 1},
+                "api": {"build": "./api", "pull_policy": "build", "expose": ["1"]},
+                "db": {"image": "pg:16", "build": "./db"},
+                "empty": None,
+            }
+        }
+        images = {
+            "main": "reg/hb__d@sha256:1",
+            "api": "reg/hb__d-api@sha256:2",
+            "empty": "reg/hb__d-empty@sha256:3",
+            "gone": "reg/x",
+        }
+        assert with_built_images(document, images) == {
+            "services": {
+                "main": {"cpus": 1, "image": "reg/hb__d@sha256:1"},
+                "api": {"expose": ["1"], "image": "reg/hb__d-api@sha256:2"},
+                # Not recorded: left as written, so the adapter (or compose_image_references) reports it.
+                "db": {"image": "pg:16", "build": "./db"},
+                "empty": {"image": "reg/hb__d-empty@sha256:3"},
+            }
+        }
+        assert with_built_images({"services": "nope"}, images) == {"services": "nope"}
 
 
 class FakeClient:
@@ -629,6 +757,22 @@ class TestRecordComposeImages:
         client = FakeClient()
         record_compose_images(tasks, tmp_path, client=client)
         assert client.resolved == []
+
+    def test_a_sidecar_with_an_image_and_an_unrecorded_build_is_skipped_per_task_not_resolved(self, tmp_path):
+        write_task(tmp_path, "good", compose=COMPOSE)
+        write_task(
+            tmp_path,
+            "bad",
+            compose="services:\n  main: {}\n  api:\n    image: skillsbench-visual-stability-api\n    build: ./api\n",
+        )
+        client = FakeClient()
+        skipped: dict[str, str] = {}
+        record_compose_images(discover_tasks(tmp_path), tmp_path, client=client, skipped=skipped)
+        # The task lands in the skipped map like the no-image case; its local-only name never reaches the registry.
+        assert skipped == {
+            "bad": "bad: Compose service 'api' has a build section and prepare recorded no build for it"
+        }
+        assert client.resolved == [MAIN_IMAGE, SIDECAR_IMAGE, "redis:7-alpine"]
 
     def test_nothing_is_written_without_compose_tasks(self, tmp_path):
         write_task(tmp_path, "plain")

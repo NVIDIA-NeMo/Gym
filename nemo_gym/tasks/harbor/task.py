@@ -10,10 +10,13 @@ import os
 import re
 import time
 import tomllib
+from collections.abc import Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
+
+import yaml
 
 from nemo_gym.tasks.harbor.dataset_config import apply_dataset_config, read_dataset_config
 from nemo_gym.tasks.harbor.digest import content_hash, context_digest
@@ -25,7 +28,7 @@ from nemo_gym.tasks.harbor.dockerfile import (
     parse_dockerfile,
     resolve_dockerfile,
 )
-from nemo_gym.tasks.harbor.models import HarborTaskConfig
+from nemo_gym.tasks.harbor.models import HarborEnvironment, HarborTaskConfig
 
 
 logger = logging.getLogger(__name__)
@@ -33,13 +36,31 @@ logger = logging.getLogger(__name__)
 TASK_FILE = "task.toml"
 INSTRUCTION_FILE = "instruction.md"
 DOCKERFILE = Path("environment") / "Dockerfile"
+# The Dockerfile Harbor builds the separate verifier's image from, with ``tests/`` as its build context
+# (``_verifier_env_build_context`` in Harbor's trial.py); see :func:`verifier_build_context`.
+TESTS_DOCKERFILE = Path("tests") / "Dockerfile"
+# The one Compose file Harbor reads for the separate verifier's environment (``environment_dir / "docker-compose.yaml"``
+# in its docker.py), stacked on its build or prebuilt template; see :func:`verifier_compose_sidecars`.
+TESTS_COMPOSE_FILE = Path("tests") / "docker-compose.yaml"
 # The OCI configurations recorded at prepare next to the task folders, keyed by image reference as the
 # tasks wrote it (see ``nemo_gym.tasks.harbor.image_configs``): Compose sidecar images and the base image
 # of every Dockerfile the loader resolves.
 IMAGE_CONFIGS_FILE = "compose-images.json"
-# The images prepare built for Dockerfiles outside pull and overlay mode, next to the task folders, keyed by
-# Harbor's content hash of the task's ``environment/`` build context (see ``nemo_gym.tasks.harbor.image_build``).
+# The images prepare built, next to the task folders, keyed by Harbor's content hash of the task's ``environment/``
+# build context (see ``nemo_gym.tasks.harbor.image_build``). An entry records one image per built Compose service
+# under ``services`` (``main`` for the Dockerfile outside pull and overlay mode, each sidecar with a ``build:``
+# section under its own name) and keeps ``main``'s image at the top level as ``image`` for older readers; an entry
+# with ``image`` and no ``services`` is a record of ``main`` alone.
 BUILT_IMAGES_FILE = "built-images.json"
+# The Compose service name of the task's own image, in Harbor's templates and the task's Compose file.
+MAIN_SERVICE = "main"
+# The service name the separate verifier's image is recorded under in ``built-images.json``, in the entry keyed by
+# Harbor's content hash of ``tests/`` (its own build context, so it never shares an entry with ``environment/``'s
+# services and a Compose sidecar of that name, kumo's ``verifier``, keeps its own record).
+VERIFIER_SERVICE = "verifier"
+# The names the loader accepts for a task's Compose overlay under ``environment/``, first match wins
+# (``nemo_gym.tasks.harbor.image_configs.compose_file``); Harbor's Docker environment reads the first one only.
+COMPOSE_FILE_NAMES = ("docker-compose.yaml", "docker-compose.yml", "compose.yaml", "compose.yml")
 
 
 class HarborTaskError(ValueError):
@@ -75,6 +96,25 @@ class HarborTask:
     Dockerfile needed a build (``built-images.json``); ``image`` is then that image and the task
     runs in pull mode from it. ``None`` in the other two modes and for a prebuilt image.
 
+    ``verifier_image`` is the image a separate verifier runs in when it is not the task's own: the
+    ``[verifier.environment].docker_image`` the task declares, else the image prepare built from ``tests/Dockerfile``
+    (service ``verifier`` under Harbor's hash of ``tests/`` in ``built-images.json``, see
+    :func:`verifier_build_context`). ``None`` in shared mode, and in separate mode when the verifier runs in the
+    task's own image because the effective verifier environment is a copy of ``[environment]`` that carries its
+    ``docker_image`` (Harbor's prebuilt verifier). Every other separate-mode shape loads with a verifier image or not
+    at all: a task whose effective verifier environment names no image and ships no ``tests/Dockerfile`` is refused as
+    Harbor refuses it, and one whose ``tests/Dockerfile`` has no recorded build is refused like an unrecorded
+    ``environment/`` build (:func:`load_task`).
+
+    ``context_id`` is Harbor's environment id of ``environment/`` (:func:`~nemo_gym.tasks.harbor.digest.context_digest`,
+    the key of ``built-images.json`` and the body of the ``hb__<hash>`` image names), computed once here when the
+    task needs it (a Dockerfile that needs a build, or a Compose file) and ``None`` otherwise; ``built_images`` is
+    every image that record holds for the context, by Compose service name (``main`` and the sidecars with a
+    ``build:`` section, :func:`recorded_service_images`), ``{}`` when none is recorded. The Compose loader
+    substitutes them at prepare and at seed without hashing the folder again; ``main``'s entry is applied only
+    when ``built_image`` is set, since a record of ``main`` may be another task's build of the same context or
+    one that predates a ``docker_image`` override.
+
     ``entrypoint`` is the image's ``Entrypoint`` as Docker would start it: the built image's recorded
     one, or the base image's for a Dockerfile the loader resolves unless that Dockerfile wrote
     ``ENTRYPOINT []``. ``None`` when the image records none or no configuration is recorded (a prebuilt
@@ -84,6 +124,12 @@ class HarborTask:
     commands run beside them. They are known whenever the image's configuration is, with or without an
     entrypoint. ``image_healthcheck`` is the recorded Dockerfile ``HEALTHCHECK`` block (``Test``,
     ``Interval``, ... as Docker records them), or ``None``.
+
+    ``verifier_image_config`` is the recorded configuration of the image prepare built from ``tests/Dockerfile``
+    (what Docker starts the separate verifier with: its ``Entrypoint``, ``User``, ``WorkingDir`` and ``Healthcheck``,
+    the way the fields above describe the task image's). ``None`` when the verifier image is a declared prebuilt one
+    (nothing is recorded for it, as for a prebuilt ``docker_image``), when the verifier grades in the task's own
+    image (the task's own fields describe that start), and in shared mode.
     """
 
     path: Path
@@ -98,10 +144,14 @@ class HarborTask:
     overlay: tuple[OverlayRun, ...] = ()
     sandbox_user: str | None = None
     built_image: str | None = None
+    context_id: str | None = None
+    built_images: Mapping[str, str] = field(default_factory=dict)
+    verifier_image: str | None = None
     entrypoint: tuple[str, ...] | None = None
     entrypoint_user: str | None = None
     entrypoint_workdir: str | None = None
     image_healthcheck: dict[str, Any] | None = None
+    verifier_image_config: BaseImageConfig | None = None
 
     @property
     def needs_sandbox(self) -> bool:
@@ -111,18 +161,79 @@ class HarborTask:
     @property
     def needs_compose(self) -> bool:
         """The task's environment is a Compose group: ``main`` plus the sidecars its overlay declares."""
-        return any(
-            (self.path / "environment" / name).is_file()
-            for name in ("docker-compose.yaml", "docker-compose.yml", "compose.yaml", "compose.yml")
-        )
+        return has_compose_file(self.path)
 
     @property
     def has_solution(self) -> bool:
         return (self.path / "solution" / "solve.sh").is_file()
 
 
+def has_compose_file(task_folder: Path) -> bool:
+    """Whether the task ships a Compose overlay under ``environment/`` (:data:`COMPOSE_FILE_NAMES`)."""
+    return any((Path(task_folder) / "environment" / name).is_file() for name in COMPOSE_FILE_NAMES)
+
+
 def is_task_folder(path: Path) -> bool:
     return (Path(path) / TASK_FILE).is_file()
+
+
+def effective_verifier_environment(config: HarborTaskConfig) -> HarborEnvironment | None:
+    """The environment a separate verifier runs in, as Harbor resolves it, or ``None`` in shared mode.
+
+    Harbor's ``resolve_effective_verifier_env_config`` (verifier_mode.py at v0.22.0) for a single-step task:
+    ``[verifier.environment]`` when the task declares one, else a copy of ``[environment]``, so a task that only says
+    ``environment_mode = "separate"`` grades in an environment shaped like the agent's, ``docker_image`` included.
+    """
+    if config.is_shared_verifier:
+        return None
+    if config.verifier.environment is not None:
+        return config.verifier.environment
+    return config.environment.model_copy(deep=True)
+
+
+def verifier_build_context(task_folder: Path, config: HarborTaskConfig) -> Path | None:
+    """The folder Harbor builds the separate verifier's image from, ``tests/``, when it builds one; else ``None``.
+
+    Harbor starts the separate verifier's environment with ``tests/`` as its environment dir
+    (``_verifier_env_build_context`` in trial.py at v0.22.0) and the effective verifier environment as its config
+    (:func:`effective_verifier_environment`). Its Docker environment then uses the config's ``docker_image`` when there
+    is one and otherwise runs ``docker compose build`` on ``tests/Dockerfile`` (``should_use_prebuilt_docker_image``,
+    ``start`` in docker.py), whatever that Dockerfile holds: a ``FROM`` plus ``RUN`` file is built, not overlaid. So:
+    shared mode, a declared or inherited ``docker_image``, or no ``tests/Dockerfile`` means no build. Without the file
+    and without an image Harbor refuses the task (``require_agent_environment_definition`` on ``tests/``, which is
+    always its verifier environment dir: there is no fallback to ``environment/``), and so does :func:`load_task`.
+    Prepare plans one build entry per returned context (``nemo_gym.tasks.harbor.image_build.plan_builds``) and the
+    loader reads its record.
+    """
+    environment = effective_verifier_environment(config)
+    if environment is None or environment.docker_image:
+        return None
+    dockerfile = Path(task_folder) / TESTS_DOCKERFILE
+    return dockerfile.parent if dockerfile.is_file() else None
+
+
+def verifier_compose_sidecars(task_folder: Path) -> list[str]:
+    """The services other than ``main`` that the task's ``tests/docker-compose.yaml`` declares, in file order; ``[]``
+    without the file, or for one that does not parse or has no services mapping.
+
+    Harbor's separate verifier is a whole Docker environment over ``tests/``: it stacks that Compose file on its build
+    or prebuilt template (``_docker_compose_paths`` in docker.py at v0.22.0), builds every service with a ``build``
+    section and starts them all with ``up``, image or built, prebuilt ``main`` or not. This server starts the
+    separate verifier as a single sandbox, so a task that declares any such service is refused: by
+    :func:`load_task` and, before any build, by ``ImageBuilder.build_many``. A ``main``-only file (cadir's and
+    arc-crm-6's shape, runtime settings and ``build.args`` for ``main``) is read for ``main``'s build section only.
+    """
+    path = Path(task_folder) / TESTS_COMPOSE_FILE
+    if not path.is_file():
+        return []
+    try:
+        document = yaml.safe_load(path.read_text())
+    except (yaml.YAMLError, UnicodeDecodeError, OSError):
+        return []
+    services = document.get("services") if isinstance(document, dict) else None
+    if not isinstance(services, dict):
+        return []
+    return [str(name) for name in services if str(name) != MAIN_SERVICE]
 
 
 # The sidecar lock file next to a record file (``<file>.lock``), see :func:`record_lock`.
@@ -213,15 +324,48 @@ def read_built_images(folder: Path) -> dict[str, Any]:
     return read_json_record(Path(folder) / BUILT_IMAGES_FILE)
 
 
-def built_image(task_folder: Path) -> str | None:
-    """The image prepare built for the task's Dockerfile, when ``built-images.json`` records one."""
+def recorded_service_records(entry: Any) -> dict[str, dict[str, Any]]:
+    """The per-service records of one ``built-images.json`` entry, by Compose service name: ``image`` plus ``tool``
+    and ``pushed`` as recorded for that service.
+
+    A ``services`` map is read as written; a service record without the two flags (written before they were kept
+    per service) takes the entry's own, as does the single ``main`` record of an entry with ``image`` and no
+    ``services``, written before sidecars were built. Anything else records nothing.
+    """
+    if not isinstance(entry, dict):
+        return {}
+    flags = {key: entry[key] for key in ("tool", "pushed") if key in entry}
+    services = entry.get("services")
+    if isinstance(services, dict):
+        records: dict[str, dict[str, Any]] = {}
+        for name, record in services.items():
+            fields = dict(record) if isinstance(record, dict) else {"image": record}
+            if fields.get("image"):
+                records[str(name)] = {**flags, **fields, "image": str(fields["image"])}
+        return records
+    image = entry.get("image")
+    return {MAIN_SERVICE: {**flags, "image": str(image)}} if image else {}
+
+
+def recorded_service_images(entry: Any) -> dict[str, str]:
+    """The images one ``built-images.json`` entry records, by Compose service name (:func:`recorded_service_records`
+    without the flags)."""
+    return {name: record["image"] for name, record in recorded_service_records(entry).items()}
+
+
+def built_service_images(task_folder: Path) -> dict[str, str]:
+    """The images prepare built for the task's ``environment/`` context, by Compose service name (``{}`` when none
+    are recorded): ``main`` for the task's own Dockerfile, each built sidecar under its service name."""
     task_folder = Path(task_folder)
     context = task_folder / DOCKERFILE.parent
     if not context.is_dir():
-        return None
-    entry = read_built_images(task_folder.parent).get(context_digest(context))
-    image = entry.get("image") if isinstance(entry, dict) else None
-    return str(image) if image else None
+        return {}
+    return recorded_service_images(read_built_images(task_folder.parent).get(context_digest(context)))
+
+
+def built_image(task_folder: Path) -> str | None:
+    """The image prepare built for the task's Dockerfile, when ``built-images.json`` records one."""
+    return built_service_images(task_folder).get(MAIN_SERVICE)
 
 
 def _build_required(dockerfile: Path, reason: Exception) -> HarborTaskError:
@@ -230,6 +374,33 @@ def _build_required(dockerfile: Path, reason: Exception) -> HarborTaskError:
         f"{dockerfile.parent.parent.parent / BUILT_IMAGES_FILE}. `gym eval run` and `gym dataset validate` build it "
         "when buildah, podman or docker is installed (configured by the `builds:` block, see "
         "environment_servers/harbor/README.md), or declare [environment].docker_image with a prebuilt image."
+    )
+
+
+def _verifier_build_required(task_folder: Path) -> HarborTaskError:
+    return HarborTaskError(
+        f"{task_folder / TESTS_DOCKERFILE} is the separate verifier's image (Harbor builds it from tests/) and no built "
+        f"image is recorded in {task_folder.parent / BUILT_IMAGES_FILE}. `gym eval run` and `gym dataset validate` "
+        "build it when buildah, podman or docker is installed (configured by the `builds:` block, see "
+        "environment_servers/harbor/README.md), or declare [verifier.environment].docker_image with a prebuilt image."
+    )
+
+
+def _verifier_definition_required(task_folder: Path) -> HarborTaskError:
+    """Harbor's refusal of a separate verifier environment with nothing to run: its environment dir is always
+    ``tests/`` (``_verifier_env_build_context`` in trial.py), checked by ``require_agent_environment_definition``."""
+    tests = task_folder / TESTS_DOCKERFILE.parent
+    if (task_folder / TESTS_COMPOSE_FILE).is_file():
+        return HarborTaskError(
+            f"{task_folder / TESTS_COMPOSE_FILE} without {task_folder / TESTS_DOCKERFILE}: Harbor builds the separate "
+            "verifier's image from that Compose file's main service, and this server builds it from tests/Dockerfile "
+            "only. Add the Dockerfile under tests/, or declare [verifier.environment].docker_image with a prebuilt image."
+        )
+    return HarborTaskError(
+        f"Task environment directory {tests} has no environment definition: the separate verifier's effective "
+        "environment names no docker_image and tests/ has no Dockerfile, so Harbor refuses the task "
+        "(require_agent_environment_definition; the verifier environment dir is always tests/). Set "
+        "[verifier.environment].docker_image or add tests/Dockerfile."
     )
 
 
@@ -335,6 +506,18 @@ def load_task(path: Path) -> HarborTask:
     base_user: str | None = None
     dockerfile = path / DOCKERFILE
     built: str | None = None
+    context_id: str | None = None
+    built_images: dict[str, str] = {}
+
+    def recorded_builds() -> dict[str, str]:
+        # Harbor's hash of environment/ is paid once per task, here, off the server's event loop (load_task runs
+        # in a thread there): the build-mode branches and the Compose loader both read the record through it.
+        nonlocal context_id, built_images
+        if context_id is None and dockerfile.parent.is_dir():
+            context_id = context_digest(dockerfile.parent)
+            built_images = recorded_service_images(read_built_images(path.parent).get(context_id))
+        return built_images
+
     # What Docker starts the image with: the record of the image the sandbox runs (built image), or the
     # base image's record carried through the Dockerfile's final USER and WORKDIR (pull and overlay mode).
     entrypoint: tuple[str, ...] | None = None
@@ -351,7 +534,7 @@ def load_task(path: Path) -> HarborTask:
         except DockerfileNeedsBuild as exc:
             if image is None:
                 # Build mode: prepare built the context once and recorded the image next to the tasks.
-                built = built_image(path)
+                built = recorded_builds().get(MAIN_SERVICE)
                 if built is None:
                     raise _build_required(dockerfile, exc) from exc
             parsed = None
@@ -386,7 +569,7 @@ def load_task(path: Path) -> HarborTask:
                 ) from exc
             except DockerfileNeedsBuild as exc:
                 # An expansion the overlay cannot resolve: a build, unless prepare already built it.
-                built = built_image(path)
+                built = recorded_builds().get(MAIN_SERVICE)
                 if built is None:
                     raise _build_required(dockerfile, exc) from exc
                 record = read_image_configs(path.parent).get(built)
@@ -415,6 +598,42 @@ def load_task(path: Path) -> HarborTask:
                     image_healthcheck = base.healthcheck
     if config.agent.user is not None:
         user = str(config.agent.user)
+    if has_compose_file(path):
+        # The Compose loader needs the context id (COMPOSE_PROJECT_NAME) and the built sidecars at every seed.
+        recorded_builds()
+
+    # The separate verifier's image, by Harbor's rules (effective_verifier_environment, verifier_build_context): a
+    # separate-mode task loads with an image for its verifier or not at all, as Harbor runs it or refuses it.
+    verifier_image: str | None = None
+    verifier_image_config: BaseImageConfig | None = None
+    verifier_environment = effective_verifier_environment(config)
+    if verifier_environment is not None:
+        sidecars = verifier_compose_sidecars(path)
+        if sidecars:
+            raise HarborTaskError(
+                f"{path / TESTS_COMPOSE_FILE} declares service(s) {', '.join(sidecars)} beside main; Harbor starts them "
+                "as the separate verifier's Compose project and this server starts a single verifier sandbox, so the "
+                "task is not supported until it does"
+            )
+        if verifier_environment.docker_image:
+            # Harbor's prebuilt verifier: the declared block's image, or the task's own when the effective environment
+            # is a copy of [environment] (verifier_image stays None; the server runs the task image then).
+            if config.verifier.environment is not None:
+                verifier_image = verifier_environment.docker_image
+        else:
+            verifier_context = verifier_build_context(path, config)
+            if verifier_context is None:
+                raise _verifier_definition_required(path)
+            # Harbor's hash of tests/, paid once per task like environment/'s: the key of the verifier's record.
+            verifier_record = read_built_images(path.parent).get(context_digest(verifier_context))
+            verifier_image = recorded_service_images(verifier_record).get(VERIFIER_SERVICE)
+            if verifier_image is None:
+                raise _verifier_build_required(path)
+            # The built verifier image's recorded configuration: the server starts its entrypoint and polls its
+            # HEALTHCHECK as it does the task image's (nothing is recorded for a declared prebuilt verifier image).
+            verifier_config_record = read_image_configs(path.parent).get(verifier_image)
+            if verifier_config_record is not None:
+                verifier_image_config = BaseImageConfig.from_record(verifier_config_record)
 
     try:
         digest = content_hash(path)
@@ -434,10 +653,14 @@ def load_task(path: Path) -> HarborTask:
         overlay=overlay,
         sandbox_user=base_user if base_known else user,
         built_image=built,
+        context_id=context_id,
+        built_images=built_images,
+        verifier_image=verifier_image,
         entrypoint=entrypoint,
         entrypoint_user=entrypoint_user,
         entrypoint_workdir=entrypoint_workdir,
         image_healthcheck=image_healthcheck,
+        verifier_image_config=verifier_image_config,
     )
 
 
