@@ -1,0 +1,4 @@
+-e nemo-gym[dev] @ ../..
+# RoboEval simulator and tracer imports
+numpy
+pandas

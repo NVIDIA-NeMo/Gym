@@ -1,0 +1,13 @@
+config_paths:
+  - resources_servers/roboeval/configs/roboeval.yaml
+
+roboeval_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      datasets:
+      - name: roboeval
+        type: benchmark
+        jsonl_fpath: benchmarks/roboeval/data/roboeval_benchmark.jsonl
+        prepare_script: benchmarks/roboeval/prepare.py
+        num_repeats: 20
+        license: TBD  # BSD-3-Clause + ML-training restriction; evaluation only (see README)
