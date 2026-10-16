@@ -19,6 +19,21 @@ class TaskData(BaseModel):
         description="Stable problem identifier (e.g. 'G50').",
         json_schema_extra={"consumed_by": ["provenance"]},
     )
+    source_dataset: Optional[str] = Field(
+        default=None,
+        description="URL of the dataset the problem was taken from.",
+        json_schema_extra={"consumed_by": ["provenance"]},
+    )
+    source_id: Optional[str] = Field(
+        default=None,
+        description="Problem identifier within the source dataset.",
+        json_schema_extra={"consumed_by": ["provenance"]},
+    )
+    dataset_license: Optional[str] = Field(
+        default=None,
+        description="License of the source dataset (e.g. 'CC-BY-4.0').",
+        json_schema_extra={"consumed_by": ["provenance"]},
+    )
     tier: Optional[str] = Field(
         default=None,
         description="Difficulty tier (EASY/MEDIUM/HARD/UNSOLVED); used by compute_metrics for subset breakdowns.",
