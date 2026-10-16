@@ -628,12 +628,14 @@ def _engine_refusal_ended_the_chain(refusal: EngineRefusalRecord, terminal: Toke
     engine rejected (``code`` is ``None``) says nothing about the conversation's length, so it is
     reported in ``metrics["engine_refusals"]`` but sets no verdict. And the refused request
     continued the delivered terminal call: its request-time lineage names that call, or a call
-    whose full token sequence is identical to it (a retry twin) that was served before the
-    refusal was recorded. A twin served after the refusal is a successful re-serving of the call
-    the refused request continued, so the harness recovered from the refusal and the retained
-    twin's own ending stands. A refusal on another branch of the rollout, one that continued an
-    earlier call the harness later moved past, and one whose parent could not be resolved leave
-    the verdict alone.
+    whose full token sequence is identical to it (a retry twin), and no twin of the terminal call
+    was served at or after the moment the refusal was recorded. A twin served at or after the
+    refusal is a successful re-serving of the call the refused request continued, so the harness
+    recovered from the refusal and the retained twin's own ending stands. The ordering reads the
+    whole twin group, whichever twin attribution retained, so the verdict does not depend on
+    which twin drew the smaller call id when attribution could only name them by content. A
+    refusal on another branch of the rollout, one that continued an earlier call the harness
+    later moved past, and one whose parent could not be resolved leave the verdict alone.
 
     Known limitation: an auxiliary request the harness sends after the session completed (a
     summary or title call, or an end-of-session compaction) can carry the terminal call's whole
@@ -642,19 +644,24 @@ def _engine_refusal_ended_the_chain(refusal: EngineRefusalRecord, terminal: Toke
     then replaces a harness ``completed`` status. A harness that reports its own ending signal
     keeps the two apart; the capture alone cannot.
 
-    The twin comparison reads the two calls' token sequences from ``out.entries`` on demand, so
-    a build without refusals compares nothing.
+    The twin comparison reads the calls' token sequences from ``out.entries`` on demand, so a
+    build without refusals compares nothing.
     """
     if refusal.code != CONTEXT_LENGTH_EXCEEDED_ERROR_CODE or refusal.parent_call_id is None:
         return False
-    if refusal.parent_call_id == terminal.model_call_id:
-        return True
-    parent = out.entries.get(refusal.parent_call_id)
-    if parent is None or not _same_full_sequence(parent, terminal):
-        return False
-    # The refused request continued a retry twin of the delivered terminal call. The records'
-    # timestamps order the two: a terminal served after the refusal superseded it.
-    return refusal.created_at > terminal.created_at
+    if refusal.parent_call_id != terminal.model_call_id:
+        parent = out.entries.get(refusal.parent_call_id)
+        if parent is None or not _same_full_sequence(parent, terminal):
+            return False
+    # The refused request continued the delivered terminal call or a retry twin of it. The
+    # records' timestamps order the refusal against every other twin: one served at or after the
+    # refusal superseded it, whichever twin attribution retained as the terminal.
+    return not any(
+        entry.model_call_id != refusal.parent_call_id
+        and entry.created_at >= refusal.created_at
+        and _same_full_sequence(entry, terminal)
+        for entry in out.entries.values()
+    )
 
 
 def _same_full_sequence(a: TokenEntry, b: TokenEntry) -> bool:
@@ -689,7 +696,10 @@ def project_main_chain_response(
     ``staging.rebuild.LinearizedRow.incomplete_reason`` applies the same mapping.
     ``finish_reason_resolved=False`` withholds the verdict: terminal attribution passes it when
     the terminal call was chosen among token-identical retries that recorded different finish
-    reasons, so the status would otherwise depend on which twin drew the smaller call id.
+    reasons, so the status would otherwise depend on which twin drew the smaller call id. The
+    withholding covers the finish-reason verdict only; a refusal that ended the chain still sets
+    the status, because the refusal record names the call it continued and its verdict never
+    depended on the twins' finish reasons.
 
     ``engine_refusals`` are the frozen snapshot's engine refusals. A refusal of the request that
     continued the delivered terminal call, refused for the context window, also makes the payload

@@ -991,16 +991,32 @@ def test_a_refusal_ends_the_rebuilt_response_only_when_it_continued_the_terminal
 
 
 @pytest.mark.parametrize(
-    ("refusal_created_at", "expected_status"),
-    [(3.1, None), (3.5, "incomplete")],
-    ids=["twin-served-after-the-refusal", "twin-served-before-the-refusal"],
+    ("retained_call", "refusal_created_at", "expected_status"),
+    [
+        ("call2b", 3.1, None),
+        ("call2b", 3.5, "incomplete"),
+        ("call2", 3.1, None),
+        ("call2", 3.2, None),
+        ("call2", 3.5, "incomplete"),
+    ],
+    ids=[
+        "twin-retained-twin-served-after-the-refusal",
+        "twin-retained-twin-served-before-the-refusal",
+        "parent-retained-twin-served-after-the-refusal",
+        "parent-retained-twin-served-with-the-refusal",
+        "parent-retained-twin-served-before-the-refusal",
+    ],
 )
-def test_a_refusal_of_a_retry_twin_counts_only_when_the_retained_twin_preceded_it(refusal_created_at, expected_status):
-    # ``call2`` and ``call2b`` served the same tokens and the harness kept ``call2b``. A refusal
-    # that continued ``call2`` is placed against the retained twin by the records' timestamps.
-    # Recorded before ``call2b`` was served (3.2), it was superseded by that successful re-serving:
-    # the harness recovered, and the retained twin's own ending stands. Recorded after it, the
-    # refusal is the harness's next request not fitting, and the rollout ended at the window.
+def test_a_refusal_of_a_retry_twin_counts_only_when_every_twin_preceded_it(
+    retained_call, refusal_created_at, expected_status
+):
+    # ``call2`` and ``call2b`` served the same tokens; attribution may retain either one (by
+    # response id, or the smaller call id when it can only name them by content). A refusal that
+    # continued ``call2`` is placed against the whole twin group by the records' timestamps.
+    # Recorded before ``call2b`` was served (3.2), or at the same instant, it was superseded by
+    # that successful re-serving: the harness recovered, and the retained twin's own ending stands
+    # whichever twin that is. Recorded after it, the refusal is the harness's next request not
+    # fitting, and the rollout ended at the window.
     record = EngineRefusalRecord(
         model_call_id="call3",
         code="context_length_exceeded",
@@ -1013,13 +1029,90 @@ def test_a_refusal_of_a_retry_twin_counts_only_when_the_retained_twin_preceded_i
         _completed_chain_entries() + [_terminal_twin_entry()],
         "prefix_merging",
         "m",
-        explicit_terminal_call_id="call2b",
+        explicit_terminal_call_id=retained_call,
         engine_refusals=(record,),
     )
     assert built[MASK_SAMPLE_KEY] is False
     assert built["rebuilt_response"].get("status") == expected_status
     expected_details = {"reason": "max_output_tokens"} if expected_status else None
     assert built["rebuilt_response"].get("incomplete_details") == expected_details
+
+
+@pytest.mark.parametrize(
+    ("terminal_finish_reason", "expected_reason"),
+    [("content_filter", "content_filter"), ("length", "max_output_tokens"), ("stop", "max_output_tokens")],
+)
+def test_a_terminal_refusal_only_fills_a_verdict_the_finish_reason_left_empty(terminal_finish_reason, expected_reason):
+    # The finish-reason verdict of the delivered terminal call comes first: a ``content_filter``
+    # stop keeps its own reason although the next request was refused for the window. The refusal
+    # fills the verdict only when the finish reason gave none (``stop``); a ``length`` stop and the
+    # refusal agree on ``max_output_tokens``.
+    entries = [
+        _entry("call1", [1, 2], [3, 4], text="step one", response_id="resp_1", created_at=2.0),
+        _entry(
+            "call2",
+            [1, 2, 3, 4, 5, 6],
+            [7, 8],
+            text="final answer",
+            response_id="resp_2",
+            created_at=3.0,
+            parent_call_id="call1",
+            finish_reason=terminal_finish_reason,
+        ),
+    ]
+    record = EngineRefusalRecord(
+        model_call_id="call3",
+        code="context_length_exceeded",
+        created_at=3.5,
+        parent_call_id="call2",
+        parent_resolution=_RESOLVED,
+    )
+    built = _assemble(
+        "r", entries, "prefix_merging", "m", explicit_terminal_call_id="call2", engine_refusals=(record,)
+    )
+    assert built["rebuilt_response"]["status"] == "incomplete"
+    assert built["rebuilt_response"]["incomplete_details"] == {"reason": expected_reason}
+
+
+@pytest.mark.parametrize("refused_parent", ["call2", "call2b"])
+def test_twins_that_disagree_on_the_finish_reason_still_take_a_terminal_refusals_verdict(refused_parent):
+    # Two token-identical servings recorded different finish reasons, and attribution can only
+    # name them by their shared response id, so the finish-reason verdict is withheld. The
+    # withholding does not reach the refusal: the refused request continued one of the twins and
+    # was recorded after both were served, so the rollout still ended at the window.
+    entries = [
+        _entry("call1", [1, 2], [3, 4], text="step one", response_id="resp_1", created_at=2.0),
+        _entry(
+            "call2",
+            [1, 2, 3, 4, 5, 6],
+            [7, 8],
+            text="final answer",
+            response_id="resp_2",
+            created_at=3.0,
+            parent_call_id="call1",
+            finish_reason="length",
+        ),
+        _entry(
+            "call2b",
+            [1, 2, 3, 4, 5, 6],
+            [7, 8],
+            text="final answer",
+            response_id="resp_2",
+            created_at=3.2,
+            parent_call_id="call1",
+            finish_reason="stop",
+        ),
+    ]
+    record = EngineRefusalRecord(
+        model_call_id="call3",
+        code="context_length_exceeded",
+        created_at=3.5,
+        parent_call_id=refused_parent,
+        parent_resolution=_RESOLVED,
+    )
+    built = _assemble("r", entries, "prefix_merging", "m", declared_response_id="resp_2", engine_refusals=(record,))
+    assert built["rebuilt_response"]["status"] == "incomplete"
+    assert built["rebuilt_response"]["incomplete_details"] == {"reason": "max_output_tokens"}
 
 
 def test_finalize_reports_a_terminal_refusal_on_the_result(tmp_path):

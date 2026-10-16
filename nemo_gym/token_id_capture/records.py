@@ -397,14 +397,19 @@ def apply_capture_incomplete_verdict(response: dict, incomplete_reason: str | No
     """Put the capture's truncation verdict on a harness response, under one precedence rule.
 
     ``incomplete_reason`` is the ``incomplete_details.reason`` the capture derived for the
-    delivered chain: ``incomplete_reason_for_finish_reason`` of the terminal call's finish reason
-    on the local path, ``staging.rebuild.LinearizedRow.incomplete_reason`` under worker custody.
+    delivered chain. On the local path it is ``incomplete_reason_for_finish_reason`` of the
+    terminal call's finish reason, or ``max_output_tokens`` when the engine refused the request
+    that continued the terminal call for the context window
+    (``builder.project_main_chain_response``). Under worker custody it is
+    ``staging.rebuild.LinearizedRow.incomplete_reason``, which carries the finish-reason mapping
+    only: the ledger row of a refused call records no code and no lineage, so a rollout rebuilt
+    from staged records reports no verdict for a refusal (issue #4647 tracks carrying both).
     ``None`` means the chain ended on its own and leaves the response alone. The verdict is
     written only when the harness reported no status or ``completed``: a harness that reported
     ``incomplete`` or ``failed`` itself gave the more specific verdict and keeps its ``status`` and
     ``incomplete_details``. Returns whether the response changed. Gym's delivery and a framework
-    that rebuilds from staged records both apply this rule, so a rollout gets the same verdict
-    whichever placement captured it.
+    that rebuilds from staged records both apply this precedence rule, so a verdict that comes
+    from the finish reason is the same whichever placement captured it.
     """
     if incomplete_reason is None or response.get("status") not in (None, "completed"):
         return False

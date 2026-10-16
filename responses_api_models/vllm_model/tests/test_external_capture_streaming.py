@@ -432,20 +432,22 @@ async def test_worker_completion_without_coordinates_still_fails_closed(make_har
     ]
 
 
+@pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("backend", ["vllm_worker", "megatron_worker"])
 async def test_a_propagated_refusal_under_worker_custody_is_a_definite_ledger_failure(
-    make_harness, monkeypatch, backend
+    make_harness, monkeypatch, backend, stream
 ):
     # The engine refused the call before the worker could stage anything, so the ledger row names
     # that definite outcome instead of the custody sweep's ambiguous uncommitted-call row, and the
-    # sweep does not add a second row for the same call.
+    # sweep does not add a second row for the same call. Codex and OpenCode stream by default; the
+    # Responses route buffers the stream, so the refusal is the same HTTP 400 before any event.
     h = make_harness("responses", backend=backend, propagate_context_overflow_errors=True)
     h.model.setup_exception_middleware(h.app)
     error = ClientResponseError(MagicMock(real_url="http://worker/v1/chat/completions"), (), status=400)
     error.response_content = b'{"error":{"message":"maximum context length","code":400}}'
     monkeypatch.setattr(h.worker, "create_chat_completion", AsyncMock(side_effect=error))
 
-    messages = await _request(h.app, _path("responses"), _body("responses", stream=False))
+    messages = await _request(h.app, _path("responses"), _body("responses", stream))
 
     assert messages[0]["status"] == 400
     payload = json.loads(b"".join(message.get("body", b"") for message in messages))

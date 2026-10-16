@@ -95,7 +95,8 @@ async def finalize_rollout_token_capture(
     It replaces ``response.output``.
     It preserves the reward and all other harness and verifier output, with one exception:
     when the rebuilt response is ``incomplete`` because the delivered chain's terminal call
-    was cut (``length`` or ``content_filter``) and the harness reported ``completed`` or no
+    was cut (``length`` or ``content_filter``), or because the engine refused the request
+    that continued it for the context window, and the harness reported ``completed`` or no
     status, the harness response takes that ``status`` and ``incomplete_details``, so a
     reader of the record sees why the delivered chain stopped. A harness that reported
     ``incomplete`` or ``failed`` itself keeps its own verdict. ``apply_capture_incomplete_verdict``

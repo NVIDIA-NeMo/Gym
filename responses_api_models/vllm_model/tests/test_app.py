@@ -1066,40 +1066,81 @@ class TestApp:
         )
         return error
 
-    def _post_captured_chat_completion(self, server: VLLMModel, store: TokenCaptureStore):
-        """Send one captured chat request through the real dispatch, which registers the call intent."""
+    def _post_captured(self, server: VLLMModel, store: TokenCaptureStore, path: str, body: dict):
+        """Send one captured request through the real dispatch, which registers the call intent."""
         app = server.setup_webserver()
         server.setup_exception_middleware(app)
         token = set_token_sink(CaptureContext(rollout_id="r0", model_call_id="mc-1", token_sink=store))
         try:
-            return TestClient(app).post(
-                "/v1/chat/completions",
-                json={"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}]},
-            )
+            return TestClient(app).post(path, json=body)
         finally:
             reset_token_sink(token)
 
-    @mark.parametrize("use_completions_api", [False, True], ids=["chat-completions", "completions"])
+    def _post_captured_chat_completion(self, server: VLLMModel, store: TokenCaptureStore, *, stream: bool = False):
+        body: dict = {"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}]}
+        if stream:
+            body["stream"] = True
+        return self._post_captured(server, store, "/v1/chat/completions", body)
+
+    @mark.parametrize(
+        "route",
+        [
+            "chat-completions",
+            "completions",
+            "chat-stream-before-headers",
+            "chat-stream-after-keepalive",
+            "responses",
+            "responses-stream",
+        ],
+    )
     def test_a_captured_rollout_records_the_propagated_refusal_and_freezes_complete(
-        self, monkeypatch: MonkeyPatch, tmp_path, use_completions_api: bool
+        self, monkeypatch: MonkeyPatch, tmp_path, route: str
     ) -> None:
         # The dispatch registers the call's capture intent before the engine is called. The refused
         # call generates nothing, so no token record resolves that intent; the refusal record does,
         # and it tells a consumer the rollout ended at the context window rather than at the
-        # harness's own stopping point.
+        # harness's own stopping point. Codex and OpenCode stream by default, so the record must
+        # also be written on the streaming paths: before the headers are committed the refusal is
+        # the same HTTP 400, and after the chat keepalive it is an SSE error event on a 200 that
+        # carries the same envelope, recorded from inside the dispatch task.
         store = TokenCaptureStore(tmp_path)
         server = self._setup_server(
-            monkeypatch, propagate_context_overflow_errors=True, use_completions_api=use_completions_api
+            monkeypatch, propagate_context_overflow_errors=True, use_completions_api=route == "completions"
         )
+        refusal = self._engine_window_refusal()
+        if route == "chat-stream-after-keepalive":
+            monkeypatch.setattr("nemo_gym.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", 0.01)
+
+            async def slow_refusal(**_kwargs):
+                await asyncio.sleep(0.05)
+                raise refusal
+
+            engine_call = AsyncMock(side_effect=slow_refusal)
+        else:
+            engine_call = AsyncMock(side_effect=refusal)
         mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
-        mock_client.create_chat_completion = AsyncMock(side_effect=self._engine_window_refusal())
-        mock_client.create_completion = AsyncMock(side_effect=self._engine_window_refusal())
+        mock_client.create_chat_completion = engine_call
+        mock_client.create_completion = engine_call
         server._clients = [mock_client]
 
-        response = self._post_captured_chat_completion(server, store)
+        if route.startswith("responses"):
+            body = {
+                "model": "dummy_model",
+                "input": [{"role": "user", "content": "hi"}],
+                "stream": route == "responses-stream",
+            }
+            response = self._post_captured(server, store, "/v1/responses", body)
+        else:
+            response = self._post_captured_chat_completion(server, store, stream=route.startswith("chat-stream"))
 
-        assert response.status_code == 400
-        assert response.json()["error"]["code"] == "context_length_exceeded"
+        if route == "chat-stream-after-keepalive":
+            assert response.status_code == 200
+            assert response.text.startswith(": keep-alive")
+            error_lines = [line for line in response.text.splitlines() if line.startswith("data: ")]
+            assert json.loads(error_lines[-1][len("data: ") :])["error"]["code"] == "context_length_exceeded"
+        else:
+            assert response.status_code == 400
+            assert response.json()["error"]["code"] == "context_length_exceeded"
         snapshot = store.freeze_now("r0")
         assert snapshot.entries == ()
         assert snapshot.incomplete is False
