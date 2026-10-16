@@ -254,6 +254,15 @@ class TestGlobalConfig:
         global_config_dict = get_global_config_dict()
         assert "openai==2.6.0" in global_config_dict["head_server_deps"]
 
+    def test_head_server_deps_carry_provider_plugins(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_openai_topology(monkeypatch, parent_version="2.6.0")
+        self._mock_parse_environment(monkeypatch, DictConfig({}))
+        monkeypatch.setattr(nemo_gym.global_config, "plugin_distributions", lambda: ["gym-substrate"])
+        monkeypatch.setattr(nemo_gym.global_config, "installed_requirement", lambda dist, req: f"{req}==0.1.0")
+
+        global_config_dict = get_global_config_dict()
+        assert "gym-substrate==0.1.0" in global_config_dict["head_server_deps"]
+
     def test_head_server_deps_raises_on_incompatible_parent_openai(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_openai_topology(monkeypatch, parent_version="2.52.0")
         self._mock_parse_environment(monkeypatch, DictConfig({}))

@@ -595,8 +595,13 @@ class ParticipantControlPlane:
             raise
 
         async with self._lock:
-            if self.checkpoint_id != request.checkpoint_id or self.phase != CheckpointPhase.PREPARING:
-                # A resume, lease expiry, or concurrent prepare finished this checkpoint while we waited.
+            if self.checkpoint_id != request.checkpoint_id:
+                # A resume or lease expiry ended this checkpoint while the prepare waited.
+                # Another checkpoint may be open by now, so its phase says nothing about this one.
+                # The reply is idle, as for a prepare that a resume interrupts.
+                return {"phase": CheckpointPhase.IDLE.value, "report": self.participant.readiness().model_dump()}
+            if self.phase != CheckpointPhase.PREPARING:
+                # A concurrent prepare of this checkpoint finished it while this one waited.
                 return {"phase": self.phase.value, "report": self.participant.readiness().model_dump()}
             report = self.participant.readiness()
             if report.ready:
