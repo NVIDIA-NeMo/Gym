@@ -220,9 +220,20 @@ def exception_class_from_stderr(stderr: str) -> str | None:
     return last.split(":", 1)[0]
 
 
+def _tail_text(text: str, limit: int) -> str:
+    """The last `limit` characters of `text`; nothing for a limit of 0 (`text[-0:]` would be all of it); the
+    whole text for a negative limit."""
+    if limit == 0:
+        return ""
+    return text[-limit:] if limit > 0 else text
+
+
+def _decode(data: bytes | None) -> str:
+    return (data or b"").decode("utf-8", errors="replace")
+
+
 def _tail(data: bytes | None, limit: int) -> str:
-    text = (data or b"").decode("utf-8", errors="replace")
-    return text[-limit:] if limit >= 0 else text
+    return _tail_text(_decode(data), limit)
 
 
 def sanitize_test(test_case: str) -> str:
@@ -248,8 +259,9 @@ def run_substep(program: str, timeout_secs: float, output_tail_chars: int = DEFA
 
     Returns `passed` and the legacy `error` (the stderr tail on failure, "timeout" on a timeout, "" on a
     pass) plus the execution details a caller may record: `returncode` (None on a timeout), `timed_out`,
-    `duration_s`, `exception_class` (see exception_class_from_stderr) and the bounded `stdout_tail` /
-    `stderr_tail` (the last `output_tail_chars` characters of each stream)."""
+    `duration_s`, `exception_class` (see exception_class_from_stderr; read from the complete stderr, so a
+    long exception message never hides the class) and the bounded `stdout_tail` / `stderr_tail` (the last
+    `output_tail_chars` characters of each stream; 0 keeps none)."""
     # Passing a large generated solution through `python -c <program>` is
     # bounded by Linux's execve argument-size limit (ARG_MAX). SciCode's
     # accumulated solutions can exceed that late in a run. A temporary source
@@ -286,14 +298,16 @@ def run_substep(program: str, timeout_secs: float, output_tail_chars: int = DEFA
                 pass
     duration_s = time.monotonic() - started
     passed = proc.returncode == 0
-    stderr_tail = _tail(proc.stderr, output_tail_chars)
+    stderr_text = _decode(proc.stderr)
+    stderr_tail = _tail_text(stderr_text, output_tail_chars)
     return {
         "passed": passed,
         "error": "" if passed else stderr_tail,
         "returncode": proc.returncode,
         "timed_out": False,
         "duration_s": duration_s,
-        "exception_class": None if passed else exception_class_from_stderr(stderr_tail),
+        # Classified from the whole stream: the tail may hold only the end of a long exception message.
+        "exception_class": None if passed else exception_class_from_stderr(stderr_text),
         "stdout_tail": _tail(proc.stdout, output_tail_chars),
         "stderr_tail": stderr_tail,
     }

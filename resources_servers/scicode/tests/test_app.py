@@ -27,6 +27,7 @@ from resources_servers.scicode.app import (
     ScicodeVerifyRequest,
 )
 from resources_servers.scicode.scicode_integration.runner import (
+    DEFAULT_OUTPUT_TAIL_CHARS,
     build_test_program,
     exception_class_from_stderr,
     run_substep,
@@ -196,6 +197,31 @@ def test_run_substep_output_tails_are_bounded():
 )
 def test_exception_class_from_stderr(stderr, expected):
     assert exception_class_from_stderr(stderr) == expected
+
+
+def test_run_substep_zero_tail_retains_nothing():
+    """output_tail_chars=0 means "keep no stream text": both tails empty on a plain failure and on a timeout
+    (text[-0:] would be the whole string)."""
+    program = "import sys\nprint('out')\nprint('err', file=sys.stderr)\nsys.exit(3)"
+    result = run_substep(program, timeout_secs=10.0, output_tail_chars=0)
+    assert result["passed"] is False and result["returncode"] == 3
+    assert result["stdout_tail"] == "" and result["stderr_tail"] == ""
+    slow = "import sys, time\nprint('out', flush=True)\nprint('err', file=sys.stderr, flush=True)\ntime.sleep(5)"
+    result = run_substep(slow, timeout_secs=0.5, output_tail_chars=0)
+    assert result["timed_out"] is True and result["returncode"] is None and result["error"] == "timeout"
+    assert result["stdout_tail"] == "" and result["stderr_tail"] == ""
+
+
+@pytest.mark.parametrize(
+    "tail_chars, expected_len", [(DEFAULT_OUTPUT_TAIL_CHARS, DEFAULT_OUTPUT_TAIL_CHARS), (5, 5), (0, 0)]
+)
+def test_run_substep_classifies_the_exception_from_the_full_stderr(tail_chars, expected_len):
+    """The exception class must not depend on the retention bound: a message longer than the tail still
+    yields its class, while the stored tail stays exactly as long as configured."""
+    result = run_substep("raise ValueError('x' * 3000)", timeout_secs=10.0, output_tail_chars=tail_chars)
+    assert result["passed"] is False and result["returncode"] == 1
+    assert result["exception_class"] == "ValueError"
+    assert len(result["stderr_tail"]) == expected_len
 
 
 def test_run_substep_null_byte_fails_instead_of_raising():
