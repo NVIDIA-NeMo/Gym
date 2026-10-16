@@ -31,6 +31,7 @@ from urllib.parse import quote, urlsplit
 from nemo_gym.sandbox.attribution import RUN_KEY, log_attribution_once, resolve_attribution, resolve_run_id
 from nemo_gym.sandbox.providers.base import (
     SandboxBackendUnreachableError,
+    SandboxCommandStatusTimeoutError,
     SandboxCreateError,
     SandboxCreateVerificationError,
     SandboxEndpoint,
@@ -134,6 +135,8 @@ def _inspect_oom_evidence(inspect: str) -> str | None:
 
 
 RETRYABLE_HTTP_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
+BACKGROUND_COMMAND_TIMEOUT_HEADROOM_S = 60.0
+BACKGROUND_STATUS_RECOVERY_WINDOW_S = 300.0
 RETRYABLE_ERROR_MARKERS = (
     "all connection attempts failed",
     "connection refused",
@@ -1793,17 +1796,37 @@ class OpenSandboxProvider:
                     f"(sandbox_id={handle.sandbox_id!r})"
                 ) from e
         except Exception as error:
-            if not isinstance(error, SandboxBackendUnreachableError) and _exception_status_code(error) != 502:
+            if isinstance(error, SandboxOOMKilledError):
                 raise
-            notice = await self._sandbox_death_notice(handle, any_death=True)
-            if notice is not None:
-                if notice.outcome == "oom":
-                    raise SandboxOOMKilledError(notice.message) from error
-                if evidence := await self._control_plane_inspect_oom_evidence(handle):
-                    raise SandboxOOMKilledError(
-                        f"Sandbox was OOM-killed: inspect confirms {evidence}. {notice.message}"
-                    ) from error
+            status_code = _exception_status_code(error)
+            if not isinstance(
+                error, (SandboxBackendUnreachableError, SandboxCommandStatusTimeoutError)
+            ) and status_code not in {410, 502}:
+                raise
+            if evidence := await self._confirmed_oom_death(handle, error):
+                raise SandboxOOMKilledError(evidence) from error
+            if status_code in {410, 502}:
+                raise SandboxBackendUnreachableError(
+                    f"OpenSandbox command backend unavailable without confirmed OOM; "
+                    f"sandbox_id={handle.sandbox_id!r}, status_code={status_code}"
+                ) from error
             raise
+
+    async def _confirmed_oom_death(self, handle: SandboxHandle, error: BaseException) -> str | None:
+        """Return current-sandbox OOM evidence after a failed execution request."""
+        notice = await self._sandbox_death_notice(handle, any_death=True)
+        if notice is not None and notice.outcome == "oom":
+            return notice.message
+        # An ended sandbox can return 410 even when get_info is unavailable.
+        # Inspect names the current user container, so it is sufficient OOM
+        # evidence without relying on the exec route's error message.
+        if notice is not None or _exception_status_code(error) in {410, 502}:
+            if evidence := await self._control_plane_inspect_oom_evidence(handle):
+                message = notice.message if notice is not None else f"sandbox_id={handle.sandbox_id!r}"
+                return f"Sandbox was OOM-killed: inspect confirms {evidence}. {message}"
+        if notice is not None and notice.outcome == "other_terminal":
+            raise SandboxBackendUnreachableError(notice.message) from error
+        return None
 
     async def _control_plane_inspect_oom_evidence(self, handle: SandboxHandle) -> str | None:
         """Check the control plane's deprecated plain-text inspect route after terminal backend loss."""
@@ -1921,7 +1944,11 @@ class OpenSandboxProvider:
 
         loop = asyncio.get_running_loop()
         # The server enforces the command timeout; leave the client headroom.
-        deadline = (loop.time() + float(total_timeout_s) + 60.0) if total_timeout_s is not None else None
+        deadline = (
+            loop.time() + float(total_timeout_s) + BACKGROUND_COMMAND_TIMEOUT_HEADROOM_S
+            if total_timeout_s is not None
+            else None
+        )
         poll_timeout_s = (
             float(self._connection.request_timeout_s) if self._connection.request_timeout_s is not None else 60.0
         )
@@ -1931,6 +1958,9 @@ class OpenSandboxProvider:
         status_timeout_s = self._operations.status_poll_timeout_s
         if status_timeout_s is None:
             status_timeout_s = poll_timeout_s
+
+        status_failure_deadline: float | None = None
+        status_failure_error: Exception | None = None
 
         def _command_read_is_retryable(exception: BaseException) -> bool:
             # Status and log reads are idempotent GETs for the same execution.
@@ -1944,22 +1974,53 @@ class OpenSandboxProvider:
         # detected promptly, then back off so long ones do not spam requests.
         poll_interval = min(self._operations.background_poll_initial_s, self._operations.background_poll_interval_s)
         while True:
-            status = await self._await_sdk_operation(
-                lambda: handle.raw.commands.get_command_status(execution_id),
-                operation="command status",
-                sandbox_id=handle.sandbox_id,
-                timeout_s=status_timeout_s,
-                retries=self._operations.retries,
-                is_retryable=_command_read_is_retryable,
-            )
+            if status_failure_deadline is not None and loop.time() >= status_failure_deadline:
+                raise SandboxCommandStatusTimeoutError(
+                    f"OpenSandbox command status unavailable beyond {BACKGROUND_STATUS_RECOVERY_WINDOW_S:g}s; "
+                    f"sandbox_id={handle.sandbox_id!r}, execution_id={execution_id!r}"
+                ) from status_failure_error
+            current_status_timeout_s = status_timeout_s
+            if status_failure_deadline is not None:
+                current_status_timeout_s = min(status_timeout_s, status_failure_deadline - loop.time())
+            try:
+                status = await self._await_sdk_operation(
+                    lambda: handle.raw.commands.get_command_status(execution_id),
+                    operation="command status",
+                    sandbox_id=handle.sandbox_id,
+                    timeout_s=current_status_timeout_s,
+                    retries=0 if status_failure_deadline is not None else self._operations.retries,
+                    is_retryable=_command_read_is_retryable,
+                )
+                status_failure_deadline = None
+                status_failure_error = None
+            except Exception as error:
+                if not isinstance(error, TimeoutError) and _exception_status_code(error) != 502:
+                    raise
+                # The command has already been submitted. A timed-out status
+                # GET or proxy 502 says nothing about its outcome. Read only
+                # the same execution under a short recovery window.
+                if status_failure_deadline is None:
+                    status_failure_deadline = loop.time() + BACKGROUND_STATUS_RECOVERY_WINDOW_S
+                    if deadline is not None:
+                        status_failure_deadline = min(status_failure_deadline, deadline)
+                status_failure_error = error
+                if evidence := await self._confirmed_oom_death(handle, error):
+                    raise SandboxOOMKilledError(evidence) from error
+                if loop.time() >= status_failure_deadline:
+                    raise SandboxCommandStatusTimeoutError(
+                        f"OpenSandbox command status unavailable beyond recovery deadline; "
+                        f"sandbox_id={handle.sandbox_id!r}, execution_id={execution_id!r}"
+                    ) from error
+                status = None
             # A renamed SDK field must not degrade silently: a missing `running`
             # would end the poll at once, a missing `exit_code` would score a
             # failed command as a success.
-            for field in ("running", "exit_code"):
-                if not hasattr(status, field):
-                    raise RuntimeError(f"OpenSandbox status has no {field!r} field; execution_id={execution_id!r}")
-            if not status.running:
-                break
+            if status is not None:
+                for field in ("running", "exit_code"):
+                    if not hasattr(status, field):
+                        raise RuntimeError(f"OpenSandbox status has no {field!r} field; execution_id={execution_id!r}")
+                if not status.running:
+                    break
             if deadline is not None and loop.time() >= deadline:
                 raise TimeoutError(
                     f"Timed out polling OpenSandbox background command; sandbox_id={handle.sandbox_id!r}, "

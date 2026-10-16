@@ -1226,6 +1226,118 @@ async def test_exec_background_reports_oom_status_after_502(monkeypatch: pytest.
 
 
 @pytest.mark.parametrize(
+    ("inspect", "oom_confirmed"),
+    [
+        (
+            "Pod Name: sandbox-pod\nContainers:\n  sandbox:\n"
+            "    State:          Terminated (exit=137, reason=OOMKilled)\n",
+            True,
+        ),
+        (
+            "Pod Name: sandbox-pod\nContainers:\n  sandbox:\n"
+            "    State:          Terminated (exit=137, reason=Error)\n"
+            "  egress:\n    State:          Terminated (exit=137, reason=OOMKilled)\n",
+            False,
+        ),
+    ],
+)
+async def test_exec_background_retries_timed_out_status_then_checks_ended_sandbox(
+    monkeypatch: pytest.MonkeyPatch, inspect: str, oom_confirmed: bool
+) -> None:
+    """A read timeout keeps the submitted command alive; a later 410 needs current-container OOM proof."""
+    from nemo_gym import server_utils
+
+    class Backend410Error(Exception):
+        status_code = 410
+
+    class Backend502Error(Exception):
+        status_code = 502
+
+    class FakeCommands:
+        def __init__(self) -> None:
+            self.run_calls = 0
+            self.status_calls: list[str] = []
+            self.log_calls = 0
+
+        async def run(self, command: str, *, opts: Any) -> Any:
+            self.run_calls += 1
+            return SimpleNamespace(id="exec-oom")
+
+        async def get_command_status(self, execution_id: str) -> Any:
+            self.status_calls.append(execution_id)
+            if len(self.status_calls) == 1:
+                raise TimeoutError("Timed out during OpenSandbox command status after 10s")
+            if len(self.status_calls) == 2:
+                raise Backend502Error("HTTP 502 [BACKEND_CONNECTION_FAILED] backend connection failed")
+            raise Backend410Error("HTTP 410 [SANDBOX::ENDED] Sandbox sandbox-oom has ended (OOMKilled)")
+
+        async def get_background_command_logs(self, execution_id: str) -> Any:
+            self.log_calls += 1
+            return SimpleNamespace(content="unexpected", cursor=None)
+
+    class FakeConnectionConfig:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+        def get_base_url(self) -> str:
+            return "https://sandbox.example/v1"
+
+        def get_api_key(self) -> str:
+            return "key"
+
+    class FakeResponse:
+        def __init__(self, status: int, body: str) -> None:
+            self.status = status
+            self.content = SimpleNamespace(read=AsyncMock(return_value=body.encode()))
+
+        async def __aenter__(self) -> Any:
+            return self
+
+        async def __aexit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+            return None
+
+    request = AsyncMock(
+        side_effect=[
+            FakeResponse(200, "Pod Name: sandbox-pod\nContainers:\n  sandbox:\n    State: Running\n"),
+            FakeResponse(200, inspect),
+        ]
+    )
+    monkeypatch.setattr(server_utils, "request", request)
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (object, FakeConnectionConfig, dict, object, object),
+    )
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"domain": "sandbox.example", "api_key": "key", "request_timeout_s": 5},
+        probe={"command": None},
+        operations={"background_exec": True, "retries": 0},
+    )
+    commands = FakeCommands()
+    raw = SimpleNamespace(commands=commands, get_info=AsyncMock(side_effect=RuntimeError("status unavailable")))
+    handle = opensandbox_provider.SandboxHandle(sandbox_id="sandbox-oom", provider_name="opensandbox", raw=raw)
+
+    if oom_confirmed:
+        with pytest.raises(opensandbox_provider.SandboxOOMKilledError, match="inspect confirms") as exc_info:
+            await provider.exec(handle, "allocate memory", timeout_s=30)
+        assert isinstance(exc_info.value.__cause__, Backend410Error)
+        assert "sandbox_id='sandbox-oom'" in str(exc_info.value)
+    else:
+        with pytest.raises(
+            opensandbox_provider.SandboxBackendUnreachableError, match="without confirmed OOM"
+        ) as exc_info:
+            await provider.exec(handle, "allocate memory", timeout_s=30)
+        assert isinstance(exc_info.value.__cause__, Backend410Error)
+
+    assert commands.run_calls == 1
+    assert commands.status_calls == ["exec-oom", "exec-oom", "exec-oom"]
+    assert commands.log_calls == 0
+    assert request.await_count == 2
+    assert request.await_args.args[1].endswith("/sandboxes/sandbox-oom/diagnostics/inspect")
+
+
+@pytest.mark.parametrize(
     ("inspect", "status_code", "evidence"),
     [
         (
@@ -1348,11 +1460,12 @@ async def test_exec_background_inspect_confirms_only_current_sandbox_oom_after_t
         assert isinstance(exc_info.value.__cause__, Backend502Error)
         assert evidence in str(exc_info.value)
     else:
-        with pytest.raises(Backend502Error, match="Get command status failed"):
+        with pytest.raises(opensandbox_provider.SandboxBackendUnreachableError) as exc_info:
             await provider.exec(handle, "allocate memory", timeout_s=30)
+        assert not isinstance(exc_info.value, opensandbox_provider.SandboxOOMKilledError)
 
-    assert raw.get_info.await_count == 1
-    assert request.await_count == 1
+    assert raw.get_info.await_count >= 1
+    assert request.await_count >= 1
     args, kwargs = request.await_args
     assert args == ("GET", "https://sandbox.example/prefix/v1/sandboxes/sandbox-oom/diagnostics/inspect")
     assert kwargs["headers"] == {"OPEN-SANDBOX-API-KEY": "configured-key"}
@@ -1457,9 +1570,11 @@ async def test_exec_hard_cap_does_not_relabel_inner_timeouts(monkeypatch: pytest
 
     class FakeCommands:
         def __init__(self) -> None:
+            self.run_calls = 0
             self.status_calls = 0
 
         async def run(self, command: str, *, opts: FakeRunCommandOpts) -> Any:
+            self.run_calls += 1
             return SimpleNamespace(id="exec-slowpolls")
 
         async def get_command_status(self, execution_id: str) -> Any:
@@ -1474,7 +1589,7 @@ async def test_exec_hard_cap_does_not_relabel_inner_timeouts(monkeypatch: pytest
         "_require_opensandbox_sdk",
         lambda: (object, object, FakeRunCommandOpts, object, object),
     )
-    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr(opensandbox_provider, "BACKGROUND_COMMAND_TIMEOUT_HEADROOM_S", 0.0)
 
     provider = opensandbox_provider.OpenSandboxProvider(
         connection={"request_timeout_s": 120},
@@ -1486,19 +1601,63 @@ async def test_exec_hard_cap_does_not_relabel_inner_timeouts(monkeypatch: pytest
             "background_poll_interval_s": 0.01,
         },
     )
+    monkeypatch.setattr(provider, "_confirmed_oom_death", AsyncMock(return_value=None))
     commands = FakeCommands()
     handle = opensandbox_provider.SandboxHandle(
         sandbox_id="sandbox-slowpolls", provider_name="opensandbox", raw=SimpleNamespace(commands=commands)
     )
 
-    with pytest.raises(TimeoutError) as exc_info:
-        await provider.exec(handle, "echo ok", timeout_s=30)
+    with pytest.raises(opensandbox_provider.SandboxCommandStatusTimeoutError) as exc_info:
+        await provider.exec(handle, "echo ok", timeout_s=0.01)
 
     # The poll-budget failure surfaced with its own message (after using its
     # retry budget), not relabeled as the wall-clock hard cap tripping.
-    assert commands.status_calls == 2
+    assert commands.status_calls >= 2
+    assert commands.run_calls == 1
     assert "command status" in str(exc_info.value)
     assert "hard cap" not in str(exc_info.value)
+
+
+async def test_status_loss_recovery_ends_before_long_agent_command_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeCommands:
+        def __init__(self) -> None:
+            self.run_calls = 0
+            self.status_calls: list[str] = []
+
+        async def run(self, command: str, *, opts: Any) -> Any:
+            self.run_calls += 1
+            return SimpleNamespace(id="one-execution")
+
+        async def get_command_status(self, execution_id: str) -> Any:
+            self.status_calls.append(execution_id)
+            raise TimeoutError("command status route is unavailable")
+
+        async def get_background_command_logs(self, execution_id: str) -> Any:
+            pytest.fail("logs cannot be fetched without a final status")
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (object, object, dict, object, object),
+    )
+    monkeypatch.setattr(opensandbox_provider, "BACKGROUND_STATUS_RECOVERY_WINDOW_S", 0.02)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 5},
+        probe={"command": None},
+        operations={"background_exec": True, "retries": 0, "background_poll_interval_s": 0.001},
+    )
+    monkeypatch.setattr(provider, "_confirmed_oom_death", AsyncMock(return_value=None))
+    commands = FakeCommands()
+    handle = opensandbox_provider.SandboxHandle(
+        sandbox_id="sandbox-status-loss", provider_name="opensandbox", raw=SimpleNamespace(commands=commands)
+    )
+
+    with pytest.raises(opensandbox_provider.SandboxCommandStatusTimeoutError, match="unavailable beyond"):
+        await provider.exec(handle, "long agent command", timeout_s=10_800)
+
+    assert commands.run_calls == 1
+    assert len(commands.status_calls) >= 2
+    assert set(commands.status_calls) == {"one-execution"}
 
 
 @pytest.mark.parametrize("request_timeout_s", [None, 5])
@@ -2508,7 +2667,7 @@ async def test_exec_background_status_polls_use_dedicated_timeout(
 async def test_exec_background_retries_timed_out_reads(
     monkeypatch: pytest.MonkeyPatch, read_operation: str, failures: int
 ) -> None:
-    """Read retries are bounded and never resubmit an already-running command."""
+    """Status read retries preserve the submitted command; log reads use one retry batch."""
 
     class FakeRunCommandOpts:
         def __init__(self, **kwargs: Any) -> None:
@@ -2560,7 +2719,7 @@ async def test_exec_background_retries_timed_out_reads(
         sandbox_id="sandbox-slowpoll", provider_name="opensandbox", raw=SimpleNamespace(commands=commands)
     )
 
-    if failures == 3:
+    if failures == 3 and read_operation == "logs":
         with pytest.raises(TimeoutError, match=f"command {read_operation}"):
             await provider.exec(handle, "echo ok", timeout_s=30)
     else:
@@ -2569,10 +2728,10 @@ async def test_exec_background_retries_timed_out_reads(
         assert result.stdout == "ok"
 
     assert commands.submissions == 1
-    expected_attempts = min(failures + 1, 3)
+    expected_attempts = failures + 1 if read_operation == "status" else min(failures + 1, 3)
     if read_operation == "status":
         assert commands.status_calls == ["exec-slowpoll"] * expected_attempts
-        assert commands.log_calls == (["exec-slowpoll"] if failures == 1 else [])
+        assert commands.log_calls == ["exec-slowpoll"]
     else:
         assert commands.status_calls == ["exec-slowpoll"]
         assert commands.log_calls == ["exec-slowpoll"] * expected_attempts

@@ -53,7 +53,12 @@ from nemo_gym.rollout_observability import (
     ToolCallObservation,
     TrajectoryRecord,
 )
-from nemo_gym.sandbox import SandboxBackendUnreachableError, SandboxHandle, SandboxOOMKilledError
+from nemo_gym.sandbox import (
+    SandboxBackendUnreachableError,
+    SandboxCommandStatusTimeoutError,
+    SandboxHandle,
+    SandboxOOMKilledError,
+)
 from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from responses_api_agents.opencode_sandboxed_agent import app as app_module
@@ -1280,7 +1285,7 @@ class TestBenchmarkLifecycle:
         assert client.post.await_count == 2
         sandbox.stop.assert_awaited_once()
 
-    @mark.parametrize("failure_phase", ["setup_oom", "agent_transport"])
+    @mark.parametrize("failure_phase", ["setup_oom", "agent_transport", "status_timeout"])
     async def test_unconfirmed_agent_oom_does_not_produce_a_scored_response(
         self, monkeypatch, tmp_path, failure_phase
     ):
@@ -1293,11 +1298,15 @@ class TestBenchmarkLifecycle:
         failure = (
             SandboxOOMKilledError("OOM during setup")
             if failure_phase == "setup_oom"
-            else SandboxBackendUnreachableError("backend disappeared without OOM status")
+            else (
+                SandboxBackendUnreachableError("backend disappeared without OOM status")
+                if failure_phase == "agent_transport"
+                else SandboxCommandStatusTimeoutError("status stayed unavailable after recovery window")
+            )
         )
         sandbox = MagicMock(
             upload=AsyncMock(),
-            exec=AsyncMock(side_effect=[failure] if failure_phase == "setup_oom" else [preflight, failure, failure]),
+            exec=AsyncMock(side_effect=[failure] if failure_phase == "setup_oom" else [preflight, failure]),
         )
         server._sandbox_id_to_sandbox = {"trial": sandbox}
         server._create_opencode_config = AsyncMock(return_value={})
@@ -1311,11 +1320,10 @@ class TestBenchmarkLifecycle:
                 await server.responses(request, body)
             assert server._sandbox_id_to_run_result == {}
         else:
-            response = await server.responses(request, body)
-            assert not response.metadata or NG_AGENT_SANDBOX_OBSERVATION_KEY not in response.metadata
-            assert server._sandbox_id_to_run_result["trial"]["opencode_error_type"] == (
-                "SandboxBackendUnreachableError"
-            )
+            with raises(type(failure), match=str(failure)):
+                await server.responses(request, body)
+            assert sandbox.exec.await_count == 2
+            assert server._sandbox_id_to_run_result == {}
 
 
 @mark.parametrize("failure", ["exception", "command", "download", "empty"])

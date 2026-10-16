@@ -70,7 +70,15 @@ from nemo_gym.rollout_observability import (
     ToolCallObservation,
     TrajectoryRecord,
 )
-from nemo_gym.sandbox import AsyncSandbox, SandboxOOMKilledError, SandboxResources, SandboxSpec, create_provider
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    SandboxBackendUnreachableError,
+    SandboxCommandStatusTimeoutError,
+    SandboxOOMKilledError,
+    SandboxResources,
+    SandboxSpec,
+    create_provider,
+)
 from nemo_gym.sandbox.agent_tools import (
     restricted_network_policy,
     sandbox_server_url,
@@ -956,6 +964,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 parallel_tool_calls=body.parallel_tool_calls,
                 metadata={NG_AGENT_SANDBOX_OBSERVATION_KEY: observation.model_dump_json()},
             )
+        except (SandboxBackendUnreachableError, SandboxCommandStatusTimeoutError):
+            raise
         except Exception as exc:
             result = None
             run_error_type = type(exc).__name__
@@ -994,6 +1004,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 env=session_env,
                 timeout_s=self.config.sandbox_timeout,
             )
+        except (SandboxBackendUnreachableError, SandboxCommandStatusTimeoutError):
+            raise
         except Exception:
             export_result = None
             print("Failed to export results", format_exc(), file=sys.stderr)
@@ -1013,6 +1025,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 print(f"Downloading results from {export_remote_fpath} to {results_local_fpath}", file=sys.stderr)
             try:
                 await sandbox.download(export_remote_fpath, results_local_fpath)
+            except (SandboxBackendUnreachableError, SandboxCommandStatusTimeoutError):
+                raise
             except Exception:
                 results_local_fpath.unlink(missing_ok=True)
                 print(f"Failed to download export results to {results_local_fpath}", format_exc(), file=sys.stderr)
@@ -1057,6 +1071,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                         trajectory,
                         model_ref=self.config.model_server,
                     )
+            except (SandboxBackendUnreachableError, SandboxCommandStatusTimeoutError):
+                raise
             except Exception:
                 print("Failed to capture OpenCode session usage or observations", format_exc(), file=sys.stderr)
                 if collect_observations:

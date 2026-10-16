@@ -236,6 +236,10 @@ class SandboxBackendUnreachableError(RuntimeError):
     """The sandbox backend became unreachable while submitting or running a command."""
 
 
+class SandboxCommandStatusTimeoutError(TimeoutError):
+    """Status reads for an already-submitted command exhausted its deadline."""
+
+
 class SandboxOOMKilledError(SandboxBackendUnreachableError):
     """The provider confirmed that the sandbox was OOM-killed."""
 

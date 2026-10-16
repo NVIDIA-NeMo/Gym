@@ -35,7 +35,14 @@ from nemo_gym.config_types import ModelServerRef
 from nemo_gym.failure_kinds import PROVIDER_OOM_KILLED
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.rollout_observability import NG_AGENT_SANDBOX_OBSERVATION_KEY, SandboxObservation
-from nemo_gym.sandbox import AsyncSandbox, SandboxOOMKilledError, SandboxResources, SandboxSpec
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    SandboxBackendUnreachableError,
+    SandboxCommandStatusTimeoutError,
+    SandboxOOMKilledError,
+    SandboxResources,
+    SandboxSpec,
+)
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_utils import SESSION_ID_KEY, get_first_server_config_dict, is_nemo_gym_fastapi_entrypoint
 from resources_servers.deepswe.task_store import (
@@ -507,7 +514,10 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                     else:
                         model_patch = await self._collect_model_patch(agent_session.sandbox, task)
                 except Exception as error:
-                    if agent_oom_observation is not None or isinstance(error, SandboxOOMKilledError):
+                    if agent_oom_observation is not None or isinstance(
+                        error,
+                        (SandboxOOMKilledError, SandboxBackendUnreachableError, SandboxCommandStatusTimeoutError),
+                    ):
                         raise
                     print(
                         f"Failed to collect DeepSWE model patch for {current_task_id}: {format_exc()}",
@@ -534,7 +544,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 started = monotonic()
                 result = await self._run_verifier(sandbox, task, model_patch, log_dir)
                 verification_time_s = monotonic() - started
-            except SandboxOOMKilledError:
+            except (SandboxOOMKilledError, SandboxBackendUnreachableError, SandboxCommandStatusTimeoutError):
                 raise
             except Exception as error:
                 print(f"DeepSWE verifier failed for {current_task_id}: {format_exc()}", file=sys.stderr)
