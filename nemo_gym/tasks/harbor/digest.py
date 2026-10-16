@@ -8,8 +8,11 @@ SHA256 over sorted ``relative_path NUL file_sha256 LF`` records covering
 ``task.toml``, ``instruction.md``, ``README.md``, ``trajectory.json`` and everything
 under ``environment/``, ``tests/``, ``solution/`` and ``steps/``. The digest travels in
 ``task_data`` under :data:`DIGEST_KEY` so the resources server can refuse a row whose
-folder changed after materialization. :func:`context_digest` is the other digest here: Harbor's environment
-id of a Dockerfile build context, which keys and names the images prepare builds.
+folder changed after materialization. Beside it, :data:`DATASET_DIGEST_KEY` carries the digest of
+the whole dataset (``manifest.toml``'s ``[dataset].digest``, see :mod:`nemo_gym.tasks.harbor.manifest`). Rollout
+collection copies both ``_ng_*`` keys from the row onto the results row it writes, so every
+``rollouts.jsonl`` row says which task folder and which dataset it ran. :func:`context_digest` is the other digest here: Harbor's
+environment id of a Dockerfile build context, which keys and names the images prepare builds.
 """
 
 import fnmatch
@@ -20,6 +23,7 @@ from nemo_gym.tasks.harbor.harbor_compat import environment_content_hash
 
 
 DIGEST_KEY = "_ng_digest"
+DATASET_DIGEST_KEY = "_ng_dataset_digest"
 
 _SINGLE_FILES = ("task.toml", "instruction.md", "README.md", "trajectory.json")
 _DIRECTORIES = ("environment", "tests", "solution", "steps")

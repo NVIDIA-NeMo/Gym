@@ -9,6 +9,10 @@ Preparation writes, under ``results/harbor/<taskset>/``:
 - ``skipped.json``: omitted task IDs and reasons (empty when all tasks load);
 - ``run_config_<agent>.yaml``: the agent and environment server blocks.
 
+Beside the task folders it reconciles ``manifest.toml`` (:mod:`nemo_gym.tasks.harbor.manifest`) before
+anything is built or pushed: a fetched dataset whose folders no longer match the manifest is refused, a
+local folder gets one. The dataset digest goes into the rows and the run config.
+
 Then the ordinary end-to-end rollout collection runs with that config plus the
 selected agent, environment server and model configs.
 """
@@ -51,6 +55,15 @@ from nemo_gym.tasks.harbor.image_configs import (
     record_compose_images,
     with_built_images,
     without_pull_policy,
+)
+from nemo_gym.tasks.harbor.manifest import (
+    LOCAL_SOURCE,
+    Manifest,
+    ManifestError,
+    check_manifest,
+    dataset_digest,
+    dataset_toml_digest,
+    downstream_digest,
 )
 from nemo_gym.tasks.harbor.materialize import (
     ENVIRONMENT_SERVER_IMPL,
@@ -329,6 +342,10 @@ class PreparedTaskset:
     # Every distinct `main` image the prepared tasks start from, for pre-pulling; Compose sidecar and separate
     # verifier images are in compose-images.json (and built-images.json for the built ones) next to the tasks.
     images: tuple[str, ...] = ()
+    # The dataset's identity (``manifest.toml``'s ``[dataset].digest``) and the digest of its
+    # ``dataset.toml``, recorded in every row and in the run config.
+    dataset_digest: str | None = None
+    dataset_toml_digest: str | None = None
 
 
 @dataclass(frozen=True)
@@ -422,6 +439,13 @@ def prepare_target(
     external volumes and foreign bind sources to shared storage (see ``nemo_gym.sandbox.config``); a task that
     declares GPUs is checked against ``gpu_volume_sources`` when given, the mapping of the block the server runs
     such tasks on.
+
+    Before any image is recorded, built or pushed, ``manifest.toml`` beside the task folders is
+    reconciled with their digests (:func:`~nemo_gym.tasks.harbor.manifest.check_manifest`): a fetched
+    dataset whose folders changed is refused, a local folder gets a manifest. The digests hashed for
+    that check are reused for the tasks that do not load; the loader's own digests are checked against
+    them. Selection does not enter the dataset digest; it covers every task folder, so two runs of
+    different subsets still name one dataset.
     """
     build = build or BuildOptions()
     if is_hub_ref(target):
@@ -434,6 +458,10 @@ def prepare_target(
     # dataset root, which is where the loader and the environment server read them from for nested tasks.
     dataset_root = folder.parent if is_task_folder(folder) else folder
     exclude = exclude or []
+    # The refusal of a hand-edited fetched dataset comes first, so no image of unverified content is
+    # built, pushed or recorded. A single task folder has no manifest of its own (see _dataset_identity).
+    digests: dict[str, str] = {}
+    identity = check_manifest(folder, digests=digests) if folder.is_dir() and not is_task_folder(folder) else None
 
     def selected(task_id: str) -> bool:
         return selection_reason(task_id, exclude, only) is None
@@ -474,6 +502,7 @@ def prepare_target(
         errors[task_id] = HarborTaskError(reason)
     loaded = [task for task in loaded if task.task_id not in unbuilt]
     _write_skipped(output_dir, errors)
+    identity = _dataset_identity(folder, loaded, identity, digests)
     tasks, skipped = select_tasks(loaded, exclude, only)
     # A left-out task that did not load (its base image was not recorded) is left out, not reported as broken.
     for task_id in [task_id for task_id in errors if not selected(task_id)]:
@@ -512,9 +541,10 @@ def prepare_target(
     if images is not None:
         print(f"Compose image configurations recorded in {images}")
     rows_path = output_dir / "tasks.jsonl"
-    write_rows(tasks, taskset, rows_path)
+    write_rows(tasks, taskset, rows_path, dataset_digest=identity.digest)
     skipped_note = f", skipped {len(errors)}" if errors else ""
     print(f"Materialized {len(tasks)} task(s) from {folder} into {rows_path}{skipped_note}")
+    print(f"Dataset digest {identity.digest} ({identity.source})")
     distinct = tuple(sorted({task.image for task in tasks if task.image}))
     # Every distinct image, for pre-pulling onto the sandbox hosts before a run.
     (output_dir / IMAGES_FILE).write_text(json.dumps(list(distinct), indent=2) + "\n")
@@ -530,6 +560,8 @@ def prepare_target(
         output_dir=output_dir,
         skipped={task_id: str(error) for task_id, error in errors.items()},
         images=distinct,
+        dataset_digest=identity.digest,
+        dataset_toml_digest=identity.dataset_toml_digest,
     )
 
 
@@ -541,6 +573,35 @@ def _listed(reasons: Mapping[str, object]) -> str:
 def _no_runnable_task(folder: Path, errors: Mapping[str, object]) -> ValueError:
     """The error of a preparation that keeps no task, listing every task left out and why."""
     return ValueError(f"No runnable task left in {folder}" + (f"; left out:{_listed(errors)}" if errors else ""))
+
+
+def _dataset_identity(
+    folder: Path, loaded: list[HarborTask], checked: Manifest | None, digests: dict[str, str]
+) -> Manifest:
+    """The dataset's manifest, reconciled with the loaded tasks' digests.
+
+    A folder of task folders carries ``manifest.toml``, reconciled by ``check_manifest`` before the
+    builds (``checked``, with the ``digests`` it hashed). The loader hashed the folders that loaded
+    again, with the same function; a digest that differs means a folder changed under the preparation,
+    so the manifest is reconciled once more with the loader's digests (and a fetched dataset refused).
+    A single task folder names no dataset folder of its own (its parent is whatever holds it), so its
+    identity is computed in memory over that one task, with the ``dataset.toml`` beside it, and nothing
+    is written (``checked`` is ``None`` exactly then).
+    """
+    if checked is None:
+        hashed = {task.task_id: task.digest for task in loaded}
+        toml_digest = dataset_toml_digest(folder.parent)
+        patch_digest = downstream_digest(folder.parent)
+        return Manifest(
+            source=LOCAL_SOURCE,
+            digest=dataset_digest(hashed, toml_digest, patch_digest),
+            dataset_toml_digest=toml_digest,
+            downstream_digest=patch_digest,
+            tasks={name: {"digest": digest} for name, digest in hashed.items()},
+        )
+    if all(digests.get(task.task_id) == task.digest for task in loaded):
+        return checked
+    return check_manifest(folder, digests={task.task_id: task.digest for task in loaded})
 
 
 def _build_dockerfiles(folder: Path, build: BuildOptions, *, select) -> dict[str, str]:
@@ -729,6 +790,8 @@ def build_run(
         agent_instance_name=agent.instance_name,
         agent_impl=agent.impl_name,
         agent_overrides=AGENT_OVERRIDES.get(agent.impl_name),
+        dataset_digest=prepared.dataset_digest,
+        dataset_toml_digest=prepared.dataset_toml_digest,
     )
     # Defaults belong below explicit config files and command-line overrides.
     config["output_jsonl_fpath"] = str(prepared.output_dir / "rollouts.jsonl")
@@ -781,7 +844,16 @@ def run_target(args: argparse.Namespace, overrides: list[str]) -> None:
             volume_sources=volume_sources_from_overrides(overrides, sandbox),
             gpu_volume_sources=gpu_volume_sources_from_overrides(overrides, sandbox),
         )
-    except (HarborTaskError, HubError, BuildError, ImageConfigError, ConfigError, ValueError, OSError) as exc:
+    except (
+        HarborTaskError,
+        HubError,
+        BuildError,
+        ImageConfigError,
+        ManifestError,
+        ConfigError,
+        ValueError,
+        OSError,
+    ) as exc:
         args._parser.error(str(exc))
     if prepared.skipped and not getattr(args, "skip_unloadable", False):
         args._parser.error(
@@ -837,7 +909,7 @@ def validate_target(args: argparse.Namespace, overrides: list[str]) -> None:
         args._parser.error(str(exc))
     unvalidated = [task.task_id for task in prepared.tasks if not task.has_solution]
     prepared = replace(prepared, tasks=[task for task in prepared.tasks if task.has_solution])
-    write_rows(prepared.tasks, prepared.taskset, prepared.rows_path)
+    write_rows(prepared.tasks, prepared.taskset, prepared.rows_path, dataset_digest=prepared.dataset_digest)
     rollouts = prepared.output_dir / "rollouts.jsonl"
     expected = []
     if prepared.tasks:

@@ -13,6 +13,7 @@ import pytest
 import yaml
 
 import nemo_gym.tasks.harbor.hub as hub_module
+import nemo_gym.tasks.harbor.manifest as manifest_module
 from nemo_gym.tasks.harbor import DIGEST_KEY, HarborTaskConfig, content_hash, discover_tasks, load_task
 from nemo_gym.tasks.harbor.cli import (
     AgentSelection,
@@ -1157,16 +1158,19 @@ class TestPackageStore:
         assert sorted(p.name for p in folder.iterdir() if p.is_dir()) == ["alpha", "beta"]
         assert content_hash(folder / "alpha") == digests["alpha"]
         manifest = tomllib.loads((folder / "manifest.toml").read_text())
-        assert manifest["dataset"] == {
-            "name": "terminal-bench/terminal-bench",
-            "version": "4.0.0",
-            "source": "harbor-package-store",
-            "content_hash": "sha256:" + "d" * 64,
-        }
+        # Derived facts only: no copy of the name or version, which live in dataset.toml.
+        assert manifest["schema_version"] == 1
+        assert set(manifest["dataset"]) == {"source", "digest", "dataset_toml_digest", "downstream_digest"}
+        assert manifest["dataset"]["source"] == "harbor-package-store"
+        assert manifest["dataset"]["digest"] == manifest_module.dataset_digest(
+            digests, manifest["dataset"]["dataset_toml_digest"], manifest["dataset"]["downstream_digest"]
+        )
         assert manifest["tasks"]["beta"] == {
+            "digest": digests["beta"],
             "package": "terminal-bench/beta",
             "content_hash": f"sha256:{digests['beta']}",
         }
+        assert "name" not in (folder / "manifest.toml").read_text()
         # A second fetch downloads nothing: every folder's digest already matches.
         downloads_before = sum(1 for c in calls if c[1].startswith("/storage/"))
         module.fetch_package_dataset(
