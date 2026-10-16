@@ -7,7 +7,7 @@ Rubric:
 {answer_rubric}
 
 Response:
-{{response}}
+{response}
 
 Decide whether the provided response satisfies the rubric.
 Output exactly: 'VERDICT: CORRECT' or 'VERDICT: INCORRECT'

@@ -75,12 +75,9 @@ class HarborBMBTask:
         return instruction_template.format(question=self.source.question)
 
     @property
-    def judge_prompt(self) -> str:
-        prompt_template = (self.template_dir / "tests/prompt.txt").read_text().strip()
-        return prompt_template.format(
-            question=self.source.question,
-            answer_rubric=self.source.answer_rubric,
-        )
+    def task_data(self) -> dict[str, str]:
+        """Return the question and private rubric used by the verifier."""
+        return {"question": self.source.question, "answer_rubric": self.source.answer_rubric}
 
     @property
     def gym_input(self) -> dict:
@@ -101,7 +98,7 @@ class HarborBMBTask:
         (task_dir / "environment/data").mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(self.source.data) as data_zip:
             data_zip.extractall(task_dir / "environment/data")
-        (task_dir / "tests/prompt.txt").write_text(self.judge_prompt + "\n")
+        (task_dir / "tests/task_data.json").write_text(json.dumps(self.task_data) + "\n")
 
         return task_dir
 

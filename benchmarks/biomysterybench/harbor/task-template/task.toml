@@ -17,7 +17,7 @@ workdir = "/app"
 timeout_sec = 3600
 
 [verifier]
-timeout_sec = 90
+timeout_sec = 900
 
 [verifier.env]
 JUDGE_MODEL = "${{JUDGE_MODEL}}"

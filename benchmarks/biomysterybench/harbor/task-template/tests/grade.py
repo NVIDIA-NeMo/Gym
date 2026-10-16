@@ -41,6 +41,7 @@ def judge(prompt: str) -> str:
 
 TRAJECTORY_PATH = Path("/logs/agent/trajectory.json")
 PROMPT_TEMPLATE = Path("/tests/prompt.txt")
+TASK_DATA_PATH = Path("/tests/task_data.json")
 JUDGE_VERDICT_PATTERN = re.compile(r"\bVERDICT:\s*(CORRECT|INCORRECT)\b", re.IGNORECASE)
 REWARD_PATH = Path("/logs/verifier/reward.txt")
 
@@ -49,7 +50,13 @@ def main():
     trajectory = json.loads(TRAJECTORY_PATH.read_text())
     response_text = trajectory["steps"][-1]["message"]
 
-    prompt = PROMPT_TEMPLATE.read_text().strip().format(response=response_text)
+    task_data = json.loads(TASK_DATA_PATH.read_text())
+    # Format once so braces in task data and model output remain literal.
+    prompt = PROMPT_TEMPLATE.read_text().strip().format(
+        question=task_data["question"],
+        answer_rubric=task_data["answer_rubric"],
+        response=response_text,
+    )
 
     judge_response_text = judge(prompt)
     matches = JUDGE_VERDICT_PATTERN.findall(judge_response_text)
