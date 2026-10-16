@@ -384,7 +384,10 @@ class TestConfigs:
         tavily = get_first_server_config_dict(_resolve(f"{variant}.yaml"), "tavily")
         assert tavily["exclude_domains_file_path"] == "benchmarks/hle_diamond/search_exclusions.json"
 
-    @pytest.mark.parametrize("config_file", ["config.yaml", "text.yaml", "opencode.yaml", "pi.yaml"])
+    @pytest.mark.parametrize(
+        "config_file",
+        ["config.yaml", "text.yaml", "opencode.yaml", "opencode_search.yaml", "pi.yaml", "pi_search.yaml"],
+    )
     def test_every_preset_shares_the_hle_judge_prompt_labels_and_partition_slices(self, config_file):
         judge = get_first_server_config_dict(_resolve(config_file), JUDGE_SERVER)
 
@@ -394,6 +397,7 @@ class TestConfigs:
         ).resolve()
         assert prompt == HLE_JUDGE_PROMPT.resolve() and prompt.is_file()
         assert (judge["judge_equal_label"], judge["judge_not_equal_label"]) == ("Judgement: yes", "Judgement: no")
+        assert judge["judge_labels_case_insensitive"] is True  # D29: "Judgement: Yes" must not be no_verdict
         assert judge["judge_model_server"]["name"] == "policy_model"
         assert list(judge["report_slice_fields"]) == ["partition"]
 
@@ -416,16 +420,24 @@ class TestConfigs:
             get_first_server_config_dict(resolved, "hle_diamond_judge_model")["openai_model"] == "vendor/other-judge"
         )
 
-    def test_slice_knob_defaults_off_and_only_hle_diamond_enables_it(self):
-        assert LLMJudgeResourcesServerConfig.model_fields["report_slice_fields"].default_factory() == []
+    def test_judge_knobs_default_off_and_only_hle_diamond_enables_them(self):
+        """The shared judge server's slice hook and case-insensitive labels stay off for hle and hle_verified."""
+        fields = LLMJudgeResourcesServerConfig.model_fields
+        assert fields["report_slice_fields"].default_factory() == []
+        assert fields["judge_labels_case_insensitive"].default is False
         base = yaml.safe_load(
             (REPO_ROOT / "resources_servers/equivalence_llm_judge/configs/equivalence_llm_judge.yaml").read_text()
-        )
-        assert "report_slice_fields" not in base["equivalence_llm_judge"]["resources_servers"]["equivalence_llm_judge"]
-        shipped = yaml.safe_load((HLE_DIAMOND_DIR / "config.yaml").read_text())
-        assert shipped[JUDGE_SERVER]["resources_servers"]["equivalence_llm_judge"]["report_slice_fields"] == [
-            "partition"
+        )["equivalence_llm_judge"]["resources_servers"]["equivalence_llm_judge"]
+        assert not {"report_slice_fields", "judge_labels_case_insensitive"} & set(base)
+        for sibling in ("hle", "hle_verified"):
+            sibling_text = (REPO_ROOT / "benchmarks" / sibling / "config.yaml").read_text(encoding="utf-8")
+            assert "judge_labels_case_insensitive" not in sibling_text and "report_slice_fields" not in sibling_text
+
+        shipped = yaml.safe_load((HLE_DIAMOND_DIR / "config.yaml").read_text())[JUDGE_SERVER]["resources_servers"][
+            "equivalence_llm_judge"
         ]
+        assert shipped["report_slice_fields"] == ["partition"]
+        assert shipped["judge_labels_case_insensitive"] is True
 
     @pytest.mark.parametrize("manifest", ["manifest.yaml", "text/manifest.yaml"])
     def test_manifests_mirror_runtime_composition(self, manifest):

@@ -30,7 +30,7 @@ from statistics import fmean
 from typing import Any, ClassVar, Optional
 from urllib.parse import quote
 
-from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer
+from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer, model_validator
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -57,34 +57,49 @@ JUDGEMENT_PARSING_ISSUE_RATE = "judgement_parsing_issue_rate"
 SLICES_PREFIX = "slices/"
 
 
-def _match_verdict_labels(text: str, equal_label: str, not_equal_label: str) -> list[str]:
+def _match_verdict_labels(
+    text: str, equal_label: str, not_equal_label: str, case_insensitive: bool = False
+) -> list[str]:
     """Return non-overlapping verdict labels in text order.
 
-    Consume each match so INCORRECT does not also count as CORRECT.
+    Consume each match so INCORRECT does not also count as CORRECT. With ``case_insensitive`` the
+    search runs on the ``str.casefold`` forms of the text and the labels, so "Judgement: Yes" matches
+    the configured "Judgement: yes"; the returned entries are always the configured labels as written.
     """
+    labels = (equal_label, not_equal_label)
+    if case_insensitive:
+        text = text.casefold()
+        needles = tuple(label.casefold() for label in labels)
+    else:
+        needles = labels
+    eq_needle, neq_needle = needles
     matches = []
     i = 0
     # Search by match position to avoid scanning each character in Python.
     while i < len(text):
-        eq_at = text.find(equal_label, i) if equal_label else -1
-        neq_at = text.find(not_equal_label, i) if not_equal_label else -1
+        eq_at = text.find(eq_needle, i) if eq_needle else -1
+        neq_at = text.find(neq_needle, i) if neq_needle else -1
         if eq_at < 0 and neq_at < 0:
             break
         if eq_at == neq_at:
             # Prefer the longer label when both start here.
-            label = equal_label if len(equal_label) > len(not_equal_label) else not_equal_label
+            which = 0 if len(eq_needle) > len(neq_needle) else 1
             pos = eq_at
         elif neq_at < 0 or (eq_at >= 0 and eq_at < neq_at):
-            label, pos = equal_label, eq_at
+            which, pos = 0, eq_at
         else:
-            label, pos = not_equal_label, neq_at
-        matches.append(label)
-        i = pos + len(label)
+            which, pos = 1, neq_at
+        matches.append(labels[which])
+        i = pos + len(needles[which])
     return matches
 
 
 def _parse_judge_verdict(
-    text: Optional[str], equal_label: str, not_equal_label: str, truncated: bool = False
+    text: Optional[str],
+    equal_label: str,
+    not_equal_label: str,
+    truncated: bool = False,
+    case_insensitive: bool = False,
 ) -> tuple[Optional[str], list[str]]:
     """Return the last verdict and any parsing issues."""
     if text is None:
@@ -93,7 +108,7 @@ def _parse_judge_verdict(
             issues.insert(0, "truncated_judge_output")
         return None, issues
 
-    matches = _match_verdict_labels(text, equal_label, not_equal_label)
+    matches = _match_verdict_labels(text, equal_label, not_equal_label, case_insensitive=case_insensitive)
     counts = Counter(matches)
     eq_count, neq_count = counts[equal_label], counts[not_equal_label]
     issues = []
@@ -167,6 +182,11 @@ class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     judge_prompt_template_fpath: str = "prompt_templates/equivalence_llm_judge.txt"
     judge_equal_label: str = "[[A=B]]"
     judge_not_equal_label: str = "[[A!=B]]"
+    # Match the two labels case-insensitively (str.casefold) when parsing the verdict. Off by default,
+    # which keeps the byte-exact match every existing config was measured with. HLE-Diamond turns it on:
+    # upstream's judge reads a structured `correct: yes|no` field whose case cannot vary, whereas here a
+    # judge that writes "Judgement: Yes" would otherwise yield no_verdict and a reward of 0.
+    judge_labels_case_insensitive: bool = False
     # Optional regex to extract the question from the last user message.
     # If provided and a match is found, the first non-empty capture group is used;
     # otherwise the full match is used.
@@ -217,6 +237,19 @@ class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     # [NEW] Reward when full generation check succeeds after first pass fails.
     # Default is 0.5 (partial credit).
     reward_if_full_generation_succeeds: float = 0.5
+
+    @model_validator(mode="after")
+    def _labels_stay_distinct_when_case_is_ignored(self) -> LLMJudgeResourcesServerConfig:
+        if (
+            self.judge_labels_case_insensitive
+            and self.judge_equal_label != self.judge_not_equal_label
+            and self.judge_equal_label.casefold() == self.judge_not_equal_label.casefold()
+        ):
+            raise ValueError(
+                "judge_equal_label and judge_not_equal_label differ only in case, so "
+                "judge_labels_case_insensitive=true could never tell the verdicts apart"
+            )
+        return self
 
 
 class LLMJudgeRunRequest(BaseRunRequest):
@@ -637,7 +670,11 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
             text = None
 
         eval_record.verdict_label, eval_record.judgement_parsing_issues = _parse_judge_verdict(
-            text, equal_label, not_equal_label, truncated=judge_response.status == "incomplete"
+            text,
+            equal_label,
+            not_equal_label,
+            truncated=judge_response.status == "incomplete",
+            case_insensitive=cfg.judge_labels_case_insensitive,
         )
         return equal_label != not_equal_label and eval_record.verdict_label == equal_label, eval_record
 
@@ -677,6 +714,7 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
                             self.config.judge_equal_label,
                             self.config.judge_not_equal_label,
                             truncated=response.get("status") == "incomplete",
+                            case_insensitive=self.config.judge_labels_case_insensitive,
                         )
                     measured = True
                     issues.update(parsing_issues)

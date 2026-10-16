@@ -25,6 +25,11 @@ hle_diamond_equivalence_llm_judge_resources_server:
       question_extract_regex: null
       check_twice_swap: false
       use_per_record_regex: false
+      # Match the verdict labels case-insensitively ("Judgement: Yes" counts as "Judgement: yes").
+      # Upstream parses a structured correct: yes|no field whose case cannot vary; with the byte-exact
+      # default a capitalised verdict is no_verdict and scores 0 (seen once in 1000 gold rows, o3-mini).
+      # Off everywhere else, so hle and hle_verified are unchanged.
+      judge_labels_case_insensitive: true
       # Emit slices/partition/{reasoning,knowledge}/mean/reward next to the headline mean/reward.
       report_slice_fields:
         - partition
