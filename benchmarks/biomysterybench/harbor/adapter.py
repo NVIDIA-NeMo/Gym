@@ -84,11 +84,13 @@ class HarborBMBTask:
         return {"task_name": self.id, "responses_create_params": {"input": []}}
 
     def write(self, output_dir: Path, force: bool = False) -> Path:
+        """Reuse completed tasks unless forced, rebuilding incomplete task directories."""
         task_dir = output_dir / self.id
+        done_marker = task_dir / ".done"
 
         if task_dir.exists():
-            if not force:
-                raise FileExistsError(f"Harbor task output directory already exists: {task_dir}")
+            if not force and done_marker.is_file():
+                return task_dir
             shutil.rmtree(task_dir)
 
         shutil.copytree(self.template_dir, task_dir, dirs_exist_ok=True)
@@ -99,6 +101,9 @@ class HarborBMBTask:
         with zipfile.ZipFile(self.source.data) as data_zip:
             data_zip.extractall(task_dir / "environment/data")
         (task_dir / "tests/task_data.json").write_text(json.dumps(self.task_data) + "\n")
+
+        # Only mark success after every template and archive file has been written.
+        done_marker.touch()
 
         return task_dir
 
@@ -118,7 +123,7 @@ class HarborBMB:
     """Maximum number of tasks to convert."""
 
     overwrite: bool = False
-    """Whether existing generated tasks may be replaced."""
+    """Rebuild completed tasks too; incomplete tasks are always rebuilt."""
 
     def __post_init__(self):
         self.output_dir = Path(self.output_dir).expanduser()
@@ -133,7 +138,7 @@ class HarborBMB:
         for source_task in BMBTask.from_dir(self.data_dir):
             yield HarborBMBTask(source_task, docker_image=self.docker_image)
 
-    def write(self):
+    def write(self) -> None:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         gym_rows: list[str] = []
