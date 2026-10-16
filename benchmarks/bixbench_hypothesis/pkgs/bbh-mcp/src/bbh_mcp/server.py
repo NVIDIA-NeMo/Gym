@@ -129,6 +129,11 @@ class MCPConfig:
     """Per cell run timeout."""
 
     def __post_init__(self) -> None:
+        # Keep judge settings in config, not in the environment inherited by Jupyter.
+        # This does not isolate the grader from same-identity process inspection.
+        for name in ("RUBRIC_MODEL", "RUBRIC_MODEL_API_BASE", "RUBRIC_MODEL_API_KEY"):
+            os.environ.pop(name, None)
+
         if not self.id_token:
             self.id_token = secrets.token_hex(32)
 
@@ -194,20 +199,19 @@ class MCPServer:
         ## Bookkeeping
         self._ready = False
         self._submitted = False
+        self._submission_lock = asyncio.Lock()
 
     def start(self):
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(self.jupyter_server.start())
-            self._ready = True
+        async def run():
             try:
-                self.mcp.run(transport="streamable-http")
+                await self.jupyter_server.start()
+                self._ready = True
+                await self.mcp.run_streamable_http_async()
             finally:
                 self._ready = False
-                loop.run_until_complete(self.jupyter_server.stop())
-        finally:
-            loop.close()
+                await self.jupyter_server.stop()
+
+        asyncio.run(run())
 
     def register_endpoints(self):
         @self.mcp.custom_route("/health", methods=["GET"])
@@ -306,6 +310,10 @@ class MCPServer:
             Args:
                 answer: Your final response to the research question
             """
+            async with self._submission_lock:
+                return await submit_once(answer)
+
+        async def submit_once(answer: str) -> str:
             if self._submitted:
                 return self.POST_SUBMIT_TOOL_RESPONSE
 
