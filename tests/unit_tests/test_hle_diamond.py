@@ -434,6 +434,30 @@ class TestConfigs:
         assert "1000" in loaded.description and "LLM-as-a-judge" in loaded.description
 
 
+class TestReasoningEffort:
+    """D4 on the sandboxed path: Gym's ++responses_create_params.reasoning.effort decorates only Gym's run
+    request, so each harness has to request high effort in its own model call."""
+
+    @pytest.mark.parametrize("config_file", ["opencode.yaml", "opencode_search.yaml"])
+    def test_opencode_presets_make_opencode_request_high_reasoning_effort(self, config_file):
+        opencode_config = get_first_server_config_dict(_resolve(config_file), "hle_diamond_opencode_agent")[
+            "opencode_config"
+        ]
+
+        assert opencode_config["provider"]["nemo_gym"]["models"]["dummy_model"]["options"]["reasoningEffort"] == "high"
+        # Merged into the inherited OpenCode config, not substituted for it.
+        assert list(opencode_config["instructions"]) == ["/tmp/nemo-gym-environment.txt"]
+        assert opencode_config["permission"]["webfetch"] == "deny"
+
+    @pytest.mark.parametrize("config_file", ["pi.yaml", "pi_search.yaml"])
+    def test_pi_presets_pass_thinking_high(self, config_file):
+        agent = get_first_server_config_dict(_resolve(config_file), "hle_diamond_pi_agent")
+
+        # Pi's --thinking levels are off, minimal, low, medium, high, xhigh, max.
+        assert agent["thinking"] == "high"
+        assert agent["model_server"]["name"] == "policy_model"  # inherited preset keys survive
+
+
 def _judge_server(report_slice_fields: list[str]) -> LLMJudgeResourcesServer:
     config = LLMJudgeResourcesServerConfig(
         host="0.0.0.0",

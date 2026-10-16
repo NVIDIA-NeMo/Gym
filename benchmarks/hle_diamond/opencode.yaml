@@ -17,6 +17,20 @@ hle_diamond_opencode_agent:
         prompt_config: benchmarks/hle_diamond/prompts/opencode.yaml
         prepare_script: benchmarks/hle_diamond/prepare_text.py
         num_repeats: 1
+      # Diamond's "reasoning high" on this harness (D4). Gym's ++responses_create_params.reasoning.effort
+      # decorates only Gym's run request; OpenCode builds its own chat-completions call inside the
+      # sandbox, which carried no reasoning_effort without this (gateway default: medium). OpenCode maps
+      # this per-model option to reasoning_effort in that request body (verified in a model-call
+      # capture). The block is deep-merged into the generated OpenCode config, so the inherited
+      # instructions / permission keys stay. Override per run with
+      # ++hle_diamond_opencode_agent.responses_api_agents.opencode_sandboxed_agent.opencode_config.provider.nemo_gym.models.dummy_model.options.reasoningEffort=<level>
+      opencode_config:
+        provider:
+          nemo_gym:
+            models:
+              dummy_model:
+                options:
+                  reasoningEffort: high
 equivalence_llm_judge_simple_agent: null
 hle_diamond_equivalence_llm_judge_simple_agent: null
 

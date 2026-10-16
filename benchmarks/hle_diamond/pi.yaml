@@ -16,6 +16,11 @@ hle_diamond_pi_agent:
         prompt_config: benchmarks/hle_diamond/prompts/opencode.yaml
         prepare_script: benchmarks/hle_diamond/prepare_text.py
         num_repeats: 1
+      # Diamond's "reasoning high" on this harness (D4): the adapter passes it to Pi as `--thinking high`
+      # (Pi levels: off, minimal, low, medium, high, xhigh, max). Gym's
+      # ++responses_create_params.reasoning.effort does not reach Pi's own model call. Override per run
+      # with ++hle_diamond_pi_agent.responses_api_agents.pi_sandboxed_agent.thinking=<level>
+      thinking: high
 equivalence_llm_judge_simple_agent: null
 hle_diamond_equivalence_llm_judge_simple_agent: null
 
