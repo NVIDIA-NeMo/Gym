@@ -245,6 +245,10 @@ class SwebenchResourcesServer(SandboxOwnerResourcesServer):
 
     config: SwebenchResourcesServerConfig
 
+    def lends_sandboxes(self) -> bool:
+        # A golden-patch instance grades the dataset's own patch and never seeds: it lends no sandbox.
+        return not self.config.is_verifying_golden_patch
+
     async def _create_sandbox(self, test_spec: TestSpec) -> AsyncSandbox:
         return await self._start_sandbox(self._sandbox_spec(test_spec), test_spec)
 
@@ -308,33 +312,37 @@ class SwebenchResourcesServer(SandboxOwnerResourcesServer):
 
     async def seed_session(self, request: Request, body: SWEBenchSeedSessionRequest) -> SWEBenchSeedSessionResponse:
         session_id = request.session[SESSION_ID_KEY]
-        restored = self.session_sandbox(session_id)
-        if restored is not None:
-            # A replacement attempt re-seeds the session a checkpoint restored: it continues in the restored
-            # sandbox, the fork of the checkpoint's snapshot.
-            return SWEBenchSeedSessionResponse(sandbox_handle=restored.handle.sandbox_id)
-
-        test_spec = self._make_test_spec(body)
-        eval_sandbox = await self.start_session_sandbox(
-            session_id, self._sandbox_spec(test_spec), setup=partial(self._patch_multilingual, test_spec)
-        )
-        wd = self._workdirs[session_id]
-
-        if self.config.apply_anti_cheating:
-            # Remove the current Git repo's future history beyond the current commit to prevent the model from cheating.
-            anti_cheat_setup_fpath = Path(__file__).parent / "anti_cheat_setup.sh"
-            await eval_sandbox.upload(anti_cheat_setup_fpath, f"{wd}/anti_cheat_setup.sh")
-            result = await eval_sandbox.exec(
-                f"""git reset --hard && WORKING_DIRECTORY={wd} bash anti_cheat_setup.sh && rm anti_cheat_setup.sh"""
+        sandbox = self.session_sandbox(session_id)
+        if sandbox is None:
+            test_spec = self._make_test_spec(body)
+            sandbox = await self.start_session_sandbox(
+                session_id, self._sandbox_spec(test_spec), setup=partial(self._setup_agent_sandbox, test_spec)
             )
-            if result.return_code != 0:
-                print(f"""Failed to setup anti-cheating for {test_spec.instance_id}. Return code: {result.return_code}
+        # Otherwise a replacement attempt re-seeds the session a checkpoint restored: it continues in the restored
+        # sandbox, the fork of the checkpoint's snapshot, whose setup already ran.
+        return SWEBenchSeedSessionResponse(sandbox_handle=sandbox.handle.sandbox_id)
+
+    async def _setup_agent_sandbox(self, test_spec: TestSpec, sandbox: AsyncSandbox) -> None:
+        """The agent's sandbox before the agent starts: the multilingual patch, then the anti-cheat scrub.
+
+        Verify diffs the working tree in the sandbox, so the session needs no data beyond the sandbox itself.
+        """
+        await self._patch_multilingual(test_spec, sandbox)
+        if not self.config.apply_anti_cheating:
+            return
+        wd = (await sandbox.exec("pwd")).stdout.strip()
+        # Remove the current Git repo's future history beyond the current commit to prevent the model from cheating.
+        anti_cheat_setup_fpath = Path(__file__).parent / "anti_cheat_setup.sh"
+        await sandbox.upload(anti_cheat_setup_fpath, f"{wd}/anti_cheat_setup.sh")
+        result = await sandbox.exec(
+            f"""git reset --hard && WORKING_DIRECTORY={wd} bash anti_cheat_setup.sh && rm anti_cheat_setup.sh"""
+        )
+        if result.return_code != 0:
+            print(f"""Failed to setup anti-cheating for {test_spec.instance_id}. Return code: {result.return_code}
 Stdout:
 {result.stdout}
 Stderr:
 {result.stderr}""")
-
-        return SWEBenchSeedSessionResponse(sandbox_handle=eval_sandbox.handle.sandbox_id)
 
     async def verify(self, request: Request, body: SWEBenchVerifyRequest) -> SWEBenchVerifyResponse:
         """
