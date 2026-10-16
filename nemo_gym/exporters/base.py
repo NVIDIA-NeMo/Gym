@@ -15,6 +15,7 @@
 import logging
 from abc import ABC, abstractmethod
 from copy import deepcopy
+from dataclasses import dataclass
 from typing import Any, ClassVar, Optional
 
 from omegaconf import DictConfig
@@ -23,6 +24,13 @@ from nemo_gym.secret_utils import recursively_hide_secrets
 
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class HistogramMetric:
+    """An observation snapshot for exporters that support histogram metrics."""
+
+    values: tuple[float, ...]
 
 
 class BaseExporter(ABC):
@@ -57,7 +65,7 @@ class BaseExporter(ABC):
 
     @abstractmethod
     def _log_metrics(self, metrics: dict[str, Any], step: Optional[int] = None) -> None:
-        """Record scalar metrics. `step` is the training step, or None for a one-shot eval."""
+        """Record metrics supported by this backend. `step` may be None for a one-shot eval."""
 
     @abstractmethod
     def _log_rollouts(self, rollouts: list[dict[str, Any]]) -> None:

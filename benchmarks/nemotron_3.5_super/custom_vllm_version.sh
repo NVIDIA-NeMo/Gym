@@ -17,7 +17,8 @@ if [[ "${1:-}" == __inside_build ]]; then
     command -v python &>/dev/null || ln -sf "$(which python3)" /usr/local/bin/python
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y
-    apt-get install -y --no-install-recommends git ca-certificates 2>&1 | tail -5
+    apt-get install -y --no-install-recommends git ca-certificates curl build-essential pkg-config perl \
+        2>&1 | tail -5
     pip install uv 2>&1 | tail -3
 
     echo ""; echo ">>> vLLM @ ${VLLM_BRANCH}"
@@ -28,17 +29,20 @@ if [[ "${1:-}" == __inside_build ]]; then
     vllm_sha=$(git rev-parse HEAD)
     test -z "${VLLM_HEAD_SHA:-}" || test "${vllm_sha}" = "${VLLM_HEAD_SHA}"
 
-    # The compatibility branch must remain Python-only so the exact v0.27.1
-    # native extensions can be reused safely.
+    # Reuse the wheel's CUDA/C++ code, but build Rust from this checkout below.
+    # Allow its source/build inputs and documentation alongside Python changes.
     git fetch --depth=1 https://github.com/vllm-project/vllm.git \
         "${VLLM_PRECOMPILED_WHEEL_COMMIT}" 2>&1 | tail -3
-    non_python_changes=$(
-        git diff --name-only "${VLLM_PRECOMPILED_WHEEL_COMMIT}" HEAD -- \
-            | grep -Ev '\.py$' || true
+    # An explicitly fetched tag may exist only as FETCH_HEAD in a shallow clone.
+    precompiled_base_sha=$(git rev-parse 'FETCH_HEAD^{commit}')
+    changed_files=$(git diff --name-only "${precompiled_base_sha}" HEAD --)
+    unsupported_changes=$(
+        printf '%s\n' "${changed_files}" | grep -Ev \
+            '(^$|\.(py|txt|yaml)$|^rust/|^rust-toolchain\.toml$|^tools/build_rust\.sh$|^docs/.*\.md$)' || true
     )
-    if [[ -n "${non_python_changes}" ]]; then
-        echo "ERROR: precompiled build cannot consume non-Python changes:" >&2
-        echo "${non_python_changes}" >&2
+    if [[ -n "${unsupported_changes}" ]]; then
+        echo "ERROR: precompiled CUDA/C++ build cannot consume these changes (Rust is rebuilt separately):" >&2
+        echo "${unsupported_changes}" >&2
         exit 1
     fi
 
@@ -47,6 +51,40 @@ if [[ "${1:-}" == __inside_build ]]; then
     export SETUPTOOLS_SCM_PRETEND_VERSION="${VLLM_VERSION}"
     uv pip install --system . --prerelease=allow --torch-backend=auto \
         --index-strategy unsafe-best-match 2>&1
+
+    # VLLM_USE_PRECOMPILED also copies Rust artifacts from the wheel. Python-only
+    # launcher changes can still break their CLI/protocol, so rebuild Rust from
+    # this checkout AFTER installing the wheel (which would overwrite the build).
+    echo ">>> Rebuilding Rust frontend and extensions from ${vllm_sha}"
+    uv pip install --system 'setuptools>=77.0.3,<81' 'setuptools-scm>=9.2.0' 'setuptools-rust>=1.9.0' wheel
+    env -u VLLM_USE_PRECOMPILED -u VLLM_USE_PRECOMPILED_RUST bash tools/build_rust.sh
+    installed_vllm_dir=$(cd / && python3 -c 'import vllm; from pathlib import Path; print(Path(vllm.__file__).parent)')
+    install -m 755 vllm/vllm-rs "${installed_vllm_dir}/vllm-rs"
+    cmp vllm/vllm-rs "${installed_vllm_dir}/vllm-rs"
+    for rust_extension in vllm/_rust_*.so; do
+        [[ -f "$rust_extension" ]] || continue
+        install -m 755 "$rust_extension" "${installed_vllm_dir}/"
+    done
+
+    # Check the installed executable, not a source-tree copy. This catches the
+    # --input-address vs --input-listener-fd failure before publishing an image.
+    python3 - "${installed_vllm_dir}" <<'PY'
+import ast
+import subprocess
+import sys
+from pathlib import Path
+
+package = Path(sys.argv[1])
+tree = ast.parse((package / "v1/utils.py").read_text())
+manager = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "RustFrontendProcessManager")
+flags = {node.value for node in ast.walk(manager)
+         if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value.startswith("--")}
+help_text = subprocess.check_output([str(package / "vllm-rs"), "frontend", "--help"], text=True)
+missing = flags - set(help_text.split())
+if missing:
+    raise SystemExit(f"Installed Rust frontend does not support Python launcher flags: {sorted(missing)}")
+print("Rust frontend accepts the installed Python launcher's flags")
+PY
 
     echo ""; echo ">>> Verify"
     python3 -c 'import torch, vllm
@@ -75,6 +113,7 @@ build_script=super-vl-evals-v0271-thin
 base_image=${BASE_IMAGE}
 vllm=${VLLM_BRANCH} @ ${vllm_sha}
 vllm_precompiled_wheel=${VLLM_PRECOMPILED_WHEEL_COMMIT}
+vllm_rust_source=${vllm_sha}
 base_image_flashinfer_and_cubins=unchanged
 omitted=custom-flashinfer,custom-cubins,cubin-download,cubin-rebuild
 EOF

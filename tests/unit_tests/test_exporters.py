@@ -39,7 +39,7 @@ from nemo_gym.exporters import (
     setup_exporters,
     teardown_exporters,
 )
-from nemo_gym.exporters.base import BaseExporter
+from nemo_gym.exporters.base import BaseExporter, HistogramMetric
 from nemo_gym.exporters.mlflow import MLflowExporter, _flatten_config, _sanitize_key
 from nemo_gym.exporters.wandb import WandbExporter
 from nemo_gym.secret_utils import recursively_hide_secrets
@@ -331,6 +331,25 @@ class TestWandbExporter:
         exporter._log_metrics({"reward": 1.0}, step=3)
 
         run.log.assert_called_once_with({"reward": 1.0}, step=3, commit=True)
+
+    def test_histogram_and_scalars_share_one_log_call(self, wandb_config: DictConfig) -> None:
+        exporter = WandbExporter(wandb_config)
+        exporter.run = MagicMock()
+        snapshot = HistogramMetric(values=(1.0, 2.0, 2.0, 10.0))
+        metrics = {"progress/total/task_completion_time_seconds": snapshot, "progress/total/rollouts_per_min": 12.0}
+
+        exporter.export_metrics(metrics, step=25)
+
+        exporter.run.log.assert_called_once()
+        call = exporter.run.log.call_args
+        histogram = call.args[0]["progress/total/task_completion_time_seconds"]
+        assert isinstance(histogram, wandb_module.wandb.Histogram)
+        assert sum(histogram.histogram) == 4
+        assert histogram.bins[0] == 1.0
+        assert histogram.bins[-1] == 10.0
+        assert call.args[0]["progress/total/rollouts_per_min"] == 12.0
+        assert call.kwargs == {"step": 25, "commit": True}
+        assert metrics["progress/total/task_completion_time_seconds"] is snapshot
 
     def test_teardown_finishes_the_run_and_is_idempotent(
         self, monkeypatch: MonkeyPatch, wandb_config: DictConfig

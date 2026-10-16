@@ -3,9 +3,16 @@
 
 """Keep Gym evaluation settings consistent across SGLang topology recipes."""
 
+import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
+import pytest
 import yaml
+
+from nemo_gym.inference_metrics import InferenceMetricsConfig
 
 
 CONFIG_DIR = Path(__file__).resolve().parents[2] / "benchmarks/nemotron_3.5_super/sglang_configs"
@@ -42,3 +49,107 @@ def test_gym_benchmark_sections_match() -> None:
         assert benchmark == reference, (
             f"{path.name}: benchmark differs from {reference_path.name}; only benchmark.env.EXPERIMENT_NAME may differ"
         )
+
+
+@pytest.mark.parametrize("missing_role", [None, "prefill", "decode"])
+@pytest.mark.parametrize("recipe", ["2P2D.yaml", "2P2D_mooncake.yaml"])
+def test_srt_worker_metrics_config(tmp_path: Path, missing_role: str | None, recipe: str) -> None:
+    config = yaml.safe_load((CONFIG_DIR / recipe).read_text())
+    command = config["benchmark"]["command"]
+    syntax = subprocess.run(["bash", "-n"], input=command, text=True, capture_output=True)
+    assert syntax.returncode == 0, syntax.stderr
+    # Execute the recipe's actual config generation with SRT's documented endpoint format.
+    setup = (
+        "inference_metrics_config=" + command.split("inference_metrics_config=", 1)[1].split("gym eval prepare", 1)[0]
+    )
+    env = os.environ | {
+        # The recipe activates Gym's venv before this block.
+        "PATH": str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", ""),
+        "output_dir": str(tmp_path),
+        "SRT_PREFILL_ENDPOINTS": "10.0.0.1:6100,10.0.0.2:6100",
+        "SRT_DECODE_ENDPOINTS": "10.0.0.3:6200,10.0.0.3:6201",
+    }
+    env.pop("SRT_SERVICE_HICACHE_MASTER_IPS", None)
+    master = next((service for service in config.get("services", []) if service["name"] == "hicache-master"), None)
+    if master:
+        env["SRT_SERVICE_HICACHE_MASTER_IPS"] = "10.0.0.5"
+    if missing_role:
+        env.pop(f"SRT_{missing_role.upper()}_ENDPOINTS")
+    result = subprocess.run(["bash", "-euc", setup], env=env, text=True, capture_output=True)
+    output = tmp_path / "inference-metrics.yaml"
+    if missing_role:
+        assert result.returncode != 0
+        assert f"SRT must provide SRT_{missing_role.upper()}_ENDPOINTS" in result.stderr
+        assert not output.exists()
+        return
+    assert result.returncode == 0, result.stderr
+    metrics = InferenceMetricsConfig.model_validate(yaml.safe_load(output.read_text())["inference_metrics"])
+    assert metrics.enabled
+    if master:
+        assert str(metrics.mooncake_endpoint) == "http://10.0.0.5:9003/metrics"
+        assert "--metrics_port=9003" in master["args"]
+    else:
+        assert metrics.mooncake_endpoint is None
+    assert {name: str(url) for name, url in metrics.endpoints.items()} == {
+        "prefill0": "http://10.0.0.1:6100/metrics",
+        "prefill1": "http://10.0.0.2:6100/metrics",
+        "decode0": "http://10.0.0.3:6200/metrics",
+        "decode1": "http://10.0.0.3:6201/metrics",
+    }
+    assert '--config "$inference_metrics_config"' in command.split("gym eval run", 1)[1]
+    assert all(role["args"]["enable-metrics"] for role in config["roles"].values())
+
+
+def test_hicache_mooncake_prefill_config(tmp_path: Path) -> None:
+    base = yaml.safe_load((CONFIG_DIR / "2P2D.yaml").read_text())
+    config = yaml.safe_load((CONFIG_DIR / "2P2D_mooncake.yaml").read_text())
+    assert config["roles"]["decode"] == base["roles"]["decode"]
+    assert config["frontend"] == base["frontend"]
+    prefill = config["roles"]["prefill"]
+    assert prefill["args"]["enable-hierarchical-cache"]
+    assert prefill["args"]["hicache-size"] == 16
+    assert prefill["args"]["hicache-storage-backend"] == "mooncake"
+    assert prefill["args"]["disaggregation-transfer-backend"] == "nixl"
+    master, store = config["services"]
+    assert master["placement"]["node"] == "head"
+    assert store["placement"]["node"] == "workers"
+    assert master["readiness"]["http"] == {"port": 9003, "path": "/health"}
+    assert "--rpc_port=50051" in master["args"]
+    assert "--metrics_port=9003" in master["args"]
+    assert config["sbatch_directives"]["mem"] == "0"
+    assert int(store["env"]["MOONCAKE_GLOBAL_SEGMENT_SIZE"]) == prefill["gpus"] * 128 * 10**9
+    assert all(role["gpus"] == prefill["gpus"] for role in config["roles"].values())
+    for env in (store["env"], prefill["env"]):
+        assert env["MC_TE_FILTERS"] == store["env"]["MOONCAKE_DEVICE"]
+        assert env["WITH_NVIDIA_PEERMEM"] == "0"
+    for service in (master, store):
+        assert service["start"] == "before_workers"
+        assert service["critical"]
+    for index in range(2):
+        substitutions = {"node": f"prefill-{index}", "node_ip": f"10.0.0.{index + 1}", "head_ip": "10.0.0.1"}
+        service_env = {key: str(value).format_map(substitutions) for key, value in store["env"].items()}
+        worker_path = prefill["env"]["SGLANG_HICACHE_MOONCAKE_CONFIG_PATH"].format_map(substitutions)
+        assert worker_path == service_env["HICACHE_CONFIG_PATH"]
+        output = tmp_path / Path(worker_path).name
+        env = (
+            os.environ
+            | service_env
+            | {
+                "PATH": str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", ""),
+                "HICACHE_CONFIG_PATH": str(output),
+            }
+        )
+        # SRT strips the preamble and joins it to the service command with &&.
+        command = store["preamble"].rstrip() + " && printf service-started"
+        result = subprocess.run(["bash", "-euc", command], env=env, text=True, capture_output=True)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "service-started"
+        assert json.loads(output.read_text()) == {
+            "local_hostname": substitutions["node_ip"],
+            "master_server_address": "10.0.0.1:50051",
+            "metadata_server": "P2PHANDSHAKE",
+            "protocol": "rdma",
+            "device_name": "mlx5_0,mlx5_1,mlx5_3,mlx5_4",
+            "global_segment_size": 0,
+            "enable_ssd_offload": False,
+        }

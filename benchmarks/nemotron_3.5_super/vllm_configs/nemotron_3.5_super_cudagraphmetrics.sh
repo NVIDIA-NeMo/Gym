@@ -2,6 +2,15 @@
 
 NUM_SPECULATIVE_TOKENS="${NUM_SPECULATIVE_TOKENS:-5}"
 
+# Optional detailed Nsight Systems capture on PD prefill nodes only.
+# PROFILE_PREFILL=1 auto-installs nsys if needed in root Ubuntu containers.
+# After /health is ready, wait PREFILL_PROFILE_DELAY_SECONDS, then capture
+# PREFILL_PROFILE_STEPS worker steps. Set the delay to manual to POST /start_profile yourself.
+# Reports go to ${SLURM_SUBMIT_DIR}/results/nsys; override with PREFILL_PROFILE_DIR.
+PROFILE_PREFILL="${PROFILE_PREFILL:-0}"
+PREFILL_PROFILE_STEPS="${PREFILL_PROFILE_STEPS:-20}"
+PREFILL_PROFILE_DELAY_SECONDS="${PREFILL_PROFILE_DELAY_SECONDS:-300}"
+
 GYM_MODEL_PARAMS=(
     "++policy_model.responses_api_models.vllm_model.sampling_overrides.temperature=1.0"
     "++policy_model.responses_api_models.vllm_model.sampling_overrides.top_p=0.95"
@@ -11,8 +20,9 @@ GYM_MODEL_PARAMS=(
 # Not used when the model has no Mamba layers.
 export VLLM_SSM_CONV_STATE_LAYOUT=DS
 
-# @bxyu-nvidia: V2 model runner is the new default in vLLM 0.29.0, but it has quite a large speed regression
-export VLLM_USE_V2_MODEL_RUNNER=0
+export VLLM_USE_V2_MODEL_RUNNER=1
+
+export VLLM_USE_RUST_FRONTEND=0
 
 # @bxyu-nvidia: `--skip-mm-profiling` Is needed to get Super VL checkpoint working, even with text benchmarks
 # @bxyu-nvidia: We set --prefix-match-unit 128 because the Mooncake store prefill lookup gets more expensive the smaller this number is
@@ -33,6 +43,7 @@ VLLM_COMMON_ARGS=(
     --no-disable-hybrid-kv-cache-manager
     --block-size 128
     --mamba-cache-mode align
+    --mamba-backend flashinfer
     --mamba-ssm-cache-dtype float32
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'
     --enable-expert-parallel
@@ -41,13 +52,29 @@ VLLM_COMMON_ARGS=(
     --data-parallel-size-local 1
     --tensor-parallel-size 4
     --api-server-count 1
-    --enable-mamba-fine-grained-prefix-cache
+    --enable-mamba-shared-prefix-checkpoint
     --prefix-match-unit 128
+    --use-replayssm
+    --replayssm-buffer-len 16
 )
 # @bxyu-nvidia: Lease duration is set to 180s since to give nodes a chance to pick up the request. Helps with resilience.
 # @bxyu-nvidia: We set num_speculative_tokens_per_batch_size to 0 here since prefill does not need to speculate any tokens, it just needs to know that we are speculating.
 VLLM_PREFILL_ARGS=(
     --speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":${NUM_SPECULATIVE_TOKENS},\"num_speculative_tokens_per_batch_size\":[[1,1024,0]]}"
+    # MRV2 captures a one-token graph for the zero-draft schedule, but Mamba's
+    # full-graph capture requires 1 + num_speculative_tokens. Keep prefill
+    # piecewise until that dynamic-speculation capture path supports Mamba.
+    # Use sparse small-token buckets; retain coverage for large prefill batches.
+    --compilation-config '{
+        "cudagraph_mode": "PIECEWISE",
+        "cudagraph_capture_sizes": [
+            6, 12, 24, 48, 96, 192, 384, 768,
+            1536, 3072, 4608, 6144,
+            8192, 12288, 16384, 20480, 24576, 28672, 32768,
+            40960, 49152, 57344, 65536, 67840
+        ]
+    }'
+    --max-cudagraph-capture-size 67840
     --kv-transfer-config '{
         "kv_connector": "MultiConnector",
         "kv_role": "kv_producer",
@@ -72,8 +99,8 @@ VLLM_PREFILL_ARGS=(
             ]
         }
     }'
-    --max-cudagraph-capture-size 1200
-    --max-num-batched-tokens 33920
+    --cudagraph-metrics
+    --max-num-batched-tokens 67840
     --max-num-seqs 1024
 )
 # @bxyu-nvidia: We set "enable_lookup": false for the Mooncake store connector because the prefill worker handles the prefix cache lookup and decode just needs to receive the transferred kv cache.
@@ -104,8 +131,18 @@ VLLM_DECODE_ARGS=(
             ]
         }
     }'
-    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
-    --max-cudagraph-capture-size 1536
+    # Preserve fine small-batch buckets; larger decode buckets remain multiples
+    # of six for the default five-draft-token MTP configuration.
+    --compilation-config '{
+        "cudagraph_mode": "FULL_DECODE_ONLY",
+        "cudagraph_capture_sizes": [
+            6, 12, 18, 24, 30, 36, 42, 48,
+            72, 96, 144, 192, 288, 384, 576, 768,
+            960, 1152, 1536, 1920, 2304, 2688, 3072,
+            3840, 4608, 5376, 6144
+        ]
+    }'
+    --max-cudagraph-capture-size 6144
     --max-num-batched-tokens 33920
     --max-num-seqs 1024
 )

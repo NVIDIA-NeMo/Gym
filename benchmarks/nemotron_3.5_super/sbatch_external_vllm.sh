@@ -2,11 +2,28 @@
 
 set -euo pipefail
 
+# Prefill profiling (set here via environment or in VLLM_CONFIG):
+# PROFILE_PREFILL=1 captures 20 worker steps, 300 seconds after API readiness.
+# PREFILL_PROFILE_STEPS, PREFILL_PROFILE_DELAY_SECONDS (or manual), and
+# PREFILL_PROFILE_DIR (default: results/nsys under SLURM_SUBMIT_DIR) override this.
+# Detailed tracing adds overhead; use separate runs for throughput measurements.
+# API-triggered captures exclude startup/graph construction. For those call sites,
+# enable cuBLAS logging before launch or collect a separate startup trace.
+
 # Input arguments and validation
 # PD (default): NUM_PREFILL_NODES=<P> NUM_DECODE_NODES=<D>
 # Aggregated: VLLM_MODE=aggregated NUM_NODES=<replicas> (defaults to one)
+# Two TP2 replicas per node: VLLM_MODE=aggregated VLLM_ENGINES_PER_NODE=2 NUM_NODES=1
 # Four TP1 replicas per node: VLLM_MODE=aggregated VLLM_ENGINES_PER_NODE=4 NUM_NODES=1
+# Disaggregated pools also support two TP2 replicas per node with VLLM_ENGINES_PER_NODE=2.
 # Disaggregated TP1 pools: VLLM_ENGINES_PER_NODE=4 NUM_PREFILL_NODES=1 NUM_DECODE_NODES=1
+# SAVE_WARMED_CONTAINER=/shared/images/warmed.sqsh runs startup only (omit eval args),
+# collects all nodes' FlashInfer autotuning caches, compiled JIT modules, and
+# vLLM startup plans inside one image, exports it, and exits. No cache mount is used.
+# Later runs with CONTAINER pointing to that image automatically load the baked
+# caches. Keep the same GPU type and
+# serving config; changed kernels/configs may need fresh tuning. Mounted model
+# weights, GPU memory and CUDA graphs are not captured. Output must not already exist.
 VLLM_MODE="${VLLM_MODE:-pd}"
 VLLM_ENGINES_PER_NODE="${VLLM_ENGINES_PER_NODE:-1}"
 case "$VLLM_MODE" in
@@ -26,9 +43,9 @@ case "$VLLM_MODE" in
         ;;
 esac
 case "$VLLM_ENGINES_PER_NODE" in
-    1 | 4) ;;
+    1 | 2 | 4) ;;
     *)
-        echo "ERROR: VLLM_ENGINES_PER_NODE must be 1 or 4." >&2
+        echo "ERROR: VLLM_ENGINES_PER_NODE must be 1, 2, or 4." >&2
         exit 1
         ;;
 esac
@@ -37,12 +54,22 @@ MODEL_NAME="${MODEL_NAME:-$MODEL}"
 CONTAINER=$CONTAINER
 MOUNTS=$MOUNTS
 VLLM_CONFIG=$VLLM_CONFIG
+SAVE_WARMED_CONTAINER="${SAVE_WARMED_CONTAINER:-}"
+warm_cache_helper=$(cat "$(dirname "${BASH_SOURCE[0]}")/save_warmed_vllm_container.py")
+if [[ -n "$SAVE_WARMED_CONTAINER" ]]; then
+    if (( $# > 0 )); then
+        echo "ERROR: SAVE_WARMED_CONTAINER runs startup only; omit evaluation arguments." >&2
+        exit 1
+    fi
+    mkdir -p "$(dirname "$SAVE_WARMED_CONTAINER")" slurm-logs
+    SAVE_WARMED_CONTAINER="$(cd "$(dirname "$SAVE_WARMED_CONTAINER")" && pwd -P)/$(basename "$SAVE_WARMED_CONTAINER")"
+fi
 ENABLE_MOONCAKE=${ENABLE_MOONCAKE:-0}
 if [[ "$VLLM_MODE" == aggregated && "$ENABLE_MOONCAKE" != 0 ]]; then
     echo "ENABLE_MOONCAKE requires VLLM_MODE=pd" >&2
     exit 1
 fi
-# Independent mode starts one TP replica or four TP1 replicas per node. Coupled mode
+# Independent mode starts one TP replica, two TP2 replicas, or four TP1 replicas per node. Coupled mode
 # forms one multi-node DP/EP engine per tier for models that cannot fit per node.
 VLLM_PD_DEPLOYMENT_MODE="${VLLM_PD_DEPLOYMENT_MODE:-independent}"
 SLURM_COMMENT="${SLURM_COMMENT:-}"
@@ -63,8 +90,8 @@ if [[ "$VLLM_MODE" == aggregated && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; th
     echo "ERROR: VLLM_MODE=aggregated does not support VLLM_PD_DEPLOYMENT_MODE=coupled." >&2
     exit 1
 fi
-if [[ "$VLLM_ENGINES_PER_NODE" == 4 && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
-    echo "ERROR: VLLM_ENGINES_PER_NODE=4 requires VLLM_PD_DEPLOYMENT_MODE=independent." >&2
+if [[ "$VLLM_ENGINES_PER_NODE" != 1 && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
+    echo "ERROR: VLLM_ENGINES_PER_NODE=$VLLM_ENGINES_PER_NODE requires VLLM_PD_DEPLOYMENT_MODE=independent." >&2
     exit 1
 fi
 
@@ -95,9 +122,12 @@ DECODE_DP_RPC_PORT=13346
 ROUTER_PREFILL_POLICY="${ROUTER_PREFILL_POLICY:-cache_aware}"
 ROUTER_DECODE_POLICY="${ROUTER_DECODE_POLICY:-cache_aware}"
 ROUTER_POLICY="${ROUTER_POLICY:-cache_aware}"
+# Shared startup timeout for vLLM engines, router workers, and Gym endpoint readiness.
+ROUTER_WORKER_STARTUP_TIMEOUT_SECONDS="${ROUTER_WORKER_STARTUP_TIMEOUT_SECONDS:-1800}"
+VLLM_ENGINE_READY_TIMEOUT_S="${VLLM_ENGINE_READY_TIMEOUT_S:-$ROUTER_WORKER_STARTUP_TIMEOUT_SECONDS}"
 ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE="${ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE:-1}"
-if [[ "$VLLM_ENGINES_PER_NODE" == 4 && "$ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE" != 1 ]]; then
-    echo "ERROR: Four independent TP1 engines require ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE=1." >&2
+if [[ "$VLLM_ENGINES_PER_NODE" != 1 && "$ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE" != 1 ]]; then
+    echo "ERROR: Multiple independent engines require ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE=1." >&2
     exit 1
 fi
 # Optional whitespace-separated flags, e.g. ROUTER_ARGS="--balance-abs-threshold 32 --balance-rel-threshold 1.1".
@@ -186,7 +216,8 @@ gym eval run \
     ++global_aiohttp_connector_limit_per_host=16384 \
     ++port_range_low=63000 \
     ++port_range_high=64000 \
-    "\${GYM_MODEL_PARAMS[@]}"
+    "\${GYM_MODEL_PARAMS[@]}" \
+    ++model_endpoint_readiness_timeout_seconds=$ROUTER_WORKER_STARTUP_TIMEOUT_SECONDS
 
 
 if (( $EXPORT_TO_CSV )); then
@@ -209,6 +240,7 @@ set -euo pipefail
 
 # Generic vLLM environment variables.
 export VLLM_USE_FASTOKENS=1
+export VLLM_ENGINE_READY_TIMEOUT_S="$VLLM_ENGINE_READY_TIMEOUT_S"
 
 # @bxyu-nvidia: This timeout keep_alive helps reduce connection reset errors between vllm-router and the prefill/decode instances.
 export VLLM_HTTP_TIMEOUT_KEEP_ALIVE=180
@@ -234,6 +266,50 @@ export ENABLE_MOONCAKE=$ENABLE_MOONCAKE
 export VLLM_ENGINES_PER_NODE=$VLLM_ENGINES_PER_NODE
 source "$VLLM_CONFIG"
 
+if [[ -f /opt/super-vl-evals/flashinfer-autotune-cache/warmed-manifest.json ]]; then
+    python3 -c "\$warm_cache_helper" inspect
+fi
+
+baked_cache=/opt/super-vl-evals/flashinfer-autotune-cache
+if [[ -n "$SAVE_WARMED_CONTAINER" || -f "\$baked_cache/.baked" ]]; then
+    export VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR="\$baked_cache"
+    mkdir -p "\$baked_cache"
+    echo "Using image-local FlashInfer autotune cache: \$baked_cache on \$(hostname)"
+fi
+if [[ -n "$SAVE_WARMED_CONTAINER" || -f "\$baked_cache/.startup-plans-baked" ]]; then
+    export VLLM_CACHE_ROOT=/opt/super-vl-evals/vllm-cache
+    export VLLM_ENABLE_STARTUP_PLAN="\${VLLM_ENABLE_STARTUP_PLAN:-1}"
+    echo "Using image-local vLLM startup plans: \$VLLM_CACHE_ROOT/startup_plan on \$(hostname)"
+fi
+if [[ -n "$SAVE_WARMED_CONTAINER" ]]; then
+    PROFILE_PREFILL=0
+    export VLLM_ENABLE_STARTUP_PLAN=1
+    # Keep every worker's runtime JIT output inside its named container. The
+    # export step collects these libraries from all nodes and installs them as AOT.
+    export FLASHINFER_WORKSPACE_BASE=/opt/super-vl-evals/flashinfer-warmup-workspace
+    touch "\$baked_cache/.warmup-start"
+fi
+
+# Custom images contain patched AOT kernels and their build-time smoke check.
+# Do this once on every node before any prefill/decode/headless workers fork.
+flashinfer_manifest=/opt/super-vl-evals/flashinfer-build.env
+if [[ -f "\$flashinfer_manifest" ]]; then
+    if ! grep -qx 'FLASHINFER_REPLAY_VERIFIED=1' "\$flashinfer_manifest"; then
+        echo "ERROR: Rebuild this image with the updated custom_flashinfer_version.sh (unverified ReplaySSM kernels)." >&2
+        exit 1
+    fi
+    # Retain the caller's cache root, but never reuse a different image build's
+    # kernels under the unchanged public FlashInfer version (e.g. 0.7.0.post1).
+    flashinfer_build_id=\$(sha256sum "\$flashinfer_manifest")
+    flashinfer_build_id=\${flashinfer_build_id%% *}
+    export FLASHINFER_WORKSPACE_BASE="\${FLASHINFER_WORKSPACE_BASE:-/tmp}/flashinfer-builds/\$flashinfer_build_id"
+    mkdir -p "\$FLASHINFER_WORKSPACE_BASE"
+    unset FLASHINFER_DISABLE_JIT
+    echo "FlashInfer build=\$flashinfer_build_id workspace=\$FLASHINFER_WORKSPACE_BASE on \$(hostname)"
+    FLASHINFER_DISABLE_JIT=1 python3 /opt/super-vl-evals/verify-flashinfer.py \\
+        --verify /opt/super-vl-evals/flashinfer-warmup.env
+fi
+
 # Increase the number of file descriptors to 65k
 if [[ \$(ulimit -Hn) == "unlimited" ]] || [[ 65535 -lt \$(ulimit -Hn) ]]; then
   ulimit -Sn 65535
@@ -242,19 +318,165 @@ fi
 this_node_hostname=\$(hostname)
 read -r -a nodes <<< "\$ALL_NODES"
 
+# The model config can opt prefill into a short, API-triggered GPU trace.
+# Keep profiler setup here so decode, evaluation, and aggregated workers are unaffected.
+profiler_pid=""
+trigger_pid=""
+cleanup_prefill_profile() {
+    if [[ -n "\$trigger_pid" ]]; then
+        kill "\$trigger_pid" 2>/dev/null || true
+        wait "\$trigger_pid" 2>/dev/null || true
+        trigger_pid=""
+    fi
+    if [[ -n "\$profiler_pid" ]]; then
+        kill "\$profiler_pid" 2>/dev/null || true
+        wait "\$profiler_pid" 2>/dev/null || true
+        profiler_pid=""
+    fi
+}
+
+trigger_prefill_profile() {
+    local url="http://\$this_node_hostname:\$profile_port"
+    local deadline=\$(( SECONDS + 1200 ))
+    until curl --noproxy '*' --silent --fail --max-time 5 "\$url/health" >/dev/null; do
+        if (( SECONDS >= deadline )); then
+            echo "WARNING: Timed out waiting for \$url/health; no prefill profile captured." >&2
+            return 1
+        fi
+        sleep 1
+    done
+    echo "Prefill profiling: \$url ready; capturing in \$profile_delay seconds." >&2
+    # Short sleeps let teardown cancel the trigger without leaving a long-lived sleep process.
+    deadline=\$(( SECONDS + 10#\$profile_delay ))
+    while (( SECONDS < deadline )); do sleep 1; done
+    if curl --noproxy '*' --silent --show-error --fail --max-time 120 \
+        -X POST "\$url/start_profile" >/dev/null; then
+        echo "Prefill profiling: capture started on \$url (worker-step limit: \$steps)." >&2
+    else
+        echo "WARNING: Could not start prefill profile on \$url; serving continues." >&2
+        return 1
+    fi
+}
+
+ensure_nsys() {
+    if command -v nsys >/dev/null 2>&1; then return; fi
+    if [[ \$(id -u) != 0 ]] || ! command -v apt-get >/dev/null 2>&1; then
+        echo "ERROR: Installing Nsight Systems requires root inside an Ubuntu container; otherwise preinstall nsys in the image." >&2
+        return 1
+    fi
+    local ID="" VERSION_ID="" arch
+    source /etc/os-release
+    if [[ "\$ID" != ubuntu ]]; then
+        echo "ERROR: Automatic Nsight Systems installation supports Ubuntu; preinstall nsys for \$ID." >&2
+        return 1
+    fi
+    arch=\$(dpkg --print-architecture)
+    if [[ "\$arch" != arm64 && "\$arch" != amd64 ]]; then
+        echo "ERROR: Unsupported Nsight Systems architecture: \$arch." >&2
+        return 1
+    fi
+    echo "Prefill profiling: installing Nsight Systems CLI for Ubuntu \$VERSION_ID / \$arch." >&2
+    # NVIDIA's devtools repository provides both the Arm SBSA and x86 CLI.
+    # Install only in this worker's container; existing nsys installations are reused.
+    if ! (
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update &&
+        apt-get install -y --no-install-recommends wget gnupg ca-certificates &&
+        mkdir -p /usr/share/keyrings &&
+        wget -qO- --timeout=30 --tries=3 \
+            https://developer.download.nvidia.com/compute/cuda/repos/ubuntu1804/x86_64/7fa2af80.pub \
+            | gpg --batch --yes --dearmor -o /usr/share/keyrings/nvidia-devtools-keyring.gpg &&
+        printf '%s\\n' "deb [signed-by=/usr/share/keyrings/nvidia-devtools-keyring.gpg] https://developer.download.nvidia.com/devtools/repos/ubuntu\${VERSION_ID//./}/\$arch/ /" \
+            | tee /etc/apt/sources.list.d/nvidia-devtools.list >/dev/null &&
+        apt-get update &&
+        apt-get install -y --no-install-recommends nsight-systems-cli curl
+    ); then
+        echo "ERROR: Nsight Systems installation failed; check container write permissions and access to the Ubuntu/NVIDIA package repositories." >&2
+        return 1
+    fi
+    hash -r
+    if ! command -v nsys >/dev/null 2>&1; then
+        echo "ERROR: Nsight Systems installation completed but nsys is still missing from PATH." >&2
+        return 1
+    fi
+    nsys --version
+}
+
+serve_prefill() {
+    local profile_port=\$1
+    shift
+    if [[ "\${PROFILE_PREFILL:-0}" != 1 ]]; then
+        vllm serve "\$@"
+        return
+    fi
+    local steps="\${PREFILL_PROFILE_STEPS:-20}"
+    if [[ ! "\$steps" =~ ^[1-9][0-9]*\$ ]]; then
+        echo "ERROR: PREFILL_PROFILE_STEPS must be a positive integer." >&2
+        return 1
+    fi
+    local profile_delay="\${PREFILL_PROFILE_DELAY_SECONDS:-300}"
+    if [[ "\$profile_delay" != manual && ! "\$profile_delay" =~ ^[0-9]+\$ ]]; then
+        echo "ERROR: PREFILL_PROFILE_DELAY_SECONDS must be a nonnegative integer or manual." >&2
+        return 1
+    fi
+    local api_worker=1 arg
+    for arg in "\$@"; do
+        if [[ "\$arg" == --headless ]]; then api_worker=0; fi
+    done
+    ensure_nsys || return 1
+    if [[ "\$profile_delay" != manual ]] && (( api_worker )) && ! command -v curl >/dev/null 2>&1; then
+        echo "ERROR: Automatic prefill profiling requires curl in the vLLM container." >&2
+        return 1
+    fi
+    local profile_dir="\${PREFILL_PROFILE_DIR:-\${SLURM_SUBMIT_DIR:-\$PWD}/results/nsys}"
+    mkdir -p "\$profile_dir"
+    # Background coupled heads and independent engines own their profiler/trigger.
+    # The parent shell owns router and Mooncake cleanup.
+    if (( BASH_SUBSHELL > 0 )); then
+        trap cleanup_prefill_profile EXIT
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
+    fi
+    # Trace graph nodes and child TP workers. 'stop' ends collection without
+    # shutting down the serving process; this captures one window per launch.
+    VLLM_WORKER_MULTIPROC_METHOD=spawn nsys profile \
+        --trace=cuda,nvtx,osrt,nccl,cublas,cublas-verbose \
+        --nccl-trace=all --pytorch=functions-trace-shapes \
+        --sample=process-tree --cpuctxsw=none \
+        --cudabacktrace=all --python-backtrace=cuda --python-sampling=true \
+        --trace-fork-before-exec=true --cuda-graph-trace=node \
+        --capture-range=cudaProfilerApi --capture-range-end=stop \
+        --output "\$profile_dir/prefill-\$SLURM_JOB_ID-\$this_node_hostname-port\$profile_port-%p" \
+        vllm serve "\$@" \
+        --profiler-config "{\"profiler\":\"cuda\",\"max_iterations\":\$steps}" &
+    profiler_pid=\$!
+    # Coupled headless ranks are profiled through their tier's API head.
+    if [[ "\$profile_delay" != manual ]] && (( api_worker )); then
+        trigger_prefill_profile &
+        trigger_pid=\$!
+    fi
+    local status=0
+    wait "\$profiler_pid" || status=\$?
+    profiler_pid=""
+    cleanup_prefill_profile
+    return "\$status"
+}
+
 mooncake_pid=""
-cleanup_mooncake() {
+cleanup_worker_services() {
+    cleanup_prefill_profile
     if [[ -n "\$mooncake_pid" ]]; then
         kill "\$mooncake_pid" 2>/dev/null || true
         wait "\$mooncake_pid" 2>/dev/null || true
     fi
 }
 
+# Cover setup failures and headless workers before serving-mode traps take over.
+trap cleanup_worker_services EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 if (( ENABLE_MOONCAKE )); then
-    # Cover setup failures before the serving-mode cleanup traps take over.
-    trap cleanup_mooncake EXIT
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
     export MOONCAKE_CONFIG_PATH="\${MOONCAKE_CONFIG_PATH:-/tmp/mooncake-\$SLURM_JOB_ID/config.json}"
     mkdir -p "\$(dirname "\$MOONCAKE_CONFIG_PATH")"
     cat > "\$MOONCAKE_CONFIG_PATH" <<MOONCAKE_CONFIG
@@ -343,7 +565,7 @@ if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
         # prefill ranks run headless so expert parallelism spans the tier.
         VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
         VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
-        vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
+        serve_prefill $WORKER_SERVER_PORT "$MODEL" --served-model-name "$MODEL_NAME" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
             --host \$this_node_hostname \
             --port $WORKER_SERVER_PORT \
             --data-parallel-size $NUM_PREFILL_NODES \
@@ -359,7 +581,7 @@ if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
             # Signal both local services without delaying failure propagation;
             # the enclosing srun tears down the remaining distributed workers.
             kill "\${coupled_pids[@]}" 2>/dev/null || true
-            cleanup_mooncake
+            cleanup_worker_services
             exit "\$status"
         }
         trap cleanup_coupled_head EXIT
@@ -376,7 +598,7 @@ if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
             --port $ROUTER_SERVER_PORT \
             --intra-node-data-parallel-size $ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE \
             --request-timeout-secs 86400 \
-            --worker-startup-timeout-secs 1200 \
+            --worker-startup-timeout-secs "$ROUTER_WORKER_STARTUP_TIMEOUT_SECONDS" \
             "\${router_common_args[@]}" &
         router_pid=\$!
         coupled_pids+=("\$router_pid")
@@ -402,7 +624,7 @@ if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
         set_headless_args "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}"
         VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
         VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
-        vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${headless_args[@]}" \
+        serve_prefill $WORKER_SERVER_PORT "$MODEL" --served-model-name "$MODEL_NAME" "\${headless_args[@]}" \
             --headless \
             --data-parallel-size $NUM_PREFILL_NODES \
             --data-parallel-start-rank \$SLURM_PROCID \
@@ -448,28 +670,29 @@ else
             kill "\${child_pids[@]}" 2>/dev/null || true
             wait "\${child_pids[@]}" 2>/dev/null || true
         fi
-        cleanup_mooncake
+        cleanup_worker_services
         exit "\$status"
     }
     trap cleanup_vllm EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
 
-    serve_tp1_engines() {
+    serve_independent_engines() {
         local nixl_base_port=\$1
         shift
-        local arg skip_value engine_index worker_port service_pid failed_status
-        local -a visible_gpus tp1_args service_pids
+        local arg skip_value engine_index worker_port service_pid failed_status gpu_start gpu_mask
+        local tensor_parallel_size=$(( 4 / VLLM_ENGINES_PER_NODE ))
+        local -a visible_gpus engine_args service_pids serve_command
         # Respect the allocation's GPU order, including UUID-based masks.
         IFS=',' read -r -a visible_gpus <<< "\${CUDA_VISIBLE_DEVICES-0,1,2,3}"
         if (( \${#visible_gpus[@]} < 4 )); then
-            echo "ERROR: Four TP1 engines require at least four visible GPUs." >&2
+            echo "ERROR: $VLLM_ENGINES_PER_NODE independent engines require at least four visible GPUs." >&2
             exit 1
         fi
 
         # Model configs may specify TP/PP/DP for a full-node replica. Replace
         # those settings in both CLI forms, retaining unrelated model tuning.
-        tp1_args=()
+        engine_args=()
         skip_value=0
         for arg in "\$@"; do
             if (( skip_value )); then
@@ -481,18 +704,30 @@ else
                     skip_value=1 ;;
                 (--tensor-parallel-size=*|--pipeline-parallel-size=*|--data-parallel-size=*|--data-parallel-size-local=*|--api-server-count=*|-tp=*|-pp=*|-dp=*)
                     ;;
-                (*) tp1_args+=("\$arg") ;;
+                (*) engine_args+=("\$arg") ;;
             esac
         done
-        tp1_args+=(--tensor-parallel-size 1 --pipeline-parallel-size 1
+        engine_args+=(--tensor-parallel-size "\$tensor_parallel_size" --pipeline-parallel-size 1
             --data-parallel-size 1 --data-parallel-size-local 1 --api-server-count 1)
-        for (( engine_index = 0; engine_index < 4; engine_index++ )); do
+        # Install once before concurrent engines can race on the package manager.
+        if [[ "$VLLM_MODE" == pd && "\${PROFILE_PREFILL:-0}" == 1 ]] && \
+            (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
+            ensure_nsys || return 1
+        fi
+        for (( engine_index = 0; engine_index < $VLLM_ENGINES_PER_NODE; engine_index++ )); do
             worker_port=\$(( $WORKER_SERVER_PORT + engine_index ))
-            echo "Starting TP1 engine \$engine_index on GPU \${visible_gpus[engine_index]}, port \$worker_port"
-            CUDA_VISIBLE_DEVICES="\${visible_gpus[engine_index]}" \
+            serve_command=(vllm serve)
+            if [[ "$VLLM_MODE" == pd ]] && (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
+                serve_command=(serve_prefill "\$worker_port")
+            fi
+            gpu_start=\$(( engine_index * tensor_parallel_size ))
+            printf -v gpu_mask '%s,' "\${visible_gpus[@]:gpu_start:tensor_parallel_size}"
+            gpu_mask=\${gpu_mask%,}
+            echo "Starting TP\$tensor_parallel_size engine \$engine_index on GPUs \$gpu_mask, port \$worker_port"
+            CUDA_VISIBLE_DEVICES="\$gpu_mask" \
             VLLM_NIXL_SIDE_CHANNEL_HOST="\$this_node_hostname" \
             VLLM_NIXL_SIDE_CHANNEL_PORT=\$(( nixl_base_port + engine_index )) \
-            vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${tp1_args[@]}" \
+            "\${serve_command[@]}" "$MODEL" --served-model-name "$MODEL_NAME" "\${engine_args[@]}" \
                 --host "\$this_node_hostname" --port "\$worker_port" &
             worker_pids+=("\$!")
         done
@@ -508,7 +743,7 @@ else
                     failed_status=0
                     wait "\$service_pid" || failed_status=\$?
                     (( failed_status != 0 )) || failed_status=1
-                    echo "ERROR: TP1 engine or router process \$service_pid exited (status=\$failed_status)." >&2
+                    echo "ERROR: Independent engine or router process \$service_pid exited (status=\$failed_status)." >&2
                     exit "\$failed_status"
                 fi
             done
@@ -526,7 +761,7 @@ else
             --port $ROUTER_SERVER_PORT \
             --intra-node-data-parallel-size $ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE \
             --request-timeout-secs 86400 \
-            --worker-startup-timeout-secs 1200 \
+            --worker-startup-timeout-secs "$ROUTER_WORKER_STARTUP_TIMEOUT_SECONDS" \
             "\${router_common_args[@]}"
         )
 
@@ -593,26 +828,26 @@ else
                 aggregated_args+=("\$arg")
             fi
         done
-        if (( $VLLM_ENGINES_PER_NODE == 4 )); then
-            serve_tp1_engines $PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT "\${aggregated_args[@]}"
+        if (( $VLLM_ENGINES_PER_NODE > 1 )); then
+            serve_independent_engines $PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT "\${aggregated_args[@]}"
         else
             vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${aggregated_args[@]}" \
                 --host \$this_node_hostname \
                 --port $WORKER_SERVER_PORT
         fi
-    elif (( $VLLM_ENGINES_PER_NODE == 4 )); then
+    elif (( $VLLM_ENGINES_PER_NODE > 1 )); then
         if (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
-            serve_tp1_engines $PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
+            serve_independent_engines $PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
                 "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}"
         else
-            serve_tp1_engines $DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
+            serve_independent_engines $DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
                 "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}"
         fi
     elif (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
         # Prefill
         VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
         VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
-        vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
+        serve_prefill $WORKER_SERVER_PORT "$MODEL" --served-model-name "$MODEL_NAME" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
             --host \$this_node_hostname \
             --port $WORKER_SERVER_PORT
     else
@@ -631,11 +866,20 @@ batch_command=$(cat <<EOF
 set -euo pipefail
 
 nodes=(\$(scontrol show hostnames "\$SLURM_JOB_NODELIST"))
+# Pyxis ignores --container-image when a named container already exists.
+# Scope names to a job attempt so a new warmed image is actually imported.
+container_attempt="\$SLURM_JOB_ID-\${SLURM_RESTART_COUNT:-0}"
+worker_container="vllm-\$container_attempt"
+if [[ -n "$SAVE_WARMED_CONTAINER" ]]; then
+    worker_container="vllm-warm-\$container_attempt"
+fi
+echo "Starting vLLM image $CONTAINER in container \$worker_container"
 
 ALL_NODES="\${nodes[*]}" \
 srun --nodes=$NUM_NODES --ntasks=$NUM_NODES --ntasks-per-node=1 --kill-on-bad-exit=1 \
     --container-image=$CONTAINER \
-    --container-name=container-on-node \
+    --container-name="\$worker_container" \
+    --container-writable \
     --container-mounts=$MOUNTS \
     --container-workdir=\$SLURM_SUBMIT_DIR \
     --no-container-mount-home \
@@ -645,18 +889,95 @@ srun --nodes=$NUM_NODES --ntasks=$NUM_NODES --ntasks-per-node=1 --kill-on-bad-ex
         exec "\$@"
     ' bash bash -c "\$vllm_command" &
 server_step=\$!
+cache_warmup_step=""
+cache_export_dir=""
 
 cleanup_server() {
     job_status=\$?
     trap - EXIT INT TERM
     set +e
-    kill "\$server_step" 2>/dev/null || true
-    wait "\$server_step" 2>/dev/null || true
+    if [[ -n "\$cache_warmup_step" ]]; then
+        kill "\$cache_warmup_step" 2>/dev/null || true
+        wait "\$cache_warmup_step" 2>/dev/null || true
+    fi
+    if [[ -n "\$server_step" ]]; then
+        kill "\$server_step" 2>/dev/null || true
+        wait "\$server_step" 2>/dev/null || true
+    fi
+    if [[ -n "\$cache_export_dir" ]]; then
+        rm -rf -- "\$cache_export_dir"
+    fi
     exit "\$job_status"
 }
 trap cleanup_server EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+if [[ -n "$SAVE_WARMED_CONTAINER" ]]; then
+    cache_urls=()
+    for (( node_index = 0; node_index < \${#nodes[@]}; node_index++ )); do
+        if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]] && \
+            (( node_index != 0 && node_index != $NUM_PREFILL_NODES )); then
+            continue
+        fi
+        for (( engine_index = 0; engine_index < $VLLM_ENGINES_PER_NODE; engine_index++ )); do
+            cache_urls+=("http://\${nodes[node_index]}:\$(( $WORKER_SERVER_PORT + engine_index ))")
+        done
+    done
+    python3 -c "\$warm_cache_helper" wait \
+        --timeout "$ROUTER_WORKER_STARTUP_TIMEOUT_SECONDS" "\${cache_urls[@]}" &
+    cache_warmup_step=\$!
+    completed_pid=""
+    completed_status=0
+    wait -n -p completed_pid "\$server_step" "\$cache_warmup_step" || completed_status=\$?
+    if [[ "\$completed_pid" == "\$server_step" ]]; then
+        echo "ERROR: vLLM exited before cache warmup completed (status=\$completed_status)." >&2
+        (( completed_status != 0 )) || completed_status=1
+    fi
+    (( completed_status == 0 )) || exit "\$completed_status"
+    cache_warmup_step=""
+
+    # Write archives directly to the shared export directory. Mount only this
+    # temporary transfer directory; runtime caches stay inside each container.
+    # Include both PD roles and headless workers' compiled modules/startup plans.
+    cache_export_dir=\$(mktemp -d "$(dirname "$SAVE_WARMED_CONTAINER")/.vllm-warm.XXXXXX")
+    for (( node_index = 0; node_index < \${#nodes[@]}; node_index++ )); do
+        dump_args=(--output "\$cache_export_dir/caches.tar")
+        if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]] && \
+            (( node_index != 0 && node_index != $NUM_PREFILL_NODES )); then
+            dump_args+=(--allow-empty)
+        fi
+        srun --overlap --exact --nodes=1 --ntasks=1 --cpus-per-task=1 --gpus=0 \
+            --nodelist="\${nodes[node_index]}" --container-name="\$worker_container" \
+            --container-writable --no-container-mount-home --container-workdir=/ \
+            --container-mounts="\$cache_export_dir:\$cache_export_dir" \
+            python3 -c "\$warm_cache_helper" dump "\${dump_args[@]}"
+    done
+
+    # Stop the serving step before exporting. The named rootfs persists for the
+    # final single-node step; do not set --container-save on the multi-node step.
+    kill "\$server_step"
+    wait "\$server_step" || true
+    server_step=""
+    # A GPU is needed to verify that the installed modules load with JIT disabled.
+    srun --overlap --exact --nodes=1 --ntasks=1 --cpus-per-task=1 --gpus=1 \
+        --nodelist="\${nodes[0]}" --container-name="\$worker_container" \
+        --container-writable --no-container-mount-home --container-workdir=/ \
+        --container-mounts="\$cache_export_dir:\$cache_export_dir" \
+        --container-save="\$cache_export_dir/warmed.sqsh" \
+        python3 -c "\$warm_cache_helper" install --input "\$cache_export_dir/caches.tar"
+    test -s "\$cache_export_dir/warmed.sqsh"
+    # Verify the exported image in a fresh, unnamed container. Checking the
+    # mutable warmup rootfs alone cannot prove the squashfs contains the caches.
+    srun --overlap --exact --nodes=1 --ntasks=1 --cpus-per-task=1 --gpus=1 \
+        --nodelist="\${nodes[0]}" --container-image="\$cache_export_dir/warmed.sqsh" \
+        --no-container-mount-home --container-workdir=/ \
+        python3 -c "\$warm_cache_helper" verify
+    # Publish only a successful export; a concurrent job must not overwrite it.
+    ln "\$cache_export_dir/warmed.sqsh" "$SAVE_WARMED_CONTAINER"
+    echo "Saved warmed vLLM image: $SAVE_WARMED_CONTAINER"
+    exit 0
+fi
 
 if (( $should_run_eval )); then
     # No need to wait for endpoint since Gym will wait for model endpoints to spin up before proceeding.
@@ -674,7 +995,7 @@ if (( $should_run_eval )); then
     ALL_NODES="\${nodes[*]}" \
     srun --overlap --exact --nodes=1 --ntasks=1 --cpus-per-task=\$SLURM_CPUS_ON_NODE --nodelist="\$EVAL_NODE" --gpus=0 \
         --container-image=$CONTAINER \
-        --container-name=eval-container-on-node \
+        --container-name="eval-\$container_attempt" \
         --container-mounts=$MOUNTS \
         --container-workdir="\$SLURM_SUBMIT_DIR" \
         --no-container-mount-home \
@@ -726,6 +1047,7 @@ main_job_id=$(
     vllm_command="$vllm_command" \
     eval_command="$eval_command" \
     batch_command="$batch_command" \
+    warm_cache_helper="$warm_cache_helper" \
     sbatch \
         --parsable \
         --nodes=$NUM_NODES \

@@ -1,0 +1,11 @@
+{
+  "source": "User-supplied collection-actions bundle",
+  "version": 5,
+  "original_sha256": {
+    "collect.py": "7aa150dce327bb4f0a3f614f4b3b70de8eb13d0790696259984844237a0d97b4",
+    "analyze.py": "0ce5d288ea15efc5960eb083f6190f155eb7c0b05706472e47f5b57a087a2443",
+    "ACTIONS.md": "229c1e9382426f52fa37c07a5692fc2c8565f70011e66767b49533819d555762",
+    "VALIDATION.json": "1e4ec7b90b8de57258effe076d7b90d0d5df0ad6c8afd3af1844305069444e44"
+  },
+  "note": "Hashes identify the supplied originals, before repository integration and fixes."
+}

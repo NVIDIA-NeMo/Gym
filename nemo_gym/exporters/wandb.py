@@ -23,7 +23,7 @@ from omegaconf import DictConfig, OmegaConf
 from wandb import Run, Table
 
 from nemo_gym.config_types import WANDBConfig
-from nemo_gym.exporters.base import BaseExporter
+from nemo_gym.exporters.base import BaseExporter, HistogramMetric
 from nemo_gym.global_config import RESULTS_DIR_KEY_NAME
 
 
@@ -55,6 +55,11 @@ class WandbExporter(BaseExporter):
             dir=str(Path(self.global_config_dict[RESULTS_DIR_KEY_NAME]) / "wandb"),
         )
 
+        inference_metrics = self.global_config_dict.get("inference_metrics")
+        if inference_metrics and inference_metrics.get("enabled"):
+            self.run.define_metric("progress/completion_pct")
+            self.run.define_metric("progress/*", step_metric="progress/completion_pct")
+
     def teardown(self) -> None:
         if self.run is not None:
             self.run.finish()
@@ -69,6 +74,10 @@ class WandbExporter(BaseExporter):
         self._active_run().config.update(OmegaConf.to_container(config_dict))
 
     def _log_metrics(self, metrics: dict[str, Any], step: Optional[int] = None) -> None:
+        metrics = {
+            key: wandb.Histogram(value.values) if isinstance(value, HistogramMetric) else value
+            for key, value in metrics.items()
+        }
         # @bxyu-nvidia: Commit here so the rollouts show up in W&B on the current step, rather than being flushed in the next step
         self._active_run().log(metrics, step=step, commit=True)
 

@@ -41,6 +41,7 @@ import nemo_gym.token_id_capture.delivery
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.batch_status import observe_materialized_rows
 from nemo_gym.config_types import AmbiguousEnvironmentServerError, ConfigError, ConfigPathNotFoundError
+from nemo_gym.exporters.base import HistogramMetric
 from nemo_gym.failure_kinds import CANCELLED
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
@@ -3973,6 +3974,9 @@ class TestRolloutCollection:
         monkeypatch: pytest.MonkeyPatch,
         empty_global_config: MagicMock,
     ) -> None:
+        sampler = MagicMock()
+        collect_metrics = MagicMock(return_value=sampler)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "collect_inference_metrics", collect_metrics)
         input_fpath = tmp_path / "input.jsonl"
         input_fpath.write_text(
             json.dumps({"responses_create_params": {"input": []}, AGENT_REF_KEY_NAME: {"name": "agent"}}) + "\n"
@@ -4012,6 +4016,9 @@ class TestRolloutCollection:
         assert len(opened_files) == 3
         assert all(file.closed for file in opened_files)
         assert not upload_spool_fpath.exists()
+        collect_metrics.assert_called_once_with(config.inference_metrics)
+        sampler.__aenter__.assert_awaited_once()
+        sampler.__aexit__.assert_awaited_once()
 
     async def test_run_from_config_processing_failure_cancels_bounded_resident_tasks(
         self,
@@ -4828,9 +4835,98 @@ class TestRolloutCollection:
         # The success and the failure that returned agent evidence are joined; the bare failure is not.
         assert sorted(merged) == [0, 1]
 
-    async def test_run_from_config_sanity(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    @pytest.mark.parametrize("inference_metrics_enabled", [False, True])
+    async def test_task_completion_histogram_uses_progress_cadence(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        empty_global_config: MagicMock,
+        inference_metrics_enabled: bool,
     ) -> None:
+        input_path = tmp_path / "input.jsonl"
+        input_path.write_text(
+            "\n".join(
+                json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "agent"}, "case": i})
+                for i in range(250)
+            )
+            + "\n"
+        )
+
+        class Helper(RolloutCollectionHelper):
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                futures = []
+                for row in examples:
+                    i = row["case"]
+                    # Zero reward is still a completed task. The final six rows
+                    # exercise unavailable/invalid timing and unsuccessful work.
+                    result = {"reward": 0.0}
+                    latency_ms = {244: None, 245: float("nan"), 246: -1.0}.get(i, (i + 1) * 1000.0)
+                    if i == 247:
+                        result[NG_FAILURE_CLASS_KEY] = "verify_failed"
+                    elif i == 248:
+                        result[NG_NO_PERSIST_KEY] = True
+                    elif i == 249:
+                        result[NG_DISPATCH_DRAINED_KEY] = True
+                        result[NG_NO_PERSIST_KEY] = True
+                    future = Future()
+                    future.set_result(_CompletedRollout(row=row, result=result, rollout_latency_ms=latency_ms))
+                    futures.append(future)
+                return futures
+
+        publish = MagicMock()
+        monkeypatch.setattr(nemo_gym.rollout_collection, "export_metrics", publish)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_exporters", lambda: [object()])
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "collect_inference_metrics", MagicMock(return_value=MagicMock())
+        )
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_path),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            retain_results_in_memory=False,
+            upload_rollouts=False,
+            disable_aggregation=True,
+            disable_health_check=True,
+            inference_metrics={
+                "enabled": inference_metrics_enabled,
+                "endpoints": {"replica0": "http://localhost:8000/metrics"},
+            },
+        )
+        await Helper().run_from_config(config)
+
+        histogram_key = "progress/total/task_completion_time_seconds"
+        progress_calls = [call for call in publish.call_args_list if "progress/total/rollouts_per_min" in call.args[0]]
+        assert len(progress_calls) == 101  # 1..99%, 99.5%, 100%; not one log per task.
+        assert all(histogram_key in call.args[0] for call in progress_calls)
+        assert all(
+            "progress/total/rollouts_per_min" in call.args[0]
+            for call in publish.call_args_list
+            if histogram_key in call.args[0]
+        )
+        assert progress_calls[0].args[0][histogram_key] == HistogramMetric(values=(1.0, 2.0, 3.0))
+        assert progress_calls[-1].args[0][histogram_key] == HistogramMetric(
+            values=tuple(float(i) for i in range(1, 245))
+        )
+        for call in progress_calls:
+            if inference_metrics_enabled:
+                assert "step" not in call.kwargs
+                assert "progress/completion_pct" in call.args[0]
+            else:
+                assert "step" in call.kwargs
+
+    @pytest.mark.parametrize("inference_metrics_enabled", [False, True])
+    async def test_run_from_config_sanity(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        empty_global_config: MagicMock,
+        inference_metrics_enabled: bool,
+    ) -> None:
+        sampler = MagicMock()
+        collect_metrics = MagicMock(return_value=sampler)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "collect_inference_metrics", collect_metrics)
+        publish = MagicMock()
+        monkeypatch.setattr(nemo_gym.rollout_collection, "export_metrics", publish)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_exporters", lambda: [object()])
         clear_captures = MagicMock()
         merge_capture = MagicMock()
         monkeypatch.setattr(nemo_gym.rollout_collection, "clear_model_call_captures_for_rollouts", clear_captures)
@@ -4848,6 +4944,10 @@ class TestRolloutCollection:
             output_jsonl_fpath=str(output_jsonl_fpath),
             limit=3,
             num_repeats=2,
+            inference_metrics={
+                "enabled": inference_metrics_enabled,
+                "endpoints": {"replica0": "http://localhost:8000/metrics"},
+            },
         )
 
         class TestRolloutCollectionHelper(RolloutCollectionHelper):
@@ -4883,6 +4983,18 @@ class TestRolloutCollection:
                 return metrics_fpath
 
         actual_returned_results = await TestRolloutCollectionHelper().run_from_config(config)
+        collect_metrics.assert_called_once_with(config.inference_metrics)
+        sampler.__aenter__.assert_awaited_once()
+        sampler.__aexit__.assert_awaited_once()
+        progress_calls = [c for c in publish.call_args_list if "progress/total/rollouts_per_min" in c.args[0]]
+        assert progress_calls
+        for call in progress_calls:
+            if inference_metrics_enabled:
+                assert "step" not in call.kwargs
+                assert 0 < call.args[0]["progress/completion_pct"] <= 100
+            else:
+                assert 0 < call.kwargs["step"] <= 100
+                assert "progress/completion_pct" not in call.args[0]
         empty_global_config.assert_called_once_with()
         clear_captures.assert_not_called()
         merge_capture.assert_not_called()
