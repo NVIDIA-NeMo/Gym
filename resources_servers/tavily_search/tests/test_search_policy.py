@@ -9,12 +9,14 @@ import pytest
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.tavily_search import app as module
 from resources_servers.tavily_search.app import (
+    DEFAULT_EXCLUDE_DOMAINS_PRIORITY,
     FindInPageRequest,
     ScrollPageRequest,
     TavilySearchRequest,
     TavilySearchResourcesServer,
     TavilySearchResourcesServerConfig,
     URLExclusionPolicy,
+    select_provider_domains,
 )
 
 
@@ -289,3 +291,122 @@ async def test_interrupted_response_body_releases_connection_before_retry(server
     await server.web_search(tool_request(), TavilySearchRequest(query="query"))
     broken.release.assert_called_once()
     good.release.assert_called_once()
+
+
+# Tavily's /search caps exclude_domains at 150 (HTTP 400 beyond it). A 220-domain policy whose priority hosts sit
+# at the END of the file: the provider subset must pull them forward and drop the tail, which stays local-only.
+FILLERS = [f"filler-{index:03d}.test" for index in range(205)]
+PRIORITY_IN_FILE_ORDER = [
+    "archive.ph",
+    "github.com",
+    "gist.github.com",  # not a priority pattern: stays in file order
+    "api.scale.com",
+    "lastexam.ai",
+    "huggingface.co",
+    "archive.today",
+    "scale.com",
+    "safe.ai",
+    "githubusercontent.com",
+    "agi.safe.ai",
+    "hf.co",
+    "huggingface.com",  # not a priority pattern
+    "answers.test",  # beyond the cap
+    "leak.test",  # beyond the cap
+]
+assert len(FILLERS) + len(PRIORITY_IN_FILE_ORDER) == 220
+
+
+@pytest.fixture
+def capped_policy(tmp_path):
+    properties = [{"type": "domain", "value": d} for d in FILLERS + PRIORITY_IN_FILE_ORDER]
+    properties.append({"type": "url_substring", "value": "/hle/answers"})
+    path = tmp_path / "capped.json"
+    path.write_text(json.dumps({"notices": [{"properties": properties}]}))
+    return path
+
+
+def make_server(policy_path, **overrides):
+    cfg = TavilySearchResourcesServerConfig(
+        host="127.0.0.1",
+        port=8000,
+        entrypoint="app.py",
+        name="tavily",
+        tavily_api_key="key-one",
+        exclude_domains_file_path=str(policy_path),
+        use_judge=False,
+        **overrides,
+    )
+    return TavilySearchResourcesServer(config=cfg, server_client=MagicMock(spec=ServerClient))
+
+
+SEARCH_RESULTS = {
+    "results": [
+        {"url": "https://leak.test/key", "title": "beyond the cap", "content": "tail-domain answer key"},
+        {"url": "https://sub.answers.test/q", "title": "beyond the cap", "content": "tail-subdomain answer key"},
+        {"url": "https://filler-000.test/hle/answers", "title": "substring", "content": "substring answer key"},
+        {"url": "https://ok.test/", "title": "allowed", "content": "allowed content"},
+    ]
+}
+
+
+async def test_provider_exclude_domains_are_capped_priority_first_and_tail_enforced_locally(
+    capped_policy, monkeypatch, caplog
+):
+    with caplog.at_level("WARNING", logger=module.__name__):
+        server = make_server(capped_policy)
+    warnings = [record for record in caplog.records if record.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert "70 domains are not sent" in warnings[0].getMessage()
+    assert str(capped_policy) in warnings[0].getMessage()
+
+    post = AsyncMock(return_value=http_response(200, SEARCH_RESULTS))
+    monkeypatch.setattr(module, "request", post)
+    for _ in range(2):
+        result = await server.web_search(tool_request(), TavilySearchRequest(query="query"))
+    assert len([record for record in caplog.records if record.levelname == "WARNING"]) == 1  # once per start
+
+    sent = json.loads(post.await_args_list[0].kwargs["data"])["exclude_domains"]
+    assert len(sent) == 150
+    assert len(set(sent)) == 150
+    # Priority block in pattern order, then file order inside a pattern; then the rest of the file in order.
+    assert sent[:11] == [
+        "huggingface.co",
+        "hf.co",
+        "lastexam.ai",
+        "agi.safe.ai",
+        "safe.ai",
+        "scale.com",
+        "api.scale.com",
+        "github.com",
+        "githubusercontent.com",
+        "archive.ph",
+        "archive.today",
+    ]
+    assert sent[11:] == FILLERS[:139]
+    assert {"gist.github.com", "huggingface.com", "answers.test", "leak.test"}.isdisjoint(sent)
+
+    # Domains beyond the cap and url_substring rules are enforced locally on the returned URLs.
+    assert "allowed content" in result.results_string
+    assert "answer key" not in result.results_string
+    assert server._is_url_excluded("https://leak.test/key")
+    assert server._is_url_excluded("https://sub.answers.test/q")
+
+
+@pytest.mark.parametrize("limit", [0, None])
+async def test_disabled_provider_exclusions_keep_local_enforcement(capped_policy, monkeypatch, caplog, limit):
+    with caplog.at_level("WARNING", logger=module.__name__):
+        server = make_server(capped_policy, tavily_exclude_domains_limit=limit)
+    assert not [record for record in caplog.records if record.levelname == "WARNING"]
+    post = AsyncMock(return_value=http_response(200, SEARCH_RESULTS))
+    monkeypatch.setattr(module, "request", post)
+    result = await server.web_search(tool_request(), TavilySearchRequest(query="query"))
+    assert "exclude_domains" not in json.loads(post.await_args_list[0].kwargs["data"])
+    assert "allowed content" in result.results_string
+    assert "answer key" not in result.results_string
+
+
+def test_select_provider_domains_honours_custom_priority_and_short_policies():
+    domains = ["a.test", "b.test", "c.test"]
+    assert select_provider_domains(domains, 150, DEFAULT_EXCLUDE_DOMAINS_PRIORITY) == domains
+    assert select_provider_domains(domains, 2, ["c.*"]) == ["c.test", "a.test"]
+    assert select_provider_domains(domains, 0, ["c.*"]) is None

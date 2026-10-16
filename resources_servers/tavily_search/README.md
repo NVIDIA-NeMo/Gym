@@ -31,3 +31,12 @@ and Pi. See [tool-service behavior and compatibility](../../fern/versions/latest
 for the exclusion policy, key pools, bounded retries, and cache limits. These
 policies apply to all Tavily configurations, including removal of the aggregate
 `Search Answer` section. Tool transcripts and Gym observability record tool use.
+
+Tavily's `/search` accepts at most 150 `exclude_domains` (HTTP 400 beyond). A
+longer policy is pre-filtered provider-side with a deterministic subset of
+`tavily_exclude_domains_limit` domains (default 150; `0` or `null` sends none):
+the hosts matching `tavily_exclude_domains_priority` first (default: dataset
+hubs, benchmark publishers, code hosts and archive mirrors), then file order.
+The server logs one warning per start with the number of domains not sent.
+Every `domain` and `url_substring` rule is still enforced locally on requested
+and returned URLs, so the cap never widens what an agent can see.
