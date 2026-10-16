@@ -23,6 +23,7 @@ from omegaconf import DictConfig
 from nemo_gym._checkpoint.agent import AgentSessionRecord
 from nemo_gym._checkpoint.control import CheckpointRequest
 from nemo_gym._checkpoint.harness import LAUNCH_TAG
+from nemo_gym._checkpoint.harness_run import LentSandbox
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.episode_types import EpisodeId
 from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, TrajectoryRecord
@@ -345,16 +346,18 @@ async def park_and_resume(agent: OpenCodeSandboxedAgent, sandbox: FakeSandbox) -
     return record
 
 
-def opencode_boundary(*, continue_session: bool) -> dict[str, Any]:
-    """The OpenCode boundary a checkpoint took before a crash: the sandbox it names is the superseded one."""
+def harness_bookmark(*, resume: bool) -> dict[str, Any]:
+    """The harness bookmark a checkpoint took before a crash: the sandbox it names is the superseded one."""
+    interrupted = {"resumed": False, "reason": None, "seconds": 1.0, "ended": "interrupted"}
     return {
-        "next": "opencode",
+        "v": 1,
+        "next": "harness",
         "cookies": {"ng_session": "s"},
         "verify_mode": "wait",
-        "sandbox_handle": "sb-1",
-        "workdir": "/testbed",
-        "data_home": RESTORED_DATA_HOME,
-        "continue": continue_session,
+        "sandbox": {"descriptor": {"sandbox_id": "sb-1"}, "workdir": "/testbed"},
+        "state": {"data_home": RESTORED_DATA_HOME},
+        "resume": resume,
+        "launches": [interrupted] if resume else [],
     }
 
 
@@ -377,13 +380,13 @@ async def test_a_checkpoint_interrupts_opencode_and_the_resume_continues_the_ses
     result = await asyncio.wait_for(run, timeout=10)
 
     # The exported boundary continues the OpenCode step with the same data home and the sandbox handle.
-    assert record.episode["next"] == "opencode" and record.episode["continue"] is True
-    assert record.episode["sandbox_handle"] == "sb-1" and record.episode["workdir"] == "/testbed"
+    assert record.episode["next"] == "harness" and record.episode["resume"] is True
+    assert record.episode["sandbox"] == {"descriptor": {"sandbox_id": "sb-1"}, "workdir": "/testbed"}
     assert record.episode["cookies"]["ng_session"] == "s"
     first, second = launch_commands(sandbox)
     assert "--continue" not in first and "--continue" in second
     assert _CONTINUE_PROMPT in second
-    assert data_home_of(first) == data_home_of(second) == record.episode["data_home"]
+    assert data_home_of(first) == data_home_of(second) == record.episode["state"]["data_home"]
     assert 'test -x "$HOME/.opencode/bin/opencode"' in second, "the install is skipped when the binary is present"
     # SIGINT ended the launch; the kill that follows stops whatever it left running before the sandbox is parked.
     assert [signal_of(c) for c in interrupt_commands(sandbox)] == ["INT", "KILL"]
@@ -415,7 +418,7 @@ async def test_opencode_that_ignores_the_interrupt_is_killed_after_the_grace(
     result = await asyncio.wait_for(run, timeout=15)
 
     assert sandbox.signals == ["INT", "KILL"], "the grace expired, so the kill followed"
-    assert record.episode["continue"] is True
+    assert record.episode["resume"] is True
     assert "--continue" in launch_commands(sandbox)[1]
     assert result.reward == 1.0
 
@@ -438,7 +441,7 @@ async def test_a_relaunch_without_a_saved_session_starts_over_with_the_task(
     result = await asyncio.wait_for(run, timeout=15)
 
     assert sandbox.signals == ["INT", "KILL"], "both signals were sent and neither reached a process"
-    assert record.episode["continue"] is True, "the boundary asks to continue; the relaunch checks first"
+    assert record.episode["resume"] is True, "the bookmark asks to continue; the relaunch checks first"
     first, second = launch_commands(sandbox)
     assert "--continue" not in second and _CONTINUE_PROMPT not in second
     assert "fix the bug" in second, "the relaunch carries the task"
@@ -468,7 +471,7 @@ async def test_a_park_requested_before_the_launch_starts_nothing_until_the_resum
     await participant.open_admission()
     result = await asyncio.wait_for(run, timeout=10)
 
-    assert record.episode["next"] == "opencode" and record.episode["continue"] is False
+    assert record.episode["next"] == "harness" and record.episode["resume"] is False
     [launch] = launch_commands(sandbox)
     assert "--continue" not in launch and "fix the bug" in launch
     assert result.reward == 1.0
@@ -486,7 +489,7 @@ async def test_a_replacement_attempt_continues_from_the_opencode_boundary_withou
     # The fork holds OpenCode's database as the snapshot had it.
     sandbox.saved_sessions.add(RESTORED_DATA_HOME)
     agent._start_sandbox = AsyncMock(return_value=sandbox)
-    await install_episode(agent, opencode_boundary(continue_session=True))
+    await install_episode(agent, harness_bookmark(resume=True))
 
     result = await asyncio.wait_for(agent.run(make_request("agent-session-2", {}), body_for("r", attempt=1)), 10)
 
@@ -509,7 +512,7 @@ async def test_a_replacement_from_a_boundary_before_the_first_launch_asks_which_
     agent = make_agent(tmp_path, resources)
     sandbox = FakeSandbox(resources, finish_runs_after=0)
     agent._start_sandbox = AsyncMock(return_value=sandbox)
-    await install_episode(agent, opencode_boundary(continue_session=False))
+    await install_episode(agent, harness_bookmark(resume=False))
 
     result = await asyncio.wait_for(agent.run(make_request("agent-session-4", {}), body_for("r", attempt=1)), 10)
 
@@ -526,7 +529,7 @@ async def test_a_failing_sandbox_access_fails_the_run_instead_of_using_the_known
     resources = FakeResourcesServer(access_status=500)
     agent = make_agent(tmp_path, resources)
     agent._start_sandbox = AsyncMock(side_effect=AssertionError("no sandbox may be connected"))
-    await install_episode(agent, opencode_boundary(continue_session=True))
+    await install_episode(agent, harness_bookmark(resume=True))
 
     with pytest.raises(RuntimeError, match="HTTP 500"):
         await asyncio.wait_for(agent.run(make_request("agent-session-5", {}), body_for("r", attempt=1)), 10)
@@ -540,11 +543,9 @@ async def test_a_404_from_sandbox_access_keeps_the_known_handle(tmp_path: Path) 
     resources = FakeResourcesServer(lends_sandbox=False)
     agent = make_agent(tmp_path, resources)
 
-    handle, workdir = await agent._refresh_sandbox_access(
-        {"ng_session": "s"}, sandbox_handle="sb-1", workdir="/testbed"
-    )
+    hint = LentSandbox(descriptor={"sandbox_id": "sb-1"}, workdir="/testbed")
 
-    assert (handle, workdir) == ("sb-1", "/testbed")
+    assert await agent.refresh_lent_sandbox({"ng_session": "s"}, hint) == hint
     assert resources.calls == ["/sandbox_access"]
 
 
@@ -623,8 +624,8 @@ async def test_a_run_parked_after_verify_keeps_its_trajectory_in_the_checkpoint(
     result = await asyncio.wait_for(run, timeout=10)
 
     assert record.episode["next"] == "return" and record.episode["result"]["reward"] == 1.0
-    assert record.episode["trajectory"] is not None
-    assert record.episode["observations"] is not None
+    assert record.episode["outcome"]["trajectory"] is not None
+    assert record.episode["outcome"]["observations"] is not None
     assert result.reward == 1.0
 
 
@@ -666,11 +667,16 @@ async def test_a_replacement_from_the_return_boundary_returns_the_stored_result_
     await install_episode(
         agent,
         {
+            "v": 1,
             "next": "return",
             "result": stored_result,
-            "run_result": run_result,
-            "observations": observations.model_dump(mode="json"),
-            "trajectory": trajectory.model_dump(mode="json"),
+            "outcome": {
+                "response": stored_result["response"],
+                "run_result": run_result,
+                "observations": observations.model_dump(mode="json"),
+                "trajectory": trajectory.model_dump(mode="json"),
+            },
+            "launches": [],
         },
     )
 
@@ -716,13 +722,12 @@ async def test_a_replacement_from_the_verify_boundary_regrades_without_relaunchi
     await install_episode(
         agent,
         {
+            "v": 1,
             "next": "verify",
             "cookies": {"ng_session": "s"},
             "verify_mode": "wait",
-            "response": stored_response,
-            "run_result": run_result,
-            "observations": None,
-            "trajectory": None,
+            "outcome": {"response": stored_response, "run_result": run_result},
+            "launches": [],
         },
     )
 

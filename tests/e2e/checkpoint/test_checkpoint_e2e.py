@@ -1346,8 +1346,9 @@ async def test_a_harness_interrupted_by_a_checkpoint_continues_after_a_crash(dep
     [snapshot] = at_commit["snapshots"].values()
     assert snapshot["files"]["notes"].splitlines() == lines_at_commit
     [boundary] = harness_boundaries(tmp_path / "ckpt")
-    assert boundary["next"] == "harness" and boundary["interrupted"] is True and boundary["launches"] == 1
-    assert boundary["sandbox_handle"] == box["id"]
+    assert boundary["next"] == "harness" and boundary["resume"] is True
+    assert [launch["ended"] for launch in boundary["launches"]] == ["interrupted"]
+    assert boundary["sandbox"]["descriptor"]["sandbox_id"] == box["id"]
     # The replacement continued in the fork of the snapshot: every line once, in order.
     assert replacement.status_code == 200, replacement.text
     result = replacement.json()
@@ -1385,7 +1386,7 @@ async def test_a_harness_interrupted_by_a_checkpoint_continues_after_the_resume(
     assert after["boxes"][box["id"]]["files"]["notes"].splitlines() == [f"line {i}" for i in range(1, 9)]
     assert len(after["snapshots"]) == 1, "verification kept the snapshot c1 still names"
     [boundary] = harness_boundaries(tmp_path / "ckpt")
-    assert boundary["next"] == "harness" and boundary["interrupted"] is True
+    assert boundary["next"] == "harness" and boundary["resume"] is True
 
 
 async def test_a_harness_relaunched_in_the_sandbox_its_boundary_names_cannot_continue_after_a_restore(
@@ -1409,7 +1410,7 @@ async def test_a_harness_relaunched_in_the_sandbox_its_boundary_names_cannot_con
 
     [snapshot] = at_commit["snapshots"].values()
     [boundary] = harness_boundaries(tmp_path / "ckpt")
-    assert boundary["sandbox_handle"] == box["id"]
+    assert boundary["sandbox"]["descriptor"]["sandbox_id"] == box["id"]
     assert replacement.status_code == 500 and "is stopped" in replacement.text, replacement.text
     [fork] = [b for b in after["boxes"].values() if b["from_snapshot"] == snapshot["id"]]
     assert fork["files"]["notes"] == box["files"]["notes"], "the fork never received the remaining lines"
