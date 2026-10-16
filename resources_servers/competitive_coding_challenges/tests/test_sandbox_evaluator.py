@@ -128,12 +128,14 @@ class TestSandboxLifecycle:
         assert spec.image == "ccc-verifier:test"
         assert spec.env["OMP_NUM_THREADS"] == "4"
         uploads = dict(provider.uploads)
+        # Each verification gets its own directory under the default work dir.
+        call_dir = next(iter(uploads)).removeprefix("/tmp/ccc_verify/").split("/")[0]
         assert set(uploads) == {
-            "/tmp/ccc_verify/ccc_eval.py",
-            "/tmp/ccc_verify/sandbox_runner.py",
-            "/tmp/ccc_verify/request.json",
+            f"/tmp/ccc_verify/{call_dir}/ccc_eval.py",
+            f"/tmp/ccc_verify/{call_dir}/sandbox_runner.py",
+            f"/tmp/ccc_verify/{call_dir}/request.json",
         }
-        request = json.loads(uploads["/tmp/ccc_verify/request.json"])
+        request = json.loads(uploads[f"/tmp/ccc_verify/{call_dir}/request.json"])
         # Only identifiers travel with the request; test data stays in problem_data_dir.
         assert request["problem_file"] == "/data/ccc/comp/toy.jsonl"
         assert request["config"] == _EVALUATOR_CONFIG

@@ -32,7 +32,8 @@ competitive_coding_challenges_resources_server:
           benchmark: competitive-coding
         provider_options:
           # Submissions need no network, and must not fetch answers. OpenSandbox enforces this;
-          # the Docker provider ignores it (set its `network: none` instead).
+          # Docker ignores it (set its `network: none` instead), and Daytona, E2B and OpenShell reject
+          # the key, so remove it for them.
           network_policy:
             defaultAction: deny
             egress: []

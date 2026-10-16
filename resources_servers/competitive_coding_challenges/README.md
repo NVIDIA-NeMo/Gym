@@ -110,6 +110,7 @@ still come from each problem's `run.sh`.
    ```bash
    export CCC_SANDBOX_IMAGE=<registry>/ccc-verifier:<tag>
    gym env start \
+       --model-type openai_model \
        --config resources_servers/competitive_coding_challenges/configs/competitive_coding_challenges.yaml \
        --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
        ++competitive_coding_challenges_resources_server.resources_servers.competitive_coding_challenges.sandbox_provider=sandbox \
@@ -121,7 +122,7 @@ still come from each problem's `run.sh`.
 
    ```yaml
    # ccc_sandbox.yaml
-   # gym env start --config resources_servers/competitive_coding_challenges/configs/competitive_coding_challenges.yaml --config ccc_sandbox.yaml
+   # gym env start --model-type openai_model --config resources_servers/competitive_coding_challenges/configs/competitive_coding_challenges.yaml --config ccc_sandbox.yaml
    config_paths:
      - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 
@@ -149,11 +150,13 @@ still come from each problem's `run.sh`.
    Keys left out keep the server's defaults, such as `resources` (8 CPUs, 16 GiB) and the
    deny-all `network_policy`.
 
-   `num_parallel_requests` caps concurrent sandboxes. Time limits are wall-clock, so
-   `test_batch_size` may not exceed `sandbox_config.resources.cpu` (8 by default); Communication
-   tasks run a manager and the submission per test, so about half the CPUs keeps them from
-   competing. The default `sandbox_config.provider_options.network_policy` denies all egress, so
-   submissions cannot reach the network.
+   `num_parallel_requests` caps concurrent sandboxes, so size it to what the provider can run at
+   once. Time limits are wall-clock, so `test_batch_size` may not exceed
+   `sandbox_config.resources.cpu` (8 by default); Communication tasks run a manager and the
+   submission per test, so about half the CPUs keeps them from competing. The default
+   `sandbox_config.provider_options.network_policy` is an OpenSandbox option that denies all
+   egress. Other providers need their own setting (Docker's `network: none`), and Daytona, E2B and
+   OpenShell reject the key, so remove it for them.
 
    The sandbox must let `run.sh` raise the stack limit (`ulimit -s unlimited`): its hard
    `RLIMIT_STACK` must be unlimited, or the process needs `CAP_SYS_RESOURCE`. Otherwise
@@ -162,8 +165,8 @@ still come from each problem's `run.sh`.
 
 A failure of the sandbox itself, not of the submission, returns `mask_sample: true` with
 `failure_kind` set to `provider_unavailable` (the sandbox could not start) or `verifier_error` (the
-runner failed or produced no valid result), and `failure_reason` holding the details. Masked
-samples are excluded from metrics and from training.
+runner failed or produced no valid result), and `failure_reason` holding the details. Gym's
+aggregate metrics leave masked samples out; whether training skips them is up to the trainer.
 
 ## Generating Rollouts
 
