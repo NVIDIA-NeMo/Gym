@@ -8,7 +8,7 @@ import logging
 import shlex
 import tarfile
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
 from nemo_gym.sandbox import AsyncSandbox
@@ -30,12 +30,36 @@ def _pack(source: Path, archive: Path) -> None:
             tar.add(child, arcname=child.name)
 
 
-def _unpack(archive: Path, target: Path, *, names: tuple[str, ...] | None = None, skip_unsafe: bool = False) -> None:
+def _unpack(
+    archive: Path,
+    target: Path,
+    *,
+    names: tuple[str, ...] | None = None,
+    skip_unsafe: bool = False,
+    links: str = "data",
+) -> None:
+    """Extract ``archive`` into ``target``.
+
+    ``links="data"`` applies :func:`tarfile.data_filter`, which refuses links that point outside the
+    extraction root: right for verifier output that is read on this host. ``links="keep"`` applies
+    :func:`tarfile.tar_filter` instead, which keeps symbolic links as links wherever they point (an
+    agent's virtualenv links to ``/usr/bin/python3``): right for artifacts that only pass through
+    this host on their way into another sandbox, where they are re-archived and never followed.
+    Hard links are created on this host whatever the mode, so their target must stay inside
+    ``target`` in both modes, as must every member's own path. In ``"keep"`` mode files and folders
+    are made readable by their owner (as ``data_filter`` does), so a tree the agent left unreadable
+    can still be re-archived.
+    """
+
     def safe_member(member: tarfile.TarInfo, destination: str) -> tarfile.TarInfo | None:
         if names is not None and member.name.removeprefix("./") not in names:
             return None
+        strict = links == "data" or member.islnk()
         try:
-            return tarfile.data_filter(member, destination)
+            member = (tarfile.data_filter if strict else tarfile.tar_filter)(member, destination)
+            if member is not None and not strict and (member.isfile() or member.isdir()):
+                member = member.replace(mode=member.mode | (0o700 if member.isdir() else 0o600))
+            return member
         except tarfile.FilterError:
             if not skip_unsafe:
                 raise
@@ -98,8 +122,13 @@ async def download_dir(
     timeout_s: float = 600,
     names: tuple[str, ...] | None = None,
     skip_unsafe: bool = False,
+    links: str = "data",
 ) -> None:
-    """Copy the contents of ``source`` inside the sandbox into the local ``target`` folder."""
+    """Copy the contents of ``source`` inside the sandbox into the local ``target`` folder.
+
+    ``links`` is passed to :func:`_unpack`: ``"keep"`` for artifacts that are restored into another
+    sandbox, ``"data"`` (the default) for files read on this host.
+    """
     target.mkdir(parents=True, exist_ok=True)
     remote = f"/tmp/.nemo-gym-download-{uuid4().hex}.tar.gz"
     command = f"tar -czf {remote} -C {shlex.quote(source)} ."
@@ -118,6 +147,41 @@ async def download_dir(
         with tempfile.TemporaryDirectory() as tmp:
             archive = Path(tmp) / "download.tar.gz"
             await sandbox.download(remote, archive)
-            await asyncio.to_thread(_unpack, archive, target, names=names, skip_unsafe=skip_unsafe)
+            await asyncio.to_thread(_unpack, archive, target, names=names, skip_unsafe=skip_unsafe, links=links)
     finally:
         await _exec_as_root(sandbox, f"rm -f {remote}", timeout_s=60)
+
+
+async def remote_kind(sandbox: AsyncSandbox, path: str) -> str | None:
+    """``"dir"``, ``"file"`` or ``None`` for a path inside the sandbox."""
+    quoted = shlex.quote(path)
+    result = await sandbox.exec(
+        f"if [ -d {quoted} ]; then echo dir; elif [ -e {quoted} ]; then echo file; else echo none; fi", timeout_s=60
+    )
+    kind = (result.stdout or "").strip().splitlines()[-1:] or ["none"]
+    return None if result.return_code or kind[0] == "none" else kind[0]
+
+
+async def download_path(
+    sandbox: AsyncSandbox, source: str, target: Path, *, timeout_s: float = 600, links: str = "data"
+) -> str | None:
+    """Copy a file or directory out of the sandbox; returns what it was, or ``None`` when absent."""
+    kind = await remote_kind(sandbox, source)
+    if kind == "dir":
+        await download_dir(sandbox, source, target, timeout_s=timeout_s, links=links)
+    elif kind == "file":
+        target.parent.mkdir(parents=True, exist_ok=True)
+        await sandbox.download(source, target)
+    return kind
+
+
+async def upload_path(sandbox: AsyncSandbox, source: Path, target: str, *, timeout_s: float = 600) -> None:
+    """Copy a local file or directory into the sandbox at ``target``, creating parents."""
+    if source.is_dir():
+        await upload_dir(sandbox, source, target, timeout_s=timeout_s)
+        return
+    parent = str(PurePosixPath(target).parent)
+    result = await sandbox.exec(f"mkdir -p {shlex.quote(parent)}", timeout_s=60)
+    if result.return_code:
+        raise SandboxTransferError(f"Could not create {parent}: {result.stderr or result.stdout}")
+    await sandbox.upload(source, target)
