@@ -52,9 +52,11 @@ This produces `data/workplace_assistant/{train,validation}.jsonl`.
 ```bash
 for split in train validation; do
     f=data/workplace_assistant/$split.jsonl
-    jq -c '. + {agent_ref: {type: "responses_api_agents", name: .task_source}}' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+    jq -c '.agent_ref //= {type: "responses_api_agents", name: .task_source}' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
 done
 ```
+
+This preserves an existing `agent_ref`, including rows collated by older Gym versions that do not have `task_source`.
 
 For an environment that declares its datasets on its resources server, `task_source` names the resources server; set `name` to the agent instance that `gym env start` prints for it instead.
 
