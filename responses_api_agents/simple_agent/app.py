@@ -80,6 +80,7 @@ from nemo_gym.server_utils import (
     rollout_path_prefix,
 )
 from nemo_gym.server_utils import request as http_request
+from nemo_gym.session_routing import SESSION_OWNER_HEADER
 from nemo_gym.tool_access import DirectHTTPToolAccess, MCPToolAccess
 
 
@@ -826,13 +827,18 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             await boundary({"next": "loop", "cookies": _cookie_values(cookies), "verify_mode": verify_mode})
             # The turn loop parks at its own boundaries and continues from them after a restore.
             # It is the /run's one activation: a restore after its reply invokes it again and gets the same reply.
+            # Its activation is tracked by this worker, which holds the episode, so the call comes back here.
+            owner = getattr(request.app.state, "nemo_gym_routing_id", None) if legacy_run is not None else None
+            headers = {AGENT_ACTIVATION_HEADER: "1"} if legacy_run is not None else {}
+            if owner is not None:
+                headers[SESSION_OWNER_HEADER] = owner
             async with step("replay"):
                 response = await self.server_client.post(
                     server_name=self.config.name,
                     url_path=self.url_path_for_run("/v1/responses", body),
                     json=self._strip_resource_only_metadata(body.responses_create_params),
                     cookies=cookies,
-                    headers={AGENT_ACTIVATION_HEADER: "1"} if legacy_run is not None else {},
+                    headers=headers,
                 )
                 await raise_for_status(response)
                 model_response_json = await get_response_json(response)
@@ -999,4 +1005,5 @@ def _tools_base_url(tool_access: DirectHTTPToolAccess, resources_prefix: str) ->
 if __name__ == "__main__":
     SimpleAgent.run_webserver()
 elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
     app = SimpleAgent.run_webserver()  # noqa: F401

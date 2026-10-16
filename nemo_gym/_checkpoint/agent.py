@@ -40,6 +40,7 @@ from typing import Any, Literal, Optional, Protocol
 from pydantic import JsonValue
 
 from nemo_gym._checkpoint.control import (
+    PARSED_JSON_CONTEXT,
     CheckpointParticipant,
     CheckpointRecord,
     CheckpointRequest,
@@ -51,6 +52,7 @@ from nemo_gym._checkpoint.errors import AdmissionClosedError, ControlError, Roll
 from nemo_gym._checkpoint.steps import Boundary, EpisodeSteps, StepMode
 from nemo_gym.episode_types import EpisodeId
 from nemo_gym.rollout_correlation import RolloutContextMiddleware, maybe_rollout_id_from_run_body
+from nemo_gym.server_utils import current_session_id
 
 
 BoundarySnapshot = Callable[[], dict[str, JsonValue]]
@@ -64,6 +66,10 @@ class AgentSessionRecord(CheckpointRecord):
     boundary: Optional[JsonPayload] = None
     # A legacy /run episode's own boundary (which protocol step is next); None for native sessions.
     episode: Optional[JsonPayload] = None
+    # With several workers, the worker ID in the session's cookie (see nemo_gym.session_routing).
+    owner: Optional[str] = None
+    # The session ID in the session's cookie, which routes a restored session whose cookie names no worker.
+    session_id: Optional[str] = None
 
 
 class ActivationOutOfOrderError(ControlError):
@@ -131,6 +137,8 @@ class AgentSessionHooks(Protocol):
 class _Session:
     key: str
     episode_id: EpisodeId
+    owner: Optional[str] = None
+    session_id: Optional[str] = None
     state: Literal["idle", "running", "at_boundary"] = "idle"
     park_requested: bool = False
     boundary: Optional[BoundarySnapshot] = None
@@ -196,6 +204,14 @@ class AgentSessionParticipant(CheckpointParticipant):
         self._restart_calls = _RestartCalls(self.notify)
         self._open = asyncio.Event()
         self._open.set()
+        # With several workers: this worker's routing owner, and where restored legacy episodes are claimed.
+        self.owner: Optional[str] = None
+        self.claim_restored: Optional[Callable[[str], Awaitable[Optional[dict[str, Any]]]]] = None
+
+    @staticmethod
+    def claim_key(record: CheckpointRecord) -> Optional[str]:
+        # A legacy /run episode lives inside its /run; a native session spans requests.
+        return record.session_key if record.episode is not None else None
 
     # -- sessions and activations ---------------------------------------------------------------
 
@@ -258,7 +274,7 @@ class AgentSessionParticipant(CheckpointParticipant):
             return
         if not self.accepting and not (seed and session_key in self._seeding):
             raise AdmissionClosedError("agent admission is closed for a checkpoint")
-        self._add(_Session(key=session_key, episode_id=episode_id))
+        self._add(_Session(key=session_key, episode_id=episode_id, owner=self.owner, session_id=current_session_id()))
 
     def has_session(self, session_key: str) -> bool:
         return session_key in self._sessions
@@ -306,6 +322,7 @@ class AgentSessionParticipant(CheckpointParticipant):
     @asynccontextmanager
     async def legacy_run(self, session_key: str, episode_id: EpisodeId) -> AsyncIterator[LegacyRun]:
         """Hold one legacy ``/run`` episode and its turn-loop session."""
+        await self._claim(session_key, episode_id)
         self.open_session(session_key, episode_id)
         session = self._sessions[session_key]
         # This /run claims a restored episode whatever step it continues at, so a commit no longer retires it.
@@ -316,6 +333,32 @@ class AgentSessionParticipant(CheckpointParticipant):
         finally:
             self._remove(session)
             await self.legacy_episodes.end(session_key)
+
+    async def _claim(self, session_key: str, episode_id: EpisodeId) -> None:
+        """Take a restored legacy episode from the coordinator, if there is one, and install it here."""
+        if self.claim_restored is None or session_key in self._sessions:
+            return
+        self.retired.check(episode_id)
+        claimed = await self.claim_restored(session_key)
+        if claimed is None:
+            return
+        # Read back from storage and parsed from the coordinator's reply: its payloads are JSON.
+        record = AgentSessionRecord.model_validate(claimed, context=PARSED_JSON_CONTEXT)
+        restored = RestoredAgentSession(
+            session_key=session_key, episode_id=next_attempt(record.episode_id), session=record.session
+        )
+        # Registered before the agent's hook runs, so a checkpoint that closes meanwhile still exports it.
+        session = _Session(
+            key=session_key, episode_id=restored.episode_id, owner=record.owner, continuation=record.boundary
+        )
+        self._add(session)
+        self._restored_episodes[session_key] = record.episode
+        try:
+            await self.hooks.restore_agent_sessions([restored])
+        except BaseException:
+            self._remove(session)
+            self._restored_episodes.pop(session_key, None)
+            raise
 
     def check_session(self, session_key: str, episode_id: EpisodeId) -> None:
         """Refuse a request of ``episode_id`` for a session that is not open or belongs to another attempt.
@@ -582,6 +625,8 @@ class AgentSessionParticipant(CheckpointParticipant):
                 boundary=boundary,
                 # A restored legacy episode whose replacement /run has not started keeps its restored step.
                 episode=legacy.get(session.key, self._restored_episodes.get(session.key)),
+                owner=session.owner,
+                session_id=session.session_id,
             )
             for session, boundary in zip(sessions, boundaries)
         ]
@@ -611,6 +656,8 @@ class AgentSessionParticipant(CheckpointParticipant):
                 _Session(
                     key=session.session_key,
                     episode_id=session.episode_id,
+                    owner=record.owner,
+                    session_id=record.session_id,
                     continuation=record.boundary,
                     restored_pending=True,
                 )
