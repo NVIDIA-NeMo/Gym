@@ -25,6 +25,7 @@ import base64
 import io
 import tarfile
 import tempfile
+import time
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -75,7 +76,14 @@ class BrowsecompSandboxedAgentConfig(BrowsecompAgentConfig):
 class _RolloutSandbox:
     sandbox: Optional[AsyncSandbox] = None
     synced: int = 0  # pages already copied into the sandbox
+    bash_calls: int = 0
+    started_at: Optional[float] = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+
+def _sandbox_label(sandbox: AsyncSandbox) -> str:
+    handle = getattr(sandbox, "_handle", None)
+    return f"provider={getattr(handle, 'provider_name', '?')} id={getattr(handle, 'sandbox_id', '?')}"
 
 
 _ROLLOUT: ContextVar[Optional[_RolloutSandbox]] = ContextVar("browsecomp_sandboxed_rollout", default=None)
@@ -116,10 +124,17 @@ class BrowsecompSandboxedAgent(BrowsecompAgent):
             # Shielded: a cancelled run must still release its sandbox, not leave it to the TTL.
             with CancelScope(shield=True):
                 if state.sandbox is not None:
+                    status = "ok"
                     try:
                         await state.sandbox.stop()
                     except Exception as e:
-                        print(f"[browsecomp_sandboxed] sandbox stop failed: {e!r}", flush=True)
+                        status = f"failed:{e!r}"
+                    lifetime = time.monotonic() - state.started_at if state.started_at is not None else -1.0
+                    print(
+                        f"[browsecomp_sandboxed][sandbox_stop] {_sandbox_label(state.sandbox)} status={status} "
+                        f"lifetime_s={lifetime:.1f} bash_calls={state.bash_calls} pages={state.synced}",
+                        flush=True,
+                    )
 
     async def responses(
         self,
@@ -154,7 +169,15 @@ class BrowsecompSandboxedAgent(BrowsecompAgent):
         if not sync["enabled"]:
             return _WORKSPACE_DISABLED
         if state.sandbox is None:
+            started = time.monotonic()
             state.sandbox = await self._start_sandbox()
+            state.started_at = time.monotonic()
+            print(
+                f"[browsecomp_sandboxed][sandbox_start] {_sandbox_label(state.sandbox)} "
+                f"start_s={state.started_at - started:.1f}",
+                flush=True,
+            )
+        state.bash_calls += 1
         root = self.config.sandbox_root
         if sync["files"]:
             pages = {f["path"]: f["content"].encode() for f in sync["files"]}

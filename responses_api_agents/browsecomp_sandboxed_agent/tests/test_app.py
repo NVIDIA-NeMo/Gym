@@ -169,7 +169,7 @@ async def rollout(request):
             await state.sandbox.stop()
 
 
-async def test_bash_runs_in_sandbox_on_synced_pages(tmp_path, rollout) -> None:
+async def test_bash_runs_in_sandbox_on_synced_pages(tmp_path, rollout, capsys) -> None:
     fake = _FakeServerClient(
         [[_fn_call("bash_command", {"keystrokes": "grep -h David pages/*.txt"}, "c1")], [_answer()]],
         pages_by_call=[[PAGE_1]],
@@ -182,6 +182,7 @@ async def test_bash_runs_in_sandbox_on_synced_pages(tmp_path, rollout) -> None:
     assert _tool_outputs(result) == ["David Pemantle 1983\n\n[exit_code=0]"]
     assert fake.tool_paths == []  # bash never reached the resources server
     assert SANDBOX_KEY_METADATA not in (fake.model_bodies[0].metadata or {})
+    assert "[browsecomp_sandboxed][sandbox_start] provider=local" in capsys.readouterr().out
 
 
 async def test_one_sandbox_per_rollout_with_incremental_sync(tmp_path, rollout) -> None:
@@ -244,7 +245,7 @@ async def test_sandbox_timeout_matches_host_message(tmp_path, rollout) -> None:
     assert _tool_outputs(result) == ["[command timed out after 5s]\n[exit_code=-1]"]
 
 
-async def test_run_tags_the_rollout_and_stops_its_sandbox(tmp_path, monkeypatch) -> None:
+async def test_run_tags_the_rollout_and_stops_its_sandbox(tmp_path, monkeypatch, capsys) -> None:
     agent = _make_agent(tmp_path, _FakeServerClient([], pages_by_call=[]))
     seen = {}
     stub = MagicMock()
@@ -253,7 +254,8 @@ async def test_run_tags_the_rollout_and_stops_its_sandbox(tmp_path, monkeypatch)
     async def fake_base_run(self, request, body):
         key = body.responses_create_params.metadata[SANDBOX_KEY_METADATA]
         seen["key"] = key
-        self._rollouts[key].sandbox = stub
+        state = self._rollouts[key]
+        state.sandbox, state.bash_calls, state.synced = stub, 3, 7
         return "verify-response"
 
     monkeypatch.setattr(BrowsecompAgent, "run", fake_base_run)
@@ -264,3 +266,5 @@ async def test_run_tags_the_rollout_and_stops_its_sandbox(tmp_path, monkeypatch)
     assert seen["key"]
     stub.stop.assert_awaited_once()
     assert agent._rollouts == {}
+    stop_line = next(line for line in capsys.readouterr().out.splitlines() if "[sandbox_stop]" in line)
+    assert "bash_calls=3" in stop_line and "pages=7" in stop_line and "status=ok" in stop_line
