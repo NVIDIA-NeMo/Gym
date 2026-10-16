@@ -95,6 +95,7 @@ from nemo_gym.rollout_collection import (
     migrate_invalid_judge_main_rows,
 )
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
+from nemo_gym.rollout_observability import NG_AGENT_SANDBOX_OBSERVATION_KEY, SandboxObservation
 from nemo_gym.telemetry.gym_metrics import ROLLOUT_COMPLETED_INSTRUMENT
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.token_id_capture import (
@@ -2066,6 +2067,15 @@ class TestRolloutCollection:
         )
         output_jsonl_fpath = tmp_path / "output.jsonl"
         aggregated: dict[str, list[dict]] = {}
+        observation = SandboxObservation(
+            role="agent",
+            provider="opensandbox",
+            sandbox_id="agent-sandbox",
+            phase="agent_execution",
+            outcome="oom",
+            error_type="SandboxOOMKilledError",
+            error_message="OpenSandbox confirmed OOMKilled; sandbox_id='agent-sandbox'",
+        )
 
         async def post(server_name: str, url_path: str, json: dict, **kwargs):
             if url_path == "/run":
@@ -2077,8 +2087,14 @@ class TestRolloutCollection:
                             "mask_sample": False,
                             "failure_kind": PROVIDER_OOM_KILLED,
                             "failure_reason": "OpenSandbox confirmed OOMKilled after agent dispatch",
-                            "agent_sandbox_oom_killed": True,
-                            "response": {"output": []},
+                            "response": {
+                                "output": [],
+                                "metadata": {NG_AGENT_SANDBOX_OBSERVATION_KEY: observation.model_dump_json()},
+                            },
+                            "ng_agent_observations": {
+                                "source": "opencode",
+                                "records": [observation.model_dump(mode="json")],
+                            },
                         },
                     )
                 return FakeResponse(200, {"reward": 1.0, "response": {"output": []}})
@@ -2102,7 +2118,11 @@ class TestRolloutCollection:
         oom_row = next(row for row in persisted if row["reward"] == 0.0)
         assert oom_row["failure_kind"] == PROVIDER_OOM_KILLED
         assert oom_row["mask_sample"] is False
-        assert oom_row["agent_sandbox_oom_killed"] is True
+        assert (
+            SandboxObservation.model_validate_json(oom_row["response"]["metadata"][NG_AGENT_SANDBOX_OBSERVATION_KEY])
+            == observation
+        )
+        assert oom_row["ng_agent_observations"]["records"][0]["sandbox_id"] == "agent-sandbox"
         assert _failures_path_for(output_jsonl_fpath).read_bytes() == b""
         assert len(aggregated["verify_responses"]) == 2
         metrics_fpath = output_jsonl_fpath.with_stem(output_jsonl_fpath.stem + "_aggregate_metrics").with_suffix(

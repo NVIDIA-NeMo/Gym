@@ -408,6 +408,18 @@ def test_async_sandbox_initial_file_error_paths() -> None:
     asyncio.run(_assert_async_sandbox_initial_file_error_paths())
 
 
+async def test_sandbox_id_is_available_while_owned_sandbox_is_open() -> None:
+    sandbox = AsyncSandbox(FakeSandboxProvider())
+    assert sandbox.provider_name == "fake"
+    assert sandbox.sandbox_id is None
+
+    await sandbox.start(SandboxSpec(image="image:tag"))
+    assert sandbox.sandbox_id == "fake-1"
+
+    await sandbox.stop()
+    assert sandbox.sandbox_id is None
+
+
 async def _assert_async_sandbox_initial_file_error_paths() -> None:
     failing_provider = FailingUploadProvider()
     failing_sandbox = AsyncSandbox(failing_provider)

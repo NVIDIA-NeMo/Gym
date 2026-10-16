@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 
 
 NG_AGENT_OBSERVATIONS_KEY = "ng_agent_observations"
+NG_AGENT_SANDBOX_OBSERVATION_KEY = "ng_agent_sandbox_observation"
 
 
 class ObservationModel(BaseModel):
@@ -167,6 +168,7 @@ class SandboxObservation(ObservationModel):
     role: Literal["agent", "verifier", "environment"]
     provider: Optional[str] = None
     sandbox_id: Optional[str] = None
+    phase: Optional[str] = None
     outcome: Literal["completed", "failed", "timeout", "oom", "sandbox_error", "cancelled", "unknown"] = "unknown"
     exit_code: Optional[int] = None
     wall_time_s: Optional[float] = Field(default=None, ge=0)
@@ -182,6 +184,7 @@ class SandboxObservation(ObservationModel):
     )
     resource_usage_source: Optional[str] = None
     error_type: Optional[str] = None
+    error_message: Optional[str] = None
 
 
 class ContextCompactionObservation(ObservationModel):

@@ -1186,10 +1186,10 @@ async def test_exec_background_reports_oom_status_after_502(monkeypatch: pytest.
         def __init__(self) -> None:
             self.commands = FakeCommands()
             self.statuses = [
-                SimpleNamespace(state="Running", reason=None, message=None),
+                SimpleNamespace(state="Running", reason="OOMKilled", message="not terminal yet"),
                 SimpleNamespace(
                     state="Failed",
-                    reason="FAILED",
+                    reason="OOMKilled",
                     message="container sandbox terminated with OOMKilled (exit code 137); " + "x" * 1000,
                 ),
             ]
@@ -1219,15 +1219,146 @@ async def test_exec_background_reports_oom_status_after_502(monkeypatch: pytest.
     message = str(exc_info.value)
     assert "OOM-killed" in message
     assert "SandboxResources.memory_mib" not in message
-    assert "reason='FAILED'" in message
+    assert "reason='OOMKilled'" in message
     assert len(message) < 800
     assert isinstance(exc_info.value.__cause__, Backend502Error)
     assert raw.info_calls == 2
 
-    raw.statuses = [SimpleNamespace(state="Failed", reason="FAILED", message="sandbox node was drained")]
-    raw.info_calls = 0
-    with pytest.raises(Backend502Error, match="Get command status failed"):
-        await provider.exec(handle, "retry after non-OOM failure", timeout_s=30)
+
+@pytest.mark.parametrize(
+    ("inspect", "status_code", "evidence"),
+    [
+        (
+            "Pod Name: sandbox-pod\nContainers:\n  sandbox:\n"
+            "    State:          Terminated (exit=137, reason=OOMKilled)\n"
+            "  egress:\n    State:          Running (since today)\n",
+            200,
+            "sandbox State: Terminated (exit=137, reason=OOMKilled)",
+        ),
+        (
+            "Container ID: abc123\nRunning: False\nOOMKilled: True\nExit Code: 137\n",
+            200,
+            "Docker OOMKilled: True",
+        ),
+        (
+            "Pod Name: sandbox-pod\nContainers:\n  sandbox:\n"
+            "    State:          Terminated (exit=137, reason=Error)\n"
+            "    Last State:     Terminated (exit=137, reason=OOMKilled)\n",
+            200,
+            None,
+        ),
+        (
+            "Pod Name: sandbox-pod\nContainers:\n  sandbox:\n"
+            "    State:          Terminated (exit=137, reason=Error)\n"
+            "  egress:\n    State:          Terminated (exit=137, reason=OOMKilled)\n"
+            "Init Containers:\n  setup:\n    State:          Terminated (exit=137, reason=OOMKilled)\n",
+            200,
+            None,
+        ),
+        (
+            "Pod Name: sandbox-pod\nContainers:\n  sandbox:\n"
+            "    State:          Terminated (exit=137, reason=Error)\n"
+            "    Message:        not OOMKilled; exit=137\n",
+            200,
+            None,
+        ),
+        (
+            "Pod Name: sandbox-pod\nContainers:\n  sandbox:\n"
+            "    State:          Terminated (exit=137, reason=OOMKilled)\n"
+            "    State:          Terminated (exit=137, reason=Error)\n",
+            200,
+            None,
+        ),
+        (
+            "Pod Name: sandbox-pod\nContainers:\n  sandbox:\n"
+            "    State:          Terminated (exit=137, reason=OOMKilled)\n",
+            404,
+            None,
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_exec_background_inspect_confirms_only_current_sandbox_oom_after_terminal_502(
+    monkeypatch: pytest.MonkeyPatch, inspect: str, status_code: int, evidence: str | None
+) -> None:
+    from nemo_gym import server_utils
+
+    class Backend502Error(Exception):
+        status_code = 502
+
+    class FakeCommands:
+        async def run(self, command: str, *, opts: Any) -> Any:
+            return SimpleNamespace(id="exec-oom")
+
+        async def get_command_status(self, execution_id: str) -> Any:
+            raise Backend502Error("Get command status failed: HTTP 502")
+
+    class FakeConnectionConfig:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+        def get_base_url(self) -> str:
+            return f"{self.kwargs['protocol']}://{self.kwargs['domain']}/v1"
+
+        def get_api_key(self) -> str:
+            return self.kwargs["api_key"]
+
+    class FakeResponse:
+        def __init__(self) -> None:
+            self.status = status_code
+            self.content = SimpleNamespace(read=AsyncMock(return_value=inspect.encode()))
+
+        async def __aenter__(self) -> Any:
+            return self
+
+        async def __aexit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+            return None
+
+    request = AsyncMock(return_value=FakeResponse())
+    monkeypatch.setattr(server_utils, "request", request)
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (object, FakeConnectionConfig, dict, object, object),
+    )
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={
+            "domain": "https://sandbox.example/prefix/",
+            "api_key": "configured-key",
+            "tls_verify": False,
+            "request_timeout_s": 5,
+        },
+        probe={"command": None},
+        operations={"background_exec": True, "retries": 0},
+    )
+    monkeypatch.setattr(provider, "_get_transport", lambda: object())
+    raw = SimpleNamespace(
+        commands=FakeCommands(),
+        get_info=AsyncMock(
+            return_value=SimpleNamespace(
+                status=SimpleNamespace(state="Failed", reason="ContainerFailed", message="not OOMKilled; exit 137")
+            )
+        ),
+    )
+    handle = opensandbox_provider.SandboxHandle(sandbox_id="sandbox-oom", provider_name="opensandbox", raw=raw)
+
+    if evidence is not None:
+        with pytest.raises(opensandbox_provider.SandboxOOMKilledError, match="inspect confirms") as exc_info:
+            await provider.exec(handle, "allocate memory", timeout_s=30)
+        assert isinstance(exc_info.value.__cause__, Backend502Error)
+        assert evidence in str(exc_info.value)
+    else:
+        with pytest.raises(Backend502Error, match="Get command status failed"):
+            await provider.exec(handle, "allocate memory", timeout_s=30)
+
+    assert raw.get_info.await_count == 1
+    assert request.await_count == 1
+    args, kwargs = request.await_args
+    assert args == ("GET", "https://sandbox.example/prefix/v1/sandboxes/sandbox-oom/diagnostics/inspect")
+    assert kwargs["headers"] == {"OPEN-SANDBOX-API-KEY": "configured-key"}
+    assert kwargs["ssl"] is False
+    assert kwargs["timeout"].total == 2.0
+    assert kwargs["_max_num_tries"] == 1
 
 
 @pytest.mark.parametrize(

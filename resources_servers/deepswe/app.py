@@ -34,9 +34,9 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.failure_kinds import PROVIDER_OOM_KILLED
 from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
+from nemo_gym.rollout_observability import NG_AGENT_SANDBOX_OBSERVATION_KEY, SandboxObservation
+from nemo_gym.sandbox import AsyncSandbox, SandboxOOMKilledError, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.sandbox.providers.opensandbox.provider import SandboxOOMKilledError
 from nemo_gym.server_utils import SESSION_ID_KEY, get_first_server_config_dict, is_nemo_gym_fastapi_entrypoint
 from resources_servers.deepswe.task_store import (
     EXPECTED_TASK_COUNT,
@@ -70,6 +70,7 @@ class DeepSWEResourcesServerConfig(BaseResourcesServerConfig):
     is_verifying_golden_patch: bool = False
     task_cpu_multiplier: float = Field(default=2.0, gt=0)
     task_memory_multiplier: float = Field(default=2.0, gt=0)
+    score_agent_sandbox_oom_as_zero: bool = False
 
     sandbox_provider: str
     sandbox_config: dict[str, Any]
@@ -100,7 +101,6 @@ class DeepSWESeedSessionResponse(BaseSeedSessionResponse):
 
 class DeepSWEVerifyRequest(DeepSWEInstanceRequest, BaseVerifyRequest):
     sandbox_handle: str | None = None
-    agent_sandbox_oom_killed: bool = False
 
 
 class DeepSWEVerifyResponse(BaseVerifyResponse):
@@ -454,8 +454,24 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
         sandbox_handle = body.sandbox_handle
         patch_collection_time_s = 0.0
         patch_error: str | None = None
+        raw_agent_observation = (body.response.metadata or {}).get(NG_AGENT_SANDBOX_OBSERVATION_KEY)
+        agent_oom_observation = None
+        if raw_agent_observation is not None:
+            agent_oom_observation = SandboxObservation.model_validate_json(raw_agent_observation)
+            if (
+                agent_oom_observation.role != "agent"
+                or agent_oom_observation.outcome != "oom"
+                or agent_oom_observation.phase != "agent_execution"
+                or agent_oom_observation.error_type != SandboxOOMKilledError.__name__
+                or not agent_oom_observation.provider
+                or not agent_oom_observation.sandbox_id
+                or not agent_oom_observation.error_message
+            ):
+                raise ValueError("Invalid agent sandbox OOM observation for DeepSWE scoring")
+            if not self.config.score_agent_sandbox_oom_as_zero:
+                raise ValueError("DeepSWE agent sandbox OOM zero scoring is disabled")
 
-        if body.agent_sandbox_oom_killed and (self.config.is_verifying_golden_patch or body.response.output):
+        if agent_oom_observation is not None and (self.config.is_verifying_golden_patch or body.response.output):
             raise ValueError("An agent sandbox OOM zero requires a non-golden run with an empty agent response")
 
         if self.config.is_verifying_golden_patch:
@@ -464,7 +480,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
             model_patch = b""
             agent_session = self._agent_sessions.pop(session_id, None)
             if agent_session is None:
-                if body.agent_sandbox_oom_killed:
+                if agent_oom_observation is not None:
                     raise RuntimeError("Cannot score an agent sandbox OOM without its seeded DeepSWE session")
                 patch_error = f"No DeepSWE agent sandbox exists for session {session_id!r}"
             else:
@@ -481,14 +497,17 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                             f"DeepSWE session image {agent_session.image!r} does not match verify image "
                             f"{current_task_image!r}"
                         )
-                    if body.agent_sandbox_oom_killed:
+                    if agent_oom_observation is not None:
+                        if agent_oom_observation.sandbox_id != agent_session.sandbox_handle:
+                            raise ValueError("Agent sandbox OOM observation does not match the seeded DeepSWE sandbox")
                         patch_error = (
-                            "Agent sandbox was OOM-killed during agent execution; no patch could be collected"
+                            "Agent sandbox was OOM-killed during agent execution; no patch could be collected. "
+                            f"{agent_oom_observation.error_message}"
                         )
                     else:
                         model_patch = await self._collect_model_patch(agent_session.sandbox, task)
                 except Exception as error:
-                    if body.agent_sandbox_oom_killed or isinstance(error, SandboxOOMKilledError):
+                    if agent_oom_observation is not None or isinstance(error, SandboxOOMKilledError):
                         raise
                     print(
                         f"Failed to collect DeepSWE model patch for {current_task_id}: {format_exc()}",
@@ -547,8 +566,8 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 "patch_collection_time_s": patch_collection_time_s,
                 "sandbox_start_time_s": sandbox_start_time_s,
                 "verification_time_s": verification_time_s,
-                "failure_kind": PROVIDER_OOM_KILLED if body.agent_sandbox_oom_killed else None,
-                "failure_reason": patch_error if body.agent_sandbox_oom_killed else None,
+                "failure_kind": PROVIDER_OOM_KILLED if agent_oom_observation is not None else None,
+                "failure_reason": patch_error if agent_oom_observation is not None else None,
             }
         )
 

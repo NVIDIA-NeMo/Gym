@@ -43,7 +43,6 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.failure_kinds import PROVIDER_OOM_KILLED
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -62,6 +61,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.responses_converter import ResponsesConverter
 from nemo_gym.rollout_observability import (
+    NG_AGENT_SANDBOX_OBSERVATION_KEY,
     AgentInvocation,
     AgentObservationBundle,
     ContextCompactionObservation,
@@ -70,7 +70,7 @@ from nemo_gym.rollout_observability import (
     ToolCallObservation,
     TrajectoryRecord,
 )
-from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, create_provider
+from nemo_gym.sandbox import AsyncSandbox, SandboxOOMKilledError, SandboxResources, SandboxSpec, create_provider
 from nemo_gym.sandbox.agent_tools import (
     restricted_network_policy,
     sandbox_server_url,
@@ -78,7 +78,6 @@ from nemo_gym.sandbox.agent_tools import (
     verify_agent_response,
 )
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.sandbox.providers.opensandbox.provider import SandboxOOMKilledError
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import (
     SESSION_ID_KEY,
@@ -445,7 +444,7 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     concurrency: Optional[int] = Field(default=None)
     preinstalled_opencode: bool = False
     execution_failure_reward_zero: bool = False
-    score_agent_sandbox_oom_as_zero: bool = False
+    report_agent_sandbox_oom: bool = False
     output_token_policy: Literal["fixed", "remaining_context"] = "fixed"
     network_access: Literal["inherit", "model_only", "model_and_tools"] = "inherit"
     tool_servers: List[ResourcesServerRef] = Field(default_factory=list)
@@ -529,7 +528,6 @@ class OpenCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
     opencode_exit_code: Optional[int] = None
     opencode_error_type: Optional[str] = None
     opencode_failed: bool = False
-    agent_sandbox_oom_killed: bool = False
     ng_agent_observations: Optional[AgentObservationBundle] = Field(
         default=None,
         exclude_if=lambda value: value is None,
@@ -893,7 +891,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         """
         if ripgrep_remote_path is not None:
             await sandbox.upload(self.config.local_ripgrep_binary_path, ripgrep_remote_path)
-        if self.config.score_agent_sandbox_oom_as_zero:
+        if self.config.report_agent_sandbox_oom:
             setup_result = await sandbox.exec(command=setup_command, timeout_s=self.config.sandbox_timeout)
             if setup_result.return_code != 0 or setup_result.error_type is not None:
                 raise RuntimeError(f"OpenCode setup failed before agent execution: {setup_result}")
@@ -911,11 +909,19 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 timeout_s=self.config.sandbox_timeout,
             )
         except SandboxOOMKilledError as exc:
-            if not self.config.score_agent_sandbox_oom_as_zero:
+            if not self.config.report_agent_sandbox_oom:
                 raise
+            observation = SandboxObservation(
+                role="agent",
+                provider=sandbox.provider_name,
+                sandbox_id=sandbox.sandbox_id,
+                phase="agent_execution",
+                outcome="oom",
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+            )
             self._sandbox_id_to_run_result[request.cookies["sandbox_id"]] = {
                 "opencode_failed": True,
-                "agent_sandbox_oom_killed": True,
                 "opencode_exit_code": None,
                 "opencode_error_type": type(exc).__name__,
                 "opencode_results_fpath": "",
@@ -923,6 +929,20 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 "opencode_run_stderr": str(exc),
                 "opencode_export_found": False,
                 "opencode_finished": False,
+                "_ng_agent_observations": AgentObservationBundle(
+                    source="opencode",
+                    records=(
+                        [
+                            AgentInvocation(
+                                invocation_id=observation_invocation_id, status="failed", error_type="server_error"
+                            )
+                        ]
+                        if observation_invocation_id is not None
+                        else []
+                    )
+                    + [observation],
+                    gaps=[ObservationGap(code="observation_capture_failed")],
+                ),
             }
             return NeMoGymResponse(
                 id=f"resp_{uuid4().hex}",
@@ -930,9 +950,11 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 model=body.model or self.config.model_server.name,
                 object="response",
                 output=[],
+                status="failed",
                 tool_choice=body.tool_choice,
                 tools=body.tools,
                 parallel_tool_calls=body.parallel_tool_calls,
+                metadata={NG_AGENT_SANDBOX_OBSERVATION_KEY: observation.model_dump_json()},
             )
         except Exception as exc:
             result = None
@@ -1190,20 +1212,18 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             run_result = self._sandbox_id_to_run_result.get(session_key, {}).copy()
             observations = run_result.pop("_ng_agent_observations", None)
             trajectory = run_result.pop("_ng_trajectory", None)
-            agent_sandbox_oom_killed = run_result.get("agent_sandbox_oom_killed", False)
-            verification_body = body.model_copy(update={"agent_sandbox_oom_killed": agent_sandbox_oom_killed})
             response_dict = await verify_agent_response(
                 self.server_client,
                 self.config.resources_server,
-                verification_body,
+                body,
                 response,
                 cookies,
-                force_zero_reward=agent_sandbox_oom_killed
-                or (self.config.execution_failure_reward_zero and run_result.get("opencode_failed", False)),
+                force_zero_reward=(
+                    self.config.execution_failure_reward_zero
+                    and run_result.get("opencode_failed", False)
+                    and run_result.get("opencode_error_type") != "SandboxOOMKilledError"
+                ),
             )
-            if agent_sandbox_oom_killed:
-                response_dict["failure_kind"] = PROVIDER_OOM_KILLED
-                response_dict["failure_reason"] = run_result["opencode_run_stderr"]
         finally:
             del request.state._ng_observation_invocation_id
             del request.state._ng_opencode_mcp

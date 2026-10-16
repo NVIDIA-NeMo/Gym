@@ -26,15 +26,17 @@ from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any, Awaitable, Callable, Literal
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from nemo_gym.sandbox.attribution import RUN_KEY, log_attribution_once, resolve_attribution, resolve_run_id
 from nemo_gym.sandbox.providers.base import (
+    SandboxBackendUnreachableError,
     SandboxCreateError,
     SandboxCreateVerificationError,
     SandboxEndpoint,
     SandboxExecResult,
     SandboxHandle,
+    SandboxOOMKilledError,
     SandboxPtyError,
     SandboxPtySession,
     SandboxPtySpec,
@@ -80,22 +82,55 @@ class OpenSandboxCreateVerificationError(SandboxCreateVerificationError):
     """Raised when a newly-created sandbox cannot execute a probe command."""
 
 
-class SandboxBackendUnreachableError(RuntimeError):
-    """Raised when the server proxy cannot open a TCP connection to a sandbox's exec daemon.
-
-    A submission 502 means the command never started. A status or log polling
-    502 can mean the backend died while the command was running.
-    """
-
-
-class SandboxOOMKilledError(SandboxBackendUnreachableError):
-    """The OpenSandbox control plane confirmed that the sandbox was OOM-killed."""
-
-
 @dataclass(frozen=True)
 class _SandboxDeathNotice:
     message: str
-    oom_killed: bool
+    outcome: Literal["oom", "other_terminal"]
+
+
+def _inspect_oom_evidence(inspect: str) -> str | None:
+    """Read only the current user container state from OpenSandbox inspect text."""
+    lines = inspect.splitlines()
+    if sum(line == "Containers:" for line in lines) == 1:
+        in_containers = False
+        container: str | None = None
+        sandbox_count = 0
+        sandbox_states: list[str] = []
+        for line in lines:
+            if line == "Containers:":
+                in_containers = True
+                container = None
+            elif in_containers and line and not line.startswith(" "):
+                in_containers = False
+            elif in_containers:
+                header = re.fullmatch(r"  ([^:\s]+):", line)
+                if header is not None:
+                    container = header.group(1)
+                    if container == "sandbox":
+                        sandbox_count += 1
+                elif container == "sandbox" and (state := re.fullmatch(r"    State:\s+(.+)", line)):
+                    sandbox_states.append(state.group(1))
+        if (
+            sandbox_count == 1
+            and len(sandbox_states) == 1
+            and re.fullmatch(r"Terminated \(exit=\d+, reason=OOMKilled\)", sandbox_states[0]) is not None
+        ):
+            return f"sandbox State: {sandbox_states[0]}"
+        return None
+
+    # Docker inspect describes one sandbox container, not a Pod with sidecars.
+    oom_lines = [line for line in lines if line.startswith("OOMKilled:")]
+    running_lines = [line for line in lines if line.startswith("Running:")]
+    if (
+        not any(line == "Containers:" for line in lines)
+        and sum(line.startswith("Container ID:") for line in lines) == 1
+        and len(running_lines) == 1
+        and re.fullmatch(r"Running:\s+False", running_lines[0]) is not None
+        and len(oom_lines) == 1
+        and re.fullmatch(r"OOMKilled:\s+True", oom_lines[0]) is not None
+    ):
+        return "Docker OOMKilled: True"
+    return None
 
 
 RETRYABLE_HTTP_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
@@ -1760,16 +1795,51 @@ class OpenSandboxProvider:
         except Exception as error:
             if not isinstance(error, SandboxBackendUnreachableError) and _exception_status_code(error) != 502:
                 raise
-            notice = await self._sandbox_death_notice(handle)
+            notice = await self._sandbox_death_notice(handle, any_death=True)
             if notice is not None:
-                error_type = SandboxOOMKilledError if notice.oom_killed else SandboxBackendUnreachableError
-                raise error_type(notice.message) from error
+                if notice.outcome == "oom":
+                    raise SandboxOOMKilledError(notice.message) from error
+                if evidence := await self._control_plane_inspect_oom_evidence(handle):
+                    raise SandboxOOMKilledError(
+                        f"Sandbox was OOM-killed: inspect confirms {evidence}. {notice.message}"
+                    ) from error
             raise
+
+    async def _control_plane_inspect_oom_evidence(self, handle: SandboxHandle) -> str | None:
+        """Check the control plane's deprecated plain-text inspect route after terminal backend loss."""
+        import aiohttp
+
+        from nemo_gym import server_utils
+
+        config = self._connection_config(request_timeout_s=2.0)
+        url = f"{config.get_base_url().rstrip('/')}/sandboxes/{quote(handle.sandbox_id, safe='')}/diagnostics/inspect"
+        api_key = config.get_api_key()
+        headers = {"OPEN-SANDBOX-API-KEY": api_key} if api_key else {}
+        try:
+            response = await server_utils.request(
+                "GET",
+                url,
+                _control=True,
+                _max_num_tries=1,
+                _server_name="opensandbox_control_plane",
+                headers=headers,
+                ssl=self._connection.tls_verify,
+                timeout=aiohttp.ClientTimeout(total=2.0),
+            )
+            async with response:
+                if response.status != 200:
+                    return None
+                body = await response.content.read(65537)
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            return None
+        if len(body) > 65536:
+            return None
+        return _inspect_oom_evidence(body.decode("utf-8", errors="replace"))
 
     async def _sandbox_death_notice(
         self, handle: SandboxHandle, *, any_death: bool = False
     ) -> _SandboxDeathNotice | None:
-        """Briefly poll the sandbox status; describe an OOM kill, else None.
+        """Briefly poll the sandbox status; describe a terminal state, else None.
 
         With ``any_death`` every terminal state is reported, not just an OOM
         kill — for callers that need to know whether the sandbox is gone at
@@ -1798,10 +1868,19 @@ class OpenSandboxProvider:
                 f"OpenSandbox status: state={state!r}, reason={reason!r}, message={str(message or '')[:500]!r}; "
                 f"sandbox_id={handle.sandbox_id!r}"
             )
-            if re.search(r"\boom[\s_-]*killed\b|\bout of memory\b", f"{reason} {message}", re.IGNORECASE):
-                return _SandboxDeathNotice(f"Sandbox was OOM-killed. {status_text}", oom_killed=True)
-            if message and _to_sandbox_status(state) in {SandboxStatus.ERROR, SandboxStatus.STOPPED}:
-                return _SandboxDeathNotice(f"Sandbox is dead. {status_text}", oom_killed=False) if any_death else None
+            terminal = _to_sandbox_status(state) in {SandboxStatus.ERROR, SandboxStatus.STOPPED}
+            if (
+                terminal
+                and isinstance(reason, str)
+                and re.fullmatch(r"oom[\s_-]*killed", reason.strip(), re.IGNORECASE)
+            ):
+                return _SandboxDeathNotice(f"Sandbox was OOM-killed. {status_text}", outcome="oom")
+            if terminal:
+                return (
+                    _SandboxDeathNotice(f"Sandbox is dead. {status_text}", outcome="other_terminal")
+                    if any_death
+                    else None
+                )
             await asyncio.sleep(min(0.5, max(0.0, deadline - asyncio.get_running_loop().time())))
         return None
 

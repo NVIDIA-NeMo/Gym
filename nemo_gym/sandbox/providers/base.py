@@ -232,6 +232,14 @@ class SandboxCreateVerificationError(SandboxCreateError):
     """Raised when a newly-created sandbox fails provider readiness checks."""
 
 
+class SandboxBackendUnreachableError(RuntimeError):
+    """The sandbox backend became unreachable while submitting or running a command."""
+
+
+class SandboxOOMKilledError(SandboxBackendUnreachableError):
+    """The provider confirmed that the sandbox was OOM-killed."""
+
+
 class SandboxProvider(Protocol):
     """Runtime/infra provider contract used by the public sandbox API."""
 
