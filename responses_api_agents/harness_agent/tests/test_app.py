@@ -172,6 +172,25 @@ def test_sandbox_model_url_prefers_backend_base_url_and_strips_v1():
     assert url == "http://vllm-node:9000"
 
 
+def test_sandbox_model_url_spreads_rollouts_over_endpoints():
+    agent = _make_agent()
+    agent.server_client.global_config_dict = MagicMock()
+    endpoints = ["http://vllm-a:8000/v1", "http://vllm-b:8000/v1", "http://vllm-c:8000/v1"]
+    with patch(
+        "responses_api_agents.harness_agent.app.get_first_server_config_dict", return_value={"base_url": endpoints}
+    ):
+        urls = [agent._sandbox_model_url(MagicMock()) for _ in range(6)]
+    assert urls == ["http://vllm-a:8000", "http://vllm-b:8000", "http://vllm-c:8000"] * 2
+
+
+def test_sandbox_model_url_override_may_list_endpoints():
+    agent = _make_agent(sandbox_model_base_url=["http://gw-1:8000/v1", "http://gw-2:8000/v1"])
+    with patch("responses_api_agents.harness_agent.app.get_first_server_config_dict") as get_config:
+        urls = [agent._sandbox_model_url(MagicMock()) for _ in range(3)]
+    assert urls == ["http://gw-1:8000", "http://gw-2:8000", "http://gw-1:8000"]
+    get_config.assert_not_called()
+
+
 @pytest.mark.parametrize("hostname", ["sandbox-gateway", "localhost"])
 def test_sandbox_model_url_uses_explicit_override(hostname):
     agent = _make_agent(sandbox_model_base_url=f"http://{hostname}:8000/v1")
