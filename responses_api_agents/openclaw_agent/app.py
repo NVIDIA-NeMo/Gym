@@ -18,6 +18,7 @@ import contextlib
 import copy
 import json
 import logging
+import math
 import os
 import re
 import shlex
@@ -35,6 +36,7 @@ from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field, PrivateAttr
 
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
+from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
@@ -626,6 +628,8 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             value = getattr(body, name)
             if name in ("stream", "background") and value is False:
                 continue
+            if name == "metadata" and value and set(value) <= {AGENT_TIMEOUT_METADATA_KEY}:
+                continue
             if value != field.get_default(call_default_factory=True):
                 raise HTTPException(422, f"OpenClaw sandbox execution does not support request field {name}")
         items = (
@@ -682,6 +686,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 "plugins": {"enabled": False},
             }
         )
+        timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
         command = [
             f"{state.runtime}/node/bin/node",
             f"{state.runtime}/openclaw/node_modules/openclaw/openclaw.mjs",
@@ -699,7 +704,8 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             "--message-file",
             f"{state.session.session_dir}/prompt.txt",
             "--timeout",
-            str(self.config.timeout),
+            # OpenClaw accepts integer seconds; the supervisor enforces the exact task budget.
+            str(math.ceil(timeout)),
         ]
         payload = {
             "config": session_config,
@@ -708,20 +714,18 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             "prompt": f"{system}\n\n{prompt}" if system else prompt,
             "cwd": state.session.workdir,
             "env": {
-                "HOME": f"{state.session.session_dir}/home",
-                "XDG_CACHE_HOME": f"{state.session.session_dir}/home/.cache",
                 "OPENCLAW_STATE_DIR": f"{state.session.session_dir}/home/.openclaw",
                 "OPENCLAW_CONFIG_PATH": f"{state.session.session_dir}/home/.openclaw/openclaw.json",
                 "OPENCLAW_TELEMETRY": "0",
                 "CLAWHUB_DISABLE_TELEMETRY": "1",
                 "OPENCLAW_EXEC_SHELL_SNAPSHOT": "0",
+                # The supervisor must retain the CLI in its process group.
+                "OPENCLAW_NO_RESPAWN": "1",
             },
         }
         try:
             async with self.sem:
-                await state.execute(
-                    payload, timeout=self.config.timeout, close_timeout=self.config.session_close_timeout_seconds
-                )
+                await state.execute(payload, timeout=timeout, close_timeout=self.config.session_close_timeout_seconds)
         except BaseException:
             # Cancellation/cleanup failure still leaves useful transcript evidence
             # for the subsequent close. Never convert uncertain cleanup to success.
@@ -735,6 +739,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             # Preserve the transcript in session observations, but let the environment
             # classify runtime/provider failures before it invokes the verifier.
             raise HTTPException(502, response.error.message)
+        response.metadata = {**(response.metadata or {}), AGENT_TIMEOUT_METADATA_KEY: str(timeout)}
         return response
 
     async def _collect_sandbox_response(
@@ -996,7 +1001,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         return env
 
     async def _run_exec(
-        self, args: list[str], *, cwd: Optional[str], env: dict[str, str], timeout: int
+        self, args: list[str], *, cwd: Optional[str], env: dict[str, str], timeout: float
     ) -> tuple[int, str, str]:
         proc = await asyncio.create_subprocess_exec(
             *args,
@@ -1099,8 +1104,11 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         observation_collector: Optional[
             Callable[[str, list[dict[str, Any]], OpenClawSessionTree, list[ObservationGap]], None]
         ] = None,
+        *,
+        timeout: float | None = None,
     ) -> tuple[list[Any], dict[str, int], str]:
         """setup and run agent. returns (output_items, usage, model_name)."""
+        timeout = self.config.timeout if timeout is None else timeout
         # Local callers still get automatic installation. Sandbox sessions never
         # enter this path, so their host does not need OpenClaw, Node, or npm.
         if self._local_setup_task is None:
@@ -1165,9 +1173,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             self._install_sigterm_handler()
             sigterm_hit = asyncio.Event()
             self.sigterm_events.add(sigterm_hit)
-            run_task = asyncio.ensure_future(
-                self._run_exec(cmd, cwd=str(work_dir), env=env, timeout=self.config.timeout)
-            )
+            run_task = asyncio.ensure_future(self._run_exec(cmd, cwd=str(work_dir), env=env, timeout=timeout))
             try:
                 term_task = asyncio.ensure_future(sigterm_hit.wait())
                 done, _ = await asyncio.wait({run_task, term_task}, return_when=asyncio.FIRST_COMPLETED)
@@ -1180,7 +1186,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                     with contextlib.suppress(asyncio.CancelledError):
                         await run_task
             except TimeoutError:
-                LOG.warning("openclaw timed out after %ds; salvaging partial session", self.config.timeout)
+                LOG.warning("openclaw timed out after %ss; salvaging partial session", timeout)
             finally:
                 self.sigterm_events.discard(sigterm_hit)
 
@@ -1237,6 +1243,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
 
         user_message, system_prompt = self._prompt_input(body)
+        timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
 
         try:
             output_items, usage, model_name = await self._run_openclaw(
@@ -1244,6 +1251,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 system_prompt,
                 rollout_id=rollout_id,
                 observation_collector=observation_collector,
+                timeout=timeout,
             )
         except TimeoutError:
             LOG.warning("OpenClaw timed out, padding empty output so the rollout scores instead of erroring")
@@ -1283,6 +1291,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
                 total_tokens=input_tokens + output_tokens,
             ),
+            metadata={AGENT_TIMEOUT_METADATA_KEY: str(timeout)},
         )
 
     async def responses(

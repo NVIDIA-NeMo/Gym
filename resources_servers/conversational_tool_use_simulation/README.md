@@ -82,6 +82,8 @@ Verification is message-level:
 - user failures are labeled `user_failure`
 - tool-result failures are labeled `tool_failure`
 - agent failures are labeled `agent_failure`
+- user failures, tool-result failures, judge generation errors, and policy message-generation errors set
+  `mask_sample: true`, because the reward does not measure the policy; agent failures keep `mask_sample: false`
 
 Final verification state is synchronized before the response is built. The top-level reward, invalid reasons, failure
 labels, judge diagnostics, and judge-generation error therefore agree with the verification objects stored in
@@ -146,6 +148,7 @@ The verification and retry controls are:
 | `enable_termination` | `true` | In `message` verification, checks user and tool-result messages first and stops later judge stages after a failure. When `false`, every message and the complete agent conversation are judged. It does not affect combined verification. |
 | `verification_type` | `message` | `message` performs staged per-message checks followed by an agent-conversation check. `complete_trajectory_combined_evaluation` sends the full trajectory through one combined user/agent/environment evaluation. |
 | `enforce_transfer_ground_truth` | `true` | Compares observed transfer behavior with `customer_scenario.outside_policy_scope`. A mismatch deterministically receives reward `0` and skips the LLM judge; a match continues through normal verification. |
+| `fallback_first_user_message` | `true` | When the user simulator cannot produce the first user message (a generation error, or, when nothing precedes it in the conversation, a message that already contains `###STOP###` or `###TRANSFER###`), uses `customer_scenario.reason_for_contact` instead, or a generic request when that is empty or contains either marker. Each fallback is recorded in `result.source_artifacts.first_user_message_fallbacks`. When `false`, the trajectory ends as invalid instead; when the user speaks first (the agent's default), that leaves no policy output to train on. Later user turns are unaffected. |
 
 `user_responses_create_params`, `tool_simulator_responses_create_params`, and `judge_responses_create_params` own the
 sampling parameters sent to those three logical roles. Their model-server references may point to one shared model, as
