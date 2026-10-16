@@ -495,8 +495,8 @@ declared on an agent must be one of them, and a dataset declared on a resources
 server must be the one the Environment Server binds. The agent does not need its
 own `resources_server` binding. An Environment Server can front several agents
 through fields other than `agent_server`, such as a `user_agent` and an
-`assistant_agent`. When it does and names no `agent_server`, `gym eval list` shows
-the Environment Server instead of an agent. Collation preserves existing collector
+`assistant_agent`. When it does and names no `agent_server`, benchmark discovery records the
+Environment Server instead of an agent. Collation preserves existing collector
 task indices, rollout IDs, and retry attempts outside `task_input`.
 
 ## Next Steps
