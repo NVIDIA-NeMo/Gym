@@ -65,7 +65,10 @@ RUN --mount=type=cache,target=/root/.npm,sharing=locked,id=npm-cache-${TARGETARC
 ARG KERNEL_ENV_PATH
 ARG PY_VERSION
 ##
-# Generate/update lockfile using `mise conda-lock benchmarks/bixbench_hypothesis/conda-envs`.
+# Generate/update lockfile using:
+#  uvx conda-lock lock --micromamba -p linux-64 -p linux-aarch64 \
+#   -f bio.yaml -f chem.yaml -f ml.yaml -f py.yaml -f r.yaml \
+#   --lockfile env.lock --without-cuda
 #
 RUN --mount=type=cache,target=/root/.mamba/pkgs,sharing=locked,id=mamba-cache-${TARGETARCH} \
     --mount=type=cache,target=/root/.cache/uv,sharing=locked,id=uv-cache-${TARGETARCH} \
