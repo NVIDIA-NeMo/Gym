@@ -197,10 +197,15 @@ The skills path is resolved like `input_jsonl_fpath` (relative paths check the w
 
 ## Limitations
 
-- Eval only for now. Token IDs and logprobs are not wired up yet.
 - With `model_server`, model calls go through Gym and can be captured. Direct Anthropic or
   `anthropic_base_url` runs bypass Gym capture.
+- Enable training-token capture with run-level `token_id_capture.enabled: true` and either the
+  agent's `token_id_capture: true` or run-level `token_id_capture.all_agents: true`.
 - With training-token capture on, thinking is returned as separate `reasoning` items instead of
-  `<think>` text, and the response `id` is the last served model response id, so Gym can attribute
-  the transcript to a captured model call.
+  `<think>` text. The response `id` is the last non-empty served model response id from the main
+  conversation; subagent frames are excluded from this transcript. Pending tool calls remain as
+  `function_call` items with `status="incomplete"` when the CLI times out. These witnesses let Gym
+  attribute the parent transcript without assigning its reward to a subagent's captured chain.
+  The served id is not a declared terminal id on `/run`; capture still corroborates it against the
+  transcript. Without capture, thinking stays folded and unmatched tool calls remain omitted.
 - `turns_used` counts assistant messages, not tool calls.
