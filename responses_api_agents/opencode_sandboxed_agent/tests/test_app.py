@@ -28,7 +28,7 @@ from unittest.mock import AsyncMock, MagicMock, call
 import anyio
 from fastapi import Request
 from pydantic import ValidationError
-from pytest import MonkeyPatch, fixture, mark, raises
+from pytest import LogCaptureFixture, MonkeyPatch, fixture, mark, raises
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.failure_kinds import PROVIDER_OOM_KILLED
@@ -356,6 +356,7 @@ class TestOpenCodeSandboxedAgent:
         )
         sandbox_mock.download = AsyncMock()
         sandbox_mock.upload = AsyncMock()
+        sandbox_mock.sandbox_id = "responses-sanity-sandbox"
         monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox_mock})
         monkeypatch.setattr(
             server, "_create_opencode_config", AsyncMock(return_value={"plugin": ["file:///user-plugin.js"]})
@@ -555,9 +556,120 @@ class TestOpenCodeSandboxedAgent:
                 self._create_config().model_dump() | {"local_ripgrep_binary_path": str(tmp_path / "missing-rg")}
             )
 
-    @mark.parametrize("error_type", [PermissionError, FileNotFoundError])
+    async def test_ripgrep_upload_timeout_retries_at_new_path_before_agent_execution(
+        self,
+        tmp_path: Path,
+        monkeypatch: MonkeyPatch,
+        opencode_export_test_data: Dict[str, Any],
+        caplog: LogCaptureFixture,
+    ) -> None:
+        binary = tmp_path / "rg"
+        binary.write_bytes(b"#!/bin/sh\necho ripgrep test\n")
+        config = OpenCodeSandboxedAgentConfig.model_validate(
+            self._create_config().model_dump() | {"local_ripgrep_binary_path": str(binary)}
+        )
+        config.preinstalled_opencode = True
+        config.opencode_version = "test"
+        client = MagicMock(spec=ServerClient)
+        client.global_config_dict = {"observability_enabled": False}
+        server = OpenCodeSandboxedAgent(config=config, server_client=client)
+        timeout = TimeoutError("Timed out during OpenSandbox write_file after 300s")
+        sandbox = MagicMock(
+            upload=AsyncMock(side_effect=[timeout, None]),
+            exec=AsyncMock(
+                side_effect=[
+                    SimpleNamespace(
+                        stdout="Shell: /bin/bash\nOpenCode run finished", stderr="", return_code=0, error_type=None
+                    ),
+                    SimpleNamespace(stdout='[{"id": "session-id"}]', stderr="", return_code=0, error_type=None),
+                    SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None),
+                    SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None),
+                ]
+            ),
+            download=AsyncMock(),
+        )
+        sandbox.sandbox_id = "upload-retry-sandbox"
+        server._sandbox_id_to_sandbox[""] = sandbox
+        monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value={}))
+        monkeypatch.setattr(app_module, "uniform", lambda *_: 0.0)
+        monkeypatch.setattr(app_module.Path, "exists", lambda self: True)
+        monkeypatch.setattr(app_module.Path, "read_text", lambda self: json.dumps(opencode_export_test_data))
+        monkeypatch.setattr(app_module, "_read_opencode_child_messages", lambda *_: [])
+
+        with caplog.at_level("INFO", logger=app_module.__name__):
+            response = await server.responses(
+                request=MagicMock(
+                    session={SESSION_ID_KEY: "upload-retry"},
+                    cookies={"sandbox_id": ""},
+                    path_params={"rollout_id": "direct-call"},
+                ),
+                body=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}]),
+            )
+
+        assert response.object == "response"
+        assert response.output
+        assert server._sandbox_id_to_run_result[""]["opencode_failed"] is False
+        assert sandbox.upload.await_count == 2
+        first_path, second_path = [upload.args[1] for upload in sandbox.upload.await_args_list]
+        assert first_path != second_path
+        assert first_path.startswith("/tmp/nemo-gym-ripgrep-")
+        assert second_path.startswith("/tmp/nemo-gym-ripgrep-")
+        command = sandbox.exec.await_args_list[0].kwargs["command"]
+        assert second_path in command
+        assert first_path not in command
+        assert [mock_call[0] for mock_call in sandbox.mock_calls[:3]] == ["upload", "upload", "exec"]
+        assert sandbox.exec.await_count == 4
+        assert f"attempt=1/2 size_bytes={binary.stat().st_size}" in caplog.text
+        assert f"attempt=2/2 size_bytes={binary.stat().st_size}" in caplog.text
+        assert "sandbox_id=upload-retry-sandbox" in caplog.text
+        assert f"remote_path={first_path}" in caplog.text
+        assert f"remote_path={second_path}" in caplog.text
+        assert caplog.text.count("duration_s=") == 2
+
+    async def test_ripgrep_upload_limits_concurrent_staging_per_agent_instance(self, tmp_path: Path) -> None:
+        binary = tmp_path / "rg"
+        binary.write_bytes(b"ripgrep test")
+        server = OpenCodeSandboxedAgent(
+            config=self._create_config(),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        two_uploads_started = asyncio.Event()
+        allow_uploads_to_finish = asyncio.Event()
+        active_uploads = 0
+        peak_uploads = 0
+
+        async def upload(_source_path: Path, _remote_path: str) -> None:
+            nonlocal active_uploads, peak_uploads
+            active_uploads += 1
+            peak_uploads = max(peak_uploads, active_uploads)
+            if active_uploads == 2:
+                two_uploads_started.set()
+            try:
+                await allow_uploads_to_finish.wait()
+            finally:
+                active_uploads -= 1
+
+        sandbox = MagicMock(upload=AsyncMock(side_effect=upload))
+        sandbox.sandbox_id = "concurrency-test-sandbox"
+        tasks = [asyncio.create_task(server._stage_ripgrep(sandbox, binary)) for _ in range(3)]
+        try:
+            await asyncio.wait_for(two_uploads_started.wait(), timeout=1)
+            await asyncio.sleep(0)
+            assert active_uploads == 2
+            assert sandbox.upload.await_count == 2
+        finally:
+            allow_uploads_to_finish.set()
+
+        remote_paths = await asyncio.gather(*tasks)
+        assert peak_uploads == 2
+        assert sandbox.upload.await_count == 3
+        assert len(set(remote_paths)) == 3
+
+    @mark.parametrize(
+        "error_type,expected_attempts", [(TimeoutError, 2), (PermissionError, 1), (FileNotFoundError, 1)]
+    )
     async def test_ripgrep_upload_failure_propagates_without_export_and_cleans_up(
-        self, tmp_path: Path, monkeypatch: MonkeyPatch, error_type: type[OSError]
+        self, tmp_path: Path, monkeypatch: MonkeyPatch, error_type: type[OSError], expected_attempts: int
     ) -> None:
         binary = tmp_path / "rg"
         binary.write_bytes(b"readable upload")
@@ -577,6 +689,7 @@ class TestOpenCodeSandboxedAgent:
         )
         monkeypatch.setattr(server, "_start_sandbox", AsyncMock(return_value=sandbox))
         monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value={}))
+        monkeypatch.setattr(app_module, "uniform", lambda *_: 0.0)
         request = Request({"type": "http", "headers": [], "session": {SESSION_ID_KEY: "upload-failure"}})
         body = OpenCodeSandboxedAgentRunRequest(
             responses_create_params={"input": [{"role": "user", "content": "Solve"}]}
@@ -586,6 +699,8 @@ class TestOpenCodeSandboxedAgent:
             await server.run(request, body)
 
         assert caught.value is upload_error
+        assert sandbox.upload.await_count == expected_attempts
+        assert len({upload.args[1] for upload in sandbox.upload.await_args_list}) == expected_attempts
         sandbox.exec.assert_not_awaited()
         sandbox.download.assert_not_awaited()
         sandbox.stop.assert_awaited_once()

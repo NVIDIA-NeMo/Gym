@@ -15,14 +15,16 @@
 
 import asyncio
 import json
+import logging
 import sqlite3
 import sys
 from asyncio import Semaphore
 from contextlib import nullcontext
 from copy import deepcopy
 from pathlib import Path
+from random import uniform
 from shlex import quote
-from time import time
+from time import monotonic, time
 from traceback import format_exc
 from typing import Any, Dict, List, Literal, Optional
 from uuid import uuid4
@@ -101,6 +103,9 @@ from responses_api_agents.opencode_agent.runtime import (
 
 
 _REMOTE_ASSISTANT_MESSAGE_PLUGIN = "/tmp/nemo-gym-opencode-assistant-message-header.js"
+_RIPGREP_UPLOAD_MAX_ATTEMPTS = 2
+_RIPGREP_UPLOAD_MAX_CONCURRENT = 2
+LOGGER = logging.getLogger(__name__)
 
 
 def _load_json(value: Any) -> dict[str, Any]:
@@ -549,6 +554,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         super().model_post_init(context)
 
         self._sem = Semaphore(self.config.concurrency) if self.config.concurrency else nullcontext()
+        # Uvicorn workers have separate agent instances, so this bounds each process.
+        self._ripgrep_upload_sem = Semaphore(_RIPGREP_UPLOAD_MAX_CONCURRENT)
         self._sandbox_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
         self._sandbox_id_to_run_result: Dict[str, Dict[str, Any]] = dict()
 
@@ -608,6 +615,44 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         await sandbox.start(sandbox_spec)
 
         return sandbox
+
+    async def _stage_ripgrep(self, sandbox: AsyncSandbox, source_path: Path) -> str:
+        """Retry an ambiguous upload timeout without reusing its remote path."""
+        size_bytes = source_path.stat().st_size
+        for attempt in range(1, _RIPGREP_UPLOAD_MAX_ATTEMPTS + 1):
+            remote_path = f"/tmp/nemo-gym-ripgrep-{uuid4().hex}"
+            try:
+                async with self._ripgrep_upload_sem:
+                    started = monotonic()
+                    await sandbox.upload(source_path, remote_path)
+            except TimeoutError:
+                LOGGER.warning(
+                    "OpenCode ripgrep upload timed out; sandbox_id=%s remote_path=%s "
+                    "attempt=%d/%d size_bytes=%d duration_s=%.1f",
+                    sandbox.sandbox_id,
+                    remote_path,
+                    attempt,
+                    _RIPGREP_UPLOAD_MAX_ATTEMPTS,
+                    size_bytes,
+                    monotonic() - started,
+                )
+                if attempt == _RIPGREP_UPLOAD_MAX_ATTEMPTS:
+                    raise
+                await asyncio.sleep(uniform(15.0, 30.0))
+            else:
+                LOGGER.info(
+                    "OpenCode ripgrep upload completed; sandbox_id=%s remote_path=%s "
+                    "attempt=%d/%d size_bytes=%d duration_s=%.1f",
+                    sandbox.sandbox_id,
+                    remote_path,
+                    attempt,
+                    _RIPGREP_UPLOAD_MAX_ATTEMPTS,
+                    size_bytes,
+                    monotonic() - started,
+                )
+                return remote_path
+
+        raise RuntimeError("OpenCode ripgrep upload retry loop did not run")
 
     def _runtime_plugins(self) -> list[str]:
         plugins = []
@@ -869,7 +914,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         ripgrep_remote_path = None
         ripgrep_install_str = ""
         if self.config.local_ripgrep_binary_path is not None:
-            ripgrep_remote_path = f"/tmp/nemo-gym-ripgrep-{uuid4().hex}"
+            ripgrep_remote_path = await self._stage_ripgrep(sandbox, self.config.local_ripgrep_binary_path)
             # Uploads may be root-owned: copy as the execution user; teardown removes the source.
             ripgrep_install_str = (
                 '&& mkdir -p "$HOME/.opencode/bin" '
@@ -897,8 +942,6 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str} -- {quote(query)} \
         && echo "OpenCode run finished"
         """
-        if ripgrep_remote_path is not None:
-            await sandbox.upload(self.config.local_ripgrep_binary_path, ripgrep_remote_path)
         if self.config.report_agent_sandbox_oom:
             setup_result = await sandbox.exec(command=setup_command, timeout_s=self.config.sandbox_timeout)
             if setup_result.return_code != 0 or setup_result.error_type is not None:
