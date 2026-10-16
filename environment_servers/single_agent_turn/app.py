@@ -23,6 +23,7 @@ from nemo_gym.base_resources_server import (
     ResourcesSeedSessionResponse,
 )
 from nemo_gym.base_responses_api_agent import (
+    AGENT_ACTIVATION_HEADER,
     AgentCloseSessionRequest,
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
@@ -41,7 +42,12 @@ from nemo_gym.global_config import (
 )
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.rollout_observability import NG_AGENT_OBSERVATIONS_KEY, AgentObservationBundle
-from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
+from nemo_gym.server_utils import (
+    get_response_json,
+    is_nemo_gym_fastapi_entrypoint,
+    raise_for_status,
+    rollout_path_prefix,
+)
 from nemo_gym.single_agent_turn_types import (
     SingleAgentTurnFailure,
     SingleAgentTurnRequest,
@@ -279,11 +285,19 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         resources_base_url = self.server_client._resolve_base_url(self.config.resources_server.name).rstrip("/")
         tool_accesses: list[ToolAccess] = []
         if "direct_http" in self.config.resources_tool_transports:
+            # With checkpointing on, the Resources Server refuses a tool call that does not name its attempt,
+            # so the grant carries this attempt's rollout prefix.
+            # An agent that continues the session after a restore sends its calls under the replacement's prefix.
+            tools_base_url = (
+                f"{resources_base_url}{rollout_path_prefix(request.episode_id.capture_key)}"
+                if self._checkpoint is not None
+                else resources_base_url
+            )
             tool_accesses.append(
                 DirectHTTPToolAccess(
                     name=f"{self.config.resources_server.name}.direct_http",
                     required=True,
-                    base_url=resources_base_url,
+                    base_url=tools_base_url,
                     cookies=handles.resources_cookies,
                 )
             )
@@ -311,6 +325,10 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                     ),
                 )
             )
+            # The MCP session token names this attempt, and the Resources Server refuses it once a restore replaces it.
+            # An agent continued from a checkpoint would keep that token and see every tool call fail.
+            # So the episode restarts from its input after a crash, and its new seed mints a token for the new attempt.
+            await self.checkpoint_restart(request)
 
         try:
             agent_create_http_response = await self.server_client.post(
@@ -347,6 +365,9 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 url_path=self._agent_responses_path(request),
                 json=request.task.task_input.responses_create_params,
                 cookies=handles.agent_cookies,
+                # The episode's only activation.
+                # A restore before its reply invokes it again, and the agent gives the reply it already gave.
+                headers={AGENT_ACTIVATION_HEADER: "1"},
             )
             await raise_for_status(agent_http_response)
             response_cookies = _cookies(agent_http_response)
