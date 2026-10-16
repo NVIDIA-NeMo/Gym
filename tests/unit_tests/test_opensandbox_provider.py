@@ -106,6 +106,38 @@ async def test_session_execution_releases_session_before_cancelling(outcome: str
     assert unhandled_errors == []
 
 
+@pytest.mark.parametrize("failure_phase", ["create", "run", "delete"])
+async def test_session_provider_request_timeout_preserves_unknown_outcome(failure_phase: str) -> None:
+    calls: list[str] = []
+
+    class Commands:
+        async def create_session(self, **kwargs: Any) -> str:
+            calls.append("create")
+            if failure_phase == "create":
+                raise TimeoutError("session create request expired")
+            return "session-1"
+
+        async def run_in_session(self, session_id: str, command: str, **kwargs: Any) -> Any:
+            calls.append("run")
+            if failure_phase == "run":
+                raise TimeoutError("session run request expired")
+            return SimpleNamespace(logs=SimpleNamespace(stdout=[], stderr=[]), exit_code=0, error=None)
+
+        async def delete_session(self, session_id: str) -> None:
+            calls.append("delete")
+            if failure_phase == "delete":
+                raise TimeoutError("session delete request expired")
+
+    provider = opensandbox_provider.OpenSandboxProvider(connection={"request_timeout_s": 1})
+    handle = opensandbox_provider.SandboxHandle("session-timeout", "opensandbox", SimpleNamespace(commands=Commands()))
+
+    with pytest.raises(opensandbox_provider.SandboxIOTimeoutError, match="timed out|Timed out") as caught:
+        await provider.exec_with_background_services(handle, "echo completed", timeout_s=5)
+
+    assert not isinstance(caught.value, TimeoutError)
+    assert calls == (["create"] if failure_phase == "create" else ["create", "run", "delete"])
+
+
 @pytest.mark.parametrize("recovers", [True, False])
 @pytest.mark.parametrize("timeout_kind", ["client", "server", "readiness"])
 async def test_tb4_create_timeout_retries_with_jitter(monkeypatch, recovers, timeout_kind):
@@ -734,6 +766,8 @@ def test_provider_validation_and_retry_helpers() -> None:
         opensandbox_provider.OpenSandboxProvider(**{"batch_" + "create_retries": 1})
     with pytest.raises(TypeError):
         opensandbox_provider.OpenSandboxProvider(connection=object())
+    with pytest.raises(TypeError, match="diagnostics.inspect_oom must be a bool"):
+        opensandbox_provider.OpenSandboxProvider(diagnostics={"inspect_oom": "true"})
 
     assert opensandbox_provider._exception_status_code(RuntimeError("HTTP status code: 503")) == 503
     assert opensandbox_provider._exception_status_code(RuntimeError("plain error")) is None
@@ -1186,10 +1220,10 @@ async def test_exec_background_reports_oom_status_after_502(monkeypatch: pytest.
         def __init__(self) -> None:
             self.commands = FakeCommands()
             self.statuses = [
-                SimpleNamespace(state="Running", reason=None, message=None),
+                SimpleNamespace(state="Running", reason="OOMKilled", message="not terminal yet"),
                 SimpleNamespace(
                     state="Failed",
-                    reason="FAILED",
+                    reason="OOMKilled",
                     message="container sandbox terminated with OOMKilled (exit code 137); " + "x" * 1000,
                 ),
             ]
@@ -1212,21 +1246,373 @@ async def test_exec_background_reports_oom_status_after_502(monkeypatch: pytest.
     raw = FakeRaw()
     handle = opensandbox_provider.SandboxHandle(sandbox_id="sandbox-oom", provider_name="opensandbox", raw=raw)
 
-    with pytest.raises(opensandbox_provider.SandboxBackendUnreachableError) as exc_info:
+    with pytest.raises(opensandbox_provider.SandboxOOMKilledError) as exc_info:
         await provider.exec(handle, "allocate memory", timeout_s=30)
 
+    assert exc_info.value.sandbox_id == "sandbox-oom"
     message = str(exc_info.value)
     assert "OOM-killed" in message
     assert "SandboxResources.memory_mib" not in message
-    assert "reason='FAILED'" in message
+    assert "reason='OOMKilled'" in message
     assert len(message) < 800
     assert isinstance(exc_info.value.__cause__, Backend502Error)
     assert raw.info_calls == 2
 
-    raw.statuses = [SimpleNamespace(state="Failed", reason="FAILED", message="sandbox node was drained")]
-    raw.info_calls = 0
-    with pytest.raises(Backend502Error, match="Get command status failed"):
-        await provider.exec(handle, "retry after non-OOM failure", timeout_s=30)
+
+@pytest.mark.parametrize(
+    ("inspect", "oom_confirmed"),
+    [
+        (
+            "Pod Name: sandbox-pod\nContainers:\n  sandbox:\n"
+            "    State:          Terminated (exit=137, reason=OOMKilled)\n",
+            True,
+        ),
+        (
+            "Pod Name: sandbox-pod\nContainers:\n  sandbox:\n"
+            "    State:          Terminated (exit=137, reason=Error)\n"
+            "  egress:\n    State:          Terminated (exit=137, reason=OOMKilled)\n",
+            False,
+        ),
+    ],
+)
+@pytest.mark.parametrize("control_status", ["unavailable", "container_failed"])
+async def test_exec_background_retries_timed_out_status_then_checks_ended_sandbox(
+    monkeypatch: pytest.MonkeyPatch, inspect: str, oom_confirmed: bool, control_status: str
+) -> None:
+    """A read timeout keeps the submitted command alive; a later 410 needs current-container OOM proof."""
+    from nemo_gym import server_utils
+
+    class Backend410Error(Exception):
+        status_code = 410
+
+    class Backend502Error(Exception):
+        status_code = 502
+
+    class FakeCommands:
+        def __init__(self) -> None:
+            self.run_calls = 0
+            self.status_calls: list[str] = []
+            self.log_calls = 0
+
+        async def run(self, command: str, *, opts: Any) -> Any:
+            self.run_calls += 1
+            return SimpleNamespace(id="exec-oom")
+
+        async def get_command_status(self, execution_id: str) -> Any:
+            self.status_calls.append(execution_id)
+            if len(self.status_calls) == 1:
+                raise TimeoutError("Timed out during OpenSandbox command status after 10s")
+            if len(self.status_calls) == 2:
+                raise Backend502Error("HTTP 502 [BACKEND_CONNECTION_FAILED] backend connection failed")
+            raise Backend410Error("HTTP 410 [SANDBOX::ENDED] Sandbox sandbox-oom has ended (OOMKilled)")
+
+        async def get_background_command_logs(self, execution_id: str) -> Any:
+            self.log_calls += 1
+            return SimpleNamespace(content="unexpected", cursor=None)
+
+    class FakeConnectionConfig:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+        def get_base_url(self) -> str:
+            return "https://sandbox.example/v1"
+
+        def get_api_key(self) -> str:
+            return "key"
+
+    class FakeResponse:
+        def __init__(self, status: int, body: str) -> None:
+            self.status = status
+            self.content = SimpleNamespace(read=AsyncMock(return_value=body.encode()))
+
+        async def __aenter__(self) -> Any:
+            return self
+
+        async def __aexit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+            return None
+
+    no_oom = FakeResponse(200, "Pod Name: sandbox-pod\nContainers:\n  sandbox:\n    State: Running\n")
+    request = AsyncMock(side_effect=[no_oom, no_oom, FakeResponse(200, inspect)])
+    monkeypatch.setattr(server_utils, "request", request)
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (object, FakeConnectionConfig, dict, object, object),
+    )
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"domain": "sandbox.example", "api_key": "key", "request_timeout_s": 5},
+        probe={"command": None},
+        operations={"background_exec": True, "retries": 0},
+    )
+    commands = FakeCommands()
+    get_info = (
+        AsyncMock(side_effect=RuntimeError("status unavailable"))
+        if control_status == "unavailable"
+        else AsyncMock(
+            return_value=SimpleNamespace(
+                status=SimpleNamespace(state="Failed", reason="ContainerFailed", message="reason not final")
+            )
+        )
+    )
+    raw = SimpleNamespace(commands=commands, get_info=get_info)
+    handle = opensandbox_provider.SandboxHandle(sandbox_id="sandbox-oom", provider_name="opensandbox", raw=raw)
+
+    if oom_confirmed:
+        with pytest.raises(opensandbox_provider.SandboxOOMKilledError, match="inspect confirms") as exc_info:
+            await provider.exec(handle, "allocate memory", timeout_s=30)
+        assert isinstance(exc_info.value.__cause__, Backend410Error)
+        assert "sandbox_id='sandbox-oom'" in str(exc_info.value)
+    else:
+        with pytest.raises(
+            opensandbox_provider.SandboxBackendUnreachableError, match="without confirmed OOM"
+        ) as exc_info:
+            await provider.exec(handle, "allocate memory", timeout_s=30)
+        assert isinstance(exc_info.value.__cause__, Backend410Error)
+
+    assert commands.run_calls == 1
+    assert commands.status_calls == ["exec-oom", "exec-oom", "exec-oom"]
+    assert commands.log_calls == 0
+    assert request.await_count == 3
+    assert request.await_args.args[1].endswith("/sandboxes/sandbox-oom/diagnostics/inspect")
+
+
+@pytest.mark.parametrize(
+    ("inspect", "oom_confirmed"),
+    [
+        (
+            "Pod Name: sandbox-pod\nContainers:\n  sandbox:\n"
+            "    State:          Terminated (exit=137, reason=OOMKilled)\n",
+            True,
+        ),
+        (
+            "Pod Name: sandbox-pod\nContainers:\n  sandbox:\n    State:          Running\n",
+            False,
+        ),
+        (
+            "Pod Name: sandbox-pod\nContainers:\n  sandbox:\n"
+            "    State:          Terminated (exit=137, reason=Error)\n"
+            "  egress:\n    State:          Terminated (exit=137, reason=OOMKilled)\n",
+            False,
+        ),
+    ],
+)
+async def test_exec_background_inspects_current_container_after_persistent_status_timeout(
+    monkeypatch: pytest.MonkeyPatch, inspect: str, oom_confirmed: bool
+) -> None:
+    """A status-only timeout can prove an OOM when get_info is unavailable, but cannot infer one."""
+    from nemo_gym import server_utils
+
+    class FakeCommands:
+        def __init__(self) -> None:
+            self.run_calls = 0
+            self.status_calls: list[str] = []
+            self.log_calls = 0
+
+        async def run(self, command: str, *, opts: Any) -> Any:
+            self.run_calls += 1
+            return SimpleNamespace(id="exec-timeout")
+
+        async def get_command_status(self, execution_id: str) -> Any:
+            self.status_calls.append(execution_id)
+            raise TimeoutError("command status route timed out")
+
+        async def get_background_command_logs(self, execution_id: str) -> Any:
+            self.log_calls += 1
+            pytest.fail("logs cannot be fetched without a final status")
+
+    class FakeConnectionConfig:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+        def get_base_url(self) -> str:
+            return "https://sandbox.example/v1"
+
+        def get_api_key(self) -> str:
+            return "key"
+
+    class FakeResponse:
+        status = 200
+
+        def __init__(self) -> None:
+            self.content = SimpleNamespace(read=AsyncMock(return_value=inspect.encode()))
+
+        async def __aenter__(self) -> Any:
+            return self
+
+        async def __aexit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+            return None
+
+    request = AsyncMock(return_value=FakeResponse())
+    monkeypatch.setattr(server_utils, "request", request)
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (object, FakeConnectionConfig, dict, object, object),
+    )
+    monkeypatch.setattr(opensandbox_provider, "BACKGROUND_STATUS_RECOVERY_WINDOW_S", 0.02)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"domain": "sandbox.example", "api_key": "key", "request_timeout_s": 5},
+        probe={"command": None},
+        operations={"background_exec": True, "retries": 0, "background_poll_interval_s": 0.001},
+    )
+    commands = FakeCommands()
+    raw = SimpleNamespace(commands=commands, get_info=AsyncMock(side_effect=RuntimeError("status unavailable")))
+    handle = opensandbox_provider.SandboxHandle(sandbox_id="sandbox-timeout", provider_name="opensandbox", raw=raw)
+
+    if oom_confirmed:
+        with pytest.raises(opensandbox_provider.SandboxOOMKilledError, match="inspect confirms") as exc_info:
+            await provider.exec(handle, "agent command", timeout_s=10_800)
+        assert isinstance(exc_info.value.__cause__, TimeoutError)
+        assert "sandbox_id='sandbox-timeout'" in str(exc_info.value)
+    else:
+        with pytest.raises(opensandbox_provider.SandboxCommandStatusTimeoutError, match="unavailable beyond"):
+            await provider.exec(handle, "agent command", timeout_s=10_800)
+        assert len(commands.status_calls) >= 2
+
+    assert commands.run_calls == 1
+    assert set(commands.status_calls) == {"exec-timeout"}
+    assert commands.log_calls == 0
+    assert request.await_count >= 1
+    assert request.await_args.args[1].endswith("/sandboxes/sandbox-timeout/diagnostics/inspect")
+
+
+@pytest.mark.parametrize(
+    ("inspect", "status_code", "evidence"),
+    [
+        (
+            "Pod Name: sandbox-pod\nContainers:\n  sandbox:\n"
+            "    State:          Terminated (exit=137, reason=OOMKilled)\n"
+            "  egress:\n    State:          Running (since today)\n",
+            200,
+            "sandbox State: Terminated (exit=137, reason=OOMKilled)",
+        ),
+        (
+            "Container ID: abc123\nRunning: False\nOOMKilled: True\nExit Code: 137\n",
+            200,
+            "Docker OOMKilled: True",
+        ),
+        (
+            "Pod Name: sandbox-pod\nContainers:\n  sandbox:\n"
+            "    State:          Terminated (exit=137, reason=Error)\n"
+            "    Last State:     Terminated (exit=137, reason=OOMKilled)\n",
+            200,
+            None,
+        ),
+        (
+            "Pod Name: sandbox-pod\nContainers:\n  sandbox:\n"
+            "    State:          Terminated (exit=137, reason=Error)\n"
+            "  egress:\n    State:          Terminated (exit=137, reason=OOMKilled)\n"
+            "Init Containers:\n  setup:\n    State:          Terminated (exit=137, reason=OOMKilled)\n",
+            200,
+            None,
+        ),
+        (
+            "Pod Name: sandbox-pod\nContainers:\n  sandbox:\n"
+            "    State:          Terminated (exit=137, reason=Error)\n"
+            "    Message:        not OOMKilled; exit=137\n",
+            200,
+            None,
+        ),
+        (
+            "Pod Name: sandbox-pod\nContainers:\n  sandbox:\n"
+            "    State:          Terminated (exit=137, reason=OOMKilled)\n"
+            "    State:          Terminated (exit=137, reason=Error)\n",
+            200,
+            None,
+        ),
+        (
+            "Pod Name: sandbox-pod\nContainers:\n  sandbox:\n"
+            "    State:          Terminated (exit=137, reason=OOMKilled)\n",
+            404,
+            None,
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_exec_background_inspect_confirms_only_current_sandbox_oom_after_terminal_502(
+    monkeypatch: pytest.MonkeyPatch, inspect: str, status_code: int, evidence: str | None
+) -> None:
+    from nemo_gym import server_utils
+
+    class Backend502Error(Exception):
+        status_code = 502
+
+    class FakeCommands:
+        async def run(self, command: str, *, opts: Any) -> Any:
+            return SimpleNamespace(id="exec-oom")
+
+        async def get_command_status(self, execution_id: str) -> Any:
+            raise Backend502Error("Get command status failed: HTTP 502")
+
+    class FakeConnectionConfig:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+        def get_base_url(self) -> str:
+            return f"{self.kwargs['protocol']}://{self.kwargs['domain']}/v1"
+
+        def get_api_key(self) -> str:
+            return self.kwargs["api_key"]
+
+    class FakeResponse:
+        def __init__(self) -> None:
+            self.status = status_code
+            self.content = SimpleNamespace(read=AsyncMock(return_value=inspect.encode()))
+
+        async def __aenter__(self) -> Any:
+            return self
+
+        async def __aexit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+            return None
+
+    request = AsyncMock(return_value=FakeResponse())
+    monkeypatch.setattr(server_utils, "request", request)
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (object, FakeConnectionConfig, dict, object, object),
+    )
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={
+            "domain": "https://sandbox.example/prefix/",
+            "api_key": "configured-key",
+            "tls_verify": False,
+            "request_timeout_s": 5,
+        },
+        probe={"command": None},
+        operations={"background_exec": True, "retries": 0},
+    )
+    monkeypatch.setattr(opensandbox_provider, "BACKGROUND_STATUS_RECOVERY_WINDOW_S", 0.02)
+    monkeypatch.setattr(provider, "_get_transport", lambda: object())
+    raw = SimpleNamespace(
+        commands=FakeCommands(),
+        get_info=AsyncMock(
+            return_value=SimpleNamespace(
+                status=SimpleNamespace(state="Failed", reason="ContainerFailed", message="not OOMKilled; exit 137")
+            )
+        ),
+    )
+    handle = opensandbox_provider.SandboxHandle(sandbox_id="sandbox-oom", provider_name="opensandbox", raw=raw)
+
+    if evidence is not None:
+        with pytest.raises(opensandbox_provider.SandboxOOMKilledError, match="inspect confirms") as exc_info:
+            await provider.exec(handle, "allocate memory", timeout_s=30)
+        assert isinstance(exc_info.value.__cause__, Backend502Error)
+        assert evidence in str(exc_info.value)
+    else:
+        with pytest.raises(opensandbox_provider.SandboxCommandStatusTimeoutError) as exc_info:
+            await provider.exec(handle, "allocate memory", timeout_s=30)
+        assert not isinstance(exc_info.value, opensandbox_provider.SandboxOOMKilledError)
+
+    assert raw.get_info.await_count >= 1
+    assert request.await_count >= 1
+    args, kwargs = request.await_args
+    assert args == ("GET", "https://sandbox.example/prefix/v1/sandboxes/sandbox-oom/diagnostics/inspect")
+    assert kwargs["headers"] == {"OPEN-SANDBOX-API-KEY": "configured-key"}
+    assert kwargs["ssl"] is False
+    assert kwargs["timeout"].total == 2.0
+    assert kwargs["_max_num_tries"] == 1
 
 
 @pytest.mark.parametrize(
@@ -1271,7 +1657,7 @@ async def test_exec_background_rejects_status_missing_a_field(
 
 
 async def test_exec_hard_cap_labels_genuinely_wedged_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A wedged exec (hard wall-clock cap tripping) surfaces as the hard-cap TimeoutError.
+    """A wedged exec has an unknown outcome, distinct from a command timeout.
 
     The cap formula floors the real duration at minutes, so the test shrinks it
     by patching asyncio.timeout to ignore the requested duration — the genuine
@@ -1302,11 +1688,87 @@ async def test_exec_hard_cap_labels_genuinely_wedged_dispatch(monkeypatch: pytes
     provider = opensandbox_provider.OpenSandboxProvider(
         connection={"request_timeout_s": 5},
         probe={"command": None},
+        diagnostics={"inspect_oom": False},
     )
     handle = opensandbox_provider.SandboxHandle(sandbox_id="sandbox-wedge", provider_name="opensandbox", raw=FakeRaw())
 
-    with pytest.raises(TimeoutError, match="hard cap"):
+    with pytest.raises(opensandbox_provider.SandboxIOTimeoutError, match="hard cap") as caught:
         await provider.exec(handle, "sleep 999", timeout_s=30)
+    assert not isinstance(caught.value, TimeoutError)
+
+
+async def test_inspect_setup_failure_preserves_provider_io_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeCommands:
+        async def run(self, command: str, *, opts: dict[str, Any]) -> None:
+            raise TimeoutError("command submit request expired")
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (object, object, dict, object, object),
+    )
+    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
+    handle = opensandbox_provider.SandboxHandle(
+        sandbox_id="unreachable-inspect", provider_name="opensandbox", raw=SimpleNamespace(commands=FakeCommands())
+    )
+
+    with pytest.raises(opensandbox_provider.SandboxIOTimeoutError, match="command run") as caught:
+        await provider.exec(handle, "echo unknown", timeout_s=30)
+
+    assert not isinstance(caught.value, TimeoutError)
+
+
+async def test_foreground_command_request_timeout_is_ungraded_provider_loss(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeCommands:
+        def __init__(self) -> None:
+            self.run_calls = 0
+
+        async def run(self, command: str, *, opts: Any) -> Any:
+            self.run_calls += 1
+            raise TimeoutError("command run request timed out")
+
+    monkeypatch.setattr(
+        opensandbox_provider, "_require_opensandbox_sdk", lambda: (object, object, dict, object, object)
+    )
+    commands = FakeCommands()
+    provider = opensandbox_provider.OpenSandboxProvider(diagnostics={"inspect_oom": False})
+    handle = opensandbox_provider.SandboxHandle(
+        sandbox_id="foreground-timeout", provider_name="opensandbox", raw=SimpleNamespace(commands=commands)
+    )
+
+    with pytest.raises(opensandbox_provider.SandboxIOTimeoutError, match="command run") as caught:
+        await provider.exec(handle, "bash /tests/test.sh", timeout_s=60)
+
+    assert not isinstance(caught.value, TimeoutError)
+    assert isinstance(caught.value.__cause__, TimeoutError)
+    assert commands.run_calls == 1
+
+
+@pytest.mark.parametrize("operation", ["upload", "download"])
+async def test_file_transfer_request_timeout_is_ungraded_provider_loss(tmp_path: Path, operation: str) -> None:
+    files = SimpleNamespace(
+        write_file=AsyncMock(side_effect=TimeoutError("write request timed out")),
+        read_bytes=AsyncMock(side_effect=TimeoutError("read request timed out")),
+    )
+    provider = opensandbox_provider.OpenSandboxProvider()
+    handle = opensandbox_provider.SandboxHandle(
+        sandbox_id="transfer-timeout", provider_name="opensandbox", raw=SimpleNamespace(files=files)
+    )
+    path = tmp_path / "artifact"
+    if operation == "upload":
+        path.write_bytes(b"artifact")
+        transfer = provider.upload_file(handle, path, "/artifact")
+    else:
+        transfer = provider.download_file(handle, "/artifact", path)
+
+    with pytest.raises(opensandbox_provider.SandboxIOTimeoutError) as caught:
+        await transfer
+
+    assert not isinstance(caught.value, TimeoutError)
+    assert isinstance(caught.value.__cause__, TimeoutError)
+    assert files.write_file.await_count + files.read_bytes.await_count == 1
+    if operation == "download":
+        assert not path.exists()
 
 
 async def test_exec_hard_cap_does_not_relabel_inner_timeouts(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1325,9 +1787,11 @@ async def test_exec_hard_cap_does_not_relabel_inner_timeouts(monkeypatch: pytest
 
     class FakeCommands:
         def __init__(self) -> None:
+            self.run_calls = 0
             self.status_calls = 0
 
         async def run(self, command: str, *, opts: FakeRunCommandOpts) -> Any:
+            self.run_calls += 1
             return SimpleNamespace(id="exec-slowpolls")
 
         async def get_command_status(self, execution_id: str) -> Any:
@@ -1342,7 +1806,7 @@ async def test_exec_hard_cap_does_not_relabel_inner_timeouts(monkeypatch: pytest
         "_require_opensandbox_sdk",
         lambda: (object, object, FakeRunCommandOpts, object, object),
     )
-    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr(opensandbox_provider, "BACKGROUND_COMMAND_TIMEOUT_HEADROOM_S", 0.0)
 
     provider = opensandbox_provider.OpenSandboxProvider(
         connection={"request_timeout_s": 120},
@@ -1354,19 +1818,125 @@ async def test_exec_hard_cap_does_not_relabel_inner_timeouts(monkeypatch: pytest
             "background_poll_interval_s": 0.01,
         },
     )
+    monkeypatch.setattr(provider, "_confirmed_oom_death", AsyncMock(return_value=None))
     commands = FakeCommands()
     handle = opensandbox_provider.SandboxHandle(
         sandbox_id="sandbox-slowpolls", provider_name="opensandbox", raw=SimpleNamespace(commands=commands)
     )
 
-    with pytest.raises(TimeoutError) as exc_info:
-        await provider.exec(handle, "echo ok", timeout_s=30)
+    with pytest.raises(opensandbox_provider.SandboxCommandStatusTimeoutError) as exc_info:
+        await provider.exec(handle, "echo ok", timeout_s=0.01)
 
     # The poll-budget failure surfaced with its own message (after using its
     # retry budget), not relabeled as the wall-clock hard cap tripping.
-    assert commands.status_calls == 2
+    assert commands.status_calls >= 2
+    assert commands.run_calls == 1
     assert "command status" in str(exc_info.value)
     assert "hard cap" not in str(exc_info.value)
+
+
+async def test_status_loss_recovery_ends_before_long_agent_command_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeCommands:
+        def __init__(self) -> None:
+            self.run_calls = 0
+            self.status_calls: list[str] = []
+
+        async def run(self, command: str, *, opts: Any) -> Any:
+            self.run_calls += 1
+            return SimpleNamespace(id="one-execution")
+
+        async def get_command_status(self, execution_id: str) -> Any:
+            self.status_calls.append(execution_id)
+            raise TimeoutError("command status route is unavailable")
+
+        async def get_background_command_logs(self, execution_id: str) -> Any:
+            pytest.fail("logs cannot be fetched without a final status")
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (object, object, dict, object, object),
+    )
+    monkeypatch.setattr(opensandbox_provider, "BACKGROUND_STATUS_RECOVERY_WINDOW_S", 0.02)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 5},
+        probe={"command": None},
+        operations={"background_exec": True, "retries": 0, "background_poll_interval_s": 0.001},
+    )
+    inspect = AsyncMock(return_value=None)
+    monkeypatch.setattr(provider, "_control_plane_inspect_oom_evidence", inspect)
+    commands = FakeCommands()
+    handle = opensandbox_provider.SandboxHandle(
+        sandbox_id="sandbox-status-loss", provider_name="opensandbox", raw=SimpleNamespace(commands=commands)
+    )
+
+    with pytest.raises(opensandbox_provider.SandboxCommandStatusTimeoutError, match="unavailable beyond"):
+        await provider.exec(handle, "long agent command", timeout_s=10_800)
+
+    assert commands.run_calls == 1
+    assert len(commands.status_calls) >= 2
+    assert set(commands.status_calls) == {"one-execution"}
+    assert inspect.await_count == len(commands.status_calls)
+
+
+async def test_pty_oom_notice_keeps_message_match_without_confirming_scored_oom(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider()
+    inspect = AsyncMock(return_value=None)
+    monkeypatch.setattr(provider, "_control_plane_inspect_oom_evidence", inspect)
+    raw = SimpleNamespace(
+        get_info=AsyncMock(
+            return_value=SimpleNamespace(
+                status=SimpleNamespace(state="Failed", reason="ContainerFailed", message="sandbox out of memory")
+            )
+        )
+    )
+    handle = opensandbox_provider.SandboxHandle(sandbox_id="pty-oom", provider_name="opensandbox", raw=raw)
+
+    assert "OOM-killed" in await provider._oom_death_notice(handle, any_death=True)
+    assert await provider._confirmed_oom_death(handle, RuntimeError("HTTP 502")) is None
+    inspect.assert_awaited_once_with(handle)
+
+
+async def test_pty_oom_notice_ignores_negated_message_and_exit_137() -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(diagnostics={"inspect_oom": False})
+    raw = SimpleNamespace(
+        get_info=AsyncMock(
+            return_value=SimpleNamespace(
+                status=SimpleNamespace(state="Failed", reason="ContainerFailed", message="not OOMKilled; exit 137")
+            )
+        )
+    )
+    handle = opensandbox_provider.SandboxHandle(sandbox_id="pty-other", provider_name="opensandbox", raw=raw)
+
+    notice = await provider._oom_death_notice(handle, any_death=True)
+
+    assert notice is not None
+    assert "Sandbox is dead" in notice
+    assert "OOM-killed" not in notice
+    assert await provider._confirmed_oom_death(handle, RuntimeError("HTTP 502")) is None
+
+
+async def test_inspect_oom_opt_out_keeps_strict_lifecycle_evidence(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(diagnostics={"inspect_oom": False})
+    inspect = AsyncMock(return_value="sandbox State: Terminated (exit=137, reason=OOMKilled)")
+    monkeypatch.setattr(provider, "_control_plane_inspect_oom_evidence", inspect)
+    raw = SimpleNamespace(
+        get_info=AsyncMock(
+            return_value=SimpleNamespace(
+                status=SimpleNamespace(state="Failed", reason="ContainerFailed", message="backend unavailable")
+            )
+        )
+    )
+    handle = opensandbox_provider.SandboxHandle(sandbox_id="no-inspect", provider_name="opensandbox", raw=raw)
+
+    assert await provider._confirmed_oom_death(handle, RuntimeError("HTTP 502")) is None
+    inspect.assert_not_awaited()
+
+    raw.get_info.return_value.status.reason = "OOMKilled"
+    assert "reason='OOMKilled'" in await provider._confirmed_oom_death(handle, RuntimeError("HTTP 502"))
+    inspect.assert_not_awaited()
 
 
 @pytest.mark.parametrize("request_timeout_s", [None, 5])
@@ -2376,11 +2946,31 @@ async def test_exec_background_status_polls_use_dedicated_timeout(
 async def test_exec_background_retries_timed_out_reads(
     monkeypatch: pytest.MonkeyPatch, read_operation: str, failures: int
 ) -> None:
-    """Read retries are bounded and never resubmit an already-running command."""
+    """Status read retries preserve the submitted command; log reads use one retry batch."""
+    from nemo_gym import server_utils
 
     class FakeRunCommandOpts:
         def __init__(self, **kwargs: Any) -> None:
             self.kwargs = kwargs
+
+    class FakeConnectionConfig:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+        def get_base_url(self) -> str:
+            return "https://sandbox.example/v1"
+
+        def get_api_key(self) -> None:
+            return None
+
+    class FakeResponse:
+        status = 404
+
+        async def __aenter__(self) -> Any:
+            return self
+
+        async def __aexit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+            return None
 
     class FakeCommands:
         def __init__(self) -> None:
@@ -2409,9 +2999,11 @@ async def test_exec_background_retries_timed_out_reads(
     monkeypatch.setattr(
         opensandbox_provider,
         "_require_opensandbox_sdk",
-        lambda: (object, object, FakeRunCommandOpts, object, object),
+        lambda: (object, FakeConnectionConfig, FakeRunCommandOpts, object, object),
     )
     monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    request = AsyncMock(return_value=FakeResponse())
+    monkeypatch.setattr(server_utils, "request", request)
 
     provider = opensandbox_provider.OpenSandboxProvider(
         connection={"request_timeout_s": 120},
@@ -2428,8 +3020,8 @@ async def test_exec_background_retries_timed_out_reads(
         sandbox_id="sandbox-slowpoll", provider_name="opensandbox", raw=SimpleNamespace(commands=commands)
     )
 
-    if failures == 3:
-        with pytest.raises(TimeoutError, match=f"command {read_operation}"):
+    if failures == 3 and read_operation == "logs":
+        with pytest.raises(opensandbox_provider.SandboxIOTimeoutError, match=f"command {read_operation}"):
             await provider.exec(handle, "echo ok", timeout_s=30)
     else:
         result = await provider.exec(handle, "echo ok", timeout_s=30)
@@ -2437,13 +3029,15 @@ async def test_exec_background_retries_timed_out_reads(
         assert result.stdout == "ok"
 
     assert commands.submissions == 1
-    expected_attempts = min(failures + 1, 3)
+    expected_attempts = failures + 1 if read_operation == "status" else min(failures + 1, 3)
     if read_operation == "status":
         assert commands.status_calls == ["exec-slowpoll"] * expected_attempts
-        assert commands.log_calls == (["exec-slowpoll"] if failures == 1 else [])
+        assert commands.log_calls == ["exec-slowpoll"]
+        assert request.await_count == (1 if failures == 3 else 0)
     else:
         assert commands.status_calls == ["exec-slowpoll"]
         assert commands.log_calls == ["exec-slowpoll"] * expected_attempts
+        assert request.await_count == (1 if failures == 3 else 0)
 
 
 def test_tls_verify_reaches_transports(fake_opensandbox_sdk: None) -> None:

@@ -20,6 +20,8 @@ from nemo_gym.agent_utils.supervisor_client import parse_cleanup_receipt
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.rollout_observability import NG_AGENT_SANDBOX_OBSERVATION_KEY, SandboxObservation
+from nemo_gym.sandbox import SandboxHandle, SandboxOOMKilledError
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.tasks.harbor.materialize import materialize_task
 from nemo_gym.tasks.harbor.task import load_task
@@ -72,6 +74,8 @@ def events() -> str:
 
 class Sandbox:
     def __init__(self):
+        self.sandbox_id = "resources-owned"
+        self.provider_name = "opensandbox"
         self.files = {}
         self.result = {
             "return_code": 0,
@@ -93,6 +97,9 @@ class Sandbox:
         self.disconnect = AsyncMock()
         self.launch = AsyncMock(side_effect=self.create)
         self.request_stop = AsyncMock(side_effect=self.signal)
+
+    def _require_handle(self):
+        return SandboxHandle(sandbox_id=self.sandbox_id, provider_name=self.provider_name, raw=None)
 
     @property
     def pty(self):
@@ -171,9 +178,10 @@ def setup():
         ),
         patch(f"{module}.resolve_provider_config"),
         patch(f"{module}.get_global_config_dict", return_value={}),
-        patch(f"{module}.create_provider"),
+        patch(f"{module}.create_provider") as provider_factory,
         patch(f"{module}.AsyncSandbox.connect", AsyncMock(return_value=sandbox)),
     ):
+        provider_factory.return_value.name = "opensandbox"
         agent = OpenCodeAgent(config=config, server_client=client)
         yield agent, sandbox
 
@@ -295,6 +303,82 @@ def test_http_session_flow_runs_opencode_in_borrowed_sandbox(setup, output_budge
     sandbox.disconnect.assert_awaited_once()
     sandbox.stop.assert_not_awaited()
     agent.server_client.post.assert_not_called()
+
+
+@pytest.mark.parametrize("owned", [False, True])
+def test_confirmed_agent_execution_oom_retains_sandbox_id_and_closes_dead_session(setup, owned):
+    agent, sandbox = setup
+    agent.config.report_agent_sandbox_oom = True
+    body = seed()
+    if owned:
+        agent.config.sandbox_provider = "agent-provider"
+        agent.config.sandbox_config = {"image": "test-image", "workdir": "/app"}
+        body.sandbox_access = None
+        sandbox.sandbox_id = "agent-owned"
+        sandbox.start = AsyncMock()
+    error = SandboxOOMKilledError(
+        f"Sandbox was OOM-killed. OpenSandbox status: reason='OOMKilled'; sandbox_id='{sandbox.sandbox_id}'",
+        sandbox_id=sandbox.sandbox_id,
+    )
+    sandbox.launch.side_effect = error
+
+    module = "responses_api_agents.opencode_agent.app"
+    with (
+        patch(f"{module}.AsyncSandbox", return_value=sandbox) as factory,
+        TestClient(agent.setup_webserver()) as client,
+    ):
+        factory.connect = AsyncMock(return_value=sandbox)
+        created = client.post("/v1/agent_sessions", json=body.model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        response = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "Fix the code"})
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["status"] == "failed"
+        assert body["output"] == []
+        observation = SandboxObservation.model_validate_json(body["metadata"][NG_AGENT_SANDBOX_OBSERVATION_KEY])
+        assert observation.role == "agent"
+        assert observation.outcome == "oom"
+        assert observation.phase == "agent_execution"
+        assert observation.provider == "opensandbox"
+        assert observation.sandbox_id == sandbox.sandbox_id
+        assert observation.error_type == "SandboxOOMKilledError"
+        assert observation.error_message == str(error)
+
+        exec_count_at_failure = sandbox.exec.await_count
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        assert closed.status_code == 200, closed.text
+        assert observation.model_dump() in closed.json()["agent_observations"]["records"]
+        assert any(
+            record["kind"] == "agent_invocation" and record["invocation_id"] == "opencode-smoke-a2"
+            for record in closed.json()["agent_observations"]["records"]
+        )
+        assert any(gap["code"] == "observation_capture_failed" for gap in closed.json()["agent_observations"]["gaps"])
+
+    assert sandbox.launch.await_count == 1
+    assert sandbox.exec.await_count == exec_count_at_failure
+    assert not any("rm -rf" in call.args[0] for call in sandbox.exec.await_args_list)
+    if owned:
+        sandbox.stop.assert_awaited_once()
+        sandbox.disconnect.assert_not_awaited()
+    else:
+        sandbox.disconnect.assert_awaited_once()
+        sandbox.stop.assert_not_awaited()
+
+
+async def test_agent_execution_oom_reporting_is_opt_in(setup):
+    agent, sandbox = setup
+    request = Request({"type": "http", "session": {}, "path_params": {"rollout_id": "opencode-smoke-a2"}})
+    session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
+    error = SandboxOOMKilledError("OpenSandbox reason='OOMKilled'; sandbox_id='resources-owned'")
+    sandbox.launch.side_effect = error
+
+    with pytest.raises(SandboxOOMKilledError) as caught:
+        await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+
+    assert caught.value is error
+    closed = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    assert not any(isinstance(record, SandboxObservation) for record in closed.agent_observations.records)
+    sandbox.disconnect.assert_awaited_once()
 
 
 @pytest.mark.parametrize("part_type", ["text", "reasoning"])

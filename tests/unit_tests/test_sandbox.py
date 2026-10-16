@@ -29,10 +29,15 @@ import nemo_gym.sandbox.providers.registry as provider_registry
 from nemo_gym.sandbox import (
     AsyncSandbox,
     Sandbox,
+    SandboxBackendUnreachableError,
+    SandboxCommandStatusTimeoutError,
     SandboxCreateError,
     SandboxEndpoint,
     SandboxExecResult,
     SandboxHandle,
+    SandboxIOTimeoutError,
+    SandboxLostError,
+    SandboxOOMKilledError,
     SandboxResources,
     SandboxSpec,
     SandboxStatus,
@@ -406,6 +411,22 @@ async def _assert_sandbox_facade_uses_public_provider_api(tmp_path: Path) -> Non
 
 def test_async_sandbox_initial_file_error_paths() -> None:
     asyncio.run(_assert_async_sandbox_initial_file_error_paths())
+
+
+def test_sandbox_runtime_errors_keep_distinct_outcomes() -> None:
+    status_loss = SandboxCommandStatusTimeoutError("status unavailable")
+    backend_loss = SandboxBackendUnreachableError("backend unavailable")
+    io_loss = SandboxIOTimeoutError("provider read timed out")
+    oom = SandboxOOMKilledError("current container OOMKilled", sandbox_id="fake-1")
+
+    assert isinstance(status_loss, SandboxLostError)
+    assert not isinstance(status_loss, TimeoutError)
+    assert isinstance(backend_loss, SandboxLostError)
+    assert isinstance(io_loss, SandboxLostError)
+    assert not isinstance(io_loss, TimeoutError)
+    assert isinstance(oom, SandboxLostError)
+    assert not isinstance(oom, SandboxBackendUnreachableError)
+    assert oom.sandbox_id == "fake-1"
 
 
 async def _assert_async_sandbox_initial_file_error_paths() -> None:

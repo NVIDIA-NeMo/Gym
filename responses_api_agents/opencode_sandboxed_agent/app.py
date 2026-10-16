@@ -15,14 +15,16 @@
 
 import asyncio
 import json
+import logging
 import sqlite3
 import sys
 from asyncio import Semaphore
 from contextlib import nullcontext
 from copy import deepcopy
 from pathlib import Path
+from random import uniform
 from shlex import quote
-from time import time
+from time import monotonic, time
 from traceback import format_exc
 from typing import Any, Dict, List, Literal, Optional
 from uuid import uuid4
@@ -61,6 +63,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.responses_converter import ResponsesConverter
 from nemo_gym.rollout_observability import (
+    NG_AGENT_SANDBOX_OBSERVATION_KEY,
     AgentInvocation,
     AgentObservationBundle,
     ContextCompactionObservation,
@@ -69,7 +72,15 @@ from nemo_gym.rollout_observability import (
     ToolCallObservation,
     TrajectoryRecord,
 )
-from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, create_provider
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    SandboxIOTimeoutError,
+    SandboxLostError,
+    SandboxOOMKilledError,
+    SandboxResources,
+    SandboxSpec,
+    create_provider,
+)
 from nemo_gym.sandbox.agent_tools import (
     restricted_network_policy,
     sandbox_server_url,
@@ -92,6 +103,9 @@ from responses_api_agents.opencode_agent.runtime import (
 
 
 _REMOTE_ASSISTANT_MESSAGE_PLUGIN = "/tmp/nemo-gym-opencode-assistant-message-header.js"
+_RIPGREP_UPLOAD_MAX_ATTEMPTS = 2
+_RIPGREP_UPLOAD_MAX_CONCURRENT = 2
+LOGGER = logging.getLogger(__name__)
 
 
 def _load_json(value: Any) -> dict[str, Any]:
@@ -443,6 +457,7 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     concurrency: Optional[int] = Field(default=None)
     preinstalled_opencode: bool = False
     execution_failure_reward_zero: bool = False
+    report_agent_sandbox_oom: bool = False
     output_token_policy: Literal["fixed", "remaining_context"] = "fixed"
     network_access: Literal["inherit", "model_only", "model_and_tools"] = "inherit"
     tool_servers: List[ResourcesServerRef] = Field(default_factory=list)
@@ -539,6 +554,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         super().model_post_init(context)
 
         self._sem = Semaphore(self.config.concurrency) if self.config.concurrency else nullcontext()
+        # Uvicorn workers have separate agent instances, so this bounds each process.
+        self._ripgrep_upload_sem = Semaphore(_RIPGREP_UPLOAD_MAX_CONCURRENT)
         self._sandbox_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
         self._sandbox_id_to_run_result: Dict[str, Dict[str, Any]] = dict()
 
@@ -598,6 +615,45 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         await sandbox.start(sandbox_spec)
 
         return sandbox
+
+    async def _stage_ripgrep(self, sandbox: AsyncSandbox, source_path: Path) -> str:
+        """Retry an ambiguous upload timeout without reusing its remote path."""
+        size_bytes = source_path.stat().st_size
+        sandbox_id = sandbox._handle.sandbox_id
+        for attempt in range(1, _RIPGREP_UPLOAD_MAX_ATTEMPTS + 1):
+            remote_path = f"/tmp/nemo-gym-ripgrep-{uuid4().hex}"
+            try:
+                async with self._ripgrep_upload_sem:
+                    started = monotonic()
+                    await sandbox.upload(source_path, remote_path)
+            except (TimeoutError, SandboxIOTimeoutError):
+                LOGGER.warning(
+                    "OpenCode ripgrep upload timed out; sandbox_id=%s remote_path=%s "
+                    "attempt=%d/%d size_bytes=%d duration_s=%.1f",
+                    sandbox_id,
+                    remote_path,
+                    attempt,
+                    _RIPGREP_UPLOAD_MAX_ATTEMPTS,
+                    size_bytes,
+                    monotonic() - started,
+                )
+                if attempt == _RIPGREP_UPLOAD_MAX_ATTEMPTS:
+                    raise
+                await asyncio.sleep(uniform(15.0, 30.0))
+            else:
+                LOGGER.info(
+                    "OpenCode ripgrep upload completed; sandbox_id=%s remote_path=%s "
+                    "attempt=%d/%d size_bytes=%d duration_s=%.1f",
+                    sandbox_id,
+                    remote_path,
+                    attempt,
+                    _RIPGREP_UPLOAD_MAX_ATTEMPTS,
+                    size_bytes,
+                    monotonic() - started,
+                )
+                return remote_path
+
+        raise RuntimeError("OpenCode ripgrep upload retry loop did not run")
 
     def _runtime_plugins(self) -> list[str]:
         plugins = []
@@ -859,7 +915,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         ripgrep_remote_path = None
         ripgrep_install_str = ""
         if self.config.local_ripgrep_binary_path is not None:
-            ripgrep_remote_path = f"/tmp/nemo-gym-ripgrep-{uuid4().hex}"
+            ripgrep_remote_path = await self._stage_ripgrep(sandbox, self.config.local_ripgrep_binary_path)
             # Uploads may be root-owned: copy as the execution user; teardown removes the source.
             ripgrep_install_str = (
                 '&& mkdir -p "$HOME/.opencode/bin" '
@@ -873,24 +929,30 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         # and there is no way to set it to null.
         # Here, we set an exorbitantly high number that cannot ever be reached.
         # In future versions of OpenCode, this can be directly passed via maxOutputTokens in the limit config above https://github.com/anomalyco/opencode/blob/1b18a50418f730aca32630ccfcde850f2b5fc360/packages/opencode/src/provider/transform.ts#L1418
-        command = f"""
+        setup_command = f"""
         echo "Shell: $SHELL" \
         && {install_str} \
         {ripgrep_install_str} \
         && export PATH="$HOME/.opencode/bin:$PATH" \
         && test "$(opencode --version)" = {quote(self.config.opencode_version)} \
         && echo "Installed OpenCode" \
-        && rm -f /tmp/nemo-gym-mcp-setup-error \
-        && NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps([s.name for s in self.config.tool_servers]))} OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} \
+        && rm -f /tmp/nemo-gym-mcp-setup-error
+        """
+        agent_command = f"""
+        NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps([s.name for s in self.config.tool_servers]))} OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} \
             opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str} -- {quote(query)} \
         && echo "OpenCode run finished"
         """
+        if self.config.report_agent_sandbox_oom:
+            setup_result = await sandbox.exec(command=setup_command, timeout_s=self.config.sandbox_timeout)
+            if setup_result.return_code != 0 or setup_result.error_type is not None:
+                raise RuntimeError(f"OpenCode setup failed before agent execution: {setup_result}")
+            command = f'echo "Shell: $SHELL" && export PATH=$HOME/.opencode/bin:$PATH && {agent_command}'
+        else:
+            command = f"{setup_command.strip()} && {agent_command.strip()}"
 
         if self.config.debug:
             print("Starting OpenCode (runtime configuration omitted to protect credentials)", file=sys.stderr)
-
-        if ripgrep_remote_path is not None:
-            await sandbox.upload(self.config.local_ripgrep_binary_path, ripgrep_remote_path)
 
         run_error_type = None
         try:
@@ -898,6 +960,57 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 command=command,
                 timeout_s=self.config.sandbox_timeout,
             )
+        except SandboxOOMKilledError as exc:
+            if not self.config.report_agent_sandbox_oom:
+                raise
+            handle = sandbox._handle
+            observation = SandboxObservation(
+                role="agent",
+                provider=handle.provider_name,
+                sandbox_id=exc.sandbox_id,
+                phase="agent_execution",
+                outcome="oom",
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+            )
+            self._sandbox_id_to_run_result[request.cookies["sandbox_id"]] = {
+                "opencode_failed": True,
+                "opencode_exit_code": None,
+                "opencode_error_type": type(exc).__name__,
+                "opencode_results_fpath": "",
+                "opencode_run_stdout": "",
+                "opencode_run_stderr": str(exc),
+                "opencode_export_found": False,
+                "opencode_finished": False,
+                "_ng_agent_observations": AgentObservationBundle(
+                    source="opencode",
+                    records=(
+                        [
+                            AgentInvocation(
+                                invocation_id=observation_invocation_id, status="failed", error_type="server_error"
+                            )
+                        ]
+                        if observation_invocation_id is not None
+                        else []
+                    )
+                    + [observation],
+                    gaps=[ObservationGap(code="observation_capture_failed")],
+                ),
+            }
+            return NeMoGymResponse(
+                id=f"resp_{uuid4().hex}",
+                created_at=int(time()),
+                model=body.model or self.config.model_server.name,
+                object="response",
+                output=[],
+                status="failed",
+                tool_choice=body.tool_choice,
+                tools=body.tools,
+                parallel_tool_calls=body.parallel_tool_calls,
+                metadata={NG_AGENT_SANDBOX_OBSERVATION_KEY: observation.model_dump_json()},
+            )
+        except SandboxLostError:
+            raise
         except Exception as exc:
             result = None
             run_error_type = type(exc).__name__
@@ -936,6 +1049,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 env=session_env,
                 timeout_s=self.config.sandbox_timeout,
             )
+        except SandboxLostError:
+            raise
         except Exception:
             export_result = None
             print("Failed to export results", format_exc(), file=sys.stderr)
@@ -955,6 +1070,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 print(f"Downloading results from {export_remote_fpath} to {results_local_fpath}", file=sys.stderr)
             try:
                 await sandbox.download(export_remote_fpath, results_local_fpath)
+            except SandboxLostError:
+                raise
             except Exception:
                 results_local_fpath.unlink(missing_ok=True)
                 print(f"Failed to download export results to {results_local_fpath}", format_exc(), file=sys.stderr)
@@ -999,6 +1116,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                         trajectory,
                         model_ref=self.config.model_server,
                     )
+            except SandboxLostError:
+                raise
             except Exception:
                 print("Failed to capture OpenCode session usage or observations", format_exc(), file=sys.stderr)
                 if collect_observations:
@@ -1160,8 +1279,11 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 body,
                 response,
                 cookies,
-                force_zero_reward=self.config.execution_failure_reward_zero
-                and run_result.get("opencode_failed", False),
+                force_zero_reward=(
+                    self.config.execution_failure_reward_zero
+                    and run_result.get("opencode_failed", False)
+                    and run_result.get("opencode_error_type") != "SandboxOOMKilledError"
+                ),
             )
         finally:
             del request.state._ng_observation_invocation_id
