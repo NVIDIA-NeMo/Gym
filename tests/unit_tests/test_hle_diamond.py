@@ -26,7 +26,7 @@ from omegaconf import OmegaConf
 import benchmarks.hle_diamond.prepare as prepare_module
 import benchmarks.hle_diamond.prepare_text as prepare_text_module
 from nemo_gym.benchmarks import BENCHMARKS_DIR, BenchmarkConfig, _benchmark_config_name, _benchmark_config_paths
-from nemo_gym.config_types import ModelServerRef
+from nemo_gym.config_types import ModelServerRef, is_almost_server, maybe_get_server_instance_config
 from nemo_gym.discovery import _parse_no_environment_tolerating_unset_values
 from nemo_gym.environment.manifest import load_manifest, resolve_manifest_config_path
 from nemo_gym.environment.validation import _mirror_differences, _resolve_manifest_composition
@@ -39,6 +39,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.prompt import fill_prompt, load_prompt_config
 from nemo_gym.reward_profile import compute_aggregate_metrics
+from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.server_utils import ServerClient
 from resources_servers.equivalence_llm_judge.app import (
     JudgeEvaluation,
@@ -456,6 +457,69 @@ class TestReasoningEffort:
         # Pi's --thinking levels are off, minimal, low, medium, high, xhigh, max.
         assert agent["thinking"] == "high"
         assert agent["model_server"]["name"] == "policy_model"  # inherited preset keys survive
+
+
+class TestLocalDockerOverride:
+    """sandbox_docker_local.yaml: the sandboxed presets on the local Docker provider (comparison infrastructure)."""
+
+    OVERRIDE = HLE_DIAMOND_DIR / "sandbox_docker_local.yaml"
+
+    @pytest.mark.parametrize(
+        ("config_file", "agent", "other_agent"),
+        [
+            ("opencode.yaml", "hle_diamond_opencode_agent", "hle_diamond_pi_agent"),
+            ("opencode_search.yaml", "hle_diamond_opencode_agent", "hle_diamond_pi_agent"),
+            ("pi.yaml", "hle_diamond_pi_agent", "hle_diamond_opencode_agent"),
+            ("pi_search.yaml", "hle_diamond_pi_agent", "hle_diamond_opencode_agent"),
+        ],
+    )
+    def test_override_resolves_to_exactly_the_docker_provider(self, config_file, agent, other_agent):
+        resolved = _resolve(config_file, "sandbox_docker_local.yaml")
+        agent_config = get_first_server_config_dict(resolved, agent)
+
+        assert (agent_config["sandbox_provider"], agent_config["network_access"]) == ("sandbox_docker", "inherit")
+        provider = resolve_provider_config(agent_config["sandbox_provider"], resolved)
+        assert list(provider) == ["docker"]
+        assert provider["docker"]["create"]["keepalive_shell"] == "/bin/sh"
+        # The preset's OpenSandbox block is still composed, which is why the placeholder env vars exist.
+        assert "opensandbox" in resolved["sandbox"]
+        # The other harness's block is partial: not a server, not an almost-server, so never started.
+        block = resolved[other_agent]
+        instance, error = maybe_get_server_instance_config(name=other_agent, server_type_config_dict=block)
+        assert instance is None and error is not None
+        assert not is_almost_server(block)
+
+    def test_override_tells_the_model_the_truth_about_egress_and_keeps_the_preset_knobs(self):
+        opencode = get_first_server_config_dict(
+            _resolve("opencode_search.yaml", "sandbox_docker_local.yaml"), "hle_diamond_opencode_agent"
+        )
+        note = opencode["sandbox_config"]["files"]["/tmp/nemo-gym-environment.txt"]
+        assert "NOT restricted" in note and "disabled" not in note
+        assert opencode["sandbox_config"]["ttl_s"] == 14400  # the rest of the inherited sandbox_config survives
+        assert opencode["opencode_config"]["provider"]["nemo_gym"]["models"]["dummy_model"]["options"] == {
+            "reasoningEffort": "high"
+        }
+
+        pi = get_first_server_config_dict(
+            _resolve("pi_search.yaml", "sandbox_docker_local.yaml"), "hle_diamond_pi_agent"
+        )
+        assert "NOT restricted" in pi["system_prompt"] and "disabled" not in pi["system_prompt"]
+        assert pi["thinking"] == "high"
+
+    def test_override_is_not_a_benchmark_and_documents_the_local_recipe(self):
+        text = self.OVERRIDE.read_text(encoding="utf-8")
+        for documented in (
+            "OPENSANDBOX_API_KEY",
+            "OPENSANDBOX_DOMAIN",
+            "# network: host",
+            "ttl_s",
+            "LABEL EVERY RESULT",
+        ):
+            assert documented in text
+        assert "datasets" not in json.dumps(yaml.safe_load(text))
+
+        discovered = {p.name for p in _benchmark_config_paths(BENCHMARKS_DIR) if p.is_relative_to(HLE_DIAMOND_DIR)}
+        assert discovered == {"config.yaml", "text.yaml", "opencode.yaml", "pi.yaml"}
 
 
 def _judge_server(report_slice_fields: list[str]) -> LLMJudgeResourcesServer:
