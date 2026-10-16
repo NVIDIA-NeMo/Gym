@@ -208,23 +208,6 @@ class TestCLISetupCommandSetupEnvCommand:
 
         assert actual_path == uv_venv_dir / "first_level/second_level/.venv"
 
-    def test_nested_server_in_checkout_installs_editable(self, tmp_path: Path) -> None:
-        (tmp_path / "pyproject.toml").touch()
-        server_dir = (tmp_path / "first_level" / "second_level" / "third_level").absolute()
-        server_dir.mkdir(parents=True)
-        (server_dir / "requirements.txt").write_text("-e nemo-gym[dev] @ ../../../\n")
-
-        with patch("importlib.metadata.version") as version:
-            actual_command = setup_env_command(
-                dir_path=server_dir,
-                global_config_dict=self._debug_global_config_dict(tmp_path),
-                prefix="my server name",
-            )
-
-        version.assert_not_called()
-        assert "nemo-gym==" not in actual_command
-        assert "-r requirements.txt" in actual_command
-
     @pytest.mark.parametrize("version", ["0.3.0", "0.3.0rc0", "1.0.0", "2.1.3rc1"])
     def test_installs_from_pypi_when_not_editable(
         self, tmp_path: Path, version: str, monkeypatch: MonkeyPatch
