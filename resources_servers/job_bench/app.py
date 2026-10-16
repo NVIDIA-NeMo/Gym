@@ -42,6 +42,9 @@ class JobBenchConfig(BaseResourcesServerConfig):
     judge_base_url: str
     judge_api_key: str
     judge_model: str
+    # Upstream asks every judge call for 200000 completion tokens. A judge whose context is not
+    # much larger than that (a self-hosted 262k model) rejects every prompt over the remainder.
+    judge_max_completion_tokens: int = 200000
     max_judge_workers: int = 10
     sandbox_provider: str
     sandbox_config: dict[str, Any]
@@ -167,6 +170,7 @@ class JobBenchResourcesServer(SimpleResourcesServer):
                     300,
                     3,
                     images,
+                    self.config.judge_max_completion_tokens,
                 )
                 for index, rubric in enumerate(rubrics)
             ]
