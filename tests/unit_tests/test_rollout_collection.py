@@ -41,7 +41,7 @@ import nemo_gym.token_id_capture.delivery
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.batch_status import observe_materialized_rows
 from nemo_gym.config_types import AmbiguousEnvironmentServerError, ConfigError, ConfigPathNotFoundError
-from nemo_gym.failure_kinds import CANCELLED
+from nemo_gym.failure_kinds import CANCELLED, PROVIDER_OOM_KILLED
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
@@ -2052,6 +2052,63 @@ class TestRolloutCollection:
         assert "Rollouts missing from the score: 1 of 2 materialized" in printed
         assert "Metrics cover: 1 of 2 rollouts" in printed
         assert str(_failures_path_for(output_jsonl_fpath)) in printed
+
+    async def test_scored_agent_sandbox_oom_is_in_main_rollouts_and_completion_gate(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        input_jsonl_fpath.write_text(
+            "\n".join(
+                json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my_agent"}, "x": i})
+                for i in range(2)
+            )
+            + "\n"
+        )
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+        aggregated: dict[str, list[dict]] = {}
+
+        async def post(server_name: str, url_path: str, json: dict, **kwargs):
+            if url_path == "/run":
+                if json["x"] == 0:
+                    return FakeResponse(
+                        200,
+                        {
+                            "reward": 0.0,
+                            "mask_sample": False,
+                            "failure_kind": PROVIDER_OOM_KILLED,
+                            "failure_reason": "OpenSandbox confirmed OOMKilled after agent dispatch",
+                            "agent_sandbox_oom_killed": True,
+                            "response": {"output": []},
+                        },
+                    )
+                return FakeResponse(200, {"reward": 1.0, "response": {"output": []}})
+            assert url_path == "/aggregate_metrics"
+            aggregated["verify_responses"] = [dict(row) for row in json.verify_responses]
+            return FakeResponse(200, compute_aggregate_metrics(aggregated["verify_responses"]).model_dump())
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            route_failures_to_sidecar=True,
+            disable_health_check=True,
+            require_complete=True,
+        )
+        await RolloutCollectionHelper().run_from_config(config)
+
+        persisted = [orjson.loads(line) for line in output_jsonl_fpath.read_bytes().splitlines()]
+        assert len(persisted) == 2
+        assert sorted(row["reward"] for row in persisted) == [0.0, 1.0]
+        oom_row = next(row for row in persisted if row["reward"] == 0.0)
+        assert oom_row["failure_kind"] == PROVIDER_OOM_KILLED
+        assert oom_row["mask_sample"] is False
+        assert oom_row["agent_sandbox_oom_killed"] is True
+        assert _failures_path_for(output_jsonl_fpath).read_bytes() == b""
+        assert len(aggregated["verify_responses"]) == 2
+        metrics_fpath = output_jsonl_fpath.with_stem(output_jsonl_fpath.stem + "_aggregate_metrics").with_suffix(
+            ".json"
+        )
+        assert orjson.loads(metrics_fpath.read_bytes())[0]["key_metrics"]["mean/reward"] == 0.5
 
     async def test_run_from_config_resume_retries_an_agent_failure_row(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock

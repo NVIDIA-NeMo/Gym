@@ -1215,6 +1215,7 @@ async def test_exec_background_reports_oom_status_after_502(monkeypatch: pytest.
     with pytest.raises(opensandbox_provider.SandboxBackendUnreachableError) as exc_info:
         await provider.exec(handle, "allocate memory", timeout_s=30)
 
+    assert isinstance(exc_info.value, opensandbox_provider.SandboxOOMKilledError)
     message = str(exc_info.value)
     assert "OOM-killed" in message
     assert "SandboxResources.memory_mib" not in message

@@ -88,6 +88,16 @@ class SandboxBackendUnreachableError(RuntimeError):
     """
 
 
+class SandboxOOMKilledError(SandboxBackendUnreachableError):
+    """The OpenSandbox control plane confirmed that the sandbox was OOM-killed."""
+
+
+@dataclass(frozen=True)
+class _SandboxDeathNotice:
+    message: str
+    oom_killed: bool
+
+
 RETRYABLE_HTTP_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
 RETRYABLE_ERROR_MARKERS = (
     "all connection attempts failed",
@@ -1750,12 +1760,15 @@ class OpenSandboxProvider:
         except Exception as error:
             if not isinstance(error, SandboxBackendUnreachableError) and _exception_status_code(error) != 502:
                 raise
-            notice = await self._oom_death_notice(handle)
+            notice = await self._sandbox_death_notice(handle)
             if notice is not None:
-                raise SandboxBackendUnreachableError(notice) from error
+                error_type = SandboxOOMKilledError if notice.oom_killed else SandboxBackendUnreachableError
+                raise error_type(notice.message) from error
             raise
 
-    async def _oom_death_notice(self, handle: SandboxHandle, *, any_death: bool = False) -> str | None:
+    async def _sandbox_death_notice(
+        self, handle: SandboxHandle, *, any_death: bool = False
+    ) -> _SandboxDeathNotice | None:
         """Briefly poll the sandbox status; describe an OOM kill, else None.
 
         With ``any_death`` every terminal state is reported, not just an OOM
@@ -1786,11 +1799,15 @@ class OpenSandboxProvider:
                 f"sandbox_id={handle.sandbox_id!r}"
             )
             if re.search(r"\boom[\s_-]*killed\b|\bout of memory\b", f"{reason} {message}", re.IGNORECASE):
-                return f"Sandbox was OOM-killed. {status_text}"
+                return _SandboxDeathNotice(f"Sandbox was OOM-killed. {status_text}", oom_killed=True)
             if message and _to_sandbox_status(state) in {SandboxStatus.ERROR, SandboxStatus.STOPPED}:
-                return f"Sandbox is dead. {status_text}" if any_death else None
+                return _SandboxDeathNotice(f"Sandbox is dead. {status_text}", oom_killed=False) if any_death else None
             await asyncio.sleep(min(0.5, max(0.0, deadline - asyncio.get_running_loop().time())))
         return None
+
+    async def _oom_death_notice(self, handle: SandboxHandle, *, any_death: bool = False) -> str | None:
+        notice = await self._sandbox_death_notice(handle, any_death=any_death)
+        return notice.message if notice is not None else None
 
     async def _exec_background(
         self,

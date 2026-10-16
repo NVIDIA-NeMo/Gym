@@ -43,6 +43,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.failure_kinds import PROVIDER_OOM_KILLED
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -77,6 +78,7 @@ from nemo_gym.sandbox.agent_tools import (
     verify_agent_response,
 )
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
+from nemo_gym.sandbox.providers.opensandbox.provider import SandboxOOMKilledError
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import (
     SESSION_ID_KEY,
@@ -443,6 +445,7 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     concurrency: Optional[int] = Field(default=None)
     preinstalled_opencode: bool = False
     execution_failure_reward_zero: bool = False
+    score_agent_sandbox_oom_as_zero: bool = False
     output_token_policy: Literal["fixed", "remaining_context"] = "fixed"
     network_access: Literal["inherit", "model_only", "model_and_tools"] = "inherit"
     tool_servers: List[ResourcesServerRef] = Field(default_factory=list)
@@ -526,6 +529,7 @@ class OpenCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
     opencode_exit_code: Optional[int] = None
     opencode_error_type: Optional[str] = None
     opencode_failed: bool = False
+    agent_sandbox_oom_killed: bool = False
     ng_agent_observations: Optional[AgentObservationBundle] = Field(
         default=None,
         exclude_if=lambda value: value is None,
@@ -873,30 +877,62 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         # and there is no way to set it to null.
         # Here, we set an exorbitantly high number that cannot ever be reached.
         # In future versions of OpenCode, this can be directly passed via maxOutputTokens in the limit config above https://github.com/anomalyco/opencode/blob/1b18a50418f730aca32630ccfcde850f2b5fc360/packages/opencode/src/provider/transform.ts#L1418
-        command = f"""
+        setup_command = f"""
         echo "Shell: $SHELL" \
         && {install_str} \
         {ripgrep_install_str} \
         && export PATH="$HOME/.opencode/bin:$PATH" \
         && test "$(opencode --version)" = {quote(self.config.opencode_version)} \
         && echo "Installed OpenCode" \
-        && rm -f /tmp/nemo-gym-mcp-setup-error \
-        && NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps([s.name for s in self.config.tool_servers]))} OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} \
+        && rm -f /tmp/nemo-gym-mcp-setup-error
+        """
+        agent_command = f"""
+        NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps([s.name for s in self.config.tool_servers]))} OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} \
             opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str} -- {quote(query)} \
         && echo "OpenCode run finished"
         """
+        if ripgrep_remote_path is not None:
+            await sandbox.upload(self.config.local_ripgrep_binary_path, ripgrep_remote_path)
+        if self.config.score_agent_sandbox_oom_as_zero:
+            setup_result = await sandbox.exec(command=setup_command, timeout_s=self.config.sandbox_timeout)
+            if setup_result.return_code != 0 or setup_result.error_type is not None:
+                raise RuntimeError(f"OpenCode setup failed before agent execution: {setup_result}")
+            command = f'echo "Shell: $SHELL" && export PATH=$HOME/.opencode/bin:$PATH && {agent_command}'
+        else:
+            command = f"{setup_command.strip()} && {agent_command.strip()}"
 
         if self.config.debug:
             print("Starting OpenCode (runtime configuration omitted to protect credentials)", file=sys.stderr)
-
-        if ripgrep_remote_path is not None:
-            await sandbox.upload(self.config.local_ripgrep_binary_path, ripgrep_remote_path)
 
         run_error_type = None
         try:
             result = await sandbox.exec(
                 command=command,
                 timeout_s=self.config.sandbox_timeout,
+            )
+        except SandboxOOMKilledError as exc:
+            if not self.config.score_agent_sandbox_oom_as_zero:
+                raise
+            self._sandbox_id_to_run_result[request.cookies["sandbox_id"]] = {
+                "opencode_failed": True,
+                "agent_sandbox_oom_killed": True,
+                "opencode_exit_code": None,
+                "opencode_error_type": type(exc).__name__,
+                "opencode_results_fpath": "",
+                "opencode_run_stdout": "",
+                "opencode_run_stderr": str(exc),
+                "opencode_export_found": False,
+                "opencode_finished": False,
+            }
+            return NeMoGymResponse(
+                id=f"resp_{uuid4().hex}",
+                created_at=int(time()),
+                model=body.model or self.config.model_server.name,
+                object="response",
+                output=[],
+                tool_choice=body.tool_choice,
+                tools=body.tools,
+                parallel_tool_calls=body.parallel_tool_calls,
             )
         except Exception as exc:
             result = None
@@ -1154,15 +1190,20 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             run_result = self._sandbox_id_to_run_result.get(session_key, {}).copy()
             observations = run_result.pop("_ng_agent_observations", None)
             trajectory = run_result.pop("_ng_trajectory", None)
+            agent_sandbox_oom_killed = run_result.get("agent_sandbox_oom_killed", False)
+            verification_body = body.model_copy(update={"agent_sandbox_oom_killed": agent_sandbox_oom_killed})
             response_dict = await verify_agent_response(
                 self.server_client,
                 self.config.resources_server,
-                body,
+                verification_body,
                 response,
                 cookies,
-                force_zero_reward=self.config.execution_failure_reward_zero
-                and run_result.get("opencode_failed", False),
+                force_zero_reward=agent_sandbox_oom_killed
+                or (self.config.execution_failure_reward_zero and run_result.get("opencode_failed", False)),
             )
+            if agent_sandbox_oom_killed:
+                response_dict["failure_kind"] = PROVIDER_OOM_KILLED
+                response_dict["failure_reason"] = run_result["opencode_run_stderr"]
         finally:
             del request.state._ng_observation_invocation_id
             del request.state._ng_opencode_mcp

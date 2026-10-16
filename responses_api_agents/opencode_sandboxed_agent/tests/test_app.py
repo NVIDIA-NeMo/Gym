@@ -31,6 +31,7 @@ from pydantic import ValidationError
 from pytest import MonkeyPatch, fixture, mark, raises
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.failure_kinds import PROVIDER_OOM_KILLED
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -52,6 +53,7 @@ from nemo_gym.rollout_observability import (
     TrajectoryRecord,
 )
 from nemo_gym.sandbox import SandboxHandle
+from nemo_gym.sandbox.providers.opensandbox.provider import SandboxBackendUnreachableError, SandboxOOMKilledError
 from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from responses_api_agents.opencode_sandboxed_agent import app as app_module
@@ -1157,6 +1159,126 @@ class TestBenchmarkLifecycle:
         assert client.post.await_args.kwargs["json"]["response"]["output"] == []
         assert result.model_dump()["library_reward"] == 0.0
         sandbox.stop.assert_awaited_once()
+
+    async def test_confirmed_agent_sandbox_oom_returns_a_scored_zero(self, monkeypatch, tmp_path: Path):
+        config = self._create_config()
+        config.preinstalled_opencode = True
+        config.score_agent_sandbox_oom_as_zero = True
+        config.opencode_version = "test"
+        ripgrep = tmp_path / "rg"
+        ripgrep.write_text("#!/bin/sh\necho rg test\n")
+        ripgrep.chmod(0o755)
+        config.local_ripgrep_binary_path = ripgrep
+        client = MagicMock(spec=ServerClient)
+        seed = MagicMock(cookies={})
+        seed.json = AsyncMock(return_value={})
+
+        async def post(**kwargs):
+            if kwargs["url_path"] == "/seed_session":
+                return seed
+            assert kwargs["url_path"] == "/verify"
+            payload = kwargs["json"]
+            assert payload["agent_sandbox_oom_killed"] is True
+            assert payload["response"]["output"] == []
+            return SimpleNamespace(
+                ok=True,
+                read=AsyncMock(return_value=json.dumps(payload | {"reward": 0.0, "mask_sample": False}).encode()),
+                raise_for_status=lambda: None,
+            )
+
+        client.post = AsyncMock(side_effect=post)
+        server = OpenCodeSandboxedAgent(config=config, server_client=client)
+        sandbox = MagicMock(
+            upload=AsyncMock(),
+            stop=AsyncMock(),
+            exec=AsyncMock(
+                side_effect=[
+                    SimpleNamespace(stdout="Installed OpenCode", stderr="", return_code=0, error_type=None),
+                    SandboxOOMKilledError("Sandbox was OOM-killed. sandbox_id='agent-sandbox'"),
+                ]
+            ),
+        )
+        server._start_sandbox = AsyncMock(return_value=sandbox)
+        server._create_opencode_config = AsyncMock(return_value={})
+        monkeypatch.setattr(app_module, "raise_for_status", AsyncMock())
+        request = Request({"type": "http", "headers": [], "session": {SESSION_ID_KEY: "trial"}})
+        body = OpenCodeSandboxedAgentRunRequest(
+            responses_create_params={"input": [{"role": "user", "content": "Solve"}]}
+        )
+
+        result = await server.run(request, body)
+
+        assert result.reward == 0.0
+        assert result.mask_sample is False
+        assert result.failure_kind == PROVIDER_OOM_KILLED
+        assert "OOM-killed" in (result.failure_reason or "")
+        assert result.agent_sandbox_oom_killed is True
+        assert result.opencode_failed is True
+        assert result.response.output == []
+        assert "opencode --version" in sandbox.exec.await_args_list[0].kwargs["command"]
+        assert "opencode run" in sandbox.exec.await_args_list[1].kwargs["command"]
+        ripgrep_upload = next(
+            index
+            for index, sandbox_call in enumerate(sandbox.mock_calls)
+            if sandbox_call[0] == "upload" and sandbox_call.args[0] == ripgrep
+        )
+        first_exec = next(index for index, sandbox_call in enumerate(sandbox.mock_calls) if sandbox_call[0] == "exec")
+        assert ripgrep_upload < first_exec
+        staged_ripgrep = sandbox.mock_calls[ripgrep_upload].args[1]
+        agent_home = tmp_path / "agent-home"
+        bin_dir = agent_home / ".opencode/bin"
+        bin_dir.mkdir(parents=True)
+        opencode = bin_dir / "opencode"
+        opencode.write_text(
+            '#!/bin/sh\nif [ "$1" = --version ]; then echo test; else touch "$HOME/agent-started"; fi\n'
+        )
+        opencode.chmod(0o755)
+        environment = {"HOME": str(agent_home), "PATH": f"{bin_dir}{os.pathsep}{os.defpath}"}
+        setup_command = (
+            sandbox.exec.await_args_list[0].kwargs["command"].replace(staged_ripgrep, shlex.quote(str(ripgrep)))
+        )
+        setup_result = subprocess.run(
+            ["sh", "-c", setup_command], env=environment, capture_output=True, text=True, timeout=10
+        )
+        assert setup_result.returncode == 0, setup_result.stderr
+        agent_result = subprocess.run(
+            ["sh", "-c", sandbox.exec.await_args_list[1].kwargs["command"]],
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert agent_result.returncode == 0, agent_result.stderr
+        assert (agent_home / "agent-started").is_file()
+        assert client.post.await_count == 2
+        sandbox.stop.assert_awaited_once()
+
+    @mark.parametrize("failure_phase", ["setup_oom", "agent_transport"])
+    async def test_unconfirmed_agent_oom_does_not_produce_a_scored_response(self, monkeypatch, failure_phase):
+        config = self._create_config()
+        config.preinstalled_opencode = True
+        config.score_agent_sandbox_oom_as_zero = True
+        server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        preflight = SimpleNamespace(stdout="Installed OpenCode", stderr="", return_code=0, error_type=None)
+        failure = (
+            SandboxOOMKilledError("OOM during setup")
+            if failure_phase == "setup_oom"
+            else SandboxBackendUnreachableError("backend disappeared without OOM status")
+        )
+        sandbox = MagicMock(
+            upload=AsyncMock(),
+            exec=AsyncMock(side_effect=[failure] if failure_phase == "setup_oom" else [preflight, failure, failure]),
+        )
+        server._sandbox_id_to_sandbox = {"trial": sandbox}
+        server._create_opencode_config = AsyncMock(return_value={})
+        request = SimpleNamespace(
+            cookies={"sandbox_id": "trial"}, session={SESSION_ID_KEY: "trial"}, state=SimpleNamespace()
+        )
+        body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}])
+
+        with raises((SandboxOOMKilledError, RuntimeError)):
+            await server.responses(request, body)
+        assert server._sandbox_id_to_run_result == {}
 
 
 @mark.parametrize("failure", ["exception", "command", "download", "empty"])

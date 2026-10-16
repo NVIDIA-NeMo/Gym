@@ -9,7 +9,9 @@ from pytest import MonkeyPatch
 
 import resources_servers.deepswe.app as app_module
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.failure_kinds import PROVIDER_OOM_KILLED
 from nemo_gym.sandbox import SandboxResources
+from nemo_gym.sandbox.providers.opensandbox.provider import SandboxOOMKilledError
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.deepswe.app import (
     DeepSWEResourcesServer,
@@ -257,6 +259,103 @@ async def test_rollout_collects_committed_patch_and_verifies_in_fresh_sandbox(
     agent_sandbox.stop.assert_awaited_once()
     verifier_sandbox.stop.assert_awaited_once()
     assert server._agent_sessions == {}
+
+
+async def test_confirmed_agent_sandbox_oom_is_an_unmasked_zero_without_a_verifier(
+    task_assets: Path, monkeypatch: MonkeyPatch
+) -> None:
+    server = DeepSWEResourcesServer(
+        config=_config(task_assets, golden=False),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    agent_sandbox = AsyncMock()
+    agent_sandbox.serialize.return_value = {"sandbox_id": "agent-sandbox"}
+    create_sandbox = AsyncMock(return_value=agent_sandbox)
+    collect_model_patch = AsyncMock()
+    run_verifier = AsyncMock()
+    monkeypatch.setattr(server, "_create_sandbox", create_sandbox)
+    monkeypatch.setattr(server, "_collect_model_patch", collect_model_patch)
+    monkeypatch.setattr(server, "_run_verifier", run_verifier)
+    request = MagicMock()
+    request.session = {SESSION_ID_KEY: "test-session"}
+
+    await server.seed_session(request, DeepSWESeedSessionRequest.model_validate(_request()))
+    response = await server.verify(
+        request,
+        DeepSWEVerifyRequest.model_validate(_request() | {"agent_sandbox_oom_killed": True}),
+    )
+
+    assert response.reward == 0.0
+    assert response.mask_sample is False
+    assert response.failure_kind == PROVIDER_OOM_KILLED
+    assert response.agent_sandbox_oom_killed is True
+    assert response.model_patch_bytes == 0
+    assert response.evaluation_completed is False
+    assert "no patch could be collected" in (response.failure_reason or "")
+    create_sandbox.assert_awaited_once()
+    collect_model_patch.assert_not_awaited()
+    run_verifier.assert_not_awaited()
+    agent_sandbox.stop.assert_awaited_once()
+    assert server._agent_sessions == {}
+
+
+async def test_agent_sandbox_oom_zero_requires_a_seeded_session(task_assets: Path) -> None:
+    server = DeepSWEResourcesServer(
+        config=_config(task_assets, golden=False), server_client=MagicMock(spec=ServerClient)
+    )
+    request = MagicMock()
+    request.session = {SESSION_ID_KEY: "missing-session"}
+
+    with pytest.raises(RuntimeError, match="without its seeded DeepSWE session"):
+        await server.verify(
+            request, DeepSWEVerifyRequest.model_validate(_request() | {"agent_sandbox_oom_killed": True})
+        )
+
+
+async def test_agent_sandbox_oom_zero_cannot_grade_a_golden_patch(task_assets: Path) -> None:
+    server = DeepSWEResourcesServer(
+        config=_config(task_assets, golden=True), server_client=MagicMock(spec=ServerClient)
+    )
+    request = MagicMock()
+    request.session = {SESSION_ID_KEY: "golden"}
+
+    with pytest.raises(ValueError, match="non-golden run"):
+        await server.verify(
+            request, DeepSWEVerifyRequest.model_validate(_request() | {"agent_sandbox_oom_killed": True})
+        )
+
+
+@pytest.mark.parametrize("oom_phase", ["patch_collection", "verification"])
+async def test_oom_without_agent_execution_proof_fails_instead_of_scoring(
+    task_assets: Path, monkeypatch: MonkeyPatch, oom_phase: str
+) -> None:
+    server = DeepSWEResourcesServer(
+        config=_config(task_assets, golden=False), server_client=MagicMock(spec=ServerClient)
+    )
+    agent_sandbox = AsyncMock()
+    agent_sandbox.serialize.return_value = {"sandbox_id": "agent-sandbox"}
+    verifier_sandbox = AsyncMock()
+    create_sandbox = AsyncMock(side_effect=[agent_sandbox, verifier_sandbox])
+    monkeypatch.setattr(server, "_create_sandbox", create_sandbox)
+    collect_model_patch = AsyncMock(return_value=b"valid patch\n")
+    if oom_phase == "patch_collection":
+        collect_model_patch.side_effect = SandboxOOMKilledError("OOM during patch collection")
+    monkeypatch.setattr(server, "_collect_model_patch", collect_model_patch)
+    run_verifier = AsyncMock(side_effect=SandboxOOMKilledError("OOM during verification"))
+    monkeypatch.setattr(server, "_run_verifier", run_verifier)
+    request = MagicMock()
+    request.session = {SESSION_ID_KEY: "test-session"}
+
+    await server.seed_session(request, DeepSWESeedSessionRequest.model_validate(_request()))
+    with pytest.raises(SandboxOOMKilledError, match="OOM during"):
+        await server.verify(request, DeepSWEVerifyRequest.model_validate(_request()))
+
+    agent_sandbox.stop.assert_awaited_once()
+    assert create_sandbox.await_count == (1 if oom_phase == "patch_collection" else 2)
+    if oom_phase == "verification":
+        verifier_sandbox.stop.assert_awaited_once()
+    else:
+        run_verifier.assert_not_awaited()
 
 
 async def test_collect_model_patch_executes_upstream_hook(task_assets: Path) -> None:
