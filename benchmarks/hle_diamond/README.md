@@ -91,8 +91,11 @@ Every prepared row carries:
 `prepare.py` loads the whole split, validates it (1000 rows, 500 + 500 partitions, 272 image rows,
 1000 unique ids) and only then writes, so an incomplete download never leaves a file behind.
 `--limit N` (positive integers only; rejected at parse time otherwise) is the one supported way to
-prepare a subset, and it says loudly that the completeness check was skipped. `prepare_text.py` is a
-thin wrapper for `prepare(text_only=True)`.
+prepare a subset, and it says loudly that the completeness check was skipped; the limit applies after
+the text filter and the summary line says `limited to N`. `prepare_text.py` is a thin wrapper for
+`prepare(text_only=True)`; its script form accepts `--limit N` and nothing else, and
+`gym eval prepare --benchmark hle_diamond/text ++prepare_script_args.limit=N` reaches the same
+function.
 
 ## Scoring
 
@@ -119,8 +122,14 @@ Headline metric: `mean/reward`, accuracy over every evaluated row. Additional me
   are the ones that PR reads, and that PR needs the same echo to see them in a real run.
 - `judgement_parsing_issue_rate` and its per-kind rates: the fraction of judged rollouts whose judge
   output had no, conflicting or repeated verdicts.
-- Coverage: the upstream harness divides by all questions, so compare the rollouts file's row count
-  with 1000 (728 for the text configs) and report rows evaluated / 1000 next to every accuracy.
+- Coverage: the upstream harness divides by all 1000 questions and counts a failed API call or a
+  missing judge verdict as incorrect, whereas `mean/reward` is over the rows present in the rollouts
+  file (a failed `/run` ends the run by default, or is dropped from the score with
+  `++route_failures_to_sidecar=true`). To use the upstream denominator, run with
+  `++count_missing_rollouts_as_zero=true` (and `'++count_failure_classes_as_zero=[agent_run_error]'`
+  when failures are routed to the sidecar) and report `coverage/imputed`; otherwise compare the
+  rollouts file's row count with 1000 (728 for the text configs) and report rows evaluated / 1000
+  next to every accuracy.
 
 Upstream also reports a calibration error from the model's stated confidence; it is not computed here.
 
@@ -181,29 +190,55 @@ gym list benchmarks | grep hle_diamond          # hle_diamond, hle_diamond/text,
 cached `huggingface-cli login` / `HF_TOKEN` credentials (verified: the gated parquet resolves with
 `token=None` and fails with `401` for `token=False`).
 
-Rollout collection has **not** been run while writing this README. The intended no-tools command,
-matching the published setting (reasoning effort high, no temperature, no token cap, one repeat),
-is:
+Rollout collection has **not** been run while writing this README. The comparable no-tools command
+(reasoning effort high, no temperature, no token cap, one repeat, dedicated judge) is:
 
 ```bash
-gym eval run --benchmark hle_diamond --model-type openai_model \
+gym eval run --benchmark hle_diamond --split benchmark --model-type openai_model \
+    '+config_paths=[benchmarks/hle_diamond/judge_openai.yaml]' \
     ++policy_model_name=<gateway model id> \
     ++responses_create_params.reasoning.effort=high \
     --num-repeats 1 --output results/hle_diamond_rollouts.jsonl
 ```
 
-Add `--split benchmark` if the CLI asks for a split, and
-`'+config_paths=[benchmarks/hle_diamond/judge_openai.yaml]'` to grade with the dedicated judge. Use
-`--benchmark hle_diamond/text` for a text-only policy model.
+`--split benchmark` is required: the dataset is `type: benchmark` and the CLI has no default split
+(without it: `gym eval run: error: missing required configuration: split`). Without
+`judge_openai.yaml` the policy grades itself; such numbers are not comparable with the published
+table and must be labelled self-judged. Use `--benchmark hle_diamond/text` for a text-only policy
+model; its 728/1000 coverage is not comparable either.
+
+Before treating a run as comparable, check on the pilot rows:
+
+- Reasoning effort was honoured: in gateway probes every model tried accepted `reasoning.effort=high`,
+  but not every one acted on it (some returned zero reasoning tokens at any effort, others the same
+  count at `low` and `high`). Confirm `response.usage.output_tokens_details.reasoning_tokens` is above zero
+  and compare the run's mean output tokens with the per-model token-usage table in the
+  announcement; label a run whose effort was ignored as such.
+- The judge is the dedicated one (`judge_evaluations[*].response.model`) and
+  `judgement_parsing_issue_rate` is near zero.
+- Coverage: rows evaluated / 1000, or `coverage/imputed` with the upstream denominator (see Scoring).
 
 ## Sandboxed agents (with tools)
 
 `hle_diamond/opencode` and `hle_diamond/pi` give the model sandboxed Python tools without search;
 `hle_diamond/opencode_search` and `hle_diamond/pi_search` add Tavily search and page tools. All four
 run the 728 text rows with the Explanation / Answer / Confidence instructions in a single user
-message and one repeat; keep collection repeats at one. The published with-tools column used each
-vendor's own harness with a different tool set, so these presets support a **comparison, not a
-reproduction**, of that column.
+message and one repeat; keep collection repeats at one. The published with-tools column was produced
+under upstream's `docs/evaluation-with-tools.md` protocol, from which these presets depart in
+concrete ways, so they support a **comparison, not a reproduction**, of that column:
+
+- Harness: OpenCode or Pi inside Gym's sandbox instead of each vendor's own agent (Claude Code,
+  Codex CLI, Gemini CLI, Muse Code).
+- Sandbox: the `gym-*-science` images carry Python 3.13 with SageMath and Lean/Mathlib preinstalled,
+  and the environment note tells the model so; upstream requires Python 3.11.16 with pinned
+  requirements and forbids specialist solvers, chess engines, OCR and other task libraries.
+- Web tools: Tavily search and page tools with up to 200,000 cached page characters and 2,000-word
+  scrolling, instead of exactly `web_search` (at most 20 results) and `web_fetch` (Markdown capped
+  at 60,000 characters, no media).
+- Leakage policy: two of upstream's seven blocklist families are enforced (see Search exclusions).
+- Rows: 728/1000 text rows; image questions cannot be sent through these adapters.
+
+State these departures next to every number collected with these presets.
 
 See the shared
 [OpenCode and Pi setup guide](../../responses_api_agents/opencode_sandboxed_agent/README.md#offline-scientific-evaluation-with-opencode-or-pi)
