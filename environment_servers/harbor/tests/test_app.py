@@ -9,7 +9,7 @@ import posixpath
 import re
 import shlex
 import tarfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import orjson
@@ -26,7 +26,6 @@ import nemo_gym.sandbox.providers.base as sandbox_base
 from environment_servers.harbor.app import (
     ENTRYPOINT_DIR,
     ENTRYPOINT_FAILED_KIND,
-    OVERLAY_FAILED_KIND,
     SEED_CREATE_GRACE_S,
     HarborEnvironmentServer,
     HarborEnvironmentServerConfig,
@@ -49,9 +48,10 @@ from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxSpec
 from nemo_gym.server_utils import BaseServerConfig, ServerClient
 from nemo_gym.single_agent_turn_types import SingleAgentTurnRequest
 from nemo_gym.tasks.harbor import DIGEST_KEY, load_task
+from nemo_gym.tasks.harbor.digest import context_digest
 from nemo_gym.tasks.harbor.dockerfile import OverlayRun
 from nemo_gym.tasks.harbor.models import HarborEnvironment
-from nemo_gym.tasks.harbor.task import IMAGE_CONFIGS_FILE
+from nemo_gym.tasks.harbor.task import BUILT_IMAGES_FILE, IMAGE_CONFIGS_FILE, HarborTaskError
 
 
 TASK_TOML = """
@@ -1110,16 +1110,24 @@ class TestOverlay:
         assert "build_timeout_sec=0.01 is used up" in response.failure.failure_reason
         assert len(sandbox.execs) == 1 and sandbox.stopped
 
-    def test_sandbox_ttls_include_the_build_budget_when_there_is_an_overlay(self, tmp_path, monkeypatch):
-        server, task, _, _ = self.overlay_server(tmp_path, monkeypatch, toml=SEPARATE_IN_TASK_IMAGE_TOML)
+    def test_sandbox_ttls_cover_the_overlay_without_a_build_budget(self, tmp_path, monkeypatch):
+        server, task, _, _ = self.overlay_server(tmp_path, monkeypatch)
         config, slack = task.config, server.config.sandbox_ttl_slack_s
-        build = config.environment.build_timeout_sec
-        assert build == 600 and task.overlay
-        agent_spec = server._sandbox_spec(task, "/app")
+        assert config.environment.build_timeout_sec == 600 and task.overlay
         episode = server.config.default_episode_timeout_seconds + server.config.cleanup_timeout_seconds
         # The agent sandbox lives for the environment's whole episode, which already covers the overlay.
-        assert agent_spec.ttl_s == episode + slack
+        assert server._sandbox_spec(task, "/app").ttl_s == episode + slack
 
+        # A separate verifier in the task's own image: Harbor's effective verifier environment is a copy of
+        # [environment] carrying its docker_image, a prebuilt image that resolves no overlay (the loader admits the
+        # task-image shape with a declared image only), so no build budget is added and the verifier starts from the
+        # task image with the agent's environment.
+        toml = SEPARATE_IN_TASK_IMAGE_TOML.replace(
+            "[environment]\n", '[environment]\ndocker_image = "debian:bookworm-slim"\n'
+        )
+        server, task, _, _ = self.overlay_server(tmp_path, monkeypatch, toml=toml)
+        assert not task.overlay and task.verifier_image is None
+        assert server._sandbox_spec(task, "/app").ttl_s == episode + slack
         specs = []
 
         class RecordingSandbox:
@@ -1132,20 +1140,9 @@ class TestOverlay:
         monkeypatch.setattr("environment_servers.harbor.app.AsyncSandbox", RecordingSandbox)
         asyncio.run(server._create_verifier_sandbox(task))
         (verifier_spec,) = specs
-        assert verifier_spec.ttl_s == config.verifier.timeout_sec + slack + build
-        # The verifier runs in the task's own image: it gets the same resolved Dockerfile environment as the agent.
+        assert verifier_spec.ttl_s == config.verifier.timeout_sec + slack
         assert verifier_spec.image == task.image == "debian:bookworm-slim"
-        assert verifier_spec.env == agent_spec.env == {"PATH": f"/opt/tools/bin:{IMAGE_PATH}", "MSG": "hi there"}
-
-        # A pull-mode task has no overlay, so no build budget is added anywhere.
-        server, task, _, _ = self.overlay_server(
-            tmp_path, monkeypatch, dockerfile="FROM img\nWORKDIR /app\n", toml=SEPARATE_IN_TASK_IMAGE_TOML
-        )
-        assert not task.overlay
-        assert server._sandbox_spec(task, "/app").ttl_s == episode + slack
-        specs.clear()
-        asyncio.run(server._create_verifier_sandbox(task))
-        assert specs[0].ttl_s == config.verifier.timeout_sec + slack
+        assert verifier_spec.env == server._sandbox_spec(task, "/app").env
 
     def separate_verifier(self, tmp_path, monkeypatch, *, toml=SEPARATE_IN_TASK_IMAGE_TOML, verifier=None):
         server, task, agent, _ = self.overlay_server(tmp_path, monkeypatch, toml=toml)
@@ -1161,55 +1158,22 @@ class TestOverlay:
         monkeypatch.setattr(server, "_create_verifier_sandbox", create_verifier)
         return server, task, agent, verifier
 
-    async def test_separate_verifier_in_the_task_image_gets_the_overlay(self, tmp_path, monkeypatch):
-        server, task, agent, verifier = self.separate_verifier(tmp_path, monkeypatch)
-        assert not task.config.is_shared_verifier and _verifier_image(task) == "debian:bookworm-slim"
-
-        result = (await run_episode(server, task)).result
-
-        assert result.reward == 1.0 and result.verifier_mode == "separate", result
-        assert result.mask_sample is False and result.failure_kind is None
-        verifier_commands = [c["command"] for c in verifier.execs]
-        # The same three lines, in the same state, before anything else touches the verifier's sandbox.
-        assert verifier.execs[0]["seen"]["command"] == "apt-get update && apt-get install -y curl"
-        assert verifier.run("apt-get update")["seen"]["env"] == {"PATH": IMAGE_PATH}
-        assert verifier.run("as agent")["seen"] == {
-            "command": 'echo "as agent" > /tmp/who',
-            "env": {"PATH": f"/opt/tools/bin:{IMAGE_PATH}", "MSG": "hi there"},
-            "user": "agent",
-            "cwd": "/app",
-        }
-        assert verifier_commands.index(verifier.run("as agent")["command"]) < next(
-            i for i, c in enumerate(verifier_commands) if "test.sh" in c
-        )
-        assert agent.stopped and verifier.stopped
-
-    async def test_separate_verifier_overlay_failure_masks_the_sample(self, tmp_path, monkeypatch):
-        verifier = OverlaySandbox(failing="apt-get install")
-        server, task, agent, verifier = self.separate_verifier(tmp_path, monkeypatch, verifier=verifier)
-
+    async def test_a_separate_verifier_with_no_image_and_no_tests_dockerfile_is_refused_as_harbor_refuses_it(
+        self, tmp_path, monkeypatch
+    ):
+        """Harbor's verifier environment dir is always tests/: this shape fails its environment validation, so the
+        loader refuses it (prepare leaves it out) and the server refuses it at seed. Nothing grades in the agent
+        image, overlay or not."""
+        agent = OverlaySandbox()
+        server, task, _, _ = make_server(tmp_path, monkeypatch, agent, dockerfile=OVERLAY_DOCKERFILE)
+        (task.path / "task.toml").write_text(SEPARATE_IN_TASK_IMAGE_TOML)
+        with pytest.raises(HarborTaskError, match="has no environment definition"):
+            load_task(task.path)
         response = await run_episode(server, task)
-
-        # The rollout is complete; a verifier sandbox that cannot take the overlay must not discard it.
-        assert response.failure is None, response.failure
-        result = response.result
-        assert result.reward == 0.0 and result.mask_sample is True
-        assert result.failure_kind == OVERLAY_FAILED_KIND == "harbor:overlay_failed"
-        assert "Dockerfile overlay failed in the verifier sandbox" in result.failure_reason
-        assert "RUN line 1/3 'apt-get update && apt-get install -y curl' exited 100" in result.failure_reason
-        assert "E: no package" in result.failure_reason
-        assert not any("test.sh" in c["command"] for c in verifier.execs)
-        assert agent.stopped and verifier.stopped
-
-    async def test_separate_verifier_provider_failure_during_the_overlay_masks_the_sample(self, tmp_path, monkeypatch):
-        verifier = OverlaySandbox(
-            failing="apt-get install",
-            failure=SandboxExecResult(stdout=None, stderr="gone", return_code=-1, error_type="sandbox"),
-        )
-        server, task, _, verifier = self.separate_verifier(tmp_path, monkeypatch, verifier=verifier)
-        result = (await run_episode(server, task)).result
-        assert result.mask_sample is True and result.failure_kind == "provider_unavailable"
-        assert "could not run in the sandbox: sandbox" in result.failure_reason and verifier.stopped
+        assert response.failure.stage == "seed" and response.failure.terminal
+        assert "has no environment definition" in response.failure.failure_reason
+        assert "Set [verifier.environment].docker_image or add tests/Dockerfile" in response.failure.failure_reason
+        assert agent.execs == [] and not server._sandboxes
 
     async def test_prebuilt_verifier_image_gets_no_overlay(self, tmp_path, monkeypatch):
         toml = TASK_TOML.replace(
@@ -1539,15 +1503,20 @@ class TestSeparateVerification:
         server, task, _, _, _ = self.prepared(tmp_path, monkeypatch, toml=toml)
         assert _verifier_image(task) == "org/agent:1"
 
-    async def test_seed_rejects_a_verifier_that_must_be_built(self, tmp_path, monkeypatch):
+    async def test_a_verifier_block_without_an_image_and_no_tests_dockerfile_is_refused(self, tmp_path, monkeypatch):
+        """Harbor's verifier environment dir is always tests/: with no Dockerfile there and no docker_image in the
+        block its environment validation fails, so the loader refuses the task (and the seed with it), naming the
+        two remedies rather than a rebuild that could not help."""
         server, task, _, created = make_server(tmp_path, monkeypatch)
         toml = SEPARATE_TOML.replace('docker_image = "org/verifier:1"\n', "")
         (task.path / "task.toml").write_text(toml)
-        task = load_task(task.path)
-        server.config.tasksets["ds"].tasks["hello"] = task.digest
+        with pytest.raises(HarborTaskError, match="has no environment definition") as info:
+            load_task(task.path)
+        assert "Set [verifier.environment].docker_image or add tests/Dockerfile" in str(info.value)
+        assert "prepare" not in str(info.value)
         response = await run_episode(server, task)
         assert response.failure.stage == "seed" and response.failure.terminal
-        assert "tests/Dockerfile" in response.failure.failure_reason and created == []
+        assert "has no environment definition" in response.failure.failure_reason and created == []
 
     async def test_verifier_failure_masks_and_stops_both_sandboxes(self, tmp_path, monkeypatch):
         class Broken(FakeSandbox):
@@ -1734,6 +1703,36 @@ class TestComposeAndRouting:
         monkeypatch.setattr(server, "_create_verifier_sandbox", create_verifier)
         return server, task, compose, documents, verifier
 
+    def test_compose_document_follows_the_requested_sandbox_platform(self, tmp_path, monkeypatch):
+        """arm64 acceptance defect: a deployment asking for arm64 pods (``sandbox_provider_options.platform``)
+        runs the arm64 images prepare built; the default deployment still runs amd64 ones and refuses the rest."""
+        arm64 = {image: {**record, "architecture": "arm64"} for image, record in IMAGE_CONFIGS.items()}
+        monkeypatch.setattr(
+            "environment_servers.harbor.app.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+        )
+
+        def compose_task(root, records, **config):
+            server, task, _, _ = make_server(root, monkeypatch, **config)
+            (task.path / "task.toml").write_text(COMPOSE_TOML)
+            (task.path / "environment" / "docker-compose.yaml").write_text(COMPOSE_YAML)
+            (task.path.parent / "compose-images.json").write_text(json.dumps(records))
+            return server, load_task(task.path)
+
+        platform = {"platform": {"os": "linux", "arch": "arm64"}, "resource_requests": {"cpu": 0.5}}
+        server, task = compose_task(tmp_path / "arm", arm64, sandbox_provider_options=platform)
+        document = server._compose_document(task)
+        assert set(document["services"]) == {"main", "api", "kafka"}
+        assert document["services"]["kafka"]["image"] == arm64["org/kafka:1"]["image"]
+        # The requested platform is the one the options still carry for the sandboxes themselves.
+        assert server._sandbox_spec(task, "/app").provider_options["platform"] == platform["platform"]
+
+        server, task = compose_task(tmp_path / "amd", arm64)
+        with pytest.raises(ValueError, match="Service 'main': the recorded image .* is linux/arm64, not linux/amd64"):
+            server._compose_document(task)
+        server, task = compose_task(tmp_path / "mixed", IMAGE_CONFIGS, sandbox_provider_options=platform)
+        with pytest.raises(ValueError, match="Service 'main': the recorded image .* is linux/amd64, not linux/arm64"):
+            server._compose_document(task)
+
     async def test_compose_document_resolves_variables_and_env_file_from_the_task_then_the_process_environment(
         self, tmp_path, monkeypatch
     ):
@@ -1773,29 +1772,49 @@ class TestComposeAndRouting:
     @pytest.mark.parametrize("main_build", list(MAIN_BUILD_SHAPES.values()), ids=list(MAIN_BUILD_SHAPES))
     def test_a_built_tasks_main_build_section_is_dropped_at_seed(self, tmp_path, monkeypatch, main_build):
         """Prepare builds ``main`` from the task's Compose file (its build args, target or dockerfile_inline apply
-        there) and records the image; at seed the recorded image stands in, so the ``build:`` and ``pull_policy``
-        keys that only describe that build are dropped before the Compose adapter, which starts images only."""
+        there) and every sidecar with a ``build:`` section (G2), and records the images by service; at seed the
+        recorded images stand in, so the ``build:`` and ``pull_policy`` keys that only describe those builds are
+        dropped before the Compose adapter, which starts images only, and the sidecar's entrypoint, command and
+        ports come from its recorded configuration like any pulled image's."""
         from nemo_gym.sandbox.adapters.docker_compose import AsyncSandboxCompose
         from nemo_gym.tasks.harbor.digest import context_digest
-        from nemo_gym.tasks.harbor.task import BUILT_IMAGES_FILE
+        from nemo_gym.tasks.harbor.task import BUILT_IMAGES_FILE, built_service_images
 
         server, task, _, _ = make_server(tmp_path, monkeypatch)
         (task.path / "environment" / "Dockerfile").write_text("FROM ubuntu:24.04\nCOPY . /app\n")
         (task.path / "environment" / "docker-compose.yaml").write_text(
             "services:\n  main:\n    image: ${MAIN_IMAGE_NAME}\n    pull_policy: build\n"
             + main_build
+            + "    depends_on:\n      world:\n        condition: service_healthy\n"
             + "  api:\n    image: org/api:1\n"
+            + "  world:\n    build:\n      context: .\n      dockerfile: world/Dockerfile\n    pull_policy: build\n"
+            + "    expose: ['8972']\n    healthcheck:\n      test: ['CMD', 'true']\n      interval: 2s\n"
         )
         built = "registry.example/ds/hb__" + "0" * 32 + "@sha256:" + "d" * 64
+        world = "registry.example/ds/hb__" + "0" * 32 + "-world@sha256:" + "e" * 64
         (task.path.parent / BUILT_IMAGES_FILE).write_text(
-            json.dumps({context_digest(task.path / "environment"): {"image": built}})
+            json.dumps(
+                {
+                    context_digest(task.path / "environment"): {
+                        "image": built,
+                        "services": {"main": {"image": built}, "world": {"image": world}},
+                    }
+                }
+            )
         )
         records = json.loads((task.path.parent / IMAGE_CONFIGS_FILE).read_text())
         records[built] = {"os": "linux", "architecture": "amd64", "image": built, "config": {"WorkingDir": "/app"}}
+        records[world] = {
+            "os": "linux",
+            "architecture": "amd64",
+            "image": world,
+            "config": {"Cmd": ["python3", "/opt/world/server.py"], "ExposedPorts": {"8972/tcp": {}}},
+        }
         records["org/api:1"] = IMAGE_CONFIGS["org/api:1"]
         (task.path.parent / IMAGE_CONFIGS_FILE).write_text(json.dumps(records))
         task = load_task(task.path)
         assert task.built_image == built == task.image and task.workdir == "/app"
+        assert built_service_images(task.path) == {"main": built, "world": world}
         monkeypatch.setattr(
             "environment_servers.harbor.app.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
         )
@@ -1806,10 +1825,62 @@ class TestComposeAndRouting:
         assert main["image"] == built and main["working_dir"] == "/app"
         assert "build" not in main and "pull_policy" not in main
         assert document["services"]["api"]["image"] == IMAGE_CONFIGS["org/api:1"]["image"]
+        sidecar = document["services"]["world"]
+        assert sidecar["image"] == world and "build" not in sidecar and "pull_policy" not in sidecar
+        assert sidecar["command"] == ["python3", "/opt/world/server.py"] and sidecar["expose"] == ["8972", "8972/tcp"]
+        assert main["depends_on"] == {"world": {"condition": "service_healthy"}}
         # The adapter's own validation accepts the document: the fields that failed every episode are gone.
         group = AsyncSandboxCompose(NetworkedStubProvider(), "compose.yaml")
         group.document = document
-        assert set(group._validate()) == {"main", "api"}
+        assert set(group._validate()) == {"main", "api", "world"}
+
+    def test_seed_reads_the_build_record_once_at_load_and_never_hashes_the_environment(self, tmp_path, monkeypatch):
+        """``load_task`` (once per task, in a thread) hashes ``environment/`` once and carries Harbor's context id
+        and the build record on the task; ``_compose_document``, which runs per episode, hashes nothing, whatever
+        the folder's size, and still substitutes the recorded images and defines ``COMPOSE_PROJECT_NAME``."""
+        import nemo_gym.tasks.harbor.digest as digest_module
+        from nemo_gym.tasks.harbor.digest import context_digest
+        from nemo_gym.tasks.harbor.task import BUILT_IMAGES_FILE
+
+        server, task, _, _ = make_server(tmp_path, monkeypatch)
+        (task.path / "environment" / "Dockerfile").write_text("FROM ubuntu:24.04\nCOPY . /app\n")
+        (task.path / "environment" / "docker-compose.yaml").write_text(
+            "services:\n  main:\n    image: ${MAIN_IMAGE_NAME}\n"
+            "  world:\n    build: ./world\n    environment: ['PROJECT=${COMPOSE_PROJECT_NAME}']\n"
+        )
+        (task.path / "environment" / "world").mkdir()
+        (task.path / "environment" / "world" / "Dockerfile").write_text("FROM python:3.12\n")
+        expected = context_digest(task.path / "environment")
+        built = f"registry.example/ds/hb__{expected}@sha256:" + "d" * 64
+        world = f"registry.example/ds/hb__{expected}-world@sha256:" + "e" * 64
+        record = {"image": built, "services": {"main": {"image": built}, "world": {"image": world}}}
+        (task.path.parent / BUILT_IMAGES_FILE).write_text(json.dumps({expected: record}))
+        records = json.loads((task.path.parent / IMAGE_CONFIGS_FILE).read_text())
+        records[built] = {"os": "linux", "architecture": "amd64", "image": built, "config": {}}
+        records[world] = {"os": "linux", "architecture": "amd64", "image": world, "config": {"Cmd": ["serve"]}}
+        (task.path.parent / IMAGE_CONFIGS_FILE).write_text(json.dumps(records))
+        task = load_task(task.path)
+        assert task.context_id == expected and task.built_images == {"main": built, "world": world}
+        monkeypatch.setattr(
+            "environment_servers.harbor.app.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+        )
+        # Every caller of context_digest reaches this function (patching task.context_digest alone would miss
+        # compose_variables' COMPOSE_PROJECT_NAME); the counter is proven live before the seed path is measured.
+        hashed: list[Path] = []
+        real = digest_module.environment_content_hash
+        monkeypatch.setattr(
+            digest_module, "environment_content_hash", lambda path: (hashed.append(path), real(path))[1]
+        )
+        assert context_digest(task.path / "environment") == expected and len(hashed) == 1
+        hashed.clear()
+
+        for _ in range(2):
+            document = server._compose_document(task)
+            assert document["services"]["main"]["image"] == built
+            sidecar = document["services"]["world"]
+            assert sidecar["image"] == world and "build" not in sidecar and sidecar["command"] == ["serve"]
+            assert sidecar["environment"] == {"PROJECT": f"hb__{expected}"}
+        assert hashed == []
 
     @pytest.mark.parametrize(
         ("dockerfile", "build"),
@@ -2141,6 +2212,9 @@ class TestComposeAndRouting:
         specs = captured["specs"]
         assert specs["main"].user == "agent"
         assert {name: spec.user for name, spec in specs.items() if name != "main"} == {"api": None, "kafka": None}
+        # Nor main's working directory: a sidecar's image decides its own (the adapter applies the recorded one).
+        assert specs["main"].workdir == task.workdir
+        assert {name: spec.workdir for name, spec in specs.items() if name != "main"} == {"api": None, "kafka": None}
 
     async def test_compose_task_seeds_a_group_and_leaves_task_context(self, tmp_path, monkeypatch):
         server, task, compose, documents, _ = self.compose_server(tmp_path, monkeypatch)
@@ -2340,6 +2414,191 @@ class TestSeedGuards:
         assert "Timed out creating OpenSandbox sandbox after 100s" in response.failure.failure_reason
 
 
+VERIFIER_TESTS_DOCKERFILE = "FROM python:3.13-slim-bookworm\nRUN pip install pytest==8.4.1\nCOPY . /tests/\n"
+
+
+def record_verifier_build(task_folder: Path, image: str, **config) -> str:
+    """Record ``image`` as the verifier image prepare built from ``tests/Dockerfile``: under Harbor's hash of ``tests/``
+    as service ``verifier`` in ``built-images.json``, its configuration in ``compose-images.json``."""
+    parent = task_folder.parent
+    digest = context_digest(task_folder / "tests")
+    path = parent / BUILT_IMAGES_FILE
+    built = json.loads(path.read_text()) if path.is_file() else {}
+    built[digest] = {
+        "tasks": [task_folder.name],
+        "tool": "buildah",
+        "pushed": True,
+        "services": {"verifier": {"image": image, "tool": "buildah", "pushed": True}},
+    }
+    path.write_text(json.dumps(built))
+    write_image_config(parent, image, **(config or {"Env": [f"PATH={IMAGE_PATH}"], "WorkingDir": "/tests"}))
+    return digest
+
+
+@dataclass
+class VerifierSandbox(FakeSandbox):
+    """A separate verifier's sandbox whose image holds ``/tests/test.sh`` unless told otherwise."""
+
+    owns_tests: bool = True
+
+    async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+        if command.startswith("if [ -d "):
+            self.execs.append({"command": command, "cwd": cwd, "env": env, "timeout_s": timeout_s, "user": user})
+            path = command.split("if [ -d ")[1].split(" ]")[0].strip("'")
+            kind = "file" if path == "/tests/test.sh" and self.owns_tests else "none"
+            return SandboxExecResult(stdout=f"{kind}\n", stderr="", return_code=0)
+        return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+
+
+class TestBuiltVerifierImage:
+    """D1: a separate verifier grades in the image prepare built from ``tests/Dockerfile``."""
+
+    BUILT = "registry.example/r/hb__0123456789abcdef0123456789abcdef-verifier@sha256:feed"
+
+    def built(self, tmp_path, monkeypatch, *, toml=SEPARATE_IN_TASK_IMAGE_TOML, verifier=None):
+        """A separate-mode task with an overlay-mode agent Dockerfile and a ``tests/Dockerfile``, built and recorded;
+        ``_create_verifier_sandbox`` is replaced by one handing out ``verifier``."""
+        agent = OverlaySandbox()
+        server, task, _, _ = make_server(tmp_path, monkeypatch, agent, dockerfile=OVERLAY_DOCKERFILE)
+        (task.path / "task.toml").write_text(toml + '\n[environment.env]\nAPP_MODE = "${HARBOR_TEST_MODE:-grade}"\n')
+        (task.path / "tests" / "Dockerfile").write_text(VERIFIER_TESTS_DOCKERFILE)
+        record_verifier_build(task.path, self.BUILT)
+        task = load_task(task.path)
+        server.config.tasksets["ds"].tasks["hello"] = task.digest
+        verifier = verifier or VerifierSandbox()
+        monkeypatch.setattr(
+            "environment_servers.harbor.app.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+        )
+
+        async def create_verifier(task, *, episode_key=None):
+            server._sandboxes[f"{episode_key}/verifier"] = verifier
+            return verifier
+
+        monkeypatch.setattr(server, "_create_verifier_sandbox", create_verifier)
+        return server, task, agent, verifier
+
+    def test_the_loader_exposes_the_recorded_image_and_the_verifier_gets_no_overlay(self, tmp_path, monkeypatch):
+        server, task, _, _ = self.built(tmp_path, monkeypatch)
+        assert task.verifier_image == self.BUILT and _verifier_image(task) == self.BUILT
+        # The agent image is overlaid (its Dockerfile has RUN lines); the verifier image was built, so it is not.
+        assert task.overlay and task.image == "debian:bookworm-slim"
+
+    async def test_the_verifier_sandbox_starts_from_the_built_image_under_the_environment_block(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("HARBOR_TEST_MODE", "strict")
+        server, task, _, _ = self.built(tmp_path, monkeypatch)
+        verifier = VerifierSandbox()
+        specs = []
+
+        async def start(spec):
+            specs.append(spec)
+
+        monkeypatch.setattr(verifier, "start", start, raising=False)
+        monkeypatch.setattr("environment_servers.harbor.app.resolve_provider_config", lambda *args: {})
+        monkeypatch.setattr("environment_servers.harbor.app.AsyncSandbox", lambda config: verifier)
+        monkeypatch.delattr(server, "_create_verifier_sandbox")  # the real one, not the test double
+        assert await server._create_verifier_sandbox(task) is verifier
+        (spec,) = specs
+        # Harbor's effective verifier environment is a copy of [environment]: its env (resolved) and resources
+        # reach the verifier sandbox, the agent image's Dockerfile ENV and WORKDIR do not, and the image keeps its
+        # own default user and working directory.
+        assert spec.image == self.BUILT and spec.metadata["harbor_role"] == "verifier"
+        assert spec.env == {"APP_MODE": "strict"} and "PATH" not in spec.env
+        assert spec.workdir is None and spec.user is None
+        assert (spec.resources.cpu, spec.resources.memory_mib) == (1, 2048)
+        assert spec.ttl_s == task.config.verifier.timeout_sec + server.config.sandbox_ttl_slack_s
+
+    async def test_the_verifier_runs_test_sh_in_the_built_image_without_uploading_tests(self, tmp_path, monkeypatch):
+        server, task, agent, verifier = self.built(tmp_path, monkeypatch)
+
+        result = (await run_episode(server, task)).result
+
+        assert result.reward == 1.0 and result.verifier_mode == "separate", result
+        assert result.mask_sample is False and result.failure_kind is None
+        # The agent's sandbox took the overlay; the verifier's did not, and no tests archive went up: the image
+        # owns /tests, as Harbor's skip_tests_upload assumes.
+        assert any("apt-get" in c["command"] for c in agent.execs)
+        assert not any("apt-get" in c["command"] for c in verifier.execs)
+        assert verifier.uploads == []
+        run = next(c for c in verifier.execs if "test.sh" in c["command"] and "timeout" in c["command"])
+        assert "bash /tests/test.sh" in run["command"]
+        assert agent.stopped and verifier.stopped
+
+    async def test_a_built_image_without_test_sh_gets_the_upload_and_one_warning(self, tmp_path, monkeypatch, caplog):
+        server, task, _, verifier = self.built(tmp_path, monkeypatch, verifier=VerifierSandbox(owns_tests=False))
+        with caplog.at_level("WARNING", logger="environment_servers.harbor.app"):
+            assert (await run_episode(server, task)).result.reward == 1.0
+            assert (await run_episode(server, task, rollout="r2")).result.reward == 1.0
+        # tests/ was uploaded both times; the image was named once.
+        archives = [remote for _, remote in verifier.uploads if remote.endswith(".tar.gz")]
+        assert len(archives) == 2
+        warnings = [r for r in caplog.records if "has no /tests/test.sh" in r.getMessage()]
+        assert len(warnings) == 1 and self.BUILT in warnings[0].getMessage()
+
+    async def test_a_verifier_environment_block_without_an_image_seeds_the_built_image_with_its_settings(
+        self, tmp_path, monkeypatch
+    ):
+        toml = (
+            TASK_TOML
+            + '\n[verifier.environment]\ncpus = 3\nworkdir = "/grade"\n\n[verifier.environment.env]\nK = "v"\n'
+        )
+        server, task, _, verifier = self.built(tmp_path, monkeypatch, toml=toml)
+        assert task.verifier_image == self.BUILT
+        spec = server._sandbox_spec(
+            task,
+            task.config.verifier.environment.workdir,
+            environment=task.config.verifier.environment,
+            image=self.BUILT,
+        )
+        assert spec.image == self.BUILT and spec.env == {"K": "v"} and spec.workdir == "/grade"
+        assert spec.resources.cpu == 3
+        assert (await run_episode(server, task)).result.reward == 1.0 and verifier.uploads == []
+
+    @pytest.mark.parametrize("shape", ["no_block", "block_without_image"])
+    async def test_without_a_record_the_task_is_refused_by_the_loader_and_at_seed(self, tmp_path, monkeypatch, shape):
+        """Harbor grades in the image built from tests/Dockerfile; without a record nothing stands in for it: not the
+        agent image (where the tests' tooling is usually missing, so every episode would score 0 with no error) and
+        not a refusal that only comes at seed. The loader refuses the task like an unrecorded environment/ build."""
+        toml = (
+            SEPARATE_IN_TASK_IMAGE_TOML if shape == "no_block" else TASK_TOML + "\n[verifier.environment]\ncpus = 2\n"
+        )
+        agent = OverlaySandbox()
+        server, task, _, _ = make_server(tmp_path, monkeypatch, agent, dockerfile=OVERLAY_DOCKERFILE)
+        (task.path / "task.toml").write_text(toml)
+        (task.path / "tests" / "Dockerfile").write_text(VERIFIER_TESTS_DOCKERFILE)
+        with pytest.raises(HarborTaskError) as info:
+            load_task(task.path)
+        reason = str(info.value)
+        assert reason.startswith(f"{task.path / 'tests' / 'Dockerfile'} is the separate verifier's image")
+        assert str(task.path.parent / BUILT_IMAGES_FILE) in reason and "`builds:` block" in reason
+        assert "declare [verifier.environment].docker_image" in reason
+        response = await run_episode(server, task)
+        assert response.failure.stage == "seed" and response.failure.terminal
+        assert "is the separate verifier's image" in response.failure.failure_reason
+        assert agent.execs == [] and not server._sandboxes
+
+    async def test_the_seed_still_checks_the_verifier_image_invariant(self, tmp_path, monkeypatch):
+        """A task with a [verifier.environment] without docker_image and no verifier image cannot come from the
+        loader; the seed refuses such an object all the same, naming the record file and the remedies."""
+        server, task, agent, _ = self.built(
+            tmp_path, monkeypatch, toml=TASK_TOML + "\n[verifier.environment]\ncpus = 2\n"
+        )
+        broken = replace(task, verifier_image=None)
+        assert _verifier_image(task) == self.BUILT and _verifier_image(broken) is None
+
+        async def resolve(task_id, task_data):
+            return broken
+
+        monkeypatch.setattr(server, "_resolve_task", resolve)
+        response = await run_episode(server, task)
+        assert response.failure.stage == "seed" and response.failure.terminal
+        assert "has no image for its separate verifier" in response.failure.failure_reason
+        assert "built-images.json" in response.failure.failure_reason
+        assert "tests/Dockerfile" in response.failure.failure_reason
+        assert agent.execs == []
+
+
 BUILT_IMAGE = "registry.example/ds-hello:abc"
 ENTRYPOINT_CONFIG = {
     "Env": [f"PATH={IMAGE_PATH}"],
@@ -2491,8 +2750,10 @@ def build_mode(task, *, record: dict | None = ENTRYPOINT_CONFIG, image: str = BU
     (task.path / "environment" / "Dockerfile").write_text(
         'FROM ubuntu:24.04\nCOPY . /app\nENTRYPOINT ["/entrypoint.sh"]\n'
     )
-    built = {context_digest(task.path / "environment"): {"image": image}}
-    (task.path.parent / BUILT_IMAGES_FILE).write_text(json.dumps(built))
+    record_path = task.path.parent / BUILT_IMAGES_FILE
+    built = json.loads(record_path.read_text()) if record_path.is_file() else {}
+    built[context_digest(task.path / "environment")] = {"image": image}
+    record_path.write_text(json.dumps(built))
     if record is not None:
         write_image_config(task.path.parent, image, **record)
     return load_task(task.path)
@@ -2825,10 +3086,23 @@ class TestEntrypoint:
         image_probes = [i for i, c in enumerate(sandbox.execs) if c["command"] == "test -f /tmp/healthy"]
         assert len(image_probes) == 6 and image_probes[-1] < sandbox.index_of("test -f /app/ready.txt")
 
-    def separate_server(self, tmp_path, monkeypatch, *, toml, agent=None, verifier=None, record=ENTRYPOINT_CONFIG):
+    VERIFIER_IMAGE = "registry.example/ds-hello-verifier:abc"
+
+    def separate_server(
+        self, tmp_path, monkeypatch, *, toml, agent=None, verifier=None, record=ENTRYPOINT_CONFIG, verifier_record=None
+    ):
+        """A separate-mode task in build mode: its agent image is ``record``'s, and (D1) its verifier grades in the
+        image prepare built from ``tests/Dockerfile``, recorded with ``verifier_record`` (``record`` by default, so
+        both images start alike). A declared ``[verifier.environment].docker_image`` in ``toml`` takes precedence."""
         agent = agent or EntrypointSandbox()
         verifier = verifier or EntrypointSandbox()
-        server, task, _, _ = make_server(tmp_path, monkeypatch, agent, toml=toml)
+        # Written in shared mode first: the loader refuses a separate-mode task before its verifier image is recorded.
+        server, task, _, _ = make_server(tmp_path, monkeypatch, agent)
+        (task.path / "task.toml").write_text(toml)
+        (task.path / "tests" / "Dockerfile").write_text(VERIFIER_TESTS_DOCKERFILE)
+        record_verifier_build(
+            task.path, self.VERIFIER_IMAGE, **(record if verifier_record is None else verifier_record)
+        )
         task = build_mode(task, record=record)
         server.config.tasksets["ds"].tasks["hello"] = task.digest
 
@@ -2839,8 +3113,14 @@ class TestEntrypoint:
         monkeypatch.setattr(server, "_create_verifier_sandbox", create_verifier)
         return server, task, agent, verifier
 
-    async def test_separate_verifier_in_the_task_image_runs_the_entrypoint_before_test_sh(self, tmp_path, monkeypatch):
+    async def test_separate_verifier_in_the_built_image_runs_its_entrypoint_before_test_sh(
+        self, tmp_path, monkeypatch
+    ):
         server, task, agent, verifier = self.separate_server(tmp_path, monkeypatch, toml=SEPARATE_IN_TASK_IMAGE_TOML)
+        # The loader read the verifier image's record (D1 built it from tests/Dockerfile) beside the task image's.
+        assert task.verifier_image == self.VERIFIER_IMAGE and task.entrypoint == ("/entrypoint.sh",)
+        assert task.verifier_image_config.entrypoint == ("/entrypoint.sh",)
+        assert (task.verifier_image_config.user, task.verifier_image_config.workdir) == ("app", "/app")
 
         response = await run_episode(server, task)
 
@@ -2860,10 +3140,86 @@ class TestEntrypoint:
         assert verifier.launch_cancelled_before_stop is True and verifier.stopped
         assert not server._sandboxes and not server._sessions
 
+    async def test_built_verifier_image_starts_with_its_own_record_not_the_task_images(self, tmp_path, monkeypatch):
+        # Harbor `up --wait`s the image built from tests/Dockerfile: its entrypoint, as its user in its WorkingDir,
+        # and its HEALTHCHECK, whatever the agent image's are.
+        verifier_record = {
+            "Entrypoint": ["/verify.sh"],
+            "User": "grader",
+            "WorkingDir": "/tests",
+            "Healthcheck": IMAGE_HEALTHCHECK,
+        }
+        verifier = EntrypointSandbox(health_failures=1)
+        server, task, agent, verifier = self.separate_server(
+            tmp_path, monkeypatch, toml=SEPARATE_IN_TASK_IMAGE_TOML, verifier=verifier, verifier_record=verifier_record
+        )
+        assert task.image_healthcheck is None and task.verifier_image_config.healthcheck == IMAGE_HEALTHCHECK
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert response.result.reward == 1.0
+        assert (agent.launch()["user"], agent.launch()["cwd"]) == ("app", "/app")
+        assert (verifier.launch()["user"], verifier.launch()["cwd"]) == ("grader", "/tests")
+        assert "/verify.sh sh -c 'sleep infinity'" in verifier.run_script()
+        assert "/entrypoint.sh" not in verifier.run_script()
+        assert verifier.health_probes == 2 and agent.health_probes == 0
+        assert verifier.index_of(f"sh {ENTRYPOINT_DIR}/run.sh") < verifier.index_of("test -f /tmp/healthy")
+        assert verifier.index_of("test -f /tmp/healthy") < verifier.index_of("bash /tests/test.sh")
+        # A verifier image whose record has no entrypoint starts nothing, while the agent image's still runs.
+        quiet = EntrypointSandbox()
+        server, task, agent, quiet = self.separate_server(
+            tmp_path / "b",
+            monkeypatch,
+            toml=SEPARATE_IN_TASK_IMAGE_TOML,
+            verifier=quiet,
+            verifier_record={"Env": [f"PATH={IMAGE_PATH}"], "WorkingDir": "/tests"},
+        )
+        assert task.verifier_image_config.entrypoint is None
+        response = await run_episode(server, task)
+        assert response.failure is None, response.failure
+        assert agent.launch() is not None and quiet.launch() is None
+        assert not any(ENTRYPOINT_DIR in c["command"] for c in quiet.execs)
+
+    async def test_separate_verifier_in_the_task_image_runs_its_entrypoint_before_test_sh(self, tmp_path, monkeypatch):
+        # Harbor's prebuilt verifier: no [verifier.environment], so the effective verifier environment is a copy of
+        # [environment] with its docker_image, and the verifier grades in the task's own image, whose recorded start
+        # (here the pull-mode Dockerfile's base image's) is what Harbor's `up --wait` runs.
+        toml = SEPARATE_IN_TASK_IMAGE_TOML.replace("[environment]\n", '[environment]\ndocker_image = "org/app:1"\n')
+        agent, verifier = EntrypointSandbox(), EntrypointSandbox()
+        server, task, _, _ = make_server(
+            tmp_path,
+            monkeypatch,
+            agent,
+            toml=toml,
+            dockerfile="FROM org/app:1\nWORKDIR /app\n",
+            image_config=ENTRYPOINT_CONFIG,
+        )
+        assert task.image == "org/app:1" and task.verifier_image is None and task.verifier_image_config is None
+        assert task.entrypoint == ("/entrypoint.sh",) and (task.entrypoint_user, task.entrypoint_workdir) == (
+            "app",
+            "/app",
+        )
+
+        async def create_verifier(task, *, episode_key=None):
+            server._sandboxes[f"{episode_key}/verifier"] = verifier
+            return verifier
+
+        monkeypatch.setattr(server, "_create_verifier_sandbox", create_verifier)
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert response.result.reward == 1.0 and response.result.verifier_mode == "separate"
+        assert agent.launch() is not None and verifier.launch() is not None
+        assert (verifier.launch()["user"], verifier.launch()["cwd"]) == ("app", "/app")
+        assert verifier.index_of(f"sh {ENTRYPOINT_DIR}/run.sh") < verifier.index_of("test.sh")
+        assert verifier.launch_cancelled_before_stop is True and verifier.stopped and not server._sandboxes
+
     async def test_separate_verifier_in_another_image_gets_no_launcher(self, tmp_path, monkeypatch):
         toml = SEPARATE_IN_TASK_IMAGE_TOML + '\n[verifier.environment]\ndocker_image = "org/verifier:1"\n'
         server, task, agent, verifier = self.separate_server(tmp_path, monkeypatch, toml=toml)
         assert _verifier_image(task) == "org/verifier:1" and task.entrypoint == ("/entrypoint.sh",)
+        assert task.verifier_image_config is None  # a declared prebuilt verifier image has no record
         response = await run_episode(server, task)
         assert response.failure is None, response.failure
         assert agent.launch() is not None and verifier.launch() is None

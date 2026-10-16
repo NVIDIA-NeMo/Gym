@@ -209,9 +209,11 @@ class AsyncSandboxCompose:
                 if volume["type"] == "volume":
                     if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*", volume["source"]):
                         raise ValueError("Named volumes require a valid Compose volume name")
-                    declaration = (self.document.get("volumes") or {}).get(volume["source"])
-                    if declaration is None:
+                    declared = self.document.get("volumes") or {}
+                    if volume["source"] not in declared:
                         raise ValueError(f"Undeclared Compose volume: {volume['source']!r}")
+                    # A bodiless declaration (`volumes:\n  data:`) is valid Compose and loads as None.
+                    declaration = declared[volume["source"]] or {}
                     if set(declaration) - {"name", "external"}:
                         raise NotImplementedError("Unsupported named volume driver/options")
                     if declaration.get("external") and volume["source"] not in self.volume_sources:

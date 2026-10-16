@@ -43,11 +43,15 @@ runs in the pulled base image at seed, before the healthcheck and the agent, eac
 and `USER` in effect at that line; `ENV`, `WORKDIR` and `USER` resolve at prepare from the base image's
 recorded configuration the way `docker build` resolves them, so preparing fails when the registry cannot
 resolve the base image. A `RUN` line that exits non-zero or outruns `[environment].build_timeout_sec` is a
-422 with the command and the tail of its output; a provider that cannot run one is a 503, and in a separate
-verifier's sandbox either masks the sample with `harbor:overlay_failed`); shared verifier mode, and
-separate verifier mode when
-`[verifier.environment]` names a prebuilt image (the agent's `/logs/artifacts` and `artifacts` entries are
-copied into the verifier sandbox first, sidecar hooks and artifacts included). Compose environments start as
+422 with the command and the tail of its output; a provider that cannot run one is a 503); shared verifier mode, and
+separate verifier mode (the agent's `/logs/artifacts` and `artifacts` entries are copied into the verifier sandbox
+first, sidecar hooks and artifacts included). In separate mode the verifier's image is the one prepare built from
+`tests/Dockerfile` when the task ships that file and its effective verifier environment names no image, as Harbor
+builds it (see "Dockerfile builds" below); else `[verifier.environment].docker_image`; else the task's own
+`[environment].docker_image` (Harbor's effective verifier environment is then a copy of `[environment]`). A
+separate-mode task that names no verifier image and ships no `tests/Dockerfile` is refused as Harbor refuses it, and
+one whose `tests/Dockerfile` has no recorded build is left out at prepare like an unrecorded `environment/` build;
+the server refuses either at seed. Compose environments start as
 a sandbox group when a `compose-images.json` with the sidecar images' recorded OCI configuration sits next to
 the task folders, written by `gym dataset fetch`; on OpenSandbox the provider block also needs
 `networking.enabled: true` (with `loopback_forwarding`) and `runtime_requirements.shm_size_metadata_key`, as
@@ -67,19 +71,55 @@ Prepare decides one of three image modes per distinct Dockerfile.
   No build and no registry.
 - Build. Everything else: `COPY`, `ADD`, heredocs, BuildKit flags, multi-stage files. The task's
   `environment/` folder is the build context. Prepare builds it once, records it, and the task then runs in
-  pull mode from the built image. A `build:` the task's Compose file gives `main` (build args, a target, a
-  `dockerfile_inline`) applies to that build; at seed the recorded image stands in for it, so the server drops
-  the key from `main` before the Compose adapter, which starts images only, sees the document. A task in pull
-  or overlay mode whose file only restates `main`'s build (`context: ${CONTEXT_DIR}` or `.`, `dockerfile:
-  Dockerfile`, `pull`) has that section dropped too, as Harbor's own template already supplies it; a build key
-  Gym cannot apply without a build (`args`, `target`, `dockerfile_inline`, another `dockerfile` or `context`)
-  leaves the task in `skipped.json` naming the key. `pull_policy` is dropped from every
-  service in every mode, as the sandbox has no pull step to configure. Prepare runs the adapter's field check
-  on each Compose task's resolved document, so a field no provider starts (`deploy`, `extra_hosts`,
-  `platform`, a sidecar `build:`) leaves that task in `skipped.json` with the service and field named instead
-  of failing every episode at seed. The same check runs on the raw file of every task about to be built,
-  before the build, so a refused task's context is neither built nor pushed and a build that would fail for
-  it cannot stop the preparation.
+  pull mode from the built image. A `build:` or `pull_policy` the task's Compose file gives `main` (build args,
+  a target, a `dockerfile_inline`) applies to that build; at seed the recorded image stands in for them, so the
+  loader drops the two keys from every service prepare built before the Compose adapter, which starts images
+  only, sees the document. A task in pull or overlay mode whose file only restates `main`'s build (`context:
+  ${CONTEXT_DIR}` or `.`, `dockerfile: Dockerfile`, `pull`) has that section dropped too, as Harbor's own
+  template already supplies it; a build key Gym cannot apply without a build (`args`, `target`,
+  `dockerfile_inline`, another `dockerfile` or `context`) leaves the task in `skipped.json` naming the key.
+  `pull_policy` is dropped from every service in every mode, as the sandbox has no pull step to configure.
+  Prepare runs the adapter's field check on each Compose task's resolved document, so a field no provider
+  starts (`deploy`, `extra_hosts`, `platform`, a sidecar `build:` prepare recorded no build for) leaves that
+  task in `skipped.json` with the service and field named instead of failing every episode at seed. The same
+  check runs on the raw file of every task about to be built, before the build, so a refused task's context is
+  neither built nor pushed and a build that would fail for it cannot stop the preparation.
+
+Every other service of the task's `environment/docker-compose.yaml` with a `build:` section (a sidecar) is built
+too, whatever `main`'s mode, as Harbor's `docker compose build` builds it: from its own context and Dockerfile
+under `environment/`, with its args and target. Its image is named `hb__<hash>-<service>`, the form Compose gives
+a service without `image:` under the project name Gym builds with (Harbor's is the per-trial session id, so its
+sidecar tags are never published), and a sidecar's own `image:` spelling is accepted and overridden by that name.
+Each built service is recorded by name under the context's `built-images.json` entry, and at seed the loader
+substitutes the recorded image for every built sidecar and drops their `build:` and `pull_policy`, so the sidecar
+starts from the image prepare built with its recorded entrypoint, command and ports like any pulled image. A
+sidecar with a `build:` section and no recorded build is refused by the loader naming it, whatever its `image:`
+says (under Compose a service with `build:` is built, never pulled, so that `image:` is only a tag), and so is one
+with neither key. `main`'s recorded image stands in only when the task runs from it (build mode): a task that
+declares a `docker_image`, in `task.toml` or by a dataset override, keeps that image even when the context's
+`main` was built for another task sharing it or before the override, as Harbor's prebuilt mode runs the declared
+image. The loader hashes `environment/` once per task, when it loads, and reads the record then; nothing is hashed
+per episode.
+
+The separate verifier's image is built the same way. Harbor runs a separate verifier in a second environment whose
+build context is the task's `tests/` folder and whose configuration is the effective verifier environment
+(`[verifier.environment]` when declared, else a copy of `[environment]`); without a `docker_image` there it runs
+`docker compose build` on `tests/Dockerfile`, whatever that file holds (a `FROM` plus `RUN` file is built, not
+overlaid), and uploads no `tests/` into the image. Prepare plans that build for every task in separate mode with
+`tests/Dockerfile` and no declared or inherited `docker_image`: the `tests/` folder is hashed on its own, as Harbor's
+environment id hashes it, and the image is named `hb__<tests hash>-verifier` (the hash Harbor exports as
+`MAIN_IMAGE_NAME` for its verifier environment, with the sidecar suffix naming the role) and recorded under that
+hash as service `verifier` in `built-images.json`, its configuration in `compose-images.json`. The loader reads it,
+the server grades in it and skips the `tests/` upload when the image holds `/tests/test.sh` (it uploads the folder
+with a warning when it does not). A task whose verifier image fails to build is left out of the preparation like one
+whose own image fails, and so is one whose `tests/Dockerfile` has no recorded build (`builds.enabled: false`, or a
+record from before verifier builds): the loader refuses it the way it refuses an unrecorded `environment/` build,
+naming the file, the record and the two remedies. Harbor's verifier environment dir is always `tests/` (there is no
+fallback to `environment/`), so a task in separate mode with neither `tests/Dockerfile` nor a declared or inherited
+`docker_image` fails Harbor's environment validation (`require_agent_environment_definition`), and the loader
+refuses it with that wording. A `tests/docker-compose.yaml` may declare `main` only (its `build` section is
+honoured): Harbor builds and starts any other service as the verifier's Compose project, this server starts a single
+verifier sandbox, so such a task is refused by the loader and at prepare before any build.
 
 The image is named the way Harbor names it, `hb__<hash>`, where the hash is Harbor's 32-character content
 hash of the `environment/` folder, its environment id (vendored from Harbor v0.22.0 in
@@ -151,11 +191,16 @@ stands, as under Compose. The section is interpolated as Compose interpolates it
 them), so `${VAR:?message}` with no value fails that task's build naming the task and the variable instead of
 passing an empty build arg, while a bare `${VAR}` nobody sets is an empty string with one warning, as Compose
 makes it. The task's Compose file is read at build time, not at planning, and checked on this path as on the
-docker path before anything is built, so a file the loader would refuse (a sidecar with a `build:` section
-among them) is never built and pushed under the `hb__` name, and a file one task gets wrong leaves that task
-out without touching the rest of the dataset. `dockerfile_inline` is refused on the direct path, with
-`builds.tool: docker` as the remedy. The image name and hash do not change: the hash is Harbor's hash of
-`environment/`, which already covers the Compose file.
+docker path before anything is built, so a file the loader would refuse is never built and pushed under the
+`hb__` name, and a file one task gets wrong leaves that task out without touching the rest of the dataset. Each
+service with a `build:` section is one `buildah bud` or `podman build` of its own context and Dockerfile, `main`
+first and the sidecars in file order, each inspected, pushed and recorded as it finishes, so an interrupted
+prepare resumes at the next service. `dockerfile_inline` and `additional_contexts` are refused on the direct
+path for any service, before the context's first build (the checked file already says so, so nothing is built or
+pushed for a context that is then refused), with `builds.tool: docker` as the remedy; `no_cache` and `pull` are
+ignored there. The
+image name and hash do not change: the hash is Harbor's hash of `environment/`, which already covers the Compose
+file.
 
 A proxy the build tool inherits can break the registry push. The tool reads `http_proxy`, `https_proxy`,
 `no_proxy` and their upper-case forms from its environment and from its own configuration
@@ -170,9 +215,14 @@ With `docker`, the build is Harbor's build step. Prepare writes the Compose file
 builds a task with (service `main`, `build.context` the task's `environment/` folder, Harbor's
 `pull_policy: build` and keep-alive `command`), adds the task's own `environment/docker-compose.yaml` after it
 when the task ships one, and runs
-`docker compose --project-directory <environment/> -f <harbor file> [-f <task file>] build`, as
+`docker compose --project-directory <environment/> -f <harbor file> [-f <task file>] -f <images file> build`, as
 `DockerEnvironment.start()` does (`harbor/environments/docker/docker.py` at v0.22.0, cited by permalink in
-`nemo_gym/tasks/harbor/image_build.py`). The command's environment is merged as Harbor merges it: the process
+`nemo_gym/tasks/harbor/image_build.py`), with one generated override of Gym's own passed last, the way Harbor
+passes its own generated overrides after the task's file: `docker-compose-images.yaml`, the `image` of every
+service built (`hb__<hash>` for `main`, `hb__<hash>-<service>` per sidecar), so Gym's names win over a sidecar's
+own `image:` without a `docker tag` step. One compose build builds every service with a `build:` section, as
+Harbor's does; when some of a context's services are already recorded, or `main` is not built, the build names
+the ones it builds. The command's environment is merged as Harbor merges it: the process
 environment, then the task's `[environment].env` (a whole value `${VAR}` or `${VAR:-default}` read from the
 host, as Harbor's `resolve_env_vars` reads it; an unset `${VAR}` with no default fails the build), then Harbor's
 infrastructure variables, which win: `MAIN_IMAGE_NAME`, `CONTEXT_DIR`, `CPUS` and `MEMORY` (`<n>M`) from the
@@ -183,7 +233,9 @@ file and command: Harbor's template sets no `image` (its build is tagged `<sessi
 says `image: ${MAIN_IMAGE_NAME}`), and Gym sets `image: hb__<hash>`, the `MAIN_IMAGE_NAME` value, so the result
 can be inspected, pushed and recorded; and `DOCKER_DEFAULT_PLATFORM` carries `builds.platform`. `main`'s
 `image`, when the task file sets it, has to resolve to `MAIN_IMAGE_NAME` (`${MAIN_IMAGE_NAME}`,
-`${MAIN_IMAGE_NAME:-…}` or `${MAIN_IMAGE_NAME-…}`); a literal other image is refused.
+`${MAIN_IMAGE_NAME:-…}` or `${MAIN_IMAGE_NAME-…}`) when `main` is built; a literal other image is refused. A
+sidecar-only build (a prebuilt, pull-mode or overlay `main`, or one already recorded) does not read or tag `main`'s
+image, so its spelling is not checked, as Harbor's prebuilt mode never reads it.
 
 The task's Compose file is third-party content that `docker compose build` runs on the build host, which often
 holds the push credentials, so prepare checks it before the command runs. The check reads the file as Compose
@@ -202,9 +254,9 @@ read the same sources (the process environment, the task's `[environment].env`, 
 file built to be the file started. Prepare refuses, naming the service and key: build `secrets`, `ssh`, `extra_hosts`, `network: host`, `additional_contexts` other than `service:`
 references, `cache_from` / `cache_to` entries carrying credentials, a `build.context` or `dockerfile` that does
 not resolve under `environment/` (symlinks resolved; `${CONTEXT_DIR}` is allowed), a top-level `include` and an
-`extends` with a `file`. A sidecar with a `build:` section is refused too: sidecars name a prebuilt `image:`
-(the loader records it from the registry and refuses one without), and no provider starts a locally built
-sidecar, so only `main` is built, from `environment/Dockerfile` or the task file's `dockerfile_inline`. Harbor
+`extends` with a `file`. The per-section checks run on every service with a `build:` section, sidecars included;
+a sidecar's `image:` is accepted whatever it says, since the build is tagged with Gym's name for it and the seed
+document is filled from the record by service name. Harbor
 reads a task's Compose file from `environment/docker-compose.yaml` only; the loader also accepts
 `docker-compose.yml`, `compose.yaml` and `compose.yml` at run time, and the build refuses those spellings so the
 file a task builds with is the file it runs with. `docker build` is never called, so the Compose v2 plugin
@@ -215,26 +267,50 @@ Images are built for `linux/amd64`, the platform the sandboxes run. The tool is 
 (`docker compose` through `DOCKER_DEFAULT_PLATFORM`), and an image that comes out for another one is
 refused before it is pushed or recorded. Building on an
 arm64 host therefore needs qemu with binfmt registered, or an x86 node. `builds.platform: OS/ARCH` overrides
-the target. `builds.enabled: false` never builds. Tasks that need a build and have none recorded are then
-skipped with a message that says so.
+the target. `builds.enabled: false` never builds. Tasks that need a build and have none recorded, the separate
+verifier's `tests/Dockerfile` included, are then skipped with a message that says so.
 
 The hash is SHA-256 over the sorted relative paths and bytes of the regular files in the build context,
 exactly as Harbor computes it: symbolic links and anything under `__pycache__`, `.git` or `.DS_Store` are
 skipped, and file modes are not part of it. Two tasks with identical `environment/` folders share one
 image and a changed file gets a new one. `built-images.json` next to the task folders maps each context
-hash to the image, the tasks that use it, the tool and whether it was pushed. Deleting a context's entry
+hash to the images built from it, by service, with the tool that built each and whether it was pushed, and the
+tasks that use the context:
+
+```json
+"<hash>": {
+  "image": "registry/path/hb__<hash>@sha256:...",
+  "tasks": ["cb100-015-ember-medical"],
+  "tool": "buildah",
+  "pushed": true,
+  "services": {
+    "main":  {"image": "registry/path/hb__<hash>@sha256:...", "tool": "buildah", "pushed": true},
+    "world": {"image": "registry/path/hb__<hash>-world@sha256:...", "tool": "buildah", "pushed": true}
+  }
+}
+```
+
+`image`, `tool` and `pushed` at the top level are `main`'s, kept there for older readers; `image` is absent when
+`main` was not built (a pull-mode `main` with a built sidecar), and the two flags are then the first recorded
+service's. The flags are kept per service because one context's services may be built by differently configured
+runs (a sidecar built locally after `main` was pushed, or the reverse), and each service is judged by its own. An
+entry with `image` and no `services` was written before sidecars were
+built and reads as `main` alone. Deleting a context's entry
 from that file forces a rebuild of it at the next prepare; there is no flag for that, since a changed
-Dockerfile or context is a new hash and builds on its own. The built image's
+Dockerfile or context is a new hash and builds on its own. Each built image's
 configuration lands in `compose-images.json` beside it, so the loader reads the Dockerfile's final
 `WORKDIR`, `ENV` and `USER` from it like any pulled image. A recorded image is reused when it fits the run:
-a pushed image serves every run, a local one only runs that push nothing, and the platform has to match.
-Otherwise it is rebuilt and the record replaced, and prepare says why. An image is recorded only after it
-was built, pushed and inspected, and each one as soon as it is done, so an interrupted prepare resumes
+a pushed image serves every run, a local one only runs that push nothing, and the platform has to match, each
+service on its own record. Otherwise it is rebuilt and the record replaced, and prepare says why; a service
+without a record is built and the context's other services are left as recorded. An image is recorded only after
+it was built, pushed and inspected, and each one as soon as it is done, so an interrupted prepare resumes
 where it stopped. Both record files are replaced atomically under a sidecar lock file next to them
 (`built-images.json.lock`, `compose-images.json.lock`), so two Gym commands recording into one datasets
-folder keep each other's entries and a reader never sees a half-written file. A failed build stops the
-preparation and names the tasks. Prepare also writes the
-distinct images of the prepared tasks to `results/harbor/<taskset>/images.json`, for pre-pulling.
+folder keep each other's entries and a reader never sees a half-written file. A failed build leaves its tasks
+out with the reason and the others prepare. Prepare also writes the
+distinct `main` images of the prepared tasks (built or pulled) to `results/harbor/<taskset>/images.json`, for
+pre-pulling; Compose sidecar images, built or from a registry, are not in that list and sit in
+`compose-images.json` (and `built-images.json` for the built ones) next to the task folders.
 
 The build tool pushes with its own login. Pulling a pushed image into a sandbox uses the registry
 credentials of the sandbox provider block (`images.auth`), the same way as any private image. The sandbox
@@ -247,8 +323,8 @@ it is, the other providers cannot run commands as it.
 
 | Setting or feature | Behavior in this layer |
 | --- | --- |
-| Image | Prebuilt `environment.docker_image`, or a base-image-only Dockerfile (`FROM`, literal absolute `WORKDIR`, `ENV`, `LABEL`). Dockerfile builds are deferred. |
-| Verification | Single-step, shared-sandbox verification. Explicit `verifier.environment_mode = "separate"` or a separate verifier environment is rejected at seed. |
+| Image | Prebuilt `environment.docker_image`; a pull-mode Dockerfile (`FROM` plus `WORKDIR`, `ENV`, `USER`, `LABEL`), started from the base image; an overlay-mode Dockerfile (the same plus `RUN` lines, run in the pulled base image at seed, no build); any other Dockerfile (`COPY`, `ADD`, heredocs, BuildKit flags, multi-stage) is built at prepare with buildah, podman or docker as `hb__<hash>` and the task runs from the built image, Compose sidecars with `build:` as `hb__<hash>-<service>`; with `builds.enabled: false` or no record such a task is skipped at prepare. The separate verifier's `tests/Dockerfile` is built the same way as `hb__<tests hash>-verifier`, whatever it holds (see "Dockerfile builds"). |
+| Verification | Single-step verification, shared or separate. A separate verifier grades in the image built from `tests/Dockerfile`, else `[verifier.environment].docker_image`, else the task's own `[environment].docker_image`. A separate-mode task with no verifier image and no `tests/Dockerfile` is refused as Harbor refuses it; one whose `tests/Dockerfile` has no recorded build is left out at prepare and refused at seed. A `tests/docker-compose.yaml` may declare `main` only. |
 | Users | The image's default user and `verifier.user` are supported. Explicit `agent.user` and Dockerfile `USER` overrides are rejected at seed because sandbox access cannot yet carry the agent user. This layer has no oracle-specific exemption. |
 | Environment variables | Whole-value `${VAR}` and `${VAR:-default}` templates in environment and verifier variables resolve from the server's host environment at use time. Missing required values fail the episode before provisioning. Resolved values are not added to dataset rows, task snapshots, or the episode result. A task can still print its own environment into verifier logs. |
 | Prebuilt-image input files | `environment/` contents are uploaded to the workdir when the task has a prebuilt image and no `Dockerfile` or Compose definition. File modes are preserved. |

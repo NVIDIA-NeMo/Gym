@@ -1420,3 +1420,24 @@ async def test_unsupported_fields_are_refused_with_the_shared_message_before_cre
     with pytest.raises(NotImplementedError, match=re.escape("Unsupported Compose fields: ['x-extra']")):
         await top.start()
     assert provider.created == []
+
+
+def test_a_bodiless_named_volume_declaration_counts_as_declared():
+    """`volumes:` followed by a bare name is valid Compose and loads as None; it must not read as undeclared."""
+
+    class VolumeProvider(ConnectableShellProvider):
+        def shared_volume_metadata(self):
+            return {"placement": "shared-disk"}
+
+        def shared_volume_options(self, source, target, *, read_only=False):
+            return {"volumes": [{"source": source, "target": target, "read_only": read_only}]}
+
+    document = {
+        "services": {"app": {"image": "app", "volumes": [{"type": "volume", "source": "data", "target": "/data"}]}},
+        "volumes": {"data": None},
+    }
+    group = make_compose(VolumeProvider(), document)
+    assert group._validate()
+    missing = make_compose(VolumeProvider(), {**document, "volumes": {}})
+    with pytest.raises(ValueError, match="Undeclared Compose volume: 'data'"):
+        missing._validate()

@@ -256,7 +256,10 @@ class TestRestatedMainBuild:
         for task_id in ("built", "prebuilt"):
             document = load_compose_document(tasks[task_id])
             assert without_restated_main_build(tasks[task_id], document) == (document, None)
-            assert "build" in document["services"]["main"]
+        # The loader already put the recorded image in for the built main, its build: and pull_policy gone
+        # (with_built_images); the prebuilt task's main keeps its section for the field check to report.
+        assert load_compose_document(tasks["built"])["services"]["main"] == {"image": tasks["built"].built_image}
+        assert "build" in load_compose_document(tasks["prebuilt"])["services"]["main"]
         assert unsupported_compose_fields_error(tasks["built"]) is None
 
 

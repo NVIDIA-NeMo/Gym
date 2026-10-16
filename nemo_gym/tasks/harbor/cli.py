@@ -50,17 +50,19 @@ from nemo_gym.tasks.harbor.image_configs import (
     load_compose_document,
     record_base_images,
     record_compose_images,
-    without_main_build,
+    with_built_images,
     without_pull_policy,
     without_restated_main_build,
 )
 from nemo_gym.tasks.harbor.materialize import run_config, write_rows
 from nemo_gym.tasks.harbor.task import (
+    VERIFIER_SERVICE,
     HarborTask,
     HarborTaskError,
     discover_tasks,
     is_task_folder,
     read_built_images,
+    recorded_service_images,
 )
 
 
@@ -220,7 +222,8 @@ class PreparedTaskset:
     rows_path: Path
     output_dir: Path
     skipped: dict[str, str] = field(default_factory=dict)
-    # Every distinct image the prepared tasks start from, for pre-pulling.
+    # Every distinct `main` image the prepared tasks start from, for pre-pulling; Compose sidecar and separate
+    # verifier images are in compose-images.json (and built-images.json for the built ones) next to the tasks.
     images: tuple[str, ...] = ()
 
 
@@ -240,22 +243,20 @@ def unsupported_compose_fields_error(task: HarborTask) -> HarborTaskError | None
     """Why the sandbox Compose adapter would refuse ``task``'s document at seed, or ``None`` when it starts it.
 
     The document checked is the one the server hands the adapter (``environment_servers/harbor/app.py``,
-    ``_compose_document``): interpolated and ``env_file``-inlined by the loader, ``pull_policy`` dropped from
-    every service, ``main``'s ``build:`` dropped when the task runs from its recorded built image or when it
-    only restates Harbor's own build of the task's Dockerfile (:func:`without_restated_main_build`; a build
-    key Gym cannot apply without a build is this task's reason). A field no provider starts (``deploy``,
-    ``extra_hosts``, ``platform``, a sidecar ``build:``) is then a per-task reason naming the service and the
-    field, recorded in ``skipped.json`` like a task that does not load, instead of a failure of every episode
-    at seed.
+    ``_compose_document``): interpolated and ``env_file``-inlined by the loader, the services prepare built
+    carrying their recorded images without ``build:`` or ``pull_policy`` (``with_built_images``), ``pull_policy``
+    dropped from every other service, and ``main``'s ``build:`` dropped when it only restates Harbor's own build
+    of the task's Dockerfile (:func:`without_restated_main_build`; a build key Gym cannot apply without a build
+    is this task's reason). A field no provider starts (``deploy``, ``extra_hosts``, ``platform``, a sidecar
+    ``build:`` prepare recorded no build for) is then a per-task reason naming the service and the field,
+    recorded in ``skipped.json`` like a task that does not load, instead of a failure of every episode at seed.
     """
     path = compose_file(task)
     document = load_compose_document(task)
     if path is None or document is None:
         return None
     document = without_pull_policy(document)
-    if task.built_image is not None:
-        document = without_main_build(document)
-    else:
+    if task.built_image is None:
         document, reason = without_restated_main_build(task, document)
         if reason is not None:
             return HarborTaskError(f"{path.name}: {reason}")
@@ -270,14 +271,21 @@ def refused_before_build(plan: list[BuildPlanEntry]) -> dict[str, HarborTaskErro
 
     :func:`unsupported_compose_fields_error` is the authoritative check, on the loader's document once the
     tasks load. This one needs only key names, which interpolation and ``env_file`` inlining do not add, so it
-    reads the raw file the way the loader's document will look: ``pull_policy`` dropped, ``main``'s ``build:``
-    dropped (the task is about to be built and will run from its recorded image) and ``env_file`` set aside,
-    as the loader folds it into ``environment``. A task it names is neither built nor pushed for an image no
-    episode would start, and a build that would fail for it cannot stop the preparation. A file that does not
-    parse is left to the loader to report in its own words.
+    reads the raw file the way the loader's document will look: ``pull_policy`` dropped, the ``build:`` of every
+    service the plan builds from the context dropped (they are about to be built and will run from their
+    recorded images) and ``env_file`` set aside, as the loader folds it into ``environment``. A task it names is
+    neither built nor pushed for an image no episode would start, and a build that would fail for it cannot stop
+    the preparation. A file that does not parse is left to the loader to report in its own words. The separate
+    verifier's ``tests/`` context is not checked: its image starts as a single sandbox, never through the adapter.
     """
     refused: dict[str, HarborTaskError] = {}
+    planned: dict[str, dict[str, str]] = {}
     for entry in plan:
+        if entry.service != VERIFIER_SERVICE:
+            planned.setdefault(entry.digest, {})[entry.service] = "built"
+    for entry in plan:
+        if entry.digest not in planned or entry.service != next(iter(planned[entry.digest])):
+            continue  # once per context, on its first planned service
         path = next((entry.context / name for name in COMPOSE_FILE_NAMES if (entry.context / name).is_file()), None)
         if path is None:
             continue
@@ -287,7 +295,7 @@ def refused_before_build(plan: list[BuildPlanEntry]) -> dict[str, HarborTaskErro
             continue
         if not isinstance(document, dict):
             continue
-        document = without_main_build(without_pull_policy(document))
+        document = with_built_images(without_pull_policy(document), planned[entry.digest])
         services = document.get("services")
         if isinstance(services, dict):
             for name, service in services.items():
@@ -345,9 +353,13 @@ def prepare_target(
     # before the tasks load; a base image the registry cannot resolve stops the preparation here. Only
     # the selected tasks' images are recorded, so an image a left-out task uses cannot stop it. A target
     # that is itself a task folder always loads (discover_tasks raises for it); selection applies after.
-    # A missing or unreadable target is reported by discover_tasks below, in its own words.
+    # A missing or unreadable target is reported by discover_tasks below, in its own words. Images are
+    # recorded for the platform the sandboxes run, ``builds.platform`` (linux/amd64 unless set), as the
+    # built ones are.
     images = (
-        record_base_images(folder, select=None if is_task_folder(folder) else selected) if folder.is_dir() else None
+        record_base_images(folder, select=None if is_task_folder(folder) else selected, platform=build.platform)
+        if folder.is_dir()
+        else None
     )
     if images is not None:
         print(f"Base image configurations recorded in {images}")
@@ -386,7 +398,7 @@ def prepare_target(
         raise _no_runnable_task(folder, errors)
     # A Compose file that does not resolve leaves its task out the same way; the others' images are still recorded.
     unresolved: dict[str, str] = {}
-    images = record_compose_images(tasks, tasks[0].path.parent, skipped=unresolved)
+    images = record_compose_images(tasks, tasks[0].path.parent, skipped=unresolved, platform=build.platform)
     if unresolved:
         for task_id, reason in unresolved.items():
             errors[task_id] = HarborTaskError(reason)
@@ -443,23 +455,35 @@ def _no_runnable_task(folder: Path, errors: Mapping[str, object]) -> ValueError:
 def _build_dockerfiles(folder: Path, build: BuildOptions, *, select) -> dict[str, str]:
     """Build and record the images of the selected tasks whose Dockerfile needs a build.
 
-    With builds disabled, the tasks that need one are left for the loader to skip with its
-    message. A missing builder stops the preparation, naming the tasks. A failed build does not:
-    each context is built on its own, and the tasks of one that fails are returned by id with the
-    reason, for the caller to leave out the way it leaves out a task that does not load. A planned task
-    whose Compose file the sandbox adapter would refuse whatever the build gave (:func:`refused_before_build`)
-    is returned the same way, and its context is neither built nor pushed.
+    With builds disabled, the tasks that need one are left for the loader to skip with its message, a task whose
+    separate verifier's ``tests/Dockerfile`` is unbuilt included (the loader refuses an unrecorded verifier image
+    the way it refuses an unrecorded ``main``). A missing builder stops the preparation, naming the tasks. A failed
+    build does not:
+    each context (every service it builds) is built on its own, and the tasks of one that fails are returned
+    by id with the reason, for the caller to leave out the way it leaves out a task that does not load. A task in
+    separate verifier mode may own two contexts, ``environment/`` and ``tests/`` (its verifier's image); a failure of
+    either leaves the task out. A planned task whose Compose file the sandbox adapter would refuse whatever the
+    build gave (:func:`refused_before_build`) is returned the same way, and its contexts are neither built nor pushed.
     """
-    plan = plan_builds(folder, select=select)
-    refused = {task_id: str(error) for task_id, error in refused_before_build(plan).items()}
-    plan = [entry for entry in plan if not any(task_id in refused for task_id in entry.tasks)]
+    services = plan_builds(folder, select=select)
+    refused = {task_id: str(error) for task_id, error in refused_before_build(services).items()}
+    services = [entry for entry in services if not any(task_id in refused for task_id in entry.tasks)]
+    # One entry per context: the plan has one per (context, service), with the same tasks.
+    plan = list({entry.digest: entry for entry in services}.values())
     if not plan:
         return refused
     names = ", ".join(task for entry in plan for task in entry.tasks[:3])
     if not build.enabled:
         parent = folder.parent if is_task_folder(folder) else folder
         recorded = read_built_images(parent)
-        unbuilt = [task for entry in plan if entry.digest not in recorded for task in entry.tasks[:3]]
+        # A context is unbuilt while any of its planned services has no record: a legacy record of main alone, or
+        # a prepare interrupted after a sidecar, leaves the digest present and the task still unrunnable.
+        unbuilt_digests = {
+            entry.digest
+            for entry in services
+            if entry.service not in recorded_service_images(recorded.get(entry.digest))
+        }
+        unbuilt = [task for entry in plan if entry.digest in unbuilt_digests for task in entry.tasks[:3]]
         if unbuilt:
             print(
                 f"Skipping Dockerfile builds ({BUILDS_KEY}.enabled is false); tasks that need one are left out: "
@@ -475,8 +499,13 @@ def _build_dockerfiles(folder: Path, build: BuildOptions, *, select) -> dict[str
     for entry in plan:
         # One build_images call per context, so a failure stops that context only and the rest still build.
         tasks = set(entry.tasks)
+        if tasks <= set(failures):
+            # Every task of this context is already out (its other context failed): nothing to build it for.
+            continue
         try:
-            results += build_images(folder, builder=builder, select=lambda name: name in tasks)
+            results += build_images(
+                folder, builder=builder, select=lambda name: name in tasks, contexts={entry.digest}
+            )
         except BuildError as exc:
             reason = f"Could not build the Dockerfile image(s) for task(s) {', '.join(entry.tasks[:3])}: {exc}"
             failures.update(dict.fromkeys(entry.tasks, reason))
