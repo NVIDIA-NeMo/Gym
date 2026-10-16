@@ -1824,8 +1824,6 @@ class OpenSandboxProvider:
             if evidence := await self._control_plane_inspect_oom_evidence(handle):
                 message = notice.message if notice is not None else f"sandbox_id={handle.sandbox_id!r}"
                 return f"Sandbox was OOM-killed: inspect confirms {evidence}. {message}"
-        if notice is not None and notice.outcome == "other_terminal":
-            raise SandboxBackendUnreachableError(notice.message) from error
         return None
 
     async def _control_plane_inspect_oom_evidence(self, handle: SandboxHandle) -> str | None:
