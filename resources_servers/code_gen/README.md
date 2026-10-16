@@ -27,11 +27,13 @@ deadline of `(unit_test_timeout_secs + 1) * num_tests + 5` seconds, 4 GiB `RLIMI
 Set `sandbox_provider` to run each verification in a fresh sandbox from any
 [sandbox provider](https://docs.nvidia.com/nemo/gym/main/infrastructure/sandbox) instead. The
 server uploads `sandbox_runner.py` together with the unchanged harness above, so the same limits
-apply inside the sandbox; the sandbox only has to be large enough not to undercut them.
+apply inside the sandbox; the sandbox only has to be large enough not to undercut them. The
+exception is the stack: the harness can raise it only up to the sandbox's hard limit, which some
+providers set far below 4 GiB.
 
-1. Build and push the runtime image. It uses the same uv-managed CPython build and numpy version
-   as this server's environment; with per-test time limits, a slower interpreter build turns
-   borderline passes into failures:
+1. Build and push the runtime image. It uses the same uv-managed CPython build as this server's
+   environment, and the same numpy, scipy and pandas versions, which candidates can import. With
+   per-test time limits, a slower interpreter build turns borderline passes into failures:
 
    ```bash
    docker build --platform linux/amd64 -t <registry>/code-gen-verifier:<tag> resources_servers/code_gen/sandbox_image
@@ -43,6 +45,7 @@ apply inside the sandbox; the sandbox only has to be large enough not to undercu
    ```bash
    export CODE_GEN_SANDBOX_IMAGE=<registry>/code-gen-verifier:<tag>
    gym env start \
+       --model-type openai_model \
        --config resources_servers/code_gen/configs/code_gen.yaml \
        --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
        ++code_gen.resources_servers.code_gen.sandbox_provider=sandbox
@@ -52,7 +55,7 @@ apply inside the sandbox; the sandbox only has to be large enough not to undercu
 
    ```yaml
    # code_gen_sandbox.yaml
-   # gym env start --config resources_servers/code_gen/configs/code_gen.yaml --config code_gen_sandbox.yaml
+   # gym env start --model-type openai_model --config resources_servers/code_gen/configs/code_gen.yaml --config code_gen_sandbox.yaml
    config_paths:
      - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 
@@ -66,16 +69,18 @@ apply inside the sandbox; the sandbox only has to be large enough not to undercu
 
    Keys left out keep the server's defaults below.
 
-   `num_processes` then caps concurrent sandboxes. The default `sandbox_config` uses 1 CPU, as a Ray
-   task does, and 6 GiB of memory, above the 4 GiB `RLIMIT_DATA`, so a memory-hungry candidate
-   fails its test instead of getting the whole sandbox killed. The default
-   `sandbox_config.provider_options.network_policy` denies all egress, so candidate code cannot
-   reach the network.
+   `num_processes` then caps concurrent sandboxes, so size it to what the provider can run at once
+   rather than to Ray CPUs. The default `sandbox_config` allows up to 1 CPU and 6 GiB of memory,
+   above the 4 GiB `RLIMIT_DATA`, so a memory-hungry candidate fails its test instead of getting the
+   whole sandbox killed. Unlike a Ray task's CPU, that CPU is a limit, not a reservation, and the
+   per-test time limits are wall-clock. The default `sandbox_config.provider_options.network_policy`
+   is an OpenSandbox option that denies all egress. Other providers need their own setting (Docker's
+   `network: none`), and Daytona, E2B and OpenShell reject the key, so remove it for them.
 
 A failure of the sandbox itself, not of the candidate, returns `mask_sample: true` with
 `failure_kind` set to `provider_unavailable` (the sandbox could not start) or `verifier_error` (the
-runner failed or produced no valid result), and `failure_reason` holding the details. Masked
-samples are excluded from metrics and from training.
+runner failed or produced no valid result), and `failure_reason` holding the details. Gym's
+aggregate metrics leave masked samples out; whether training skips them is up to the trainer.
 
 ### Example of rollouts and usage
 

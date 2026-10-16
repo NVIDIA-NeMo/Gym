@@ -28,6 +28,7 @@ result. A failure of the sandbox or the runner raises ``SandboxVerificationError
 import json
 import logging
 import shlex
+import uuid
 from collections.abc import Callable, Mapping
 from typing import Any, TypeVar
 
@@ -94,12 +95,15 @@ async def run_verification_sandbox(
         config: Image, resources and provider settings.
         files: Text files to upload, keyed by path relative to ``work_dir``. Must include
             ``sandbox_runner.py``, which is run as ``sandbox_runner.py request.json result.json``.
-        request: JSON-serializable request written to ``request.json``.
+        request: JSON-serializable request written to ``request.json``. It stays in the runner's
+            working directory, so anything the runner launches can read it: keep expected outputs
+            out of it or delete it before running the submission.
         exec_timeout_s: Deadline for the runner.
         parse_result: Parses and validates the text of ``result.json``. Any exception it raises
             is reported as a ``verifier_error``.
         metadata: Sandbox metadata; ``config.metadata`` entries win on conflicts.
-        work_dir: Absolute directory in the sandbox for the uploaded files and the result.
+        work_dir: Absolute directory in the sandbox; each call uses its own subdirectory of it for
+            the uploaded files and the result.
 
     Raises:
         SandboxVerificationError: ``provider_unavailable`` if the sandbox could not start,
@@ -107,6 +111,9 @@ async def run_verification_sandbox(
     """
     if RUNNER_FILE not in files:
         raise ValueError(f"files must include {RUNNER_FILE}")
+    # One directory per call: providers that share /tmp between sandboxes (local, and Apptainer, which binds the
+    # host /tmp by default) would otherwise let concurrent verifications overwrite each other's files.
+    work_dir = f"{work_dir.rstrip('/')}/{uuid.uuid4().hex}"
     uploads = {f"{work_dir}/{name}": content for name, content in files.items()}
     uploads[f"{work_dir}/request.json"] = json.dumps(request)
     spec = SandboxSpec(
@@ -125,6 +132,9 @@ async def run_verification_sandbox(
         try:
             # Covers allocation, readiness and the file upload.
             await sandbox.start(spec)
+        except ImportError:
+            # A missing provider SDK is a deployment error, not an outage; masking it would drop every sample.
+            raise
         except Exception as e:
             raise SandboxVerificationError(PROVIDER_UNAVAILABLE, f"sandbox start failed: {e!r}") from e
 
@@ -143,7 +153,7 @@ async def run_verification_sandbox(
             )
 
         return parse_result(await read_text(sandbox, path=f"{work_dir}/result.json"))
-    except SandboxVerificationError:
+    except (SandboxVerificationError, ImportError):
         raise
     except Exception as e:
         # Request boundary: any other sandbox or result failure invalidates only this sample.

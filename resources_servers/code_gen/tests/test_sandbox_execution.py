@@ -92,12 +92,14 @@ class TestSandboxLifecycle:
         assert spec.resources.cpu == 1
         assert spec.env["OMP_NUM_THREADS"] == "1"
         assert spec.metadata == {"benchmark": "code-gen"}
+        # Each verification gets its own directory under the default work dir.
+        call_dir = provider.uploads[0].removeprefix("/tmp/code_gen_verify/").split("/")[0]
         assert set(provider.uploads) == {
-            "/tmp/code_gen_verify/sandbox_runner.py",
-            "/tmp/code_gen_verify/lcb_integration/__init__.py",
-            "/tmp/code_gen_verify/lcb_integration/correctness.py",
-            "/tmp/code_gen_verify/lcb_integration/testing_util.py",
-            "/tmp/code_gen_verify/request.json",
+            f"/tmp/code_gen_verify/{call_dir}/sandbox_runner.py",
+            f"/tmp/code_gen_verify/{call_dir}/lcb_integration/__init__.py",
+            f"/tmp/code_gen_verify/{call_dir}/lcb_integration/correctness.py",
+            f"/tmp/code_gen_verify/{call_dir}/lcb_integration/testing_util.py",
+            f"/tmp/code_gen_verify/{call_dir}/request.json",
         }
         # check_correctness allows (timeout + 1) * num_tests + 5 seconds; the runner gets that plus overhead.
         (command, timeout_s), *_ = provider.execs
@@ -137,6 +139,28 @@ class TestLocalProvider:
 
         timed_out, _ = await self._grade_locally(tmp_path, "while True:\n    pass")
         assert timed_out == [-3]
+
+    async def test_candidate_cannot_read_expected_outputs_from_the_request(self, tmp_path: Path) -> None:
+        # The outputs have no relation to the inputs, so only a candidate that reads them can pass.
+        sample = {"input_output": json.dumps({"inputs": ["1\n", "2\n"], "outputs": ["kiwi\n", "plum\n"]})}
+        generation = (
+            "import json\n"
+            "io_ = json.loads(json.load(open('request.json'))['sample']['input_output'])\n"
+            "print(dict(zip(io_['inputs'], io_['outputs']))[input() + '\\n'])"
+        )
+        result, metadata = await check_correctness_in_sandbox(
+            sample,
+            generation,
+            3,
+            False,
+            num_tests=2,
+            provider={"local": {}},
+            config=SandboxVerificationConfig(python=sys.executable),
+            metadata={},
+            work_dir=str(tmp_path / "work"),
+        )
+        assert result == [-4], metadata
+        assert "FileNotFoundError" in metadata["error"]
 
     @pytest.mark.skipif(not Path("/proc/self/limits").exists(), reason="reads /proc/self/limits")
     async def test_candidates_cannot_dump_core(self, tmp_path: Path) -> None:

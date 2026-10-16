@@ -26,7 +26,8 @@ code_gen:
           benchmark: code-gen
         provider_options:
           # Candidate code needs no network, and must not fetch answers. OpenSandbox enforces this;
-          # the Docker provider ignores it (set its `network: none` instead).
+          # Docker ignores it (set its `network: none` instead), and Daytona, E2B and OpenShell reject
+          # the key, so remove it for them.
           network_policy:
             defaultAction: deny
             egress: []
