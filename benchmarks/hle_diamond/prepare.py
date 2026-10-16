@@ -45,8 +45,8 @@ DATA_DIR = BENCHMARK_DIR / "data"
 OUTPUT_FPATH = DATA_DIR / "hle_diamond_benchmark.jsonl"
 OUTPUT_TEXT_FPATH = DATA_DIR / "hle_diamond_benchmark_text.jsonl"
 
-# The HLE prompt (system + user) is reused unchanged; the text variant applies the
-# same file at rollout time via prompt_config.
+# Gym's shared HLE prompt (system + user): a paraphrase of the upstream SYSTEM_PROMPT, not a verbatim
+# copy (see README > Prompting). The text variant applies the same file at rollout time via prompt_config.
 PROMPT_CONFIG_FPATH = BENCHMARK_DIR.parent / "hle" / "prompts" / "default.yaml"
 
 REPO_ID = "cais/hle-diamond"

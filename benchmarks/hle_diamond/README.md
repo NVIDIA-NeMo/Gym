@@ -41,15 +41,33 @@ The `image` data URI appears only inside the materialized `input_image` block of
 
 ## Prompting
 
-Upstream's prompts are reused unchanged from `benchmarks/hle/prompts/`, so no prompt file lives in
-this directory:
+The prompts are Gym's shared HLE prompts, referenced from `benchmarks/hle/prompts/` so that no
+prompt file lives in this directory. They are adaptations of the
+[`centerforaisafety/hle`](https://github.com/centerforaisafety/hle) harness, not verbatim copies:
 
-- `default.yaml`: the `centerforaisafety/hle` system prompt (Explanation / Answer / Confidence) with
-  the bare question as the user turn. The default set bakes it into `responses_create_params.input`
-  with `nemo_gym.vision_input.build_image_input`; the text variant applies it at rollout time.
+- `default.yaml`: Gym's HLE system prompt (Explanation / Answer / Confidence) with the bare question
+  as the user turn, the placement upstream's `run_model_predictions.py` uses. The wording differs:
+  upstream's `SYSTEM_PROMPT` asks for `{your explanation for your answer choice}` and
+  `{your chosen answer}`; Gym's file asks for `{your explanation for your final answer}` and
+  `{your succinct, final answer}`. The default set bakes this text into
+  `responses_create_params.input` with `nemo_gym.vision_input.build_image_input`; the text variant
+  applies the same file at rollout time. Every prepared row and every sandboxed preset therefore
+  carries the paraphrase, which is a comparability caveat to state next to any number compared with
+  the published table. Keeping the shared file is deliberate (one HLE prompt across `hle`,
+  `hle_verified` and `hle_diamond`); a verbatim-upstream prompt would be a separate decision.
 - `opencode.yaml`: the same instructions folded into one user message for the sandboxed harnesses,
   whose native system prompts stay intact.
-- `judge.txt`: the official HLE judge prompt.
+- `judge.txt`: the HLE judge prompt adapted for the `equivalence_llm_judge` label parser. Upstream's
+  `run_judge_results.py` parses a structured object
+  (`extracted_final_answer, reasoning, correct: yes|no, confidence, strict`); Gym's file renames the
+  fields to `Reasoning:` / `Judgement:` / `Confidence:` and the verdict is the `Judgement: yes|no`
+  string found in free text, with unparseable judge output tracked by `judgement_parsing_issue_rate`.
+  The grading criteria are the same.
+
+Image questions: upstream attaches the image as `image_url` with no `detail` setting (the provider
+default); Gym's shared builder requests `detail: high`, which changes image tiling and token counts
+on the 272 image rows for OpenAI-family models. Making `detail` configurable would be a change to
+`nemo_gym.vision_input`, not to this benchmark.
 
 The upstream harness sends no temperature and no output-token cap. When comparing with the published
 table, send `++responses_create_params.reasoning.effort=high` and nothing else; on this gateway a
@@ -68,7 +86,7 @@ Every prepared row carries:
 | `partition` | `reasoning` or `knowledge`; read by the accuracy slices |
 | `category`, `raw_subject` | upstream subject labels; carried for analysis, never read |
 | `has_image` | whether the question has an image |
-| `responses_create_params` | default set only: the materialized `input` messages; image rows carry an `input_image` block with `detail: high` |
+| `responses_create_params` | default set only: the materialized `input` messages; image rows carry an `input_image` block with `detail: high` (upstream sends no `detail`; see Prompting) |
 
 `prepare.py` loads the whole split, validates it (1000 rows, 500 + 500 partitions, 272 image rows,
 1000 unique ids) and only then writes, so an incomplete download never leaves a file behind.
@@ -79,10 +97,12 @@ thin wrapper for `prepare(text_only=True)`.
 ## Scoring
 
 `reward` is 1.0 when the judge answers `Judgement: yes` and 0.0 otherwise: `equivalence_llm_judge`
-with the HLE labels, no swap check, no regex extraction and no per-record regex, exactly as
-`benchmarks/hle/config.yaml`. An empty final answer scores 0 without a judge call
+with the HLE labels, no swap check, no regex extraction and no per-record regex, the same judge
+settings as `benchmarks/hle/config.yaml` (see Prompting for how the judge prompt differs from
+upstream's structured output). An empty final answer scores 0 without a judge call
 (`failure_reason: empty_final_answer`). The judge defaults to the policy model, as in
-`benchmarks/hle`, so the model under test grades itself unless `judge_openai.yaml` is composed in.
+`benchmarks/hle`, so the model under test grades itself unless `judge_openai.yaml` is composed in;
+self-judged numbers are not comparable with the published table (see Quickstart).
 
 Headline metric: `mean/reward`, accuracy over every evaluated row. Additional metrics:
 
@@ -209,5 +229,5 @@ Code: Apache 2.0.
 
 `cais/hle-diamond` data: MIT, with the dataset card's request not to publicly share, re-upload or
 redistribute it; the data is downloaded at run time and never committed. Prompts are reused from
-`benchmarks/hle/prompts/` and originate from the HLE authors'
-[`centerforaisafety/hle`](https://github.com/centerforaisafety/hle) harness.
+`benchmarks/hle/prompts/` and are adapted from the HLE authors'
+[`centerforaisafety/hle`](https://github.com/centerforaisafety/hle) harness (MIT).
