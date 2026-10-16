@@ -25,6 +25,8 @@ from typing import Any, Dict
 from unittest.mock import AsyncMock, MagicMock
 
 import anyio
+from fastapi import Request
+from pydantic import ValidationError
 from pytest import MonkeyPatch, fixture, mark, raises
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
@@ -211,6 +213,102 @@ class TestOpenCodeSandboxedAgent:
         ]
 
         assert expected_usages == actual_usages
+
+    def test_missing_local_ripgrep_is_rejected(self, tmp_path: Path) -> None:
+        with raises(ValidationError, match="Path does not point to a file"):
+            OpenCodeSandboxedAgentConfig.model_validate(
+                self._create_config().model_dump() | {"local_ripgrep_binary_path": str(tmp_path / "missing-rg")}
+            )
+
+    @mark.parametrize("stage_ripgrep", [False, True])
+    async def test_local_ripgrep_is_uploaded_and_staged_before_opencode(
+        self, opencode_export_test_data: Dict[str, Any], monkeypatch: MonkeyPatch, tmp_path: Path, stage_ripgrep: bool
+    ) -> None:
+        binary = tmp_path / "rg"
+        binary.write_text("#!/bin/sh\necho 'ripgrep test'\n")
+        config = self._create_config()
+        if stage_ripgrep:
+            config = OpenCodeSandboxedAgentConfig.model_validate(
+                config.model_dump() | {"local_ripgrep_binary_path": str(binary)}
+            )
+        server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        sandbox_mock = MagicMock()
+        sandbox_mock.exec = AsyncMock(
+            side_effect=[
+                SimpleNamespace(stdout="OpenCode run finished", stderr="", return_code=0, error_type=None),
+                SimpleNamespace(stdout='[{"id": "session-id"}]', stderr="", return_code=0, error_type=None),
+                SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None),
+            ]
+        )
+        sandbox_mock.download = AsyncMock()
+        sandbox_mock.upload = AsyncMock()
+        monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox_mock})
+        monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value=dict()))
+        monkeypatch.setattr("responses_api_agents.opencode_sandboxed_agent.app.Path.exists", lambda self: True)
+        monkeypatch.setattr(
+            "responses_api_agents.opencode_sandboxed_agent.app.Path.read_text",
+            lambda self: json.dumps(opencode_export_test_data),
+        )
+
+        await server.responses(
+            request=MagicMock(
+                session={SESSION_ID_KEY: "my session"},
+                cookies={"sandbox_id": ""},
+                path_params={"rollout_id": "direct-call"},
+            ),
+            body=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "hello"}]),
+        )
+
+        command = sandbox_mock.exec.await_args_list[0].kwargs["command"]
+        uploads = [c.args for c in sandbox_mock.upload.await_args_list]
+        if stage_ripgrep:
+            # Uploaded before OpenCode starts, then copied onto PATH ahead of `opencode run`.
+            [(source, remote)] = [u for u in uploads if str(u[1]).startswith("/tmp/nemo-gym-ripgrep-")]
+            assert source == binary
+            staged = command.index(f'cp {shlex.quote(remote)} "$HOME/.opencode/bin/rg"')
+            assert staged < command.index('"$HOME/.opencode/bin/rg" --version') < command.index("opencode run")
+        else:
+            assert not any(str(u[1]).startswith("/tmp/nemo-gym-ripgrep-") for u in uploads)
+            assert "nemo-gym-ripgrep" not in command and ".opencode/bin/rg" not in command
+
+    @mark.parametrize("error_type", [PermissionError, FileNotFoundError])
+    async def test_ripgrep_upload_failure_propagates_without_export_and_cleans_up(
+        self, tmp_path: Path, monkeypatch: MonkeyPatch, error_type: type[OSError]
+    ) -> None:
+        binary = tmp_path / "rg"
+        binary.write_bytes(b"readable upload")
+        config = OpenCodeSandboxedAgentConfig.model_validate(
+            self._create_config().model_dump() | {"local_ripgrep_binary_path": str(binary)}
+        )
+        seed = SimpleNamespace(ok=True, cookies={}, json=AsyncMock(return_value={"sandbox_handle": "seed"}))
+        client = MagicMock(spec=ServerClient)
+        client.post = AsyncMock(return_value=seed)
+        server = OpenCodeSandboxedAgent(config=config, server_client=client)
+        upload_error = error_type("ripgrep upload failed")
+        sandbox = MagicMock(
+            upload=AsyncMock(side_effect=upload_error),
+            exec=AsyncMock(return_value=SimpleNamespace(stdout="[]", stderr="", return_code=0, error_type=None)),
+            download=AsyncMock(),
+            stop=AsyncMock(),
+        )
+        monkeypatch.setattr(server, "_start_sandbox", AsyncMock(return_value=sandbox))
+        monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value={}))
+        request = Request({"type": "http", "headers": [], "session": {SESSION_ID_KEY: "upload-failure"}})
+        body = OpenCodeSandboxedAgentRunRequest(
+            responses_create_params={"input": [{"role": "user", "content": "Solve"}]}
+        )
+
+        with raises(error_type) as caught:
+            await server.run(request, body)
+
+        assert caught.value is upload_error
+        sandbox.exec.assert_not_awaited()
+        sandbox.download.assert_not_awaited()
+        sandbox.stop.assert_awaited_once()
+        assert client.post.await_count == 1  # Seed only; no verification of an unstarted agent.
+        assert server._sandbox_id_to_sandbox == server._sandbox_id_to_run_result == {}
+        assert not hasattr(request.state, "_ng_observation_invocation_id")
+        assert not hasattr(request.state, "_ng_opencode_mcp")
 
     @mark.parametrize("remaining_context", [False, True])
     async def test_responses_sanity(
