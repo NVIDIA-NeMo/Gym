@@ -4,7 +4,9 @@
 """Exercise wire protocols, independent witnesses, and fail-closed reporting."""
 
 import copy
+import dataclasses
 import json
+import os
 import subprocess
 import sys
 
@@ -28,6 +30,18 @@ TOOL = {
     "function": {
         "name": "bash",
         "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]},
+    },
+}
+
+FINISH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "finish",
+        "parameters": {
+            "type": "object",
+            "properties": {"reason": {"type": "string"}, "paths": {"type": "array", "items": {"type": "string"}}},
+            "required": ["reason", "paths"],
+        },
     },
 }
 
@@ -69,8 +83,8 @@ def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, use_agent_
             assert "cwd" not in agent and "extra_config" not in agent
         if harness == "opencode":
             assert "agent" not in agent["opencode_config"]
-    # Validate available adapters without invoking their auto-install hooks.
-    if harness != "hermes":
+    # A CI job installs only its own adapter's dependencies, so only that adapter can be imported there.
+    if os.environ.get("HARNESS") == harness:
         import importlib
 
         module = importlib.import_module(f"responses_api_agents.{harness}_agent.app")
@@ -303,6 +317,45 @@ def test_live_chat_endpoint_executes_script_and_captures_every_attempt(tmp_path,
         assert captures[-1]["cached_tokens"] == 3
 
 
+def test_a_harness_that_finishes_on_a_tool_gets_a_finish_call(tmp_path):
+    probe = Probe(SCENARIO["tool_success"], tmp_path)
+    code_exec = {
+        "type": "function",
+        "function": {
+            "name": "code_exec",
+            "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]},
+        },
+    }
+    messages = [{"role": "user", "content": "Run checks"}]
+    body = {"model": "conformance-model", "messages": messages, "tools": [code_exec, FINISH_TOOL]}
+    with TestClient(probe.model_app()) as client:
+        for _ in range(2):
+            message = client.post("/ng-rollout/0-0/v1/chat/completions", json=body).json()["choices"][0]["message"]
+            call = message["tool_calls"][0]
+            assert call["function"]["name"] == "code_exec"
+            command = json.loads(call["function"]["arguments"])["cmd"]
+            execution = subprocess.run(command, shell=True, capture_output=True, text=True, check=False)
+            messages.extend([message, {"role": "tool", "tool_call_id": call["id"], "content": execution.stdout}])
+        choice = client.post("/ng-rollout/0-0/v1/chat/completions", json=body).json()["choices"][0]
+    (call,) = choice["message"]["tool_calls"]
+    assert (choice["finish_reason"], choice["message"]["content"]) == ("tool_calls", None)
+    assert call["function"]["name"] == "finish"
+    assert json.loads(call["function"]["arguments"]) == {"reason": "CONFORMANCE_DONE", "paths": []}
+    assert probe.finished and not probe.violations
+    assert probe.finish_call["id"] == call["id"]
+
+
+def test_a_finish_tool_with_unfillable_arguments_falls_back_to_a_text_answer(tmp_path):
+    probe = Probe(dataclasses.replace(SCENARIO["tool_success"], tool_steps=0), tmp_path)
+    finish = copy.deepcopy(FINISH_TOOL)
+    finish["function"]["parameters"]["properties"]["paths"] = {"type": "integer"}
+    body = {"model": "conformance-model", "messages": [], "tools": [finish]}
+    with TestClient(probe.model_app()) as client:
+        message = client.post("/v1/chat/completions", json=body).json()["choices"][0]["message"]
+    assert message["content"] == "CONFORMANCE_DONE" and "tool_calls" not in message
+    assert probe.finished and probe.finish_call is None
+
+
 @pytest.mark.parametrize("dialect", ["chat/completions", "responses"])
 def test_streaming_tool_roundtrip_and_unknown_usage(tmp_path, dialect):
     probe = Probe(SCENARIO["usage_omitted"], tmp_path)
@@ -375,6 +428,40 @@ def test_verifier_records_actual_final_answer(tmp_path, name, reward):
     assert response.json()["mask_sample"] is False
     assert probe.verifications == [{"reward": reward, "answer_seen": True}]
     assert probe.seeded == 1
+
+
+@pytest.mark.parametrize("name,exercised", [("model_error", True), ("tool_success", False)])
+def test_only_a_terminal_error_episode_is_inspected_from_its_failure_record(tmp_path, name, exercised):
+    (tmp_path / "rollouts.jsonl").write_text("")
+    (tmp_path / "rollouts_failures.jsonl").write_text(
+        json.dumps({"_ng_task_index": 0, "_ng_rollout_index": 0, "_ng_failure_class": "environment_server_failed"})
+        + "\n"
+    )
+
+    result = inspect_episode(SCENARIO[name], tmp_path, {"returncode": 1, "timed_out": False})
+
+    assert result["exercised"] is exercised
+    assert result["delivery"] == "failure_record"
+
+
+def test_verifier_accepts_the_answer_in_the_finish_call(tmp_path):
+    probe = Probe(SCENARIO["tool_success"], tmp_path)
+    probe.finish_call = {
+        "id": "call-finish",
+        "name": "finish",
+        "arguments": {"reason": "CONFORMANCE_DONE", "paths": []},
+    }
+    arguments = json.dumps({"reason": "CONFORMANCE_DONE", "paths": []})
+    body = {
+        "response": {
+            "output": [{"type": "function_call", "call_id": "call-finish", "name": "finish", "arguments": arguments}]
+        }
+    }
+    with TestClient(probe.resources_app()) as client:
+        client.post("/seed_session", json={})
+        response = client.post("/ng-rollout/0-0/verify", json=body)
+    assert response.json()["reward"] == 1.0
+    assert probe.verifications == [{"reward": 1.0, "answer_seen": True}]
 
 
 @pytest.fixture
@@ -698,7 +785,9 @@ def test_missing_rollout_fails_required_checks_and_preserves_exclusions(tmp_path
     result = inspect_episode(SCENARIO["model_error"], tmp_path, {"returncode": 1, "timed_out": False})
     checks = {c["id"]: c for c in result["checks"]}
     assert checks["calls.outcome"]["status"] == "fail"
-    assert checks["calls.outcome"]["reasons"][0].startswith("required input is unavailable")
+    # A failure record is inspected, so the evidence it lacks blocks the check rather than its absence.
+    reason = "required input is unavailable" if delivery == "missing" else "blocked by model_calls.present"
+    assert checks["calls.outcome"]["reasons"][0].startswith(reason)
     assert checks["tool_calls.present"]["status"] == "not_applicable"
     assert checks["evaluation.reward"]["status"] == "fail"
     assert checks["turns.present"]["status"] == "not_applicable"
