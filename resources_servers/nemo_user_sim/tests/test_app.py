@@ -547,9 +547,40 @@ async def test_closed_and_unknown_sessions_return_404() -> None:
 def test_resources_session_contract() -> None:
     server = _server()
     server.session_id_to_seed = {}
+    server.resources_session_id_to_session_id = {}
     server.closed_resources_session_ids = {}
 
-    check_resources_session_contract(server.setup_webserver(), _seed_body(_resolved_row()), keeps_state=True)
+    check_resources_session_contract(
+        server.setup_webserver(),
+        _seed_body(_resolved_row()),
+        keeps_state=True,
+        holds_state=lambda resources_session_id: any(
+            seeded.resources_session_id == resources_session_id for seeded in server.session_id_to_seed.values()
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_seed_retried_under_a_new_cookie_moves_the_record_and_close_without_it_releases() -> None:
+    server = _server()
+    server.session_id_to_seed = {}
+    server.resources_session_id_to_session_id = {}
+    server.closed_resources_session_ids = {}
+    body = _seed_body(_resolved_row())
+
+    await server.seed_session(_request("lost-reply"), body)
+    retried = _request("retry")
+    await server.seed_session(retried, body)
+
+    assert set(server.session_id_to_seed) == {"retry"}
+    assert server._seeded_episode(retried).resources_session_id == body.resources_session_id
+
+    await server.close_resources_session(
+        _request("no-cookie"),
+        SimpleNamespace(resources_session_id=body.resources_session_id, episode_id=body.episode_id),
+    )
+    assert server.session_id_to_seed == {}
+    assert server.resources_session_id_to_session_id == {}
 
 
 @pytest.mark.asyncio
