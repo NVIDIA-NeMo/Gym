@@ -26,7 +26,9 @@ import re
 from collections import Counter
 from contextlib import nullcontext
 from pathlib import Path
+from statistics import fmean
 from typing import Any, ClassVar, Optional
+from urllib.parse import quote
 
 from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer
 
@@ -51,6 +53,8 @@ from resources_servers.equivalence_llm_judge.verifier_fixture import create_hle_
 
 # Aggregate parsing metric, also included in key_metrics.
 JUDGEMENT_PARSING_ISSUE_RATE = "judgement_parsing_issue_rate"
+# Prefix of the per-label accuracy slices emitted for `report_slice_fields`.
+SLICES_PREFIX = "slices/"
 
 
 def _match_verdict_labels(text: str, equal_label: str, not_equal_label: str) -> list[str]:
@@ -106,6 +110,37 @@ def _parse_judge_verdict(
     return matches[-1] if matches else None, issues
 
 
+def _compute_slice_metrics(tasks: list[list[dict[str, Any]]], fields: list[str]) -> dict[str, Any]:
+    """Accuracy per label of each configured row field, e.g. HLE-Diamond's reasoning/knowledge partition.
+
+    Emits ``slices/<field>/<label>/{question_count,rollout_count,mean/reward}`` plus the number of
+    rollouts whose label is missing. Masked rollouts never reach here, so slices share the headline's
+    denominator semantics. Empty ``fields`` emits nothing.
+    """
+    metrics: dict[str, Any] = {}
+    for field in fields:
+        rows_by_label: dict[str, list[dict[str, Any]]] = {}
+        questions_by_label: Counter[str] = Counter()
+        missing = 0
+        for task in tasks:
+            labels_in_task: set[str] = set()
+            for rollout in task:
+                label = rollout.get(field)
+                if label is None or (isinstance(label, str) and not label.strip()):
+                    missing += 1
+                    continue
+                rows_by_label.setdefault(str(label), []).append(rollout)
+                labels_in_task.add(str(label))
+            questions_by_label.update(labels_in_task)
+        metrics[f"{SLICES_PREFIX}{field}/missing_label_rollouts"] = missing
+        for label, rows in sorted(rows_by_label.items()):
+            prefix = f"{SLICES_PREFIX}{field}/{quote(label, safe='')}/"
+            metrics[prefix + "question_count"] = questions_by_label[label]
+            metrics[prefix + "rollout_count"] = len(rows)
+            metrics[prefix + "mean/reward"] = fmean(float(rollout.get("reward") or 0.0) for rollout in rows)
+    return metrics
+
+
 class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     """Configuration for the LLM judge server.
 
@@ -150,6 +185,11 @@ class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     check_twice_swap: bool = False
     # Reward to assign if the second (swap) pass fails. Defaults to 0.0; can be set to -1.0.
     reward_if_swap_fails: float = 0.0
+
+    # Row fields to slice accuracy by (e.g. ["partition"] for HLE-Diamond). Each configured field adds
+    # slices/<field>/<label>/{question_count,rollout_count,mean/reward} to agent_metrics and promotes the
+    # slice means to key_metrics. Empty by default: metrics are unchanged.
+    report_slice_fields: list[str] = Field(default_factory=list)
 
     # ========================================================================
     # Per-Record Regex Features (OpenQA support)
@@ -640,18 +680,22 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
                     rollouts_with_issues += bool(issues)
                     kind_counts.update(issues)
 
+        metrics: dict[str, Any] = _compute_slice_metrics(tasks, self.config.report_slice_fields)
         if not judged:
-            return {}
-        metrics: dict[str, Any] = {JUDGEMENT_PARSING_ISSUE_RATE: rollouts_with_issues / judged}
+            return metrics
+        metrics[JUDGEMENT_PARSING_ISSUE_RATE] = rollouts_with_issues / judged
         for kind, count in sorted(kind_counts.items()):
             metrics[f"{JUDGEMENT_PARSING_ISSUE_RATE}/{kind}"] = count / judged
         return metrics
 
     def get_key_metrics(self, agent_metrics: dict[str, Any]) -> dict[str, Any]:
-        """Add the parsing-issue rate to the default mean metrics."""
+        """Add the parsing-issue rate and any per-label slice accuracies to the default mean metrics."""
         key = super().get_key_metrics(agent_metrics)
         if JUDGEMENT_PARSING_ISSUE_RATE in agent_metrics:
             key[JUDGEMENT_PARSING_ISSUE_RATE] = agent_metrics[JUDGEMENT_PARSING_ISSUE_RATE]
+        key.update(
+            {k: v for k, v in agent_metrics.items() if k.startswith(SLICES_PREFIX) and k.endswith("/mean/reward")}
+        )
         return key
 
 
