@@ -19,6 +19,16 @@ def _objects(value: object) -> list[dict]:
     return [v for v in value if isinstance(v, dict)] if isinstance(value, list) else []
 
 
+def _as_text(value: object) -> object:
+    """A tool result as text. Parts are joined without a separator, so part boundaries are ignored."""
+    is_text_parts = (
+        isinstance(value, list)
+        and value
+        and all(isinstance(part, dict) and isinstance(part.get("text"), str) for part in value)
+    )
+    return "".join(part["text"] for part in value) if is_text_parts else value
+
+
 def tool_checks(
     record: dict | None,
     witnessed: list[dict],
@@ -68,7 +78,9 @@ def tool_checks(
             values["join"].append(len(requests) == 1)
             values["status"].append(tool.get("status") == ("failed" if expected["exit_code"] else "completed"))
             observed = expected.get("outputs", [])
-            values["output"].append(bool(observed) and all(o == tool.get("output") for o in observed))
+            values["output"].append(
+                bool(observed) and all(_as_text(o) == _as_text(tool.get("output")) for o in observed)
+            )
             if len(requests) != 1:
                 continue
             request = requests[0]
