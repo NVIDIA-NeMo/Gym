@@ -16,7 +16,7 @@
 """Grade a submission in a fresh provider sandbox instead of the NeMo Skills sandbox.
 
 ``ccc_eval.py`` and ``sandbox_runner.py`` are uploaded with the request and run by
-``nemo_gym.sandbox.verification.run_verification_sandbox``, which raises
+``nemo_gym.verifier_utils.sandbox_verification.run_verification_sandbox``, which raises
 ``SandboxVerificationError`` on a sandbox or runner failure so the caller can mask the sample.
 The problem's grader files and tests are read from ``problem_data_dir``, which must already
 exist in the sandbox (baked into the image or mounted), because full-problem test sets reach
@@ -34,7 +34,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from nemo_gym.sandbox import SandboxProvider
-from nemo_gym.sandbox.verification import SandboxVerificationConfig, run_verification_sandbox
+from nemo_gym.verifier_utils.sandbox_verification import SandboxVerificationConfig, run_verification_sandbox
 
 
 _CCC_DIR = Path(__file__).parent
