@@ -510,6 +510,45 @@ dropped when there is none. A missing
 file fails prepare with its name unless the entry says `required: false`. Error messages name the file and
 the line number and never repeat a line's content.
 
+## Compose service fields
+
+Beyond images, commands, `environment`, `depends_on`, `healthcheck`, `expose`/`ports`, `shm_size` and
+`cap_add`, a task's Compose services may use the fields below. Prepare gives each its meaning (or fails naming
+the field) before any sandbox starts, and the server re-reads the file through the same check at seed. Error
+messages read `<task>: environment/docker-compose.yaml: service '<name>' <field> ...`.
+
+| Field | Meaning in a sandbox group |
+|---|---|
+| `deploy.resources` | `limits.cpus`/`limits.memory` size the service's sandbox (then `reservations`, then the legacy `cpus`/`mem_limit`). `reservations.devices` with the `gpu` capability and a numeric `count` (or `device_ids`) becomes the service's GPU count; `count: all`, other capabilities, `limits.pids` and device `options` fail prepare. `replicas` must be 1; `restart_policy` is recorded like `restart`; every other `deploy` key names swarm scheduling and fails prepare. |
+| `restart` | Accepted (`no`, `always`, `on-failure[:n]`, `unless-stopped`) and recorded on the collection (`restart_policies`). Nothing restarts: the group starts each service once, and an exit is reported through the dependency gates, as before. |
+| `pull_policy` | `always`, `missing` (also `if_not_present`, `daily`, `weekly`, `every_<n>`, since the group keeps no pull history) or `never`. Applied per sandbox where the provider can (OpenSandbox's image pull policy extension, Docker's `--pull`) and recorded on the collection (`pull_policies`) otherwise, so the deployment's default pull behaviour applies. `build` fails prepare. |
+| `platform` | Must match the deployment platform, which prepare and the server read from the same setting: the environment server's `sandbox_provider_options.platform` (`{os, arch}`, as `++harbor_environment_server.environment_servers.harbor.sandbox_provider_options.platform.arch=arm64` names it) when set, else `linux/amd64`. `x86_64` and `aarch64` are the usual aliases. Image configurations are still recorded for `linux/amd64` only, so a Compose task runs end to end on amd64 deployments today. |
+| `networks` | Custom networks map onto the group's one pod network as name scopes: a service resolves itself, the services sharing a network with it (by name and by their aliases on that network) and nothing else. Network declarations take `name`, `driver`, `external`, `attachable` and `labels` with no further meaning; `internal`, `ipam` with a configuration, `driver_opts` and `enable_ipv6` ask for isolation the pod does not provide and fail prepare, as do static `ipv4_address`/`ipv6_address` entries on a service. |
+| `extra_hosts` | Hostname-to-IP entries (list or mapping form) added to the service's hosts. `host-gateway` fails prepare. A sidecar whose image runs as a non-root user gets no host injection (the group resolves its peers through its environment URLs instead), so it cannot take them: prepare fails naming the service once the image configurations are recorded, and the adapter refuses the same document at seed. |
+| `post_start` | Hooks run once the service's command has started, in order, before the group waits for health (as Compose runs them). `command` (string through the shell, or argv), `user` (default: the service's), `working_dir` and `environment`. A hook that exits non-zero fails the seed with its index and output. `privileged` hooks and `pre_stop` fail prepare. |
+| `tmpfs`, `ulimits`, `sysctls`, `security_opt` | Behind a provider capability check (next paragraph). |
+
+GPU sidecars route per service: a service whose `deploy.resources` reserves GPUs runs on the `gpu_sandbox_provider`
+block when one is set, with that block's `default_metadata` and, with `request_gpu_type`, the task's
+`gpu_types[0]`, exactly as the main service does when `task.toml` declares GPUs. The task's own services keep
+following the task's declaration, so a CPU task with one GPU sidecar puts only that sidecar on the GPU block. Both
+blocks must be able to reach each other's sandboxes on the network. Everything about a sidecar on another block
+goes through that block's provider: its sandbox, its `network_mode` forwarding relay, and its volumes, which are
+seeded and mounted on that provider's `shared_storage`, so a volume shared with a service on the task's block
+needs the same root on both.
+
+**Capability check.** `tmpfs`, `ulimits`, `sysctls` and `security_opt` need a provider that implements
+`SupportsSandboxServiceOptions` and names the field in its `SERVICE_OPTION_FIELDS`. Prepare reads the deployment's
+provider names from the keys of the `sandbox:` block the command names (the `--sandbox` provider file and the
+configuration's own block) and, when `harbor_environment_server.environment_servers.harbor.gpu_sandbox_provider`
+names a GPU block, from that block's keys too (values are never resolved, so credentials are not needed). Each
+service is checked against the provider it will run on, the GPU block's for the services of a GPU-declaring task
+and for a sidecar that reserves GPUs, and prepare fails with
+`service '<name>' <field> is not supported by the <provider> sandbox provider` when that provider lacks it. Docker
+applies all four as `docker run` flags; OpenSandbox applies none (a pod exposes no tmpfs, ulimit, sysctl or
+security option through its API). When prepare cannot tell the provider, the adapter runs the same check against
+the live provider before creating any sandbox.
+
 ## Where settings live
 
 Four homes, one owner each. A setting sits on this server's config only if every dataset on the same

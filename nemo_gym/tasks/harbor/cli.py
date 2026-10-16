@@ -20,7 +20,7 @@ import logging
 import math
 import os
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -31,7 +31,7 @@ from nemo_gym import _resolve_under_cwd_or_install, component_search_roots
 from nemo_gym.cli.utils import exit_cleanly_on_config_error
 from nemo_gym.config_types import ConfigError
 from nemo_gym.path_utils import failures_path_for
-from nemo_gym.sandbox.compose_config import unsupported_compose_fields
+from nemo_gym.sandbox.compose_config import DEFAULT_PLATFORM, deployment_platform, unsupported_compose_fields
 from nemo_gym.tasks.harbor.digest import DIGEST_KEY
 from nemo_gym.tasks.harbor.hub import HubError, datasets_dir, fetch_ref, is_hub_ref
 from nemo_gym.tasks.harbor.image_build import (
@@ -46,15 +46,17 @@ from nemo_gym.tasks.harbor.image_build import (
 from nemo_gym.tasks.harbor.image_configs import (
     COMPOSE_FILE_NAMES,
     ImageConfigError,
-    compose_file,
-    load_compose_document,
     record_base_images,
     record_compose_images,
     with_built_images,
     without_pull_policy,
-    without_restated_main_build,
 )
-from nemo_gym.tasks.harbor.materialize import run_config, write_rows
+from nemo_gym.tasks.harbor.materialize import (
+    ENVIRONMENT_SERVER_IMPL,
+    ENVIRONMENT_SERVER_INSTANCE,
+    run_config,
+    write_rows,
+)
 from nemo_gym.tasks.harbor.task import (
     VERIFIER_SERVICE,
     HarborTask,
@@ -88,6 +90,14 @@ IN_SANDBOX_AGENTS = frozenset(
 )
 USE_ABSOLUTE_IP_KEY = "use_absolute_ip"
 SANDBOX_PROVIDER_CONFIG = "nemo_gym/sandbox/providers/{provider}/configs/{provider}.yaml"
+# The top-level block the Harbor environment server reads its provider from by default (`sandbox_provider`).
+SANDBOX_BLOCK_KEY = "sandbox"
+# Where the server's settings sit in the configuration a command names: the shipped environment server instance
+# every run config inherits from. `gpu_sandbox_provider` names the block GPU-declaring tasks and GPU sidecars run
+# on; `sandbox_provider_options.platform` ({os, arch}) is the platform a service's `platform` must match.
+HARBOR_SERVER_KEY = f"{ENVIRONMENT_SERVER_INSTANCE}.environment_servers.{ENVIRONMENT_SERVER_IMPL}"
+GPU_SANDBOX_PROVIDER_KEY = f"{HARBOR_SERVER_KEY}.gpu_sandbox_provider"
+SANDBOX_PROVIDER_OPTIONS_KEY = f"{HARBOR_SERVER_KEY}.sandbox_provider_options"
 # Harness-specific settings a Harbor run needs; keyed by the agent implementation folder.
 AGENT_OVERRIDES: dict[str, dict[str, Any]] = {
     # Hermes borrows the task sandbox and drives it through its terminal toolset. vLLM-only
@@ -172,24 +182,17 @@ def _build_setting(block: Mapping[str, Any], name: str) -> str | None:
     return value
 
 
-def build_options_from_overrides(overrides: list[str]) -> BuildOptions:
-    """Read the ``builds:`` block from the configuration the command line names, before the run config exists.
+def _merged_cli_config(overrides: list[str], config_files: Sequence[Path] = ()) -> Any:
+    """The configuration the command line names, merged but unresolved, before the run config exists.
 
-    Preparation builds images before the run config can be written, so the global configuration is not
-    composed yet. This merges the sources the user controls, in the global config's order (the files
-    the ``+config_paths`` tokens name, from ``--config`` and the asset selectors, then ``env.yaml``, then
-    the ``+``/``++`` overrides), and reads the block from the result. The full global config is still
-    parsed once, at dispatch, with the run config added.
+    The sources the user controls, in the global config's order: ``config_files``, then the files the
+    ``+config_paths`` tokens name (from ``--config`` and the asset selectors), then ``env.yaml``, then the
+    ``+``/``++`` overrides. Nothing is resolved here, so a provider block's credentials are not needed to
+    read a sibling key. The full global config is still parsed once, at dispatch, with the run config added.
     """
     from omegaconf import OmegaConf
-    from omegaconf.errors import InterpolationResolutionError
 
-    from nemo_gym.global_config import (
-        CONFIG_PATHS_KEY_NAME,
-        GlobalConfigDictParser,
-        _load_config_yaml,
-        translate_interpolation_error,
-    )
+    from nemo_gym.global_config import CONFIG_PATHS_KEY_NAME, GlobalConfigDictParser, _load_config_yaml
 
     parser = GlobalConfigDictParser()
     saved_argv = sys.argv
@@ -205,7 +208,91 @@ def build_options_from_overrides(overrides: list[str]) -> BuildOptions:
     dotenv = _load_config_yaml(dotenv_path) if dotenv_path.exists() else OmegaConf.create({})
     config_paths = OmegaConf.merge(dotenv, cli).get(CONFIG_PATHS_KEY_NAME) or []
     _, extra_configs = parser.load_extra_config_paths([str(path) for path in config_paths])
-    merged = OmegaConf.merge(*extra_configs, dotenv, cli)
+    return OmegaConf.merge(*(_load_config_yaml(path) for path in config_files), *extra_configs, dotenv, cli)
+
+
+def _block_from_overrides(overrides: list[str], key: str, *, config_files: Sequence[Path] = ()) -> Any:
+    """The ``key`` node (dotted) of the configuration the command names, resolved; a scalar as it is, ``None`` when
+    absent. Only that node's own interpolations are evaluated, so a provider block's credentials are not needed
+    to read a sibling key. Merged as :func:`_merged_cli_config` does."""
+    from omegaconf import OmegaConf
+    from omegaconf.errors import InterpolationResolutionError
+
+    from nemo_gym.global_config import translate_interpolation_error
+
+    block = OmegaConf.select(_merged_cli_config(overrides, config_files), key, throw_on_resolution_failure=False)
+    if not OmegaConf.is_config(block):
+        return block
+    try:
+        return OmegaConf.to_container(block, resolve=True)
+    except InterpolationResolutionError as exc:
+        raise translate_interpolation_error(exc) from exc
+
+
+def _block_provider_name(overrides: list[str], sandbox: str | None, block_key: str) -> str | None:
+    """The provider name a top-level sandbox block carries, read from its keys alone (never its values)."""
+    from omegaconf import OmegaConf
+
+    from nemo_gym.sandbox.config import SANDBOX_BLOCK_RESERVED_KEYS
+
+    files = [resolve_sandbox_config(sandbox)] if sandbox is not None else []
+    block = OmegaConf.select(_merged_cli_config(overrides, files), block_key, throw_on_resolution_failure=False)
+    if block is None or not hasattr(block, "keys"):
+        return None
+    providers = [str(key) for key in block.keys() if key not in SANDBOX_BLOCK_RESERVED_KEYS]
+    return providers[0] if len(providers) == 1 else None
+
+
+def sandbox_provider_from_overrides(overrides: list[str], sandbox: str | None) -> str | None:
+    """The provider name (``opensandbox``, ``docker``, ...) of the ``sandbox:`` block the command names.
+
+    The block comes from the ``--sandbox`` provider file (when given) and the configuration the command line
+    names, merged as :func:`_merged_cli_config` does; only its keys are read, never its values, so provider
+    credentials are not needed at prepare. Prepare checks each Compose task's ``tmpfs``, ``ulimits``,
+    ``sysctls`` and ``security_opt`` against this provider's capabilities. ``None`` when no block names a
+    provider: the check then runs at seed, against the live provider.
+    """
+    return _block_provider_name(overrides, sandbox, SANDBOX_BLOCK_KEY)
+
+
+def gpu_sandbox_provider_from_overrides(overrides: list[str], sandbox: str | None) -> str | None:
+    """The provider name of the block GPU-declaring tasks and GPU sidecars run on: the environment server's
+    ``gpu_sandbox_provider`` in the configuration the command names (``GPU_SANDBOX_PROVIDER_KEY``), read like
+    :func:`sandbox_provider_from_overrides` reads the ``sandbox:`` block. ``None`` when no GPU block is set
+    (every service is then checked against the ``sandbox:`` block) or the block does not name one provider."""
+    block = _block_from_overrides(overrides, GPU_SANDBOX_PROVIDER_KEY)
+    if block is None:
+        return None
+    if not isinstance(block, str) or not block:
+        raise ValueError(f"`{GPU_SANDBOX_PROVIDER_KEY}` must name a top-level sandbox block; got {block!r}")
+    return _block_provider_name(overrides, sandbox, block)
+
+
+def compose_platform_from_overrides(overrides: list[str]) -> str:
+    """The platform a Compose service's ``platform`` must match at prepare: the environment server's
+    ``sandbox_provider_options.platform`` (``{os, arch}``) in the configuration the command names, else
+    linux/amd64, exactly as the server reads it at seed (``deployment_platform``)."""
+    options = _block_from_overrides(overrides, SANDBOX_PROVIDER_OPTIONS_KEY)
+    if options is not None and not isinstance(options, Mapping):
+        raise ValueError(f"`{SANDBOX_PROVIDER_OPTIONS_KEY}` must be a mapping; got {options!r}")
+    return deployment_platform(options)
+
+
+def build_options_from_overrides(overrides: list[str]) -> BuildOptions:
+    """Read the ``builds:`` block from the configuration the command line names, before the run config exists.
+
+    Preparation builds images before the run config can be written, so the global configuration is not
+    composed yet. This merges the sources the user controls, in the global config's order (the files
+    the ``+config_paths`` tokens name, from ``--config`` and the asset selectors, then ``env.yaml``, then
+    the ``+``/``++`` overrides), and reads the block from the result. The full global config is still
+    parsed once, at dispatch, with the run config added.
+    """
+    from omegaconf import OmegaConf
+    from omegaconf.errors import InterpolationResolutionError
+
+    from nemo_gym.global_config import translate_interpolation_error
+
+    merged = _merged_cli_config(overrides)
     block = merged.get(BUILDS_KEY)
     try:
         resolved = OmegaConf.to_container(block, resolve=True) if block is not None else None
@@ -236,47 +323,19 @@ class AgentSelection:
     runs_in_sandbox: bool = False
 
 
-REFUSED_NOTE = " (the sandbox Compose adapter does not start them)"
-
-
-def unsupported_compose_fields_error(task: HarborTask) -> HarborTaskError | None:
-    """Why the sandbox Compose adapter would refuse ``task``'s document at seed, or ``None`` when it starts it.
-
-    The document checked is the one the server hands the adapter (``environment_servers/harbor/app.py``,
-    ``_compose_document``): interpolated and ``env_file``-inlined by the loader, the services prepare built
-    carrying their recorded images without ``build:`` or ``pull_policy`` (``with_built_images``), ``pull_policy``
-    dropped from every other service, and ``main``'s ``build:`` dropped when it only restates Harbor's own build
-    of the task's Dockerfile (:func:`without_restated_main_build`; a build key Gym cannot apply without a build
-    is this task's reason). A field no provider starts (``deploy``, ``extra_hosts``, ``platform``, a sidecar
-    ``build:`` prepare recorded no build for) is then a per-task reason naming the service and the field,
-    recorded in ``skipped.json`` like a task that does not load, instead of a failure of every episode at seed.
-    """
-    path = compose_file(task)
-    document = load_compose_document(task)
-    if path is None or document is None:
-        return None
-    document = without_pull_policy(document)
-    if task.built_image is None:
-        document, reason = without_restated_main_build(task, document)
-        if reason is not None:
-            return HarborTaskError(f"{path.name}: {reason}")
-    refused = unsupported_compose_fields(document)
-    if not refused:
-        return None
-    return HarborTaskError(f"{path.name}: {'; '.join(refused)}{REFUSED_NOTE}")
-
-
 def refused_before_build(plan: list[BuildPlanEntry]) -> dict[str, HarborTaskError]:
-    """The field refusals of the tasks ``plan`` would build, read from their Compose files before any build runs.
+    """The key refusals of the tasks ``plan`` would build, read from their Compose files before any build runs.
 
-    :func:`unsupported_compose_fields_error` is the authoritative check, on the loader's document once the
-    tasks load. This one needs only key names, which interpolation and ``env_file`` inlining do not add, so it
-    reads the raw file the way the loader's document will look: ``pull_policy`` dropped, the ``build:`` of every
-    service the plan builds from the context dropped (they are about to be built and will run from their
-    recorded images) and ``env_file`` set aside, as the loader folds it into ``environment``. A task it names is
-    neither built nor pushed for an image no episode would start, and a build that would fail for it cannot stop
-    the preparation. A file that does not parse is left to the loader to report in its own words. The separate
-    verifier's ``tests/`` context is not checked: its image starts as a single sandbox, never through the adapter.
+    The authoritative check is ``check_task_compose_fields`` (:func:`record_compose_images` runs it on the loader's
+    document once the tasks load); this screen is its first step, the key allow-list
+    (:func:`~nemo_gym.sandbox.compose_config.unsupported_compose_fields`), which needs only key names, which
+    interpolation and ``env_file`` inlining do not add. It reads the raw file the way the loader's document will
+    look: ``pull_policy`` dropped, the ``build:`` of every service the plan builds from the context dropped (they
+    are about to be built and will run from their recorded images) and ``env_file`` set aside, as the loader folds
+    it into ``environment``. A task it names is neither built nor pushed for an image no episode would start, and a
+    build that would fail for it cannot stop the preparation, with the reason spelled as the loader-time check
+    spells it. A file that does not parse is left to the loader to report in its own words. The separate verifier's
+    ``tests/`` context is not checked: its image starts as a single sandbox, never through the adapter.
     """
     refused: dict[str, HarborTaskError] = {}
     planned: dict[str, dict[str, str]] = {}
@@ -303,9 +362,8 @@ def refused_before_build(plan: list[BuildPlanEntry]) -> dict[str, HarborTaskErro
                     services[name] = {key: value for key, value in service.items() if key != "env_file"}
         messages = unsupported_compose_fields(document)
         if messages:
-            refused.update(
-                dict.fromkeys(entry.tasks, HarborTaskError(f"{path.name}: {'; '.join(messages)}{REFUSED_NOTE}"))
-            )
+            where = f"{entry.context.name}/{path.name}"
+            refused.update({task_id: HarborTaskError(f"{task_id}: {where}: {messages[0]}") for task_id in entry.tasks})
     return refused
 
 
@@ -323,6 +381,9 @@ def prepare_target(
     exclude: list[str] | None = None,
     only: list[str] | None = None,
     build: BuildOptions | None = None,
+    sandbox_provider: str | None = None,
+    gpu_sandbox_provider: str | None = None,
+    compose_platform: str = DEFAULT_PLATFORM,
 ) -> PreparedTaskset:
     """Fetch (for hub references) and load the tasks, then write the rows file.
 
@@ -335,7 +396,10 @@ def prepare_target(
     rows and listed on stdout. Dockerfiles outside pull and overlay mode are built once and
     recorded before the tasks load, as ``build`` (the ``builds:`` configuration block) says; the
     default builds locally with docker, and pushes with the first tool on PATH when a repository
-    is named.
+    is named. Compose service fields are checked against ``sandbox_provider`` and ``gpu_sandbox_provider``,
+    the provider names of the ``sandbox:`` and GPU blocks, which decide the ``tmpfs``, ``ulimits``, ``sysctls``
+    and ``security_opt`` each service's provider can apply, and against ``compose_platform``, the deployment's (see
+    ``nemo_gym.tasks.harbor.image_configs.check_task_compose_fields``).
     """
     build = build or BuildOptions()
     if is_hub_ref(target):
@@ -400,9 +464,19 @@ def prepare_target(
         print(f"Skipping {task_id}: {reason}")
     if not tasks:
         raise _no_runnable_task(folder, errors)
-    # A Compose file that does not resolve leaves its task out the same way; the others' images are still recorded.
+    # A Compose file that does not resolve, or a field the sandbox Compose adapter would refuse at seed, leaves its
+    # task out the same way, with the field named, as an unloadable task is, not as a seed failure of every episode;
+    # the others' images are still recorded.
     unresolved: dict[str, str] = {}
-    images = record_compose_images(tasks, dataset_root, skipped=unresolved, platform=build.platform)
+    images = record_compose_images(
+        tasks,
+        dataset_root,
+        skipped=unresolved,
+        platform=build.platform,
+        sandbox_provider=sandbox_provider,
+        gpu_sandbox_provider=gpu_sandbox_provider,
+        compose_platform=compose_platform,
+    )
     if unresolved:
         for task_id, reason in unresolved.items():
             errors[task_id] = HarborTaskError(reason)
@@ -413,17 +487,6 @@ def prepare_target(
             raise _no_runnable_task(folder, errors)
     if images is not None:
         print(f"Compose image configurations recorded in {images}")
-    # The Compose adapter's field check, per task and before any sandbox exists: a field it does not start is
-    # a skipped task with the field named, as an unloadable task is, not a seed failure of every episode.
-    refused = {task.task_id: error for task in tasks if (error := unsupported_compose_fields_error(task))}
-    if refused:
-        errors.update(refused)
-        _write_skipped(output_dir, errors)
-        for task_id, error in refused.items():
-            logger.warning("Skipping task %s: %s", task_id, error)
-        tasks = [task for task in tasks if task.task_id not in refused]
-        if not tasks:
-            raise _no_runnable_task(folder, errors)
     rows_path = output_dir / "tasks.jsonl"
     write_rows(tasks, taskset, rows_path)
     skipped_note = f", skipped {len(errors)}" if errors else ""
@@ -680,13 +743,17 @@ def run_target(args: argparse.Namespace, overrides: list[str]) -> None:
     except (ValueError, OSError, yaml.YAMLError) as exc:
         args._parser.error(str(exc))
     try:
-        # The `builds:` block comes from the configuration the command names; the run config does not exist yet.
+        # The `builds:` and `sandbox:` blocks come from the configuration the command names; the run config
+        # does not exist yet.
         build = build_options_from_overrides(overrides)
         prepared = prepare_target(
             args.target,
             exclude=_patterns(args, "exclude_tasks"),
             only=_patterns(args, "only_tasks"),
             build=build,
+            sandbox_provider=sandbox_provider_from_overrides(overrides, sandbox),
+            gpu_sandbox_provider=gpu_sandbox_provider_from_overrides(overrides, sandbox),
+            compose_platform=compose_platform_from_overrides(overrides),
         )
     except (HarborTaskError, HubError, BuildError, ImageConfigError, ConfigError, ValueError, OSError) as exc:
         args._parser.error(str(exc))
@@ -725,6 +792,9 @@ def validate_target(args: argparse.Namespace, overrides: list[str]) -> None:
             exclude=_patterns(args, "exclude_tasks"),
             only=_patterns(args, "only_tasks"),
             build=build_options_from_overrides(overrides),
+            sandbox_provider=sandbox_provider_from_overrides(overrides, sandbox),
+            gpu_sandbox_provider=gpu_sandbox_provider_from_overrides(overrides, sandbox),
+            compose_platform=compose_platform_from_overrides(overrides),
         )
     except (
         HarborTaskError,

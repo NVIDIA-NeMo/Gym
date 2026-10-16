@@ -3178,3 +3178,102 @@ class TestMainImageSpellings:
         build = fake_docker()[1]
         assert build["argv"][-1] == "build" and build["env"]["MAIN_IMAGE_NAME"] == result.tag
         assert read_built_images(folder)[result.digest]["image"] == result.tag
+
+
+class TestSandboxProviderAtPrepare:
+    """M28: prepare learns the deployment's provider name from the `sandbox:` block's keys, never its values."""
+
+    def test_provider_name_is_read_from_the_block_keys_without_resolving_values(self, tmp_path, monkeypatch):
+        import nemo_gym.tasks.harbor.cli as harbor_cli
+        from nemo_gym.tasks.harbor.cli import sandbox_provider_from_overrides
+
+        dotenv = tmp_path / "env.yaml"
+        dotenv.write_text("some_key: 1\n")
+        monkeypatch.setattr(harbor_cli, "_resolve_under_cwd_or_install", lambda rel: tmp_path / rel)
+        assert sandbox_provider_from_overrides([], None) is None
+        # The block's values are never resolved, so a credential interpolation does not have to succeed here.
+        dotenv.write_text(
+            "sandbox:\n  opensandbox:\n    connection:\n      api_key: ${oc.env:NEMO_GYM_M28_NO_SUCH_KEY}\n"
+            "  default_metadata: {team: t}\n"
+        )
+        monkeypatch.delenv("NEMO_GYM_M28_NO_SUCH_KEY", raising=False)
+        assert sandbox_provider_from_overrides([], None) == "opensandbox"
+        # `--sandbox <provider>` adds that provider file below the rest.
+        dotenv.write_text("some_key: 1\n")
+        provider_file = tmp_path / "docker.yaml"
+        provider_file.write_text("sandbox:\n  docker:\n    create: {use_init: true}\n")
+        monkeypatch.setattr(harbor_cli, "resolve_sandbox_config", lambda name: provider_file)
+        assert sandbox_provider_from_overrides([], "docker") == "docker"
+        # A ++ override on the command line is part of the picture too.
+        assert sandbox_provider_from_overrides(["++sandbox.opensandbox.connection.domain=x"], None) == "opensandbox"
+
+    def test_run_and_validate_hand_the_provider_to_prepare(self, tmp_path, monkeypatch):
+        import argparse
+
+        import nemo_gym.tasks.harbor.cli as harbor_cli
+
+        seen = {}
+
+        def fake_prepare(target, **kwargs):
+            seen[target] = kwargs
+            raise harbor_cli.HubError("stop here")
+
+        monkeypatch.setattr(harbor_cli, "prepare_target", fake_prepare)
+        monkeypatch.setattr(harbor_cli, "build_options_from_overrides", lambda overrides: harbor_cli.BuildOptions())
+        monkeypatch.setattr(harbor_cli, "sandbox_provider_from_overrides", lambda overrides, sandbox: f"p:{sandbox}")
+        monkeypatch.setattr(
+            harbor_cli, "gpu_sandbox_provider_from_overrides", lambda overrides, sandbox: f"g:{sandbox}"
+        )
+        monkeypatch.setattr(harbor_cli, "compose_platform_from_overrides", lambda overrides: "linux/arm64")
+        monkeypatch.setattr(harbor_cli, "resolve_agent", lambda name: object())
+        monkeypatch.setattr(harbor_cli, "resolve_sandbox_config", lambda name: tmp_path / f"{name}.yaml")
+        parser = argparse.ArgumentParser()
+        parser.error = lambda message: (_ for _ in ()).throw(SystemExit(message))
+        args = argparse.Namespace(target="run-target", agent="hermes_agent", sandbox="docker", _parser=parser)
+        with pytest.raises(SystemExit, match="stop here"):
+            harbor_cli.run_target(args, [])
+        assert seen["run-target"]["sandbox_provider"] == "p:docker"
+        assert seen["run-target"]["gpu_sandbox_provider"] == "g:docker"
+        assert seen["run-target"]["compose_platform"] == "linux/arm64"
+        args = argparse.Namespace(target="validate-target", sandbox=None, _parser=parser)
+        with pytest.raises(SystemExit, match="stop here"):
+            harbor_cli.validate_target(args, [])
+        assert seen["validate-target"]["sandbox_provider"] == "p:None"
+        assert seen["validate-target"]["gpu_sandbox_provider"] == "g:None"
+        assert seen["validate-target"]["compose_platform"] == "linux/arm64"
+
+    def test_the_gpu_block_provider_and_the_platform_are_read_from_the_same_configuration(self, tmp_path, monkeypatch):
+        """The server routes GPU sidecars to `gpu_sandbox_provider` and checks `platform` against
+        `sandbox_provider_options.platform`; prepare reads both from the configuration the command names."""
+        import nemo_gym.tasks.harbor.cli as harbor_cli
+        from nemo_gym.tasks.harbor.cli import (
+            GPU_SANDBOX_PROVIDER_KEY,
+            SANDBOX_PROVIDER_OPTIONS_KEY,
+            compose_platform_from_overrides,
+            gpu_sandbox_provider_from_overrides,
+        )
+
+        assert GPU_SANDBOX_PROVIDER_KEY == "harbor_environment_server.environment_servers.harbor.gpu_sandbox_provider"
+        dotenv = tmp_path / "env.yaml"
+        dotenv.write_text(
+            "sandbox:\n  opensandbox: {}\nsandbox_gpu:\n  docker:\n    create: {use_init: true}\n"
+            "  default_metadata: {pool: h100}\n"
+        )
+        monkeypatch.setattr(harbor_cli, "_resolve_under_cwd_or_install", lambda rel: tmp_path / rel)
+        gpu_block = f"++{GPU_SANDBOX_PROVIDER_KEY}=sandbox_gpu"
+        # No GPU block named: every service is checked against the sandbox: block. Named: that block's keys.
+        assert gpu_sandbox_provider_from_overrides([], None) is None
+        assert gpu_sandbox_provider_from_overrides([gpu_block], None) == "docker"
+        # A GPU block that names no provider defers to the adapter, as the sandbox: block does.
+        assert gpu_sandbox_provider_from_overrides([f"++{GPU_SANDBOX_PROVIDER_KEY}=sandbox_other"], None) is None
+        with pytest.raises(ValueError, match="must name a top-level sandbox block"):
+            gpu_sandbox_provider_from_overrides([f"++{GPU_SANDBOX_PROVIDER_KEY}=[a]"], None)
+        # The platform: sandbox_provider_options.platform ({os, arch}), else linux/amd64, as the server reads it.
+        assert compose_platform_from_overrides([]) == "linux/amd64"
+        options = [
+            f"++{SANDBOX_PROVIDER_OPTIONS_KEY}.platform.os=linux",
+            f"++{SANDBOX_PROVIDER_OPTIONS_KEY}.platform.arch=aarch64",
+        ]
+        assert compose_platform_from_overrides(options) == "linux/arm64"
+        with pytest.raises(ValueError, match="must be a mapping"):
+            compose_platform_from_overrides([f"++{SANDBOX_PROVIDER_OPTIONS_KEY}=x"])
