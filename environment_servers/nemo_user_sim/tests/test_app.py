@@ -804,6 +804,8 @@ async def test_committed_activation_fixtures_round_trip_through_real_bridge(
     assert result.response["reasoning_content"]
     assert len(bridge.invocations) == 1
     assert bridge.invocations[0].role == "assistant"
+    # With checkpointing on, the agent refuses a session activation whose path does not name its attempt.
+    assert client.calls[0][1] == f"/ng-rollout/{request.episode_id.capture_key}/v1/responses"
     sent_tools = client.calls[0][2]["json"].tools
     if probe_type == "tool_calling":
         assert [tool["name"] for tool in sent_tools] == ["get_weather"]

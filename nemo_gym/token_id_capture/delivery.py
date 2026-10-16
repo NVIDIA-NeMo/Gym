@@ -38,6 +38,7 @@ import warnings
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.token_id_capture.consumer import trajectories_from_source
 from nemo_gym.token_id_capture.protocols import TokenSource
+from nemo_gym.token_id_capture.records import apply_capture_incomplete_verdict
 
 
 # Attach token-capture health to each rollout record.
@@ -97,7 +98,8 @@ async def finalize_rollout_token_capture(
     was cut (``length`` or ``content_filter``) and the harness reported ``completed`` or no
     status, the harness response takes that ``status`` and ``incomplete_details``, so a
     reader of the record sees why the delivered chain stopped. A harness that reported
-    ``incomplete`` or ``failed`` itself keeps its own verdict.
+    ``incomplete`` or ``failed`` itself keeps its own verdict. ``apply_capture_incomplete_verdict``
+    states that rule once, for this path and for a framework that rebuilds from staged records.
 
     The function freezes capture records through ``source``.
     It rebuilds from that frozen snapshot.
@@ -200,14 +202,11 @@ async def finalize_rollout_token_capture(
     if projected is not None:
         if isinstance(result.get("response"), dict):
             result["response"]["output"] = projected["output"]
-            # The rebuilt output's truncation verdict travels with it: a harness response that
-            # reports no status, or ``completed``, takes the capture's ``incomplete`` verdict and
-            # its ``incomplete_details``, so a trainer reading the record sees why the delivered
-            # chain stopped. A harness that already reported ``incomplete`` or ``failed`` keeps its
-            # own, more specific, verdict.
-            if projected.get("status") == "incomplete" and result["response"].get("status") in (None, "completed"):
-                result["response"]["status"] = "incomplete"
-                result["response"]["incomplete_details"] = projected.get("incomplete_details")
+            # The rebuilt output's truncation verdict travels with it, under the one precedence
+            # rule ``apply_capture_incomplete_verdict`` states for both capture placements.
+            incomplete_details = projected.get("incomplete_details") or {}
+            reason = incomplete_details.get("reason") if projected.get("status") == "incomplete" else None
+            apply_capture_incomplete_verdict(result["response"], reason)
         else:
             result["response"] = projected
 

@@ -8,7 +8,9 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Literal
+from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import orjson
 import pytest
 from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError
@@ -669,6 +671,27 @@ async def test_a_seed_reply_that_cannot_be_captured_makes_the_episode_a_restart(
     assert len(restarts) == (0 if restarting_seed is None else 1)
 
 
+@pytest.mark.parametrize("transports", [["direct_http"], ["mcp"], ["direct_http", "mcp"]])
+async def test_an_episode_that_grants_mcp_access_is_a_restart(transports: list[Literal["direct_http", "mcp"]]) -> None:
+    environment_server, client = _environment_server(resources_tool_transports=transports)
+    client.responses[0] = _Response(
+        {
+            "resources_session_id": "resources-session",
+            "resources_tools": {"server_name": "resources", "headers": {"X-NeMo-Gym-Session-Token": "token"}},
+        }
+    )
+    restarts: list[list[str]] = []
+
+    async def record_restart(request: object) -> None:
+        restarts.append([path for _, path, _ in client.calls])
+
+    object.__setattr__(environment_server, "checkpoint_restart", record_restart)
+    await environment_server.run_request(_request())
+
+    # Marked before the agent receives the token, so no checkpoint ever records the episode past its seed.
+    assert restarts == ([["/seed_session"]] if "mcp" in transports else [])
+
+
 async def test_an_agent_that_returns_during_a_checkpoint_parks_at_close_agent_and_stays_ready() -> None:
     from nemo_gym._checkpoint.control import CheckpointRequest, ParticipantControlPlane
     from nemo_gym._checkpoint.environment import EnvironmentParticipant
@@ -892,6 +915,143 @@ async def test_boundary_payloads_are_not_built_without_checkpointing(monkeypatch
 
     # The return boundary's payload is the only dump of the verification result, and nothing records it here.
     assert dumps == []
+
+
+class _ForwardedResponse:
+    """An agent server's reply, as the environment server's HTTP client presents it."""
+
+    def __init__(self, reply: httpx.Response) -> None:
+        self.ok = reply.is_success
+        self.status = reply.status_code
+        self.headers = reply.headers
+        self.cookies = {name: SimpleNamespace(value=value) for name, value in reply.cookies.items()}
+        self.body = reply.content
+
+    async def read(self) -> bytes:
+        return self.body
+
+
+class _AgentForwardingClient(_Client):
+    """Sends the environment server's agent calls to a real agent server; scripts every other call."""
+
+    agent: Any = None
+
+    async def post(self, server_name: str, url_path: str, **kwargs) -> Any:
+        if server_name != "agent":
+            return await super().post(server_name, url_path, **kwargs)
+        self.calls.append((server_name, url_path, kwargs))
+        body = kwargs.get("json")
+        if isinstance(body, BaseModel):
+            body = body.model_dump(mode="json", exclude_unset=True)
+        headers = dict(kwargs.get("headers") or {})
+        cookies = kwargs.get("cookies") or {}
+        if cookies:
+            headers["cookie"] = "; ".join(f"{name}={value}" for name, value in cookies.items())
+        reply = await self.agent.post(url_path, json=body, headers=headers)
+        # The environment server keeps the agent's cookies in its handles, as a checkpoint records them.
+        self.agent.cookies.clear()
+        return _ForwardedResponse(reply)
+
+
+def _checkpointed_agent(model_calls: list[str]) -> tuple[Any, httpx.AsyncClient]:
+    """A Simple Agent with checkpointing on, whose model replies at once and records each call."""
+    from responses_api_agents.simple_agent.app import ModelServerRef, SimpleAgent, SimpleAgentConfig
+
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = {
+        "observability_enabled": True,
+        "checkpoint": {"enabled": True, "control_auth_token": "t"},
+    }
+
+    async def model(*, url_path: str, **kwargs: Any) -> Any:
+        model_calls.append(url_path)
+        reply = MagicMock(status=200, cookies={}, ok=True)
+        reply.read = AsyncMock(return_value=orjson.dumps(_agent_response().model_dump(mode="json")))
+        return reply
+
+    client.post = AsyncMock(side_effect=model)
+    agent = SimpleAgent(
+        config=SimpleAgentConfig(
+            host="agent",
+            port=8001,
+            entrypoint="app.py",
+            name="agent",
+            model_server=ModelServerRef(type="responses_api_models", name="model"),
+        ),
+        server_client=client,
+    )
+    return agent, httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=agent.setup_webserver()), base_url="http://agent"
+    )
+
+
+async def test_an_agent_reply_lost_to_a_restore_is_given_again_without_running_the_activation() -> None:
+    from environment_servers.single_agent_turn.app import SessionHandles
+    from nemo_gym._checkpoint.environment import EnvironmentParticipant, EpisodeRecord, task_digest
+    from nemo_gym.base_resources_server import ResourcesSeedSessionResponse
+
+    request = _request()
+    first_attempt = request.model_copy(update={"episode_id": request.episode_id.model_copy(update={"attempt": 1})})
+    model_calls: list[str] = []
+    handles = SessionHandles(resources_session_id="resources-session", agent_session_id="agent-session")
+
+    # Before the crash, the agent finishes the activation and its checkpoint follows the reply,
+    # while the environment server's checkpoint precedes the reply: its episode is still at invoke_agent.
+    agent, agent_http = _checkpointed_agent(model_calls)
+    environment, client = _environment_server(client_type=_AgentForwardingClient)
+    client.agent = agent_http
+    async with agent_http:
+        await environment._seed_agent(
+            first_attempt, handles, ResourcesSeedSessionResponse(resources_session_id="resources-session")
+        )
+        environment_boundary = {"next": "invoke_agent", "handles": handles.model_dump()}
+        await environment._invoke_agent(first_attempt, handles)
+        agent_records = await agent.checkpoint_participant.export(None)
+    observations = agent._session_state("agent-session").observations
+
+    # Both are restored, and the environment server invokes the activation again.
+    restored_agent, restored_http = _checkpointed_agent(model_calls)
+    await restored_agent.checkpoint_participant.install(agent_records, [first_attempt.episode_id])
+    environment, client = _environment_server(client_type=_AgentForwardingClient)
+    client.agent = restored_http
+    # Only the verification and the resources close are scripted; the agent answers the rest.
+    del client.responses[:4]
+    participant = EnvironmentParticipant()
+    environment._checkpoint = participant
+    participant.restore_records(
+        [
+            EpisodeRecord(
+                episode_id=first_attempt.episode_id,
+                task_digest=task_digest(request.task.model_dump(mode="json")),
+                boundary=environment_boundary,
+            )
+        ]
+    )
+    async with restored_http:
+        response = await environment.run_request(request)
+
+    assert [path for _, path, _ in client.calls] == [
+        "/ng-rollout/rollout-a2/v1/responses",
+        "/v1/agent_sessions/close",
+        "/verify",
+        "/close_session",
+    ]
+    # The agent gave the reply it already gave, without calling the model again.
+    assert model_calls == ["/ng-rollout/rollout-a1/v1/responses"]
+    assert response.result.reward == 1.0
+    assert response.result.ng_agent_observations == observations
+
+
+async def test_with_checkpointing_on_a_direct_http_grant_names_the_seeding_attempt() -> None:
+    from nemo_gym._checkpoint.environment import EnvironmentParticipant
+
+    environment_server, client = _environment_server(resources_tool_transports=["direct_http"])
+    environment_server._checkpoint = EnvironmentParticipant()
+    await environment_server.run_request(_request())
+
+    [tool_access] = AgentSeedSessionRequest.model_validate(client.calls[1][2]["json"]).tool_accesses
+    # The Resources Server refuses a tool call that names no attempt, so the grant carries the rollout prefix.
+    assert str(tool_access.base_url) == "http://resources:8000/ng-rollout/rollout-a2"
 
 
 async def test_verify_says_that_the_resources_session_is_closed_afterwards() -> None:
