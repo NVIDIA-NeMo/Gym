@@ -12,6 +12,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
+import runpy
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import orjson
@@ -27,7 +30,8 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
-from nemo_gym.server_utils import ServerClient
+import nemo_gym.server_utils
+from nemo_gym.server_utils import ServerClient, SimpleServer
 from nemo_gym.verifier_fixture import exercise_verifier_fixture
 from resources_servers.proof_jury_judge.app import (
     VERIFIER_FIXTURE,
@@ -223,3 +227,17 @@ def test_metrics():
     key = server.get_key_metrics({**metrics, "mean/output_tokens": 10.0})
     assert key["pass@1[avg-of-2]/score"] == pytest.approx(25.0)
     assert key["mean/output_tokens"] == 10.0
+
+
+def test_module_exports_app_for_multi_worker_import(monkeypatch):
+    app_path = Path(__file__).parents[1] / "app.py"
+    worker_app = object()
+    calls = []
+    monkeypatch.setattr(SimpleServer, "run_webserver", classmethod(lambda cls: calls.append(cls) or worker_app))
+
+    monkeypatch.setattr(nemo_gym.server_utils, "is_nemo_gym_fastapi_entrypoint", lambda _: False)
+    assert "app" not in runpy.run_path(str(app_path), run_name="proof_jury_judge.library_import")
+    assert calls == []
+
+    monkeypatch.setattr(nemo_gym.server_utils, "is_nemo_gym_fastapi_entrypoint", lambda _: True)
+    assert runpy.run_path(str(app_path), run_name="proof_jury_judge.worker_import")["app"] is worker_app
