@@ -342,6 +342,8 @@ class ActionComparator(BaseModel):
     list_f1_match_details: list[ListF1MatchDetail] = Field(default_factory=list)
 
     def compare_action(self, expected_action: ExpectedAction, actual_action: ExpectedAction) -> ActionComparisonResult:
+        # The details describe this comparison only, so a comparator reused across rows does not accumulate them.
+        self.list_f1_match_details = []
         match expected_action:
             case MessageAction():
                 # Currently, any chat message is assigned a reward of one.
