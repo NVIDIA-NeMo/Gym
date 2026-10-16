@@ -1,0 +1,131 @@
+---
+title: "NeMo User Sim Integration Reference"
+description: "Architecture, ownership, request contracts, and saved fields for the NeMo User Sim integration."
+position: 3
+---
+
+This page describes the integration behind the
+[NeMo User Sim rollout tutorial](/tutorials/evaluation-tutorials/nemo-user-sim-rollout-collection).
+
+## Component ownership
+
+- **Preparation** materializes one validation row per first-party probe before collection.
+- The **rollout collector** loads a task and dispatches an episode request to the Environment Server.
+- The **Environment Server** seeds sessions, owns the conversation runtime and tool loop, invokes participants
+  and support models, requests verification, and returns the episode response.
+- The **User Agent** produces simulated User messages through `user_model`.
+- The **Assistant Agent** produces the evaluated Assistant messages and function calls through `policy_model`.
+- The **Resources Server** validates the materialized row, stores its session snapshot, evaluates the completed
+  episode, and returns Gym's reward contract.
+- The **support model** handles structured judge, summary, tool-simulation, evaluator, and probe-scorer requests.
+  The Environment invokes support roles used during the conversation; the Resources Server invokes final
+  evaluator and probe-scorer requests through its configured `probe_scorer_model`.
+
+The Resources Server does not create a second conversation runtime and does not expose probe-tool routes.
+
+## Materialized task contract
+
+Preparation provides stable string `task_id` values and complete `resolved_row` objects:
+
+```json
+{
+  "task_id": "<trajectory-id>",
+  "resolved_row": {
+    "persona": {},
+    "probe_type": "general_open_ended",
+    "conversation_language": "en",
+    "trajectory_id": "<trajectory-id>",
+    "usersim_config": {},
+    "usersim_provenance": "{\"code_sha\":\"<pinned-revision>\",\"bank_version\":{}}"
+  }
+}
+```
+
+`usersim_provenance` is JSON text so empty nested values remain Arrow- and Parquet-safe.
+
+At `/seed_session`, Resources validates required fields and the configured User Sim revision, then stores the
+row and a canonical SHA-256 digest. At `/verify`, it rejects mismatched episode identity, task identity, row
+content, or trajectory identity.
+
+The digest establishes immutability between seeding and verification. It is not a comparison with a separately
+stored preparation artifact.
+
+## Episode execution
+
+The Environment Server constructs one `ProbeEpisodeRuntime.from_resolved_row(...)` from the materialized row.
+The runtime owns conversation state, probe state, tool validation and execution, semantic call indices, and
+episode evidence.
+
+For `tool_calling`, `safety_agentic`, and `financial_services`, the Assistant Agent returns function calls
+without executing them. User Sim validates and executes accepted calls, appends tool messages, and requests
+another Assistant activation when needed. Internal API-response synthesis uses `tool_simulation_model`.
+
+Unexpected runtime exceptions become failures-sidecar records with an `agent` stage. Only failures that User
+Sim handles and returns appear under `usersim_result.simulation_outcome`.
+
+## Model requirements and routing
+
+`user_model`, `policy_model`, and `support_model` are separate Gym Model Server configurations. Their upstream
+URLs can be shared, but every URL must implement an OpenAI-compatible Chat Completions API.
+
+The support endpoint must accept JSON Schema response formats because evaluator and scorer requests require
+structured output. A schema rejection is a masked verifier failure.
+
+The semantic invocation roles are:
+
+- `user`: simulated User participant.
+- `assistant`: evaluated Assistant participant.
+- `judge`: conversation-quality judge.
+- `summary`: optional context summarization.
+- `tool_simulation`: simulated tool-result generation.
+
+## Verification and reward
+
+The Resources Server calls NeMo User Sim's `TrajectoryEvaluatorGenerator.agenerate()` once, with the scorer
+selected for the prepared probe when one applies.
+
+`scenario_completed` requires:
+
+1. a completed conversation;
+2. both User and Assistant messages; and
+3. a passing applicable probe scorer.
+
+When `scenario_completed` is `true` and all required axes exist, `reward` is the mean of normalized helpfulness,
+accuracy, and coherence. Otherwise, `reward` is `0.0`.
+
+The verification response includes:
+
+- `reward`: scalar Gym reward.
+- `mask_sample`: whether aggregation must exclude the reward.
+- `failure_kind` and `failure_reason`: normalized failure details.
+- `reward_components`: flat completion flags and quality metrics for Gym aggregation.
+- `scenario_completed`: whether the full scoring gate passed.
+- `verifier_data`: structured User Sim evaluator and probe evidence.
+
+The Environment copies the first four fields onto the top-level persisted rollout. The nested `verification`
+object retains the complete verifier response.
+
+## Saved rollout fields
+
+- `usersim_result.conversation_messages`: ordered User, Assistant, function-call, and tool-result messages.
+- `usersim_result.simulation_outcome`: User Sim-reported simulation status, attribution, detail, and warnings.
+- `invocations`: ordered Environment-owned participant and support activations.
+- `verification.verifier_data.normalized_axis_scores`: full normalized User Sim quality map.
+- `reward_components`: Gym's flat projection of quality metrics plus completion/scoring flags.
+- `ng_model_call_capture`: provider-level calls captured through the User and Assistant Agents.
+- `ng_trajectory`: Gym's normalized Agent execution record, including any reported gaps.
+- `_ng_failure_*`: failure-sidecar fields for attempts without a completed episode response.
+
+`reward_components` repeats quality axes with a `quality.` prefix so Gym can aggregate them. The structured
+`normalized_axis_scores` map remains in verifier evidence for User Sim-specific inspection.
+
+## Masking rules
+
+- Assistant-attributed simulation failure: measured zero, `mask_sample: false`.
+- Failed applicable probe check: measured zero, `mask_sample: false`.
+- Infrastructure or non-Assistant simulation failure: zero, `mask_sample: true`.
+- Scorer/evaluator error or timeout: zero, `mask_sample: true`.
+- Inconclusive scorer or missing required judge quality: zero, `mask_sample: true`.
+
+For commands and examples, see
+[Troubleshoot NeMo User Sim Rollouts](/tutorials/evaluation-tutorials/nemo-user-sim-rollout-collection/rollout-troubleshooting).
