@@ -549,33 +549,51 @@ def _documented_command_lines() -> list[str]:
     lines: list[str] = []
     for path in (README, *(HLE_DIAMOND_DIR / name for name in OVERRIDE_FILES)):
         text = re.sub(r"\\\n#?[ \t]*", " ", path.read_text(encoding="utf-8"))
-        lines += [line.strip().lstrip("# ") for line in text.splitlines() if "gym eval run " in line]
+        stripped = (line.strip().lstrip("# ") for line in text.splitlines())
+        lines += [line for line in stripped if line.startswith("gym eval run ")]
     return lines
 
 
-def _documented_run_commands() -> dict[str, list[str]]:
-    """The README's complete `gym eval run` commands (fenced bash blocks, no `...` elision) as argv lists
-    without the leading `gym`, keyed by their --benchmark value; placeholders become parseable tokens."""
-    commands: dict[str, list[str]] = {}
+def _documented_bash_commands(prefix: str) -> list[list[str]]:
+    """The README's complete commands starting with ``prefix`` (fenced bash blocks, continuations joined,
+    no `...` elision) as argv lists without the leading `gym`; placeholders become parseable tokens."""
+    commands: list[list[str]] = []
     for block in re.findall(r"```bash\n(.*?)```", README.read_text(encoding="utf-8"), flags=re.DOTALL):
         for line in block.replace("\\\n", " ").splitlines():
             line = line.strip()
-            if line.startswith("gym eval run ") and not line.endswith("..."):
-                argv = shlex.split(line.replace("<gateway model id>", "policy"))[1:]
-                commands[argv[argv.index("--benchmark") + 1]] = argv
+            if line.startswith(prefix) and not line.endswith("..."):
+                commands.append(shlex.split(line.replace("<gateway model id>", "policy"))[1:])
     return commands
 
 
-def _cli_config_paths(argv: list[str]) -> tuple[list[str], object]:
-    """The config_paths `gym eval run <argv>` composes, produced by the CLI's own flag translation and
-    coalescing (nemo_gym.cli.main.main), plus the parsed namespace."""
-    from nemo_gym.cli.main import _is_positional_hydra_override, _merge_config_paths, build_parser
+def _documented_run_commands() -> dict[str, list[str]]:
+    """The README's complete `gym eval run --benchmark` commands keyed by their --benchmark value."""
+    return {
+        argv[argv.index("--benchmark") + 1]: argv
+        for argv in _documented_bash_commands("gym eval run ")
+        if "--benchmark" in argv
+    }
 
-    args, overrides = build_parser().parse_known_args(["eval", "run", *argv])
+
+def _parse_cli(subcommand: list[str], argv: list[str]):
+    """The argparse namespace, the Hydra tokens the CLI's flags translate to, and the raw Hydra overrides
+    (including one argparse captured as the optional TARGET positional, which main() restores)."""
+    from nemo_gym.cli.main import _is_positional_hydra_override, build_parser
+
+    args, overrides = build_parser().parse_known_args([*subcommand, *argv])
     translated = [token for flag in args._command.flags for token in flag.translate_to_hydra(args)]
-    # main() restores a bare Hydra override that argparse captured as the optional TARGET positional.
-    if args.target and _is_positional_hydra_override(args.target):
-        overrides = [args.target, *overrides]
+    target = getattr(args, "target", None)
+    if target and _is_positional_hydra_override(target):
+        overrides = [target, *overrides]
+    return args, translated, overrides
+
+
+def _cli_config_paths(argv: list[str], subcommand: tuple[str, ...] = ("eval", "run")) -> tuple[list[str], object]:
+    """The config_paths `gym <subcommand> <argv>` composes, produced by the CLI's own flag translation and
+    coalescing (nemo_gym.cli.main.main), plus the parsed namespace."""
+    from nemo_gym.cli.main import _merge_config_paths
+
+    args, translated, overrides = _parse_cli(list(subcommand), argv)
     (token,) = [t for t in _merge_config_paths(translated + overrides) if t.startswith(CONFIG_PATHS_PREFIX)]
     return token[len(CONFIG_PATHS_PREFIX) : -1].split(","), args
 
@@ -644,15 +662,58 @@ class TestDocumentedCommands:
 
     def test_every_documented_run_line_carries_split_and_the_raw_override_token(self):
         lines = _documented_command_lines()
-        assert len(lines) >= 4  # the README's full commands and fragment, and both override headers
+        assert len(lines) >= 5  # the README's full commands, fragment and --no-serve run, and both override headers
 
         for line in lines:
+            if "--no-serve" in line:
+                # Running the full set: the dataset is --input and --split is not read; the servers (and the
+                # judge override, via `gym env start --config`) are already up.
+                assert "--split" not in line and "--benchmark" not in line, line
+                assert "--agent hle_diamond_equivalence_llm_judge_simple_agent" in line, line
+                assert "++route_failures_to_sidecar=true" in line, line
+                continue
             assert "--split benchmark" in line, line
             assert "--config " not in line, line  # merges before the preset: never for these overrides
             if any(name in line for name in OVERRIDE_FILES):
                 assert f"'{CONFIG_PATHS_PREFIX}" in line, line
             if "sandbox_docker_local.yaml" in line:
                 assert "judge_openai.yaml" in line, line  # otherwise a copied command self-judges
+
+    def test_full_set_servers_compose_the_judge_override_after_the_preset(self, monkeypatch):
+        """Running the full set: under `gym env start` every --config lands in command-line order."""
+        monkeypatch.delenv("HLE_DIAMOND_JUDGE_MODEL", raising=False)
+        (argv,) = _documented_bash_commands("gym env start ")
+
+        paths, _ = _cli_config_paths(argv, subcommand=("env", "start"))
+        _, _, overrides = _parse_cli(["env", "start"], argv)
+
+        assert [Path(p).name for p in paths] == ["openai_model.yaml", "config.yaml", "judge_openai.yaml"]
+        assert "++policy_model_name=policy" in overrides and "++observability_enabled=true" in overrides
+        resolved = _resolve_paths(paths)
+        judge = get_first_server_config_dict(resolved, JUDGE_SERVER)
+        assert judge["judge_model_server"]["name"] == "hle_diamond_judge_model"
+        assert judge["judge_labels_case_insensitive"] is True
+        assert (
+            get_first_server_config_dict(resolved, "hle_diamond_judge_model")["openai_model"] == "azure/openai/o3-mini"
+        )
+        assert get_first_server_config_dict(resolved, "policy_model")["entrypoint"] == "app.py"
+
+    def test_full_set_collection_runs_no_serve_with_sidecar_routing_and_only_the_effort_setting(self):
+        (argv,) = [argv for argv in _documented_bash_commands("gym eval run ") if "--no-serve" in argv]
+
+        args, translated, overrides = _parse_cli(["eval", "run"], argv)
+
+        assert args.no_serve is True and args.split is None and args.limit is None
+        assert (args.agent, args.input) == (
+            "hle_diamond_equivalence_llm_judge_simple_agent",
+            "benchmarks/hle_diamond/data/hle_diamond_benchmark.jsonl",
+        )
+        assert "+num_repeats=1" in translated
+        # D4: the one sampling setting; D33: failures go to the sidecar instead of ending the run.
+        assert {"++responses_create_params.reasoning.effort=high", "++route_failures_to_sidecar=true"} <= set(
+            overrides
+        )
+        assert (args.temperature, args.top_p, args.max_output_tokens) == (None, None, None)
 
 
 def _judge_server(report_slice_fields: list[str]) -> LLMJudgeResourcesServer:

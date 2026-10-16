@@ -166,11 +166,19 @@ function.
 
 `reward` is 1.0 when the judge answers `Judgement: yes` and 0.0 otherwise: `equivalence_llm_judge`
 with the HLE labels, no swap check, no regex extraction and no per-record regex, the same judge
-settings as `benchmarks/hle/config.yaml` (see Prompting for how the judge prompt differs from
-upstream's structured output). An empty final answer scores 0 without a judge call
-(`failure_reason: empty_final_answer`). The judge defaults to the policy model, as in
+settings as `benchmarks/hle/config.yaml` except for the case rule below (see Prompting for how the
+judge prompt differs from upstream's structured output). An empty final answer scores 0 without a
+judge call (`failure_reason: empty_final_answer`). The judge defaults to the policy model, as in
 `benchmarks/hle`, so the model under test grades itself unless `judge_openai.yaml` is composed in;
 self-judged numbers are not comparable with the published table (see Quickstart).
+
+The verdict labels are matched case-insensitively: `judge_labels_case_insensitive: true` on the single
+judge server instance every preset shares (`str.casefold` on the judge text and on the labels; the
+recorded `verdict_label` is always the configured spelling). Upstream reads a structured
+`correct: yes|no` field whose case cannot vary, whereas Gym finds the label in free text, and on the
+gold sweep (Harness validation) o3-mini wrote `Judgement: Yes` on 1 of 1000 rows, which the byte-exact
+default scored 0 as `no_verdict`. The knob is off everywhere else, so `hle` and `hle_verified` are
+unchanged; when it is on, labels that differ only in case are rejected at config time.
 
 Judge request: the judge call carries no `max_output_tokens` and no reasoning parameter
 (`judge_responses_create_params: {input: []}`), so the judge model runs at its default effort and its
@@ -252,7 +260,24 @@ Model-free checks that have been run (commands below, from the repository root):
   `SimpleAgentVerifyResponse` into the slices). Mutation-checked: changing one word of the prompt,
   lowering either effort knob to `medium`, breaking the count check, the limit truncation, the
   response field echo or the slice hook, switching a README command to `--config` or dropping its
-  `--split benchmark` each makes tests fail.
+  `--split benchmark` each makes tests fail. The `gym env start` / `--no-serve` pair of Running the
+  full set is composed through the same CLI translation: the three `--config` files land in
+  command-line order so the judge override wins, and the collection command carries the
+  sidecar routing, `reasoning.effort=high`, one repeat and no sampling flag.
+- `resources_servers/equivalence_llm_judge/tests/test_app.py`, the case rule: `Judgement: Yes` scores
+  1.0 with `judge_labels_case_insensitive` and `no_verdict` / 0.0 without; a text holding both
+  `Judgement: yes` and `JUDGEMENT: No` still follows the last-verdict rule with `conflicting_verdicts`;
+  matches return the configured labels; legacy rollouts are re-parsed with the same setting; labels
+  differing only in case are rejected when the knob is on. Mutation-checked: removing the folding,
+  either call-site pass-through, the validator or the knob in `config.yaml` each fails a test.
+- `responses_api_models/openai_model/tests/test_reasoning_item_normalizer.py`: the two response bodies
+  captured from the gateway (Claude Opus 5.5 and Gemini 4 Argon; ids, encrypted content and long
+  texts shortened, structure untouched) fail `NeMoGymResponse` validation with exactly the two
+  documented errors (`output.0.reasoning.summary` not a list, `output.0.reasoning.content.0.type` not
+  `reasoning_text`), validate through `openai_model` with usage intact, and fail again with
+  `normalize_reasoning_items: false`; message items and well-formed bodies pass through unchanged.
+  Mutation-checked: skipping the summary repair or the part rename, ignoring or bypassing the knob,
+  renaming message parts too, or mutating the input each fails a test.
 - `tests/unit_tests/test_hle_diamond_search_exclusions.py`: the generator's normalisation, dedup and
   audit trail; the rendered and the committed list loading through the real Tavily parser and
   blocking load-bearing hosts; the committed list being at least as strict as `benchmarks/hle`'s;
@@ -268,8 +293,78 @@ Model-free checks that have been run (commands below, from the repository root):
   gym env validate --manifest benchmarks/hle_diamond/text/manifest.yaml   # hle_diamond_text: 728 rows (benchmark)
   ```
 
-Not yet run: a gold-as-prediction sweep (every `expected_answer` fed back as the response) through
-the judge with the dedicated judge model, which needs a judge endpoint and belongs to the pilot run.
+### Gold-as-prediction sweep and negative controls (model-free)
+
+Run on 2026-10-16 over the real HTTP `/verify` path (`gym env start` with `config.yaml`, then a
+`--no-serve` collection and `gym eval aggregate`), with every row's `expected_answer` fed back as the
+model's `Answer:` line. No policy model is involved: these are properties of the harness. The judge
+was an oracle stub (a local `/v1/responses` server that grades the filled HLE judge prompt by
+normalised exact match of the final `Answer:` line against `[correct_answer]`), so only Gym's plumbing
+is measured:
+
+| Input fed back as the answer | Rows scored 1.0 |
+| --- | --- |
+| the reference answer | 1000/1000 (reasoning 500/500, knowledge 500/500; exactMatch 796/796, multipleChoice 204/204) |
+| empty final answer | 0/1000 (`failure_reason: empty_final_answer`, no judge call) |
+| `Answer: None` | 0/1000 |
+| a wrong answer | 0/1000 |
+| the reference followed by a contradicting second `Answer:` line | 0/1000 |
+
+On the gold file `slices/partition/reasoning/mean/reward` and `slices/partition/knowledge/mean/reward`
+were 1.0 and 1.0 with `question_count` 500 each; a mixed file (gold on the reasoning rows, wrong on
+the knowledge rows) gave `mean/reward` 0.5 with slices 1.0 / 0.0; `uuid` and `partition` were echoed
+on every saved row.
+
+### Judge agreement on gold (a judge property, not a model score)
+
+The same gold sweep through the dedicated judge (`judge_openai.yaml`, alias `azure/openai/o3-mini`,
+2026-10-16, default effort, no output cap) scored 997/1000 (reasoning 497/500, knowledge 500/500)
+with `judgement_parsing_issue_rate` 0.001, mean judge output 180 tokens, mean latency 3.1 s and 100 s
+wall at concurrency 32. The three misses:
+
+1. `675f556ede1b5c57f5efbf6a`: the judge wrote `Judgement: Yes`; the byte-exact label match returned
+   `no_verdict` and reward 0. A verifier-side false negative, since removed by
+   `judge_labels_case_insensitive` (Scoring).
+2. `671360871b12bd5183fec91a`: the judge dropped a parenthesis while extracting a lambda-calculus
+   answer and judged its own extraction wrong. A judge-model error.
+3. `67c0f062afa64ff0bf4ecf55`: rubric-style reference ("Any five 5-letter words that are headwords
+   ...") that even the reference text fed back verbatim fails. A dataset property (Known limitations).
+
+Negative controls through the same judge on a stratified 100-row sample (80 exactMatch, 20
+multipleChoice):
+
+- `Answer: None`: 2/100 scored 1.0, both multiple-choice items whose correct option literally begins
+  with "None" (Known limitations); the control is confounded on such items and clean on the rest.
+- the reference with a `_wrong` suffix: 14/100 scored 1.0, all on exactMatch rows (14/80); o3-mini
+  treats the suffix as an annotation of the right answer. This is a weak control: 14/80 is an upper
+  bound on the judge's leniency towards decorated right answers, not a false-positive rate for
+  genuinely wrong answers. A control that substitutes another row's reference has not been run.
+- a different option letter on the multiple-choice rows: 0/20 scored 1.0.
+
+## Known limitations
+
+- `67c0f062afa64ff0bf4ecf55` carries a rubric-style reference ("Any five 5-letter words that are
+  headwords ..."): the judge prompt asks whether the extracted answer matches `[correct_answer]`, so
+  even the reference fed back verbatim scores 0 with o3-mini. The row is kept because upstream keeps
+  it; expect at most 999/1000 on gold with that judge.
+- At least 11 of the 204 multiple-choice rows have a correct option that literally begins with
+  "None" (read from the prepared rows: the option line of the reference letter starts with "None";
+  9 reasoning, 2 knowledge: `6736c2e82db9d8cc7cd8e607`, `69a738a50a19a2f7b803ca97`,
+  `66fb75ded83ed7a299fdd136`, `67c133211c3841e3c6b8d938`, `66fde2de0b21f205c121aca7`,
+  `672422631fac8550679c4bd6`, `66e8e1056c0b8ace336996ea`, `67253c33ad98e94b47ea3477`,
+  `66ebefa090db075818df99a9`, `670d122102e9032e4a224628`, `67cbde9e89f4b433f1de1ada`). A model
+  answering "None" on them is right, so an `Answer: None` control over the whole set has a floor of
+  about 11/1000, and the two false positives of the 100-row control were two of these rows. The
+  carried `answer_type` and `uuid` let you separate them.
+- The Pi presets do not transmit the thinking level: the Pi adapter registers its provider with
+  `compat.supportsReasoningEffort: false`, so Pi's own request carries no `reasoning_effort` whatever
+  `thinking:` says (Prompting > Reasoning effort). Label Pi runs "effort not transmitted (adapter)";
+  the fix is a change to `responses_api_agents/pi_agent`, outside this benchmark.
+- Gateway timeout: the LiteLLM gateway used for the pilot enforces a 360 s per-attempt limit
+  (HTTP 408, `litellm.Timeout ... Timeout passed=360.0`) and `openai_model` retries a 408 with a fresh
+  generation, so an answer that needs more than six minutes is lost rather than slow (Running the
+  full set says how to report the loss). Not fixable from Gym configuration; ownership of the limit
+  sits with the gateway operators.
 
 ## Quickstart
 
@@ -289,8 +384,9 @@ cached `huggingface-cli login` / `HF_TOKEN` credentials (verified: the gated par
 
 ### No-tools runs
 
-**Not run as written** while writing this README: rollout collection belongs to the pilot. Every
-part of the command is load-bearing:
+**Not run as written**: the pilot and the full-set collection used the two-command shape of Running
+the full set, where `gym env start --config` composes the judge override. This one-process form is
+kept as the shortest path to a `--benchmark` run; every part of it is load-bearing:
 
 - `--split benchmark` is required: the dataset is `type: benchmark` and the CLI has no default split
   (without it: `gym eval run: error: missing required configuration: split`).
@@ -400,6 +496,66 @@ gym eval run --benchmark hle_diamond/opencode --split benchmark --model-type ope
 - Token and latency figures are not comparable with the announcement's mean output tokens: the
   harness's system prompt and tool schema dominate the input, and the call is chat-completions.
 
+## Running the full set
+
+The comparable run is split into servers and collection, so that one process holds the model servers
+for the whole run and the judge override composes with `--config`: under `gym env start` every
+`--config` lands in `config_paths` in command-line order, so `judge_openai.yaml` merges after
+`config.yaml` and wins, whereas the `--benchmark ... --split benchmark` form of the Quickstart needs
+the raw `+config_paths=[...]` token (Scoring > Dedicated judge). Under `--no-serve` the dataset is
+named by `--input`, `--split` is not read, and the servers must already be up. Run as written on
+2026-10-16 for the 20-row pilot (`--input` pointing at the sample, `--concurrency 20`); the full-set
+collection was launched with this shape:
+
+```bash
+RUN=/abs/path/hle-diamond-runs/<model-slug>/<UTC timestamp>   # outside the repository
+mkdir -p "$RUN/model-calls"
+
+# 1. Servers: policy, hle_diamond judge resources server, agent, dedicated judge. Blocks until stopped.
+gym env start \
+    --config responses_api_models/openai_model/configs/openai_model.yaml \
+    --config benchmarks/hle_diamond/config.yaml \
+    --config benchmarks/hle_diamond/judge_openai.yaml \
+    ++policy_model_name=<gateway model id> \
+    ++observability_enabled=true ++model_call_capture_dir="$RUN/model-calls"
+
+# 2. Collection, from a second shell. No --split, no temperature, top-p or output cap.
+gym eval run --no-serve \
+    --agent hle_diamond_equivalence_llm_judge_simple_agent \
+    --input benchmarks/hle_diamond/data/hle_diamond_benchmark.jsonl \
+    --output "$RUN/rollouts.jsonl" \
+    --num-repeats 1 --concurrency 32 \
+    ++responses_create_params.reasoning.effort=high \
+    ++route_failures_to_sidecar=true \
+    ++observability_enabled=true ++model_call_capture_dir="$RUN/model-calls"
+
+# 3. Stop: SIGINT the `gym env start` process; its KeyboardInterrupt path shuts every server down.
+```
+
+For the 728-row text variant (not run as written) pass `text.yaml` in place of `config.yaml`,
+`--agent hle_diamond_text_equivalence_llm_judge_simple_agent` and the text file as `--input`.
+
+Claude and Gemini models through LiteLLM-style gateways return reasoning items with `summary: null`
+and `output_text` parts, which `NeMoGymResponse` rejects; `openai_model` repairs exactly that shape
+before validation (`normalize_reasoning_items`, on by default, see its README). Without it every such
+rollout was lost to a validation error (0/20 scored for both families in the pilot), so the policy
+server for those families must run code that has the knob.
+
+### Reporting a full run
+
+Every full run passes `++route_failures_to_sidecar=true`, so a row whose model call fails (the
+gateway timeout, an HTTP 500) goes to the failure sidecar instead of ending the run. Report, next to
+every number:
+
+- Coverage: scored rows / 1000, and lost rows by failure kind from the sidecar (the 408
+  `litellm.Timeout` rows are the gateway's 360 s per-attempt limit).
+- Two accuracies: `mean/reward` over the scored rows, and accuracy with the lost rows counted as
+  wrong, which is upstream's denominator (all 1000 questions). Lost rows are the longest generations,
+  so the over-scored accuracy is biased upward and the mean output tokens downward; say so beside
+  each figure.
+- The judge alias and run date (Scoring > Dedicated judge), the effort label by model family
+  (Prompting > Reasoning effort), and the partition slices with their `question_count`.
+
 ## Sandboxed agents (with tools)
 
 `hle_diamond/opencode` and `hle_diamond/pi` give the model sandboxed Python tools without search;
@@ -498,7 +654,8 @@ Refresh procedure when upstream changes its blocklist: update `UPSTREAM_COMMIT` 
 
 ```bash
 pytest tests/unit_tests/test_hle_diamond.py tests/unit_tests/test_hle_diamond_search_exclusions.py \
-    resources_servers/equivalence_llm_judge/tests/test_app.py
+    resources_servers/equivalence_llm_judge/tests/test_app.py \
+    responses_api_models/openai_model/tests/test_reasoning_item_normalizer.py
 ```
 
 ## Licensing
