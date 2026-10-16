@@ -21,6 +21,7 @@ Importing ``nemo_gym`` does not eagerly import the server stack.
 """
 
 import importlib
+import inspect
 import subprocess
 import sys
 
@@ -70,6 +71,46 @@ EXPECTED_EAGER_EXPORTS = {
     "__package_name__",
     "__version__",
 }
+
+_POSITIONAL = inspect.Parameter.POSITIONAL_OR_KEYWORD
+_KEYWORD = inspect.Parameter.KEYWORD_ONLY
+_REQUIRED = inspect.Parameter.empty
+
+# nemo_gym.in_process: plan a benchmark in one call, then run single tasks against running servers.
+# Changes must be additive: a new parameter is optional and keyword-only. Removing or renaming a parameter,
+# or changing its default, needs a deprecation first; update this list in the same change.
+EXPECTED_IN_PROCESS_TASK_SIGNATURES = {
+    "plan_benchmark": [
+        ("benchmark", _POSITIONAL, _REQUIRED),
+        ("task_ids", _KEYWORD, None),
+        ("overrides", _KEYWORD, None),
+        ("work_dir", _KEYWORD, None),
+    ],
+    "TaskRunner.__init__": [
+        ("self", _POSITIONAL, _REQUIRED),
+        ("rows", _POSITIONAL, _REQUIRED),
+        ("head_server", _KEYWORD, _REQUIRED),
+    ],
+    "TaskRunner.run_task": [
+        ("self", _POSITIONAL, _REQUIRED),
+        ("task_id", _POSITIONAL, _REQUIRED),
+        ("num_repeats", _KEYWORD, 1),
+        ("rollout_id", _KEYWORD, None),
+    ],
+    "TaskRunner.task_ids": [("self", _POSITIONAL, _REQUIRED)],
+}
+
+
+@pytest.mark.parametrize("qualified_name", sorted(EXPECTED_IN_PROCESS_TASK_SIGNATURES))
+def test_in_process_task_api_keeps_its_signature(qualified_name: str):
+    from nemo_gym import in_process
+
+    target = in_process
+    for part in qualified_name.split("."):
+        target = getattr(target, part)
+    parameters = inspect.signature(target).parameters.values()
+    actual = [(parameter.name, parameter.kind, parameter.default) for parameter in parameters]
+    assert actual == EXPECTED_IN_PROCESS_TASK_SIGNATURES[qualified_name]
 
 
 def test_public_api_contract_is_explicit():
