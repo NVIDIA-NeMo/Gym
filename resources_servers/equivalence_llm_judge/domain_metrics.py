@@ -1,107 +1,95 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""HLE domain summaries and repeat-level intervals from scored verifier responses."""
+"""HLE domain and modality summaries using Gym's shared aggregation."""
 
 import math
 from typing import Any
 from urllib.parse import quote
 
-from scipy.stats import t
+from nemo_gym.reward_profile import compute_aggregate_metrics
 
 
-def repeat_confidence_interval(observations: list[tuple]) -> tuple[dict | None, str | None]:
-    """Student-t interval across repeats with identical question coverage."""
-    repeats = {}
-    for question, repeat, value in observations:
-        if type(repeat) is not int or repeat < 0:
-            return None, "Missing or invalid repeat identity"
-        samples = repeats.setdefault(repeat, {})
-        if question in samples:
-            return None, "Duplicate question within a repeat"
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
-            return None, "Missing or invalid observations"
-        samples[question] = value
-    if len(repeats) < 2:
-        return None, "At least two evaluation repeats are required"
-    coverage = [set(samples) for samples in repeats.values()]
-    if any(keys != coverage[0] for keys in coverage[1:]):
-        return None, "Repeat question coverage differs"
-    means = [sum(samples.values()) / len(samples) for _, samples in sorted(repeats.items())]
-    mean = sum(means) / len(means)
-    sem = math.sqrt(sum((value - mean) ** 2 for value in means) / (len(means) - 1) / len(means))
-    half_width = float(t.ppf(0.975, len(means) - 1)) * sem if sem else 0.0
-    return {
-        "level": 0.95,
-        "lower": mean - half_width,
-        "upper": mean + half_width,
-        "half_width": half_width,
-        "method": "Student t interval across repeat-level estimates",
-        "kind": "across_repeats",
-        "sampling_unit": "evaluation repeat on the fixed benchmark",
-        "repeat_count": len(means),
-    }, None
+def repeat_coverage_reason(questions: list[list[dict[str, Any]]]) -> str | None:
+    """Require the same labeled questions in every repeat before publishing CIs."""
+    coverage = []
+    for task in questions:
+        repeats = [row.get("_ng_rollout_index") for row in task]
+        if any(type(repeat) is not int or repeat < 0 for repeat in repeats):
+            return "Missing or invalid repeat identity"
+        if len(set(repeats)) != len(repeats):
+            return "Duplicate question within a repeat"
+        coverage.append(set(repeats))
+    if any(repeats != coverage[0] for repeats in coverage[1:]):
+        return "Repeat question coverage differs"
+    if not coverage or len(coverage[0]) < 2:
+        return "At least two evaluation repeats are required"
+    return None
 
 
 def compute_domain_metrics(tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
-    """Emit flat, exporter-friendly category and raw-subject accuracy/token metrics.
+    """Aggregate category, raw subject and text/vision slices of scored responses.
 
-    Called after masked rollouts have been excluded by compute_aggregate_metrics.
-    A domain is never guessed; missing labels and token usage have explicit counts.
+    The parent aggregator has already excluded masked outcomes. Each slice calls
+    the same public aggregator without this custom hook, so its means and CIs use
+    Gym's normal repeat machinery, without recursive slicing or separate CI math.
     """
     metrics: dict[str, Any] = {}
-    for field in ("category", "raw_subject"):
+    for field in ("category", "raw_subject", "has_image"):
+        namespace = "modality" if field == "has_image" else field
         groups: dict[str, list[list[dict[str, Any]]]] = {}
         missing = 0
         for task in tasks:
-            labels = {row.get(field) for row in task}
-            if len(labels) != 1:
+            labels = [row.get(field) for row in task]
+            if not labels:
+                continue
+            if any(label != labels[0] or type(label) is not type(labels[0]) for label in labels):
                 raise ValueError(f"Inconsistent {field} labels across repeats of a question")
-            label = next(iter(labels), None)
+            label = labels[0]
+            if field == "has_image":
+                label = ("vision" if label else "text") if type(label) is bool else None
             if not isinstance(label, str) or not label.strip():
                 missing += len(task)
                 continue
             groups.setdefault(label, []).append(task)
-        metrics[f"domains/{field}/missing_label_rollouts"] = missing
+        metrics[f"domains/{namespace}/missing_label_rollouts"] = missing
         for label, questions in sorted(groups.items()):
-            prefix = f"domains/{field}/{quote(label, safe='')}/"
+            prefix = f"domains/{namespace}/{quote(label, safe='')}/"
+            rows = [row for task in questions for row in task]
             metrics[prefix + "question_count"] = len(questions)
-            metrics[prefix + "rollout_count"] = sum(map(len, questions))
+            metrics[prefix + "rollout_count"] = len(rows)
+            coverage_reason = repeat_coverage_reason(questions)
+            aggregate = compute_aggregate_metrics(rows).agent_metrics
             for metric in ("reward", "output_tokens"):
-                clusters = []
-                observations = []
-                missing_values = 0
-                for question_index, task in enumerate(questions):
-                    values = []
-                    for row in task:
-                        value = (
-                            row.get("reward")
-                            if metric == "reward"
-                            else ((row.get("response") or {}).get("usage") or {}).get("output_tokens")
-                        )
-                        valid = (
-                            not isinstance(value, bool)
-                            and isinstance(value, (int, float))
-                            and math.isfinite(value)
-                            and value >= 0
-                            and (metric != "reward" or value <= 1)
-                        )
-                        if valid:
-                            values.append(value)
-                            observations.append((question_index, row.get("_ng_rollout_index"), value))
-                        else:
-                            missing_values += 1
-                    clusters.append((sum(values), len(values)))
+                values = [
+                    row.get("reward")
+                    if metric == "reward"
+                    else ((row.get("response") or {}).get("usage") or {}).get("output_tokens")
+                    for row in rows
+                ]
+                missing_values = sum(
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(value)
+                    or value < 0
+                    or (metric == "reward" and value > 1)
+                    for value in values
+                )
                 metrics[prefix + f"missing/{metric}"] = missing_values
+                metrics[prefix + f"ci_available/{metric}"] = False
                 if missing_values:
+                    metrics[prefix + f"ci_unavailable_reason/{metric}"] = "Missing or invalid observations"
                     continue
-                metrics[prefix + f"mean/{metric}"] = sum(v for v, _ in clusters) / sum(n for _, n in clusters)
-                repeat_interval, reason = repeat_confidence_interval(observations)
-                metrics[prefix + f"ci_available/{metric}"] = repeat_interval is not None
-                if repeat_interval:
-                    metrics[prefix + f"ci_low_95_across_repeats/{metric}"] = repeat_interval["lower"]
-                    metrics[prefix + f"ci_high_95_across_repeats/{metric}"] = repeat_interval["upper"]
-                    metrics[prefix + f"repeat_count/{metric}"] = repeat_interval["repeat_count"]
-                else:
-                    metrics[prefix + f"ci_unavailable_reason/{metric}"] = reason
-    metrics["domains/ci_method"] = "Student t interval across repeat-level estimates (default)"
+                metrics[prefix + f"mean/{metric}"] = aggregate[f"mean/{metric}"]
+                low = aggregate.get(f"ci_low_95_across_repeats/mean/{metric}")
+                high = aggregate.get(f"ci_high_95_across_repeats/mean/{metric}")
+                if coverage_reason or low is None or high is None:
+                    metrics[prefix + f"ci_unavailable_reason/{metric}"] = (
+                        coverage_reason or "Gym did not emit a repeat interval"
+                    )
+                    continue
+                metrics[prefix + f"ci_available/{metric}"] = True
+                metrics[prefix + f"ci_low_95_across_repeats/{metric}"] = low
+                metrics[prefix + f"ci_high_95_across_repeats/{metric}"] = high
+                metrics[prefix + f"repeat_count/{metric}"] = aggregate["num_repeats"]
+    metrics["domains/ci_method"] = "Gym Student t interval across repeat-level estimates"
     return metrics

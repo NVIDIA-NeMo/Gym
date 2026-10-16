@@ -64,7 +64,7 @@ def test_hle_preparation_preserves_domain_labels(monkeypatch, tmp_path, include_
     import nemo_gym.prompt as prompt
 
     data = {
-        "image": "",
+        "image": "image-data" if include_vision else "",
         "question": "Q",
         "answer": "A",
         "answer_type": "exactMatch",
@@ -84,6 +84,7 @@ def test_hle_preparation_preserves_domain_labels(monkeypatch, tmp_path, include_
     monkeypatch.setattr(prepare, "OUTPUT_FPATH", tmp_path / "text.jsonl")
     monkeypatch.setattr(prepare, "OUTPUT_VISION_FPATH", tmp_path / "vision.jsonl")
     record = json.loads(prepare.prepare(include_vision=include_vision).read_text())
+    assert record["has_image"] is include_vision
     assert {key: record[key] for key in ("uuid", "category", "raw_subject")} == {
         "uuid": "q1",
         "category": "Math",
@@ -97,9 +98,17 @@ def test_hle_verified_preserves_domain_labels(vision, monkeypatch):
 
     monkeypatch.setattr(prepare, "build_image_input", lambda *args: [])
     record = prepare.format_entry(
-        {"id": "q1", "question": "Q", "answer": "A", "category": "Math", "raw_subject": "Algebra"},
+        {
+            "id": "q1",
+            "question": "Q",
+            "answer": "A",
+            "category": "Math",
+            "raw_subject": "Algebra",
+            "image": "image-data" if vision else "",
+        },
         prompt_config={} if vision else None,
     )
+    assert record["has_image"] is vision
     assert record["category"] == "Math"
     assert record["raw_subject"] == "Algebra"
 
@@ -119,3 +128,49 @@ def test_repeat_ci_requires_matching_repeated_questions():
     incomplete = compute_domain_metrics([tasks[0], tasks[1][:1]])
     assert incomplete[prefix + "ci_available/reward"] is False
     assert "coverage" in incomplete[prefix + "ci_unavailable_reason/reward"]
+
+
+def test_text_vision_slices_match_shared_aggregation():
+    tasks = [
+        [
+            {
+                **row(q, repeat, float(q != 3) if repeat == 0 else float(q != 0), 100 + 20 * q + 10 * repeat),
+                "has_image": q == 3,
+            }
+            for repeat in (0, 1)
+        ]
+        for q in range(4)
+    ]
+    result = compute_domain_metrics(tasks)
+    assert result["domains/modality/missing_label_rollouts"] == 0
+    for label, has_image, count in (("text", False, 3), ("vision", True, 1)):
+        prefix = f"domains/modality/{label}/"
+        subset = [r for task in tasks for r in task if r["has_image"] is has_image]
+        native = compute_aggregate_metrics(subset).agent_metrics
+        assert result[prefix + "question_count"] == count
+        assert result[prefix + "rollout_count"] == 2 * count
+        for metric in ("reward", "output_tokens"):
+            assert result[prefix + f"mean/{metric}"] == native[f"mean/{metric}"]
+            assert (
+                result[prefix + f"ci_low_95_across_repeats/{metric}"]
+                == native[f"ci_low_95_across_repeats/mean/{metric}"]
+            )
+            assert (
+                result[prefix + f"ci_high_95_across_repeats/{metric}"]
+                == native[f"ci_high_95_across_repeats/mean/{metric}"]
+            )
+    assert result["domains/modality/text/mean/reward"] == pytest.approx(5 / 6)
+    assert result["domains/modality/vision/mean/reward"] == 0.5
+    assert compute_aggregate_metrics([r for task in tasks for r in task]).key_metrics["mean/reward"] == 0.75
+
+
+def test_unknown_modality_is_not_assumed_text_and_single_repeat_has_no_interval():
+    tasks = [[row(0, 0, 1)], [{**row(1, 0, 0), "has_image": False}]]
+    result = compute_domain_metrics(tasks)
+    assert result["domains/modality/missing_label_rollouts"] == 1
+    assert result["domains/modality/text/question_count"] == 1
+    assert result["domains/modality/text/mean/reward"] == 0
+    assert result["domains/modality/text/ci_available/reward"] is False
+    assert "domains/modality/vision/mean/reward" not in result
+    with pytest.raises(ValueError, match="Inconsistent has_image"):
+        compute_domain_metrics([[{**row(0, 0, 1), "has_image": True}, {**row(0, 1, 1), "has_image": False}]])
