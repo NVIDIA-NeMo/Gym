@@ -33,8 +33,8 @@ from nemo_gym.base_resources_server import AggregateMetricsRequest
 from nemo_gym.failure_kinds import VERIFIER_ERROR
 from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.sandbox.verification import SandboxVerificationError
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.verifier_utils.sandbox_verification import SandboxVerificationError
 
 
 class TestApp:

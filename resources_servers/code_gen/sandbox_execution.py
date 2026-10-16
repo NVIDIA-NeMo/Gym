@@ -16,7 +16,7 @@
 """Grade a candidate in a fresh provider sandbox instead of on a Ray worker.
 
 The runner and the unchanged grading harness are uploaded with the request and run by
-``nemo_gym.sandbox.verification.run_verification_sandbox``, which raises
+``nemo_gym.verifier_utils.sandbox_verification.run_verification_sandbox``, which raises
 ``SandboxVerificationError`` on a sandbox or runner failure so the caller can mask the sample.
 Candidate failures (wrong answer, timeout, crash) come back as normal harness results.
 """
@@ -28,7 +28,7 @@ from typing import Any
 from pydantic import BaseModel, StrictBool, StrictInt
 
 from nemo_gym.sandbox import SandboxProvider
-from nemo_gym.sandbox.verification import SandboxVerificationConfig, run_verification_sandbox
+from nemo_gym.verifier_utils.sandbox_verification import SandboxVerificationConfig, run_verification_sandbox
 
 
 _CODE_GEN_DIR = Path(__file__).parent
