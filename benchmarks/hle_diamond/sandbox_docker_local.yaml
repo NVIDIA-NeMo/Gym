@@ -48,7 +48,9 @@ sandbox_docker:
       # Optional: share the host network namespace (`docker run --network host`). Needed on hosts
       # whose firewall drops bridge (docker0) -> host traffic, or whose hostname resolves to a
       # loopback alias such as 127.0.1.1 under the presets' use_absolute_ip: true, since the
-      # container must reach the Gym model server at the advertised address. It also lets the
+      # container must reach the Gym model server at the advertised address. The recipe was
+      # verified end to end (hle/opencode smoke) ONLY with this line uncommented; the bridge
+      # default below is unverified and timed out on that host. Host networking also lets the
       # container reach every service listening on the host, so prefer bridge networking plus
       # `++use_absolute_ip=false ++default_host=<routable host IP>` where the firewall allows it.
       # network: host

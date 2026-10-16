@@ -58,11 +58,12 @@ Answer: {your chosen answer}
 Confidence: {your confidence score between 0% and 100% for your answer}
 ```
 
-This is a deliberate departure from `benchmarks/hle` and `benchmarks/hle_verified`, which share
-Gym's `benchmarks/hle/prompts/default.yaml`, a paraphrase (`{your explanation for your final answer}`,
-`{your succinct, final answer}`). The sole purpose of this benchmark is comparison with the published
-table, so the measured prompt has to be upstream's; one prompt shared across the three HLE benchmarks
-loses to that. Do not "fix" the wording back to the shared file.
+This is a deliberate departure from `benchmarks/hle` and `benchmarks/hle_verified`, whose
+`prompts/default.yaml` files (identical copies, one per benchmark) carry Gym's paraphrase
+(`{your explanation for your final answer}`, `{your succinct, final answer}`). The sole purpose of
+this benchmark is comparison with the published table, so the measured prompt has to be upstream's;
+keeping the Gym paraphrase for consistency with the other HLE benchmarks loses to fidelity. Do not
+"fix" the wording back to it.
 
 - `prompts/default.yaml`: the verbatim text as the system message with the bare question as the user
   message, the placement upstream uses (upstream moves the instruction into the user role only for
@@ -89,9 +90,13 @@ default); Gym's shared builder requests `detail: high`, which changes image tili
 on the 272 image rows for OpenAI-family models. Making `detail` configurable would be a change to
 `nemo_gym.vision_input`, not to this benchmark.
 
-The upstream harness sends no temperature and no output-token cap. When comparing with the published
-table, send `++responses_create_params.reasoning.effort=high` and nothing else; on this gateway a
-`temperature` is dropped by some models and rejected by others.
+Upstream calls the chat-completions API directly (`client.chat.completions.create`); this benchmark
+sends a Responses API request through the gateway, which translates it per provider (system-role
+handling, the `reasoning` object, what the response echoes; see Reasoning effort for what survives).
+Upstream sends no temperature and, by default, no output-token cap (`--max_completion_tokens`
+defaults to `None`; the value used for the published table is not stated). When comparing with the
+published table, send `++responses_create_params.reasoning.effort=high` and nothing else; on this
+gateway a `temperature` is dropped by some models and rejected by others.
 
 ### Reasoning effort
 
@@ -106,9 +111,12 @@ was probed per model (Responses API, `reasoning.effort` low against high on the 
    the gateway. Label such a run "effort not controllable via this gateway (adaptive default)" and
    never call a Claude run "reasoning high".
 3. Every model is still run with the one request shape (`++responses_create_params.reasoning.effort=high`,
-   no temperature, top-p or output cap), so runs differ only in what the gateway does with it. Check
-   `response.usage.output_tokens_details.reasoning_tokens` on the pilot rows and record which label
-   applies before comparing with the published mean output tokens.
+   no temperature, top-p or output cap), so runs differ only in what the gateway does with it. Apply
+   the label by model family from the probe, not from token counts: `reasoning_tokens > 0` is not
+   evidence that the effort was honoured (the Claude models report thousands of reasoning tokens at
+   every setting), and only the GPT models echo the effort (`response.reasoning.effort`; Gemini and
+   Claude echo `reasoning: null`). Record `response.usage.output_tokens_details.reasoning_tokens` on
+   the pilot rows for the mean-output-token comparison only.
 
 On the no-tools path the effort travels on Gym's Responses request. On the sandboxed path it does
 not: `++responses_create_params.reasoning.effort` decorates only Gym's run request, while OpenCode
@@ -125,7 +133,9 @@ each harness's own knob:
   (Pi's levels: `off, minimal, low, medium, high, xhigh, max`). **Caveat:** the Pi adapter registers
   its provider with `compat.supportsReasoningEffort: false`, and Pi's `openai-completions` path emits
   `reasoning_effort` only when that flag is true, so Pi runs through this adapter do not transmit
-  the level today. The knob is the right value and takes effect once the adapter exposes the flag;
+  the level today (established by inspecting `pi_agent/app.py`, whose provider block the sandboxed
+  adapter reuses, and Pi 0.85.1's `openai-completions` path; no Pi request has been captured yet).
+  The knob is the right value and takes effect once the adapter exposes the flag;
   until then label Pi runs "effort not transmitted (adapter)".
 
 ## Dataset format
@@ -199,12 +209,18 @@ Upstream also reports a calibration error from the model's stated confidence; it
 `judge_openai.yaml` is a composable override, not a benchmark: it declares no dataset and does not
 appear in `gym list benchmarks`. It defines `hle_diamond_judge_model`, an `openai_model` on the
 policy gateway (`policy_base_url` / `policy_api_key` from `env.yaml`) serving
-`HLE_DIAMOND_JUDGE_MODEL` (default `azure/openai/o3-mini`, the upstream judge family), and repoints
-the single `hle_diamond_equivalence_llm_judge_resources_server` that every preset shares:
+`HLE_DIAMOND_JUDGE_MODEL` (default `azure/openai/o3-mini`), and repoints the single
+`hle_diamond_equivalence_llm_judge_resources_server` that every preset shares:
 
 ```bash
 gym eval run --benchmark hle_diamond --split benchmark '+config_paths=[benchmarks/hle_diamond/judge_openai.yaml]' ...
 ```
+
+Judge identity is a documented divergence, next to the `judge.txt` format adaptation and the uncapped
+judge call: upstream pins the judge to the snapshot `o3-mini-2025-01-31`, whereas `azure/openai/o3-mini`
+is a gateway alias whose served snapshot is not pinned and cannot be read from
+`judge_evaluations[*].response.model` (the gateway echoes the requested id). Record the alias and the
+run date next to every number.
 
 Composition order is load-bearing. The presets set `judge_model_server` directly and a later entry in
 `config_paths` overrides an earlier one (`GlobalConfigDictParser.load_extra_config_paths`), so the
@@ -301,19 +317,26 @@ coverage is not comparable with the published table.
 
 Before treating a run as comparable, check on the pilot rows:
 
-- Reasoning effort was honoured or is not controllable (Prompting > Reasoning effort): confirm
-  `response.usage.output_tokens_details.reasoning_tokens` and label the run accordingly.
-- The judge is the dedicated one (`judge_evaluations[*].response.model`) and
-  `judgement_parsing_issue_rate` is near zero.
+- The effort label, by model family (Prompting > Reasoning effort): GPT-6 Astra, GPT-6.1 Sol and
+  Gemini 4 Argon are "reasoning high" (for the GPT models also confirm the echoed
+  `response.reasoning.effort == "high"`); Claude Opus 5.5, Claude Sonnet 5.5 and Claude Opus 5 are
+  "effort not controllable via this gateway (adaptive default)". `reasoning_tokens > 0` is not
+  evidence either way.
+- The judge is the dedicated one: `judge_evaluations[*].response.model` echoes the requested alias
+  (`azure/openai/o3-mini` by default; the served snapshot is not verifiable, so record the alias and
+  the run date), and `judgement_parsing_issue_rate` is near zero.
 - Coverage: rows evaluated / 1000, or `coverage/imputed` with the upstream denominator (see Scoring).
 
 ### Sandboxed presets on a local Docker host
 
-**Not run as written** for `hle_diamond`. The same recipe (Docker provider, host networking, the
-OpenCode effort knob, the dedicated-judge composition aside) was run end to end on `hle/opencode`
-for two rows before these presets existed, which is where the facts below come from. Every run
-through this recipe is **comparison infrastructure only: egress is unrestricted**, and its results
-must carry the label "local Docker; egress not restricted".
+**Not run as written** for `hle_diamond`. The same recipe (Docker provider, the OpenCode effort knob;
+the dedicated-judge composition aside) was run end to end on `hle/opencode` for two rows before these
+presets existed, which is where the facts below come from, and only with `network: host` uncommented:
+on the verifying workstation bridge networking timed out (ufw drops docker0 to host traffic and the
+hostname resolves to `127.0.1.1`). The committed override keeps bridge networking as the default
+because it exposes the least, but that form is unverified; if the first rollout hangs on the model
+call, uncomment `network: host`. Every run through this recipe is **comparison infrastructure only:
+egress is unrestricted**, and its results must carry the label "local Docker; egress not restricted".
 
 ```bash
 # The presets always compose nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml, whose
@@ -343,9 +366,10 @@ gym eval run --benchmark hle_diamond/opencode --split benchmark --model-type ope
   any provider but OpenSandbox). Only the agent the preset defines is started; the other block stays
   a partial, inert entry. It also replaces the presets' environment note, which says internet is
   disabled, with the truth.
-- Uncomment `network: host` in the override on hosts whose firewall drops bridge (docker0) to host
-  traffic or whose hostname resolves to a loopback alias such as `127.0.1.1` under the presets'
-  `use_absolute_ip: true`: the container must reach the Gym model server at the advertised address.
+- Uncomment `network: host` (the verified form) in the override on hosts whose firewall drops
+  bridge (docker0) to host traffic or whose hostname resolves to a loopback alias such as
+  `127.0.1.1` under the presets' `use_absolute_ip: true`: the container must reach the Gym model
+  server at the advertised address.
   Host networking also lets the container reach every service on the host; where the firewall allows
   it, prefer bridge networking with `++use_absolute_ip=false ++default_host=<routable host IP>`.
 - The Docker provider ignores `sandbox_config.ttl_s` when an entrypoint is set, and the presets set
@@ -356,8 +380,10 @@ gym eval run --benchmark hle_diamond/opencode --split benchmark --model-type ope
 
 ### Reading sandboxed results
 
-- `response.status` is `null` on sandboxed rows (the adapter synthesises the response). Read the
-  outcome from `opencode_finished`, `opencode_failed`, `opencode_exit_code` and
+- `response.status` is `null` on sandboxed rows (the adapter synthesises the response) unless the
+  output limit was hit, when the adapter sets `incomplete` with
+  `incomplete_details.reason = max_output_tokens`. Read success or failure from
+  `opencode_finished`, `opencode_failed`, `opencode_exit_code` and
   `opencode_export_found` (OpenCode) or `finished_naturally`, `pi_failed`, `pi_exit_code` and
   `pi_error_type` (Pi); the aggregate metrics carry `mean/opencode_failed` and `mean/opencode_finished`.
 - `ng_trajectory`, `ng_perf` and `ng_model_call_capture` are attached only with
@@ -366,8 +392,11 @@ gym eval run --benchmark hle_diamond/opencode --split benchmark --model-type ope
 - Confirm tool use: at least one pilot row must show `ng_perf.num_tool_calls > 0` (or a `tool` part
   in the harness transcript under the artifacts directory). Otherwise the sandbox was never
   exercised and the run is a no-tools run through a different prompt path, not a with-tools result.
-- Confirm effort: the captured OpenCode request body carries `reasoning_effort: high`; a captured Pi
-  request does not (Prompting > Reasoning effort).
+- Confirm effort: the captured OpenCode request body carries `reasoning_effort: high` (seen in the
+  `hle/opencode` smoke capture). Pi's request will not carry it, by inspection of the adapter's
+  `compat.supportsReasoningEffort: false` and Pi 0.85.1's `openai-completions` path rather than from
+  a capture (no Pi run has been captured yet); confirm on the first Pi capture (Prompting > Reasoning
+  effort).
 - Token and latency figures are not comparable with the announcement's mean output tokens: the
   harness's system prompt and tool schema dominate the input, and the call is chat-completions.
 
