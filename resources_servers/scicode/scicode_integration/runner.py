@@ -213,17 +213,14 @@ _INHERITED_PYTHON_ENV = (
     "VIRTUAL_ENV",
     "__PYVENV_LAUNCHER__",
 )
-_INFRASTRUCTURE_ERROR_MARKERS = (
-    "OpenBLAS blas_thread_init:",
-    "Resource temporarily unavailable",
-    "PyCapsule_Import could not import module",
-    "Error importing numpy",
-    "numpy.core._multiarray_umath failed to import",
-    "ModuleNotFoundError: No module named 'h5py'",
-    "ModuleNotFoundError: No module named 'numpy'",
-    "ModuleNotFoundError: No module named 'scipy'",
-    "ModuleNotFoundError: No module named 'sympy'",
-)
+# Check only grader-owned dependencies. Solution libraries can legitimately differ
+# between the canonical environments and must remain ordinary per-environment failures.
+_GRADING_PREFLIGHT_PROGRAM = """
+import numpy
+import scipy.sparse
+import h5py
+numpy.linalg.solve(numpy.eye(1), numpy.ones(1))
+"""
 
 
 def _bounded_stderr(stderr: bytes) -> str:
@@ -235,8 +232,31 @@ def _bounded_stderr(stderr: bytes) -> str:
     return f"{decoded[:half]}\n... stderr truncated ...\n{decoded[-half:]}"
 
 
-def _is_infrastructure_error(error: str) -> bool:
-    return any(marker in error for marker in _INFRASTRUCTURE_ERROR_MARKERS)
+def _grading_child_env() -> dict[str, str]:
+    """Keep the resource server's Python paths out of separately frozen grading environments."""
+    child_env = os.environ.copy()
+    for variable in _INHERITED_PYTHON_ENV:
+        child_env.pop(variable, None)
+    child_env.update(_GRADING_THREAD_ENV)
+    return child_env
+
+
+def preflight_grading_interpreter(python_executable: str, *, timeout_secs: float = 30.0) -> str | None:
+    """Check required libraries in a separate process that never executes model code."""
+    try:
+        proc = subprocess.run(
+            [python_executable, "-c", _GRADING_PREFLIGHT_PROGRAM],
+            capture_output=True,
+            env=_grading_child_env(),
+            timeout=timeout_secs,
+        )
+    except subprocess.TimeoutExpired:
+        return "grading environment preflight timed out"
+    except OSError as error:
+        return str(error)
+    if proc.returncode != 0:
+        return _bounded_stderr(proc.stderr) or f"grading environment preflight exited with code {proc.returncode}"
+    return None
 
 
 def sanitize_test(test_case: str) -> str:
@@ -277,16 +297,10 @@ def run_substep(program: str, timeout_secs: float, python_executable: str | None
         # Numerical libraries otherwise size their native thread pools to the host's CPU count.
         # Concurrent SciCode subprocesses can then exceed a cluster's process/thread quota before
         # any model code executes. Pin each isolated grading process to one native thread.
-        child_env = os.environ.copy()
-        # The resources server runs in its own uv-managed environment. Do not leak that
-        # environment's Python path or venv selection into separately frozen grading venvs.
-        for variable in _INHERITED_PYTHON_ENV:
-            child_env.pop(variable, None)
-        child_env.update(_GRADING_THREAD_ENV)
         proc = subprocess.run(
             [python_executable or sys.executable, source_path],
             capture_output=True,
-            env=child_env,
+            env=_grading_child_env(),
             timeout=timeout_secs,
         )
     except subprocess.TimeoutExpired:
@@ -304,5 +318,6 @@ def run_substep(program: str, timeout_secs: float, python_executable: str | None
     return {
         "passed": passed,
         "error": error,
-        "infrastructure_error": False if passed else _is_infrastructure_error(error),
+        # Once model code runs, stderr is model-controlled and cannot identify infrastructure failures.
+        "infrastructure_error": False,
     }

@@ -16,6 +16,7 @@ import hashlib
 import subprocess
 import sys
 import tempfile
+import venv
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
@@ -29,7 +30,12 @@ from resources_servers.scicode.app import (
     ScicodeResourcesServerConfig,
     ScicodeVerifyRequest,
 )
-from resources_servers.scicode.scicode_integration.runner import build_test_program, run_substep, sanitize_test
+from resources_servers.scicode.scicode_integration.runner import (
+    build_test_program,
+    preflight_grading_interpreter,
+    run_substep,
+    sanitize_test,
+)
 
 
 def _server(test_data_fpath=None, **config_overrides):
@@ -41,7 +47,11 @@ def _server(test_data_fpath=None, **config_overrides):
         test_data_fpath=test_data_fpath,
         **config_overrides,
     )
-    return ScicodeResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    # Most server tests isolate grading behavior from external scientific dependencies.
+    with patch.object(app, "preflight_grading_interpreter", return_value=None):
+        server = ScicodeResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        server._resolve_grading_interpreters()
+    return server
 
 
 def _response() -> NeMoGymResponse:
@@ -118,6 +128,21 @@ def test_run_substep_accepts_explicit_python_interpreter():
     assert run_substep("assert 1 == 1", timeout_secs=10.0, python_executable=sys.executable)["passed"] is True
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Error importing numpy",
+        "ModuleNotFoundError: No module named 'numpy'",
+        "OpenBLAS blas_thread_init: Resource temporarily unavailable",
+    ],
+)
+def test_generated_error_text_is_not_an_infrastructure_failure(message):
+    result = run_substep(f"raise RuntimeError({message!r})", timeout_secs=10.0)
+    assert result["passed"] is False
+    assert message in result["error"]
+    assert result["infrastructure_error"] is False
+
+
 def test_run_substep_reports_interpreter_launch_error():
     result = run_substep("assert True", timeout_secs=10.0, python_executable="/does/not/exist/python")
     assert result["passed"] is False
@@ -147,28 +172,70 @@ def test_run_substep_limits_numerical_library_threads():
     assert "VIRTUAL_ENV" not in child_env
 
 
-def test_run_substep_classifies_openblas_thread_failure_as_infrastructure_error():
+def test_preflight_reports_native_library_initialization_failure():
     stderr = b"OpenBLAS blas_thread_init: pthread_create failed: Resource temporarily unavailable"
     with patch(
         "resources_servers.scicode.scicode_integration.runner.subprocess.run",
         return_value=subprocess.CompletedProcess(args=[], returncode=1, stdout=b"", stderr=stderr),
     ):
-        result = run_substep("assert True", timeout_secs=10.0)
+        error = preflight_grading_interpreter(sys.executable)
 
-    assert result["passed"] is False
-    assert result["infrastructure_error"] is True
+    assert "OpenBLAS blas_thread_init" in error
 
 
-def test_run_substep_classifies_missing_required_dependency_as_infrastructure_error():
+def test_preflight_reports_missing_required_dependency():
     stderr = b"ModuleNotFoundError: No module named 'numpy'"
     with patch(
         "resources_servers.scicode.scicode_integration.runner.subprocess.run",
         return_value=subprocess.CompletedProcess(args=[], returncode=1, stdout=b"", stderr=stderr),
     ):
-        result = run_substep("import numpy", timeout_secs=10.0)
+        error = preflight_grading_interpreter(sys.executable)
 
-    assert result["passed"] is False
-    assert result["infrastructure_error"] is True
+    assert "No module named 'numpy'" in error
+
+
+def test_preflight_detects_genuinely_missing_numpy(tmp_path):
+    empty_env = tmp_path / "empty-grading-env"
+    venv.EnvBuilder(with_pip=False).create(empty_env)
+    error = preflight_grading_interpreter(str(empty_env / "bin/python"))
+    assert "No module named 'numpy'" in error
+
+
+def test_preflight_reports_missing_interpreter():
+    assert preflight_grading_interpreter("/does/not/exist/python")
+
+
+def test_preflight_timeout_is_an_infrastructure_failure():
+    with patch(
+        "resources_servers.scicode.scicode_integration.runner.subprocess.run",
+        side_effect=subprocess.TimeoutExpired(cmd=[sys.executable], timeout=30),
+    ):
+        assert "timed out" in preflight_grading_interpreter(sys.executable)
+
+
+@pytest.mark.parametrize("timeout_secs", [30.0, 1800.0])
+def test_preflight_uses_only_trusted_imports_and_sanitized_environment(timeout_secs):
+    with (
+        patch.dict(
+            "resources_servers.scicode.scicode_integration.runner.os.environ",
+            {"PYTHONPATH": "/resource/server", "VIRTUAL_ENV": "/resource/server/.venv"},
+        ),
+        patch(
+            "resources_servers.scicode.scicode_integration.runner.subprocess.run",
+            return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout=b"", stderr=b""),
+        ) as mocked_run,
+    ):
+        assert preflight_grading_interpreter(sys.executable, timeout_secs=timeout_secs) is None
+    command = mocked_run.call_args.args[0]
+    assert command[:2] == [sys.executable, "-c"]
+    assert "import numpy" in command[2]
+    assert "import h5py" in command[2]
+    assert "matplotlib" not in command[2]  # Optional solution libraries may differ across OR environments.
+    assert mocked_run.call_args.kwargs["timeout"] == timeout_secs
+    child_env = mocked_run.call_args.kwargs["env"]
+    assert child_env["OPENBLAS_NUM_THREADS"] == "1"
+    assert "PYTHONPATH" not in child_env
+    assert "VIRTUAL_ENV" not in child_env
 
 
 def test_run_substep_null_byte_fails_instead_of_raising():
@@ -186,6 +253,52 @@ def test_run_substep_program_larger_than_arg_max():
 # server
 # ----------------------------
 class TestApp:
+    def test_preflight_failure_stops_server_before_model_code(self):
+        config = ScicodeResourcesServerConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            grading_interpreters=[{"name": "broken", "python_executable": sys.executable}],
+        )
+        with (
+            patch.object(app, "preflight_grading_interpreter", return_value="missing numpy"),
+            patch.object(app, "run_substep") as generated_program,
+            pytest.raises(RuntimeError, match="preflight failed for 'broken'"),
+        ):
+            ScicodeResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        generated_program.assert_not_called()
+
+    def test_preflight_runs_once_per_resolved_interpreter(self):
+        config = ScicodeResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name="", timeout_secs=1800.0)
+        with patch.object(app, "preflight_grading_interpreter", return_value=None) as checked:
+            server = ScicodeResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+            server._resolve_grading_interpreters()
+            server._resolve_grading_interpreters()
+        checked.assert_called_once_with(sys.executable, timeout_secs=1800.0)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("second_passes", [False, True])
+    async def test_verify_generated_error_marker_does_not_abort_or_grading(self, tmp_path, second_passes):
+        targets = tmp_path / "targets.h5"
+        targets.write_bytes(b"fixture")
+        server = _server(
+            test_data_fpath=str(targets),
+            grading_interpreters=[
+                {"name": "2024", "python_executable": sys.executable},
+                {"name": "2025", "python_executable": sys.executable},
+            ],
+            required_grading_interpreters=2,
+        )
+        # Use real subprocess results for a model-controlled traceback and a healthy program.
+        failed = run_substep('raise RuntimeError("Error importing numpy")', timeout_secs=10.0)
+        second = run_substep("assert True", timeout_secs=10.0) if second_passes else failed
+        with patch.object(app, "run_substep", side_effect=[failed, second]) as mocked_run:
+            result = await server.verify(_request(solutions={"1.1": "model code"}, n_steps=1))
+        assert mocked_run.call_count == 2
+        assert result.reward == float(second_passes)
+        assert result.step_environment_results == [{"2024": False, "2025": second_passes}]
+
     @pytest.mark.asyncio
     @pytest.mark.parametrize("has_solution", [False, True])
     async def test_verify_preserves_step_usage(self, has_solution):

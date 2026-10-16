@@ -246,6 +246,7 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
             step_number = sub_steps[cur_step]["step_number"]
             if step_number in body.prefilled_steps_code:
                 previous_llm_code[cur_step] = body.prefilled_steps_code[step_number]
+                step_record["status"] = "prefilled"
                 continue
             if (body.problem_id, cur_step) in PREFILLED_STEPS_CODE:
                 previous_llm_code[cur_step] = PREFILLED_STEPS_CODE[(body.problem_id, cur_step)]

@@ -285,7 +285,7 @@ class TestApp:
         def _post(server_name, url_path, json, cookies):
             if url_path == "/v1/responses":
                 captured["model"].append(json)
-                return _Resp(_model_json("x = 1"))
+                return _Resp(_model_json("x = 1") | {"usage": _usage(100)})
             captured["verify"] = json
             return _Resp({"reward": 1.0})
 
@@ -300,6 +300,11 @@ class TestApp:
         assert "class OfficialVerifiedBlock" in prompt
         assert "self.operator_dict = operator_dict" not in prompt
         assert set(captured["verify"]["solutions"]) == {"62.2"}
+        assert [step["status"] for step in captured["verify"]["step_usage"]] == ["prefilled", "generated"]
+        metrics = _aggregate([{**captured["verify"], "reward": 1.0}])
+        assert metrics.agent_metrics["num_subproblems"] == 1
+        assert metrics.key_metrics["generation_coverage"] == 1.0
+        assert metrics.key_metrics["mean/output_tokens_per_subproblem"] == 100
 
     @pytest.mark.asyncio
     async def test_run_context_window_sentinels_remaining_steps(self):

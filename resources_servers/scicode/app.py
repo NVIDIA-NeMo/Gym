@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
-from scicode_integration.runner import build_test_program, run_substep, sanitize_test
+from scicode_integration.runner import build_test_program, preflight_grading_interpreter, run_substep, sanitize_test
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.base_resources_server import (
@@ -189,6 +189,10 @@ class ScicodeResourcesServer(SimpleResourcesServer):
                 f"{self.config.required_grading_interpreters} grading interpreters, but "
                 f"{len(resolved)} resolved. Configure grading_interpreters explicitly."
             )
+        for name, executable in resolved:
+            # Cold imports on a network filesystem need the same budget as grading, not a tighter cutoff.
+            if error := preflight_grading_interpreter(executable, timeout_secs=self.config.timeout_secs):
+                raise RuntimeError(f"SciCode grading environment preflight failed for {name!r}:\n{error}")
         self._resolved_grading_interpreters = resolved
         return self._resolved_grading_interpreters
 
