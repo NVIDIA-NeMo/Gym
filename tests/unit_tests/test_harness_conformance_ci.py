@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from scripts.harness_conformance.ci import changed_harnesses, report, select_harnesses
+from scripts.harness_conformance.ci import ROOT, changed_harnesses, install_runtime, report, select_harnesses
 from scripts.harness_conformance.registry import HARNESSES
 
 
@@ -84,6 +84,22 @@ def test_missing_base_runs_all(tmp_path, capsys):
     assert changed_harnesses("", root=tmp_path) == list(HARNESSES)
     assert changed_harnesses("missing-base", root=tmp_path) == list(HARNESSES)
     assert "::warning::" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("harness", HARNESSES)
+def test_runtime_install_uses_the_harness_own_requirements_and_overrides(monkeypatch, harness):
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda command, **kwargs: calls.append((command, kwargs.get("cwd"))))
+
+    install_runtime(harness)
+
+    command, cwd = calls[0]
+    adapter = ROOT / "responses_api_agents" / f"{harness}_agent"
+    assert cwd == adapter
+    assert command[command.index("-r") + 1] == "requirements.txt"
+    ships_overrides = (adapter / "overrides.txt").is_file()
+    assert ("--override" in command) is ships_overrides
+    assert not ships_overrides or command[command.index("--override") + 1] == "overrides.txt"
 
 
 @pytest.mark.parametrize("exit_code", [0, 1, 2])
