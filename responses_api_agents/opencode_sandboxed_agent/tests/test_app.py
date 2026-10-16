@@ -542,6 +542,112 @@ class TestOpenCodeSandboxedAgent:
         else:
             assert "nemo-gym-ripgrep" not in command
 
+    @mark.parametrize(
+        "run_stdouts, run_seconds, sandbox_timeout, expected_timeouts, expected_finished",
+        [
+            (["finished", "finished", "finished"], 10, 1000, [1000, 990, 980], True),
+            (["finished", "cut", "finished"], 10, 1000, [1000, 990], False),
+            (["cut", "finished", "finished"], 10, 1000, [1000], False),
+            (["finished", "finished", "finished"], 60, 100, [100, 40], False),
+        ],
+    )
+    async def test_responses_injects_followup_user_messages_into_the_same_session(
+        self,
+        opencode_export_test_data: Dict[str, Any],
+        monkeypatch: MonkeyPatch,
+        run_stdouts: list[str],
+        run_seconds: float,
+        sandbox_timeout: float,
+        expected_timeouts: list[float],
+        expected_finished: bool,
+    ) -> None:
+        config = self._create_config()
+        config.sandbox_timeout = sandbox_timeout
+        client = MagicMock(spec=ServerClient)
+        client.global_config_dict = {"observability_enabled": False}
+        server = OpenCodeSandboxedAgent(config=config, server_client=client)
+        stdout_by_name = {"finished": "Shell: /bin/bash\nOpenCode run finished\n", "cut": "Shell: /bin/bash\n"}
+        clock = {"now": 0.0}
+        runs: list[tuple[str, float]] = []
+
+        async def fake_exec(command: str, timeout_s: float | None = None, env: Any = None) -> SimpleNamespace:
+            if "opencode run" not in command:
+                stdout = '[{"id": "ses_1"}]' if "session list" in command else ""
+                return SimpleNamespace(stdout=stdout, stderr="", return_code=0, error_type=None)
+            runs.append((command, timeout_s))
+            clock["now"] += run_seconds
+            return SimpleNamespace(
+                stdout=stdout_by_name[run_stdouts[len(runs) - 1]], stderr="", return_code=0, error_type=None
+            )
+
+        sandbox_mock = MagicMock()
+        sandbox_mock.exec = AsyncMock(side_effect=fake_exec)
+        sandbox_mock.download = AsyncMock()
+        sandbox_mock.upload = AsyncMock()
+        monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox_mock})
+        monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value=dict()))
+        monkeypatch.setattr(app_module.Path, "exists", lambda self: True)
+        monkeypatch.setattr(app_module.Path, "read_text", lambda self: json.dumps(opencode_export_test_data))
+        monkeypatch.setattr(app_module, "time", lambda: clock["now"])
+
+        followups = ["second request", "third request with 'quotes'"]
+        request = MagicMock(session={SESSION_ID_KEY: "my session"}, cookies={"sandbox_id": ""})
+        request.state._ng_followup_user_messages = followups
+        await server.responses(
+            request=request,
+            body=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "first request"}]),
+        )
+
+        assert [timeout for _, timeout in runs] == expected_timeouts
+        assert '--title "NG dummy title"' in runs[0][0]
+        assert "--session" not in runs[0][0]
+        for (command, _), message in zip(runs[1:], followups):
+            assert "opencode run --session ses_1" in command
+            assert f"-- {shlex.quote(message)}" in command
+            assert "--title" not in command
+        run_result = server._sandbox_id_to_run_result[""]
+        assert run_result["opencode_finished"] is expected_finished
+        assert run_result["opencode_failed"] is not expected_finished
+        assert run_result["opencode_run_stdout"] == "".join(stdout_by_name[name] for name in run_stdouts[: len(runs)])
+
+    def test_run_request_defaults_to_no_followup_user_messages(self) -> None:
+        body = OpenCodeSandboxedAgentRunRequest.model_validate(
+            {"responses_create_params": {"input": [{"role": "user", "content": "hello"}]}}
+        )
+        assert body.followup_user_messages == []
+
+    async def test_run_hands_the_rows_followup_user_messages_to_responses(self, monkeypatch: MonkeyPatch) -> None:
+        class Response:
+            ok = True
+            cookies: dict[str, str] = {}
+
+            async def json(self) -> dict[str, Any]:
+                return {"sandbox_handle": "seed-sandbox"}
+
+        request = SimpleNamespace(cookies={}, session={SESSION_ID_KEY: "session-1"}, state=SimpleNamespace())
+        server_client = MagicMock(spec=ServerClient)
+        server_client.post = AsyncMock(return_value=Response())
+        server = OpenCodeSandboxedAgent(config=self._create_config(), server_client=server_client)
+        server._start_sandbox = AsyncMock(return_value=MagicMock(stop=AsyncMock()))
+        seen: list[Any] = []
+
+        async def responses(self, request, params):
+            seen.append(request.state._ng_followup_user_messages)
+            raise RuntimeError("stop after responses")
+
+        monkeypatch.setattr(OpenCodeSandboxedAgent, "responses", responses)
+        body = OpenCodeSandboxedAgentRunRequest.model_validate(
+            {
+                "responses_create_params": {"input": [{"role": "user", "content": "first"}]},
+                "followup_user_messages": ["second", "third"],
+            }
+        )
+
+        with raises(RuntimeError, match="stop after responses"):
+            await server.run(request, body)
+        assert seen == [["second", "third"]]
+        assert not hasattr(request.state, "_ng_followup_user_messages")
+
     def test_missing_local_ripgrep_is_rejected(self, tmp_path: Path) -> None:
         with raises(ValidationError, match="Path does not point to a file"):
             OpenCodeSandboxedAgentConfig.model_validate(
