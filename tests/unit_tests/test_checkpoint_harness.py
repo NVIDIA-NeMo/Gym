@@ -184,3 +184,68 @@ async def test_stdout_only_keeps_progress_on_stderr_out_of_parsed_output() -> No
     result = await LocalShell().exec(stdout_only("echo 'Exporting session: ses_1' >&2; echo '{\"id\": 1}'"))
 
     assert result.stdout == '{"id": 1}\n'
+
+
+class SlowDaemon(LocalShell):
+    """An exec daemon that is slow around the launch: it starts the launch late, or reports its result late, as
+    OpenSandbox can by up to about 30 s. Other commands run at once."""
+
+    def __init__(self, *, start_delay_s: float = 0.0, result_delay_s: float = 0.0) -> None:
+        super().__init__()
+        self.start_delay_s = start_delay_s
+        self.result_delay_s = result_delay_s
+        self.launch_returned = asyncio.Event()
+
+    async def exec(self, command: str, *, timeout_s: Optional[float] = None) -> SandboxExecResult:
+        if not command.startswith(f"env {LAUNCH_TAG}="):
+            return await super().exec(command, timeout_s=timeout_s)
+        await asyncio.sleep(self.start_delay_s)
+        result = await super().exec(command, timeout_s=timeout_s)
+        self.launch_returned.set()
+        await asyncio.sleep(self.result_delay_s)
+        return result
+
+
+async def test_a_launch_that_ended_before_the_park_request_keeps_its_late_result() -> None:
+    shell, park = SlowDaemon(result_delay_s=2.0), ParkRequest()
+    run = asyncio.create_task(run_until_park_requested(shell, "echo done", park, timeout_s=30))  # type: ignore[arg-type]
+    await asyncio.wait_for(shell.launch_returned.wait(), timeout=10)
+
+    park.requested.set()
+    result = await asyncio.wait_for(run, timeout=30)
+
+    assert (result.return_code, result.stdout) == (0, "done\n"), "the finished launch is not relaunched"
+    assert not [command for command in shell.commands if "kill -KILL" in command], "nothing was killed"
+    assert not list(Path("/tmp").glob(f"nemo-gym-harness-{launch_id(shell)}.*"))
+
+
+async def test_a_park_request_before_the_launch_starts_interrupts_it_and_nothing_runs(tmp_path: Path) -> None:
+    """A launch the daemon has not started yet has no record either; it must not count as one that ended."""
+    started = tmp_path / "started"
+    shell, park = SlowDaemon(start_delay_s=1.0), ParkRequest()
+    park.requested.set()
+
+    with pytest.raises(HarnessInterrupted):
+        await asyncio.wait_for(
+            run_until_park_requested(shell, f"touch {started}", park, timeout_s=30),  # type: ignore[arg-type]
+            timeout=30,
+        )
+    await asyncio.sleep(1.5)
+
+    assert not started.exists(), "the stop that came first kept the launch from starting"
+
+
+async def test_cancelling_the_run_kills_the_launch_and_everything_it_started(tmp_path: Path) -> None:
+    started, pids = tmp_path / "started", tmp_path / "pids"
+    shell, park = LocalShell(), ParkRequest()
+    command = PHASES["with_a_detached_process"].format(started=started, pids=pids, python=quote(sys.executable))
+    run = asyncio.create_task(run_until_park_requested(shell, command, park, timeout_s=600))  # type: ignore[arg-type]
+    await until(lambda: started.exists() and pids.exists() and pids.read_text())
+
+    run.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(run, timeout=60)
+
+    assert not alive(int(pids.read_text())), "the detached process the launch started is gone"
+    found = await shell.exec(f"grep -l {LAUNCH_TAG}={launch_id(shell)} /proc/[0-9]*/environ 2>/dev/null; true")
+    assert not [line for line in (found.stdout or "").split() if alive(int(line.split("/")[2]))], "no process is left"

@@ -131,6 +131,8 @@ class FakeResourcesServer:
                     "workdir": "/testbed",
                 }
             )
+        if url_path == "/close_session":
+            return FakeResponse({"closed": True})
         if url_path == "/verify":
             self.verify_started.set()
             await self.release_verify.wait()
@@ -399,8 +401,15 @@ async def test_a_checkpoint_interrupts_opencode_and_the_resume_continues_the_ses
     # checked that the saved session carries the task.
     assert resources.calls == ["/seed_session", "/sandbox_access", "/sandbox_access", "/verify"]
     assert any("opencode export ses_1" in c and c.endswith("2>/dev/null") for c in sandbox.commands), "stdout only"
-    assert sandbox.disconnected == 1, "the stale client was released before reconnecting"
-    assert result.reward == 1.0 and sandbox.stopped, "the episode finished and the sandbox was stopped"
+    assert sandbox.disconnected == 2, "the stale client was released before reconnecting, and the last at the end"
+    # The owner ended the session at verify; a checkpointed run never stops the sandbox itself.
+    assert result.reward == 1.0 and not sandbox.stopped
+    launches = result.model_dump(mode="json")["ng_harness_launches"]
+    assert [(launch["resumed"], launch["ended"]) for launch in launches] == [
+        (False, "interrupted"),
+        (True, "finished"),
+    ]
+    assert launches[1]["reason"] == "OpenCode's session ses_1 starts with the task"
 
 
 async def test_opencode_that_ignores_the_interrupt_is_killed_after_the_grace(
@@ -498,7 +507,7 @@ async def test_a_replacement_attempt_continues_from_the_opencode_boundary_withou
     assert resources.calls == ["/sandbox_access", "/verify"], "no re-seed: the session is the checkpoint's"
     # The run continued in the fork the resources server named, not in the sandbox the boundary recorded.
     assert agent._start_sandbox.await_args.kwargs == {"sandbox_id": "sb-2", "workdir": "/testbed"}
-    assert result.reward == 1.0 and sandbox.stopped
+    assert result.reward == 1.0 and not sandbox.stopped, "the owner ended the session at verify"
 
 
 async def test_a_replacement_from_a_boundary_before_the_first_launch_asks_which_sandbox_is_current(
@@ -534,7 +543,8 @@ async def test_a_failing_sandbox_access_fails_the_run_instead_of_using_the_known
     with pytest.raises(RuntimeError, match="HTTP 500"):
         await asyncio.wait_for(agent.run(make_request("agent-session-5", {}), body_for("r", attempt=1)), 10)
 
-    assert resources.calls == ["/sandbox_access"]
+    # The run leaves without a verdict, so it closes its session through the owner, which stops the sandbox.
+    assert resources.calls == ["/sandbox_access", "/close_session"]
     agent._start_sandbox.assert_not_awaited()
 
 
@@ -762,7 +772,11 @@ async def test_a_run_cancelled_while_parked_leaves_the_checkpointed_sandbox_alon
     assert agent._sandbox_id_to_sandbox == {}
 
 
-async def test_a_run_cancelled_while_opencode_runs_still_stops_the_sandbox(tmp_path: Path) -> None:
+async def test_a_run_cancelled_while_opencode_runs_kills_the_launch_and_closes_the_session_through_the_owner(
+    tmp_path: Path,
+) -> None:
+    """The owner may still export the session, so a checkpointed run never stops its sandbox: it kills its own
+    launch, so OpenCode stops generating, and closes the session, which the owner ends by stopping the sandbox."""
     resources = FakeResourcesServer()
     agent = make_agent(tmp_path, resources)
     sandbox = FakeSandbox(resources)
@@ -774,7 +788,29 @@ async def test_a_run_cancelled_while_opencode_runs_still_stops_the_sandbox(tmp_p
     with pytest.raises(asyncio.CancelledError):
         await run
 
-    assert sandbox.stopped, "a disconnected caller must not leave OpenCode generating in its pod"
+    [kill] = interrupt_commands(sandbox)
+    assert signal_of(kill) == "KILL" and launch_id(kill) == launch_id(launch_commands(sandbox)[0])
+    assert resources.calls[-1] == "/close_session"
+    assert not sandbox.stopped and sandbox.disconnected == 1
+
+
+@pytest.mark.parametrize("lender", ["restart_only", "no_sandbox"])
+async def test_a_restart_still_stops_its_sandbox_when_it_fails(tmp_path: Path, lender: str) -> None:
+    """A lender that cannot capture the session (or a sandbox of the agent's own) makes the run a restart, and
+    such a lender may have no empty-body close: the run stops the sandbox itself, as it does without
+    checkpointing."""
+    resources = FakeResourcesServer(restart_only=lender == "restart_only", lends_sandbox=lender != "no_sandbox")
+    agent = make_agent(tmp_path, resources)
+    sandbox = FakeSandbox(resources)
+    agent._start_sandbox = AsyncMock(return_value=sandbox)
+
+    run = asyncio.create_task(agent.run(make_request("agent-session", {}), body_for("r")))
+    await asyncio.wait_for(sandbox.started.wait(), timeout=5)
+    run.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await run
+
+    assert sandbox.stopped and "/close_session" not in resources.calls
 
 
 async def test_without_checkpointing_the_run_is_unchanged(tmp_path: Path) -> None:

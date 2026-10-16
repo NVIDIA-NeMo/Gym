@@ -32,7 +32,13 @@ from openai.types.responses import ResponseInputTextParam
 from pydantic import BaseModel, ConfigDict, Field, FilePath, JsonValue
 
 from nemo_gym._checkpoint.harness import HarnessInterrupted, ResumeDecision, stdout_only
-from nemo_gym._checkpoint.harness_run import HarnessRunResult, LaunchContext, LentSandbox, SandboxedHarnessAgent
+from nemo_gym._checkpoint.harness_run import (
+    HarnessRunResult,
+    LaunchContext,
+    LaunchRecord,
+    LentSandbox,
+    SandboxedHarnessAgent,
+)
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
@@ -531,6 +537,11 @@ class OpenCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
     opencode_error_type: Optional[str] = None
     opencode_failed: bool = False
     ng_agent_observations: Optional[AgentObservationBundle] = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    # With checkpointing on: every OpenCode launch of the rollout, including the ones a checkpoint interrupted.
+    ng_harness_launches: Optional[List[LaunchRecord]] = Field(
         default=None,
         exclude_if=lambda value: value is None,
     )
@@ -1212,6 +1223,8 @@ class OpenCodeSandboxedAgent(SandboxedHarnessAgent):
         trajectory = done.outcome.trajectory
         response_dict: Dict[str, Any] = dict(done.result)
         response_dict |= run_result
+        if self.checkpoint_participant is not None:
+            response_dict["ng_harness_launches"] = [launch.model_dump(mode="json") for launch in done.launches]
         if trajectory is not None:
             response_dict["ng_trajectory"] = scope_opencode_trajectory(trajectory, body, rollout_id)
         raw_verifier_sandbox_observation = response_dict.pop("verifier_sandbox_observation", None)

@@ -702,6 +702,8 @@ async def test_opencode_continues_in_the_fork_of_its_sandbox_after_a_crash(
     assert "echo drift > file" not in provider.boxes[fork]["commands"], "the fork holds the checkpoint"
     assert provider.boxes["sb-1"]["state"] == "stopped", "the superseded sandbox is stopped"
     assert result.reward == 1.0 and result.opencode_finished is True
+    # Verify stopped the fork once it had the patch; the agent never stops the sandbox SWE-bench checkpoints.
+    assert ops(provider, "close").count(fork) == 1
 
 
 async def test_opencode_asks_for_the_fork_when_the_checkpoint_came_before_its_first_launch(
