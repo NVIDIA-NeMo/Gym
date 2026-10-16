@@ -10,9 +10,7 @@ the HTTP seam.
 
 import asyncio
 import json
-import os
-import shutil
-import subprocess
+import re
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,6 +22,7 @@ from omegaconf import DictConfig
 
 from nemo_gym._checkpoint.agent import AgentSessionRecord
 from nemo_gym._checkpoint.control import CheckpointRequest
+from nemo_gym._checkpoint.harness import LAUNCH_TAG
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.episode_types import EpisodeId
 from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, TrajectoryRecord
@@ -33,11 +32,11 @@ from responses_api_agents.opencode_sandboxed_agent.app import (
     OpenCodeSandboxedAgent,
     OpenCodeSandboxedAgentConfig,
     OpenCodeSandboxedAgentRunRequest,
-    _interrupt_command,
 )
 
 
 APP = "responses_api_agents.opencode_sandboxed_agent.app"
+HARNESS = "nemo_gym._checkpoint.harness"
 CLOSE = CheckpointRequest(checkpoint_id="c1", deadline_ts=time.time() + 3600)
 EXPORT = {
     "messages": [
@@ -159,14 +158,20 @@ class FakeSandbox:
         self.runs = 0
         self.finish_runs_after = finish_runs_after
         self.saves_session_from = saves_session_from
+        self.launching = False
         # The data folders whose OpenCode database holds a session, as the sandbox's filesystem would.
         self.saved_sessions: set[Optional[str]] = set()
         self.upload = AsyncMock()
 
+    def stop_launch(self) -> None:
+        """An interrupt ends the launch that is running; the kill after the launch ended finds nothing."""
+        self.killed.set()
+
     async def exec(self, command: str, timeout_s: float | None = None, env: Any = None, **_: Any) -> Any:
         self.commands.append(command)
-        if "[o]pencode run" in command:
-            self.killed.set()
+        if is_interrupt(command):
+            if self.launching:
+                self.stop_launch()
             return done()
         if "opencode run" in command:
             self.runs += 1
@@ -175,6 +180,7 @@ class FakeSandbox:
                 self.saved_sessions.add(data_home_of(command))
             if self.runs > self.finish_runs_after:
                 return done("Shell: /bin/bash\nOpenCode run finished")
+            self.launching = True
             killed = asyncio.ensure_future(self.killed.wait())
             finished = asyncio.ensure_future(self.finish.wait())
             try:
@@ -182,17 +188,20 @@ class FakeSandbox:
             finally:
                 killed.cancel()
                 finished.cancel()
+                self.launching = False
             if self.finish.is_set():
                 return done("Shell: /bin/bash\nOpenCode run finished")
             self.killed.clear()
             return done("Shell: /bin/bash\n", return_code=130, stderr="interrupted")
         data_home = (env or {}).get("XDG_DATA_HOME")
         if "session list" in command:
-            return done('[{"id": "ses_1"}]' if data_home in self.saved_sessions else "[]")
+            return done('[{"id": "ses_1"}]' if data_home in self.saved_sessions else "")
         if "opencode export" in command:
             if data_home not in self.saved_sessions:
                 return done(return_code=1, stderr="Session not found")
-            return done(json.dumps(EXPORT))
+            # OpenCode reports progress on stderr, which OpenSandbox's background executions return inside stdout.
+            progress = "" if "2>/dev/null" in command else "Exporting session: ses_1\n"
+            return done(progress + json.dumps(EXPORT))
         if "opencode db path" in command:
             return done("/tmp/db")
         return done()
@@ -218,12 +227,12 @@ class IgnoresTheInterrupt(FakeSandbox):
         self.signals: list[str] = []
 
     async def exec(self, command: str, timeout_s: float | None = None, env: Any = None, **kwargs: Any) -> Any:
-        if "[o]pencode run" in command:
+        if is_interrupt(command):
             self.commands.append(command)
-            signal_name = "KILL" if "-KILL" in command else "INT"
+            signal_name = signal_of(command)
             self.signals.append(signal_name)
-            if signal_name == self.ends_on:
-                self.killed.set()
+            if signal_name == self.ends_on and self.launching:
+                self.stop_launch()
             return done()
         return await super().exec(command, timeout_s=timeout_s, env=env, **kwargs)
 
@@ -278,12 +287,26 @@ def body_for(rollout_id: str, attempt: int = 0) -> OpenCodeSandboxedAgentRunRequ
     )
 
 
+def is_interrupt(command: str) -> bool:
+    return "kill -INT" in command or "kill -KILL" in command
+
+
+def signal_of(interrupt: str) -> str:
+    return "KILL" if "kill -KILL" in interrupt else "INT"
+
+
 def launch_commands(sandbox: FakeSandbox) -> list[str]:
-    return [c for c in sandbox.commands if "opencode run" in c and "[o]pencode" not in c]
+    return [c for c in sandbox.commands if "opencode run" in c]
 
 
 def interrupt_commands(sandbox: FakeSandbox) -> list[str]:
-    return [c for c in sandbox.commands if "[o]pencode run" in c]
+    return [c for c in sandbox.commands if is_interrupt(c)]
+
+
+def launch_id(command: str) -> Optional[str]:
+    """The harness launch a launch or stop command names (``NEMO_GYM_HARNESS_LAUNCH=<id>``)."""
+    match = re.search(rf"{LAUNCH_TAG}=([0-9a-f]+)", command)
+    return match.group(1) if match else None
 
 
 def data_home_of(command: str) -> Optional[str]:
@@ -362,8 +385,9 @@ async def test_a_checkpoint_interrupts_opencode_and_the_resume_continues_the_ses
     assert _CONTINUE_PROMPT in second
     assert data_home_of(first) == data_home_of(second) == record.episode["data_home"]
     assert 'test -x "$HOME/.opencode/bin/opencode"' in second, "the install is skipped when the binary is present"
-    interrupts = interrupt_commands(sandbox)
-    assert len(interrupts) == 1 and "-INT" in interrupts[0]
+    # SIGINT ended the launch; the kill that follows stops whatever it left running before the sandbox is parked.
+    assert [signal_of(c) for c in interrupt_commands(sandbox)] == ["INT", "KILL"]
+    assert {launch_id(c) for c in interrupt_commands(sandbox)} == {launch_id(first)}, "they stop the first launch"
     # The continued launch really ran OpenCode again, in the sandbox the commit left running.
     assert sandbox.runs == 2
     assert result.opencode_failed is False, result.opencode_error_type
@@ -371,7 +395,7 @@ async def test_a_checkpoint_interrupts_opencode_and_the_resume_continues_the_ses
     # Before each launch the run asked the resources server which sandbox is current, and before the relaunch it
     # checked that the saved session carries the task.
     assert resources.calls == ["/seed_session", "/sandbox_access", "/sandbox_access", "/verify"]
-    assert any("opencode export ses_1" in command and ">" not in command for command in sandbox.commands)
+    assert any("opencode export ses_1" in c and c.endswith("2>/dev/null") for c in sandbox.commands), "stdout only"
     assert sandbox.disconnected == 1, "the stale client was released before reconnecting"
     assert result.reward == 1.0 and sandbox.stopped, "the episode finished and the sandbox was stopped"
 
@@ -379,8 +403,8 @@ async def test_a_checkpoint_interrupts_opencode_and_the_resume_continues_the_ses
 async def test_opencode_that_ignores_the_interrupt_is_killed_after_the_grace(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(f"{APP}._INTERRUPT_GRACE_S", 0.05)
-    monkeypatch.setattr(f"{APP}._KILL_GRACE_S", 10.0)
+    monkeypatch.setattr(f"{HARNESS}._GRACEFUL_S", 0.05)
+    monkeypatch.setattr(f"{HARNESS}._KILL_S", 10.0)
     resources = FakeResourcesServer()
     agent = make_agent(tmp_path, resources)
     sandbox = IgnoresTheInterrupt(resources, ends_on="KILL")
@@ -399,11 +423,11 @@ async def test_opencode_that_ignores_the_interrupt_is_killed_after_the_grace(
 async def test_a_relaunch_without_a_saved_session_starts_over_with_the_task(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A park request that arrives while the launch is still installing or booting OpenCode reaches no process,
-    and OpenCode saved nothing: ``--continue`` would open an empty session, so the relaunch starts over with the
+    """A launch that neither signal ends (the sandbox stopped answering) is abandoned after both graces, and
+    OpenCode had saved nothing: ``--continue`` would open an empty session, so the relaunch starts over with the
     task, in a fresh data folder."""
-    monkeypatch.setattr(f"{APP}._INTERRUPT_GRACE_S", 0.05)
-    monkeypatch.setattr(f"{APP}._KILL_GRACE_S", 0.05)
+    monkeypatch.setattr(f"{HARNESS}._GRACEFUL_S", 0.05)
+    monkeypatch.setattr(f"{HARNESS}._KILL_S", 0.05)
     resources = FakeResourcesServer()
     agent = make_agent(tmp_path, resources)
     sandbox = IgnoresTheInterrupt(resources, ends_on=None, saves_session_from=2)
@@ -761,42 +785,3 @@ async def test_without_checkpointing_the_run_is_unchanged(tmp_path: Path) -> Non
     assert "--continue" not in launch
     assert resources.calls == ["/seed_session", "/verify"]
     assert result.reward == 1.0 and sandbox.stopped
-
-
-# -- the interrupt command, run for real ---------------------------------------------------------------------
-
-
-@pytest.mark.skipif(shutil.which("bash") is None, reason="the interrupt command is a shell snippet")
-@pytest.mark.skipif(
-    os.environ.get("NEMO_GYM_RUN_SIGNAL_TESTS") != "1",
-    reason="signals every process on the host whose command line names `opencode run`; opt in on an isolated host",
-)
-@pytest.mark.parametrize("without_pkill", [False, True], ids=["pkill", "proc_fallback"])
-def test_the_interrupt_command_signals_opencode_and_its_launching_shell(tmp_path: Path, without_pkill: bool) -> None:
-    """Run ``_interrupt_command`` under a real bash, both branches, against processes shaped like the ones it meets
-    in the sandbox: the OpenCode binary (its argv names it) and the shell whose command line launched it (the one
-    ``sandbox.exec`` runs). Both are signalled; the shell running the snippet does not match itself."""
-    bash = shutil.which("bash")
-    binary = subprocess.Popen([bash, "-c", 'exec -a "opencode run --title NG dummy title" sleep 300'])
-    launcher = subprocess.Popen([bash, "-c", "sleep 300; true  # opencode run --title NG dummy title"])
-    environment = dict(os.environ)
-    if without_pkill:
-        # No pkill on PATH, so the snippet takes its /proc fallback; it still needs tr, and kill is a builtin.
-        fake_bin = tmp_path / "bin"
-        fake_bin.mkdir()
-        (fake_bin / "tr").symlink_to(shutil.which("tr"))
-        environment["PATH"] = str(fake_bin)
-    try:
-        time.sleep(0.2)
-        interrupting = subprocess.run(
-            [bash, "-c", _interrupt_command("TERM")], env=environment, capture_output=True, text=True, timeout=60
-        )
-
-        assert interrupting.returncode == 0, interrupting.stderr
-        assert binary.wait(timeout=10) is not None, "the OpenCode process, whose argv names it, was signalled"
-        assert launcher.wait(timeout=10) is not None, "so was the shell whose command line launched it"
-    finally:
-        for process in (binary, launcher):
-            if process.poll() is None:
-                process.kill()
-                process.wait(timeout=10)

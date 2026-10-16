@@ -34,6 +34,12 @@ from openai.types.responses import ResponseInputTextParam
 from pydantic import ConfigDict, Field, FilePath, JsonValue
 
 from nemo_gym._checkpoint.agent import LegacyRun, RestoredAgentSession, require_rollout
+from nemo_gym._checkpoint.harness import (
+    HarnessInterrupted,
+    ResumeDecision,
+    run_until_park_requested,
+    stdout_only,
+)
 from nemo_gym._checkpoint.steps import StepMode, seed_restarts, seed_verify_mode
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
@@ -472,23 +478,6 @@ _LEGACY_SESSION_PREFIX = "run:"
 # The prompt a continued session gets: OpenCode's session database on the sandbox root filesystem carries the
 # turns before the interruption, so the continued run only has to pick the task back up.
 _CONTINUE_PROMPT = "Your previous session was interrupted. Continue working on the task from where you left off."
-# How long an interrupted OpenCode gets to exit after SIGINT before it is killed, and after the kill.
-_INTERRUPT_GRACE_S = 45.0
-_KILL_GRACE_S = 30.0
-
-
-def _interrupt_command(signal_name: str) -> str:
-    """Signal every ``opencode run`` process in the sandbox without matching the shell that runs this command.
-
-    The ``[o]`` bracket keeps the pattern from matching its own command line (pkill and the /proc fallback
-    alike); the fallback is for images without procps.
-    """
-    return (
-        f"if command -v pkill >/dev/null 2>&1; then pkill -{signal_name} -f '[o]pencode run'; "
-        'else for d in /proc/[0-9]*; do p=${d#/proc/}; [ "$p" = "$$" ] && continue; '
-        "c=$(tr '\\0' ' ' < \"$d/cmdline\" 2>/dev/null); "
-        f'case "$c" in *[o]pencode\\ run*) kill -{signal_name} "$p" 2>/dev/null;; esac; done; fi; true'
-    )
 
 
 @dataclass
@@ -503,10 +492,6 @@ class _OpenCodeRunContext:
     legacy_run: Optional[LegacyRun]
     data_home: str
     continue_session: bool = False
-
-
-class _OpenCodeInterrupted(Exception):
-    """OpenCode was stopped at a checkpoint's request; the run continues it after the resume or a restore."""
 
 
 def _cookie_values(cookies: Any) -> dict[str, str]:
@@ -986,8 +971,16 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         run_error_type = None
         try:
-            result = await self._exec_opencode(sandbox, command, run_context)
-        except _OpenCodeInterrupted:
+            # With checkpointing, the OpenCode step is one long `wait` step with no boundary inside it: when a
+            # checkpoint asks the run to park, the launch and everything it started are stopped, and OpenCode's
+            # session database on the root filesystem goes into the snapshot taken once the run has parked.
+            result = await run_until_park_requested(
+                sandbox,
+                command,
+                run_context.legacy_run if run_context is not None else None,
+                timeout_s=self.config.sandbox_timeout,
+            )
+        except HarnessInterrupted:
             raise
         except Exception as exc:
             result = None
@@ -1201,48 +1194,6 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         )
         return response
 
-    async def _exec_opencode(
-        self, sandbox: AsyncSandbox, command: str, run_context: Optional[_OpenCodeRunContext]
-    ) -> Any:
-        """Run the OpenCode command; with a checkpointed run, stop it when a checkpoint asks the run to park.
-
-        The run is one long ``wait`` step with no boundary inside it, so when admission closes the only way to
-        reach a boundary within the checkpoint's deadline is to stop OpenCode: SIGINT first, so it records the
-        step it was on, then SIGKILL. Its session database on the root filesystem goes into the snapshot the
-        resources server takes once the run has parked. Raises :class:`_OpenCodeInterrupted`.
-        """
-        legacy_run = run_context.legacy_run if run_context is not None else None
-        if legacy_run is None:
-            return await sandbox.exec(command=command, timeout_s=self.config.sandbox_timeout)
-        exec_task = asyncio.ensure_future(sandbox.exec(command=command, timeout_s=self.config.sandbox_timeout))
-        park_task = asyncio.ensure_future(legacy_run.wait_park_requested())
-        try:
-            await asyncio.wait({exec_task, park_task}, return_when=asyncio.FIRST_COMPLETED)
-        except BaseException:
-            # Cancelled from outside (the caller disconnected): the caller's cleanup stops the sandbox.
-            exec_task.cancel()
-            raise
-        finally:
-            park_task.cancel()
-        if exec_task.done():
-            return exec_task.result()
-        print("Checkpoint requested: interrupting OpenCode in the sandbox", file=sys.stderr)
-        for signal_name, grace_s in (("INT", _INTERRUPT_GRACE_S), ("KILL", _KILL_GRACE_S)):
-            try:
-                await sandbox.exec(command=_interrupt_command(signal_name), timeout_s=30)
-            except Exception:
-                print(f"Failed to send SIG{signal_name} to OpenCode", format_exc(), file=sys.stderr)
-            done, _ = await asyncio.wait({exec_task}, timeout=grace_s)
-            if done:
-                break
-        if not exec_task.done():
-            exec_task.cancel()
-            with CancelScope(shield=True):
-                await asyncio.gather(exec_task, return_exceptions=True)
-        else:
-            exec_task.exception()  # retrieved: an interrupted command's failure is expected
-        raise _OpenCodeInterrupted()
-
     async def _refresh_sandbox_access(
         self, cookies: Dict[str, str], *, sandbox_handle: Optional[str], workdir: Optional[str]
     ) -> tuple[Optional[str], Optional[str]]:
@@ -1260,31 +1211,31 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         access = SandboxAccess.model_validate(await response.json())
         return str(access.connection.descriptor.get("sandbox_id") or sandbox_handle), access.workdir
 
-    async def _saved_session_has_task(self, sandbox: AsyncSandbox, data_home: str) -> bool:
-        """Whether OpenCode's database in ``data_home`` holds a session whose first message is the task.
+    async def _resume_decision(self, sandbox: AsyncSandbox, data_home: str) -> ResumeDecision:
+        """Whether the relaunch continues OpenCode's session in ``data_home``: only one that starts with the task.
 
         ``opencode run --continue`` reopens the newest session and silently starts an empty one when there is none,
-        so a relaunch continues only a session that already carries the task. Any failure reads as no session.
+        so a relaunch continues only a session that already carries the task. Any failure means starting over.
         """
         env = {"XDG_DATA_HOME": data_home}
         opencode = 'export PATH="$HOME/.opencode/bin:$PATH" && opencode'
         try:
-            listed = await sandbox.exec(command=f"{opencode} session list --format json", env=env, timeout_s=60)
+            listed = await sandbox.exec(stdout_only(f"{opencode} session list --format json"), env=env, timeout_s=60)
+            if listed.return_code == 0 and not (listed.stdout or "").strip():
+                return ResumeDecision(resume=False, reason="OpenCode was stopped before it saved a session")
             if listed.return_code != 0:
-                return False
+                raise RuntimeError(f"opencode session list exited with {listed.return_code}")
             session_id = _extract_opencode_session_id(listed.stdout or "")
-            exported = await sandbox.exec(command=f"{opencode} export {quote(session_id)}", env=env, timeout_s=60)
+            exported = await sandbox.exec(stdout_only(f"{opencode} export {quote(session_id)}"), env=env, timeout_s=60)
             if exported.return_code != 0:
-                return False
-            messages = json.loads(exported.stdout or "{}").get("messages")
-        except ValueError:
-            # No session in the data folder yet, or output that is not one: there is nothing to continue.
-            return False
-        except Exception:
-            print("Could not read OpenCode's saved session; starting it over", format_exc(), file=sys.stderr)
-            return False
+                raise RuntimeError(f"opencode export exited with {exported.return_code}")
+            messages = json.loads(exported.stdout or "").get("messages")
+        except Exception as error:
+            return ResumeDecision(resume=False, reason=f"could not read OpenCode's saved session: {error!r}")
         first = messages[0] if isinstance(messages, list) and messages and isinstance(messages[0], dict) else {}
-        return (first.get("info") or {}).get("role") == "user"
+        if (first.get("info") or {}).get("role") != "user":
+            return ResumeDecision(resume=False, reason=f"OpenCode's session {session_id} does not start with the task")
+        return ResumeDecision(resume=True, reason=f"OpenCode's session {session_id} starts with the task")
 
     async def run(
         self, request: Request, body: OpenCodeSandboxedAgentRunRequest
@@ -1304,7 +1255,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
     ) -> OpenCodeSandboxedAgentVerifyResponse:
         # Steps: seed → OpenCode in the sandbox → verify. With checkpointing, a boundary before each step names
         # the next step and what it needs, so a resumed or replacement run continues at that step. The OpenCode
-        # step is interrupted at a checkpoint's request and relaunched with --continue (see _exec_opencode).
+        # step is interrupted at a checkpoint's request and relaunched with --continue (nemo_gym._checkpoint.harness).
         continuation = (legacy_run.continuation if legacy_run is not None else None) or {}
         stage = continuation.get("next", "seed")
         cookies: Any = continuation.get("cookies", dict(request.cookies))
@@ -1389,11 +1340,14 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     )
                 sandbox = await self._start_sandbox(sandbox_id=sandbox_handle, workdir=workdir)
                 self._sandbox_id_to_sandbox[session_key] = sandbox
-                if continue_session and not await self._saved_session_has_task(sandbox, data_home):
-                    # OpenCode was stopped before it saved the task, so --continue would open an empty session and the
-                    # model would never see the task: start over with the task, in a fresh data folder.
-                    continue_session = False
-                    data_home = f"/tmp/nemo-gym-opencode-{uuid4().hex}"
+                if continue_session:
+                    decision = await self._resume_decision(sandbox, data_home)
+                    print(f"OpenCode relaunch of {rollout_id}: {decision}", file=sys.stderr)
+                    if not decision.resume:
+                        # --continue would open an empty session and the model would never see the task: start over
+                        # with the task, in a fresh data folder.
+                        continue_session = False
+                        data_home = f"/tmp/nemo-gym-opencode-{uuid4().hex}"
                 if legacy_run is not None and legacy_run.park_requested:
                     # A checkpoint asked this run to park before OpenCode started: park at the boundary instead of
                     # starting OpenCode only to interrupt it during its install.
@@ -1408,9 +1362,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 async with step("wait"):
                     try:
                         response = await self.responses(request, body.responses_create_params)
-                    except _OpenCodeInterrupted:
+                    except HarnessInterrupted as stopped:
                         # OpenCode is stopped; the next boundary parks this run until the resume, and names a
                         # continuation for a replacement attempt after a crash.
+                        print(f"OpenCode of {rollout_id} stopped for a checkpoint: {stopped}", file=sys.stderr)
                         continue_session = True
                         stop_sandbox_on_exit = False
                         continue
