@@ -32,6 +32,12 @@ from typing import Any, Callable
 
 import yaml
 
+from nemo_gym.sandbox.compose_config import (
+    ComposeSubstitutionError,
+    inline_env_files,
+    residual_interpolation,
+    substitute_compose,
+)
 from nemo_gym.tasks.harbor.dataset_config import apply_dataset_config, read_dataset_config
 from nemo_gym.tasks.harbor.models import HarborTaskConfig
 from nemo_gym.tasks.harbor.task import IMAGE_CONFIGS_FILE, TASK_FILE, HarborTask, dockerfile_base_image, is_task_folder
@@ -224,12 +230,72 @@ def compose_file(task: HarborTask) -> Path | None:
     return None
 
 
-def compose_image_references(task: HarborTask) -> list[str]:
-    """Every image a Compose task starts: the task image for ``main`` and each sidecar's image."""
+# In-sandbox paths Harbor's legacy ``${HOST_*_PATH}`` and ``${ENV_*_PATH}`` log-mount variables stand for.
+LOG_MOUNT_PATHS = {"VERIFIER_LOGS": "/logs/verifier", "AGENT_LOGS": "/logs/agent", "ARTIFACTS": "/logs/artifacts"}
+
+
+def compose_variables(task: HarborTask) -> dict[str, str]:
+    """The variables a task's Compose file may interpolate, resolved the way Harbor's trial resolves them.
+
+    ``[environment].env`` supplies the task's own variables. Harbor's infrastructure variables win over
+    them: ``MAIN_IMAGE_NAME`` (the resolved task image), ``CONTEXT_DIR`` (the task's ``environment/``
+    folder), ``PREBUILT_IMAGE_NAME`` when ``docker_image`` is declared, ``CPUS`` and ``MEMORY`` from the
+    task's resources, and the ``HOST_*_PATH`` / ``ENV_*_PATH`` log mounts as the ``/logs`` tree. The
+    process environment is never consulted.
+    """
+    environment = task.config.environment
+    infra: dict[str, str] = {"MAIN_IMAGE_NAME": task.image or "", "CONTEXT_DIR": str(task.path / "environment")}
+    if environment.docker_image:
+        infra["PREBUILT_IMAGE_NAME"] = environment.docker_image
+    if environment.cpus:
+        infra["CPUS"] = str(environment.cpus)
+    if environment.memory_mb:
+        infra["MEMORY"] = f"{environment.memory_mb}m"
+    for suffix, path in LOG_MOUNT_PATHS.items():
+        infra[f"HOST_{suffix}_PATH"] = path
+        infra[f"ENV_{suffix}_PATH"] = path
+    # Task values are themselves interpolated, the way Harbor resolves them before the Compose file (hil-bench
+    # writes `ASK_HUMAN_BACKEND = "${ASK_HUMAN_BACKEND:-litellm_proxy}"` to let a deployment override it). Here
+    # only the infrastructure variables are visible, so the default is what a dataset gets everywhere.
+    variables: dict[str, str] = {}
+    for key, value in (environment.env or {}).items():
+        variables[str(key)] = substitute_compose(str(value), infra)
+    variables.update(infra)
+    return variables
+
+
+def load_compose_document(task: HarborTask) -> dict[str, Any] | None:
+    """The task's Compose overlay with ``env_file`` entries inlined and ``${VAR}`` references resolved.
+
+    Returns ``None`` for a task without a Compose file. Prepare and the resources server both read the
+    file through this function, so the document the sandbox starts is the one prepare validated. An
+    unresolved variable or a missing ``env_file`` raises :class:`ImageConfigError` naming it.
+    """
     path = compose_file(task)
     if path is None:
-        return []
+        return None
     document = yaml.safe_load(path.read_text()) or {}
+    if not isinstance(document, dict):
+        raise ImageConfigError(f"{task.task_id}: {path.name} is not a mapping")
+    try:
+        # Interpolate first, as Compose does, so an env_file path may use ${CONTEXT_DIR}; env_file values are then
+        # literal. Anything still carrying a ``$NAME`` afterwards fails here, at prepare, not at seed.
+        variables = compose_variables(task)
+        document = substitute_compose(document, variables)
+        document = inline_env_files(document, path.parent, variables)
+    except ComposeSubstitutionError as exc:
+        raise ImageConfigError(f"{task.task_id}: {path.name}: {exc}") from exc
+    residual = residual_interpolation(document)
+    if residual is not None:
+        raise ImageConfigError(f"{task.task_id}: {path.name}: unresolved interpolation left in {residual!r}")
+    return document
+
+
+def compose_image_references(task: HarborTask) -> list[str]:
+    """Every image a Compose task starts: the task image for ``main`` and each sidecar's image."""
+    document = load_compose_document(task)
+    if document is None:
+        return []
     services = document.get("services") or {}
     references: list[str] = []
     main_image = (services.get("main") or {}).get("image") or task.image
