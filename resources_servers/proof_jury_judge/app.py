@@ -139,7 +139,15 @@ class ProofJuryJudgeServer(SimpleResourcesServer):
         return Judgment(judge=judge.name, round=round_idx, score=score, text=text)
 
     async def _round(self, prompt: str, round_idx: int) -> List[Judgment]:
-        return list(await asyncio.gather(*(self._judge(j, prompt, round_idx) for j in self.config.judges)))
+        tasks = [asyncio.create_task(self._judge(j, prompt, round_idx)) for j in self.config.judges]
+        try:
+            return list(await asyncio.gather(*tasks))
+        except BaseException:
+            # No judge call may outlive its round: each can be a long, expensive generation.
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
 
     async def verify(self, body: ProofJuryVerifyRequest) -> ProofJuryVerifyResponse:
         solution = response_text(body.response)
