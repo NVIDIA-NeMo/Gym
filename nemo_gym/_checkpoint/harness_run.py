@@ -29,7 +29,7 @@ from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass
 from typing import Annotated, Any, ClassVar, Generic, Literal, Optional, Protocol, TypeVar, Union
 
-from anyio import CancelScope
+from anyio import CancelScope, move_on_after
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, ValidationError
 
@@ -49,6 +49,9 @@ LOGGER = logging.getLogger(__name__)
 # Session keys of legacy /run episodes in the checkpoint participant; everything a restore needs is in the bookmark.
 LEGACY_SESSION_PREFIX = "run:"
 BOOKMARK_VERSION = 1
+# How long a checkpointed run that leaves without a verdict waits for the owner to close its session. The close
+# waits out a checkpoint that is open, as every resources request does.
+_CLOSE_TIMEOUT_S = 120.0
 
 OutcomeT = TypeVar("OutcomeT", bound=BaseModel)
 
@@ -310,6 +313,12 @@ class _HarnessRun(Generic[OutcomeT]):
         self.sandbox: Optional[AsyncSandbox] = None
         # While the run waits at a bookmark: a checkpoint may be exporting it, and the sandbox is the checkpoint's.
         self.parked = False
+        # The owner snapshots the sandbox: checkpointing is on and the run is not a restart. Such a run never stops
+        # the sandbox; the owner ends the session at verify, or when the run closes it.
+        self.checkpointed = legacy_run is not None
+        # The session cookies once seeded; a checkpointed run that leaves without a verdict closes the session.
+        self.cookies: Optional[dict[str, str]] = None
+        self.verified = False
 
     async def record(self, bookmark: Bookmark) -> None:
         if self.legacy_run is None:
@@ -328,6 +337,8 @@ class _HarnessRun(Generic[OutcomeT]):
         try:
             if isinstance(bookmark, SeedBookmark):
                 bookmark = await self.seed()
+            if isinstance(bookmark, (HarnessBookmark, VerifyBookmark)):
+                self.cookies = bookmark.cookies
             while isinstance(bookmark, HarnessBookmark):
                 bookmark, outcome = await self.launch_once(bookmark)
             if isinstance(bookmark, VerifyBookmark):
@@ -336,6 +347,7 @@ class _HarnessRun(Generic[OutcomeT]):
                 await self.record(bookmark)
                 async with self.step(bookmark.verify_mode):
                     result = await self.adapter.verify(bookmark.cookies, outcome)
+                self.verified = True
                 bookmark = ReturnBookmark(result=result, outcome=bookmark.outcome, launches=bookmark.launches)
                 # Recorded so that a restore never runs a state-changing verification twice.
                 await self.record(bookmark)
@@ -366,6 +378,7 @@ class _HarnessRun(Generic[OutcomeT]):
             # Nothing saves the sandbox the harness runs in: the resources server cannot capture its session, or
             # the sandbox is the agent's own. The run is a restart: never parked, and after a crash it starts over.
             await self.legacy_run.mark_restart()
+            self.checkpointed = False
         return HarnessBookmark(
             cookies=cookies,
             verify_mode=seed_verify_mode(headers),
@@ -433,14 +446,50 @@ class _HarnessRun(Generic[OutcomeT]):
                 LOGGER.warning("Failed to release the sandbox client of %s", self.rollout_id, exc_info=True)
 
     async def cleanup(self) -> None:
-        # A server cancels its handler when the caller disconnects, and the harness keeps running in its sandbox
-        # regardless. Shielded because the cancellation is re-delivered at every await until the handler exits.
-        sandbox = self.sandbox
-        if sandbox is None or self.parked:
+        """Leave the sandbox as the run's state says.
+
+        - Parked at a bookmark: the sandbox is the checkpoint's; only the client is released.
+        - Checkpointed: never stop the sandbox, which the owner may still export (and stopping it under the owner
+          failed the next commit). The launch is already dead: it ended, or was stopped or killed. Without a
+          verdict the run closes its session through the owner, which stops the sandbox.
+        - Every other run (a restart, checkpointing off, a lender that cannot capture the session, the agent's own
+          sandbox): stop the sandbox, or the harness would keep running in it.
+        """
+        if self.parked:
             await self.disconnect()
             return
+        if self.checkpointed:
+            if not self.verified and self.cookies is not None:
+                await self.close_session()
+            await self.disconnect()
+            return
+        sandbox, self.sandbox = self.sandbox, None
+        if sandbox is None:
+            return
+        # A server cancels its handler when the caller disconnects, and the cancellation is re-delivered at every
+        # await until the handler exits: shielded, or the stop would itself be cancelled.
         with CancelScope(shield=True):
             try:
                 await sandbox.stop()
             except Exception:
                 LOGGER.warning("Failed to stop the sandbox of %s", self.rollout_id, exc_info=True)
+
+    async def close_session(self) -> None:
+        """Ask the owner to end the session (``POST /close_session`` with an empty body); a failure is logged, and
+        the owner's retire or the provider's lease frees the sandbox."""
+        agent = self.agent
+        with move_on_after(_CLOSE_TIMEOUT_S, shield=True) as scope:
+            try:
+                response = await agent.server_client.post(
+                    server_name=agent.config.resources_server.name,
+                    url_path="/close_session",
+                    json={},
+                    cookies=self.cookies,
+                )
+                await raise_for_status(response)
+                return
+            except Exception:
+                LOGGER.warning("Failed to close the resources session of %s", self.rollout_id, exc_info=True)
+                return
+        if scope.cancelled_caught:
+            LOGGER.warning("Closing the resources session of %s timed out", self.rollout_id)
