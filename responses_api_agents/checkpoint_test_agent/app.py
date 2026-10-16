@@ -115,6 +115,11 @@ class CheckpointTestAgent(SimpleAgent):
         )
 
     def setup_agent_checkpoint(self, app: FastAPI) -> None:
+        # Called from both setup_webserver and setup_checkpoint_participant: install once, as the base does,
+        # so the participant behind the control routes is the one /run registers its sessions with.
+        if getattr(app.state, "nemo_gym_agent_checkpoint_installed", False):
+            return
+        app.state.nemo_gym_agent_checkpoint_installed = True
         settings = checkpoint_settings(getattr(self.server_client, "global_config_dict", None))
         if settings is None:
             return

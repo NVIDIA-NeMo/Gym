@@ -189,3 +189,21 @@ def test_workplace_prefix_mode_rejects_invalid_min_tokens(
             NeMoGymResponseCreateParamsNonStreaming(input="test"),
             turn_index=2,
         )
+
+
+def test_the_checkpoint_participant_is_installed_once_per_app() -> None:
+    agent = _agent()
+    agent.server_client.global_config_dict = {
+        "observability_enabled": False,
+        "checkpoint": {"enabled": True, "control_auth_token": "t"},
+    }
+    app = agent.setup_webserver()
+    participant = agent.checkpoint_participant
+    control_routes = [route for route in app.routes if "/checkpoint/" in getattr(route, "path", "")]
+    # The server framework installs it again for any app setup_webserver returns.
+    agent.setup_checkpoint_participant(app)
+
+    # /run must register its sessions with the participant behind the control routes.
+    assert isinstance(participant, CheckpointTestParticipant)
+    assert agent.checkpoint_participant is participant
+    assert [route for route in app.routes if "/checkpoint/" in getattr(route, "path", "")] == control_routes
