@@ -53,6 +53,7 @@ def main() -> None:
     parser.add_argument("--subagent-max-depth", type=int, default=1)
     parser.add_argument("--subagent-max-active", type=int, default=None)
     parser.add_argument("--delegation-prompt", default=None)
+    parser.add_argument("--subagent-prompt", default=None)
     parser.add_argument("--judge-base-url", required=True)
     parser.add_argument("--judge-model", required=True)
     parser.add_argument("--judge-api-key-env", required=True)
@@ -108,6 +109,7 @@ def main() -> None:
         subagent_max_depth=args.subagent_max_depth,
         subagent_max_active=args.subagent_max_active,
         delegation_prompt=args.delegation_prompt,
+        subagent_prompt=args.subagent_prompt,
     )
     opencode_config = raw_config["agents"][0]["kwargs"]["opencode_config"]
     opencode_config["mcp"] = {

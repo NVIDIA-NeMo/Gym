@@ -42,6 +42,7 @@ claweval_agent:
       opencode_subagent_max_depth: 1
       opencode_subagent_max_active: ${oc.env:CLAW_EVAL_SUBAGENT_MAX_ACTIVE,null}
       opencode_delegation_prompt: ${oc.env:CLAW_EVAL_DELEGATION_PROMPT,null}
+      opencode_subagent_prompt: ${oc.env:CLAW_EVAL_SUBAGENT_PROMPT,null}
       train_compaction_summaries: ${oc.env:CLAW_EVAL_TRAIN_COMPACTION_SUMMARIES,true}
       capture_proxy_host: ${oc.env:CLAW_EVAL_CAPTURE_PROXY_HOST,null}
       datasets:

@@ -237,6 +237,8 @@ class ClawEvalAgent(AgenticVBenchAgent):
                 command.extend(["--subagent-max-active", str(self.config.opencode_subagent_max_active)])
             if self.config.opencode_delegation_prompt is not None:
                 command.extend(["--delegation-prompt", self.config.opencode_delegation_prompt])
+            if self.config.opencode_subagent_prompt is not None:
+                command.extend(["--subagent-prompt", self.config.opencode_subagent_prompt])
             try:
                 exit_code = await run_process(command, output, runtime, self._env)
             except asyncio.CancelledError:
