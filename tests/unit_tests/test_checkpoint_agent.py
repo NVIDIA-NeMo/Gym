@@ -172,6 +172,46 @@ async def test_commit_reply_names_the_episodes_legacy_runs_own(tmp_path: Path) -
     assert reply["legacy_episode_ids"] == ["legacy"]
 
 
+async def test_a_restored_legacy_run_not_yet_reclaimed_is_still_named_in_the_commit_reply(tmp_path: Path) -> None:
+    """A checkpoint between a restore and the replacement /run must still credit the episode to its legacy run."""
+    source = AgentSessionParticipant(Hooks())
+    source_controller = ParticipantControlPlane(source, instance_name="agent", lease_grace_seconds=60)
+    episode_id = EpisodeId(rollout_id="legacy")
+    verifying, release = asyncio.Event(), asyncio.Event()
+
+    async def legacy() -> None:
+        async with source.legacy_run("run:legacy", episode_id) as run:
+            await run.boundary({"next": "verify"})
+            async with run.step("replay"):
+                verifying.set()
+                await release.wait()
+
+    task = asyncio.create_task(legacy())
+    await asyncio.wait_for(verifying.wait(), 5)
+    await source_controller.prepare(CheckpointRequest(**control()))
+    await source_controller.commit(CommitRequest(**control(checkpoint_dir=str(tmp_path / "first"))))
+    await source_controller.resume(CheckpointRequest(**control()))
+    release.set()
+    await asyncio.wait_for(task, 5)
+
+    restored = AgentSessionParticipant(Hooks())
+    controller = ParticipantControlPlane(restored, instance_name="agent", lease_grace_seconds=60)
+    await controller.restore(
+        RestoreRequest(**control("r1", checkpoint_dir=str(tmp_path / "first"), episode_ids=[episode_id]))
+    )
+    await controller.resume(CheckpointRequest(**control("r1")))
+    replacement = EpisodeId(rollout_id="legacy", attempt=1)
+    # No replacement /run has claimed the session yet.
+    assert await restored.restored_pending() == [replacement]
+    await controller.prepare(CheckpointRequest(**control("c2")))
+    reply = await controller.commit(
+        CommitRequest(**control("c2", checkpoint_dir=str(tmp_path / "second"), episode_ids=[replacement]))
+    )
+
+    assert reply["episode_ids"] == ["legacy-a1"]
+    assert reply["legacy_episode_ids"] == ["legacy-a1"]
+
+
 async def test_retire_stops_the_activation_before_it_replies() -> None:
     hooks = Hooks()
     participant = AgentSessionParticipant(hooks)
