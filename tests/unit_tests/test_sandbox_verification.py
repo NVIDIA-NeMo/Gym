@@ -86,6 +86,12 @@ async def _run(provider, *, config=None, files=None, metadata=None, work_dir="/t
     )
 
 
+def _call_dir(provider: _VerificationProvider) -> str:
+    (call_dir,) = {path.rsplit("/", 1)[0] for path in provider.uploaded if path.endswith("/request.json")}
+    assert call_dir.startswith("/tmp/verify/") and "/" not in call_dir.removeprefix("/tmp/verify/")
+    return call_dir
+
+
 async def test_builds_spec_runs_runner_and_parses_result() -> None:
     provider = _VerificationProvider()
     config = SandboxVerificationConfig(
@@ -99,15 +105,24 @@ async def test_builds_spec_runs_runner_and_parses_result() -> None:
     assert spec.env["OMP_NUM_THREADS"] == "4" and spec.env["EXTRA"] == "1"
     assert spec.metadata == {"benchmark": "override", "run": "r1"}
     assert spec.ttl_s > spec.ready_timeout_s + 120
-    assert provider.uploaded["/tmp/verify/lib/helper.py"] == "X = 1\n"
-    assert json.loads(provider.uploaded["/tmp/verify/request.json"]) == {"x": 21}
+    call_dir = _call_dir(provider)
+    assert provider.uploaded[f"{call_dir}/lib/helper.py"] == "X = 1\n"
+    assert json.loads(provider.uploaded[f"{call_dir}/request.json"]) == {"x": 21}
     (runner_call,) = provider.exec_calls
     assert runner_call["command"] == (
-        "cd /tmp/verify && python3 sandbox_runner.py request.json result.json > runner.log 2>&1"
+        f"cd {call_dir} && python3 sandbox_runner.py request.json result.json > runner.log 2>&1"
     )
     assert runner_call["timeout_s"] == 120
-    assert provider.download_calls[0][1] == "/tmp/verify/result.json"
+    assert provider.download_calls[0][1] == f"{call_dir}/result.json"
     assert len(provider.closed) == 1
+
+
+async def test_each_call_gets_its_own_work_dir() -> None:
+    # Providers that share /tmp between sandboxes (local, Apptainer) would otherwise mix up concurrent calls.
+    first, second = _VerificationProvider(), _VerificationProvider()
+    await _run(first, work_dir="/tmp/verify/")
+    await _run(second)
+    assert _call_dir(first) != _call_dir(second)
 
 
 async def test_create_failure_is_provider_unavailable() -> None:
@@ -116,6 +131,13 @@ async def test_create_failure_is_provider_unavailable() -> None:
         await _run(provider)
     assert info.value.failure_kind == PROVIDER_UNAVAILABLE
     assert "no capacity" in str(info.value)
+
+
+async def test_missing_provider_sdk_fails_loudly() -> None:
+    # A venv without nemo-gym[sandbox] must not turn every sample into a masked provider_unavailable.
+    provider = _VerificationProvider(create_error=ModuleNotFoundError("OpenSandbox SDK is required"))
+    with pytest.raises(ModuleNotFoundError, match="OpenSandbox SDK is required"):
+        await _run(provider)
 
 
 @pytest.mark.parametrize(

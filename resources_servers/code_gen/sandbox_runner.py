@@ -57,6 +57,8 @@ def _disable_core_dumps() -> None:
 
 def main(request_path: Path, result_path: Path) -> None:
     request = json.loads(request_path.read_text(encoding="utf-8"))
+    # The request holds every expected output, and candidates run in this directory with a real open().
+    request_path.unlink()
     result, metadata = check_correctness(
         request["sample"], request["generation"], timeout=request["timeout"], debug=request["debug"]
     )
