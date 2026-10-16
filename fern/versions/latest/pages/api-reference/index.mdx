@@ -18,3 +18,27 @@ This reference is built from docstrings in the [source code](https://github.com/
 | `nemo_gym.server_utils` | Server utilities, HTTP client, and middleware |
 | `nemo_gym.openai_utils` | OpenAI API client wrapper |
 | `nemo_gym.sandbox` | Provider-neutral sandbox API for isolated command execution and file transfer |
+| `nemo_gym.in_process` | Plan a benchmark in one call (`plan_benchmark`) and run single tasks against running servers (`TaskRunner`) |
+
+## Planning and running single tasks in-process
+
+To run a benchmark task by task from Python, plan it once with `plan_benchmark`, then run each task through
+`TaskRunner.run_task` against Gym servers that are already running:
+
+```python
+from nemo_gym.config_types import BaseServerConfig
+from nemo_gym.in_process import TaskRunner, plan_benchmark
+
+planned = plan_benchmark("ifeval")          # resolve, prepare, plan and collate the benchmark
+runner = TaskRunner(planned.rows, head_server=BaseServerConfig(host="127.0.0.1", port=11000))
+result = await runner.run_task(planned.task_ids()[0])
+print(result.rewards)
+```
+
+`plan_benchmark` builds the same plan as `gym eval plan` and collates the benchmark's rows. It reads no
+command-line arguments and does not set Gym's process-wide configuration, so a long-lived process can call it.
+Start the servers with `gym env start --benchmark NAME` first.
+
+This module is a supported API. Its signatures change only additively: a new parameter is optional and
+keyword-only, and a parameter is deprecated before it is removed or renamed.
+
