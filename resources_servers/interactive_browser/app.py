@@ -30,7 +30,6 @@ abandoned without `verify` or a re-seed keeps its browser until the process exit
 (local) or the provider reclaims it (remote).
 """
 
-import asyncio
 import logging
 import re
 from pathlib import Path
@@ -50,6 +49,7 @@ from nemo_gym.base_resources_server import (
     ResourcesCloseSessionResponse,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
+    ResourcesSessionFence,
     SimpleResourcesServer,
 )
 from nemo_gym.episode_types import EpisodeId, TaskId
@@ -157,10 +157,9 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
         self._session_id_to_state = {}
         # Sessions an Environment Server seeded under its own resources_session_id.
         self._typed_identity: Dict[str, Tuple[EpisodeId, TaskId]] = {}
-        self._typed_locks: Dict[str, asyncio.Lock] = {}
-        # Closed ids stay known: a seed that lands after its close would otherwise open a
-        # browser nobody will ever close.
-        self._typed_closed: Dict[str, EpisodeId] = {}
+        # Closed ids stay known for a bounded time: a seed that lands after its close would
+        # otherwise open a browser nobody will ever close.
+        self._fence = ResourcesSessionFence()
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -188,9 +187,8 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
 
         session_id = body.resources_session_id
         request.session[SESSION_ID_KEY] = session_id
-        async with self._typed_locks.setdefault(session_id, asyncio.Lock()):
-            if session_id in self._typed_closed:
-                raise ValueError(f"resources session is already closed: {session_id}")
+        async with self._fence.locked(session_id):
+            self._fence.raise_if_closed(session_id)
             identity = self._typed_identity.get(session_id)
             if identity is not None:
                 # A retried seed for the same episode gets the browser it already has.
@@ -219,8 +217,9 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
         except ValidationError as error:
             raise RequestValidationError(error.errors()) from error
         session_id = typed.resources_session_id
-        async with self._typed_locks.setdefault(session_id, asyncio.Lock()):
-            closed_episode = self._typed_closed.get(session_id)
+        # The body names the session, so a close without a cookie (after a lost seed reply) still releases it.
+        async with self._fence.locked(session_id):
+            closed_episode = self._fence.closed_episode(session_id)
             if closed_episode is not None:
                 if typed.episode_id != closed_episode:
                     raise ValueError("episode_id does not match the closed resources session")
@@ -233,7 +232,7 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
             # episode that ended before it, and a no-op otherwise.
             await self._release(session_id)
             self._typed_identity.pop(session_id, None)
-            self._typed_closed[session_id] = typed.episode_id
+            self._fence.mark_closed(session_id, typed.episode_id)
             request.session.pop(SESSION_ID_KEY, None)
             return ResourcesCloseSessionResponse(resources_session_id=session_id)
 

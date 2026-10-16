@@ -22,7 +22,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from fastapi import Request
+from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
@@ -33,6 +33,7 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+from nemo_gym.testing.session_conformance import check_resources_session_contract
 from resources_servers.swebench_pro.app import (
     SWEBenchProInstanceRequest,
     SWEBenchProResourcesServer,
@@ -377,7 +378,7 @@ async def test_episode_seed_returns_direct_access_and_resources_close_owns_stop(
                 episode_id=EpisodeId(rollout_id="different"),
             ).model_dump(mode="json"),
         )
-    with pytest.raises(ValueError, match="already closed"):
+    with pytest.raises(HTTPException, match="already closed") as refused:
         await server.seed_session(
             request,
             ResourcesSeedSessionRequest(
@@ -387,6 +388,38 @@ async def test_episode_seed_returns_direct_access_and_resources_close_owns_stop(
                 task_data=task_data,
             ),
         )
+    assert refused.value.status_code == 409
+
+
+def test_episode_session_follows_the_session_contract(monkeypatch: MonkeyPatch) -> None:
+    server = make_server(golden=False, apply_anti_cheating=False)
+    sandbox = SimpleNamespace(
+        _handle=SimpleNamespace(sandbox_id="sandbox-id"),
+        exec=AsyncMock(),
+        serialize=AsyncMock(return_value={"sandbox_id": "sandbox-id"}),
+        stop=AsyncMock(),
+    )
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=sandbox))
+    monkeypatch.setattr(
+        "resources_servers.swebench_pro.app.resolve_provider_config",
+        lambda name, config: {"opensandbox": {}},
+    )
+    monkeypatch.setattr("resources_servers.swebench_pro.app.get_global_config_dict", lambda: {})
+    task_data = request_body()
+    task_data.pop("responses_create_params")
+    task_data.pop("response")
+
+    check_resources_session_contract(
+        server.setup_webserver(),
+        ResourcesSeedSessionRequest(
+            resources_session_id="contract-session",
+            episode_id=EpisodeId(rollout_id="rollout"),
+            task_id=TaskId(taskset="swebench_pro", task_id="instance_example"),
+            task_data=task_data,
+        ),
+        keeps_state=True,
+        holds_state=lambda resources_session_id: resources_session_id in server._session_id_to_sandbox,
+    )
 
 
 @pytest.mark.asyncio
