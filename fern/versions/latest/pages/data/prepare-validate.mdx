@@ -222,7 +222,7 @@ gym dataset collate \
     --output-dir data
 ```
 
-This validates your data and adds the `agent_ref` field to each row, routing samples to your resources server.
+This validates your data and adds a `task_source` field to each row, which NeMo Gym resolves to your agent server at run time.
 
 ---
 
@@ -317,7 +317,7 @@ with open("your_data.jsonl") as f:
 2. **Check files** — Verify dataset files exist
 3. **Validate samples** — Parse each line, validate against schema
 4. **Compute metrics** — Aggregate statistics
-5. **Collate** — Combine samples with agent references
+5. **Collate** — Combine samples and stamp each row with `task_source`
 
 ### Output Locations
 
