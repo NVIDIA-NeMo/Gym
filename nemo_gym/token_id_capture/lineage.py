@@ -97,31 +97,6 @@ def _log_late_write_dropped(rollout_id: str, model_call_id: str, staging_key: st
     )
 
 
-# Names of the token-free CallRecord custody columns a ledger row carries.
-# ``staging_digest`` is the worker's staged-record digest; the row's ``digest``
-# key remains the lineage digest over the cumulative token IDs.
-_CUSTODY_FIELDS = (
-    "parent_call_id",
-    "staging_key",
-    "weight_version",
-    "prev_len",
-    "delta_len",
-    "cum_len",
-    "staging_digest",
-    "extras_digest",
-    "mode",
-    "admitted_at",
-    "staging_chain",
-    "chain_hash",
-    "cumulative_hash",
-    "response_id",
-    "output_fingerprint",
-    "continuation_fingerprint",
-    "fingerprint_version",
-    "finish_reason",
-)
-
-
 def _custody_columns(record: CallRecord, staging_chain: tuple[str, ...] | list[str] = ()) -> dict:
     """Return the ledger custody columns for one committed ``CallRecord``.
 
