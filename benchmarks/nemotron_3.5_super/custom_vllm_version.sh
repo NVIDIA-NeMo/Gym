@@ -29,8 +29,8 @@ if [[ "${1:-}" == __inside_build ]]; then
     vllm_sha=$(git rev-parse HEAD)
     test -z "${VLLM_HEAD_SHA:-}" || test "${vllm_sha}" = "${VLLM_HEAD_SHA}"
 
-    # Allow Python, text, and YAML changes when reusing the wheel's native code.
-    # Other file types still require review before using precompiled artifacts.
+    # Reuse the wheel's CUDA/C++ code, but build Rust from this checkout below.
+    # Allow its source/build inputs and documentation alongside Python changes.
     git fetch --depth=1 https://github.com/vllm-project/vllm.git \
         "${VLLM_PRECOMPILED_WHEEL_COMMIT}" 2>&1 | tail -3
     # An explicitly fetched tag may exist only as FETCH_HEAD in a shallow clone.
@@ -38,10 +38,10 @@ if [[ "${1:-}" == __inside_build ]]; then
     changed_files=$(git diff --name-only "${precompiled_base_sha}" HEAD --)
     unsupported_changes=$(
         printf '%s\n' "${changed_files}" | grep -Ev \
-            '(^$|\.(py|txt|yaml)$)' || true
+            '(^$|\.(py|txt|yaml)$|^rust/|^rust-toolchain\.toml$|^tools/build_rust\.sh$|^docs/.*\.md$)' || true
     )
     if [[ -n "${unsupported_changes}" ]]; then
-        echo "ERROR: precompiled build cannot consume changes outside .py, .txt, and .yaml files:" >&2
+        echo "ERROR: precompiled CUDA/C++ build cannot consume these changes (Rust is rebuilt separately):" >&2
         echo "${unsupported_changes}" >&2
         exit 1
     fi
@@ -55,10 +55,12 @@ if [[ "${1:-}" == __inside_build ]]; then
     # VLLM_USE_PRECOMPILED also copies Rust artifacts from the wheel. Python-only
     # launcher changes can still break their CLI/protocol, so rebuild Rust from
     # this checkout AFTER installing the wheel (which would overwrite the build).
+    echo ">>> Rebuilding Rust frontend and extensions from ${vllm_sha}"
     uv pip install --system 'setuptools>=77.0.3,<81' 'setuptools-scm>=9.2.0' 'setuptools-rust>=1.9.0' wheel
-    bash tools/build_rust.sh
+    env -u VLLM_USE_PRECOMPILED -u VLLM_USE_PRECOMPILED_RUST bash tools/build_rust.sh
     installed_vllm_dir=$(cd / && python3 -c 'import vllm; from pathlib import Path; print(Path(vllm.__file__).parent)')
     install -m 755 vllm/vllm-rs "${installed_vllm_dir}/vllm-rs"
+    cmp vllm/vllm-rs "${installed_vllm_dir}/vllm-rs"
     for rust_extension in vllm/_rust_*.so; do
         [[ -f "$rust_extension" ]] || continue
         install -m 755 "$rust_extension" "${installed_vllm_dir}/"
