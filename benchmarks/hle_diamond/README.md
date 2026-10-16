@@ -142,10 +142,16 @@ Model-free checks that have been run (commands below, from the repository root):
 
 - `tests/unit_tests/test_hle_diamond.py`: preparation against an in-memory arrow fixture (field set,
   the `input_image` block, the text filter, fail-closed on a wrong row count / partition split /
-  image count / duplicated id, `--limit` boundaries, no download on invalid arguments), config
-  discovery and composition, the judge prompt path, manifests, and the partition slices through
-  `compute_aggregate_metrics`. The count check and the slice hook were mutation-checked: breaking
-  either makes the tests fail.
+  image count / duplicated id, `--limit` truncation after the text filter and above the corpus size,
+  the `prepare_text.py` script form, no download on invalid arguments), config discovery and
+  composition, the judge prompt path, manifests, the partition slices through
+  `compute_aggregate_metrics`, and the production row shape (`/verify` reply through
+  `SimpleAgentVerifyResponse` into the slices). The count check, the limit truncation, the response
+  field echo and the slice hook were mutation-checked: breaking any of them makes tests fail.
+- `tests/unit_tests/test_hle_diamond_search_exclusions.py`: the generator's normalisation, dedup and
+  audit trail; the rendered and the committed list loading through the real Tavily parser and
+  blocking load-bearing hosts; the committed list being at least as strict as `benchmarks/hle`'s;
+  and the upstream pin being a full 40-character revision (the `--download` URL depends on it).
 - Real preparation printed `Wrote 1000 problems ... (272 with an image)` and
   `Wrote 728 problems ... (skipped 272 image questions)`; the written rows were re-counted
   (500 / 500 partitions, 272 `input_image` blocks, 1000 and 728 unique ids, no dropped field leaked).
@@ -171,7 +177,9 @@ gym list benchmarks | grep hle_diamond          # hle_diamond, hle_diamond/text,
 ```
 
 `cais/hle-diamond` is gated: request access on the dataset page and put the token in `env.yaml` as
-`hf_token` (a `huggingface-cli login` token is not read by `gym eval prepare`).
+`hf_token`. When that key is absent, `prepare.py` passes `token=None` and `datasets` falls back to the
+cached `huggingface-cli login` / `HF_TOKEN` credentials (verified: the gated parquet resolves with
+`token=None` and fails with `401` for `token=False`).
 
 Rollout collection has **not** been run while writing this README. The intended no-tools command,
 matching the published setting (reasoning effort high, no temperature, no token cap, one repeat),
@@ -212,15 +220,65 @@ these presets:
   blocked. Label any such run accordingly.
 - Answer exposure: the search presets supply the HLE-Diamond
   [exclusion list](search_exclusions.json), derived from the upstream `docs/blocklist.json` domains
-  and URL prefixes by `build_search_exclusions.py`. Deployments requiring an additional policy must
-  supply their combined policy file through the Tavily resource's `exclude_domains_file_path`; keep
-  private policies outside the public repository. The list reduces answer exposure but cannot
-  guarantee that every answer-bearing page is excluded.
+  and URL prefixes by `build_search_exclusions.py` (see Search exclusions below for what is and is
+  not enforced). Deployments requiring an additional policy must supply their combined policy file
+  through the Tavily resource's `exclude_domains_file_path`; keep private policies outside the public
+  repository. The list reduces answer exposure but cannot guarantee that every answer-bearing page is
+  excluded.
+
+### Search exclusions
+
+`search_exclusions.json` is generated, never hand-edited: `build_search_exclusions.py` maps the
+upstream `docs/blocklist.json` at the revision pinned in the script (`UPSTREAM_COMMIT`, with the
+snapshot's SHA-256 in `UPSTREAM_BLOCKLIST_SHA256`) onto Gym's format and unions it with
+`benchmarks/hle/search_exclusions.json`, so the Diamond list is at least as strict as Gym's HLE list.
+Gym's Tavily resource (`URLExclusionPolicy`) expresses two rule types, so two of upstream's seven rule
+families are enforced:
+
+| Upstream family | Rules | Gym rule | Enforced |
+| --- | --- | --- | --- |
+| `domains` | 220 | `domain`: exact hostname or any subdomain | yes |
+| `url_prefixes` | 66 | `url_substring`: case-insensitive substring of the URL, scheme and leading `www.` removed; a prefix becomes a substring, so at least as strict | yes |
+| `serp_url_patterns` | 12 | none | no |
+| `url_patterns` | 22 | none | no |
+| `patterns_case_sensitive` | 4 | none | no |
+| `answer_title_patterns` | 5 | none | no |
+| `answer_title_allow_hosts` | 7 | none | no |
+
+The unrepresented families are recorded by name and count under `unrepresented_upstream_rules` in
+the JSON, a key the parser ignores. The consequences make the search presets a **weaker leakage
+policy than upstream's protocol** (`docs/evaluation-with-tools.md`), and a with-tools number from
+them must be labelled as such:
+
+- Only hostnames and URL substrings are inspected. No search query is refused (upstream refuses
+  queries with a blocked `site:` domain or a long verbatim span of the question), and no result title,
+  snippet or fetched Markdown is matched against the regex families (upstream rejects pages whose
+  text matches `url_patterns` or `patterns_case_sensitive`, e.g. "Humanity's Last Exam" in several
+  languages, `cais/hle`, specific arXiv ids and answer-key phrasing).
+- Raw search-engine result pages (`serp_url_patterns`) and answer-key style titles
+  (`answer_title_patterns`) are not filtered.
+- The parser percent-decodes a URL and re-checks it, so a `url_substring` embedded in a proxy or
+  archive link is caught; a `domain` rule applies to the outer hostname only, so an archive or
+  proxy page that wraps a blocked host in its path passes unless a substring rule matches.
+- Upstream blocks GitHub wholesale (`github.com`, `githubusercontent.com`, `gist.github.com`,
+  `api.github.com`, `github.io`), and so does this list: the agent cannot fetch any GitHub page.
+
+Two `url_substring` rules inherited from `benchmarks/hle/search_exclusions.json`
+(`openreview.net/pdf/<40 hex characters>.pdf`) carry OpenReview document ids. They are not secrets,
+they pass the repository's secrets scan unaltered, and they are kept rather than widened to the
+`openreview.net/pdf/` prefix so the list does not block more than upstream does.
+
+Refresh procedure when upstream changes its blocklist: update `UPSTREAM_COMMIT` and
+`UPSTREAM_BLOCKLIST_SHA256` together in `build_search_exclusions.py`, run
+`python benchmarks/hle_diamond/build_search_exclusions.py --download`, review the diff of
+`search_exclusions.json` (a rule family new to the generator is reported as a warning), and run
+`pytest tests/unit_tests/test_hle_diamond_search_exclusions.py`.
 
 ## Tests
 
 ```bash
-pytest tests/unit_tests/test_hle_diamond.py resources_servers/equivalence_llm_judge/tests/test_app.py
+pytest tests/unit_tests/test_hle_diamond.py tests/unit_tests/test_hle_diamond_search_exclusions.py \
+    resources_servers/equivalence_llm_judge/tests/test_app.py
 ```
 
 ## Licensing
