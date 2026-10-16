@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import copy
+import shutil
 from copy import deepcopy
 from pathlib import Path
 
@@ -9,6 +11,7 @@ import yaml
 
 from nemo_gym.sandbox.compose_config import (
     ComposeFieldError,
+    ComposeVolumeError,
     adapt_non_root_sidecars,
     check_compose_fields,
     check_sidecar_extra_hosts,
@@ -16,6 +19,8 @@ from nemo_gym.sandbox.compose_config import (
     non_root_sidecar_users,
     normalize_platform,
     opensandbox_shm_labels,
+    parse_volume,
+    plan_compose_volumes,
     resolve_compose,
     sandbox_platform,
     service_gpus,
@@ -763,3 +768,314 @@ def test_extra_hosts_on_a_non_root_sidecar_are_refused_where_the_host_opt_out_is
     adapted = adapt_non_root_sidecars(deepcopy(document), root)
     assert "x-sandbox" not in adapted["services"]["browser"]
     assert adapted["services"]["browser"]["extra_hosts"] == {"licence.example": "198.51.100.7"}
+
+
+VOLUME_FIXTURES = Path(__file__).parent / "fixtures" / "harbor_compose_volumes"
+
+
+class TestComposeVolumes:
+    """M22: bind mounts of task files become uploads, named volumes stay for shared storage, external ones map
+    through ``volume_sources``; anything else fails naming the field."""
+
+    @pytest.mark.parametrize(
+        "entry,expected",
+        [
+            (
+                "./seed.json:/app/seed.json:ro",
+                {"type": "bind", "source": "./seed.json", "target": "/app/seed.json", "read_only": True},
+            ),
+            (
+                "/var/lib/models:/models",
+                {"type": "bind", "source": "/var/lib/models", "target": "/models", "read_only": False},
+            ),
+            ("~/cache:/cache:rw,z", {"type": "bind", "source": "~/cache", "target": "/cache", "read_only": False}),
+            (
+                "pgdata:/var/lib/postgresql/data",
+                {"type": "volume", "source": "pgdata", "target": "/var/lib/postgresql/data", "read_only": False},
+            ),
+            (
+                "pgdata:/data:nocopy",
+                {
+                    "type": "volume",
+                    "source": "pgdata",
+                    "target": "/data",
+                    "read_only": False,
+                    "volume": {"nocopy": True},
+                },
+            ),
+            (
+                {
+                    "type": "bind",
+                    "source": "./data",
+                    "target": "/data",
+                    "read_only": True,
+                    "bind": {"create_host_path": True},
+                },
+                {"type": "bind", "source": "./data", "target": "/data", "read_only": True},
+            ),
+            (
+                {"source": "pgdata", "target": "/data", "volume": {"nocopy": True}, "consistency": "cached"},
+                {
+                    "type": "volume",
+                    "source": "pgdata",
+                    "target": "/data",
+                    "read_only": False,
+                    "volume": {"nocopy": True},
+                },
+            ),
+        ],
+    )
+    def test_parse_volume_handles_short_and_long_syntax(self, entry, expected):
+        assert parse_volume(entry, "api") == expected
+
+    @pytest.mark.parametrize(
+        "entry,name",
+        [
+            ("/data", "/data"),  # anonymous volume
+            (":/data", ":/data"),
+            ("./a:/data:ro:extra", "./a:/data:ro:extra"),
+            ("./a:/data:rshared", "rshared"),
+            ({"type": "tmpfs", "target": "/tmp"}, "type"),
+            ({"type": "volume", "target": "/data"}, "source"),
+            ({"type": "bind", "target": "/data"}, "source"),
+            ({"type": "bind", "source": "./a", "target": "data"}, "target"),
+            ({"type": "bind", "source": "./a", "target": "/data", "bind": {"propagation": "rshared"}}, "propagation"),
+            ({"type": "volume", "source": "v", "target": "/data", "volume": {"subpath": "x"}}, "subpath"),
+            ({"type": "volume", "source": "v", "target": "/data", "tmpfs": {}}, "tmpfs"),
+            (42, "volumes"),
+        ],
+    )
+    def test_unsupported_volume_entries_name_the_field(self, entry, name):
+        with pytest.raises(ComposeVolumeError) as exc:
+            parse_volume(entry, "api")
+        assert exc.value.name == name
+
+    def test_task_aw_bind_mount_becomes_an_upload_into_the_sidecar(self, tmp_path):
+        env = tmp_path / "task-aw" / "environment"
+        shutil.copytree(VOLUME_FIXTURES / "task-aw" / "environment", env)
+        document = yaml.safe_load((env / "docker-compose.yaml").read_text())
+        uploads = plan_compose_volumes(document, env, root=env.parent)
+        api = document["services"]["api"]
+        assert "volumes" not in api
+        assert uploads == {"api": [{"source": str(env / "seed.json"), "target": "/app/seed.json"}]}
+        assert api["x-sandbox"] == {"uploads": uploads["api"]}
+        assert "x-sandbox" not in document["services"]["main"]
+        # Nothing else is needed from the deployment: no shared storage, no volume_sources.
+        assert "volumes" not in document
+
+    def test_context_dir_folder_bind_and_task_root_paths_upload(self, tmp_path):
+        env = tmp_path / "t" / "environment"
+        (env / "data").mkdir(parents=True)
+        (env / "data" / "a.txt").write_text("a")
+        (tmp_path / "t" / "tests").mkdir()
+        document = {
+            "services": {
+                "main": {"volumes": [f"{env}/data:/data", {"type": "bind", "source": "../tests", "target": "/tests"}]}
+            }
+        }
+        uploads = plan_compose_volumes(document, env, root=env.parent)
+        assert uploads["main"] == [
+            {"source": str(env / "data"), "target": "/data"},
+            {"source": str(tmp_path / "t" / "tests"), "target": "/tests"},
+        ]
+
+    def test_named_volumes_stay_in_long_syntax_for_shared_storage(self, tmp_path):
+        document = {
+            "services": {
+                "db": {"volumes": ["pgdata:/var/lib/postgresql/data"]},
+                "backup": {
+                    "volumes": [{"type": "volume", "source": "pgdata", "target": "/mnt/db", "read_only": True}]
+                },
+            },
+            "volumes": {"pgdata": None},
+        }
+        assert plan_compose_volumes(document, tmp_path) == {}
+        assert document["services"]["db"]["volumes"] == [
+            {"type": "volume", "source": "pgdata", "target": "/var/lib/postgresql/data", "read_only": False}
+        ]
+        assert document["services"]["backup"]["volumes"][0]["read_only"] is True
+        # The canonical null declaration is normalised to the mapping the adapter reads (review finding).
+        assert document["volumes"] == {"pgdata": {}}
+
+    def test_external_volume_needs_a_volume_sources_entry(self, tmp_path):
+        document = {"services": {"db": {"volumes": ["pgdata:/data"]}}, "volumes": {"pgdata": {"external": True}}}
+        with pytest.raises(ComposeVolumeError, match="external volume 'pgdata' needs a `volume_sources` entry") as exc:
+            plan_compose_volumes(copy.deepcopy(document), tmp_path)
+        assert exc.value.name == "pgdata"
+        plan_compose_volumes(document, tmp_path, volume_sources={"pgdata": "datasets/pgdata"})
+        assert document["services"]["db"]["volumes"][0]["source"] == "pgdata"
+
+    def test_foreign_bind_mount_needs_a_volume_sources_entry(self, tmp_path):
+        document = {"services": {"api": {"volumes": ["/var/lib/models:/models:ro"]}}}
+        with pytest.raises(ComposeVolumeError, match="outside the task") as exc:
+            plan_compose_volumes(copy.deepcopy(document), tmp_path)
+        assert exc.value.name == "/var/lib/models"
+        plan_compose_volumes(document, tmp_path, volume_sources={"/var/lib/models": "models"})
+        assert document["services"]["api"]["volumes"] == [
+            {"type": "bind", "source": "/var/lib/models", "target": "/models", "read_only": True}
+        ]
+
+    @pytest.mark.parametrize(
+        "document,name",
+        [
+            ({"services": {"db": {"volumes": ["pgdata:/data"]}}}, "pgdata"),
+            ({"services": {"db": {"volumes": ["pgdata:/data"]}}, "volumes": {"pgdata": {"driver": "nfs"}}}, "driver"),
+            ({"services": {"db": {"volumes": ["./missing.json:/x.json"]}}}, "./missing.json"),
+            ({"services": {"db": {"volumes": "./a:/a"}}}, "volumes"),
+            ({"services": {"db": {}}, "volumes": []}, "volumes"),
+        ],
+    )
+    def test_undeclared_missing_and_malformed_volumes_fail_naming_them(self, tmp_path, document, name):
+        with pytest.raises(ComposeVolumeError) as exc:
+            plan_compose_volumes(document, tmp_path)
+        assert exc.value.name == name
+
+    def test_a_link_leaving_the_task_folder_is_refused(self, tmp_path):
+        env = tmp_path / "t" / "environment"
+        env.mkdir(parents=True)
+        outside = tmp_path / "outside.json"
+        outside.write_text("{}")
+        (env / "seed.json").symlink_to(outside)
+        with pytest.raises(ComposeVolumeError, match="leaves the task folder") as exc:
+            plan_compose_volumes({"services": {"api": {"volumes": ["./seed.json:/seed.json"]}}}, env, root=env.parent)
+        assert exc.value.name == "./seed.json"
+
+    def test_a_link_with_an_absolute_target_inside_the_task_is_refused_and_a_relative_one_is_not(self, tmp_path):
+        # Review: the server plans on a copy of the task folder (links copied as links). An absolute target still
+        # points into the original, so a source reached through one would pass prepare and fail seed; the planner
+        # refuses it like the hub refuses such a link in a fetched task. A relative link agrees at both ends.
+        task = tmp_path / "t"
+        env = task / "environment"
+        (env / "realdata" / "sub").mkdir(parents=True)
+        (env / "realdata" / "sub" / "a.txt").write_text("a")
+        (env / "real.json").write_text("{}")
+        (env / "data").symlink_to(env / "realdata", target_is_directory=True)
+        (env / "seed.json").symlink_to(env / "real.json")
+
+        def document(*entries):
+            return {"services": {"api": {"volumes": list(entries)}}}
+
+        for source, link in [("./data", "data"), ("./data/sub", "data"), ("./seed.json", "seed.json")]:
+            with pytest.raises(ComposeVolumeError, match=rf"absolute target: .*environment/{link}; make") as exc:
+                plan_compose_volumes(document(f"{source}:/mnt"), env, root=task)
+            assert exc.value.name == source
+        (env / "data").unlink()
+        (env / "seed.json").unlink()
+        (env / "data").symlink_to("realdata", target_is_directory=True)
+        (env / "seed.json").symlink_to("real.json")
+        entries = ("./data:/data", "./data/sub:/sub", "./seed.json:/seed.json")
+        uploads = plan_compose_volumes(document(*entries), env, root=task)
+        assert uploads == {
+            "api": [
+                {"source": str(env.resolve() / "realdata"), "target": "/data"},
+                {"source": str(env.resolve() / "realdata" / "sub"), "target": "/sub"},
+                {"source": str(env.resolve() / "real.json"), "target": "/seed.json"},
+            ]
+        }
+        # The same plan on a copy made the way the server snapshots a task: the links resolve inside the copy.
+        copy = tmp_path / "copy"
+        shutil.copytree(task, copy, symlinks=True)
+        uploads = plan_compose_volumes(document(*entries), copy / "environment", root=copy)
+        assert [entry["source"] for entry in uploads["api"]] == [
+            str(copy.resolve() / "environment" / "realdata"),
+            str(copy.resolve() / "environment" / "realdata" / "sub"),
+            str(copy.resolve() / "environment" / "real.json"),
+        ]
+
+    def test_a_link_inside_a_bound_folder_is_refused_naming_it(self, tmp_path):
+        # Review: a folder is uploaded file by file, so a link inside it would be read through to the host.
+        env = tmp_path / "t" / "environment"
+        (env / "data" / "sub").mkdir(parents=True)
+        (env / "data" / "ok.txt").write_text("ok")
+        outside = tmp_path / "outside.txt"
+        outside.write_text("secret")
+        (env / "data" / "sub" / "leak").symlink_to(outside)
+        with pytest.raises(ComposeVolumeError, match=r"contains a link: .*data/sub/leak") as exc:
+            plan_compose_volumes({"services": {"api": {"volumes": ["./data:/data"]}}}, env, root=env.parent)
+        assert exc.value.name == "./data"
+        # A relative link that stays inside the task is refused too: no link is ever uploaded.
+        (env / "data" / "sub" / "leak").unlink()
+        (env / "data" / "sub" / "alias").symlink_to("../ok.txt")
+        with pytest.raises(ComposeVolumeError, match="contains a link"):
+            plan_compose_volumes({"services": {"api": {"volumes": ["./data:/data"]}}}, env, root=env.parent)
+
+    @pytest.mark.parametrize("service", ["main", "api"])
+    @pytest.mark.parametrize("source", ["/etc/passwd", "OUTSIDE"])
+    def test_a_task_authored_x_sandbox_is_refused_naming_the_field(self, tmp_path, service, source):
+        # Review blocker: x-sandbox is the planner's output. A task file carrying one could name any host file
+        # as an upload source, so it fails before any volume is looked at, naming the field.
+        env = tmp_path / "t" / "environment"
+        env.mkdir(parents=True)
+        outside = tmp_path / "outside" / "secret"
+        outside.parent.mkdir()
+        outside.write_text("secret")
+        source = str(outside) if source == "OUTSIDE" else source
+        document = {
+            "services": {
+                "main": {},
+                "api": {"image": "a"},
+            }
+        }
+        document["services"][service]["x-sandbox"] = {"uploads": [{"source": source, "target": "/tmp/stolen"}]}
+        with pytest.raises(ComposeVolumeError, match=f"service {service!r} declares x-sandbox") as exc:
+            plan_compose_volumes(document, env, root=env.parent)
+        assert exc.value.name == "x-sandbox"
+        # Any x-sandbox key, not only uploads: the sidecar adaptation's keys are Gym's too.
+        document["services"][service]["x-sandbox"] = {"hosts": []}
+        with pytest.raises(ComposeVolumeError) as exc:
+            plan_compose_volumes(document, env, root=env.parent)
+        assert exc.value.name == "x-sandbox"
+
+    @pytest.mark.parametrize(
+        "entry",
+        [
+            "./seed.json:app/seed.json",
+            "./seed.json:/app/../x",
+            "data:rel/path",
+            {"type": "bind", "source": "./seed.json", "target": "/app/../x"},
+            "./seed.json:/",
+            {"type": "bind", "source": "./seed.json", "target": "//"},
+            "data:/",
+        ],
+    )
+    def test_targets_are_absolute_below_the_root_without_dotdot_in_both_syntaxes(self, tmp_path, entry):
+        # Review: the short syntax took any target; a relative or `..` target failed only at seed, and `/` was
+        # accepted (chmod and uploads over the whole container).
+        (tmp_path / "seed.json").write_text("{}")
+        document = {"services": {"api": {"volumes": [entry]}}, "volumes": {"data": {}}}
+        with pytest.raises(ComposeVolumeError, match="target") as exc:
+            plan_compose_volumes(document, tmp_path)
+        assert exc.value.name == "target"
+
+    def test_an_unknown_home_user_in_a_bind_source_names_the_source(self, tmp_path):
+        # Review: Path.expanduser raised a bare RuntimeError for `~user` with no such user.
+        document = {"services": {"db": {"volumes": ["~nosuchuser_xyz/x:/x"]}}}
+        with pytest.raises(ComposeVolumeError, match="cannot resolve the home directory") as exc:
+            plan_compose_volumes(document, tmp_path)
+        assert exc.value.name == "~nosuchuser_xyz/x"
+
+    def test_logs_tree_bind_is_dropped_on_main_and_refused_on_a_sidecar(self, tmp_path):
+        document = {"services": {"main": {"volumes": ["/logs/verifier:/logs/verifier", "/logs:/logs"]}}}
+        assert plan_compose_volumes(document, tmp_path) == {}
+        assert "volumes" not in document["services"]["main"] and "x-sandbox" not in document["services"]["main"]
+        with pytest.raises(ComposeVolumeError, match="only `main` can mount /logs") as exc:
+            plan_compose_volumes({"services": {"api": {"volumes": ["/logs/agent:/logs/agent"]}}}, tmp_path)
+        assert exc.value.name == "/logs/agent"
+
+    def test_documents_without_services_or_volumes_are_left_alone(self, tmp_path):
+        for document in ({}, {"services": None}, {"services": {"main": None, "api": {"volumes": None}}}):
+            assert plan_compose_volumes(copy.deepcopy(document), tmp_path) == {}
+
+    def test_non_root_sidecar_adaptation_keeps_uploads(self, tmp_path):
+        seed = tmp_path / "seed.json"
+        seed.write_text("{}")
+        overlay = copy.deepcopy(OVERLAY)
+        overlay["services"]["browser"]["volumes"] = ["./seed.json:/app/seed.json:ro"]
+        uploads = plan_compose_volumes(overlay, tmp_path)
+        document = adapt_non_root_sidecars(resolve_compose(overlay, MAIN, IMAGE_CONFIGS), IMAGE_CONFIGS)
+        browser = document["services"]["browser"]
+        assert browser["x-sandbox"] == {
+            "uploads": uploads["browser"],
+            "hosts": [],
+            "resolve_environment": ["BROWSER_URL"],
+        }

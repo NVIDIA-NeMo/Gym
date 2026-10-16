@@ -14,6 +14,7 @@ from pathlib import Path
 
 import orjson
 import pytest
+import yaml
 from aiohttp import ClientResponseError, RequestInfo
 from fastapi.testclient import TestClient
 from multidict import CIMultiDict, CIMultiDictProxy
@@ -1840,6 +1841,7 @@ class TestComposeAndRouting:
             "  kafka:\n    image: org/kafka:1\n    environment: ['KAFKA_TOPIC=${KAFKA_TOPIC:-events}']\n"
         )
         (task.path / "environment" / "api.env").write_text("API_MODE=replay\n")
+        (task.path / "environment" / "seed.json").write_text("{}")
         task = load_task(task.path)
         server.config.tasksets["ds"].tasks["hello"] = task.digest
 
@@ -1848,10 +1850,12 @@ class TestComposeAndRouting:
         assert response.failure is None, response.failure
         services = documents[0]["services"]
         assert services["main"]["image"] == IMAGE_CONFIGS["org/agent:1"]["image"]
-        # The server resolves the task from its snapshot, so the bind mount points into that copy.
-        (volume,) = services["main"]["volumes"]
-        assert volume.endswith("/hello/environment/seed.json:/app/seed.json:ro")
-        assert volume.startswith(server._snapshots.name) and not volume.startswith(str(task.path))
+        # The server resolves the task from its snapshot, so the bind mount (an upload since M22) points into
+        # that copy.
+        (upload,) = services["main"]["x-sandbox"]["uploads"]
+        assert upload["target"] == "/app/seed.json" and upload["source"].endswith("/hello/environment/seed.json")
+        assert upload["source"].startswith(server._snapshots.name) and not upload["source"].startswith(str(task.path))
+        assert "volumes" not in services["main"]
         assert services["api"]["environment"] == {"API_MODE": "replay"} and "env_file" not in services["api"]
         assert services["kafka"]["environment"] == {"KAFKA_TOPIC": "from-the-shell"}
 
@@ -2315,6 +2319,74 @@ class TestComposeAndRouting:
         assert specs["main"].workdir == task.workdir
         assert {name: spec.workdir for name, spec in specs.items() if name != "main"} == {"api": None, "kafka": None}
 
+    def test_compose_document_turns_task_bind_mounts_into_uploads_from_the_task_copy(self, tmp_path, monkeypatch):
+        # M22: the task-aw pattern, a sidecar bind-mounting ./seed.json from the task folder. The server plans it
+        # as an upload whose source is the file in its own task copy; named and external volumes resolve through
+        # the provider block's volume_sources, which also reaches the Compose adapter.
+        server, task, _, documents, _ = self.compose_server(tmp_path, monkeypatch)
+        (task.path / "environment" / "seed.json").write_text('{"records": []}')
+        (task.path / "environment" / "docker-compose.yaml").write_text(
+            "services:\n  main:\n    image: org/agent:1\n    volumes:\n      - ${HOST_VERIFIER_LOGS_PATH}:/logs/verifier\n"
+            "  api:\n    image: org/api:1\n    volumes:\n      - ./seed.json:/app/seed.json:ro\n      - models:/models\n"
+            "  kafka:\n    image: org/kafka:1\nvolumes:\n  models:\n    external: true\n"
+        )
+        task = load_task(task.path)
+        server.config.tasksets["ds"].tasks["hello"] = task.digest
+        with pytest.raises(RuntimeError, match="external volume 'models' needs a `volume_sources` entry"):
+            server._compose_document(task)
+        monkeypatch.setattr(
+            "environment_servers.harbor.app.get_global_config_dict",
+            lambda: {"sandbox": {"opensandbox": {}, "volume_sources": {"models": "shared/models"}}},
+        )
+        document = server._compose_document(task)
+        api, main = document["services"]["api"], document["services"]["main"]
+        assert api["x-sandbox"]["uploads"] == [
+            {"source": str(task.path / "environment" / "seed.json"), "target": "/app/seed.json"}
+        ]
+        assert api["volumes"] == [{"type": "volume", "source": "models", "target": "/models", "read_only": False}]
+        assert "volumes" not in main  # the /logs tree is the server's own, created at seed
+        captured = {}
+
+        class FakeComposeGroup:
+            def __init__(
+                self, provider_config, path, *, service_specs, timeout_s, volume_sources, upload_root, **kwargs
+            ):
+                captured["volume_sources"] = volume_sources
+                captured["upload_root"] = upload_root
+                captured["document"] = yaml.safe_load(Path(path).read_text())
+
+            async def start(self):
+                return None
+
+        monkeypatch.setattr("environment_servers.harbor.app.AsyncSandboxCompose", FakeComposeGroup)
+        asyncio.run(type(server)._create_compose(server, task, "r1"))  # compose_server() replaced the instance's
+        assert captured["volume_sources"] == {"models": "shared/models"}
+        assert captured["document"]["services"]["api"]["x-sandbox"]["uploads"] == api["x-sandbox"]["uploads"]
+        # The adapter may only read upload sources from the server's own task copy, the one the planner saw.
+        assert captured["upload_root"] == task.path
+
+    @pytest.mark.parametrize("service", ["main", "api"])
+    async def test_compose_document_refuses_a_task_authored_x_sandbox(self, tmp_path, monkeypatch, service):
+        # Review blocker: a task file that writes the planner's output form itself would have the server upload
+        # any readable host file into the sandbox. The seed fails naming the field; nothing starts.
+        server, task, compose, documents, _ = self.compose_server(tmp_path, monkeypatch)
+        smuggled = "    x-sandbox:\n      uploads:\n        - {source: /etc/passwd, target: /tmp/passwd}\n"
+        (task.path / "environment" / "docker-compose.yaml").write_text(
+            "services:\n  main:\n    image: org/agent:1\n"
+            + (smuggled if service == "main" else "")
+            + "  api:\n    image: org/api:1\n"
+            + (smuggled if service == "api" else "")
+            + "  kafka:\n    image: org/kafka:1\n"
+        )
+        task = load_task(task.path)
+        server.config.tasksets["ds"].tasks["hello"] = task.digest
+        with pytest.raises(RuntimeError, match=f"service {service!r} declares x-sandbox"):
+            server._compose_document(task)
+        response = await run_episode(server, task)
+        assert response.failure is not None and response.failure.stage == "seed"
+        assert "x-sandbox" in response.failure.failure_reason
+        assert documents == []
+
     async def test_compose_task_seeds_a_group_and_leaves_task_context(self, tmp_path, monkeypatch):
         server, task, compose, documents, _ = self.compose_server(tmp_path, monkeypatch)
 
@@ -2411,7 +2483,9 @@ class TestComposeAndRouting:
         captured = {}
 
         class FakeComposeGroup:
-            def __init__(self, provider_config, path, *, service_specs, timeout_s, service_providers, platform):
+            def __init__(
+                self, provider_config, path, *, service_specs, timeout_s, service_providers, platform, **kwargs
+            ):
                 captured.update(
                     provider=provider_config,
                     specs=service_specs,
@@ -4173,7 +4247,9 @@ class TestGeneralization:
         verifier = FakeSandbox()
 
         class FlakyComposeGroup:
-            def __init__(self, provider_config, path, *, service_specs, timeout_s, service_providers, platform):
+            def __init__(
+                self, provider_config, path, *, service_specs, timeout_s, service_providers, platform, **kwargs
+            ):
                 groups.append(self)
                 self.provider_config = provider_config
                 self.services: dict = {}
@@ -4221,7 +4297,9 @@ class TestGeneralization:
         class FailingComposeGroup:
             services: dict = {}
 
-            def __init__(self, provider_config, path, *, service_specs, timeout_s, service_providers, platform):
+            def __init__(
+                self, provider_config, path, *, service_specs, timeout_s, service_providers, platform, **kwargs
+            ):
                 pass
 
             async def start(self):
@@ -4272,7 +4350,9 @@ class TestGeneralization:
         verifier = FakeSandbox()
 
         class FlakyComposeGroup:
-            def __init__(self, provider_config, path, *, service_specs, timeout_s, service_providers, platform):
+            def __init__(
+                self, provider_config, path, *, service_specs, timeout_s, service_providers, platform, **kwargs
+            ):
                 groups.append(self)
                 self.services: dict = {}
                 self.stopped = 0
