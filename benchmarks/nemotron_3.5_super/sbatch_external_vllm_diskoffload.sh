@@ -551,8 +551,8 @@ MOONCAKE_CONFIG
             -metrics_port=9003 \
             -eviction_high_watermark_ratio=0.9 \
             -eviction_ratio=0.1 \
-            -minloglevel=1 \
-            -enable_metric_reporting=false \
+            -minloglevel=0 \
+            -enable_metric_reporting=true \
             -default_kv_lease_ttl=30000 \
             -logtostderr &
         mooncake_pid=\$!
