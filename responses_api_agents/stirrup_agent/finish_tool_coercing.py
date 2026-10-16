@@ -41,13 +41,27 @@ Observed broken shapes from the r5 GDPVal client log (verbatim):
   "paths": "Case Feedback.docx"            # bare filename
   "paths": {...}                            # rare; pydantic will reject
 
-Once the wedu image is rebuilt against vLLM main ≥ #41801, this coercion is
-a no-op (the first ``isinstance(v, list)`` branch will always take) and the
-module can be removed.
+Qwen3.8-Flash-Next served with ``--tool-call-parser qwen3_xml`` renders the
+array one level deeper: ``paths`` arrives as a real list whose single element
+is the *rendered* list, so the pass-through branch above accepted it verbatim
+and the whole rendering was existence-checked as one filename. Observed in
+GDPVal invocation f5dccfaddbdd5722 (verbatim, from the finish tool results):
+
+  "paths": ["['/root/output/Award_Spending_Rate_Analysis.xlsx']"]
+  "paths": ["[/root/output/Daily Shipment Manifest.xlsx, /root/output/Daily Shipment Manifest.pdf]"]
+
+Neither survives ``json.loads``: the first is a Python repr (single quotes),
+the second has no quoting at all. Elements are therefore parsed with
+``json.loads``, then ``ast.literal_eval``, then a comma split of the bracket
+body, and any element that yields a list is spliced into the result.
+
+Once every serving parser forwards arrays faithfully this coercion is a no-op
+(no element starts with ``[``) and the module can be removed.
 """
 
 from __future__ import annotations
 
+import ast
 import json
 from typing import Annotated
 
@@ -55,6 +69,31 @@ from pydantic import BaseModel, Field, field_validator
 from stirrup.constants import DEFAULT_FINISH_TOOL_NAME
 from stirrup.core.models import Tool, ToolResult, ToolUseCountMetadata
 from stirrup.tools.finish import _validating_finish_executor
+
+
+def _parse_rendered_list(value: str) -> list[str] | None:
+    """The paths inside a string holding a rendered list, or None if it is not one.
+
+    Serving-side tool-call parsers render an array argument with whatever
+    quoting they please, so try the strict readers first and fall back to
+    splitting the bracket body. A path containing a comma would split wrongly,
+    but the executor existence-checks every path, so that surfaces as a normal
+    "file does not exist" rejection rather than a silent bad submission.
+    """
+    stripped = value.strip()
+    if not (stripped.startswith("[") and stripped.endswith("]")):
+        return None
+    for load in (json.loads, ast.literal_eval):
+        try:
+            parsed = load(stripped)
+        except (ValueError, SyntaxError):
+            continue
+        if isinstance(parsed, (list, tuple)):
+            return [str(p) for p in parsed]
+    body = stripped[1:-1].strip()
+    if not body:
+        return []
+    return [part.strip().strip("\"'") for part in body.split(",") if part.strip()]
 
 
 class CoercingFinishParams(BaseModel):
@@ -69,20 +108,21 @@ class CoercingFinishParams(BaseModel):
     @field_validator("paths", mode="before")
     @classmethod
     def _coerce_paths(cls, v):
-        if isinstance(v, list):
-            return [str(p) for p in v]
         if isinstance(v, str):
+            rendered = _parse_rendered_list(v)
+            if rendered is not None:
+                return rendered
             stripped = v.strip()
-            if stripped.startswith("[") and stripped.endswith("]"):
-                try:
-                    parsed = json.loads(stripped)
-                except json.JSONDecodeError:
-                    parsed = None
-                if isinstance(parsed, list):
-                    return [str(p) for p in parsed]
-            if stripped:
-                return [stripped]
-            return []
+            return [stripped] if stripped else []
+        if isinstance(v, list):
+            paths: list[str] = []
+            for item in v:
+                rendered = _parse_rendered_list(item) if isinstance(item, str) else None
+                if rendered is None:
+                    paths.append(str(item))
+                else:
+                    paths.extend(rendered)
+            return paths
         return v
 
 

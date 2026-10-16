@@ -47,6 +47,25 @@ from responses_api_agents.stirrup_agent.finish_tool_coercing import (
         ('{"reason":"ok","paths":[]}', []),
         ('{"reason":"ok","paths":["a.txt"]}', ["a.txt"]),
         ('{"reason":"ok","paths":["a.txt","b.pdf"]}', ["a.txt", "b.pdf"]),
+        # qwen3_xml: a real list whose one element is the rendered list.
+        # Python repr — single quotes, so json.loads cannot read it.
+        ('{"reason":"ok","paths":["[\'/root/output/a.xlsx\']"]}', ["/root/output/a.xlsx"]),
+        (
+            '{"reason":"ok","paths":["[\'/root/a.docx\', \'/root/b.pdf\']"]}',
+            ["/root/a.docx", "/root/b.pdf"],
+        ),
+        # Unquoted bracket body — neither json nor literal_eval reads it.
+        (
+            '{"reason":"ok","paths":["[/root/Daily Manifest.xlsx, /root/Daily Manifest.pdf]"]}',
+            ["/root/Daily Manifest.xlsx", "/root/Daily Manifest.pdf"],
+        ),
+        # Rendered empty list nested in a real list.
+        ('{"reason":"ok","paths":["[]"]}', []),
+        # A rendered list alongside an ordinary path.
+        (
+            '{"reason":"ok","paths":["/root/plain.txt","[\'/root/a.xlsx\']"]}',
+            ["/root/plain.txt", "/root/a.xlsx"],
+        ),
     ],
 )
 def test_paths_coercion(raw: str, expected: list[str]) -> None:
@@ -86,3 +105,17 @@ def test_tool_carries_coercing_params() -> None:
     schema — sanity check that the wire-up doesn't fall back to upstream."""
     assert COERCING_FINISH_TOOL.parameters is CoercingFinishParams
     assert COERCING_FINISH_TOOL.name == "finish"
+
+
+def test_ordinary_paths_are_not_split_on_commas() -> None:
+    """A real path containing a comma is untouched — only a bracket-delimited
+    element is treated as a rendered list."""
+    p = CoercingFinishParams.model_validate({"reason": "ok", "paths": ["/root/Q1, Q2 summary.docx"]})
+    assert p.paths == ["/root/Q1, Q2 summary.docx"]
+
+
+def test_filename_with_brackets_is_untouched() -> None:
+    """Only an element that both starts and ends with a bracket is read as a
+    rendered list, so a filename merely containing brackets passes through."""
+    p = CoercingFinishParams.model_validate({"reason": "ok", "paths": ["/root/[draft].docx"]})
+    assert p.paths == ["/root/[draft].docx"]
