@@ -138,12 +138,12 @@ async def test_legacy_run_steps_block_prepare_only_when_waited_on() -> None:
 
 
 async def test_commit_reply_names_the_episodes_legacy_runs_own(tmp_path: Path) -> None:
-    """A native session's episode belongs to its environment server; only a legacy /run owns its own."""
+    """An agent session an environment server started belongs to that server; the agent owns only its own /run."""
     participant = AgentSessionParticipant(Hooks())
     controller = ParticipantControlPlane(participant, instance_name="agent", lease_grace_seconds=60)
-    legacy_id, native_id = EpisodeId(rollout_id="legacy"), EpisodeId(rollout_id="native", attempt=1)
-    participant.open_session("native", native_id)
-    verifying, native_parked, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    legacy_id, session_id = EpisodeId(rollout_id="legacy"), EpisodeId(rollout_id="session", attempt=1)
+    participant.open_session("session", session_id)
+    verifying, session_parked, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
     async def legacy() -> None:
         async with participant.legacy_run("run:legacy", legacy_id) as run:
@@ -152,23 +152,23 @@ async def test_commit_reply_names_the_episodes_legacy_runs_own(tmp_path: Path) -
                 verifying.set()
                 await release.wait()
 
-    async def native() -> None:
-        async with participant.activation("native", native_id) as activation:
-            await native_parked.wait()
+    async def environment_session() -> None:
+        async with participant.activation("session", session_id) as activation:
+            await session_parked.wait()
             await activation.boundary(lambda: {"step": 2})
 
-    tasks = [asyncio.create_task(legacy()), asyncio.create_task(native())]
+    tasks = [asyncio.create_task(legacy()), asyncio.create_task(environment_session())]
     await asyncio.wait_for(verifying.wait(), 5)
     prepare = asyncio.create_task(controller.prepare(CheckpointRequest(**control())))
     await asyncio.sleep(0.01)
-    native_parked.set()
+    session_parked.set()
     await prepare
     reply = await controller.commit(CommitRequest(**control(checkpoint_dir=str(tmp_path))))
     await controller.resume(CheckpointRequest(**control()))
     release.set()
     await asyncio.wait_for(asyncio.gather(*tasks), 5)
 
-    assert reply["episode_ids"] == ["legacy", "native-a1"]
+    assert reply["episode_ids"] == ["legacy", "session-a1"]
     assert reply["legacy_episode_ids"] == ["legacy"]
 
 
