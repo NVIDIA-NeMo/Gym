@@ -147,7 +147,7 @@ def record_built(folder: Path, task: Path, *, architecture: str = "amd64") -> st
         "config": {},
         "record_version": RECORD_VERSION,
     }
-    (entry,) = plan_builds(task)
+    entry = next(entry for entry in plan_builds(task) if entry.is_main)
     try:
         # The digest a build of the context records, so prepare reuses this record rather than rebuilding it.
         configs[image]["inputs_digest"] = build_inputs_digest(
@@ -269,7 +269,10 @@ class TestRestatedMainBuild:
         for task_id in ("built", "prebuilt"):
             document = load_compose_document(tasks[task_id])
             assert without_restated_main_build(tasks[task_id], document) == (document, None)
-            assert "build" in document["services"]["main"]
+        # The loader already put the recorded image in for the built main, its build: and pull_policy gone
+        # (with_built_images); the prebuilt task's main keeps its section for the field check to report.
+        assert load_compose_document(tasks["built"])["services"]["main"] == {"image": tasks["built"].built_image}
+        assert "build" in load_compose_document(tasks["prebuilt"])["services"]["main"]
         assert unsupported_compose_fields_error(tasks["built"]) is None
         # The same file on a task that was not built keeps a main build with a target Gym cannot apply.
         error = unsupported_compose_fields_error(tasks["pulled"])
@@ -279,6 +282,112 @@ class TestRestatedMainBuild:
 class TestPrepareChecksTheFieldsBeforeBuilding:
     """The field check also runs on the raw file of every task about to be built, so a refused task costs no build
     or push and a build that would fail for it does not stop the preparation."""
+
+    @staticmethod
+    def docker_tool(monkeypatch):
+        """prepare_target's builder as a docker FakeTool, whatever ``builds.tool`` says."""
+        from nemo_gym.tasks.harbor.build_tools import ImageBuilder
+        from tests.unit_tests.harbor_build_helpers import FakeTool
+
+        tool = FakeTool("docker")
+        monkeypatch.setattr(
+            prepare_builds,
+            "ImageBuilder",
+            lambda **kw: ImageBuilder(tool="docker", run=tool, **{k: v for k, v in kw.items() if k != "tool"}),
+        )
+        return tool
+
+    @staticmethod
+    def write_with_sidecar(folder: Path, name: str, main_build: str | None, **kwargs) -> Path:
+        """A task whose Compose file has ``main`` with ``build: main_build`` (none when ``None``) and a sidecar ``api``
+        the plan builds from ``environment/api/Dockerfile``."""
+        build = f"    build: {main_build}\n" if main_build is not None else ""
+        compose = f"services:\n  main:\n    image: ${{MAIN_IMAGE_NAME}}\n{build}  api:\n    build: ./api\n"
+        task = write_task(folder, name, compose=compose, **kwargs)
+        (task / "environment" / "api").mkdir()
+        (task / "environment" / "api" / "Dockerfile").write_text("FROM postgres:16\n")
+        return task
+
+    @pytest.mark.parametrize("dockerfile", [PULL_DOCKERFILE, OVERLAY_DOCKERFILE], ids=["pull", "overlay"])
+    @pytest.mark.parametrize(
+        "build", ["{context: .}", '{context: "${CONTEXT_DIR}", pull: true}', ".", "{dockerfile: Dockerfile}"]
+    )
+    def test_a_restated_main_build_beside_a_built_sidecar_passes_the_preflight_and_the_task_prepares(
+        self, tmp_path, monkeypatch, dockerfile, build
+    ):
+        """Review (M24): a pull or overlay ``main`` whose ``build:`` only restates Harbor's own template, beside a
+        sidecar the plan builds. The plan holds the sidecar only, so the preflight left main's section in place and
+        refused the whole task for ``main.build`` before any build, while the loader accepts the same file
+        (``without_restated_main_build``; orca-bench, terminal_bench_aai and data-eng-bench ship the restatement). The
+        same rule drops it here, ``${CONTEXT_DIR}`` read as the raw file spells it: the sidecar is built and recorded,
+        the task loads, and the document the sandbox receives has no ``build`` on main."""
+        folder = tmp_path / "ds"
+        folder.mkdir()
+        task = self.write_with_sidecar(folder, "t", build, dockerfile=dockerfile)
+        image_configs.record_base_images(folder)  # as prepare does before planning: the overlay's base is known
+        plan = plan_builds(folder)
+        assert [(entry.service, entry.tasks) for entry in plan] == [("api", ("t",))]
+        assert prepare_builds.refused_before_build(plan) == {}
+        tool = self.docker_tool(monkeypatch)
+
+        prepared = prepare_target(
+            str(folder), output_root=tmp_path / "out", build=BuildOptions(repository="registry.example/r")
+        )
+
+        assert prepared.skipped == {} and [t.task_id for t in prepared.tasks] == ["t"]
+        (loaded,) = prepared.tasks
+        assert loaded.built_image is None and bool(loaded.overlay) == (dockerfile is OVERLAY_DOCKERFILE)
+        digest = context_digest(task / "environment")
+        assert any("build" in call and str(task / "environment") in " ".join(call) for call in tool.calls)
+        from nemo_gym.tasks.harbor.task import built_service_images
+
+        assert built_service_images(loaded.path) == {"api": f"registry.example/r/hb__{digest}-api@sha256:pushed02"}
+        # The loader's own rule agrees with the preflight: the restatement is dropped, no reason, and the sidecar runs
+        # from its recorded image.
+        document, reason = without_restated_main_build(loaded, load_compose_document(loaded))
+        assert reason is None and document["services"]["main"] == {"image": loaded.image}
+        assert document["services"]["api"] == {"image": f"registry.example/r/hb__{digest}-api@sha256:pushed02"}
+
+    def test_a_main_build_key_gym_cannot_apply_is_the_reason_before_the_sidecar_builds(self, tmp_path, monkeypatch):
+        """The loader's rule, with the loader's wording: ``args`` would change the image Harbor builds and has no
+        equivalent without a build, so the task is left out before its sidecar costs a build or a push."""
+        folder = tmp_path / "ds"
+        folder.mkdir()
+        task = self.write_with_sidecar(folder, "t", '{context: ., args: {X: "1"}}')
+        write_task(folder, "good", compose=GOOD)
+        expected = {"t": "t: environment/docker-compose.yaml: main.build.args" + UNBUILT_NOTE}
+        refused = prepare_builds.refused_before_build(plan_builds(folder))
+        assert {task_id: str(error) for task_id, error in refused.items()} == expected
+        tool = self.docker_tool(monkeypatch)
+
+        prepared = prepare_target(
+            str(folder), output_root=tmp_path / "out", build=BuildOptions(repository="registry.example/r")
+        )
+
+        assert prepared.skipped == expected and [t.task_id for t in prepared.tasks] == ["good"]
+        assert not any("build" in call and str(task / "environment") in " ".join(call) for call in tool.calls)
+        assert not any("push" in call for call in tool.calls)
+        assert not (folder / BUILT_IMAGES_FILE).exists()
+
+    def test_a_prebuilt_main_with_a_build_section_beside_a_sidecar_is_still_refused_by_the_allow_list(
+        self, tmp_path, monkeypatch
+    ):
+        """Unchanged: a prebuilt ``main`` (``docker_image``, no Dockerfile) has no build of Harbor's to restate, so its
+        section stays and the allow-list reports it, before the sidecar builds."""
+        folder = tmp_path / "ds"
+        folder.mkdir()
+        task = self.write_with_sidecar(folder, "prebuilt", "{target: prod}", dockerfile=None, docker_image=AGENT_IMAGE)
+        write_task(folder, "good", compose=GOOD)
+        allow_list = "Service 'main': unsupported Compose fields ['build']"
+        refused = prepare_builds.refused_before_build(plan_builds(folder))
+        assert list(refused) == ["prebuilt"] and allow_list in str(refused["prebuilt"])
+        tool = self.docker_tool(monkeypatch)
+        prepared = prepare_target(
+            str(folder), output_root=tmp_path / "out", build=BuildOptions(repository="registry.example/r")
+        )
+        assert list(prepared.skipped) == ["prebuilt"] and allow_list in prepared.skipped["prebuilt"]
+        assert [t.task_id for t in prepared.tasks] == ["good"]
+        assert not any(str(task / "environment") in " ".join(call) for call in tool.calls)
 
     def test_a_refused_task_is_neither_built_nor_pushed_and_its_failing_build_stops_nothing(
         self, tmp_path, monkeypatch

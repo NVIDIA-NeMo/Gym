@@ -25,8 +25,9 @@ from nemo_gym.tasks.harbor.image_configs import (
     load_compose_document,
     record_base_images,
     record_compose_images,
+    with_built_images,
 )
-from nemo_gym.tasks.harbor.records import write_json_record
+from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE, write_json_record
 from nemo_gym.tasks.harbor.registry import ImageConfigError, RegistryClient, parse_image_ref
 from nemo_gym.tasks.harbor.task import discover_tasks
 
@@ -144,17 +145,24 @@ class FakeRegistry:
                 },
             },
             "sha256:cfg-arm64": {"os": "linux", "architecture": "arm64", "config": {"Cmd": ["python", "server.py"]}},
+            # An amd64/v3 build: the same os/arch in the blob (a configuration blob may omit the variant), another Cmd.
+            "sha256:cfg-amd64-v3": {"os": "linux", "architecture": "amd64", "config": {"Cmd": ["server-v3"]}},
         }
         self.manifests = {
             "sha256:m-amd64": {"mediaType": self.MANIFEST, "config": {"digest": "sha256:cfg-amd64"}},
             "sha256:m-arm64": {"mediaType": self.MANIFEST, "config": {"digest": "sha256:cfg-arm64"}},
             "sha256:m-att": {"mediaType": self.MANIFEST, "config": {"digest": "sha256:cfg-amd64"}},
+            "sha256:m-amd64-v3": {"mediaType": self.MANIFEST, "config": {"digest": "sha256:cfg-amd64-v3"}},
         }
         self.tags = {
+            # The Docker Official Images' shape (ubuntu:24.04, redis, python): the arm64 entry declares variant v8.
             "7-alpine": {
                 "mediaType": self.INDEX,
                 "manifests": [
-                    {"digest": "sha256:m-arm64", "platform": {"os": "linux", "architecture": "arm64"}},
+                    {
+                        "digest": "sha256:m-arm64",
+                        "platform": {"os": "linux", "architecture": "arm64", "variant": "v8"},
+                    },
                     {
                         "digest": "sha256:m-att",
                         "platform": {"os": "unknown", "architecture": "unknown"},
@@ -165,7 +173,33 @@ class FakeRegistry:
             },
             "arm-only": {
                 "mediaType": self.INDEX,
-                "manifests": [{"digest": "sha256:m-arm64", "platform": {"os": "linux", "architecture": "arm64"}}],
+                "manifests": [
+                    {
+                        "digest": "sha256:m-arm64",
+                        "platform": {"os": "linux", "architecture": "arm64", "variant": "v8"},
+                    }
+                ],
+            },
+            # An amd64 entry at micro-architecture level v3 listed before the baseline one: another platform to
+            # containerd's matcher (v2..v4 need CPU features a baseline host may lack), with its own configuration.
+            "amd64-v3": {
+                "mediaType": self.INDEX,
+                "manifests": [
+                    {
+                        "digest": "sha256:m-amd64-v3",
+                        "platform": {"os": "linux", "architecture": "amd64", "variant": "v3"},
+                    },
+                    {"digest": "sha256:m-amd64", "platform": {"os": "linux", "architecture": "amd64"}},
+                ],
+            },
+            "amd64-v3-only": {
+                "mediaType": self.INDEX,
+                "manifests": [
+                    {
+                        "digest": "sha256:m-amd64-v3",
+                        "platform": {"os": "linux", "architecture": "amd64", "variant": "v3"},
+                    }
+                ],
             },
         }
 
@@ -328,6 +362,74 @@ class TestRegistryClient:
         with pytest.raises(ImageConfigError, match="linux/arm64, not linux/amd64"):
             RegistryClient().image_config("redis@sha256:m-arm64")
 
+    def test_resolves_for_the_platform_asked_for(self, registry):
+        """``builds.platform: linux/arm64`` deployments record the arm64 configuration. The pin stays the index,
+        so one pinned reference serves an arm64 pod and an amd64 one, each selecting its own manifest from it.
+        Review (M24): the index's arm64 entry carries ``variant: v8``, as every Docker Official Image's does, and
+        ``linux/arm64`` selects it as ``docker --platform linux/arm64`` does (containerd reads arm64 as arm64/v8);
+        the selection used to refuse any entry with a variant and report that the index had no arm64 manifest."""
+        client = RegistryClient(platform=("linux", "arm64"))
+        entry = client.image_config("redis:7-alpine")
+        assert entry["image"] == "library/redis@sha256:index-of-7-alpine" and entry["architecture"] == "arm64"
+        assert entry["config_digest"] == "sha256:cfg-arm64"
+        assert client.image_config(entry["image"])["config_digest"] == "sha256:cfg-arm64"
+        assert RegistryClient().image_config(entry["image"])["config_digest"] == "sha256:cfg-amd64"
+        assert client.image_config("redis:arm-only")["config_digest"] == "sha256:cfg-arm64"
+        with pytest.raises(ImageConfigError, match="linux/amd64, not linux/arm64"):
+            client.image_config("redis@sha256:m-amd64")
+        # The explicit variant and the architecture alias name the same platform and select the same manifest.
+        for platform in ("linux/arm64", "linux/arm64/v8", "linux/aarch64"):
+            spelled = RegistryClient(platform=registry_module.platform_pair(platform))
+            assert spelled.platform == ("linux", "arm64", "v8")
+            assert spelled.image_config("redis:7-alpine")["config_digest"] == "sha256:cfg-arm64"
+        # Review (M24): an amd64 entry at micro-architecture level v3 is not baseline amd64. containerd's matcher
+        # (the rule `docker --platform linux/amd64` selects by) answers a baseline request with an entry of variant
+        # v1 or none only, since v2..v4 need CPU features a baseline host may lack; the levels used to be folded into
+        # one platform, so the default client recorded v3's configuration whenever v3 was listed first. Baseline is
+        # selected past a v3 entry, a v3 request selects v3, and an index of v3 alone has no linux/amd64 manifest.
+        assert RegistryClient().image_config("redis:amd64-v3")["config_digest"] == "sha256:cfg-amd64"
+        v3 = RegistryClient(platform=("linux", "amd64", "v3"))
+        assert v3.platform == ("linux", "amd64", "v3")
+        assert v3.image_config("redis:amd64-v3")["config_digest"] == "sha256:cfg-amd64-v3"
+        with pytest.raises(ImageConfigError, match="no linux/amd64 manifest"):
+            RegistryClient().image_config("redis:amd64-v3-only")
+        assert RegistryClient(platform=("linux", "amd64", "v1")).platform == ("linux", "amd64", "")
+        # Another variant of a 32-bit arm is another platform, and the message names it.
+        with pytest.raises(ImageConfigError, match="no linux/arm/v6 manifest"):
+            RegistryClient(platform=("linux", "arm", "v6")).image_config("redis:7-alpine")
+
+    def test_record_image_configs_resolves_for_builds_platform(self, tmp_path, monkeypatch):
+        platforms = []
+
+        class Recording:
+            def __init__(self, *args, **kwargs):
+                platforms.append(kwargs.get("platform"))
+
+            def image_config(self, reference):
+                return {"os": "linux", "architecture": "arm64", "image": reference, "config": {}}
+
+        monkeypatch.setattr(image_configs, "RegistryClient", Recording)
+        image_configs.record_image_configs({"redis:7": ["a"]}, tmp_path, platform="linux/arm64/v8")
+        image_configs.record_image_configs({"redis:8": ["a"]}, tmp_path)
+        assert platforms == [("linux", "arm64", "v8"), None], "the default client keeps its own default platform"
+        assert registry_module.platform_pair(None) == registry_module.platform_pair("") == ("linux", "amd64", "")
+        # Normalised as containerd normalises a platform: the variant arm64 defaults to, aliases, amd64's baseline
+        # level v1. A higher amd64 level is another platform, and the records keep os/arch only (reusable_record,
+        # recorded_image_mismatch), so builds.platform cannot ask for one: a v3 record would serve a baseline run.
+        assert registry_module.platform_pair("linux/arm64/v8") == ("linux", "arm64", "v8")
+        assert registry_module.platform_pair("linux/aarch64") == registry_module.platform_pair("linux/arm64")
+        assert registry_module.platform_pair("linux/x86_64") == registry_module.platform_pair("linux/amd64/v1")
+        assert registry_module.platform_pair("linux/amd64/v1") == ("linux", "amd64", "")
+        with pytest.raises(ImageConfigError, match="Unsupported platform: 'linux/amd64/v3'"):
+            registry_module.platform_pair("linux/amd64/v3")
+        assert registry_module.platform_pair("linux/arm") == ("linux", "arm", "v7")
+        assert registry_module.platform_name(registry_module.platform_pair("linux/arm64/v8")) == "linux/arm64"
+        assert registry_module.platform_name(registry_module.platform_pair("linux/arm/v6")) == "linux/arm/v6"
+        with pytest.raises(ImageConfigError, match="Not a platform: 'arm64'"):
+            registry_module.platform_pair("arm64")
+        with pytest.raises(ImageConfigError, match="Not a platform: 'linux/arm64/v8/extra'"):
+            registry_module.platform_pair("linux/arm64/v8/extra")
+
     def test_http_errors_carry_the_repository_and_status(self, registry):
         with pytest.raises(ImageConfigError, match="library/redis: registry returned HTTP 404"):
             RegistryClient().image_config("redis:missing")
@@ -362,11 +464,131 @@ class TestComposeImageReferences:
         (task,) = discover_tasks(tmp_path)
         assert compose_image_references(task) == []
 
-    def test_a_sidecar_that_builds_is_rejected(self, tmp_path):
-        write_task(tmp_path, "ctr", compose="services:\n  api:\n    build: ./api\n")
+    @pytest.mark.parametrize(
+        ("service", "message"),
+        [
+            ("    build: ./api\n", "service 'api' has a build section and prepare recorded no build for it"),
+            (
+                "    image: skillsbench-visual-stability-api\n    build: ./api\n",
+                "service 'api' has a build section and prepare recorded no build for it",
+            ),
+            ("    expose: ['1']\n", "service 'api' names no image and prepare recorded no build for it"),
+        ],
+        ids=["build-only", "image-and-build", "neither"],
+    )
+    def test_a_sidecar_with_a_build_and_no_record_is_refused_naming_it(self, tmp_path, service, message):
+        # Under Compose and Harbor a service with build: is built, never pulled, so its image: (when it has one) is
+        # a local tag: it is not resolved from the registry, and without a record the task is refused by name. A
+        # service with neither key is a different task defect, reported in its own words.
+        write_task(tmp_path, "ctr", compose="services:\n  api:\n" + service)
         (task,) = discover_tasks(tmp_path)
-        with pytest.raises(ImageConfigError, match="service 'api' names no image"):
+        with pytest.raises(ImageConfigError, match=message):
             compose_image_references(task)
+
+    def test_a_recorded_main_is_not_substituted_for_a_task_pinned_to_a_prebuilt_image(self, tmp_path):
+        # The context's main was built (for another task sharing environment/, or before the override) and the
+        # record names it; this task declares a docker_image, so Harbor runs the prebuilt image and so does Gym:
+        # main keeps ${MAIN_IMAGE_NAME} = task.image, and the sidecar is substituted as it always is.
+        compose = "services:\n  main:\n    image: ${MAIN_IMAGE_NAME}\n  db:\n    build: ./db\n"
+        task_dir = write_task(
+            tmp_path, "t", image=None, compose=compose, dockerfile="FROM ubuntu:24.04\nCOPY . /app\n"
+        )
+        (tmp_path / "dataset.toml").write_text('[gym.tasks."t".environment]\ndocker_image = "org/pinned:2"\n')
+        built = "reg.example/r/hb__" + "0" * 32 + "@sha256:" + "d" * 64
+        db = "reg.example/r/hb__" + "0" * 32 + "-db@sha256:" + "e" * 64
+        record = {"image": built, "tasks": ["t"], "services": {"main": {"image": built}, "db": {"image": db}}}
+        (tmp_path / BUILT_IMAGES_FILE).write_text(json.dumps({context_digest(task_dir / "environment"): record}))
+        config = {"os": "linux", "architecture": "amd64", "config": {"WorkingDir": "/app"}, "record_version": 2}
+        (tmp_path / "compose-images.json").write_text(
+            json.dumps({image: {**config, "image": image} for image in (built, db, "org/pinned:2")})
+        )
+        (task,) = discover_tasks(tmp_path)
+        assert task.image == "org/pinned:2" and task.built_image is None
+        assert task.built_images == {"main": built, "db": db}
+        document = load_compose_document(task)
+        assert document["services"]["main"] == {"image": "org/pinned:2"}
+        assert document["services"]["db"] == {"image": db}
+        assert compose_image_references(task) == ["org/pinned:2", db]
+        # The complementary case: the override names another task, so this one runs from its built main.
+        (tmp_path / "dataset.toml").write_text('[gym.tasks."other".environment]\ndocker_image = "org/pinned:2"\n')
+        (task,) = discover_tasks(tmp_path)
+        assert task.built_image == built == task.image
+        assert load_compose_document(task)["services"]["main"] == {"image": built}
+        assert compose_image_references(task) == [built, db]
+
+    def test_a_sidecar_prepare_built_is_listed_by_its_recorded_image_and_not_resolved_again(self, tmp_path):
+        # G2: prepare built `api` from ./api and recorded it under the context digest by service name; the loader
+        # substitutes that image, so the reference is the recorded one and the registry is never asked for it.
+        compose = (
+            "services:\n  main: {}\n  api:\n    build: ./api\n    pull_policy: build\n    expose: ['3080']\n"
+            "  cache:\n    image: redis:7-alpine\n"
+        )
+        task_dir = write_task(tmp_path, "ctr", compose=compose)
+        built = "reg.example/r/hb__" + "0" * 32 + "-api@sha256:" + "e" * 64
+        (tmp_path / BUILT_IMAGES_FILE).write_text(
+            json.dumps(
+                {context_digest(task_dir / "environment"): {"tasks": ["ctr"], "services": {"api": {"image": built}}}}
+            )
+        )
+        (tmp_path / "compose-images.json").write_text(
+            json.dumps(
+                {
+                    built: {
+                        "os": "linux",
+                        "architecture": "amd64",
+                        "image": built,
+                        "config": {"Cmd": ["api"]},
+                        "record_version": 2,
+                    }
+                }
+            )
+        )
+        (task,) = discover_tasks(tmp_path)
+        assert compose_image_references(task) == [MAIN_IMAGE, built, "redis:7-alpine"]
+        document = load_compose_document(task)
+        assert document["services"]["api"] == {"image": built, "expose": ["3080"]}
+        assert document["services"]["main"] == {}
+        client = FakeClient()
+        record_compose_images([task], tmp_path, client=client)
+        assert client.resolved == [MAIN_IMAGE, "redis:7-alpine"]
+        recorded = json.loads((tmp_path / "compose-images.json").read_text())
+        assert recorded[built]["config"] == {"Cmd": ["api"]}
+
+    def test_with_built_images_drops_the_build_and_its_policy_only_on_named_services(self):
+        """A recorded service loses its ``build:`` and a ``pull_policy: build`` (Harbor's template spelling, in any
+        case), the two that describe the build prepare ran. A runtime policy (``always``, ``missing``, ``never``) is
+        not part of the build and stays with the recorded image (review: it was dropped with the build, so a built
+        service's policy never reached the field check or the adapter)."""
+        document = {
+            "services": {
+                "main": {"image": "x", "build": {"context": "."}, "pull_policy": "build", "cpus": 1},
+                "api": {"build": "./api", "pull_policy": "Build ", "expose": ["1"]},
+                "worker": {"build": "./worker", "pull_policy": "always"},
+                "cache": {"image": "local/cache", "build": "./cache", "pull_policy": "never"},
+                "db": {"image": "pg:16", "build": "./db"},
+                "empty": None,
+            }
+        }
+        images = {
+            "main": "reg/hb__d@sha256:1",
+            "api": "reg/hb__d-api@sha256:2",
+            "worker": "reg/hb__d-worker@sha256:4",
+            "cache": "reg/hb__d-cache@sha256:5",
+            "empty": "reg/hb__d-empty@sha256:3",
+            "gone": "reg/x",
+        }
+        assert with_built_images(document, images) == {
+            "services": {
+                "main": {"cpus": 1, "image": "reg/hb__d@sha256:1"},
+                "api": {"expose": ["1"], "image": "reg/hb__d-api@sha256:2"},
+                "worker": {"pull_policy": "always", "image": "reg/hb__d-worker@sha256:4"},
+                "cache": {"pull_policy": "never", "image": "reg/hb__d-cache@sha256:5"},
+                # Not recorded: left as written, so the adapter (or compose_image_references) reports it.
+                "db": {"image": "pg:16", "build": "./db"},
+                "empty": {"image": "reg/hb__d-empty@sha256:3"},
+            }
+        }
+        assert with_built_images({"services": "nope"}, images) == {"services": "nope"}
 
 
 class FakeClient:
@@ -749,6 +971,14 @@ class TestRecordComposeImages:
         recorded = json.loads((tmp_path / "compose-images.json").read_text())
         assert recorded["redis:7-alpine"] == pinned["redis:7-alpine"]
         assert client.resolved == [MAIN_IMAGE, SIDECAR_IMAGE]
+        # Review (M24): a record is kept for the platform it was recorded for. Asked for the same platform, nothing is
+        # resolved; asked for another, every entry is read again at its pin (the pinned digest, not the tag).
+        client = FakeClient()
+        record_compose_images(discover_tasks(tmp_path), tmp_path, client=client, platform="linux/amd64")
+        assert client.resolved == []
+        client = FakeClient()
+        record_compose_images(discover_tasks(tmp_path), tmp_path, client=client, platform="linux/arm64")
+        assert client.resolved == [MAIN_IMAGE, SIDECAR_IMAGE, "library/redis@sha256:old"]
 
     def test_a_complete_file_means_no_registry_traffic(self, tmp_path):
         write_task(tmp_path, "ctr", compose=COMPOSE)
@@ -757,6 +987,22 @@ class TestRecordComposeImages:
         client = FakeClient()
         record_compose_images(tasks, tmp_path, client=client)
         assert client.resolved == []
+
+    def test_a_sidecar_with_an_image_and_an_unrecorded_build_is_skipped_per_task_not_resolved(self, tmp_path):
+        write_task(tmp_path, "good", compose=COMPOSE)
+        write_task(
+            tmp_path,
+            "bad",
+            compose="services:\n  main: {}\n  api:\n    image: skillsbench-visual-stability-api\n    build: ./api\n",
+        )
+        client = FakeClient()
+        skipped: dict[str, str] = {}
+        record_compose_images(discover_tasks(tmp_path), tmp_path, client=client, skipped=skipped)
+        # The task lands in the skipped map like the no-image case; its local-only name never reaches the registry.
+        assert skipped == {
+            "bad": "bad: Compose service 'api' has a build section and prepare recorded no build for it"
+        }
+        assert client.resolved == [MAIN_IMAGE, SIDECAR_IMAGE, "redis:7-alpine"]
 
     def test_nothing_is_written_without_compose_tasks(self, tmp_path):
         write_task(tmp_path, "plain")
@@ -881,6 +1127,72 @@ class TestRecordBaseImages:
         record_base_images(tmp_path)
         assert len(registry.requests) == requests
 
+    AMD64_RECORD = {
+        "architecture": "amd64",
+        "config": {
+            "Cmd": ["python", "server.py"],
+            "WorkingDir": "/app",
+            "ExposedPorts": {"5000/tcp": {}},
+            "Env": ["A=1"],
+        },
+        "config_digest": "sha256:cfg-amd64",
+        "image": "library/redis@sha256:index-of-7-alpine",
+        "os": "linux",
+        "record_version": 2,
+    }
+
+    def test_a_record_of_another_platform_is_read_again_at_its_pin_for_the_requested_platform(
+        self, tmp_path, registry
+    ):
+        """Review (M24): ``compose-images.json`` holds a current-version amd64 record, and the dataset is prepared
+        again with ``builds.platform: linux/arm64``. The record used to be kept by ``record_version`` alone, so the
+        registry was never asked and ``resolve_compose`` refused the amd64 record at every seed with "prepare the
+        dataset for that platform", which the user had just done. A record of another platform is now read again at
+        its pin, the multi-arch index: the pin does not move and the configuration is the arm64 manifest's."""
+        write_task(tmp_path, "overlay", image=None, dockerfile="FROM redis:7-alpine\nRUN true\n")
+        (tmp_path / "compose-images.json").write_text(json.dumps({"redis:7-alpine": self.AMD64_RECORD}))
+
+        record_base_images(tmp_path, platform="linux/arm64")
+
+        recorded = json.loads((tmp_path / "compose-images.json").read_text())["redis:7-alpine"]
+        assert recorded["architecture"] == "arm64" and recorded["record_version"] == 2
+        assert recorded["config_digest"] == "sha256:cfg-arm64" and recorded["config"] == {
+            "Cmd": ["python", "server.py"]
+        }
+        assert recorded["image"] == "library/redis@sha256:index-of-7-alpine", "the pin never moves"
+        manifests = [url for url, _ in registry.requests if "/manifests/" in url]
+        assert manifests[0].endswith("/manifests/sha256:index-of-7-alpine"), "read at the pin, not the tag"
+        assert all(
+            url.endswith(("/manifests/sha256:index-of-7-alpine", "/manifests/sha256:m-arm64")) for url in manifests
+        )
+        # Recorded for arm64 now: the next arm64 prepare asks nothing; an amd64 prepare reads the pin back for amd64.
+        requests = len(registry.requests)
+        record_base_images(tmp_path, platform="linux/arm64")
+        assert len(registry.requests) == requests
+        record_base_images(tmp_path)
+        recorded = json.loads((tmp_path / "compose-images.json").read_text())["redis:7-alpine"]
+        assert recorded["architecture"] == "amd64" and recorded["config_digest"] == "sha256:cfg-amd64"
+        assert recorded["image"] == "library/redis@sha256:index-of-7-alpine"
+
+    def test_a_pin_to_a_single_manifest_of_another_platform_fails_the_prepare_with_the_remedy(
+        self, tmp_path, registry
+    ):
+        """A pin that is one amd64 manifest (the reference was a digest, or an older record pinned behind the tag)
+        has no arm64 manifest behind it: preparing for arm64 fails naming the image, the tasks and what to do, instead
+        of keeping a record every arm64 seed refuses. The file is left as it was."""
+        write_task(tmp_path, "overlay", image=None, dockerfile="FROM redis:7-alpine\nRUN true\n")
+        pinned = {"redis:7-alpine": {**self.AMD64_RECORD, "image": "library/redis@sha256:m-amd64"}}
+        (tmp_path / "compose-images.json").write_text(json.dumps(pinned))
+        with pytest.raises(ImageConfigError, match="resolved to linux/amd64, not linux/arm64") as info:
+            record_base_images(tmp_path, platform="linux/arm64")
+        message = str(info.value)
+        assert "Could not record the configuration of base image 'redis:7-alpine' (used by task(s) overlay)" in message
+        assert message.endswith(
+            "library/redis@sha256:m-amd64: resolved to linux/amd64, not linux/arm64; pin a multi-arch tag or an image "
+            "of linux/arm64, or prepare this dataset for linux/amd64"
+        )
+        assert json.loads((tmp_path / "compose-images.json").read_text()) == pinned
+
     def test_a_single_task_folder_records_into_its_parent(self, tmp_path, registry):
         task = write_task(tmp_path, "one", image=None, dockerfile="FROM redis:7-alpine\nRUN true\n")
         assert record_base_images(task) == tmp_path / "compose-images.json"
@@ -929,8 +1241,10 @@ class TestRecordImageConfigsUnderTheLock:
     def test_an_entry_another_process_recorded_during_the_lookup_is_kept(self, tmp_path):
         write_task(tmp_path, "ctr", compose=COMPOSE)
         record_path = tmp_path / "compose-images.json"
+        # Of this run's platform (an entry of another platform would be read again at its pin, see
+        # TestRecordBaseImages), told apart from the FakeClient's records by its config digest.
         competitor = {
-            "architecture": "arm64",
+            "architecture": "amd64",
             "config": {},
             "config_digest": "sha256:other",
             "os": "linux",

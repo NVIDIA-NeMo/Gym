@@ -97,10 +97,6 @@ def _check_overlay_result(result: SandboxExecResult, label: str, what: str | Non
         raise HarborOverlayError(f"{subject} exited {result.return_code}; output tail: {_output_tail(result)}")
 
 
-# The separate verifier's sandbox could not take the task's Dockerfile overlay after the rollout ran.
-OVERLAY_FAILED_KIND = "harbor:overlay_failed"
-
-
 class HarborOverlayMixin:
     """Apply a Dockerfile overlay at seed, the way docker build would have applied it.
 
