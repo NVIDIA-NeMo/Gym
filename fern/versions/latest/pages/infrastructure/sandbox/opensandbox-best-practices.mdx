@@ -136,8 +136,12 @@ Create is synchronous on the server: schedule the pod, lazy-load the image, star
 On a healthy cluster that is p50 ≈ 7 s, p90 ≈ 20 s, p99 ≈ 2 min. On a full cluster, pods sit
 `Pending` for as long as your timeout allows.
 
-- `create.timeout_s` must exceed `ready_timeout_s`; it bounds the whole create including the
-  readiness wait (the shipped config: 1500 s over 1200 s).
+- `create.request_timeout_s` is capped at `ready_timeout_s` for the create request, so an unplaceable
+  pod fails within one ready timeout; the sandbox it left `Pending` is deleted and the attempt retried
+  (`create.fail_fast_on_pending: true` reports it once instead).
+- `create.timeout_s` bounds one create attempt as configured, the request plus the readiness wait
+  that starts once the request returns; unset, it is the capped request timeout plus `ready_timeout_s`
+  plus 30 s. The shipped 1500 s over 1200 s is below that sum and is logged once as such.
 - `ttl_s` is the server-side backstop if your client dies. Set it above your longest rollout.
 
 <Warning>

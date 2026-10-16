@@ -17,7 +17,7 @@ import asyncio
 import builtins
 import gc
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -588,7 +588,7 @@ async def test_direct_create_passes_resource_requests_to_sdk_create(
             {"cpu": 4, "memory_mib": 16384, "gpu": 1, "gpu_type": "H100"},
             {"cpu": "4", "memory": "16384Mi", "gpu": "1", "gpu_type": "H100"},
         ),
-        ({}, {"cpu": "1", "memory": "2Gi"}),
+        ({}, {"cpu": "1", "memory": "2048Mi"}),
     ],
 )
 async def test_explicit_requests_match_each_sandbox_limits(fake_opensandbox_sdk, resources, expected):
@@ -1937,6 +1937,7 @@ async def test_create_injects_attribution_metadata(
 
     await provider.create(SandboxSpec(image="image:tag", metadata={"purpose": "test"}))
 
+    assert len(FakeSandbox.created_kwargs["metadata"].pop("nemo-gym.nvidia.com/create-attempt")) == 32
     assert FakeSandbox.created_kwargs["metadata"] == {
         "nemo-gym.nvidia.com/team": "gym_team",
         "nemo-gym.nvidia.com/user": "alice",
@@ -1960,6 +1961,7 @@ async def test_create_spec_metadata_and_config_win_over_attribution_detection(
 
     await provider.create(SandboxSpec(image="image:tag", metadata={"nemo-gym.nvidia.com/team": "explicit-team"}))
 
+    assert len(FakeSandbox.created_kwargs["metadata"].pop("nemo-gym.nvidia.com/create-attempt")) == 32
     assert FakeSandbox.created_kwargs["metadata"] == {
         "nemo-gym.nvidia.com/team": "explicit-team",
         "nemo-gym.nvidia.com/user": "cfg-user",
@@ -1980,7 +1982,8 @@ async def test_create_attribution_disabled(
 
     await provider.create(SandboxSpec(image="image:tag"))
 
-    assert FakeSandbox.created_kwargs["metadata"] == {}
+    # Attribution off still leaves the per-attempt key: it is what finds a timed-out create's orphan.
+    assert list(FakeSandbox.created_kwargs["metadata"]) == ["nemo-gym.nvidia.com/create-attempt"]
 
 
 @pytest.mark.parametrize(
@@ -2618,3 +2621,564 @@ async def test_shared_memory_metadata_reaches_create_api(fake_opensandbox_sdk, s
     provider = OpenSandboxProvider(attribution={"enabled": False}, probe={"command": None})
     await provider.create(SandboxSpec(image="image:tag", metadata={"nemo.nvidia.com/shm": size}))
     assert FakeSandbox.created_kwargs["metadata"]["nemo.nvidia.com/shm"] == size
+
+
+def test_images_config_rewrites_prefixes_and_picks_the_longest_auth_prefix() -> None:
+    images = opensandbox_provider.OpenSandboxImagesConfig(
+        rewrites=[{"from": "harborframework/", "to": "registry.example/mirror/"}],
+        auth={
+            "registry.example/": {"username": "outer", "password": TEST_REGISTRY_PASSWORD},
+            "registry.example/mirror/": {"username": "inner", "password": TEST_REGISTRY_PASSWORD},
+        },
+    )
+    assert images.resolve(None) == (None, None)
+    assert images.resolve("python:3.11") == ("python:3.11", None)
+    image, auth = images.resolve("harborframework/tb:abc@sha256:0")
+    assert image == "registry.example/mirror/tb:abc@sha256:0" and auth["username"] == "inner"
+    image, auth = images.resolve("registry.example/other:1")
+    assert image == "registry.example/other:1" and auth["username"] == "outer"
+
+
+async def test_direct_create_applies_the_provider_image_policy(fake_opensandbox_sdk: None) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        probe={"command": None},
+        images={
+            "rewrites": [{"from": "harborframework/", "to": "registry.example/mirror/"}],
+            "auth": {"registry.example/": {"username": "mirror", "password": TEST_REGISTRY_PASSWORD}},
+        },
+    )
+    await provider.create(SandboxSpec(image="harborframework/tb:abc"))
+    image = FakeSandbox.created_kwargs["image"]
+    assert image.image == "registry.example/mirror/tb:abc" and image.auth.username == "mirror"
+
+    # A spec's own credentials win over the provider's, and an unrewritten image with no matching prefix is plain.
+    await provider.create(
+        SandboxSpec(
+            image="harborframework/tb:abc", provider_options={"image_auth": {"username": "spec", "password": "x"}}
+        )
+    )
+    assert FakeSandbox.created_kwargs["image"].auth.username == "spec"
+    await provider.create(SandboxSpec(image="python:3.11"))
+    assert FakeSandbox.created_kwargs["image"] == "python:3.11"
+
+
+async def test_direct_create_runs_setup_commands_as_root_and_a_failure_fails_the_create(
+    fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        probe={"command": None},
+        setup={
+            "commands": ["apt-get update", "false"],
+            "timeout_s": 12,
+            "env": {"EXECD_API_GRACE_SHUTDOWN": "50ms", "A": "provider"},
+        },
+    )
+    calls: list[tuple[str, str | None, float | None]] = []
+    cleaned: list[str] = []
+
+    async def exec_(handle, command, **kwargs):
+        calls.append((command, kwargs.get("user"), kwargs.get("timeout_s")))
+        return opensandbox_provider.SandboxExecResult(
+            stdout="", stderr="boom" if command == "false" else "", return_code=int(command == "false")
+        )
+
+    async def cleanup(handle):
+        cleaned.append(handle.sandbox_id)
+
+    monkeypatch.setattr(provider, "exec", exec_)
+    monkeypatch.setattr(provider, "_cleanup_failed_create_handle", cleanup)
+    with pytest.raises(opensandbox_provider.OpenSandboxSetupError, match="setup command failed.*false"):
+        await provider.create(SandboxSpec(image="python:3.11", env={"A": "spec"}))
+    assert calls == [("apt-get update", "root", 12), ("false", "root", 12)]
+    assert cleaned == ["sandbox-1"]
+    # The provider's environment sits under the spec's own variables.
+    assert FakeSandbox.created_kwargs["env"] == {"EXECD_API_GRACE_SHUTDOWN": "50ms", "A": "spec"}
+
+
+def test_a_failed_setup_command_is_never_a_retryable_create_error() -> None:
+    # The operator's command failed; a transient-looking marker in its stderr must not re-run the create.
+    error = opensandbox_provider.OpenSandboxSetupError("setup command failed: false; stderr: gateway timeout")
+    assert opensandbox_provider._is_retryable_create_error(error) is False
+    assert opensandbox_provider._is_retryable_sdk_operation_error(error) is False
+
+
+async def test_direct_create_does_not_retry_a_failed_setup_command(
+    fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        probe={"command": None},
+        create={"retries": 3, "retry_delay_s": 0, "retry_max_delay_s": 0},
+        setup={"commands": ["false"], "timeout_s": 12},
+    )
+    calls: list[str] = []
+    cleaned: list[str] = []
+
+    async def exec_(handle, command, **kwargs):
+        calls.append(command)
+        return opensandbox_provider.SandboxExecResult(stdout="", stderr="gateway timeout", return_code=1)
+
+    async def cleanup(handle):
+        cleaned.append(handle.sandbox_id)
+
+    monkeypatch.setattr(provider, "exec", exec_)
+    monkeypatch.setattr(provider, "_cleanup_failed_create_handle", cleanup)
+    with pytest.raises(opensandbox_provider.OpenSandboxSetupError):
+        await provider.create(SandboxSpec(image="python:3.11"))
+    assert calls == ["false"] and cleaned == ["sandbox-1"]
+
+
+async def test_a_cancelled_create_still_cleans_up_the_new_sandbox(
+    fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None}, setup={"commands": ["sleep 600"]})
+    cleaned: list[str] = []
+    started = asyncio.Event()
+
+    async def exec_(handle, command, **kwargs):
+        started.set()
+        await asyncio.sleep(3600)
+
+    async def cleanup(handle):
+        # The cleanup itself is awaited to completion, not abandoned with the cancelled task.
+        await asyncio.sleep(0)
+        cleaned.append(handle.sandbox_id)
+
+    monkeypatch.setattr(provider, "exec", exec_)
+    monkeypatch.setattr(provider, "_cleanup_failed_create_handle", cleanup)
+    task = asyncio.create_task(provider.create(SandboxSpec(image="python:3.11")))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cleaned == ["sandbox-1"]
+
+
+# -- requests above limits, create budget, orphaned creates ---------------------------------
+
+
+async def test_direct_create_clamps_requests_above_the_sandbox_limits(
+    fake_opensandbox_sdk: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
+    with caplog.at_level(logging.WARNING, logger=opensandbox_provider.LOGGER.name):
+        await provider.create(
+            SandboxSpec(
+                image="image:tag",
+                resources={"cpu": 1, "memory_mib": 2048, "disk_gib": 4},
+                provider_options={"resource_requests": {"cpu": 0.5, "memory_mib": 512, "disk_gib": 10}},
+            ),
+        )
+    assert FakeSandbox.created_kwargs["resource"] == {"cpu": "1", "memory": "2048Mi", "ephemeral-storage": "4Gi"}
+    assert FakeSandbox.created_kwargs["resource_requests"] == {
+        "cpu": "0.5",
+        "memory": "512Mi",
+        "ephemeral-storage": "4Gi",
+    }
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1 and "disk_gib=10" in warnings[0] and "limit 4" in warnings[0]
+
+    # A request a task declares no limit for is passed through, silently.
+    caplog.clear()
+    await provider.create(
+        SandboxSpec(image="image:tag", resources={"cpu": 1}, provider_options={"resource_requests": {"disk_gib": 10}})
+    )
+    assert FakeSandbox.created_kwargs["resource_requests"] == {"ephemeral-storage": "10Gi"}
+    assert not [r for r in caplog.records if r.levelno == logging.WARNING]
+
+    # "limits" mirrors the limits and needs no clamp; no requests sends none.
+    await provider.create(
+        SandboxSpec(image="image:tag", resources={"disk_gib": 4}, provider_options={"resource_requests": "limits"})
+    )
+    assert FakeSandbox.created_kwargs["resource_requests"] == {"ephemeral-storage": "4Gi"}
+    await provider.create(SandboxSpec(image="image:tag", resources={"disk_gib": 4}))
+    assert "resource_requests" not in FakeSandbox.created_kwargs
+    assert not [r for r in caplog.records if r.levelno == logging.WARNING]
+
+
+async def test_requests_are_clamped_against_the_sdk_default_limits_when_the_spec_declares_none(
+    fake_opensandbox_sdk: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The SDK sends cpu 1 / memory 2Gi as limits for a spec without resources (Harbor's default and every
+    Compose sidecar), so a deployment's requests are held to those; otherwise the pod never schedules."""
+    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
+    with caplog.at_level(logging.WARNING, logger=opensandbox_provider.LOGGER.name):
+        await provider.create(
+            SandboxSpec(
+                image="image:tag", resources={}, provider_options={"resource_requests": {"cpu": 2, "memory_mib": 4096}}
+            )
+        )
+    assert FakeSandbox.created_kwargs["resource"] == {}
+    assert FakeSandbox.created_kwargs["resource_requests"] == {"cpu": "1", "memory": "2048Mi"}
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 2
+    assert "cpu=2 exceeds the sandbox's limit 1.0 (the SDK's default" in warnings[0]
+    assert "memory_mib=4096 exceeds the sandbox's limit 2048 (the SDK's default" in warnings[1]
+    # Requests within the defaults, and keys the defaults do not cover, pass through silently.
+    caplog.clear()
+    await provider.create(
+        SandboxSpec(
+            image="image:tag", resources={}, provider_options={"resource_requests": {"cpu": 0.5, "disk_gib": 10}}
+        )
+    )
+    assert FakeSandbox.created_kwargs["resource_requests"] == {"cpu": "0.5", "ephemeral-storage": "10Gi"}
+    assert not [r for r in caplog.records if r.levelno == logging.WARNING]
+
+
+async def test_create_attempt_key_is_unique_per_create(fake_opensandbox_sdk: None) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
+    key = f"{provider._attribution.key_prefix}{opensandbox_provider.CREATE_ATTEMPT_KEY}"
+    values = []
+    for _ in range(2):
+        await provider._create_once(SandboxSpec(image="image:tag", metadata={"harbor_task": "t"}))
+        values.append(FakeSandbox.created_kwargs["metadata"][key])
+    first, second = values
+    assert first != second and len(first) == 32
+    assert FakeSandbox.created_kwargs["metadata"]["harbor_task"] == "t"
+    assert key == "nemo-gym.nvidia.com/create-attempt"
+
+
+class HangingCreateSandbox(FakeSandbox):
+    @classmethod
+    async def create(cls, **kwargs: Any) -> "FakeSandbox":
+        cls.created_kwargs = kwargs
+        await asyncio.get_running_loop().create_future()
+        return cls()
+
+
+@dataclass
+class FakeLifecycleService:
+    """The SDK's management API without a sandbox handle: list by metadata filter, delete by id."""
+
+    sandboxes: list[SimpleNamespace]
+    killed: list[str] = field(default_factory=list)
+    filters: list[Any] = field(default_factory=list)
+    kill_error: Exception | None = None
+
+    async def list_sandboxes(self, filter: Any) -> SimpleNamespace:
+        self.filters.append(filter)
+        matches = [
+            s
+            for s in self.sandboxes
+            if all((s.metadata or {}).get(k) == v for k, v in (filter.metadata or {}).items())
+        ]
+        return SimpleNamespace(sandbox_infos=matches, pagination=SimpleNamespace(has_next_page=False))
+
+    async def kill_sandbox(self, sandbox_id: str) -> None:
+        self.killed.append(sandbox_id)
+        if self.kill_error is not None:
+            raise self.kill_error
+
+
+def install_lifecycle(monkeypatch: pytest.MonkeyPatch, service: FakeLifecycleService) -> None:
+    @dataclass
+    class FakeFilter:
+        metadata: dict[str, str] | None = None
+        page: int | None = None
+        page_size: int | None = None
+
+    class FakeFactory:
+        def __init__(self, connection_config: Any) -> None:
+            self.connection_config = connection_config
+
+        def create_sandbox_service(self) -> FakeLifecycleService:
+            return service
+
+    monkeypatch.setattr(opensandbox_provider, "_require_opensandbox_lifecycle_sdk", lambda: (FakeFactory, FakeFilter))
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (HangingCreateSandbox, FakeConnectionConfig, object, FakePlatformSpec, object),
+    )
+
+
+def orphan(sandbox_id: str, metadata: dict[str, str], state: str = "PENDING", reason: str | None = None):
+    return SimpleNamespace(
+        id=sandbox_id,
+        metadata=metadata,
+        status=SimpleNamespace(state=state, reason=reason, message="BatchSandbox is pending allocation"),
+    )
+
+
+async def test_ready_timeout_caps_the_request_but_a_configured_attempt_budget_stands(
+    fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """(a) The spec's ready timeout caps a configured SDK request timeout; create.timeout_s is respected as is."""
+    install_lifecycle(monkeypatch, FakeLifecycleService(sandboxes=[]))
+    monkeypatch.setattr(opensandbox_provider, "_BUDGET_WARNINGS", set())
+    provider = opensandbox_provider.OpenSandboxProvider(
+        create={"timeout_s": 0.05, "request_timeout_s": 1200}, probe={"command": None}
+    )
+    started = asyncio.get_running_loop().time()
+    with caplog.at_level(logging.WARNING, logger=opensandbox_provider.LOGGER.name):
+        with pytest.raises(opensandbox_provider.OpenSandboxCreateTimeoutError, match="after 0.05s") as info:
+            await provider._create_once(SandboxSpec(image="image:tag", ready_timeout_s=0.03))
+    assert not isinstance(info.value, opensandbox_provider.OpenSandboxCreatePendingError)
+    assert asyncio.get_running_loop().time() - started < 5
+    assert HangingCreateSandbox.created_kwargs["connection_config"].kwargs["request_timeout"] == timedelta(
+        seconds=0.03
+    )
+    assert HangingCreateSandbox.created_kwargs["ready_timeout"] == timedelta(seconds=0.03)
+    # The configured budget cannot hold the capped request (0.03) plus the readiness wait (0.03): said once.
+    warnings = [r.getMessage() for r in caplog.records if "create.timeout_s=0.05 is below" in r.getMessage()]
+    assert len(warnings) == 1 and "0.03s plus the spec's ready_timeout_s of 0.03s" in warnings[0]
+    caplog.clear()
+    with pytest.raises(opensandbox_provider.OpenSandboxCreateTimeoutError):
+        await provider._create_once(SandboxSpec(image="image:tag", ready_timeout_s=0.03))
+    # Nor by the next provider built for the same configuration: servers build one per sandbox.
+    with pytest.raises(opensandbox_provider.OpenSandboxCreateTimeoutError):
+        await opensandbox_provider.OpenSandboxProvider(
+            create={"timeout_s": 0.05, "request_timeout_s": 1200}, probe={"command": None}
+        )._create_once(SandboxSpec(image="image:tag", ready_timeout_s=0.03))
+    assert not [r for r in caplog.records if "create.timeout_s=0.05 is below" in r.getMessage()]
+
+    # Without a ready timeout the create budget is the configured one, unchanged.
+    provider = opensandbox_provider.OpenSandboxProvider(
+        create={"timeout_s": 0.01, "request_timeout_s": 1200}, probe={"command": None}
+    )
+    with pytest.raises(opensandbox_provider.OpenSandboxCreateTimeoutError, match="after 0.01s"):
+        await provider._create_once(SandboxSpec(image="image:tag"))
+    assert HangingCreateSandbox.created_kwargs["connection_config"].kwargs["request_timeout"] == timedelta(
+        seconds=1200
+    )
+
+
+async def test_create_budget_holds_the_request_plus_the_readiness_wait(fake_opensandbox_sdk: None) -> None:
+    def budget(**create: Any) -> Any:
+        connection = {"request_timeout_s": create.pop("connection_request_timeout_s", None)}
+        return opensandbox_provider.OpenSandboxProvider(create=create, connection=connection, probe={"command": None})
+
+    # Nothing configured: the SDK's default request timeout (30 s) plus the ready timeout plus 30 s slack.
+    assert budget()._create_budget(SandboxSpec(image="i", ready_timeout_s=1200)) == (1260.0, None)
+    # A configured request timeout is capped at the ready timeout and counted in the default budget.
+    assert budget(request_timeout_s=1200)._create_budget(SandboxSpec(image="i", ready_timeout_s=300)) == (630.0, 300)
+    assert budget(connection_request_timeout_s=300)._create_budget(SandboxSpec(image="i", ready_timeout_s=1200)) == (
+        1530.0,
+        300,
+    )
+    # A configured create.timeout_s stands, above or below the sum (the shipped 1500 over 1200 plus 1200).
+    assert budget(timeout_s=3000, request_timeout_s=1200)._create_budget(
+        SandboxSpec(image="i", ready_timeout_s=1200)
+    ) == (3000, 1200)
+    assert budget(timeout_s=1500, request_timeout_s=1200)._create_budget(
+        SandboxSpec(image="i", ready_timeout_s=1200)
+    ) == (1500, 1200)
+    # Without a ready timeout nothing is capped: the configured budget, else the connection's request timeout.
+    assert budget(timeout_s=90, request_timeout_s=1200)._create_budget(SandboxSpec(image="i")) == (90, 1200)
+    assert budget(connection_request_timeout_s=300)._create_budget(SandboxSpec(image="i")) == (300.0, 300)
+    assert budget()._create_budget(SandboxSpec(image="i")) == (None, None)
+
+
+async def test_unconfigured_request_timeout_is_not_raised_to_the_ready_timeout(fake_opensandbox_sdk: None) -> None:
+    """The create's connection config lives on the handle for the sandbox's life: a deployment that configured
+    no request timeout keeps the SDK's default (30 s) on status, endpoint and file calls, not a 20-minute one."""
+    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
+    await provider.create(SandboxSpec(image="image:tag", ready_timeout_s=1200))
+    assert "request_timeout" not in FakeSandbox.created_kwargs["connection_config"].kwargs
+    assert FakeSandbox.created_kwargs["ready_timeout"] == timedelta(seconds=1200)
+    # The connection's request timeout is capped for the create, as a create-level one is.
+    provider = opensandbox_provider.OpenSandboxProvider(connection={"request_timeout_s": 300}, probe={"command": None})
+    await provider.create(SandboxSpec(image="image:tag", ready_timeout_s=120))
+    assert FakeSandbox.created_kwargs["connection_config"].kwargs["request_timeout"] == timedelta(seconds=120)
+
+
+@pytest.mark.parametrize("fail_fast", [False, True])
+async def test_timed_out_create_deletes_its_orphan_and_a_pending_one_is_retried_unless_fail_fast(
+    fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, fail_fast: bool
+) -> None:
+    """(b) and (c): the orphan is found by run plus attempt key and deleted; still Pending is retried like any
+    other timeout (Pending also covers a full cluster and a slow pull) unless the deployment opted out."""
+    prefix = opensandbox_provider.DEFAULT_ATTRIBUTION_KEY_PREFIX
+    run_key, attempt_key = f"{prefix}run", f"{prefix}{opensandbox_provider.CREATE_ATTEMPT_KEY}"
+    service = FakeLifecycleService(sandboxes=[])
+    install_lifecycle(monkeypatch, service)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        create={
+            "retries": 2,
+            "retry_delay_s": 0,
+            "retry_max_delay_s": 0,
+            "timeout_s": 0.05,
+            "fail_fast_on_pending": fail_fast,
+        },
+        probe={"command": None},
+    )
+    attempts = 0
+    real_create_once = provider._create_once
+
+    async def create_once(spec: SandboxSpec) -> Any:
+        nonlocal attempts
+        attempts += 1
+        return await real_create_once(spec)
+
+    monkeypatch.setattr(provider, "_create_once", create_once)
+
+    def seed_orphans(metadata: dict[str, str], attempt_key: str) -> Any:
+        # What the server holds once the request has gone out: this attempt's sandbox, pending; another
+        # attempt's and an unrelated sandbox that the server-side filter must not make us delete.
+        service.sandboxes = [
+            orphan("this-attempt", dict(metadata), reason="BATCHSANDBOX_PENDING"),
+            orphan("other-attempt", {**metadata, attempt_key: "other"}),
+            orphan("unrelated", {}),
+        ]
+        return real_reap(metadata, attempt_key)
+
+    real_reap = provider._reap_orphaned_create
+    monkeypatch.setattr(provider, "_reap_orphaned_create", seed_orphans)
+
+    with caplog.at_level(logging.WARNING, logger=opensandbox_provider.LOGGER.name):
+        with pytest.raises(opensandbox_provider.OpenSandboxCreatePendingError) as info:
+            await provider.create(SandboxSpec(image="image:tag", ready_timeout_s=0.05))
+    message = str(info.value)
+    assert "this-attempt" in message and "PENDING" in message and "BATCHSANDBOX_PENDING" in message
+    assert "after 0.05s" in message and "requests against its limits" in message
+    assert ("Not retrying" in message) is fail_fast
+    assert attempts == (1 if fail_fast else 3)  # the default retries a Pending orphan like any other timeout
+    assert service.killed == ["this-attempt"] * attempts  # and deletes what each attempt left behind
+    assert len(service.filters) == attempts
+    assert set(service.filters[0].metadata) == {run_key, attempt_key}
+    assert service.filters[0].page == 1 and service.filters[0].page_size == 100
+    assert any("Deleted OpenSandbox sandbox this-attempt" in r.getMessage() for r in caplog.records)
+    assert opensandbox_provider._is_retryable_create_error(info.value) is (not fail_fast)
+    assert opensandbox_provider._is_retryable_create_error(opensandbox_provider.OpenSandboxCreateTimeoutError("x"))
+
+
+async def test_sdk_request_timeout_reaps_the_orphan_like_the_attempt_budget_does(
+    fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The SDK's own request timeout (its 30 s default, or a configured one below the attempt budget) leaves
+    the same unknown sandbox behind: it is reaped and the failure classified the same way."""
+    from opensandbox.exceptions import SandboxApiException, SandboxInternalException, SandboxReadyTimeoutException
+
+    service = FakeLifecycleService(sandboxes=[])
+    install_lifecycle(monkeypatch, service)
+    failures: list[Exception] = []
+
+    class SdkTimeoutSandbox(FakeSandbox):
+        @classmethod
+        async def create(cls, **kwargs: Any) -> "FakeSandbox":
+            cls.created_kwargs = kwargs
+            raise failures.pop(0)
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (SdkTimeoutSandbox, FakeConnectionConfig, object, FakePlatformSpec, object),
+    )
+    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
+    real_reap = provider._reap_orphaned_create
+    state = "PENDING"
+
+    def seed(metadata: dict[str, str], attempt_key: str) -> Any:
+        service.sandboxes = [orphan("left-behind", dict(metadata), state=state, reason="CREATING")]
+        return real_reap(metadata, attempt_key)
+
+    monkeypatch.setattr(provider, "_reap_orphaned_create", seed)
+
+    # The aiohttp transport's read timeout, as the SDK wraps it (SandboxInternalException with the httpx cause).
+    read_timeout = httpx.ReadTimeout("Timeout on reading data from socket")
+    failures.append(SandboxInternalException("Network connectivity error: read", cause=read_timeout))
+    with pytest.raises(opensandbox_provider.OpenSandboxCreatePendingError) as info:
+        await provider._create_once(SandboxSpec(image="image:tag", ready_timeout_s=1200))
+    assert "left-behind" in str(info.value) and "CREATING" in str(info.value)
+    assert "SDK's request timeout of 30s" in str(info.value)  # nothing configured: the SDK default
+    assert isinstance(info.value.__cause__, SandboxInternalException) and service.killed == ["left-behind"]
+    assert opensandbox_provider._is_retryable_create_error(info.value) is True
+
+    # A sandbox that was merely slow: the plain, retryable timeout; a configured request timeout is named.
+    state = "RUNNING"
+    provider = opensandbox_provider.OpenSandboxProvider(create={"request_timeout_s": 600}, probe={"command": None})
+    monkeypatch.setattr(provider, "_reap_orphaned_create", seed)
+    failures.append(SandboxInternalException("Network connectivity error: read", cause=httpx.ReadTimeout("read")))
+    with pytest.raises(opensandbox_provider.OpenSandboxCreateTimeoutError) as info:
+        await provider._create_once(SandboxSpec(image="image:tag", ready_timeout_s=1200))
+    assert not isinstance(info.value, opensandbox_provider.OpenSandboxCreatePendingError)
+    assert "SDK's request timeout of 600s" in str(info.value) and service.killed == ["left-behind"] * 2
+
+    # Other SDK failures are not request timeouts: no list, no reclassification. A connect timeout sent no
+    # request; a readiness timeout is raised with the id known and the sandbox already killed by the SDK.
+    listed = len(service.filters)
+    for failure in (
+        SandboxApiException("boom", status_code=500),
+        SandboxInternalException("Network connectivity error", cause=httpx.ConnectTimeout("connect")),
+        SandboxReadyTimeoutException("Sandbox health check timed out after 1200s"),
+        SandboxInternalException("Unexpected SDK error occurred: x", cause=ValueError("x")),
+    ):
+        failures.append(failure)
+        with pytest.raises(type(failure)) as raised:
+            await provider._create_once(SandboxSpec(image="image:tag", ready_timeout_s=1200))
+        assert raised.value is failure
+    assert len(service.filters) == listed
+    assert opensandbox_provider._is_request_timeout(TimeoutError()) is True
+    assert opensandbox_provider._is_request_timeout(RuntimeError("not a timeout")) is False
+
+
+async def test_timed_out_create_whose_orphan_left_pending_stays_retryable(
+    fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A slow but schedulable pod: the orphan is deleted, the attempt is an ordinary retryable timeout."""
+    service = FakeLifecycleService(sandboxes=[])
+    install_lifecycle(monkeypatch, service)
+    provider = opensandbox_provider.OpenSandboxProvider(create={"timeout_s": 0.05}, probe={"command": None})
+    real_reap = provider._reap_orphaned_create
+
+    def seed_orphans(metadata: dict[str, str], attempt_key: str) -> Any:
+        service.sandboxes = [orphan("slow", dict(metadata), state="RUNNING")]
+        return real_reap(metadata, attempt_key)
+
+    monkeypatch.setattr(provider, "_reap_orphaned_create", seed_orphans)
+    with pytest.raises(opensandbox_provider.OpenSandboxCreateTimeoutError) as info:
+        await provider._create_once(SandboxSpec(image="image:tag", ready_timeout_s=0.05))
+    assert not isinstance(info.value, opensandbox_provider.OpenSandboxCreatePendingError)
+    assert service.killed == ["slow"]
+    assert opensandbox_provider._is_retryable_create_error(info.value) is True
+
+
+async def test_orphan_reap_failures_never_hide_the_create_timeout(
+    fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from opensandbox.exceptions import SandboxApiException
+
+    class BrokenLifecycleService(FakeLifecycleService):
+        async def list_sandboxes(self, filter: Any) -> SimpleNamespace:
+            raise SandboxApiException("list failed", status_code=500)
+
+    install_lifecycle(monkeypatch, BrokenLifecycleService(sandboxes=[]))
+    provider = opensandbox_provider.OpenSandboxProvider(create={"timeout_s": 0.05}, probe={"command": None})
+    with caplog.at_level(logging.WARNING, logger=opensandbox_provider.LOGGER.name):
+        with pytest.raises(opensandbox_provider.OpenSandboxCreateTimeoutError) as info:
+            await provider._create_once(SandboxSpec(image="image:tag", ready_timeout_s=0.05))
+    assert not isinstance(info.value, opensandbox_provider.OpenSandboxCreatePendingError)
+    assert any("Could not reap the sandbox" in r.getMessage() for r in caplog.records)
+
+    # A delete that finds the sandbox already gone is success; any other delete failure is reported, not raised.
+    gone = FakeLifecycleService(sandboxes=[], kill_error=SandboxApiException("not found", status_code=404))
+    install_lifecycle(monkeypatch, gone)
+    real_reap = provider._reap_orphaned_create
+
+    def seed(metadata: dict[str, str], attempt_key: str) -> Any:
+        gone.sandboxes = [orphan("gone", dict(metadata))]
+        return real_reap(metadata, attempt_key)
+
+    monkeypatch.setattr(provider, "_reap_orphaned_create", seed)
+    with pytest.raises(opensandbox_provider.OpenSandboxCreatePendingError):
+        await provider._create_once(SandboxSpec(image="image:tag", ready_timeout_s=0.05))
+    assert gone.killed == ["gone"]
+
+
+async def test_cancelled_create_request_reaps_its_orphan(
+    fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A caller's deadline (the seed timeout) cancels the open request; the sandbox it started is deleted."""
+    service = FakeLifecycleService(sandboxes=[])
+    install_lifecycle(monkeypatch, service)
+    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
+    real_reap = provider._reap_orphaned_create
+
+    def seed(metadata: dict[str, str], attempt_key: str) -> Any:
+        service.sandboxes = [orphan("cancelled", dict(metadata))]
+        return real_reap(metadata, attempt_key)
+
+    monkeypatch.setattr(provider, "_reap_orphaned_create", seed)
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.05):
+            await provider._create_once(SandboxSpec(image="image:tag", ready_timeout_s=100))
+    assert service.killed == ["cancelled"]

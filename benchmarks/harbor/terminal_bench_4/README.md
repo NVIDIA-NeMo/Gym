@@ -30,3 +30,18 @@ identical but whose current build is newer. Place the benchmark's file in the da
 prepare to pin the same redis build. The 3 H100 tasks run on a GPU deployment when the harbor environment
 server's `gpu_sandbox_provider` names its config block (for example `sandbox_gpu`); without one they run on the
 default provider and fail to schedule. `--exclude-tasks` and `--only-tasks` select subsets.
+
+Settings live in four places (see `environment_servers/harbor/README.md`). For a like-for-like comparison
+with the legacy benchmark's server, which sets `CIRCLE_NODE_TOTAL=3` for `nextjs-performance`, write that
+override beside the fetched tasks; the loader applies it and nothing else changes:
+
+```toml
+# datasets/terminal-bench-4.0.0/dataset.toml
+[gym.tasks."nextjs-performance".environment]
+env = { CIRCLE_NODE_TOTAL = "3" }
+```
+
+Deployment settings go in the `sandbox` and `sandbox_gpu` provider blocks of `env.yaml`: Compose networking and
+the shared-memory label as documented in the harbor README, and, for `gym dataset validate` on the three images
+that run as a non-root user, `images.rewrites` pointing them at derived images with writable `/solution` and
+`/logs` folders. Model runs use the upstream images.
