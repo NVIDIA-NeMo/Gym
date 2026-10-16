@@ -76,7 +76,8 @@ A new pairing does not need another combined preset.
 
 ## Runtime and model requirements
 
-Use an exact `pi_version` (default **0.80.2**), and a Gym `model_server`.
+Use an exact `pi_version` (default **0.80.2**), and either a Gym `model_server` or a
+`model_base_url` that Pi calls directly.
 For a Resources-owned task sandbox, supply direct `SandboxAccess` with an absolute
 task working directory. Without access, configure agent-owned creation as noted below.
 Session setup rejects `pi_version: latest`. Pi's `resources_server` setting is required
@@ -157,7 +158,8 @@ configuration must not replace the agent's cap with a larger value. Enforcement 
    This installs the harness runtime, not task dependencies or the test environment.
 4. Environment Server calls the rollout-prefixed `/v1/responses` route with the agent-session cookie.
 5. Pi runs in the sandbox, uses its built-in tools, and sends Chat Completions to
-   the rollout-prefixed Gym model-server URL. The sandbox must be able to reach that URL.
+   the rollout-prefixed Gym model-server URL (or to `model_base_url`). The sandbox must be able to
+   reach that URL.
 6. Agent close confirms harness termination, returns observations,
    removes session files, and disconnects. Missing termination evidence keeps close retryable;
    a final negative receipt fails the activation but releases the borrowed connection.
@@ -222,6 +224,41 @@ detail, not a separate endpoint or a setup step users must run.
 - `finish_tool_names`: granted MCP tools whose successful call ends a sandbox session's run (default none;
   uses Pi's `terminate`, available from Pi 0.69.0)
 - `session_close_timeout_seconds`: sandbox process cleanup timeout (default 60)
+- `model_base_url`, `model_api_key`: an OpenAI-compatible base URL (with `/v1`) that Pi calls directly
+  from the sandbox, instead of a Gym `model_server` (set exactly one), and its key (default `EMPTY`).
+  Gym does not capture these calls.
+- `thinking_level_map`: the generated model's Pi `thinkingLevelMap`, e.g. `{max: max}` so that
+  `thinking: max` sends `reasoning_effort: "max"` (with `provider_compat.supportsReasoningEffort: true`)
+- `provider_compat`: Pi compat flags merged over the generated provider's
+  (`supportsDeveloperRole` and `supportsReasoningEffort` off)
+- `settings`: extra `settings.json` entries merged over Gym's, e.g. `{retry: {maxRetries: 10}}`
+
+Sandbox-session settings for running Pi the way a harness started in the task container runs (the
+[Terminal-Bench-Science profile](../../benchmarks/terminal_bench_science/README.md#pi-in-the-task-sandbox)
+uses all of them):
+
+- `sandbox_env`: further environment for Pi and its tools, e.g. `{PI_OFFLINE: "1"}`
+- `sandbox_runtime_guards`: Gym's bash cap and system-prompt note (default true); false runs Pi's own tools
+  and system prompt unchanged
+- `session_prompt_cache_key`: send one `prompt_cache_key` per session with every model call, so a gateway
+  that routes on it keeps the session on one replica
+- `sandbox_logs_dir`, `log_requests`: a sandbox log directory (e.g. Harbor's `/logs/agent`) for Pi's JSON
+  events without the streaming deltas (`pi.txt`), its stderr (`pi_stderr.txt`) and, with `log_requests`,
+  every model request without its conversation (`pi-requests.jsonl`; the first in full in
+  `pi-requests.first.json`)
+- `raise_oom_score_adj`: make Pi and its tools the memory-cgroup OOM killer's preferred victims
+  (`oom_score_adj` 1000, or 0 when the sandbox starts below zero)
+- `verify_after_agent_error`: return a failed run (nonzero or signalled exit, a terminal error, no terminal
+  assistant result) as a gradable `failed` response (`incomplete` at the deadline; the error is in
+  `metadata.graded_agent_error`), as Harbor grades after any agent exit, when cleanup is confirmed, the
+  terminal error is not a transient model-endpoint failure (connection, timeout, 429 or 5xx, as Pi's retry
+  classifier names them) and the sandbox still runs and answers a command. Anything else stays an execution
+  error and the episode is retried.
+
+Sandbox sessions drop Pi's streaming events (`message_update`, `tool_execution_update`), which repeat the
+whole partial message or tool output on every delta, before they reach the event log. In JSON mode Pi
+routes extension console output to stderr, so the outcome extension writes its records to a session file
+that the runner appends to the event log.
 
 ## Results and limits
 

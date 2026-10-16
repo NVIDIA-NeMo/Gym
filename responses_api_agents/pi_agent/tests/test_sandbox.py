@@ -28,10 +28,11 @@ from nemo_gym.agent_utils.supervisor_client import parse_cleanup_receipt
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.sandbox import SandboxStatus
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.tasks.harbor.materialize import materialize_task
 from nemo_gym.tasks.harbor.task import load_task
-from responses_api_agents.pi_agent.app import PiAgent, PiAgentConfig, PiAgentRunRequest
+from responses_api_agents.pi_agent.app import PiAgent, PiAgentConfig, PiAgentRunRequest, _merge_settings
 
 
 def seed(*, session_id: str = "pi-session") -> AgentSeedSessionRequest:
@@ -2162,3 +2163,270 @@ def test_task_timeout_does_not_allow_other_metadata_or_consume_activation(
         assert accepted.status_code == 200, accepted.text
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
         assert closed.status_code == 200, closed.text
+
+
+# ---------------------------------------------------------------- direct endpoint and task-container settings
+
+TBSCI_COMPAT = {
+    "supportsStore": False,
+    "supportsDeveloperRole": False,
+    "supportsReasoningEffort": True,
+    "maxTokensField": "max_tokens",
+    "supportsStrictMode": False,
+    "supportsLongCacheRetention": False,
+}
+
+
+def configure_direct(agent, **overrides):
+    """The settings benchmarks/terminal_bench_science/pi.yaml gives the agent."""
+    settings = {
+        "model_server": None,
+        "model_base_url": "http://gateway.example:16100/v1/",
+        "model_api_key": "gateway-key",  # pragma: allowlist secret
+        "model": "deepseek-flash",
+        "pi_version": "0.80.10",
+        "thinking": "max",
+        "thinking_level_map": {"max": "max"},
+        "provider_compat": TBSCI_COMPAT,
+        "context_window": 1048576,
+        "max_output_tokens": 393216,
+        "settings": {"retry": {"maxRetries": 10}},
+        "sandbox_env": {"PI_OFFLINE": "1", "GIT_PAGER": "cat"},
+        "sandbox_runtime_guards": False,
+        "session_prompt_cache_key": True,
+        "sandbox_logs_dir": "/logs/agent",
+        "log_requests": True,
+        "raise_oom_score_adj": True,
+        "verify_after_agent_error": True,
+    } | overrides
+    for name, value in settings.items():
+        setattr(agent.config, name, value)
+
+
+def test_direct_endpoint_session_runs_pi_as_a_task_container_harness(setup):
+    agent, sandbox = setup
+    configure_direct(agent)
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        # The session prepares Harbor's agent log directory with its own.
+        assert "/logs/agent" in sandbox.exec.await_args_list[0].args[0]
+        assert sandbox.exec.await_args_list[1].args[0].endswith("/tmp/nemo-gym-pi-node-22.19.0-0.80.10 0.80.10")
+        result = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "Fix the code"})
+        assert result.status_code == 200, result.text
+        assert result.json()["status"] == "completed"
+        directory = sandbox.directory
+        models = json.loads(sandbox.files[f"{directory}/home/.pi/agent/models.json"])
+        # Pi calls the endpoint directly: no Gym rollout prefix, the configured key, the configured compat
+        # flags with reasoning_effort allowed, and `--thinking max` mapped to reasoning_effort "max".
+        assert models == {
+            "providers": {
+                "nemo": {
+                    "baseUrl": "http://gateway.example:16100/v1",
+                    "api": "openai-completions",
+                    "apiKey": "gateway-key",  # pragma: allowlist secret
+                    "compat": TBSCI_COMPAT,
+                    "models": [
+                        {
+                            "id": "deepseek-flash",
+                            "reasoning": True,
+                            "input": ["text"],
+                            "contextWindow": 1048576,
+                            "maxTokens": 393216,
+                            "thinkingLevelMap": {"max": "max"},
+                        }
+                    ],
+                }
+            }
+        }
+        settings = json.loads(sandbox.files[f"{directory}/home/.pi/agent/settings.json"])
+        assert settings["retry"] == {"provider": {"timeoutMs": 900000}, "maxRetries": 10}
+        assert settings["compaction"] == {"enabled": True}
+        payload = json.loads(sandbox.files[f"{directory}/input.json"])
+        command = payload["command"]
+        extensions = [command[i + 1].rsplit("/", 1)[1] for i, arg in enumerate(command) if arg == "--extension"]
+        # No runtime guards; the request log comes last so it records the final payload.
+        assert extensions == ["output-limit.mjs", "outcome.mjs", "prompt-cache-key.mjs", "request-log.mjs"]
+        for extension in extensions:
+            assert (
+                sandbox.files[f"{directory}/{extension}"] == Path(__file__).parents[1].joinpath(extension).read_text()
+            )
+        assert command[command.index("--thinking") + 1] == "max"
+        assert "--append-system-prompt" not in command
+        assert "Fix the code" not in " ".join(command)
+        assert payload["prompt"] == "Fix the code"
+        env = payload["env"]
+        # The task's HOME stays; Pi's configuration comes from the private session directory.
+        assert "HOME" not in env
+        assert env["PI_CODING_AGENT_DIR"] == f"{directory}/home/.pi/agent"
+        assert (env["PI_OFFLINE"], env["GIT_PAGER"]) == ("1", "cat")
+        assert env["NEMO_GYM_PI_PROMPT_CACHE_KEY"] == "pi-" + directory.rsplit("/", 1)[1]
+        assert env["NEMO_GYM_PI_REQUEST_LOG"] == "/logs/agent/pi-requests.jsonl"
+        assert env["NEMO_GYM_PI_OUTCOME_LOG"] == payload["outcome_log"] == f"{directory}/outcome.jsonl"
+        assert "gateway-key" not in json.dumps(payload)
+        assert (payload["transcript"], payload["stderr"]) == ("/logs/agent/pi.txt", "/logs/agent/pi_stderr.txt")
+        assert payload["raise_oom_score_adj"] is True
+        closed = client.post("/v1/agent_sessions/close", json=close_body(seed().agent_session_id))
+        assert closed.status_code == 200, closed.text
+    agent.server_client.post.assert_not_called()
+
+
+async def test_session_prompt_cache_key_is_unique_per_session(setup):
+    agent, sandbox = setup
+    configure_direct(agent)
+    keys = []
+    for session_id in ("first", "second"):
+        await agent.seed_agent_session(
+            Request({"type": "http", "headers": [], "session": {}}), seed(session_id=session_id)
+        )
+        state = agent._session_records[session_id].state
+        payload = agent._sandbox_payload(state, prompt="task", system="", extensions=agent._sandbox_extensions())
+        keys.append(payload["env"]["NEMO_GYM_PI_PROMPT_CACHE_KEY"])
+    assert keys[0] != keys[1]
+    assert all(key.startswith("pi-") for key in keys)
+    configure_direct(agent, session_prompt_cache_key=False, log_requests=False)
+    payload = agent._sandbox_payload(state, prompt="task", system="", extensions=agent._sandbox_extensions())
+    assert not {"NEMO_GYM_PI_PROMPT_CACHE_KEY", "NEMO_GYM_PI_REQUEST_LOG"} & payload["env"].keys()
+    assert "prompt-cache-key.mjs" not in " ".join(payload["command"])
+
+
+@pytest.mark.parametrize("routes", ["neither", "both"])
+def test_seed_requires_exactly_one_model_route(setup, routes):
+    agent, sandbox = setup
+    if routes == "neither":
+        agent.config.model_server = None
+    else:
+        agent.config.model_base_url = "http://gateway.example/v1"
+    with TestClient(agent.setup_webserver()) as client:
+        response = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+    assert response.status_code == 422
+    assert "model_server or a model_base_url" in response.text
+    sandbox.exec.assert_not_awaited()
+
+
+def test_task_sandbox_rooted_at_filesystem_root_runs(setup):
+    # Task images without a WORKDIR start in "/": Pi's runtime and session files stay under /tmp.
+    agent, sandbox = setup
+    configure_direct(agent)
+    sandbox.expected_workdir = "/"
+    body = seed()
+    body.sandbox_access.workdir = "/"
+    with TestClient(agent.setup_webserver()) as client:
+        assert client.post("/v1/agent_sessions", json=body.model_dump(mode="json")).status_code == 200
+        response = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "task"})
+        assert response.status_code == 200, response.text
+        state = agent._session_records[body.agent_session_id].state
+        assert state.session.session_dir.startswith("/tmp/nemo-gym-pi-sessions/")
+        assert state.runtime.startswith("/tmp/")
+        assert client.post("/v1/agent_sessions/close", json=close_body(body.agent_session_id)).status_code == 200
+
+
+def failed_events(error_message: str | None) -> str:
+    """Events of a run whose last assistant turn ended in an error, or (None) that stopped mid-turn."""
+    recorded = [json.loads(line)[1] for line in events(stop_reason="error").splitlines()]
+    final = recorded[2]["message"]
+    if error_message is None:
+        final["stopReason"] = "toolUse"
+        final.pop("errorMessage")
+        recorded = recorded[:3]
+    else:
+        final["errorMessage"] = error_message
+        recorded[3]["messages"][0]["stopReason"] = "error"
+    return "\n".join(json.dumps([float(i), event]) for i, event in enumerate(recorded))
+
+
+@pytest.mark.parametrize(
+    "case,status_code,expected",
+    [
+        # Pi killed mid-turn (e.g. the OOM killer or an agent's pkill) while its sandbox still runs.
+        ("killed", 200, "failed"),
+        # A deterministic provider rejection is graded; retrying would fail the same way.
+        ("bad_request", 200, "failed"),
+        # A transient endpoint failure after Pi's own retries, or a lost sandbox: retried, never graded.
+        ("endpoint", 500, None),
+        ("endpoint_status", 500, None),
+        ("sandbox_gone", 500, None),
+        ("disabled", 500, None),
+    ],
+)
+async def test_failed_run_is_graded_only_while_its_sandbox_runs(setup, case, status_code, expected):
+    agent, sandbox = setup
+    configure_direct(agent, verify_after_agent_error=case != "disabled")
+    sandbox.status = AsyncMock(return_value=SandboxStatus.STOPPED if case == "sandbox_gone" else SandboxStatus.RUNNING)
+    if case in ("killed", "sandbox_gone", "disabled"):
+        sandbox.events = failed_events(None)
+        sandbox.result["return_code"] = 137
+    else:
+        message = {
+            "bad_request": "400 Invalid tool call format",
+            "endpoint": "Connection error.",
+            "endpoint_status": "502 Bad Gateway",
+        }[case]
+        sandbox.events = failed_events(message)
+        sandbox.result["return_code"] = 0
+    app = agent.setup_webserver()
+    agent.setup_exception_middleware(app)
+    with TestClient(app) as client:
+        assert client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).status_code == 200
+        response = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "task"})
+        assert response.status_code == status_code, response.text
+        if expected is not None:
+            body = response.json()
+            assert body["status"] == expected
+            assert body["error"] is None
+            assert "graded_agent_error" in body["metadata"]
+            # The partial transcript reaches the verifier with the run's state.
+            assert any(item["type"] == "function_call" for item in body["output"])
+        else:
+            assert "Pi agent failed" in response.text
+        closed = client.post("/v1/agent_sessions/close", json=close_body(seed().agent_session_id))
+        assert closed.status_code == 200
+        record = closed.json()["agent_observations"]["records"][0]
+        if expected is not None:
+            assert record["status"] == expected
+    probed = [call.args[0] for call in sandbox.exec.await_args_list if call.args[0] == "true"]
+    assert len(probed) == int(case in ("killed", "bad_request"))
+
+
+@pytest.mark.parametrize(
+    "settings,message",
+    [
+        ({"sandbox_env": {"PI_CODING_AGENT_DIR": "/x"}}, "sandbox_env cannot set PI_CODING_AGENT_DIR"),
+        ({"sandbox_env": {"NEMO_GYM_PI_REQUEST_LOG": "/x"}}, "sandbox_env cannot set NEMO_GYM_PI_REQUEST_LOG"),
+        ({"sandbox_logs_dir": "logs"}, "sandbox_logs_dir must be an absolute"),
+        ({"sandbox_logs_dir": "/"}, "sandbox_logs_dir must be an absolute"),
+        ({"log_requests": True}, "log_requests requires sandbox_logs_dir"),
+    ],
+)
+def test_invalid_sandbox_settings_are_rejected(settings, message):
+    with pytest.raises(ValidationError, match=message):
+        PiAgentConfig(name="pi", host="localhost", port=1, entrypoint="app.py", **settings)
+
+
+def test_sandbox_env_numbers_become_strings():
+    config = PiAgentConfig(name="pi", host="localhost", port=1, entrypoint="app.py", sandbox_env={"PI_OFFLINE": 1})
+    assert config.sandbox_env["PI_OFFLINE"] == "1"
+
+
+def test_settings_merge_recursively_over_gyms():
+    base = {"compaction": {"enabled": True}, "retry": {"provider": {"timeoutMs": 5}}}
+    merged = _merge_settings(base, {"retry": {"maxRetries": 10, "provider": {"maxRetries": 2}}, "extra": [1]})
+    assert merged == {
+        "compaction": {"enabled": True},
+        "retry": {"provider": {"timeoutMs": 5, "maxRetries": 2}, "maxRetries": 10},
+        "extra": [1],
+    }
+    assert base == {"compaction": {"enabled": True}, "retry": {"provider": {"timeoutMs": 5}}}
+
+
+def test_gym_model_server_route_is_unchanged_by_direct_settings(setup):
+    agent, sandbox = setup
+    agent.config.model_api_key = "unused"  # pragma: allowlist secret
+    agent.config.thinking_level_map = {"max": "max"}
+    models = agent._build_models_config("pi-smoke-a2")
+    provider = models["providers"]["nemo"]
+    assert provider["baseUrl"] == "http://model.example:9000/ng-rollout/pi-smoke-a2/v1"
+    assert provider["apiKey"] == "EMPTY"  # pragma: allowlist secret
+    assert provider["compat"] == {"supportsDeveloperRole": False, "supportsReasoningEffort": False}
+    assert provider["headers"] == {"x-session-id": "pi-smoke-a2"}
+    assert provider["models"][0]["thinkingLevelMap"] == {"max": "max"}

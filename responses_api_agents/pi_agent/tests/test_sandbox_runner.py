@@ -150,3 +150,76 @@ def test_spawn_error_is_not_success(tmp_path):
     summary = result(tmp_path, process)
     assert summary["cleanup_confirmed"] is True
     assert summary["return_code"] != 0
+
+
+def test_streaming_events_are_dropped_and_logs_go_to_the_given_paths(tmp_path):
+    # Pi's JSON mode repeats the partial message on every streaming delta; only completed events are kept.
+    lines = [
+        {"type": "message_start", "message": {"role": "assistant"}},
+        {"type": "message_update", "message": {"role": "assistant", "content": "partial"}},
+        {"type": "tool_execution_update", "toolCallId": "t", "partialResult": "out"},
+        {"type": "message_end", "message": {"role": "assistant", "stopReason": "stop"}},
+    ]
+    code = (
+        "import json,sys; "
+        f"[print(json.dumps(line), flush=True) for line in {lines!r}]; "
+        "print('not json'); sys.stderr.write('pi stderr\\n'); "
+        "open(sys.argv[1], 'a').write(json.dumps({'type': 'ng_pi_outcome', 'context_overflow': True}) + '\\nbad\\n')"
+    )
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    outcome = tmp_path / "outcome.jsonl"
+    return_code = sandbox_runner.run(
+        {
+            "directory": str(tmp_path),
+            "command": [sys.executable, "-c", code, str(outcome)],
+            "cwd": str(tmp_path),
+            "env": {},
+            "prompt": "task input",
+            "transcript": str(logs / "pi.txt"),
+            "stderr": str(logs / "pi_stderr.txt"),
+            "outcome_log": str(outcome),
+        }
+    )
+    assert return_code == 0
+    recorded = [json.loads(line)[1]["type"] for line in (tmp_path / "events.jsonl").read_text().splitlines()]
+    # The outcome extension's records follow Pi's own events.
+    assert recorded == ["message_start", "message_end", "ng_pi_outcome"]
+    transcript = (logs / "pi.txt").read_text().splitlines()
+    assert [json.loads(line)["type"] for line in transcript[:2]] == ["message_start", "message_end"]
+    assert transcript[2:] == ["not json"]
+    assert (logs / "pi_stderr.txt").read_text() == "pi stderr\n"
+    assert not (tmp_path / "stderr.log").exists()
+
+
+def test_oom_score_is_raised_for_pi_and_its_tools(tmp_path):
+    score = tmp_path / "oom_score_adj"
+    score.write_text("0\n")
+    assert sandbox_runner.prefer_for_oom_kill(str(score)) == "0 -> 1000"
+    assert score.read_text() == "1000"
+    score.write_text("-997\n")
+    assert sandbox_runner.prefer_for_oom_kill(str(score)) == "-997 -> 0"
+    assert sandbox_runner.prefer_for_oom_kill(str(tmp_path / "missing")).startswith("unchanged:")
+    code = "import sys; print(open('/proc/self/oom_score_adj').read().strip(), file=sys.stderr)"
+    params = {
+        "directory": str(tmp_path),
+        "command": [sys.executable, "-c", code],
+        "cwd": str(tmp_path),
+        "env": {},
+        "prompt": "",
+        "raise_oom_score_adj": True,
+    }
+    before = Path("/proc/self/oom_score_adj").read_text().strip()
+    try:
+        assert sandbox_runner.run(params) == 0
+    finally:
+        # The test process is the runner here: restore what the runner raised (lowering may need privilege).
+        try:
+            Path("/proc/self/oom_score_adj").write_text(before)
+        except OSError:
+            pass
+    record, child = (tmp_path / "stderr.log").read_text().splitlines()
+    # The runner records what it changed, and Pi (here the child) inherits the score.
+    assert record.startswith("oom_score_adj: ")
+    if record.endswith("-> 1000"):
+        assert child == "1000"
