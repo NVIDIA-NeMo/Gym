@@ -40,7 +40,8 @@ EXPECTED_MARKER = "synthetic_expected_marker"
 NONTERMINAL_CATEGORIES = tuple(name for name, (_, terminal) in UNSCORABLE_CATEGORIES.items() if not terminal)
 TERMINAL_CATEGORIES = tuple(name for name, (_, terminal) in UNSCORABLE_CATEGORIES.items() if terminal)
 CLEAN = {"reference": "deleted", "comparator": "deleted", "candidate": "deleted"}
-# Every category probe_runtime raises: each one refuses to serve.
+# Every category probe_runtime raises: each one refuses to serve. startup() itself raises a seventh, image_missing,
+# before any probe; the image tests below cover it.
 PROBE_CATEGORIES = (
     "exec_user_unsupported",
     "exec_user_is_root",
@@ -522,6 +523,61 @@ async def test_startup_refuses_to_serve_on_every_probe_category(monkeypatch, cat
     (provider,) = ScriptedProvider.instances
     assert caught.value.category == category and probe.await_count == 1
     assert server._grader is None and server._provider is None and provider.aclosed == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("startup_probe", [True, False])
+@pytest.mark.parametrize("image", [None, ""])  # an empty CRITPT_CUSTOM_GRADER_IMAGE resolves to "", not null
+async def test_startup_without_an_image_refuses_to_serve_before_any_sandbox(startup_probe, image):
+    # No image is shipped, and the server runs without one only on the local provider: checked before the probe,
+    # and without it. Unset and empty are the same refusal.
+    ScriptedProvider.reset()
+    server = probing_server({"critpt_fake": {}}, startup_probe=startup_probe, image=image)
+    with pytest.raises(RuntimeProbeError) as caught:
+        await server.startup()
+    (provider,) = ScriptedProvider.instances
+    assert caught.value.category == "image_missing"
+    assert provider.created == [] and provider.exec_calls == [] and provider.aclosed == 1
+    assert server._grader is None and server._provider is None and server._probe_info == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider_options", [{"snapshot_id": "grader-snapshot"}, {"template": "grader-template"}])
+async def test_startup_refuses_a_snapshot_or_template_in_place_of_the_image(provider_options):
+    # Deliberate: some providers could start from a snapshot or template without an image, but the reference cache
+    # names the runtime by its image, not by provider_options, so such a setup is refused like any missing image.
+    ScriptedProvider.reset()
+    server = probing_server({"critpt_fake": {}}, image=None, provider_options=provider_options)
+    with pytest.raises(RuntimeProbeError) as caught:
+        await server.startup()
+    (provider,) = ScriptedProvider.instances
+    assert caught.value.category == "image_missing" and provider.created == [] and provider.aclosed == 1
+    assert server._grader is None and server._provider is None
+
+
+@pytest.mark.asyncio
+async def test_startup_without_an_image_serves_on_a_provider_named_local(monkeypatch):
+    # The exemption keys on the provider's name: the same double, named as the local provider is, starts and probes.
+    ScriptedProvider.reset()
+    monkeypatch.setattr(ScriptedProvider, "name", "local")
+    server = probing_server({"critpt_fake": {"script": {("result", "probe"): b"x"}}}, image=None)
+    await server.startup()
+    (provider,) = ScriptedProvider.instances
+    (spec,) = provider.created
+    assert spec.image is None and provider.closed == ["fake-probe-1"] and server._probe_info["uid"] == "1000"
+    assert server._grader is not None
+    await server.shutdown()
+    assert provider.aclosed == 1
+
+
+@pytest.mark.asyncio
+async def test_startup_without_an_image_serves_on_gyms_local_provider():
+    # Gym's own local provider, selected by name as an operator's config selects it. Without the probe nothing runs.
+    server = probing_server({"local": {}}, startup_probe=False, image=None)
+    await server.startup()
+    assert server._provider.name == "local" and server._grader is not None
+    await server.shutdown()
+    assert server._provider is None and server._grader is None
 
 
 @pytest.mark.asyncio

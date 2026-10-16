@@ -5,6 +5,9 @@
 The server model refuses, at startup, a sandbox workdir the execution policy disagrees with, a create budget that
 cannot hold the readiness wait plus the two setup transfers, a sandbox ttl a job can outlive and any key that is
 neither its own nor one Gym reads from a resources-server block.
+
+No grading image is shipped: ``sandbox_spec.image`` resolves to CRITPT_CUSTOM_GRADER_IMAGE when that is set and to
+None otherwise, which the server model accepts.
 """
 
 from pathlib import Path
@@ -133,3 +136,17 @@ def test_startup_config_accepts_the_framework_pairing_keys():
     block["sandbox_providr"] = block.pop("sandbox_provider")
     with pytest.raises(ValueError, match="sandbox_providr"):
         loaded(block)
+
+
+def test_shipped_config_ships_no_image(monkeypatch):
+    monkeypatch.delenv("CRITPT_CUSTOM_GRADER_IMAGE", raising=False)
+    block = shipped_block()
+    assert block["sandbox_spec"]["image"] is None
+    assert loaded(block).sandbox_spec.image is None
+
+
+def test_shipped_config_takes_the_image_from_the_environment(monkeypatch):
+    monkeypatch.setenv("CRITPT_CUSTOM_GRADER_IMAGE", "registry.example.invalid/grader-rt:test")
+    block = shipped_block()
+    assert block["sandbox_spec"]["image"] == "registry.example.invalid/grader-rt:test"
+    assert loaded(block).sandbox_spec.image == "registry.example.invalid/grader-rt:test"

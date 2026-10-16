@@ -7,7 +7,7 @@
 # pinned versions (the table in that check must equal requirements.txt), or if `su` to the account does not give uid 1000.
 # Build and publish for both architectures, then set sandbox_spec.image (or CRITPT_CUSTOM_GRADER_IMAGE) to the tag:
 #   docker buildx build --platform linux/amd64,linux/arm64 \
-#       -t docker.io/<account>/critpt-custom-grader-rt:<tag> --push resources_servers/critpt_custom_grader/runtime
+#       -t <registry>/<path>/critpt-custom-grader-rt:<tag> --push resources_servers/critpt_custom_grader/runtime
 FROM python:3.13-slim
 COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir --root-user-action=ignore -r /tmp/requirements.txt && rm /tmp/requirements.txt

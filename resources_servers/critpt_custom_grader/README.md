@@ -4,7 +4,9 @@ A sandboxed grader for CritPt-like tasks with operator-supplied task data: Pytho
 graded against test cases and stored expectations, with numeric tolerances, exact integers, composite values, symbolic
 expressions, categorical strings and expected exceptions. Every reference, candidate and comparator step runs in a
 sandbox created through Gym's provider-neutral sandbox API, so the same server runs on OpenSandbox, docker, apptainer,
-enroot or the `local` provider by swapping one provider config. It does not call an external grading service and
+enroot or the `local` provider by swapping one provider config; every provider but `local` also needs a build of
+`runtime/Dockerfile` named in `CRITPT_CUSTOM_GRADER_IMAGE` (see [The grading image](#the-grading-image)). It does not
+call an external grading service and
 claims no parity with any hidden grader. It is a separate server from `resources_servers/critpt` and imports nothing
 from it.
 
@@ -88,6 +90,7 @@ unknown key is a task-data defect.
 Pick a provider config and a model; the provider block binds the name `sandbox` the server references:
 
 ```bash
+export CRITPT_CUSTOM_GRADER_IMAGE=<registry>/<path>:<tag>  # your build of runtime/Dockerfile (see The grading image)
 gym env start \
     --config resources_servers/critpt_custom_grader/configs/critpt_custom_grader.yaml \
     --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
@@ -99,7 +102,7 @@ gym eval run --no-serve +agent_name=critpt_custom_grader_simple_agent \
 ```
 
 Provider credentials come from the provider's own config (OpenSandbox: `OPENSANDBOX_DOMAIN`, `OPENSANDBOX_API_KEY`).
-`CRITPT_CUSTOM_GRADER_IMAGE` overrides the grading image.
+`CRITPT_CUSTOM_GRADER_IMAGE` names the grading image; none is shipped (see [The grading image](#the-grading-image)).
 
 ### Startup check
 
@@ -108,8 +111,10 @@ as a non-root identity under `execution.exec_user`, that the provider accepts th
 imports the pinned packages (`pydantic`, `sympy`, `numpy`, `scipy`), and that an upload to a nested path creates its
 parent directories, is found, with a plain-digit size, by the grader's own size command (`test -f`, then
 `stat -c %s`), and comes back byte for byte through the grader's own bounded download. The sandbox is stopped
-whatever the outcome. A failed check refuses to serve and names one of six categories:
+whatever the outcome. A failed check refuses to serve and names one of seven categories:
 
+- `image_missing`: `sandbox_spec.image` is unset or empty on a provider other than `local` (a provider-side `snapshot_id` or
+  `template` does not count: the reference cache names the runtime by its image); checked before any sandbox starts.
 - `exec_user_unsupported`: the provider refuses `execution.exec_user`, or `id -u` reports an error or no uid.
 - `exec_user_is_root`: commands run as uid 0, which the runner refuses.
 - `interpreter_missing_dependency`: the import check reports an error: the interpreter cannot import the packages.
@@ -118,16 +123,16 @@ whatever the outcome. A failed check refuses to serve and names one of six categ
   print plain digits; or the bounded download failed or returned other bytes.
 - `provider_exec`: only the `id -u` or the import-check command raised, or the host's bounded wait on it expired.
 
-`startup_probe: false` skips the check and the startup sandbox. Gym gives every server `server_spinup_timeout_seconds`
-(default 600 s) to become ready and the probe's sandbox create counts against it, so on a provider with a slow first
-image pull raise it above `execution.create_timeout_s` plus a margin, for example
-`++server_spinup_timeout_seconds=1200`.
+`startup_probe: false` skips the startup sandbox and its checks, but not the `image_missing` check. Gym gives every
+server `server_spinup_timeout_seconds` (default 600 s) to become ready and the probe's sandbox create counts against
+it, so on a provider with a slow first image pull raise it above `execution.create_timeout_s` plus a margin, for
+example `++server_spinup_timeout_seconds=1200`.
 
 ### Providers
 
 | Provider | Status | `exec_user` | Memory and ttl enforced |
 |---|---|---|---|
-| opensandbox | validated end to end with `docker.io/earakelyan93701/critpt-custom-grader-rt:2026.10` | `su` wrapper | yes |
+| opensandbox | validated end to end with an image built from `runtime/Dockerfile` | `su` wrapper | yes |
 | local | CI end-to-end test | must be `null` | no |
 | docker | supported | `--user` | yes |
 | apptainer, enroot | supported | `su` (needs root inside the container) | no |
@@ -145,11 +150,34 @@ image pull raise it above `execution.create_timeout_s` plus a margin, for exampl
 
 ### The grading image
 
-`runtime/Dockerfile`: `python:3.13-slim`, `runtime/requirements.txt` pinned in the interpreter's own site-packages
-(the runner runs with `-I`), a `grader` user (uid 1000), `/work` owned by it. Build it multi-arch and point
-`sandbox_spec.image` at it. Network isolation is a provider setting. The sandbox runtime's hard limits must allow an
-`RLIMIT_FSIZE` of at least 156,303,360 bytes and an `RLIMIT_NPROC` of at least `execution.max_processes`, which the
-runner sets on every task process; otherwise every run fails as `runner_error: limits` (non-terminal).
+No image is shipped: build `runtime/Dockerfile` and publish it where your provider pulls from. `runtime/Dockerfile`:
+`python:3.13-slim`, `runtime/requirements.txt` pinned in the interpreter's own site-packages (the runner runs with
+`-I`), a `grader` user (uid 1000), `/work` owned by it.
+
+1. Build it multi-arch and push it:
+
+   ```bash
+   docker buildx build --platform linux/amd64,linux/arm64 \
+       -t <registry>/<path>:<tag> --push resources_servers/critpt_custom_grader/runtime
+   ```
+
+   With the `docker` provider on the host that builds it, a plain
+   `docker build -t <registry>/<path>:<tag> resources_servers/critpt_custom_grader/runtime` is enough; apptainer and
+   enroot pull a bare reference from a registry (`docker://`), so push the image for them too.
+2. Point the server at it: `export CRITPT_CUSTOM_GRADER_IMAGE=<registry>/<path>:<tag>`, which the shipped config reads
+   into `sandbox_spec.image`, or set `sandbox_spec.image` directly. Pinning by digest
+   (`<registry>/<path>@sha256:<digest>`) is recommended, since a tag can be pushed again with other contents.
+
+The `local` provider runs the host interpreter and needs no image. On every other provider the server refuses to start
+without `sandbox_spec.image` (`image_missing`), even where the provider could start without one, so snapshot- or
+template-only setups are not supported: a `provider_options.snapshot_id` (daytona, opensandbox), an E2B
+`create.template` or an OpenShell gateway's default image. The reference cache names the runtime by its image and
+could not tell such runtimes apart. Daytona also refuses a `snapshot_id` beside an image, so leave it unset there. On
+E2B, map the image to its template with `create.template_map`.
+
+Network isolation is a provider setting. The sandbox runtime's hard limits must allow an `RLIMIT_FSIZE` of at least
+156,303,360 bytes and an `RLIMIT_NPROC` of at least `execution.max_processes`, which the runner sets on every task
+process; otherwise every run fails as `runner_error: limits` (non-terminal).
 
 ### Configuration
 

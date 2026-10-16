@@ -54,6 +54,7 @@ from resources_servers.critpt_custom_grader.execution import (
     ExecutionPolicy,
     Grader,
     GradeResult,
+    RuntimeProbeError,
     probe_runtime,
     validate_candidate_source,
 )
@@ -351,7 +352,10 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
     async def startup(self) -> None:
         """Resolve the provider once, probe the runtime, build the grader. Any probe failure refuses to serve.
 
-        On any failure the provider is closed and the server holds neither provider nor grader.
+        This server requires ``sandbox_spec.image`` on every provider but ``local``, even one that could start from a
+        snapshot, a template or a default image: without it, startup refuses with ``image_missing`` before any sandbox
+        starts, whether or not the probe runs. On any failure the provider is closed and the server holds neither
+        provider nor grader.
         """
         if self._grader is not None:
             return
@@ -360,6 +364,16 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
         )
         try:
             spec = self._sandbox_spec()
+            # No image is shipped. The local provider runs the host interpreter and ignores the image; it is told apart
+            # by the name every provider declares. A provider's own fallback (a snapshot, a template, a default image)
+            # does not stand in for it: the reference cache names the runtime by its image.
+            if not spec.image and getattr(provider, "name", None) != "local":  # unset or empty
+                raise RuntimeProbeError(
+                    "image_missing",
+                    "sandbox_spec.image is unset or empty; it is required on every provider but local (a provider's snapshot, template or "
+                    "default image does not replace it): build runtime/Dockerfile and set CRITPT_CUSTOM_GRADER_IMAGE "
+                    "or sandbox_spec.image",
+                )
             if self.config.startup_probe:
                 self._probe_info = await probe_runtime(provider, spec, self.config.execution)
             grader = Grader(

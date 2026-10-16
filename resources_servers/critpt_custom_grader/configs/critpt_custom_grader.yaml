@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Sandboxed grader for CritPt-like tasks with operator-supplied task data. Every reference, candidate and comparator
 # step runs in a sandbox created through Gym's sandbox API. Pick the provider by adding its config to config_paths:
+#   export CRITPT_CUSTOM_GRADER_IMAGE=<registry>/<path>:<tag>  # your build of runtime/Dockerfile (see sandbox_spec.image)
 #   gym env start --config resources_servers/critpt_custom_grader/configs/critpt_custom_grader.yaml \
 #       --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml --model-type openai_model ...
 # Every shipped provider config binds the name `sandbox`, which `sandbox_provider` below references.
@@ -21,10 +22,14 @@ critpt_custom_grader:
       # daytona, e2b and openshell reject). apptainer and enroot have no egress setting; local has no isolation at
       # all and suits trusted inputs only.
       sandbox_spec:
-        # The grading image: Python 3.13 with pinned pydantic, sympy, mpmath, numpy and scipy in the interpreter's own
-        # site-packages (the runner runs with -I), a non-root `grader` user and a /work directory it owns. See
-        # runtime/Dockerfile. OpenSandbox does not create the workdir, so it must exist in the image.
-        image: ${oc.env:CRITPT_CUSTOM_GRADER_IMAGE,docker.io/earakelyan93701/critpt-custom-grader-rt:2026.10}
+        # No grading image is shipped. Build runtime/Dockerfile (Python 3.13 with pinned pydantic, sympy, mpmath, numpy
+        # and scipy in the interpreter's own site-packages, as the runner runs with -I; a non-root `grader` user and a
+        # /work directory it owns), publish it where the provider pulls from, and set CRITPT_CUSTOM_GRADER_IMAGE or
+        # this key to it. The `local` provider runs the host interpreter and needs none. On every other provider the
+        # server refuses to start without one (image_missing), even when the provider could start from a snapshot or
+        # template: the reference cache names the runtime by its image. On e2b, map the image to its template with
+        # create.template_map. OpenSandbox does not create the workdir, so it must exist in the image.
+        image: ${oc.env:CRITPT_CUSTOM_GRADER_IMAGE,null}
         # Must equal execution.workdir (default /work); every grading domain works in a directory below it.
         workdir: /work
         ready_timeout_s: 600
