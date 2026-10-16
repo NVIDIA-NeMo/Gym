@@ -20,7 +20,9 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
+import nemo_gym.orchestration.executors.slurm_script as slurm_script_module
 from nemo_gym.orchestration.api import NodePool, RayServiceConfig, SubmitConfig, VllmPDTierConfig
 from nemo_gym.orchestration.executors.script_templates import (
     render_driver_entrypoint,
@@ -2544,3 +2546,458 @@ def test_a_ray_head_on_node_0_is_probed_locally(tmp_path):
     }
     script = _render(tmp_path, {"policy": _vllm(8000, "gpu", tensor_parallel_size=4), "ray": ray})
     assert "Waiting for ray at http://localhost:8011" in script
+
+
+# ---------------------------------------------------------------------------
+# GPU packing: services sharing a node get disjoint GPUs
+# ---------------------------------------------------------------------------
+
+
+_ONE_NODE = {"gpu": {"partition": "batch", "nodes": 1, "ntasks_per_node": 1, "gpus_per_node": 4}}
+
+
+def _step(script, name):
+    return script.split(f"# service: {name}\n")[1].split("\n\n")[0]
+
+
+def _gpus(step):
+    # Slurm resets an `env K=V srun` value, so the plan is exported inside the step's command.
+    match = (
+        re.search(r"export CUDA_VISIBLE_DEVICES=([^\n]*)", shlex.split(step.split("bash -c ", 1)[1])[0])
+        if "bash -c " in step
+        else None
+    )
+    return match and match.group(1)
+
+
+def test_a_judge_and_a_policy_on_one_node_get_disjoint_gpus(tmp_path):
+    script = _render(
+        tmp_path,
+        {"judge": _vllm(8001, None), "policy": _vllm(8000, None, tensor_parallel_size=2)},
+        _ONE_NODE,
+    )
+    assert _gpus(_step(script, "judge")) == "0"
+    assert _gpus(_step(script, "policy")) == "1,2"
+
+
+def test_data_parallel_replicas_take_tp_times_instances(tmp_path):
+    eight = {"gpu": {**_ONE_NODE["gpu"], "gpus_per_node": 8}}
+    script = _render(
+        tmp_path,
+        {"policy": _vllm(8000, None, tensor_parallel_size=2, number_of_instances=2), "judge": _vllm(8001, None)},
+        eight,
+    )
+    # One `vllm serve --data-parallel-size 2` puts rank r on visible devices [2r, 2r+2).
+    assert _gpus(_step(script, "policy")) == "0,1,2,3"
+    assert _gpus(_step(script, "judge")) == "4"
+
+
+def test_a_lone_service_renders_no_cuda_visible_devices(tmp_path):
+    script = _render(tmp_path, {"policy": _vllm(8000, None, tensor_parallel_size=2)}, _ONE_NODE)
+    assert "CUDA_VISIBLE_DEVICES" not in script
+
+
+def test_a_lone_vllm_next_to_a_gpu_ray_service_is_packed(tmp_path):
+    # Otherwise Ray advertises the policy's GPUs and schedules work onto them.
+    script = _render(
+        tmp_path,
+        {"policy": _vllm(8000, None, tensor_parallel_size=2), "ray": {"type": "ray", "container": "img"}},
+        _ONE_NODE,
+    )
+    assert _gpus(_step(script, "policy")) == "0,1"
+    assert _gpus(_step(script, "ray")) == "2,3"
+
+
+def test_a_lone_vllm_next_to_a_cpu_only_ray_service_renders_nothing_new(tmp_path):
+    script = _render(
+        tmp_path,
+        {
+            "policy": _vllm(8000, None, tensor_parallel_size=2),
+            "ray": {"type": "ray", "container": "img", "num_gpus": 0},
+        },
+        _ONE_NODE,
+    )
+    assert "CUDA_VISIBLE_DEVICES" not in script
+
+
+def test_a_lone_ray_service_renders_nothing_new(tmp_path):
+    script = _render(tmp_path, {"ray": {"type": "ray", "container": "img"}}, _ONE_NODE)
+    assert "CUDA_VISIBLE_DEVICES" not in script
+
+
+def test_a_manual_cuda_visible_devices_wins_and_reserves_its_gpus(tmp_path):
+    script = _render(
+        tmp_path,
+        {
+            "judge": _vllm(8001, None),
+            "policy": _vllm(8000, None, tensor_parallel_size=2, env={"CUDA_VISIBLE_DEVICES": "lit:0,1"}),
+        },
+        _ONE_NODE,
+    )
+    assert _gpus(_step(script, "policy")) == "0,1"
+    assert _gpus(_step(script, "judge")) == "2"
+
+
+def test_overlapping_manual_gpus_are_refused(tmp_path):
+    with pytest.raises(ValueError, match="Services 'a' and 'b' both set GPU 1"):
+        _placement_config(
+            tmp_path,
+            {
+                "a": _vllm(8000, None, env={"CUDA_VISIBLE_DEVICES": "lit:1"}),
+                "b": _vllm(8001, None, tensor_parallel_size=2, env={"CUDA_VISIBLE_DEVICES": "lit:1,2"}),
+            },
+            _ONE_NODE,
+        )
+
+
+def test_a_manual_gpu_past_the_node_is_refused(tmp_path):
+    with pytest.raises(ValueError, match="has only GPUs 0-3"):
+        _placement_config(
+            tmp_path,
+            {"a": _vllm(8000, None, env={"CUDA_VISIBLE_DEVICES": "lit:4"}), "b": _vllm(8001, None)},
+            _ONE_NODE,
+        )
+
+
+def test_services_that_need_more_gpus_than_the_node_has_are_refused(tmp_path):
+    with pytest.raises(ValueError, match=r"need 5 GPUs per node \(judge 1, policy 4\), but it has 4") as error:
+        _placement_config(
+            tmp_path, {"judge": _vllm(8001, None), "policy": _vllm(8000, None, tensor_parallel_size=4)}, _ONE_NODE
+        )
+    assert "node_pool" in str(error.value)
+    assert "share_gpus" in str(error.value)
+
+
+def test_share_gpus_opts_a_service_out(tmp_path):
+    script = _render(
+        tmp_path,
+        {
+            "judge": _vllm(8001, None, share_gpus=True),
+            "policy": _vllm(8000, None, tensor_parallel_size=4),
+            "scorer": _vllm(8002, None, tensor_parallel_size=4, share_gpus=True),
+        },
+        _ONE_NODE,
+    )
+    assert "CUDA_VISIBLE_DEVICES" not in script
+
+
+def test_an_unreadable_manual_value_is_kept_and_shares(tmp_path):
+    script = _render(
+        tmp_path,
+        {
+            "judge": _vllm(8001, None, env={"CUDA_VISIBLE_DEVICES": "runtime:CUDA_VISIBLE_DEVICES"}),
+            "policy": _vllm(8000, None, tensor_parallel_size=4),
+        },
+        _ONE_NODE,
+    )
+    assert _gpus(_step(script, "judge")) == '"$GYM_CUDA_VISIBLE_DEVICES"'
+    assert "CUDA_VISIBLE_DEVICES" not in _step(script, "policy")
+
+
+def test_a_ray_service_gets_the_leftover_gpus(tmp_path):
+    script = _render(
+        tmp_path,
+        {
+            "judge": _vllm(8001, None),
+            "policy": _vllm(8000, None, tensor_parallel_size=2),
+            "ray": {"type": "ray", "container": "img"},
+        },
+        _ONE_NODE,
+    )
+    assert _gpus(_step(script, "ray")) == "3"
+
+
+def test_a_ray_service_with_its_own_gpus_keeps_them(tmp_path):
+    script = _render(
+        tmp_path,
+        {
+            "judge": _vllm(8001, None),
+            "policy": _vllm(8000, None, tensor_parallel_size=2),
+            "ray": {"type": "ray", "container": "img", "env": {"CUDA_VISIBLE_DEVICES": "lit:0"}},
+        },
+        _ONE_NODE,
+    )
+    assert _gpus(_step(script, "ray")) == "0"
+    assert _gpus(_step(script, "judge")) == "1"
+    assert _gpus(_step(script, "policy")) == "2,3"
+
+
+def test_pinned_pools_are_packed_per_pool(tmp_path):
+    script = _render(
+        tmp_path,
+        {
+            "policy": _vllm(8000, "gpu", tensor_parallel_size=4),
+            "judge": _vllm(8001, "aux"),
+            "scorer": _vllm(8002, "aux", tensor_parallel_size=2),
+            "ray": {"type": "ray", "container": "img", "node_pools": ["gpu", "aux"]},
+        },
+    )
+    # The policy fills its pool, so the ray head beside it sees no GPUs.
+    assert _gpus(_step(script, "policy")) == "0,1,2,3"
+    assert _gpus(_step(script, "ray")) == "''"
+    assert _gpus(_step(script, "judge")) == "0"
+    assert _gpus(_step(script, "scorer")) == "1,2"
+    assert _gpus(_step(script, "ray_aux_workers")) == "3"
+
+
+def test_multi_node_data_parallel_is_packed_per_node(tmp_path):
+    pools = {"gpu": {"partition": "batch", "nodes": 2, "ntasks_per_node": 1, "gpus_per_node": 4}}
+    script = _render(
+        tmp_path,
+        {
+            "policy": _vllm(8000, "gpu", tensor_parallel_size=1, number_of_instances=4),
+            "judge": _vllm(8001, "gpu", number_of_instances=2),
+        },
+        pools,
+    )
+    assert _gpus(_step(script, "policy")) == "0,1"
+    assert _gpus(_step(script, "judge")) == "2"
+
+
+def test_a_ray_placed_multi_node_service_leaves_its_pool_as_today(tmp_path):
+    pools = {"gpu": {"partition": "batch", "nodes": 2, "ntasks_per_node": 1, "gpus_per_node": 4}}
+    script = _render(
+        tmp_path,
+        {"policy": _vllm(8000, "gpu", tensor_parallel_size=8), "judge": _vllm(8001, "gpu", number_of_instances=2)},
+        pools,
+    )
+    assert "CUDA_VISIBLE_DEVICES" not in script
+
+
+def test_planned_gpus_are_exported_inside_the_step_not_passed_through_srun(tmp_path):
+    # On a cluster, Slurm reset `env CUDA_VISIBLE_DEVICES=0 srun ...` to the step's four GPUs.
+    script = _render(
+        tmp_path,
+        {
+            "judge": _vllm(8001, None, env={"HF_HOME": "lit:/hf"}),
+            "policy": _vllm(8000, None, tensor_parallel_size=2, env={"CUDA_VISIBLE_DEVICES": "lit:2,3"}),
+        },
+        _ONE_NODE,
+    )
+    for name in ("judge", "policy"):
+        assert "CUDA_VISIBLE_DEVICES" not in _step(script, name).split("srun", 1)[0]
+    assert _step(script, "judge").startswith("env HF_HOME=/hf srun")
+    assert _gpus(_step(script, "policy")) == "2,3"
+
+
+def test_a_lone_services_manual_value_is_exported_inside_the_step(tmp_path):
+    # Left in the srun env, Slurm silently replaced it with every GPU of the step.
+    script = _render(tmp_path, {"policy": _vllm(8000, None, env={"CUDA_VISIBLE_DEVICES": "lit:0"})}, _ONE_NODE)
+    assert "CUDA_VISIBLE_DEVICES" not in _step(script, "policy").split("srun", 1)[0]
+    assert _gpus(_step(script, "policy")) == "0"
+
+
+def test_a_runtime_manual_value_exports_the_batch_shells_value(tmp_path):
+    script = _render(
+        tmp_path, {"policy": _vllm(8000, None, env={"CUDA_VISIBLE_DEVICES": "runtime:MY_GPUS"})}, _ONE_NODE
+    )
+    step = _step(script, "policy")
+    assert step.startswith("env GYM_CUDA_VISIBLE_DEVICES=${MY_GPUS} srun")
+    assert _gpus(step) == '"$GYM_CUDA_VISIBLE_DEVICES"'
+
+
+def test_the_multi_instance_example_renders(tmp_path, monkeypatch):
+    raw = yaml.safe_load((Path(__file__).parents[2] / "examples" / "slurm_vllm_multi_instance.yaml").read_text())
+    raw["job"]["output_path"] = str(tmp_path)
+    monkeypatch.setenv("HF_TOKEN", "x")
+    config = SubmitConfig.model_validate(raw)
+    compute = next(iter(config.compute.values()))
+    script = build_sbatch_script(config, "gpqa", config.driver.benchmarks["gpqa"], compute, tmp_path / "gpqa")
+    assert "CUDA_VISIBLE_DEVICES" not in script
+    assert "--data-parallel-size 4" in _step(script, "vllm_model")
+    assert subprocess.run(["bash", "-n"], input=script, text=True).returncode == 0
+
+
+# ---------------------------------------------------------------------------
+# nodes: auto
+# ---------------------------------------------------------------------------
+
+
+def _auto_pool(gpus_per_node=4):
+    return {"gpu": {"partition": "batch", "nodes": "auto", "ntasks_per_node": 1, "gpus_per_node": gpus_per_node}}
+
+
+def _auto_config(tmp_path, services, pools=None, policy=None):
+    return SubmitConfig.model_validate(
+        {
+            "services": services,
+            "compute": {"hsg": {"type": "slurm", "account": "acct", "node_pools": pools or _auto_pool()}},
+            "driver": {"container": "gym:latest", "policy_model": policy, "benchmarks": {"b": {"run": {}}}},
+            "job": {"output_path": str(tmp_path / "jobs")},
+        }
+    )
+
+
+def _auto_render(tmp_path, services, pools=None, policy=None):
+    config = _auto_config(tmp_path, services, pools, policy)
+    return config, build_sbatch_script(
+        config, "b", config.driver.benchmarks["b"], config.compute["hsg"], tmp_path / "jobs" / "b"
+    )
+
+
+def test_auto_packs_a_judge_and_a_two_gpu_model_onto_one_node(tmp_path):
+    services = {"judge": _vllm(8001, None), "policy": _vllm(8000, None, tensor_parallel_size=2)}
+    config, script = _auto_render(tmp_path, services, policy="policy")
+    assert config.compute["hsg"].node_pools["gpu"].nodes == 1
+    assert "#SBATCH --nodes=1" in script
+    # GPU indices follow declaration order on a node.
+    assert _gpus(_step(script, "judge")) == "0"
+    assert _gpus(_step(script, "policy")) == "1,2"
+    # Exactly what the same config with an explicit `nodes: 1` renders.
+    _, explicit = _auto_render(tmp_path, services, {"gpu": {**_auto_pool()["gpu"], "nodes": 1}}, policy="policy")
+    assert script == explicit
+
+
+def test_auto_gives_a_service_bigger_than_a_node_whole_nodes_of_its_own(tmp_path):
+    # 6 GPUs on 4-GPU nodes: ceil(6 / 4) = 2 whole nodes, nothing else on them.
+    config, script = _auto_render(
+        tmp_path,
+        {
+            "judge": _vllm(8001, None, tensor_parallel_size=4),
+            "policy": _vllm(8000, None, number_of_instances=6),
+        },
+    )
+    pools = config.compute["hsg"].node_pools
+    assert {name: pool.nodes for name, pool in pools.items()} == {"gpu-0": 2, "gpu-1": 1}
+    assert config.services["policy"].node_pool == "gpu-0"
+    assert config.services["judge"].node_pool == "gpu-1"
+    assert "#SBATCH --nodes=3" in script
+    assert '--nodelist="${GYM_POOL_GPU_0_NODES}" --nodes=2 --ntasks=2' in _step(script, "policy")
+    assert '--nodelist="${GYM_POOL_GPU_1_NODES}" --nodes=1 --ntasks=1' in _step(script, "judge")
+    assert "--data-parallel-size-local 3" in _step(script, "policy")
+    # Each is alone on its nodes, so neither is narrowed.
+    assert "CUDA_VISIBLE_DEVICES" not in script
+
+
+def test_auto_packs_biggest_first_into_the_first_node_with_room(tmp_path):
+    config = _auto_config(
+        tmp_path,
+        {
+            "a": _vllm(8001, None),
+            "b": _vllm(8002, None, tensor_parallel_size=3),
+            "c": _vllm(8003, None, tensor_parallel_size=2),
+            "d": _vllm(8004, None, tensor_parallel_size=2),
+        },
+    )
+    placed = {name: service.node_pool for name, service in config.services.items()}
+    assert placed == {"b": "gpu-0", "c": "gpu-1", "d": "gpu-1", "a": "gpu-0"}
+
+
+def test_auto_puts_the_policy_on_node_0_beside_the_driver(tmp_path):
+    config, script = _auto_render(
+        tmp_path,
+        {"scorer": _vllm(8001, None, tensor_parallel_size=4), "policy": _vllm(8000, None)},
+        policy="policy",
+    )
+    assert config.services["policy"].node_pool == "gpu-0"
+    assert config.services["scorer"].node_pool == "gpu-1"
+    driver = next(line for line in script.splitlines() if "--output=logs/driver-$SLURM_JOB_ID.log" in line)
+    assert '--nodelist="${gym_nodes[0]}"' in driver
+
+
+def test_explicit_node_counts_are_not_touched(tmp_path):
+    config = _placement_config(
+        tmp_path,
+        {"policy": _vllm(8000, "gpu", tensor_parallel_size=4), "scorer": _vllm(8001, "aux", tensor_parallel_size=4)},
+        _TWO_POOLS,
+    )
+    assert {name: pool.nodes for name, pool in config.compute["hsg"].node_pools.items()} == {"gpu": 1, "aux": 1}
+    assert config.services["policy"].node_pool == "gpu"
+
+
+def test_auto_gives_the_leftovers_to_ray_on_every_node(tmp_path):
+    config, script = _auto_render(
+        tmp_path,
+        {
+            "policy": _vllm(8000, None, tensor_parallel_size=3),
+            "judge": _vllm(8001, None, tensor_parallel_size=2),
+            "ray": {"type": "ray", "container": "img", "node_pools": ["gpu"], "resources": {"gpu": {"x": 1}}},
+        },
+        policy="policy",
+    )
+    ray = config.services["ray"]
+    assert ray.node_pools == ["gpu-0", "gpu-1"]
+    assert set(ray.resources) == {"gpu-0", "gpu-1"}
+    assert _gpus(_step(script, "policy")) == "0,1,2"
+    assert _gpus(_step(script, "ray")) == "3"
+    assert _gpus(_step(script, "judge")) == "0,1"
+    assert _gpus(_step(script, "ray_gpu-1_workers")) == "2,3"
+
+
+def test_auto_keeps_a_manual_cuda_visible_devices(tmp_path):
+    config, script = _auto_render(
+        tmp_path,
+        {
+            "policy": _vllm(8000, None, tensor_parallel_size=2),
+            "judge": _vllm(8001, None, env={"CUDA_VISIBLE_DEVICES": "lit:0"}),
+        },
+        policy="policy",
+    )
+    assert config.compute["hsg"].node_pools["gpu"].nodes == 1
+    assert _gpus(_step(script, "judge")) == "0"
+    assert _gpus(_step(script, "policy")) == "1,2"
+
+
+def test_auto_without_gpus_per_node_is_refused(tmp_path):
+    pools = {"gpu": {"partition": "batch", "nodes": "auto"}}
+    with pytest.raises(ValueError, match="nodes: auto but no gpus_per_node"):
+        _auto_config(tmp_path, {"policy": _vllm(8000, None)}, pools)
+
+
+def test_auto_with_no_vllm_service_is_refused(tmp_path):
+    with pytest.raises(ValueError, match="no vLLM service runs on it"):
+        _auto_config(tmp_path, {"ray": {"type": "ray", "container": "img", "node_pools": ["gpu"]}})
+
+
+def test_auto_puts_services_with_clashing_manual_gpus_on_different_nodes(tmp_path):
+    config = _auto_config(
+        tmp_path,
+        {
+            "a": _vllm(8001, None, env={"CUDA_VISIBLE_DEVICES": "lit:0"}),
+            "b": _vllm(8002, None, env={"CUDA_VISIBLE_DEVICES": "lit:0"}),
+        },
+    )
+    assert config.services["a"].node_pool == "gpu-0"
+    assert config.services["b"].node_pool == "gpu-1"
+
+
+# ---------------------------------------------------------------------------
+# GPU packing and nodes: auto beside vllm_pd
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("server_per_node", [False, True])
+def test_a_pd_config_renders_the_same_with_and_without_gpu_packing(tmp_path, monkeypatch, server_per_node):
+    # A tier owns its nodes: nothing beside it is packed, whatever else shares the pool.
+    services = _pd_services(server_per_node=server_per_node)
+    if server_per_node:
+        for tier in ("prefill", "decode"):
+            services["policy"][tier]["number_of_instances"] = 1
+    services["judge"] = _vllm(8100, "decode")
+    services["ray"] = {"type": "ray", "container": "img", "node_pools": ["prefill"]}
+    packed = _pd_script(tmp_path, services=services)
+    monkeypatch.setattr(slurm_script_module, "plan_gpus", lambda config: {})
+    assert _pd_script(tmp_path, services=services) == packed
+    assert "CUDA_VISIBLE_DEVICES" not in packed
+
+
+def test_auto_refuses_a_pool_a_pd_tier_uses(tmp_path):
+    pools = {**_PD_POOLS, "decode": {**_PD_POOLS["decode"], "nodes": "auto"}}
+    with pytest.raises(ValueError, match="vllm_pd service 'policy' uses it"):
+        _pd_config(tmp_path, pools=pools)
+
+
+def test_a_pd_router_beside_a_lone_vllm_takes_no_gpus(tmp_path):
+    services = {**_pd_services(node_pool="front"), "scorer": _vllm(8200, "front")}
+    pools = {"front": {"partition": "batch", "nodes": 1, "ntasks_per_node": 1, "gpus_per_node": 4}, **_PD_POOLS}
+    assert "CUDA_VISIBLE_DEVICES" not in _pd_script(tmp_path, services=services, pools=pools)
+
+
+def test_auto_probes_a_service_it_moves_to_a_second_node_there(tmp_path):
+    _, script = _auto_render(
+        tmp_path,
+        {"policy": _vllm(8000, None, tensor_parallel_size=4), "judge": _vllm(8001, None)},
+        policy="policy",
+    )
+    assert "Waiting for policy at http://localhost:8000" in script
+    assert "Waiting for judge at http://${gym_nodes[1]}:8001" in script
