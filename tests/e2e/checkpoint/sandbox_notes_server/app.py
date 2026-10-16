@@ -7,6 +7,10 @@ file back and rewards 1.0 when it holds exactly the expected lines. The sandboxe
 sandbox backend, which outlives a Gym crash, and the server owns them through ``SandboxOwnerResourcesServer``,
 as the SWE-bench server does, so the suite's process-level scenarios exercise that base.
 
+The seed's setup returns a token as the session's data, and verification rewards nothing without it: a restore
+that lost the data the setup returned would fail every crash scenario, as a SWE-family server that lost its
+``base_commit`` would grade the wrong patch.
+
 An agent that runs its own harness in the session's sandbox gets the sandbox's ID in the seed reply, as from the
 SWE-bench server, and asks ``/sandbox_access`` for the current one after a restore, which forks the sandbox
 under a new ID.
@@ -14,6 +18,7 @@ under a new ID.
 
 import sys
 from pathlib import Path
+from uuid import uuid4
 
 from fastapi import FastAPI, Request
 from pydantic import BaseModel
@@ -28,7 +33,8 @@ from nemo_gym.base_resources_server import (  # noqa: E402
     BaseVerifyRequest,
     BaseVerifyResponse,
 )
-from nemo_gym.sandbox.owner import SandboxOwnerConfig, SandboxOwnerResourcesServer  # noqa: E402
+from nemo_gym.sandbox.api import AsyncSandbox  # noqa: E402
+from nemo_gym.sandbox.owner import SandboxOwnerConfig, SandboxOwnerResourcesServer, SessionData  # noqa: E402
 from nemo_gym.sandbox.providers.base import SandboxSpec  # noqa: E402
 from nemo_gym.server_utils import SESSION_ID_KEY  # noqa: E402
 
@@ -70,7 +76,7 @@ class SandboxNotesResourcesServer(SandboxOwnerResourcesServer):
         sandbox = self.session_sandbox(session_id)
         if sandbox is None:
             sandbox = await self.start_session_sandbox(
-                session_id, SandboxSpec(image="notes:1", workdir="/work"), workdir="/work"
+                session_id, SandboxSpec(image="notes:1", workdir="/work"), setup=_seed_token, workdir="/work"
             )
         return SandboxNotesSeedSessionResponse(sandbox_handle=sandbox.handle.sandbox_id)
 
@@ -87,11 +93,16 @@ class SandboxNotesResourcesServer(SandboxOwnerResourcesServer):
         sandbox = self.session_sandbox(session_id)
         if sandbox is not None:
             result = await sandbox.exec("read notes")
-            reward = float((result.stdout or "").splitlines() == body.expected_notes)
+            seeded_here = bool(self.session_data(session_id).get("seed_token"))
+            reward = float(seeded_here and (result.stdout or "").splitlines() == body.expected_notes)
             # The episode is over: free its sandbox. A checkpoint taken before may still name its snapshots,
             # so only a release deletes them.
             await self.end_session_sandbox(session_id)
         return BaseVerifyResponse(**body.model_dump(), reward=reward)
+
+
+async def _seed_token(sandbox: AsyncSandbox) -> SessionData:
+    return {"seed_token": uuid4().hex}
 
 
 if __name__ == "__main__":

@@ -331,7 +331,13 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         settings = checkpoint_settings(getattr(self.server_client, "global_config_dict", None))
         if settings is None:
             return
-        if self.checkpoint_mode == "exported":
+        mode = self.checkpoint_mode_in_effect()
+        if mode not in get_args(ResourcesCheckpointMode):
+            raise ValueError(
+                f"{type(self).__name__}.checkpoint_mode_in_effect() returned {mode!r}; "
+                f"expected one of {get_args(ResourcesCheckpointMode)}"
+            )
+        if mode == "exported":
             # Hooks from an intermediate base class or a mixin count; only the stubs here do not.
             missing = [
                 name for name in _SESSION_HOOKS if getattr(type(self), name) is getattr(SimpleResourcesServer, name)
@@ -340,7 +346,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
                 raise ValueError(
                     f"{type(self).__name__} declares checkpoint_mode='exported' but does not implement {missing}"
                 )
-        participant = ResourcesParticipant(self, self.checkpoint_mode, verify_mode=self.checkpoint_verify)
+        participant = ResourcesParticipant(self, mode, verify_mode=self.checkpoint_verify)
         self._checkpoint = participant
         install_server_participant(
             app,
@@ -374,6 +380,14 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
                 f"{type(self).__name__}.setup_webserver did not install the checkpoint participant; "
                 "build the app with SimpleResourcesServer.setup_webserver, or call setup_resources_checkpoint on it"
             )
+
+    def checkpoint_mode_in_effect(self) -> ResourcesCheckpointMode:
+        """The mode this instance takes part in checkpoints with; read once at startup, with checkpointing on.
+
+        The default is the declared ``checkpoint_mode``. A server whose ability to capture its sessions depends on
+        its configuration, such as a sandbox provider that cannot snapshot, returns a mode that captures less.
+        """
+        return self.checkpoint_mode
 
     @property
     def checkpoint_participant(self) -> Optional[ResourcesParticipant]:
