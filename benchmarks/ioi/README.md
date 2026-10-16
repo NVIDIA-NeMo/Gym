@@ -17,10 +17,19 @@ This benchmark contributes:
 
 ## Metrics
 
+The benchmark sets `grade_all_subtasks: true` and `partial_credit: true`, so every
+rollout is graded on every subtask of its problem with partial credit, as IOI and NeMo Skills score it, and
+the totals are comparable with NeMo Skills' CCC numbers. They are not comparable with totals from earlier
+Gym versions, which gave a subtask full points when only the tests it shares with the row's own subtask
+passed, and gave no partial credit. Both totals are on the 0–600 IOI'24 scale.
+
 Emitted by `competitive_coding_challenges`:
 
 - `total_score` — sum across problems of max per-subtask score pooled
-  across rollouts. On the 0–600 IOI'24 scale.
+  across rollouts (Skills' `pass@k` total).
+- `pass@1[avg-of-k]/total_score` — per prompt row and subtask, the mean score
+  over that row's rollouts; per subtask, the best row; summed (Skills'
+  `pass@1[avg-of-k]` total).
 - `per_problem_subtask_scores` — per-problem breakdown, each with
   `total.{score,max_score}` plus per-subtask `{score, max_score}`.
 - Plus the standard pass@k/accuracy stats from `compute_pass_majority_metrics`.
