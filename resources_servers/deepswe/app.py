@@ -342,6 +342,8 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 cwd="/app",
                 timeout_s=task.config.verifier.timeout_sec,
             )
+        except SandboxCommandStatusTimeoutError:
+            raise
         except TimeoutError:
             return VerifierResult(
                 evaluation_completed=False,

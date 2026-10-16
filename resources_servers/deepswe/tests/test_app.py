@@ -414,6 +414,49 @@ async def test_sandbox_loss_without_agent_execution_proof_fails_instead_of_scori
         run_verifier.assert_not_awaited()
 
 
+async def test_verifier_status_timeout_propagates_without_scoring(
+    task_assets: Path, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    server = DeepSWEResourcesServer(
+        config=_config(task_assets, golden=False), server_client=MagicMock(spec=ServerClient)
+    )
+    stage_verifier = AsyncMock()
+    monkeypatch.setattr(server, "_stage_verifier", stage_verifier)
+    task = server._task_store.get("example-task")
+    error = SandboxCommandStatusTimeoutError("command status unavailable after recovery deadline")
+    sandbox = AsyncMock()
+    sandbox.exec.side_effect = error
+
+    with pytest.raises(SandboxCommandStatusTimeoutError) as caught:
+        await server._run_verifier(sandbox, task, b"valid patch\n", tmp_path)
+
+    assert caught.value is error
+    sandbox.exec.assert_awaited_once_with(
+        "bash /tests/test.sh", cwd="/app", timeout_s=task.config.verifier.timeout_sec
+    )
+
+
+async def test_verifier_execution_timeout_remains_a_zero_result(
+    task_assets: Path, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    server = DeepSWEResourcesServer(
+        config=_config(task_assets, golden=False), server_client=MagicMock(spec=ServerClient)
+    )
+    monkeypatch.setattr(server, "_stage_verifier", AsyncMock())
+    task = server._task_store.get("example-task")
+    sandbox = AsyncMock()
+    sandbox.exec.side_effect = TimeoutError("verifier execution deadline reached")
+
+    result = await server._run_verifier(sandbox, task, b"valid patch\n", tmp_path)
+
+    assert result.evaluation_completed is False
+    assert result.reward == 0.0
+    assert result.verifier_error == f"Verifier timed out after {task.config.verifier.timeout_sec:g} seconds"
+    sandbox.exec.assert_awaited_once_with(
+        "bash /tests/test.sh", cwd="/app", timeout_s=task.config.verifier.timeout_sec
+    )
+
+
 async def test_collect_model_patch_executes_upstream_hook(task_assets: Path) -> None:
     server = DeepSWEResourcesServer(
         config=_config(task_assets, golden=False),
