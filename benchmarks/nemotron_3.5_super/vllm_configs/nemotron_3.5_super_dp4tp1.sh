@@ -83,7 +83,8 @@ VLLM_PREFILL_ARGS=(
                     "kv_role": "kv_both",
                     "kv_connector_extra_config": {
                         "load_async": true,
-                        "lookup_async": true
+                        "lookup_async": true,
+                        "async_prefetch_limit": 0
                     }
                 }
             ]
