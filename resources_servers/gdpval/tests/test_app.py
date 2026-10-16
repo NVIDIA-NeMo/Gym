@@ -1540,6 +1540,29 @@ class TestMultiReference:
             with pytest.raises(RuntimeError, match=r"all 2 judge matchup\(s\) failed .*500 Internal Server Error"):
                 await server.verify(_NO_SESSION, body)
 
+    @pytest.mark.asyncio
+    async def test_a_permanent_and_a_transport_ineligible_matchup_error_together_are_terminal(self, tmp_path) -> None:
+        from resources_servers.gdpval.app import TransportIneligibleError
+
+        server, body = self._two_ref_server_and_body(tmp_path)
+        errors = iter(
+            [RuntimeError("Error code: 413 - payload too large"), TransportIneligibleError("attachment limit")]
+        )
+
+        def fail(**_kwargs):
+            raise next(errors)
+
+        with (
+            patch("resources_servers.gdpval.comparison.run_trials", side_effect=fail),
+            patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
+            patch("resources_servers.gdpval.comparison.build_file_section", return_value=[]),
+            patch("openai.OpenAI", return_value=MagicMock()),
+        ):
+            dumped = (await server.verify(_NO_SESSION, body)).model_dump()
+
+        # Neither matchup can ever succeed, so the row is a masked terminal failure rather than a retry.
+        assert (dumped["_ng_failure_class"], dumped["_ng_failure_terminal"]) == ("permanent_judge_error", True)
+
     def test_aggregate_metrics_mle_and_per_reference_stats(self) -> None:
         from nemo_gym.config_types import AggregateMetricsRequest
 

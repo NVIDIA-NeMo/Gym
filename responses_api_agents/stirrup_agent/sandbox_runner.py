@@ -140,6 +140,16 @@ class _RemoteParams(BaseModel):
         return cls.schema_
 
 
+def _is_validation_error(detail: Any) -> bool:
+    """Whether a 422 detail is FastAPI's list of validation errors, which ``_report_invalid_arguments`` formats."""
+    return isinstance(detail, list) and all(isinstance(e, dict) and "loc" in e and "msg" in e for e in detail)
+
+
+def _text(value: Any) -> str:
+    # Non-ASCII text stays readable for the model instead of becoming \\uXXXX escapes.
+    return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+
+
 def remote_tool(spec: FunctionToolParam, client: httpx.AsyncClient) -> Tool:
     """Expose one resources-server route as a Stirrup tool with the schema the row declares.
 
@@ -155,20 +165,17 @@ def remote_tool(spec: FunctionToolParam, client: httpx.AsyncClient) -> Tool:
         response = await client.post(f"/{name}", json=arguments.model_dump())
         # A 422 (FastAPI's validation error) and a 400 (a call the route refused, e.g. finish without the files)
         # are mistakes the model can fix, so it sees them and the episode goes on.
-        detail = response.json()["detail"] if response.status_code in (400, 422) else None
-        if response.status_code == 422 and isinstance(detail, list):
-            # Answered in run_tool, which has the raw arguments the message quotes.
-            raise InvalidArguments(detail)
         if response.status_code in (400, 422):
-            return ToolResult(
-                content=detail if isinstance(detail, str) else json.dumps(detail),
-                success=False,
-                metadata=ToolUseCountMetadata(),
-            )
+            # Routes outside FastAPI's `{"detail": ...}` shape still reach the model; only a non-JSON body fails.
+            body = response.json()
+            detail = body.get("detail", body) if isinstance(body, dict) else body
+            if response.status_code == 422 and _is_validation_error(detail):
+                # Answered in run_tool, which has the raw arguments the message quotes.
+                raise InvalidArguments(detail)
+            return ToolResult(content=_text(detail), success=False, metadata=ToolUseCountMetadata())
         # Anything else is an infrastructure failure: the run fails and the environment server retries a 5xx.
         response.raise_for_status()
-        body = response.json()
-        return ToolResult(content=body if isinstance(body, str) else json.dumps(body), metadata=ToolUseCountMetadata())
+        return ToolResult(content=_text(response.json()), metadata=ToolUseCountMetadata())
 
     return Tool(name=name, description=spec.get("description") or "", parameters=params, executor=executor)
 
@@ -422,7 +429,15 @@ def main(input_path: str, output_path: str) -> None:
             "traceback": traceback.format_exc(),
             **observer.report(InvocationStatus.FAILED),
         }
-    Path(output_path).write_text(json.dumps(output))
+    # asyncio.run restored SIGTERM's default action, and a TERM during a plain write would leave a truncated report
+    # that collect reads as "exited without output". The report is final, so finish it and publish it whole.
+    previous = signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    try:
+        temporary = Path(f"{output_path}.tmp")
+        temporary.write_text(json.dumps(output))
+        temporary.replace(output_path)
+    finally:
+        signal.signal(signal.SIGTERM, previous)
 
 
 if __name__ == "__main__":

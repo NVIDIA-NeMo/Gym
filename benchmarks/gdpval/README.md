@@ -769,6 +769,10 @@ scripts.
 The environment variables above are no longer read by the benchmark config. Setting one does nothing, so a run
 that used to skip the policy (`JUDGE_ONLY=true`) now runs it.
 
+The GDPVal scripts under `nemotron_recipes/` still pass these options. They pin Gym to a commit from before this
+change (`PIN_GYM=1`, the default), so they keep working; with `PIN_GYM=0` they fail at startup until they are
+migrated with the table above.
+
 ### Other changes
 
 - **Sandbox:** the resources server starts an OpenSandbox sandbox and the agent runs inside it, instead of

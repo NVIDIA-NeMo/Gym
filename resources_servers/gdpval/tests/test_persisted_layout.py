@@ -35,7 +35,9 @@ def test_the_repeat_of_a_gdpval_rollout_is_its_rollout_index(tmp_path: Path) -> 
         assert repeat_from_rollout_id(episode_id.rollout_id) == row[ROLLOUT_INDEX_KEY_NAME]
 
 
-@pytest.mark.parametrize("rollout_id", ["explicit", "task-x", "-", "batch-7", "x-3", "0-x", "0-1-2", "-1", "1-"])
+@pytest.mark.parametrize(
+    "rollout_id", ["explicit", "task-x", "-", "batch-7", "x-3", "0-x", "0-1-2", "-1", "1-", "0-01", "1-\u0663"]
+)
 def test_a_rollout_id_that_is_not_two_integers_is_refused(rollout_id: str) -> None:
     with pytest.raises(ValueError, match="is not '<task_index>-<rollout_index>' with two integers"):
         repeat_from_rollout_id(rollout_id)

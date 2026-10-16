@@ -182,7 +182,11 @@ def test_sigterm_makes_the_runner_write_its_partial_report(tmp_path, resources):
 def _run_main(tmp_path: Path, payload: dict) -> dict:
     input_path, output_path = tmp_path / "input.json", tmp_path / "output.json"
     input_path.write_text(json.dumps(payload))
+    handler = signal.getsignal(signal.SIGTERM)
     main(str(input_path), str(output_path))
+    # The report is published by a rename, and SIGTERM is only ignored while it is written.
+    assert not output_path.with_name("output.json.tmp").exists()
+    assert signal.getsignal(signal.SIGTERM) is handler
     return json.loads(output_path.read_text())
 
 
@@ -296,20 +300,41 @@ def test_remote_tool_schema_is_the_rows_schema():
     assert to_openai_tools({tool.name: tool})[0]["function"]["parameters"] == spec["parameters"]
 
 
-@pytest.mark.parametrize("body", [{"found": True, "ids": [1, 2]}, [{"id": 1}], 7, None, "plain text"])
+@pytest.mark.parametrize(
+    "body", [{"found": True, "ids": [1, 2]}, [{"id": 1}], 7, None, "plain text", {"title": "Café 東京"}]
+)
 def test_a_route_reply_that_is_not_a_string_reaches_the_model_as_json(body):
     result = _call_remote_tool(lambda request: httpx.Response(200, content=json.dumps(body)))
 
     assert result.success is True
-    assert result.content == (body if isinstance(body, str) else json.dumps(body))
+    # Non-ASCII text reaches the model as written, not as \\uXXXX escapes.
+    assert result.content == (body if isinstance(body, str) else json.dumps(body, ensure_ascii=False))
 
 
-@pytest.mark.parametrize("detail", [{"error": "no such file"}, ["a", "b"], "ERROR: Files do not exist"])
+@pytest.mark.parametrize("detail", [{"error": "no such file"}, ["a", "b"], "ERROR: Files do not exist", "fichier é"])
 def test_a_refusal_detail_that_is_not_a_string_reaches_the_model_as_json(detail):
     result = _call_remote_tool(lambda request: httpx.Response(400, json={"detail": detail}))
 
     assert result.success is False
-    assert result.content == (detail if isinstance(detail, str) else json.dumps(detail))
+    assert result.content == (detail if isinstance(detail, str) else json.dumps(detail, ensure_ascii=False))
+
+
+@pytest.mark.parametrize(
+    "status, body",
+    [
+        (400, {"error": "no such file"}),
+        (400, ["not", "an", "object"]),
+        (422, {"error": "unprocessable"}),
+        (422, {"detail": [{"field": "path"}]}),
+    ],
+)
+def test_a_refusal_outside_fastapis_detail_shape_still_reaches_the_model(status, body):
+    result = _call_remote_tool(lambda request: httpx.Response(status, json=body))
+
+    # The route already handled the call, so the model sees the refusal instead of the run failing.
+    assert result.success is False
+    expected = body.get("detail", body) if isinstance(body, dict) else body
+    assert result.content == json.dumps(expected, ensure_ascii=False)
 
 
 @pytest.mark.parametrize(
