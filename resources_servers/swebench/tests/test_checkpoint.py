@@ -472,7 +472,7 @@ def exec_result(stdout: str = "", return_code: int = 0) -> SimpleNamespace:
 
 
 def launches_in(provider: SnapshotProvider, sandbox_id: str) -> list[str]:
-    return [c for c in provider.boxes[sandbox_id]["commands"] if "opencode run" in c and "[o]pencode" not in c]
+    return [c for c in provider.boxes[sandbox_id]["commands"] if "opencode run" in c]
 
 
 class AgentSandbox:
@@ -482,32 +482,37 @@ class AgentSandbox:
         self.provider = provider
         self.sandbox_id = sandbox_id
         self.finish = finish
-        self.interrupted = asyncio.Event()
+        self.running: Optional[asyncio.Event] = None
 
     async def exec(self, command: str, timeout_s: Optional[float] = None, env: Any = None, **_: Any) -> Any:
         history = self.provider._box(self.sandbox_id)["commands"]  # a sandbox that is gone raises
         history.append(command)
-        if "[o]pencode run" in command:
-            self.interrupted.set()
+        if "kill -INT" in command or "kill -KILL" in command:
+            # The agent's stop ends the launch that is running; the kill after it ended finds nothing.
+            if self.running is not None:
+                self.running.set()
             return exec_result()
         if "opencode run" in command:
-            interrupted = asyncio.ensure_future(self.interrupted.wait())
+            self.running = stop = asyncio.Event()
+            stopped = asyncio.ensure_future(stop.wait())
             finished = asyncio.ensure_future(self.finish.wait())
             try:
-                await asyncio.wait({interrupted, finished}, return_when=asyncio.FIRST_COMPLETED)
+                await asyncio.wait({stopped, finished}, return_when=asyncio.FIRST_COMPLETED)
             finally:
-                interrupted.cancel()
+                stopped.cancel()
                 finished.cancel()
+                self.running = None
             if self.finish.is_set():
                 return exec_result("Shell: /bin/bash\nOpenCode run finished")
-            self.interrupted.clear()
             return exec_result("Shell: /bin/bash\n", return_code=130)
         data_home = (env or {}).get("XDG_DATA_HOME")
         saved = any(f"XDG_DATA_HOME={data_home}" in c and "opencode run" in c for c in history[:-1])
         if "session list" in command:
-            return exec_result('[{"id": "ses_1"}]' if saved else "[]")
+            return exec_result('[{"id": "ses_1"}]' if saved else "")
         if "opencode export" in command:
-            return exec_result(json.dumps(OPENCODE_EXPORT)) if saved else exec_result(return_code=1)
+            # OpenCode reports progress on stderr, which OpenSandbox's background executions return inside stdout.
+            progress = "" if "2>/dev/null" in command else "Exporting session: ses_1\n"
+            return exec_result(progress + json.dumps(OPENCODE_EXPORT)) if saved else exec_result(return_code=1)
         if "opencode db path" in command:
             return exec_result("/tmp/db")
         return exec_result()
