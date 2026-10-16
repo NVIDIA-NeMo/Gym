@@ -7,6 +7,7 @@ import functools
 import json
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -374,22 +375,28 @@ def test_a_seed_without_a_sandbox_image_names_the_setting(server, root, tmp_path
     assert not root.exists()
 
 
-def test_a_seed_for_another_task_than_its_data_is_rejected(server, root, tmp_path):
+def test_a_seed_for_another_task_than_its_data_is_rejected_without_a_retry(server, root, tmp_path):
     seed = _seed(tmp_path)
     seed.task_data["task_id"] = "task-2"
 
-    with pytest.raises(ValueError, match="TaskId does not match"):
-        _post_seed(TestClient(server.setup_webserver()), seed)
+    response = _post_seed(TestClient(server.setup_webserver()), seed)
 
+    assert (response.status_code, response.json()["detail"]) == (422, "TaskId does not match the GDPVal task_id")
     assert not root.exists()
 
 
-def test_a_seed_whose_rollout_id_names_no_rollout_index_is_rejected(server, root, tmp_path):
-    seed = _seed(tmp_path).model_copy(update={"episode_id": EpisodeId(rollout_id="explicit")})
+@pytest.mark.parametrize("rollout_id", ["explicit", "batch-7", "0-01"])
+def test_a_seed_whose_rollout_id_names_no_rollout_index_is_rejected_without_a_retry(
+    server, root, tmp_path, rollout_id
+):
+    seed = _seed(tmp_path).model_copy(update={"episode_id": EpisodeId(rollout_id=rollout_id)})
 
-    with pytest.raises(ValueError, match="is not '<task_index>-<rollout_index>' with two integers"):
-        _post_seed(TestClient(server.setup_webserver()), seed)
+    response = _post_seed(TestClient(server.setup_webserver()), seed)
 
+    # 422, not a 500 the Environment Server would retry: the same rollout ID can never seed.
+    assert response.status_code == 422
+    assert "is not '<task_index>-<rollout_index>' with two integers" in response.json()["detail"]
+    assert server._claimed_directories == {}
     assert not root.exists()
 
 
@@ -450,6 +457,26 @@ def test_a_failed_seed_releases_its_claim(server, root, tmp_path, references):
 
     assert failed.status_code == 500
     assert retried.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_seed_releases_its_claim(server, root, tmp_path, monkeypatch, references):
+    started = asyncio.Event()
+
+    async def hang(task, reference_dir):
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(server, "_download_reference_files", hang)
+    pending = asyncio.ensure_future(server.seed_session(SimpleNamespace(session={}), _seed(tmp_path, session_id="a")))
+    await started.wait()
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+
+    # A cancelled seed must not hold the directory, or every retry of this task and repeat would get a 409.
+    assert server._claimed_directories == {}
+    assert list(references.iterdir()) == []
 
 
 def test_a_session_is_bound_to_its_episode_and_task(server, root, tmp_path):

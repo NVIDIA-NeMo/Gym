@@ -663,9 +663,13 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     raise ValueError("resources_session_id is already bound to another episode or task")
                 return await self._seed_response(session_id, session)
             task = TaskData.model_validate(body.task_data)
+            # A seed that can never succeed answers 422, so the Environment Server does not retry it.
             if body.task_id.task_id != task.task_id:
-                raise ValueError("TaskId does not match the GDPVal task_id")
-            repeat = persisted_layout.repeat_from_rollout_id(body.episode_id.rollout_id)
+                raise HTTPException(status_code=422, detail="TaskId does not match the GDPVal task_id")
+            try:
+                repeat = persisted_layout.repeat_from_rollout_id(body.episode_id.rollout_id)
+            except ValueError as error:
+                raise HTTPException(status_code=422, detail=str(error)) from error
             directory = (task.task_id, repeat)
             owner = self._claimed_directories.get(directory)
             if owner is not None:

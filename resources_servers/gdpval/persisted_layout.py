@@ -12,7 +12,8 @@ from typing import List, Union
 
 
 FINISH_PARAMS_FILE = "finish_params.json"
-_ROLLOUT_ID = re.compile(r"(\d+)-(\d+)")
+# ASCII digits without leading zeros, as Gym writes them, so two spellings never name one directory.
+_ROLLOUT_ID = re.compile(r"(0|[1-9][0-9]*)-(0|[1-9][0-9]*)")
 
 
 def task_dir(root: Union[str, Path], task_id: str) -> Path:
