@@ -692,13 +692,13 @@ async def test_opencode_continues_in_the_fork_of_its_sandbox_after_a_crash(
     result, replacement, _ = await crash_and_continue(provider, tmp_path, record, finish)
 
     assert prepared.status_code == 200 and commit.status_code == 200, (prepared.text, commit.text)
-    assert record.episode["next"] == "opencode" and record.episode["continue"] is True
+    assert record.episode["next"] == "harness" and record.episode["resume"] is True
     assert link.calls[0] == "/ng-rollout/r/seed_session"
     # The replacement asked which sandbox is current and continued OpenCode's session in the fork.
     assert replacement.calls == ["/ng-rollout/r-a1/sandbox_access", "/ng-rollout/r-a1/verify"], "no re-seed"
     fork = next(box for box, state in provider.boxes.items() if state["from_snapshot"] == "snap-2")
     relaunch = launches_in(provider, fork)[-1]
-    assert "--continue" in relaunch and f"XDG_DATA_HOME={record.episode['data_home']}" in relaunch
+    assert "--continue" in relaunch and f"XDG_DATA_HOME={record.episode['state']['data_home']}" in relaunch
     assert "echo drift > file" not in provider.boxes[fork]["commands"], "the fork holds the checkpoint"
     assert provider.boxes["sb-1"]["state"] == "stopped", "the superseded sandbox is stopped"
     assert result.reward == 1.0 and result.opencode_finished is True
@@ -732,7 +732,7 @@ async def test_opencode_asks_for_the_fork_when_the_checkpoint_came_before_its_fi
         provider.create = create
         created.set()
         prepared = await preparing
-        await until(lambda: (participant.legacy_episodes.exported().get("run:r") or {}).get("next") == "opencode")
+        await until(lambda: (participant.legacy_episodes.exported().get("run:r") or {}).get("next") == "harness")
         [record] = await participant.export(None, checkpoint_id="c1")
         commit = await client.post(
             "/ng-control/v1/checkpoint/commit", json=control(checkpoint_dir=str(tmp_path)), headers=AUTH
@@ -744,7 +744,7 @@ async def test_opencode_asks_for_the_fork_when_the_checkpoint_came_before_its_fi
     result, replacement, _ = await crash_and_continue(provider, tmp_path, record, finish)
 
     assert prepared.status_code == 200 and commit.status_code == 200, (prepared.text, commit.text)
-    assert record.episode["continue"] is False and record.episode["sandbox_handle"] == "sb-1"
+    assert record.episode["resume"] is False and record.episode["sandbox"]["descriptor"]["sandbox_id"] == "sb-1"
     assert launches_in(provider, "sb-1") == [], "OpenCode never started before the checkpoint"
     assert replacement.calls == ["/ng-rollout/r-a1/sandbox_access", "/ng-rollout/r-a1/verify"]
     fork = next(box for box, state in provider.boxes.items() if state["from_snapshot"] == "snap-2")
