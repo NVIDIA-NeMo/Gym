@@ -90,9 +90,13 @@ Headline metric: `mean/reward`, accuracy over every evaluated row. Additional me
   partition, also promoted to `key_metrics`, with `question_count` and `rollout_count` next to each
   and `slices/partition/missing_label_rollouts` counting rows without a label (never assumed). They
   come from the judge server's `report_slice_fields: [partition]` knob, which is off by default
-  everywhere else. Open PR [#4658](https://github.com/NVIDIA-NeMo/Gym/pull/4658) adds `category`,
-  `raw_subject` and modality slices under `domains/...` for HLE; the two hooks are additive and the
-  fields this benchmark carries are the ones that PR reads.
+  everywhere else. The hook reads the label from the saved rollout row, so `LLMJudgeVerifyResponse`
+  now echoes the request's extra row fields (`uuid`, `partition`, `category`, `raw_subject`,
+  `has_image`); before this change the judge's `/verify` reply dropped them and every slice would
+  have reported `missing_label_rollouts` only. Open PR
+  [#4658](https://github.com/NVIDIA-NeMo/Gym/pull/4658) adds `category`, `raw_subject` and modality
+  slices under `domains/...` for HLE; the two hooks are additive, the fields this benchmark carries
+  are the ones that PR reads, and that PR needs the same echo to see them in a real run.
 - `judgement_parsing_issue_rate` and its per-kind rates: the fraction of judged rollouts whose judge
   output had no, conflicting or repeated verdicts.
 - Coverage: the upstream harness divides by all questions, so compare the rollouts file's row count

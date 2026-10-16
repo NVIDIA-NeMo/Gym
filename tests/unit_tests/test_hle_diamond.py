@@ -31,10 +31,21 @@ from nemo_gym.discovery import _parse_no_environment_tolerating_unset_values
 from nemo_gym.environment.manifest import load_manifest, resolve_manifest_config_path
 from nemo_gym.environment.validation import _mirror_differences, _resolve_manifest_composition
 from nemo_gym.global_config import GlobalConfigDictParserConfig, get_first_server_config_dict
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.openai_utils import (
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseOutputMessage,
+    NeMoGymResponseOutputText,
+)
 from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.server_utils import ServerClient
-from resources_servers.equivalence_llm_judge.app import LLMJudgeResourcesServer, LLMJudgeResourcesServerConfig
+from resources_servers.equivalence_llm_judge.app import (
+    JudgeEvaluation,
+    LLMJudgeResourcesServer,
+    LLMJudgeResourcesServerConfig,
+    LLMJudgeVerifyRequest,
+)
+from responses_api_agents.simple_agent.app import SimpleAgentVerifyResponse
 
 
 REPO_ROOT = Path(__file__).parents[2]
@@ -437,3 +448,53 @@ class TestPartitionSlices:
         assert result.key_metrics["judgement_parsing_issue_rate"] == 0.0
         # Unjudged rows still produce no custom metrics at all, exactly as before the hook.
         assert server.compute_metrics([[{"reward": 1.0, "partition": "reasoning"}]]) == {}
+
+
+def _response(text: str) -> NeMoGymResponse:
+    return NeMoGymResponse(
+        id="resp",
+        created_at=0,
+        model="m",
+        object="response",
+        output=[
+            NeMoGymResponseOutputMessage(
+                id="msg",
+                type="message",
+                role="assistant",
+                status="completed",
+                content=[NeMoGymResponseOutputText(type="output_text", text=text, annotations=[])],
+            )
+        ],
+        parallel_tool_calls=False,
+        tool_choice="none",
+        tools=[],
+    )
+
+
+class TestVerifyResponseWireFormat:
+    def test_partition_survives_the_verify_response_and_reaches_the_slices(self, prepared_env):
+        """Production row shape: /verify reply -> SimpleAgentVerifyResponse -> saved rollout -> /aggregate_metrics."""
+        prepared = _read_rows(prepare_text_module.prepare())[0]  # q-reasoning-text, as the collector materializes it
+        server = _judge_server(["partition"])
+        request = LLMJudgeVerifyRequest(
+            **prepared,
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=_response("Explanation: trivial.\nAnswer: 4\nConfidence: 100%"),
+        )
+        evaluation = JudgeEvaluation(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=_response("Reasoning: same.\nJudgement: yes\nConfidence: 100"),
+            verdict_label="Judgement: yes",
+        )
+
+        wire = server._make_response(request, prepared["expected_answer"], 1.0, [evaluation]).model_dump(mode="json")
+        row = SimpleAgentVerifyResponse.model_validate(wire).model_dump()
+
+        assert (row["uuid"], row["partition"], row["has_image"]) == ("q-reasoning-text", "reasoning", False)
+        assert (row["expected_answer"], row["reward"]) == ("4", 1.0)
+        row.update({"_ng_task_index": 0, "_ng_rollout_index": 0})
+        result = compute_aggregate_metrics(
+            [row], compute_metrics_fn=server.compute_metrics, get_key_metrics_fn=server.get_key_metrics
+        )
+        assert result.key_metrics["slices/partition/reasoning/mean/reward"] == 1.0
+        assert result.agent_metrics["slices/partition/missing_label_rollouts"] == 0

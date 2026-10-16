@@ -262,6 +262,11 @@ class JudgeEvaluation(BaseModel):
 
 
 class LLMJudgeVerifyResponse(BaseVerifyResponse):
+    """Verify response; echoes the request's extra row fields (``uuid``, dataset labels such as
+    ``partition``) so saved rollouts keep them for ``report_slice_fields`` and other metric hooks."""
+
+    model_config = ConfigDict(extra="allow")
+
     expected_answer: str
     judge_evaluations: list[JudgeEvaluation]
 
