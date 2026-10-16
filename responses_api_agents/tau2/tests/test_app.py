@@ -39,8 +39,9 @@ from responses_api_agents.tau2.app import (
     Tau2MalformedToolCallError,
     Tau2RunRequest,
     Tau2ToolValidatingAsyncOpenAI,
+    Tau2VerifyResponse,
 )
-from tau2.data_model.message import AssistantMessage, UserMessage
+from tau2.data_model.message import AssistantMessage, ToolCall, ToolMessage, UserMessage
 from tau2.data_model.simulation import RewardInfo, SimulationRun, TerminationReason
 from tau2.utils import llm_utils as tau2_llm_utils
 
@@ -63,6 +64,7 @@ class TestApp:
         max_agent_steps: Optional[int] = None,
         turns_remaining_interval: int = 1,
         malformed_tool_call_max_retries: int = 0,
+        replay_policy_reasoning: bool = False,
     ) -> Tuple[Tau2Config, Tau2Agent]:
         config = Tau2Config(
             host="0.0.0.0",
@@ -81,6 +83,7 @@ class TestApp:
             max_agent_steps=max_agent_steps,
             turns_remaining_interval=turns_remaining_interval,
             malformed_tool_call_max_retries=malformed_tool_call_max_retries,
+            replay_policy_reasoning=replay_policy_reasoning,
         )
         server = Tau2Agent(config=config, server_client=MagicMock(spec=ServerClient))
 
@@ -160,6 +163,7 @@ class TestApp:
         assert config.max_agent_steps is None
         assert config.turns_remaining_interval == 1
         assert config.malformed_tool_call_max_retries == 0
+        assert config.replay_policy_reasoning is False
 
     def test_setup_webserver_installs_tool_validating_client(self) -> None:
         _, server = self._dummy_server(malformed_tool_call_max_retries=2)
@@ -401,6 +405,107 @@ class TestApp:
         assert response.result.agent_steps == 3
         assert response.result.max_agent_steps == 3
         assert response.result.termination_reason == TerminationReason.MAX_AGENT_STEPS
+
+    @pytest.mark.parametrize("enabled", [False, True])
+    async def test_policy_reasoning_replay_flag_is_policy_only(self, enabled: bool) -> None:
+        _, server = self._dummy_server(replay_policy_reasoning=enabled)
+        body = self._example_run_request()
+        captured_kwargs = {}
+
+        async def fake_run_single_task(**kwargs):
+            captured_kwargs.update(kwargs)
+            return self._fake_simulation_run()
+
+        with (
+            patch("responses_api_agents.tau2.app.get_server_url", return_value="http://model"),
+            patch("responses_api_agents.tau2.app.run_single_task", side_effect=fake_run_single_task),
+        ):
+            response = await server.run(body)
+
+        assert isinstance(response, Tau2VerifyResponse)
+        policy_args = captured_kwargs["config"].llm_args_agent
+        user_args = captured_kwargs["config"].llm_args_user
+        if enabled:
+            assert policy_args["replay_reasoning"] is True
+        else:
+            assert "replay_reasoning" not in policy_args
+        assert "replay_reasoning" not in user_args
+
+    @pytest.mark.parametrize("enabled", [False, True])
+    async def test_policy_reasoning_is_recorded_only_when_replayed(self, enabled: bool) -> None:
+        _, server = self._dummy_server(replay_policy_reasoning=enabled)
+        final_message = AssistantMessage.text("done")
+        final_message.raw_data = {"choices": [{"message": {"role": "assistant", "reasoning_content": "check KB"}}]}
+        messages = [AssistantMessage.text("hello"), UserMessage.text("hi"), final_message]
+
+        with (
+            patch("responses_api_agents.tau2.app.get_server_url", return_value="http://model"),
+            patch(
+                "responses_api_agents.tau2.app.run_single_task",
+                AsyncMock(return_value=self._fake_simulation_run(messages=messages)),
+            ),
+        ):
+            response = await server.run(self._example_run_request())
+
+        assert isinstance(response, Tau2VerifyResponse)
+        reasoning = [item for item in response.response.output if item.type == "reasoning"]
+        assert [item.summary[0].text for item in reasoning] == (["check KB"] if enabled else [])
+
+    @pytest.mark.parametrize(
+        ("initial_content", "include_tool_call", "expected_initial_types"),
+        [
+            ("hello", False, ["reasoning", "message"]),
+            (None, True, ["reasoning", "function_call"]),
+            ("hello", True, ["reasoning", "message", "function_call"]),
+        ],
+    )
+    async def test_initial_reasoning_turn_stays_in_input(
+        self,
+        initial_content: Optional[str],
+        include_tool_call: bool,
+        expected_initial_types: list[str],
+    ) -> None:
+        _, server = self._dummy_server(replay_policy_reasoning=True)
+        body = self._example_run_request()
+        tool_calls = [ToolCall(id="call-1", name="lookup", arguments={})] if include_tool_call else None
+        initial_message = AssistantMessage(role="assistant", content=initial_content, tool_calls=tool_calls)
+        initial_message.raw_data = {
+            "choices": [{"message": {"role": "assistant", "reasoning_content": "greeting plan"}}]
+        }
+        final_message = AssistantMessage.text("done")
+        final_message.raw_data = {"choices": [{"message": {"role": "assistant", "reasoning_content": "answer plan"}}]}
+        follow_up = (
+            ToolMessage(id="call-1", role="tool", content="lookup result")
+            if include_tool_call
+            else UserMessage.text("Hi")
+        )
+        messages = [initial_message, follow_up, final_message]
+
+        with (
+            patch("responses_api_agents.tau2.app.get_server_url", return_value="http://model"),
+            patch(
+                "responses_api_agents.tau2.app.run_single_task",
+                AsyncMock(return_value=self._fake_simulation_run(messages=messages)),
+            ),
+        ):
+            response = await server.run(body)
+
+        assert isinstance(response, Tau2VerifyResponse)
+        new_input = response.responses_create_params.input[len(body.responses_create_params.input) :]
+        follow_up_type = "function_call_output" if include_tool_call else "message"
+        assert [item.type for item in new_input] == expected_initial_types + [follow_up_type]
+        assert new_input[0].summary[0].text == "greeting plan"
+        if initial_content is not None:
+            assistant_input = next(item for item in new_input if item.type == "message" and item.role == "assistant")
+            assert assistant_input.content[0].text == initial_content
+        if include_tool_call:
+            assert next(item for item in new_input if item.type == "function_call").call_id == "call-1"
+            assert new_input[-1].call_id == "call-1"
+        else:
+            assert new_input[-1].role == "user"
+        assert [item.type for item in response.response.output] == ["reasoning", "message"]
+        assert response.response.output[0].summary[0].text == "answer plan"
+        assert response.response.output[1].content[0].text == "done"
 
     async def test_run_uses_agent_visible_messages_for_responses_conversion(self) -> None:
         _, server = self._dummy_server(max_agent_steps=3)
