@@ -261,7 +261,10 @@ def _extract_verdict(judge_text: str) -> tuple[str, str]:
 class InverseIFServer(SimpleResourcesServer):
     """Inverse IF evaluation server."""
 
-    ray_enabled = False
+    # Each verification judges the request's rubric with the judge model: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
 
     config: InverseIFConfig
 

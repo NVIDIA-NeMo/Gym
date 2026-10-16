@@ -59,9 +59,10 @@ class SingleAgentTurnResult(BaseVerifyResponse):
 
 
 class SingleAgentTurnFailure(EpisodeFailure):
-    """Extend the shared failure with any usable agent response for diagnostics."""
+    """Extend the shared failure with any usable agent response and agent evidence for diagnostics."""
 
     partial_response: NeMoGymResponse | None = None
+    agent_observations: AgentObservationBundle | None = None
 
 
 class SingleAgentTurnRequest(BaseEpisodeRequest[SingleAgentTurnTaskInput]):

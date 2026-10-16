@@ -14,6 +14,7 @@ from nemo_gym.token_id_capture.fingerprint import FINGERPRINT_VERSION, assistant
 from nemo_gym.token_id_capture.protocols import CaptureLedger
 from nemo_gym.token_id_capture.records import (
     TOKEN_FIELDS,
+    response_finish_reason,
     response_to_output_items,
     strip_token_fields,
 )
@@ -108,6 +109,9 @@ class _BaseExternalCaptureHandler(ABC):
         admission = context.capture_admission
         if admission is None:
             return request_payload
+        if context.admission_hook is not None:
+            admission = context.admission_hook(context, admission)
+            context.capture_admission = admission
         return self._prepare_admitted_request(request_payload, admission)
 
     @abstractmethod
@@ -274,6 +278,10 @@ class _BaseExternalCaptureHandler(ABC):
             output_fingerprint=output_fingerprint,
             continuation_fingerprint=continuation_fingerprint,
             fingerprint_version=FINGERPRINT_VERSION,
+            # The served representation states why the call stopped (a chat finish reason, a
+            # Responses ``incomplete_details``, or an Anthropic ``stop_reason``); the row keeps the
+            # chat-vocabulary reason so the rebuild can report a terminal ``length`` stop.
+            finish_reason=response_finish_reason(served_payload),
         )
         commit = CaptureLedgerCommit(
             rollout_id=context.rollout_id,
@@ -282,11 +290,40 @@ class _BaseExternalCaptureHandler(ABC):
             request_items=list(context.request_items or []),
             response_items=response_items,
         )
+        if context.publish_on_delivery:
+            context.deferred_commit = commit
+            return
         await ledger.record(commit)
         mark_external_staging_committed(
             rollout_id=coords.rollout_id,
             model_call_id=coords.model_call_id,
         )
+
+
+async def publish_deferred_commit(context: CaptureContext) -> None:
+    """Publish the ledger row a checkpoint gate deferred, once the call's response has started.
+
+    A failed write poisons the call, as it does at finalization, and then propagates,
+    so the caller does not send an answer the ledger has no row for.
+    """
+    ledger = context.lineage_store
+    try:
+        await ledger.record(context.deferred_commit)
+    except Exception:
+        LOGGER.exception(
+            "Could not publish the ledger row of rollout %s call %s", context.rollout_id, context.model_call_id
+        )
+        try:
+            await ledger.record_failure(context.rollout_id, context.model_call_id, INVALID_COMMIT_COORDS_REASON)
+        except Exception:
+            LOGGER.exception(
+                "Could not poison rollout %s call %s after its ledger row failed",
+                context.rollout_id,
+                context.model_call_id,
+            )
+        raise
+    # The capture context variable may already be reset here, so the context is marked directly.
+    context.committed = True
 
 
 class VLLMWorkerCaptureHandler(_BaseExternalCaptureHandler):

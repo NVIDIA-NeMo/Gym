@@ -27,6 +27,7 @@ class _Response:
     def __init__(self, payload: dict, cookies: dict[str, str] | None = None) -> None:
         self.payload = payload
         self.cookies = SimpleCookie(cookies or {})
+        self.headers = {}
         self.ok = True
         self.status = 200
 
@@ -111,7 +112,7 @@ async def test_session_composition_routes_collector_through_environment_and_resp
         TestClient(environment.setup_webserver()) as environment_http,
     ):
 
-        async def dispatch(*, server_name, url_path, json, cookies=None):
+        async def dispatch(*, server_name, url_path, json, cookies=None, headers=None):
             nonlocal seed_id, responses_body
             body = json.model_dump(mode="json") if isinstance(json, BaseModel) else json
             calls.append((server_name, url_path, body))
@@ -124,7 +125,7 @@ async def test_session_composition_routes_collector_through_environment_and_resp
                 assert url_path != "/run", "Environment collection must not call agent /run"
                 agent_http.cookies.clear()
                 agent_http.cookies.update(cookies or {})
-                response = await asyncio.to_thread(agent_http.post, url_path, json=body)
+                response = await asyncio.to_thread(agent_http.post, url_path, json=body, headers=headers)
                 assert response.status_code == 200, response.text
                 if url_path == "/v1/agent_sessions":
                     seed_id = body["agent_session_id"]
