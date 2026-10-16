@@ -72,7 +72,7 @@ provisioning the remaining images.
 | Section | Important fields |
 | --- | --- |
 | `connection` | SDK credentials, hosted or gateway URLs, headers, proxy, and control-plane `request_timeout_s`. |
-| `create` | Default template/mapping, sandbox `timeout_s`, `secure`, `allow_internet_access`, and `strict_resources`. |
+| `create` | Default template/mapping, sandbox `timeout_s`, timeout action `auto_resume`, `secure`, `allow_internet_access`, and `strict_resources`. |
 | `exec` | Fallback command timeout, default user, stream-open request timeout, background execution, and reconnect attempts. |
 | `operations` | Retry count and exponential-backoff delays for safe, retryable operations. |
 
@@ -116,10 +116,12 @@ suitable E2B template prepared through E2B tooling.
   first, billable sandbox running while a retry creates another one.
 - Rate-limit responses are returned without automatic retries so callers can choose an
   appropriate backoff window.
-- Close retries transient kill failures and treats an already-expired sandbox as closed. The
-  local handle is cleared only after E2B confirms the sandbox is killed or already absent.
-- The configured TTL is a remote cleanup backstop, not a replacement for `stop()` or a context
-  manager.
+- Close retries transient kill failures and treats an already-deleted sandbox as closed. It
+  also deletes paused sandboxes. The local handle is cleared only after E2B confirms the
+  sandbox is killed or already absent.
+- With the default `create.auto_resume: false`, the TTL deletes the sandbox and acts as a
+  remote cleanup backstop; it is not a replacement for `stop()` or a context manager. With
+  `auto_resume: true` the TTL pauses the sandbox instead, so it keeps its storage until closed.
 - Background commands can reconnect by process ID after a stream interruption. Output emitted
   before reconnection is not replayed, and a process that exits during the gap cannot be
   recovered. Reconnects share the original command wait budget rather than restarting it.
