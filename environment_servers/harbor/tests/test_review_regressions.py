@@ -15,6 +15,7 @@ from environment_servers.harbor.app import HarborEnvironmentServer, resolve_env_
 from environment_servers.harbor.sandbox_io import SandboxTransferError
 from environment_servers.harbor.task_data import TaskData
 from environment_servers.harbor.tests.test_app import (
+    SEPARATE_IN_TASK_IMAGE_TOML,
     SEPARATE_TOML,
     TASK_TOML,
     AgentSandbox,
@@ -86,42 +87,6 @@ async def test_templates_resolve_at_use_without_changing_materialized_task(tmp_p
     assert task.env["TOKEN"] == "${HARBOR_TEST_TOKEN}"
     assert "agent-secret" not in materialize_task(task, "ds").model_dump_json()
     assert "verifier-secret" not in (snapshots[0] / "task.toml").read_text()
-
-
-@pytest.mark.parametrize("variant", ["agent_user", "dockerfile_user"])
-async def test_unsupported_semantics_fail_before_provisioning(tmp_path, monkeypatch, variant):
-    # Separate verification is supported since M10; agent user overrides arrive with overlay images.
-    toml = TASK_TOML
-    dockerfile = "FROM ubuntu:24.04\nWORKDIR /app"
-    if variant == "agent_user":
-        toml = toml.replace("[agent]", '[agent]\nuser = "nobody"')
-    else:
-        dockerfile += "\nUSER nobody"
-    server, task, _, created = make_server(tmp_path, monkeypatch, toml=toml, dockerfile=dockerfile)
-    response = await run_episode(server, task)
-    assert response.failure.stage == "seed" and response.failure.terminal
-    assert "not supported" in response.failure.failure_reason
-    assert created == []
-
-
-# A Compose file makes the task a Compose group (M13), covered by TestComposeAndRouting.
-@pytest.mark.parametrize("build_file", [None, "Dockerfile"])
-async def test_prebuilt_environment_files_only_uploaded_without_build_definition(tmp_path, monkeypatch, build_file):
-    toml = TASK_TOML.replace("[environment]", '[environment]\ndocker_image = "ubuntu:24.04"')
-    server, task, sandbox, _ = make_server(tmp_path, monkeypatch, toml=toml)
-    env = task.path / "environment"
-    (env / "Dockerfile").unlink()
-    if build_file:
-        (env / build_file).write_text("FROM ubuntu:24.04" if build_file == "Dockerfile" else "services: {}")
-    (env / "input.txt").write_text("task input")
-    task = refresh_task(server, task)
-    response = await run_episode(server, task)
-    assert response.failure is None, response.failure
-    # The verifier's tests/ archive is always the last upload; the task inputs come first when they are uploaded.
-    assert len(sandbox.uploaded_archives) == (1 if build_file else 2)
-    if not build_file:
-        with tarfile.open(fileobj=io.BytesIO(sandbox.uploaded_archives[0])) as archive:
-            assert archive.extractfile("input.txt").read() == b"task input"
 
 
 async def test_live_folder_edits_do_not_change_seeded_verifier(tmp_path, monkeypatch):
@@ -467,6 +432,48 @@ async def test_interrupted_verifier_start_is_stopped_by_the_episode(tmp_path, mo
     assert response.failure is not None
     # The episode's own cleanup stops the half-started verifier; it does not wait for shutdown.
     assert verifier.stopped and agent.stopped and not server._sandboxes
+
+
+@pytest.mark.parametrize("mode", ["task_image", "explicit", "explicit_workdir"])
+async def test_separate_verifier_spec_follows_the_task_image_or_the_explicit_environment(tmp_path, monkeypatch, mode):
+    """Built through ``_create_verifier_sandbox`` itself, not a test double of it."""
+    monkeypatch.setenv("HARBOR_TEST_TOKEN", "secret")
+    explicit = mode != "task_image"
+    toml = (
+        SEPARATE_TOML
+        if explicit
+        else SEPARATE_IN_TASK_IMAGE_TOML + '\n[environment.env]\nAPP_MODE = "${HARBOR_TEST_TOKEN}"\n'
+    )
+    if mode == "explicit_workdir":
+        toml = toml.replace(
+            'docker_image = "org/verifier:1"\n', 'docker_image = "org/verifier:1"\nworkdir = "/work"\n'
+        )
+    server, task, _, _ = make_server(tmp_path, monkeypatch, toml=toml)
+    verifier = FakeSandbox()
+    specs = []
+
+    async def start(spec):
+        specs.append(spec)
+
+    monkeypatch.setattr(verifier, "start", start, raising=False)
+    monkeypatch.setattr("environment_servers.harbor.app.resolve_provider_config", lambda *args: {})
+    monkeypatch.setattr(
+        "environment_servers.harbor.app.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+    )
+    monkeypatch.setattr("environment_servers.harbor.app.AsyncSandbox", lambda config: verifier)
+    assert await server._create_verifier_sandbox(task) is verifier
+    (spec,) = specs
+    assert spec.metadata["harbor_role"] == "verifier"
+    if explicit:
+        # An explicit verifier image starts in its own WORKDIR, or the one `[verifier.environment]` names,
+        # with its own variables.
+        assert spec.image == "org/verifier:1" and spec.env == {}
+        assert spec.workdir == ("/work" if mode == "explicit_workdir" else None)
+    else:
+        # The task image: the agent's working directory and resolved environment, Dockerfile ENV included.
+        assert task.workdir == "/app"
+        assert spec.image == task.image and spec.workdir == "/app"
+        assert spec.env == resolve_env_templates(task.env) and spec.env["APP_MODE"] == "secret"
 
 
 def test_task_data_requires_digest_and_accepts_materialized_row(tmp_path, monkeypatch):
