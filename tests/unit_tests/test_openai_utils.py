@@ -30,8 +30,11 @@ from typing import (
 from unittest.mock import AsyncMock, call
 
 import openai
+import orjson
 import pytest
 from aiohttp import ClientResponseError, ClientTimeout
+from openai.types.chat import ChatCompletionToolChoiceOptionParam
+from openai.types.chat.chat_completion import ChatCompletion
 from openai.types.chat.completion_create_params import CompletionCreateParamsNonStreaming
 from openai.types.responses import (
     EasyInputMessage,
@@ -46,7 +49,8 @@ from openai.types.responses import (
     ResponseOutputMessage,
     ResponseReasoningItem,
 )
-from openai.types.responses.response_create_params import ResponseCreateParamsBase
+from openai.types.responses.response import Response
+from openai.types.responses.response_create_params import ResponseCreateParamsBase, ToolChoice, ToolParam
 from openai.types.responses.response_input_item import (
     AdditionalTools as InputAdditionalTools,
 )
@@ -71,6 +75,7 @@ from pydantic import ValidationError
 
 from nemo_gym import openai_utils as openai_utils_module
 from nemo_gym.openai_utils import (
+    CHAT_REQUEST_IGNORED_CLIENT_FIELDS,
     CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS,
     MAX_NUM_TRIES,
     RESPONSES_TO_TRAIN,
@@ -138,6 +143,23 @@ class TestOpenAIUtils:
 
     async def test_NeMoGymAsyncOpenAI(self) -> None:
         NeMoGymAsyncOpenAI(api_key="abc", base_url="https://api.openai.com/v1")
+
+    @pytest.mark.parametrize("debug_enabled", [True, False])
+    async def test_failed_response_logs_request_only_when_request_debug_is_enabled(
+        self, monkeypatch, capsys, debug_enabled: bool
+    ) -> None:
+        import nemo_gym.server_utils
+
+        # set_global_aiohttp_client sets the flag on server_utils at startup, after openai_utils was imported.
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", debug_enabled)
+        monkeypatch.setattr(openai_utils_module, "raise_for_status", AsyncMock())
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
+        request_kwargs = {"url": "https://example.com/v1/chat/completions", "json": {"model": "m"}}
+
+        await client._raise_for_status(SimpleNamespace(ok=False), request_kwargs)
+
+        logged = "Request kwargs:" in capsys.readouterr().out
+        assert logged is debug_enabled
 
     async def test_explicit_attempt_cap_reaches_low_level_transport(
         self,
@@ -745,6 +767,58 @@ class TestNeMoGymResponse:
         assert isinstance(params.input[0], NeMoGymResponseFunctionWebSearch)
         assert params.input[0].model_dump(mode="json") == payload
 
+    def test_output_text_logprobs_replay_as_input_and_serialize_repeatedly(self) -> None:
+        """A next-turn request that replays assistant logprobs encodes completely on every serialization."""
+        logprobs = [
+            {
+                "token": "hi",
+                "bytes": [104, 105],
+                "logprob": -0.1,
+                "top_logprobs": [{"token": "hi", "bytes": [104, 105], "logprob": -0.1}],
+            }
+        ]
+        response = NeMoGymResponse.model_validate(
+            {
+                "id": "resp_1",
+                "created_at": 0,
+                "model": "m",
+                "object": "response",
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+                "output": [
+                    {
+                        "type": "message",
+                        "id": "msg_1",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [{"type": "output_text", "text": "hi", "annotations": [], "logprobs": logprobs}],
+                    },
+                    {
+                        "type": "function_call",
+                        "id": "fc_1",
+                        "call_id": "call_1",
+                        "name": "lookup",
+                        "arguments": "{}",
+                        "status": "completed",
+                    },
+                ],
+            }
+        )
+        body = NeMoGymResponseCreateParamsNonStreaming.model_validate({"input": [{"role": "user", "content": "q"}]})
+        # This follows simple_agent, which deep-copies the body and then appends the model output and the tool result.
+        body = body.model_copy(deep=True)
+        new_body = body.model_copy(
+            update={"input": [*body.input, *response.output, NeMoGymFunctionCallOutput(call_id="call_1", output="ok")]}
+        )
+
+        for _ in range(2):
+            encoded = orjson.loads(orjson.dumps(new_body.model_dump(exclude_unset=True)))
+            assert encoded["input"][1]["content"][0]["logprobs"] == logprobs
+            assert encoded["input"][2]["type"] == "function_call"
+            assert encoded["input"][3] == {"call_id": "call_1", "output": "ok"}
+            assert response.model_dump(mode="json")["output"][0]["content"][0]["logprobs"] == logprobs
+
     def test_web_search_call_keeps_typed_sdk_actions(self) -> None:
         from openai.types.responses.response_function_web_search import (
             ActionOpenPage,
@@ -1123,6 +1197,76 @@ class TestNeMoGymChatCompletionSchemas:
             with pytest.raises(ValidationError):
                 NeMoGymChatCompletionCreateParamsNonStreaming.model_validate({"messages": [], field: "not-a-mapping"})
 
+    @pytest.mark.parametrize("field", sorted(CHAT_REQUEST_IGNORED_CLIENT_FIELDS))
+    @pytest.mark.parametrize("value", [None, "us-east-1", 123, {"ignored": ["value"]}])
+    def test_ignored_client_fields_are_accepted_but_not_forwarded(self, field: str, value: object) -> None:
+        # The pinned OpenHands direct client includes aws_region_name even when unset (null).
+        # Every ignored field must be excluded regardless of its value or serialization mode.
+        assert NeMoGymChatCompletionCreateParamsNonStreaming.model_fields[field].exclude is True
+        params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(
+            {"messages": [{"role": "user", "content": "hi"}], field: value}
+        )
+
+        assert field in params.model_fields_set
+        assert params.model_dump(exclude_unset=True) == {"messages": [{"role": "user", "content": "hi"}]}
+        assert field not in params.model_dump()
+        assert field not in orjson.loads(params.model_dump_json())
+        assert field not in orjson.loads(params.model_dump_json(exclude_unset=True))
+
+    def test_tool_message_accepts_openhands_name(self) -> None:
+        # OpenHands' Message serializer includes name on tool-result messages.
+        messages = [
+            {"role": "user", "content": "hi"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "ls", "arguments": "{}"}}],
+            },
+            {"role": "tool", "tool_call_id": "c1", "name": "ls", "content": "ok"},
+        ]
+        params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate({"messages": messages})
+
+        assert params.model_dump(exclude_unset=True)["messages"][2] == messages[2]
+
+    def test_tool_message_accepts_image_parts(self) -> None:
+        # A vision tool may return the image it loaded inside its result for a vision-capable model to see.
+        tool_message = {
+            "role": "tool",
+            "tool_call_id": "c1",
+            "content": [
+                {"type": "text", "text": "Image loaded."},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,YWJj", "detail": "auto"}},
+            ],
+        }
+        messages = [
+            {"role": "user", "content": "What color is the image?"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {"id": "c1", "type": "function", "function": {"name": "load_image", "arguments": "{}"}}
+                ],
+            },
+            tool_message,
+        ]
+        params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate({"messages": messages})
+
+        assert params.model_dump(exclude_unset=True)["messages"][2] == tool_message
+
+    @pytest.mark.parametrize(
+        "part",
+        [
+            {"type": "input_audio", "input_audio": {"data": "YWJj", "format": "wav"}},
+            {"type": "video_url", "video_url": {"url": "data:video/mp4;base64,YWJj"}},
+        ],
+        ids=["audio", "video"],
+    )
+    def test_tool_message_refuses_other_media_parts(self, part: dict) -> None:
+        tool_message = {"role": "tool", "tool_call_id": "c1", "content": [{"type": "text", "text": "x"}, part]}
+
+        with pytest.raises(ValidationError):
+            NeMoGymChatCompletionCreateParamsNonStreaming.model_validate({"messages": [tool_message]})
+
     def test_custom_tool_and_training_tool_call_round_trip(self) -> None:
         payload = {
             "messages": [
@@ -1308,6 +1452,34 @@ class TestNeMoGymChatCompletionSchemas:
 
         assert round_tripped == completion
         assert isinstance(completion.choices[0].message.tool_calls[0], NeMoGymChatCompletionMessageCustomToolCall)
+
+    def test_accepts_provider_specific_service_tier(self) -> None:
+        """Third-party providers return tier strings outside the SDK's fixed enum.
+
+        The SDK ``ChatCompletion.service_tier`` is a closed ``Literal``, so a
+        non-OpenAI value would otherwise fail validation and turn the model
+        server response into a 500.
+        """
+        payload = {
+            "id": "chatcmpl-1",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "gpt-test",
+            "service_tier": "on-demand",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": "hi"},
+                }
+            ],
+        }
+        with pytest.raises(ValidationError):
+            ChatCompletion.model_validate(payload)
+
+        completion = NeMoGymChatCompletion.model_validate(payload)
+
+        assert completion.service_tier == "on-demand"
 
 
 class TestNeMoGymFunctionCallOutput:
@@ -2259,7 +2431,11 @@ def test_chat_request_field_set_matches_sdk_without_deprecated_fields() -> None:
     Deprecated fields remain disabled.
     """
     sdk_fields = set(get_type_hints(CompletionCreateParamsNonStreaming, include_extras=True))
-    expected = (sdk_fields - {"function_call", "functions"}) | CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS
+    expected = (
+        (sdk_fields - {"function_call", "functions"})
+        | CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS
+        | CHAT_REQUEST_IGNORED_CLIENT_FIELDS
+    )
     actual = set(NeMoGymChatCompletionCreateParamsNonStreaming.model_fields)
     assert actual == expected, (
         f"openai {openai.__version__} Chat request fields changed: "
@@ -2319,3 +2495,209 @@ def test_response_field_set_is_pinned() -> None:
         f"openai {openai.__version__} changed Response's field set: added={added} removed={removed}.\n"
         f"Decide what Gym does with each, then update this list."
     )
+
+
+_PUBLIC_WIRE_MODELS = [
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponse,
+    NeMoGymChatCompletionCreateParamsNonStreaming,
+    NeMoGymChatCompletion,
+]
+
+
+def _generator_schema_paths(schema: Any, path: str, definitions: Dict[str, Any], seen: frozenset[str]) -> List[str]:
+    """Return the field path of every ``generator`` schema reachable from ``schema``."""
+    if isinstance(schema, list):
+        return [found for item in schema for found in _generator_schema_paths(item, path, definitions, seen)]
+    if not isinstance(schema, dict):
+        return []
+    schema_type = schema.get("type")
+    if schema_type == "generator":
+        return [path]
+    if schema_type == "definitions":
+        definitions = {**definitions, **{item["ref"]: item for item in schema["definitions"]}}
+        return _generator_schema_paths(schema["schema"], path, definitions, seen)
+    if schema_type == "definition-ref":
+        ref = schema["schema_ref"]
+        if ref in seen:
+            return []
+        return _generator_schema_paths(definitions[ref], path, definitions, seen | {ref})
+    if schema_type in ("model-fields", "typed-dict"):
+        owner = f"{schema['cls'].__name__}:" if schema_type == "typed-dict" else ""
+        return [
+            found
+            for name, field in schema["fields"].items()
+            for found in _generator_schema_paths(field, f"{path}.{owner}{name}", definitions, seen)
+        ]
+    return [
+        found
+        for value in schema.values()
+        if isinstance(value, (dict, list))
+        for found in _generator_schema_paths(value, path, definitions, seen)
+    ]
+
+
+@pytest.mark.parametrize("model", _PUBLIC_WIRE_MODELS, ids=lambda m: m.__name__)
+def test_public_wire_models_have_no_lazy_iterable_fields(model: type) -> None:
+    """Pydantic validates an ``Iterable`` field into an iterator that can be read only once.
+
+    orjson cannot encode it, ``model_copy(deep=True)`` cannot pickle it,
+    and a second ``model_dump`` returns an empty list.
+    """
+    paths = _generator_schema_paths(model.__pydantic_core_schema__, model.__name__, {}, frozenset())
+    assert not paths, (
+        f"{paths} validate into lazy iterators.\n"
+        f"Fix: add a Gym copy of the SDK type that declares the field as a List."
+    )
+
+
+@pytest.mark.parametrize(
+    "gym_union, sdk_union",
+    [
+        (openai_utils_module.NeMoGymToolParam, ToolParam),
+        (openai_utils_module.NeMoGymToolChoice, ToolChoice),
+        (openai_utils_module.NeMoGymChatCompletionToolChoiceOptionParam, ChatCompletionToolChoiceOptionParam),
+    ],
+    ids=["ToolParam", "ToolChoice", "ChatCompletionToolChoiceOptionParam"],
+)
+def test_list_copies_of_sdk_unions_keep_every_member_in_order(gym_union: Any, sdk_union: Any) -> None:
+    """Each Gym union member is the SDK member or a subclass of it, so no SDK shape is dropped or reordered."""
+    gym_members = get_args(gym_union)
+    sdk_members = get_args(sdk_union)
+    assert len(gym_members) == len(sdk_members), (
+        f"openai {openai.__version__} changed the members of {sdk_union}.\nFix: mirror the change in {gym_union}."
+    )
+    for gym_member, sdk_member in zip(gym_members, sdk_members):
+        # A TypedDict subclass records its SDK base in __orig_bases__ rather than __mro__.
+        assert gym_member == sdk_member or sdk_member in getattr(gym_member, "__orig_bases__", ())
+
+
+@pytest.mark.parametrize(
+    "model, payload",
+    [
+        (
+            NeMoGymResponseCreateParamsNonStreaming,
+            {
+                "input": "q",
+                "tools": [
+                    {
+                        "type": "namespace",
+                        "name": "ns",
+                        "description": "d",
+                        "tools": [{"type": "function", "name": "f", "parameters": {}}],
+                    }
+                ],
+            },
+        ),
+        (
+            NeMoGymResponseCreateParamsNonStreaming,
+            {
+                "input": "q",
+                "tool_choice": {"type": "allowed_tools", "mode": "auto", "tools": [{"type": "function", "name": "f"}]},
+            },
+        ),
+        (
+            NeMoGymResponseCreateParamsNonStreaming,
+            {
+                "input": "q",
+                "tools": [
+                    {
+                        "type": "file_search",
+                        "vector_store_ids": ["vs_1"],
+                        "filters": {
+                            "type": "and",
+                            "filters": [
+                                {"type": "eq", "key": "a", "value": "x"},
+                                {"type": "or", "filters": [{"type": "eq", "key": "b", "value": "y"}]},
+                            ],
+                        },
+                    }
+                ],
+            },
+        ),
+        (
+            NeMoGymResponseCreateParamsNonStreaming,
+            {
+                "input": "q",
+                "tools": [
+                    {
+                        "type": "shell",
+                        "environment": {
+                            "type": "container_auto",
+                            "network_policy": {
+                                "type": "allowlist",
+                                "allowed_domains": ["example.com"],
+                                "domain_secrets": [{"domain": "example.com", "name": "TOKEN", "value": "v"}],
+                            },
+                            "skills": [{"type": "skill_reference", "skill_id": "skill_1"}],
+                        },
+                    },
+                    {
+                        "type": "shell",
+                        "environment": {"type": "local", "skills": [{"name": "n", "description": "d", "path": "/p"}]},
+                    },
+                ],
+            },
+        ),
+        (
+            NeMoGymChatCompletionCreateParamsNonStreaming,
+            {
+                "messages": [{"role": "user", "content": "q"}],
+                "prediction": {"type": "content", "content": [{"type": "text", "text": "p"}]},
+                "tool_choice": {
+                    "type": "allowed_tools",
+                    "allowed_tools": {"mode": "auto", "tools": [{"type": "function", "function": {"name": "f"}}]},
+                },
+            },
+        ),
+    ],
+    ids=["namespace_tools", "allowed_tool_choice", "compound_filter", "shell_skills", "chat_prediction_tool_choice"],
+)
+def test_requests_with_sdk_iterable_fields_encode_copy_and_dump_repeatedly(model: type, payload: dict) -> None:
+    """``ServerClient.request`` encodes a python-mode dump with orjson; agents deep-copy and re-send request bodies."""
+    params = model.model_validate(payload)
+
+    for _ in range(2):
+        assert orjson.loads(orjson.dumps(params.model_dump(exclude_unset=True))) == payload
+        assert params.model_dump(mode="json", exclude_unset=True) == payload
+    assert orjson.loads(orjson.dumps(params.model_copy(deep=True).model_dump(exclude_unset=True))) == payload
+
+
+def test_response_accepts_provider_specific_service_tier() -> None:
+    """Third-party providers return tier strings outside the SDK's fixed enum.
+
+    The SDK ``Response.service_tier`` is a closed ``Literal``, so a
+    non-OpenAI value would otherwise fail validation and turn the model
+    server response into a 500.
+    """
+    payload = _response_with_output([]) | {"service_tier": "on-demand"}
+
+    with pytest.raises(ValidationError):
+        Response.model_validate(payload)
+
+    response = NeMoGymResponse.model_validate(payload)
+
+    assert response.service_tier == "on-demand"
+
+
+def test_chat_request_drops_litellm_provider_specific_fields_from_history() -> None:
+    from nemo_gym.openai_utils import NeMoGymChatCompletionCreateParamsNonStreaming
+
+    params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(
+        {
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {"id": "call_1", "type": "function", "function": {"name": "bash", "arguments": "{}"}}
+                    ],
+                    "provider_specific_fields": {"refusal": None},
+                },
+            ]
+        }
+    )
+
+    assert "provider_specific_fields" not in params.messages[1]
+    assert params.messages[1]["tool_calls"][0]["function"]["name"] == "bash"

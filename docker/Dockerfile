@@ -31,7 +31,6 @@ ENV NEMO_GYM_CONTAINER=1
 USER root
 
 ARG ENROOT_VERSION=3.5.0
-ARG NSYS_VERSION=2026.5.1.161-265138896106v0
 RUN <<"EOF" bash -exu -o pipefail
 export DEBIAN_FRONTEND=noninteractive
 export TZ=America/Los_Angeles
@@ -59,6 +58,9 @@ apt-get purge -y \
     libfdk-aac* \
     libmp3lame* \
     2>/dev/null || true
+
+# Gym never imports dbus or GObject; drop the base image's Python bindings.
+apt-get purge -y python3-dbus python3-gi
 
 apt-get autoremove -y
 
@@ -92,26 +94,11 @@ apt-get update
 apt-get install -y nvidia-container-toolkit
 rm -f /etc/apt/sources.list.d/nvidia-container-toolkit.list /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
 
-# Replace the CUDA base image's bundled Nsight Systems, which is built
-# against an outdated Go toolchain flagged by CVE scans, with a current
-# release from NVIDIA's devtools apt repo.
+# Remove the CUDA base image's bundled Nsight Systems. Gym does not profile
+# with nsys, and the bundled copy ships prebuilt Go binaries flagged by scans.
 rm -rf /usr/local/cuda*/NsightSystems-cli-* /opt/nvidia/nsight-systems*
 apt-get remove --purge -y --allow-change-held-packages 'nsight-systems*' || true
-
-nsys_release=$(echo "${NSYS_VERSION}" | cut -d. -f1-3)
-nsys_repo="https://developer.download.nvidia.com/devtools/repos/ubuntu2404/${arch}"
-curl -fsSL "${nsys_repo}/nvidia.pub" -o /usr/share/keyrings/nvidia-devtools.asc
-echo "deb [signed-by=/usr/share/keyrings/nvidia-devtools.asc] ${nsys_repo}/ /" \
-    > /etc/apt/sources.list.d/nvidia-devtools.list
-apt-get update
-apt-get install -y --no-install-recommends "nsight-systems-cli-${nsys_release}=${NSYS_VERSION}"
-rm -f /etc/apt/sources.list.d/nvidia-devtools.list /usr/share/keyrings/nvidia-devtools.asc
-
-# The base image's cuda/bin dir can precede /usr/local/bin on PATH; if it
-# already symlinks nsys (pointing at the old bundled copy), repoint it.
-if [ -L /usr/local/cuda/bin/nsys ]; then
-    ln -sf /usr/local/bin/nsys /usr/local/cuda/bin/nsys
-fi
+rm -f /usr/local/cuda/bin/nsys /usr/local/bin/nsys
 
 apt-get clean
 rm -rf /var/lib/apt/lists/*
@@ -190,7 +177,7 @@ COPY --from=nemo-gym --chown=${RUNTIME_UID}:${RUNTIME_GID} \
 # an environment variable — they would have to rebuild. Off remains the default: the code
 # is inert until NEMO_LENS_ENABLED=1.
 RUN uv venv --seed && \
-    uv sync --link-mode symlink --locked --extra vllm --extra telemetry --extra dev --no-install-project
+    uv sync --link-mode symlink --locked --extra vllm --extra telemetry --extra dev --extra ray --no-install-project
 
 ENV PATH="/opt/nemo_gym_venv/bin:$PATH"
 
@@ -226,7 +213,7 @@ COPY --from=nemo-gym --chown=${RUNTIME_UID}:${RUNTIME_GID} \
 # worktree was created for the runtime UID in the base stage, so restore build ownership
 # before setuptools invokes Git.
 RUN chown root:root /opt/nemo-gym && \
-    UV_LINK_MODE=symlink uv sync --locked --extra vllm --extra telemetry --extra dev
+    UV_LINK_MODE=symlink uv sync --locked --extra vllm --extra telemetry --extra dev --extra ray
 
 # Seed the runtime uv cache with the full dependency set (including the dev
 # extra and the project itself) so that CI scripts can run offline: setup_dev.sh
@@ -236,7 +223,7 @@ RUN chown root:root /opt/nemo-gym && \
 ENV UV_CACHE_DIR=/opt/nemo-gym/cache/uv
 RUN uv venv /opt/nemo-gym/cache/seed-venv && \
     UV_PROJECT_ENVIRONMENT=/opt/nemo-gym/cache/seed-venv \
-        uv sync --locked --extra vllm --extra telemetry --extra dev && \
+        uv sync --locked --extra vllm --extra telemetry --extra dev --extra ray && \
     rm -rf /opt/nemo-gym/cache/seed-venv && \
     chown -R "${RUNTIME_UID}:${RUNTIME_GID}" /opt/nemo-gym/cache/uv
 

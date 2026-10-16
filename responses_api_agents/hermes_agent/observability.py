@@ -101,11 +101,16 @@ def normalize_hermes_messages(messages: Iterable[Any], *, id_prefix: str = "herm
 
 
 class _ObservedChildren(list):
+    _gym_child_hook_supported = True
+
     def __init__(self, values: Iterable[Any], observer: "HermesAgentObserver", parent_id: str):
         super().__init__(values)
         self.observer, self.parent_id = observer, parent_id
+        self._gym_prepare_child = getattr(values, "_gym_prepare_child", None)
 
     def append(self, child: Any) -> None:
+        if self._gym_prepare_child is not None:
+            self._gym_prepare_child(child)
         super().append(child)
         self.observer._child_added(child, self.parent_id)
 
@@ -118,11 +123,13 @@ class HermesAgentObserver:
         *,
         root_invocation_id: str = "root",
         model_ref: ModelServerRef | None = None,
+        capture_correlated: bool = False,
     ) -> None:
         self._lock = threading.RLock()
         self._current = threading.local()
         self._root_id = root_invocation_id
         self._model_ref = model_ref
+        self._capture_correlated = capture_correlated
         self._child_index = 0
         self._agents: set[int] = set()
         self._invocation_agents: dict[str, Any] = {}
@@ -136,6 +143,16 @@ class HermesAgentObserver:
     def instrument(self, agent: Any) -> "HermesAgentObserver":
         self._instrument_safely(agent, self._root_id, wrap_conversation=False)
         return self
+
+    def on_iteration_limit_reached(self, *, invocation_id: str) -> None:
+        """Record this invocation's budget stop once, without affecting its parent or summary."""
+        with self._lock:
+            invocation = self._invocations.get(invocation_id)
+            if invocation is None:
+                self._gap("hermes_observer_error", invocation_id, "iteration_limit: unknown invocation")
+                return
+            invocation.stop_reason = "max_iterations"
+            invocation.status = "incomplete"
 
     def finish(
         self,
@@ -154,7 +171,7 @@ class HermesAgentObserver:
                 if tool.status == "unknown":
                     tool.status = "incomplete"
             for invocation in self._invocations.values():
-                if not invocation.model_calls:
+                if not invocation.model_calls and not self._capture_correlated:
                     self._gap("model_call_ownership_unavailable", invocation.invocation_id)
             return AgentObservationBundle(
                 source=_SOURCE,
@@ -179,6 +196,9 @@ class HermesAgentObserver:
                 return
             self._agents.add(agent_id)
             self._invocation_agents[invocation_id] = agent
+
+        agent._gym_invocation_id = invocation_id
+        agent._gym_on_iteration_limit_reached = self.on_iteration_limit_reached
 
         self._chain_callback(agent, "tool_start_callback", self._tool_started, invocation_id)
         self._chain_callback(agent, "tool_complete_callback", self._tool_completed, invocation_id)
@@ -226,6 +246,15 @@ class HermesAgentObserver:
             return
 
         def call(*args: Any, **kwargs: Any) -> Any:
+            if self._capture_correlated:
+                # The SDK repeats these headers on every HTTP retry, including
+                # attempts that fail without returning a response ID.
+                api_kwargs = dict(args[0] if args else kwargs["api_kwargs"])
+                api_kwargs["extra_headers"] = {**api_kwargs.get("extra_headers", {}), "x-session-id": invocation_id}
+                if args:
+                    args = (api_kwargs, *args[1:])
+                else:
+                    kwargs = {**kwargs, "api_kwargs": api_kwargs}
             try:
                 response = original(*args, **kwargs)
             except BaseException as exc:
@@ -446,7 +475,9 @@ class HermesAgentObserver:
                     status = "incomplete"
             with self._lock:
                 self._invocations[invocation_id].conversation = conversation
-                self._invocations[invocation_id].status = status
+                self._invocations[invocation_id].status = (
+                    "incomplete" if self._invocations[invocation_id].stop_reason == "max_iterations" else status
+                )
         except Exception as exc:
             self._gap("hermes_observer_error", invocation_id, f"conversation: {type(exc).__name__}")
 

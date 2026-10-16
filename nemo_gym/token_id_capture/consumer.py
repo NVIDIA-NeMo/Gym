@@ -83,12 +83,9 @@ def clear_token_captures_for_rollouts(records: list, token_capture_dirs: list[Pa
         return
     from nemo_gym.base_responses_api_model import maybe_rollout_id_from_run_body
 
+    rollout_ids = [rollout_id for record in records if (rollout_id := maybe_rollout_id_from_run_body(record))]
     for directory in token_capture_dirs:
-        store = TokenCaptureStore(directory)
-        for record in records:
-            rollout_id = maybe_rollout_id_from_run_body(record)
-            if rollout_id:
-                store.delete(rollout_id)
+        TokenCaptureStore(directory).delete_now(rollout_ids)
 
 
 def _assemble(
@@ -139,7 +136,9 @@ def _assemble(
     try:
         for chain in out.chains:
             chain.validate()
-        response = project_main_chain_response(rollout_id, out, model=model)
+        response = project_main_chain_response(
+            rollout_id, out, model=model, finish_reason_resolved=attribution.finish_reason_resolved
+        )
         assert_prefix_contiguity(response)
     except (AssertionError, ValueError, KeyError, IndexError, TypeError) as error:
         logger.warning(

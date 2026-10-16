@@ -13,7 +13,7 @@ Before you add a single line, your server already produces:
 - `gym.verify` around your `verify()` implementation, if it is a resources server.
 - A CLIENT span for every outbound call your server makes through
   `nemo_gym.server_utils.request()`.
-- `http.server.request.duration`, dimensioned by route, method, and status.
+- `http.server.duration`, dimensioned by route, method, and status, while traces are exported.
 
 Add your own spans when you want to name a phase *inside* one of those, such as the parse
 step of a verifier or a retrieval call in an agent harness.

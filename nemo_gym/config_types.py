@@ -26,6 +26,7 @@ from pydantic import (
     Field,
     TypeAdapter,
     ValidationError,
+    model_serializer,
     model_validator,
 )
 from pydantic_core import PydanticUndefined
@@ -160,6 +161,10 @@ class MalformedConfigPathsError(ConfigError, ValueError):
     """`config_paths` was not a list of paths (e.g. a scalar string was passed)."""
 
 
+class HeadServerConfigMalformedError(ConfigError, ValueError):
+    """`head_server` is not a mapping, or a field has the wrong type (e.g. a non-integer `port` from a `++head_server.port=` override)."""
+
+
 class NoServerInstancesError(ConfigError, ValueError):
     """A run was requested but the merged config defines no server instances to start."""
 
@@ -191,6 +196,10 @@ class AgentWithoutEnvironmentServerError(ConfigError, ValueError):
 
 class AmbiguousEnvironmentServerError(ConfigError, ValueError):
     """Rows route by an agent that more than one environment server fronts."""
+
+
+class AmbiguousAgentRenameError(ConfigError, ValueError):
+    """An environment server references an agent inherited by several new instances."""
 
 
 class AgentCompositionError(ConfigError, ValueError):
@@ -462,6 +471,8 @@ class DatasetConfig(BaseModel):
     name: str
     type: DatasetType
     jsonl_fpath: str
+    prepare_script: Optional[Path] = None
+    prepare_dependencies: List[str] = Field(default_factory=list)
     taskset: Optional[str] = Field(
         default=None,
         min_length=1,
@@ -480,6 +491,7 @@ class DatasetConfig(BaseModel):
             Literal["MIT"],
             Literal["Creative Commons Attribution 4.0 International"],
             Literal["Creative Commons Attribution-ShareAlike 4.0 International"],
+            Literal["CC-BY-SA-4.0 AND LicenseRef-OpenMDW-1.1"],
             Literal["CC BY-SA 4.0"],
             Literal["CC BY-NC 3.0"],
             Literal["NVIDIA Internal Use Only, Do Not Distribute"],
@@ -488,6 +500,15 @@ class DatasetConfig(BaseModel):
             Literal["GNU General Public License v3.0"],
         ]
     ] = None
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_preparation_fields(self, handler: Any) -> dict[str, Any]:
+        data = handler(self)
+        if self.prepare_script is None:
+            data.pop("prepare_script", None)
+        if not self.prepare_dependencies:
+            data.pop("prepare_dependencies", None)
+        return data
 
     @model_validator(mode="after")
     def check_train_validation_sets(self) -> "DatasetConfig":
@@ -891,6 +912,8 @@ class MLFlowConfig(ExporterConfig):
     mlflow_tracking_token: Optional[str] = None
     mlflow_experiment_name: Optional[str] = None
     mlflow_run_name: Optional[str] = None
+    mlflow_run_description: Optional[str] = None
+    mlflow_run_tags: Dict[str, str] = Field(default_factory=dict)
 
     @property
     def is_available(self) -> bool:

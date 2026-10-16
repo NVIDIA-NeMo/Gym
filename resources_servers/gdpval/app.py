@@ -459,7 +459,6 @@ class GDPValVerifyResponse(GDPValVerifyRequest, BaseVerifyResponse):
 
 
 class GDPValResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: GDPValResourcesServerConfig
 
     def model_post_init(self, context: Any) -> None:
