@@ -64,6 +64,8 @@ gym eval run \
     --benchmark <name> \
     --model-type switchyard_model \
     --model switchyard \
+    --split benchmark \
+    --output results/<name>.jsonl \
     ++policy_model.responses_api_models.switchyard_model.deployment="$(pwd)/routes.toml"
 ```
 
@@ -83,6 +85,7 @@ for route in capable-only switchyard; do
         --benchmark <name> \
         --model-type switchyard_model \
         --model "$route" \
+        --split benchmark \
         --output "results/$route/rollouts.jsonl" \
         ++policy_model.responses_api_models.switchyard_model.deployment="$(pwd)/routes.toml" \
         ++policy_model.responses_api_models.switchyard_model.condition_dir="$PWD/results/$route"
@@ -153,6 +156,8 @@ gym eval run \
     --benchmark <name> \
     --model-type switchyard_model \
     --model switchyard \
+    --split benchmark \
+    --output results/<name>.jsonl \
     ++policy_model.responses_api_models.switchyard_model.switchyard_base_url=http://127.0.0.1:4000/v1
 ```
 
@@ -174,6 +179,8 @@ gym eval run \
     --benchmark <name> \
     --model-type switchyard_model \
     --model switchyard \
+    --split benchmark \
+    --output results/<name>.jsonl \
     ++policy_model.responses_api_models.switchyard_model.switchyard_base_url=http://127.0.0.1:4000/v1 \
     "++policy_model.responses_api_models.switchyard_model.session_id_headers=[x-switchyard-session-id,proxy_x_session_id]"
 ```
