@@ -96,6 +96,7 @@ class LocalSandbox:
         host: str = os.getenv("NEMO_SKILLS_SANDBOX_HOST", "127.0.0.1"),
         port: str = os.getenv("NEMO_SKILLS_SANDBOX_PORT", "6000"),
     ):
+        # Lazy: ccc_eval.py is also uploaded into the sandbox image, which has only the standard library.
         import httpx
 
         self.host = host

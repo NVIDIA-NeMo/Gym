@@ -25,6 +25,8 @@ competitive_coding_challenges_resources_server:
         image: ${oc.env:CCC_SANDBOX_IMAGE,null}
         # Read-only problem data from split_problem_metadata.py, mounted or baked into the image.
         problem_data_dir: /data/ccc
+        # Whole verification (compiles plus every test run); exceeding it masks the sample.
+        exec_timeout_s: 3600
         resources:
           cpu: 8
           memory_mib: 16384

@@ -18,7 +18,9 @@ import asyncio
 import importlib.util
 import json
 import os
+import resource
 import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -31,6 +33,7 @@ from nemo_gym.sandbox import SandboxExecResult, SandboxHandle
 from nemo_gym.sandbox.verification import SandboxVerificationError
 from resources_servers.competitive_coding_challenges.ccc_eval import _load_metadata_file
 from resources_servers.competitive_coding_challenges.sandbox_evaluator import (
+    _HARNESS_FILES,
     CCCSandboxConfig,
     evaluate_in_sandbox,
     problem_file,
@@ -185,6 +188,26 @@ def test_split_problem_metadata_streams_like_the_evaluator_load(tmp_path: Path) 
     assert original["comp"]["toy"]["run"] == "echo 3"
 
 
+def test_uploaded_harness_imports_with_the_standard_library_only(tmp_path: Path) -> None:
+    # The image has only Python's standard library, and the runner imports the uploaded ccc_eval as a top-level module.
+    for name in _HARNESS_FILES:
+        shutil.copy(_CCC_DIR / name, tmp_path / name)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-S",
+            "-c",
+            "import sys; sys.path.insert(0, sys.argv[1]); import sandbox_runner",
+            tmp_path,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 class TestProcessSandbox:
     """The executor that replaces the NeMo Skills sandbox inside the verification sandbox."""
 
@@ -210,7 +233,7 @@ class TestProcessSandbox:
         }
         assert self._run(process_sandbox, "echo bad >&2; exit 3", timeout=10)["process_status"] == "error"
 
-    def test_timeout_kills_the_whole_session(self, process_sandbox, tmp_path: Path) -> None:
+    def test_timeout_kills_the_process_group(self, process_sandbox, tmp_path: Path) -> None:
         marker = tmp_path / "survived"
         result = self._run(process_sandbox, f"(sleep 2; touch {marker}) & sleep 30", timeout=0.5)
         assert result == {
@@ -218,9 +241,17 @@ class TestProcessSandbox:
             "stdout": "",
             "stderr": "Execution timed out after 0.5 seconds\n",
         }
-        # The background child was in the same session, so it died before touching the marker.
+        # The background child was in bash's process group, so it died before touching the marker.
         time.sleep(2.5)
         assert not marker.exists()
+
+    @pytest.mark.skipif(shutil.which("timeout") is None, reason="needs GNU timeout")
+    def test_timeout_does_not_wait_for_processes_outside_the_group(self, process_sandbox) -> None:
+        # run.sh's `timeout` moves the submission into its own process group, which killpg does not reach.
+        start = time.monotonic()
+        result = self._run(process_sandbox, "timeout 3 sleep 3", timeout=0.5)
+        assert result["process_status"] == "timeout"
+        assert time.monotonic() - start < 2.5
 
     def test_output_is_cut_like_the_skills_sandbox(self, process_sandbox) -> None:
         result = self._run(process_sandbox, "printf '%05000d' 0", timeout=10, max_output_characters=10)
@@ -275,6 +306,10 @@ class TestLocalProvider:
         assert {output["test_name"]: output["score"] for output in subtask["outputs"]}["t2"] == 0.0
 
     @pytest.mark.skipif(not Path("/proc/self/limits").exists(), reason="reads /proc/self/limits")
+    @pytest.mark.skipif(
+        resource.getrlimit(resource.RLIMIT_CORE)[1] == 0,
+        reason="the hard RLIMIT_CORE is 0, so the runner cannot set it to one byte",
+    )
     async def test_submissions_cannot_dump_core(self, tmp_path: Path) -> None:
         # A one-byte RLIMIT_CORE keeps piped core dumps from stalling a crashing submission past its time limit.
         run_script = "#!/bin/bash\n[ \"$(awk '/^Max core file size/ {print $5, $6}' /proc/self/limits)\" = '1 1' ] && echo 1 || echo 0\n"

@@ -69,7 +69,7 @@ def _make_server(**config_overrides) -> CompetitiveCodingChallengesResourcesServ
 def _make_verify_request(
     *,
     text: str = "```cpp\nint main() { return 0; }\n```",
-    competition_id: str = "comp-1",
+    competition_id: str | None = "comp-1",
     problem_id: str = "prob-1",
     subtask: str | None = "samples",
     subtask_score: float | None = None,
@@ -486,15 +486,15 @@ class TestComputeMetrics:
 
     def test_pass_at_1_total_averages_rows_then_keeps_the_best_row(self, server_with_two_problems) -> None:
         # NeMo Skills' pass@1[avg-of-k] total: per row and subtask, the mean over that row's rollouts;
-        # per subtask, the best row. Row 1 averages 6 and 3 on 01-equal; row 2 averages 13 and 0 on
-        # 02-permutation but also 6 and 6 on 01-equal, which is the better row there.
+        # per subtask, the best row. Row 1 averages 6 on 01-equal and 0 on 02-permutation; row 2 averages
+        # 4.5 and 6.5. Each row is best on a different subtask.
         row_1 = [
             _make_rollout("nile", "01-equal", {"01-equal": {"score": 6.0}, "02-permutation": {"score": 0.0}}),
-            _make_rollout("nile", "01-equal", {"01-equal": {"score": 3.0}, "02-permutation": {"score": 0.0}}),
+            _make_rollout("nile", "01-equal", {"01-equal": {"score": 6.0}, "02-permutation": {"score": 0.0}}),
         ]
         row_2 = [
             _make_rollout("nile", "02-permutation", {"01-equal": {"score": 6.0}, "02-permutation": {"score": 13.0}}),
-            _make_rollout("nile", "02-permutation", {"01-equal": {"score": 6.0}, "02-permutation": {"score": 0.0}}),
+            _make_rollout("nile", "02-permutation", {"01-equal": {"score": 3.0}, "02-permutation": {"score": 0.0}}),
         ]
         metrics = server_with_two_problems.compute_metrics([row_1, row_2])
 
@@ -557,6 +557,21 @@ class TestSandboxPath:
         with pytest.raises(ValueError, match="sandbox_config.image is required"):
             _make_server(sandbox_provider="sandbox")
 
+    def test_sandbox_provider_requires_cpu(self) -> None:
+        with pytest.raises(ValueError, match="sandbox_config.resources.cpu is required"):
+            _make_server(sandbox_provider="sandbox", sandbox_config={"image": "x"}, test_batch_size=4)
+
+    def test_setup_fails_for_an_unknown_sandbox_provider(self, monkeypatch) -> None:
+        # verify() would otherwise score every sample 0.0 unmasked: the error is not a SandboxVerificationError.
+        monkeypatch.setattr(ccc_app, "get_global_config_dict", lambda: {})
+        server = _make_server(
+            sandbox_provider={"opensandboxx": {}},
+            sandbox_config={"image": "x", "resources": {"cpu": 8}},
+            test_batch_size=4,
+        )
+        with pytest.raises(ValueError, match="Unknown sandbox provider"):
+            server.setup_webserver()
+
     def test_test_batch_size_must_fit_the_sandbox_cpus(self) -> None:
         with pytest.raises(ValueError, match="must not exceed sandbox_config.resources.cpu"):
             _make_server(
@@ -591,6 +606,30 @@ class TestSandboxPath:
         assert response.failure_kind == PROVIDER_UNAVAILABLE
         assert response.failure_reason == "sandbox start failed: no capacity"
         assert response.reward == 0.0
+
+    async def test_missing_provider_sdk_fails_loudly(self, monkeypatch) -> None:
+        # A venv without nemo-gym[sandbox] must not score every sample 0.0.
+        async def _fail(entry, **kwargs):
+            raise ModuleNotFoundError("OpenSandbox SDK is required")
+
+        monkeypatch.setattr(ccc_app, "evaluate_in_sandbox", _fail)
+        with pytest.raises(ModuleNotFoundError, match="OpenSandbox SDK is required"):
+            await self._sandbox_server().verify(_make_verify_request())
+
+    async def test_row_without_competition_reads_its_problem_from_the_competition(self, monkeypatch) -> None:
+        entries = []
+
+        async def _evaluate(entry, **kwargs):
+            entries.append(entry)
+            return {"test_case_results": {"samples": {"score": 5.0, "outputs": []}}}
+
+        monkeypatch.setattr(ccc_app, "evaluate_in_sandbox", _evaluate)
+        server = self._sandbox_server()
+        server._evaluator.problem_index = {"prob-1": {"comp-1": {}}}
+        response = await server.verify(_make_verify_request(competition_id=None, subtask_score=5.0))
+
+        assert response.reward == 1.0 and not response.mask_sample
+        assert entries[0]["competition_id"] == "comp-1"
 
     async def test_unknown_problem_fails_before_any_sandbox(self, monkeypatch) -> None:
         async def _must_not_run(entry, **kwargs):
