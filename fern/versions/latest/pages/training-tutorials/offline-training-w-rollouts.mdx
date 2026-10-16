@@ -162,7 +162,7 @@ After you have filtered, high-quality rollouts, format them for your chosen trai
 
 Rollouts store the conversation as Responses API items: the prompt in `responses_create_params.input` and the model's turns in `response.output`. Training libraries expect Chat Completions messages, so convert both with NeMo Gym's `ResponsesConverter`, the same converter its model servers use. It turns `function_call` items into assistant `tool_calls`, `function_call_output` items into `tool` messages, and `reasoning` items into `<think>` blocks in the assistant content. Filter out items whose `type` is `reasoning` first if you don't want to train on them. The task's `instructions`, when set, become the leading system message.
 
-Some Responses fields have no Chat Completions equivalent, and the converter raises `NotImplementedError` on them. `to_chat` drops them first: a message's `phase` and a reasoning item's `encrypted_content`. Readable reasoning `content` is kept as the `<think>` text.
+Some Responses fields have no Chat Completions equivalent, and the converter raises `NotImplementedError` on them. `to_chat` drops them first: a message's `phase` and a reasoning item's `encrypted_content`. Readable reasoning `content` becomes the `<think>` text when present; otherwise the snippet uses the reasoning `summary`.
 
 Run these snippets in the NeMo Gym environment, in one Python session:
 
@@ -179,7 +179,7 @@ def chat_representable(item: dict) -> dict:
     """Drop the Responses-only fields that Chat Completions messages cannot hold."""
     item = {key: value for key, value in item.items() if key != "phase"}
     if item.get("type") == "reasoning":
-        if not item.get("summary") and item.get("content"):
+        if item.get("content"):
             item["summary"] = [{"type": "summary_text", "text": part["text"]} for part in item["content"]]
         item.pop("content", None)
         item.pop("encrypted_content", None)
