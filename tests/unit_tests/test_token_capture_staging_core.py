@@ -236,7 +236,7 @@ def test_staged_record_and_snapshot_round_trip() -> None:
     ("version_field", "version"),
     [
         ("schema_version", 1),
-        ("schema_version", 3),
+        ("schema_version", STAGING_SCHEMA_VERSION + 1),
         ("digest_version", 1),
         ("digest_version", 3),
         ("extras_digest_version", 0),

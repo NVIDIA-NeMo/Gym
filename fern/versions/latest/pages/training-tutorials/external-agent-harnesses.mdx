@@ -385,7 +385,26 @@ asyncio.run(main())
 
 For a multi-process deployment, run the check against the real shared backend rather than a local stand-in.
 
-### Provide unique rollout ids
+## Let the framework own context reconstruction
+
+For compaction-aware training with a compatible framework worker, enable
+`token_id_capture.framework_owned_context: true` together with `external_staging: true`,
+`external_staging_backend: vllm_worker`, and `rebuild_response: false`.
+See [Framework-owned context and compaction](/main/model-server/model-call-capture#framework-owned-context-and-compaction)
+for configuration prerequisites, supported APIs, measurement, and admission closure.
+
+The harness keeps using rollout-correlated Responses or Chat requests with explicit history.
+It owns compaction of the next input and needs no special parent header or segment definition.
+Return the complete accepted execution history or existing call references, including actions
+before compaction. The shortened next input alone is not that history. NeMo RL joins the returned
+evidence to captured calls and reconstructs their context chains; Gym does not replace `response.output`.
+Concurrent capture is permitted, but selecting subagent calls for training remains the framework's
+responsibility. Capture alone cannot establish which calls the harness accepted.
+
+The single-chain rebuilding steps and metrics above describe Gym's local capture path. Framework-owned
+reconstruction has its own finalization and validity checks; it does not use that delivery function.
+
+## Provide unique rollout ids
 
 Gym normally derives the capture id from the task and rollout indices. If a custom training loop restarts those indices on each step, explicitly provide a unique `_ng_rollout_id`:
 

@@ -25,7 +25,7 @@ from time import monotonic, time, time_ns
 from typing import Any, Awaitable, ClassVar, Dict, List, Literal, Optional, Union, get_args
 
 from aiohttp.client_exceptions import ClientConnectionError, ClientResponseError
-from fastapi import HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import Field, PrivateAttr, model_validator
 
@@ -36,6 +36,7 @@ from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
     Body,
     SimpleResponsesAPIModel,
+    _request_messages,
     context_overflow_error_fields,
     is_propagated_refusal,
     start_model_execution,
@@ -60,13 +61,18 @@ from nemo_gym.responses_converter import (
 from nemo_gym.rollout_correlation import current_rollout_id
 from nemo_gym.server_utils import SESSION_ID_KEY, _redacted_url, is_nemo_gym_fastapi_entrypoint
 from nemo_gym.token_id_capture import (
+    CaptureContext,
     current_capture_context,
+    reset_token_sink,
+    resolve_parent,
+    set_token_sink,
 )
 from nemo_gym.token_id_capture.config import token_id_capture_config
 from nemo_gym.token_id_capture.external_capture import (
     ExternalCaptureHandler,
     make_external_capture_handler,
 )
+from nemo_gym.token_id_capture.protocols import CaptureAdmissionError
 from responses_api_models.vllm_model.tar_audio import TarAudioReader, resolve_archive_path, validate_relative_path
 
 
@@ -493,6 +499,14 @@ class VLLMModel(SimpleResponsesAPIModel):
         "chat_template_kwargs",
         "mm_processor_kwargs",
         "required_prefix_token_ids",
+        "documents",
+        "reasoning_effort",
+        "add_generation_prompt",
+        "continue_final_message",
+        "add_special_tokens",
+        "chat_template",
+        "media_io_kwargs",
+        "ng_capture",
     )
     _external_capture_handler: ExternalCaptureHandler | None = PrivateAttr(default=None)
     _warned_request_chat_template_kwargs_dropped: bool = PrivateAttr(default=False)
@@ -530,6 +544,51 @@ class VLLMModel(SimpleResponsesAPIModel):
                 raise
 
         super().setup_exception_middleware(app)
+
+    def setup_webserver(self) -> FastAPI:
+        app = super().setup_webserver()
+        config = token_id_capture_config(self.server_client.global_config_dict)
+        if config.token_id_capture.framework_owned_context:
+            app.post("/context/{rollout_id}/measure")(self.measure_context)
+        return app
+
+    async def measure_context(
+        self,
+        request: Request,
+        rollout_id: str,
+        body: NeMoGymResponseCreateParamsNonStreaming = Body(),
+    ) -> dict[str, int]:
+        """Render through the generation admission path without writing capture state."""
+        if self._external_capture_handler is None or self._capture_lineage is None:
+            raise HTTPException(status_code=409, detail="measurement requires external capture")
+        if body.stream or body.previous_response_id or body.conversation:
+            raise HTTPException(status_code=422, detail="measurement requires explicit non-streaming history")
+        client = self._resolve_client(request)
+        context = CaptureContext(
+            rollout_id=rollout_id,
+            model_call_id="measurement",
+            token_sink=None,
+            lineage_store=self._capture_lineage,
+            external_staging=True,
+            framework_owned_context=True,
+        )
+        token = set_token_sink(context)
+        try:
+            try:
+                await resolve_parent(_request_messages(body))
+            except CaptureAdmissionError as error:
+                raise HTTPException(status_code=409, detail=str(error)) from error
+            chat = self._converter.responses_to_chat_completion_create_params(body)
+            processed = self._preprocess_chat_completion_create_params(request, chat.model_dump(exclude_unset=True))
+            if processed.get("truncate_prompt_tokens") is not None:
+                raise HTTPException(status_code=422, detail="measurement does not support prompt truncation")
+            result = await client.create_tokenize(**self._get_tokenize_chat_body(processed))
+        finally:
+            reset_token_sink(token)
+        count = result.get("prompt_token_count")
+        if type(count) is not int or count < 0 or result.get("ng_context_measured") is not True:
+            raise HTTPException(status_code=502, detail="worker did not acknowledge exact context measurement")
+        return {"prompt_token_count": count}
 
     def get_converter(self) -> "VLLMConverter":
         """Return the converter used for Responses API <-> Chat Completions mapping.
@@ -1387,6 +1446,9 @@ class VLLMModel(SimpleResponsesAPIModel):
         """Publish lineage using the final Chat, Responses, or Messages representation."""
         if self._external_capture_handler is not None:
             await self._external_capture_handler.finalize_response(_jsonable(response))
+            context = current_capture_context()
+            if context is not None and context.framework_owned_context and not context.committed:
+                raise RuntimeError("Framework-owned context requires a committed capture before serving a response")
 
     @staticmethod
     def _require_token_id_list(value: Any, field_name: str) -> List[Any]:
@@ -1968,6 +2030,10 @@ class VLLMModel(SimpleResponsesAPIModel):
         self._session_id_to_client[session_id] = client
         note_generation_backend(getattr(client, "base_url", None))
 
+        context = current_capture_context()
+        if context is not None and context.framework_owned_context:
+            # The cached client is shared with ordinary traffic; scope this to one call.
+            return client.model_copy(update={"retry_requests": False})
         return client
 
     def _hashed_client(self, session_id: str) -> NeMoGymAsyncOpenAI:

@@ -64,6 +64,7 @@ from nemo_gym.token_id_capture.fingerprint import (
     canonicalize_tool_arguments as canonicalize_tool_arguments,
 )
 from nemo_gym.token_id_capture.protocols import (
+    CaptureAdmissionError,
     LineageMatch,
     LineageResolution,
     RolloutRemovalPayload,
@@ -145,7 +146,14 @@ def _custody_columns(record: CallRecord, staging_chain: tuple[str, ...] | list[s
         "output_fingerprint": record.output_fingerprint or None,
         "continuation_fingerprint": record.continuation_fingerprint or None,
         "fingerprint_version": record.fingerprint_version,
+        "replay": record.replay.model_dump(exclude={"schema_version"}) if record.replay is not None else None,
+        "output_items": [item.model_dump(exclude={"schema_version"}) for item in record.output_items]
+        if record.output_items is not None
+        else None,
+        "response_status": record.response_status,
         "finish_reason": record.finish_reason,
+        "last_output_item": record.last_output_item,
+        "capture_key": record.capture_key,
     }
 
 
@@ -169,7 +177,12 @@ def _manifest_from_rows(rollout_id: str, rows: list[dict]) -> dict:
 
     records = []
     failures = []
+    completed = {row["model_call_id"] for row in rows if row.get("staging_key")}
+    attempted = list(dict.fromkeys(row["model_call_id"] for row in rows if row.get("intent")))
+    pending = [row["model_call_id"] for row in rows if row.get("intent") and row["model_call_id"] not in completed]
     for row in rows:
+        if row.get("intent"):
+            continue
         if row.get("failure_reason") is not None:
             failures.append(
                 ManifestFailure(
@@ -218,14 +231,33 @@ def _manifest_from_rows(rollout_id: str, rows: list[dict]) -> dict:
                     output_fingerprint=row.get("output_fingerprint") or None,
                     continuation_fingerprint=row.get("continuation_fingerprint") or None,
                     fingerprint_version=int(row.get("fingerprint_version") or 0),
+                    replay=row.get("replay"),
+                    output_items=row.get("output_items"),
+                    response_status=row.get("response_status"),
+                    last_output_item=row.get("last_output_item"),
                     # Set on rows a checkpoint restore carried over from an earlier attempt.
                     capture_key=row.get("capture_key"),
                     # A row written before the column existed reads as an unstated reason.
                     finish_reason=row.get("finish_reason") or None,
                 )
             )
-    manifest = RolloutManifest(rollout_id=rollout_id, records=records, failures=failures)
+    manifest = RolloutManifest(
+        rollout_id=rollout_id,
+        records=records,
+        failures=failures,
+        attempted_call_ids=attempted,
+        pending_call_ids=pending,
+    )
     return manifest.model_dump(mode="json")
+
+
+def _validate_call_intent(rows: list[dict], model_call_id: str) -> None:
+    if any(row.get("admissions_closed") for row in rows):
+        raise CaptureAdmissionError("Capture admissions are closed for this rollout")
+    if any(row.get("model_call_id") == model_call_id for row in rows):
+        raise CaptureAdmissionError(f"Capture call ID already registered: {model_call_id}")
+    if any(row.get("failure_reason") is not None for row in rows):
+        raise CaptureAdmissionError("Cannot admit a call after failed capture in this attempt")
 
 
 @dataclass
@@ -527,6 +559,23 @@ class InMemoryLineageStore:
     def is_process_shared(self) -> bool:
         return False
 
+    async def begin_call(self, rollout_id: str, model_call_id: str) -> None:
+        """Register one unique call before dispatch; independent calls may overlap."""
+        if rollout_id in self._retired:
+            raise RolloutRetiredError(f"rollout {rollout_id} is retired")
+        rows = self._ledgers.setdefault(rollout_id, [])
+        _validate_call_intent(rows, model_call_id)
+        rows.append({"model_call_id": model_call_id, "intent": True})
+
+    async def close_admissions(self, rollout_id: str) -> dict:
+        """Stop new calls idempotently; admitted calls may still commit."""
+        if rollout_id in self._retired:
+            raise RolloutRetiredError(f"rollout {rollout_id} is retired")
+        rows = self._ledgers.setdefault(rollout_id, [])
+        if not any(row.get("admissions_closed") for row in rows):
+            rows.append({"admissions_closed": True})
+        return _manifest_from_rows(rollout_id, rows)
+
     async def record(self, commit: CaptureLedgerCommit) -> None:
         # Custody rows are token-free (mirrors FileLineageStore): the chain
         # hash covers continuity, so the index keeps tokens only for
@@ -540,7 +589,9 @@ class InMemoryLineageStore:
         # Write-once per model call (CaptureLedger contract): an identical
         # replay is a no-op, any differing field is a conflict. Checked on the
         # full custody row, not just the columns the lineage index keeps.
-        existing = next((r for r in rows if r.get("model_call_id") == record.model_call_id), None)
+        existing = next(
+            (r for r in rows if r.get("model_call_id") == record.model_call_id and not r.get("intent")), None
+        )
         if existing is not None:
             if existing != row:
                 raise ValueError(f"conflicting lineage record for model call {record.model_call_id}")
@@ -1058,6 +1109,31 @@ class FileLineageStore(IncrementalLineageStore):
             ),
         )
 
+    async def begin_call(self, rollout_id: str, model_call_id: str) -> None:
+        """Register one unique call before dispatch; independent calls may overlap."""
+        await asyncio.to_thread(self._begin_call, rollout_id, model_call_id)
+
+    def _begin_call(self, rollout_id: str, model_call_id: str) -> None:
+        with self._locked(rollout_id):
+            if self._is_retired(rollout_id):
+                raise RolloutRetiredError(f"rollout {rollout_id} is retired")
+            rows = self._read(rollout_id)
+            _validate_call_intent(rows, model_call_id)
+            self._append(rollout_id, {"model_call_id": model_call_id, "intent": True}, rows)
+
+    async def close_admissions(self, rollout_id: str) -> dict:
+        """Close new admissions atomically with begin_call and return a snapshot."""
+        return await asyncio.to_thread(self._close_admissions, rollout_id)
+
+    def _close_admissions(self, rollout_id: str) -> dict:
+        with self._locked(rollout_id):
+            if self._is_retired(rollout_id):
+                raise RolloutRetiredError(f"rollout {rollout_id} is retired")
+            rows = self._read(rollout_id)
+            if not any(row.get("admissions_closed") for row in rows):
+                self._append(rollout_id, {"admissions_closed": True}, rows)
+            return _manifest_from_rows(rollout_id, rows)
+
     async def record(self, commit: CaptureLedgerCommit) -> None:
         await asyncio.to_thread(self._record, commit)
 
@@ -1081,7 +1157,11 @@ class FileLineageStore(IncrementalLineageStore):
             if not records and self._is_retired(commit.rollout_id):
                 _log_late_write_dropped(commit.rollout_id, model_call_id, commit.record.staging_key)
                 return
-            matches = [existing for existing in records if existing["model_call_id"] == model_call_id]
+            matches = [
+                existing
+                for existing in records
+                if existing.get("model_call_id") == model_call_id and not existing.get("intent")
+            ]
             if matches:
                 # A replay of a pre-column row remains a no-op. Without the original
                 # output in that row, a reader cannot safely backfill its fallback key.

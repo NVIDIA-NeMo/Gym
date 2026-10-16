@@ -64,7 +64,7 @@ original request and response payloads.
 
 ### Buffered SSE with external token staging
 
-With `token_id_capture.external_staging: true`, captured requests can use `stream: true`
+With `token_id_capture.external_staging: true` and `framework_owned_context: false`, captured requests can use `stream: true`
 on Chat Completions, Responses (including the compaction adapter), and Anthropic Messages.
 Gym requests a complete, non-streaming answer from the inference worker. The worker stages
 training tokens before returning commit coordinates. Gym removes internal token fields,
@@ -83,6 +83,62 @@ fields, so the model server that stages a call and the framework that rebuilds t
 the staged rows must run the same Gym version. A framework whose Gym predates a column the model
 server writes, such as `capture_key` or `finish_reason`, rejects every manifest row as
 `invalid_manifest_row` and masks the rollout.
+
+### Framework-owned context and compaction
+
+A compatible training framework can own exact-token prefix reuse and training-row reconstruction.
+Gym matches source history and effective render options, sending a root when they do not match.
+For a candidate parent, the inference worker verifies the converted-message boundary and any
+required null/empty tool-content equivalence before restoring exact tokens. The harness sends its chosen
+message history, including any compaction. It does not send tokens, segment IDs, or a parent header.
+
+Framework candidates carry an explicit source-match proof. Deploy compatible Gym and RL worker
+revisions together: a missing proof is an error, not permission to assume an exact match.
+Direct roots retain replay evidence and framework safety checks so later calls can continue them.
+
+The framework must configure the worker, shared capture ledger and control bearer token as well as
+these run-wide settings:
+
+```yaml
+token_id_capture:
+  enabled: true
+  external_staging: true
+  external_staging_backend: vllm_worker
+  rebuild_response: false
+  framework_owned_context: true
+```
+
+This requires a framework worker implementing Gym's capture protocol; stock vLLM alone is insufficient.
+Keep the usual per-agent capture opt-in or `all_agents: true`. `rebuild_response: false` preserves
+ordinary rollout output for framework reconstruction instead of Gym's single-chain rebuilding.
+
+| Request | Framework-owned behavior |
+|---|---|
+| Responses with explicit history | Supported, including buffered SSE. |
+| Chat Completions with explicit history | Non-streaming, one choice; omitted or null `n` means one. |
+| `/v1/messages` | Refused with HTTP 422. |
+| Responses `previous_response_id` or `conversation` | Refused with HTTP 422; full input must be visible. |
+| Chat `stream: true` or `n` other than null or 1 | Refused with HTTP 422. |
+
+Independent calls may overlap. Each registers an intent before inference. Failed capture prevents
+further admission in that attempt; a pending call alone does not. After the harness returns, the
+framework calls the bearer-protected `POST /training-token-capture/control/rollouts/{rollout_id}/close`
+then drains already-admitted calls through the manifest endpoint. Closure refuses new generation but
+allows admitted calls to finish. Missing acknowledgements remain pending; failure is not permission
+to delete data that a worker may still be writing. NeMo RL masks an incomplete attempt.
+Closed, failed, or ambiguous admission returns HTTP 409 with a reason instead of a retryable 500.
+Use a fresh attempt ID when restarting a rollout.
+
+The model server also exposes `POST /context/{rollout_id}/measure`. Call it **without** the
+`/ng-rollout/.../training-token-capture` prefix, with a non-streaming Responses request containing
+explicit history. It returns `{"prompt_token_count": N}` using the same candidate and rendering
+path as generation, without registering an intent or writing capture records. This is a count of
+that request, not a reservation against concurrent changes. Idempotent worker tokenization retains
+ordinary retries; captured generation disables them to avoid replaying an uncertain call.
+
+Framework callers should use `run_examples(retry_requests=False)` to avoid automatically replaying
+an entire `/run` after transport failure. This does not prevent a harness from explicitly making a
+new call after a definite, successfully captured response.
 
 ### Rollout-record attachment
 

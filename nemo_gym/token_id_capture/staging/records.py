@@ -19,7 +19,19 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt, StrictStr, ValidationInfo, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    StrictBool,
+    StrictFloat,
+    StrictInt,
+    StrictStr,
+    ValidationInfo,
+    model_serializer,
+    model_validator,
+)
 
 from nemo_gym.token_id_capture.records import (  # noqa: F401  (re-exported for staging consumers)
     LEDGER_ROW_MISSING_CHAIN_HASH_REASON,
@@ -97,6 +109,37 @@ class _DigestWireModel(_WireModel):
     extras_digest_version: Literal[EXTRAS_DIGEST_VERSION] = EXTRAS_DIGEST_VERSION
 
 
+class ReplayItem(_WireModel):
+    """Prompt-content identity before gateway conversion, without media payloads."""
+
+    role: Literal["system", "developer", "user", "assistant", "tool", "envelope"]
+    digest: DigestHex
+    empty_tool_content_digest: DigestHex | None = None
+
+
+class ReplayContext(_WireModel):
+    """Versioned comparison facts; only the framework decides compatibility."""
+
+    normalization_version: Literal[1] = 1
+    items: list[ReplayItem]
+    render_digest: DigestHex | None = None
+
+
+class ReplaySummary(_WireModel):
+    """Bounded evidence for an ordered source history, stored once per call.
+
+    The next request supplies its items transiently so Gym can compare
+    the corresponding prefix. Historical per-item arrays are not persisted.
+    """
+
+    normalization_version: Literal[1] = 1
+    item_count: NonNegativeInt
+    source_digest: DigestHex
+    # Alternate source identity only; RL must prove renderer equivalence.
+    empty_tool_content_digest: DigestHex | None = None
+    render_digest: DigestHex | None = None
+
+
 class GenerationCutContinuation(_WireModel):
     """A checkpointed prefix of the same call, which the worker continues instead of regenerating.
 
@@ -139,17 +182,36 @@ class CaptureAdmission(_WireModel):
     model_call_id: Identifier
     parent_call_id: Identifier | None = None
     prev_len: NonNegativeInt = 0
-    mode: CaptureMode
+    mode: Literal["token_in", "text", "candidate"]
     required_prefix_token_ids: list[StrictInt] = Field(default_factory=list)
     staging_chain: list[str] = Field(default_factory=list)
     parent_chain_hash: DigestHex | None = None
     generation_cut: GenerationCutContinuation | None = None
+    request_replay: ReplayContext | None = None
+    candidate_replay: ReplaySummary | None = None
+    # Gym matched source history; RL qualifies the actual renderer when needed.
+    requires_empty_tool_content_equivalence: StrictBool | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize_admission(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        result = handler(self)
+        # Keep legacy text/token-in payloads compatible with strict older schemas.
+        if self.requires_empty_tool_content_equivalence is None:
+            result.pop("requires_empty_tool_content_equivalence", None)
+        return result
 
     @model_validator(mode="after")
     def _validate_prefix_contract(self) -> Self:
         if any(token_id < 0 for token_id in self.required_prefix_token_ids):
             raise ValueError("required_prefix_token_ids must be non-negative")
-        if self.mode == "token_in":
+        if self.mode == "candidate":
+            if self.request_replay is None or self.candidate_replay is None:
+                raise ValueError("candidate admission requires source request and predecessor evidence")
+            if self.requires_empty_tool_content_equivalence is None:
+                raise ValueError("candidate admission requires an explicit source-match proof")
+        elif self.candidate_replay is not None or self.requires_empty_tool_content_equivalence is not None:
+            raise ValueError("source-match proof is only valid for candidate admissions")
+        if self.mode in ("token_in", "candidate"):
             if self.parent_call_id is None or self.prev_len == 0:
                 raise ValueError("token_in admission requires a parent_call_id and prev_len > 0")
             if self.parent_chain_hash is None:
@@ -379,6 +441,13 @@ class CommitCoords(_DigestWireModel):
         return self
 
 
+class OutputItemEvidence(_WireModel):
+    """Original served item identity and a content witness, without token arrays."""
+
+    id: str | None = None
+    fingerprint: DigestHex
+
+
 class CallRecord(_DigestWireModel):
     """One token-free call manifest row in a rollout's capture ledger."""
 
@@ -407,6 +476,11 @@ class CallRecord(_DigestWireModel):
     # Canonicalization version of the fingerprints above; 0 means none were
     # recorded. Attribution ignores fingerprints from a different version.
     fingerprint_version: NonNegativeInt = 0
+    replay: ReplaySummary | None = None
+    output_items: list[OutputItemEvidence] | None = None
+    response_status: str | None = None
+    last_output_item: dict | None = None
+
     # The capture key this call was staged under, when it is not the receipt's own.
     # A checkpoint restore continues an episode under its next attempt,
     # and the calls made before the checkpoint stay staged under the earlier attempt's key.
@@ -463,6 +537,11 @@ class RolloutManifest(_WireModel):
     rollout_id: Identifier
     records: list[CallRecord] = Field(default_factory=list)
     failures: list[ManifestFailure] = Field(default_factory=list)
+    attempted_call_ids: list[Identifier] = Field(default_factory=list)
+    # No successful custody acknowledgement, not proof that a worker is active
+    # or wrote nothing. A terminal consumer may mask the attempt, but must leave
+    # these calls' possible late staging writes out of immediate cleanup.
+    pending_call_ids: list[Identifier] = Field(default_factory=list)
 
 
 class RolloutRemoval(_WireModel):
@@ -481,6 +560,8 @@ class RolloutReceipt(_DigestWireModel):
     reward: float | None = None
     terminal_model_call_id: Identifier | None = None
     manifest: list[CallRecord] = Field(default_factory=list)
+    attempted_call_ids: list[Identifier] = Field(default_factory=list)
+    pending_call_ids: list[Identifier] = Field(default_factory=list)
     capture_poisoned: bool = False
     failure_reason: str | None = None
     # How ``terminal_model_call_id`` was chosen: ``declared`` when the agent

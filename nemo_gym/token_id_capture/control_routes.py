@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Expose rollout capture manifests and ledger removal over HTTP.
+"""Expose rollout capture manifests, admission closure, and ledger removal over HTTP.
 
 The training framework reads one manifest for each rollout.
-The endpoint returns call metadata and does not read staged token data.
+The endpoints return call metadata and do not read staged token data.
 The framework builds receipts and removes staged data after use.
 It then retires the rollout's ledger, which Gym cannot otherwise know is no longer needed.
 """
@@ -44,7 +44,7 @@ def install_rollout_control_routes(
     auth_token: str,
     refuse_removal: Callable[[], str | None] | None = None,
 ) -> None:
-    """Install the bearer-protected manifest, retire, and delete routes.
+    """Install bearer-protected manifest, admission closure, retire, and delete routes.
 
     ``refuse_removal`` returns a reason to refuse retire and delete for now, with 409; the caller retries later.
     """
@@ -100,6 +100,23 @@ def install_rollout_control_routes(
         check_removal()
         try:
             return await lineage_store.delete(body.rollout_ids)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @router.post("/rollouts/{rollout_id}/close")
+    async def close_admissions(
+        rollout_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict:
+        check_auth(authorization)
+        # Optional ledger extension, like begin_call; ordinary capture is unchanged.
+        close = getattr(lineage_store, "close_admissions", None)
+        if close is None:
+            raise HTTPException(status_code=409, detail="capture ledger cannot close admissions")
+        try:
+            return await close(rollout_id)
+        except RolloutRetiredError as error:
+            raise HTTPException(status_code=410, detail=str(error)) from error
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
 
