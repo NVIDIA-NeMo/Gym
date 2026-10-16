@@ -104,8 +104,15 @@ async def run_verifier(
     diagnostics: list[dict[str, object]],
     *,
     archive_workers: ArchiveWorkers | None = None,
+    max_timeout_sec: float | None = None,
 ) -> dict[str, dict[str, float]]:
     settings = environment.task.config.verifier
+    # A run may cap the task's verifier budget; the smaller applies, and either cut is the same timeout.
+    timeout_sec = settings.timeout_sec
+    budget_note = ""
+    if max_timeout_sec is not None and max_timeout_sec < timeout_sec:
+        timeout_sec = max_timeout_sec
+        budget_note = f" (the run's cap; the task allows {settings.timeout_sec:g})"
     logs = Path(directory) / "verifier"
     await run_local(partial(logs.mkdir, parents=True, exist_ok=True), archive_workers)
 
@@ -125,7 +132,7 @@ async def run_verifier(
         return {"rewards": await run_local(partial(parse_reward, logs), archive_workers)}
 
     try:
-        return await asyncio.wait_for(execute(), timeout=settings.timeout_sec)
+        return await asyncio.wait_for(execute(), timeout=timeout_sec)
     except TimeoutError as exc:
         # Preserve diagnostics on timeout without turning partial reward files
         # into a completed evaluation (the reference aborts this verifier).
@@ -133,4 +140,4 @@ async def run_verifier(
             await download_dir(environment.main, "/logs/verifier", logs, archive_workers=archive_workers)
         except Exception as download_exc:
             diagnostics.append({"operation": "verifier_logs", "error": str(download_exc)})
-        raise VerifierTimeoutError(f"Verifier execution timed out after {settings.timeout_sec} seconds") from exc
+        raise VerifierTimeoutError(f"Verifier execution timed out after {timeout_sec:g} seconds{budget_note}") from exc

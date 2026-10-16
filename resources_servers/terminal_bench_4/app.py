@@ -67,6 +67,9 @@ class TerminalBench4Config(BaseResourcesServerConfig):
     # the attempt left behind. ``zero``: reward 0 without running the verifier, reported as a completed evaluation, so
     # training treats it as a valid failed attempt rather than an incomplete one. Setup timeouts stay errors.
     agent_timeout_reward: Literal["graded", "zero"] = "graded"
+    # Cap on the official verifier's run time, the task's ``[verifier] timeout_sec``: the smaller applies. A verifier the
+    # cap cuts fails like one its own budget cuts (VerifierTimeoutError, an incomplete evaluation). None keeps TB4's rule.
+    verifier_max_timeout_sec: float | None = Field(default=None, gt=0)
 
 
 def atomic_json(path, value):

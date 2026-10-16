@@ -255,6 +255,48 @@ async def test_verifier_timeout_does_not_promote_partial_reward(tmp_path, monkey
     download.assert_awaited_once()
 
 
+def hanging_verifier(timeout_sec):
+    cfg = TaskSettings.model_validate(
+        {
+            "environment": {"docker_image": "a"},
+            "verifier": {"timeout_sec": timeout_sec, "environment": {"docker_image": "v"}},
+        }
+    )
+
+    async def execute(*args, **kwargs):
+        await asyncio.Event().wait()
+
+    return SimpleNamespace(task=SimpleNamespace(config=cfg), exec=execute, main=None)
+
+
+async def test_run_cap_cuts_a_longer_task_verifier_budget(tmp_path, monkeypatch):
+    from resources_servers.terminal_bench_4 import verifier
+
+    monkeypatch.setattr(verifier, "download_dir", AsyncMock())
+    with pytest.raises(VerifierTimeoutError, match=r"after 0\.01 seconds \(the run's cap; the task allows 10800\)"):
+        await asyncio.wait_for(run_verifier(hanging_verifier(10800), tmp_path, [], max_timeout_sec=0.01), timeout=10)
+
+
+async def test_run_cap_never_extends_a_shorter_task_verifier_budget(tmp_path, monkeypatch):
+    from resources_servers.terminal_bench_4 import verifier
+
+    monkeypatch.setattr(verifier, "download_dir", AsyncMock())
+    with pytest.raises(VerifierTimeoutError, match=r"after 0\.01 seconds$"):
+        await asyncio.wait_for(run_verifier(hanging_verifier(0.01), tmp_path, [], max_timeout_sec=1200), timeout=10)
+
+
+async def test_a_verifier_inside_the_run_cap_is_graded(tmp_path):
+    cfg = TaskSettings.model_validate(
+        {
+            "environment": {"docker_image": "a"},
+            "verifier": {"timeout_sec": 10800, "environment": {"docker_image": "v"}},
+        }
+    )
+    env, main, _ = environment(tmp_path / "verifier", cfg)
+    main.path("/tests/test.sh").write_text(f"#!/bin/sh\necho 1 > {main.path('/logs/verifier/reward.txt')}\n")
+    assert await run_verifier(env, tmp_path / "result", [], max_timeout_sec=60) == {"rewards": {"reward": 1}}
+
+
 async def test_transfer_fallbacks_preserve_file_bytes_and_empty_directories(tmp_path):
     from resources_servers.terminal_bench_4.transfers import download_dir, upload_dir
 

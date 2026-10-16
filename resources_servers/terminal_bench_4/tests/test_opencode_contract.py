@@ -579,6 +579,14 @@ def test_agent_timeout_floor_must_be_positive():
     assert opencode.OpenCodeHarnessConfig().agent_timeout_floor_sec is None
 
 
+def test_verifier_cap_is_off_by_default_and_must_be_positive(tmp_path):
+    manifest, _ = local_manifest(tmp_path)
+    assert config(tmp_path, manifest).verifier_max_timeout_sec is None
+    assert config(tmp_path, manifest, verifier_max_timeout_sec=1200).verifier_max_timeout_sec == 1200
+    with pytest.raises(ValidationError):
+        config(tmp_path, manifest, verifier_max_timeout_sec=0)
+
+
 def named_package(path, name):
     source = package(path)
     (source / "task.toml").write_text((source / "task.toml").read_text().replace("terminal-bench/test", name))

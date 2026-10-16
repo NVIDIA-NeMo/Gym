@@ -36,6 +36,7 @@ def make_session(tmp_path, reason="timeout", detail="OpenCode run exceeded its 2
         archive_workers=None,
         directory=tmp_path,
         persist=lambda: None,
+        config=SimpleNamespace(verifier_max_timeout_sec=None),
     )
 
 
@@ -88,6 +89,35 @@ async def test_a_clean_budget_kill_records_no_failure(tmp_path, monkeypatch, qui
     assert "exception_info" not in session.result
     assert session.result["verifier_result"] == {"rewards": {"reward": 0.0}}
     assert any(d.get("exception_type") == "AgentTimeoutError" for d in session.diagnostics)
+
+
+async def test_the_servers_verifier_cap_reaches_the_verifier(tmp_path, monkeypatch, quiet_cleanup):
+    seen = {}
+
+    async def ok_collect(*args, **kwargs):
+        return None
+
+    class Verifier:
+        async def start(self):
+            return None
+
+    async def ok_restore(*args, **kwargs):
+        return None
+
+    async def recording_verifier(*args, **kwargs):
+        seen.update(kwargs)
+        return {"rewards": {"reward": 1.0}}
+
+    monkeypatch.setattr(lifecycle, "collect", ok_collect)
+    monkeypatch.setattr(lifecycle, "restore", ok_restore)
+    monkeypatch.setattr(lifecycle, "run_verifier", recording_verifier)
+    session = make_session(tmp_path, reason="completed", detail=None)
+    session.config = SimpleNamespace(verifier_max_timeout_sec=1200)
+    session.verifier_environment = Verifier()
+    session.task = SimpleNamespace(config=SimpleNamespace(environment=SimpleNamespace(build_timeout_sec=5)))
+    await lifecycle.finalize_session(session, grade=True)
+    assert seen["max_timeout_sec"] == 1200
+    assert session.result["verifier_result"] == {"rewards": {"reward": 1.0}}
 
 
 async def test_non_zero_exit_is_noted_the_same_way(tmp_path, monkeypatch, quiet_cleanup):

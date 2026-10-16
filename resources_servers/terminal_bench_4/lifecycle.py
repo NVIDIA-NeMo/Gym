@@ -282,6 +282,7 @@ async def finalize_session(session, *, grade):
                 session.directory,
                 session.diagnostics,
                 archive_workers=session.archive_workers,
+                max_timeout_sec=session.config.verifier_max_timeout_sec,
             )
         finally:
             session.result["verifier"]["finished_at"] = now()
