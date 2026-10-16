@@ -382,6 +382,11 @@ multipleChoice):
   `compat.supportsReasoningEffort: false`, so Pi's own request carries no `reasoning_effort` whatever
   `thinking:` says (Prompting > Reasoning effort). Label Pi runs "effort not transmitted (adapter)";
   the fix is a change to `responses_api_agents/pi_agent`, outside this benchmark.
+- The search presets' leakage policy binds only the Tavily tools: under the Docker provider (open
+  egress) the agent can search and fetch from bash around it, and Tavily pre-filters at most 150 of
+  the 220 excluded domains, the rest being enforced locally (Sandboxed agents (with tools), Search
+  exclusions). A reproduction-grade with-tools run needs the OpenSandbox provider with
+  `network_access: model_and_tools`.
 - Gateway timeout: the LiteLLM gateway used for the pilot enforces a 360 s per-attempt limit
   (HTTP 408, `litellm.Timeout ... Timeout passed=360.0`) and `openai_model` retries a 408 with a fresh
   generation, so an answer that needs more than six minutes is lost rather than slow (Running the
@@ -628,12 +633,24 @@ support a **comparison, not a reproduction**, of that column:
 - Web tools: Tavily search and page tools with up to 200,000 cached page characters and 2,000-word
   scrolling, instead of exactly `web_search` (at most 20 results) and `web_fetch` (Markdown capped
   at 60,000 characters, no media).
-- Leakage policy: two of upstream's seven blocklist families are enforced (see Search exclusions).
+- Leakage policy: two of upstream's seven blocklist families are enforced in full and the
+  search-engine result-page family approximately; the search provider pre-filters at most 150 of the
+  220 excluded domains and the rest are enforced locally (see Search exclusions).
 - Rows: 728/1000 text rows; image questions cannot be sent through these adapters.
 - Reasoning effort: requested through the harness's own knob; transmitted by OpenCode, not by Pi
   (see Prompting > Reasoning effort).
 
 State these departures next to every number collected with these presets.
+
+**First run of the search presets.** A 10-row `hle_diamond/opencode_search` pilot on 2026-10-16
+(GPT-6 Astra, judge o3-mini, local Docker with host networking, egress unrestricted) was the first
+execution of either search preset. With the code of that day every `web_search` failed on Tavily's
+150-domain limit (Search exclusions > Provider-side cap on excluded domains), so its 9 scored rows
+(8 correct) measure a search tool that returned nothing plus unrestricted bash egress, not a
+with-tools result; the same run exposed the search-engine result-page gap that the SERP rules now
+close. No search-preset number from the committed code exists yet. Before reading any statistic from
+the next pilot, confirm in the Tavily server log that `web_search` returns results: one cap warning
+at start and no `Tavily HTTP 400`.
 
 See the shared
 [OpenCode and Pi setup guide](../../responses_api_agents/opencode_sandboxed_agent/README.md#offline-scientific-evaluation-with-opencode-or-pi)
@@ -648,7 +665,15 @@ these presets:
   (search). Only the OpenSandbox provider enforces those policies; the Docker provider has no
   network policy, so a local Docker run goes through `sandbox_docker_local.yaml`, which switches to
   `network_access: inherit`, and its egress is **not** blocked (verified: an HTTPS request to a
-  public site succeeds inside such a sandbox). Label any such run accordingly.
+  public site succeeds inside such a sandbox). Label any such run accordingly. With open egress the
+  exclusion policy binds only the Tavily tools: in the first `opencode_search` pilot the agent, once
+  `web_search` failed, queried `google.com/search`, `bing.com/search`, `html.duckduckgo.com` and
+  `search.yahoo.com/search` from bash with `python -c "import requests ..."`, downloaded PDFs and
+  images from arbitrary hosts, and used `tavily_scroll_page` on DuckDuckGo result pages as a search
+  engine (one row: 69 scrolls). None of those fetches passes through the policy. A reproduction-grade
+  with-tools run therefore needs the OpenSandbox provider with `network_access: model_and_tools`,
+  under which the sandbox reaches only the model and tool servers, so every fetch goes through the
+  Tavily resource and its policy.
 - Answer exposure: the search presets supply the HLE-Diamond
   [exclusion list](search_exclusions.json), derived from the upstream `docs/blocklist.json` domains
   and URL prefixes by `build_search_exclusions.py` (see Search exclusions below for what is and is
@@ -664,35 +689,79 @@ upstream `docs/blocklist.json` at the revision pinned in the script (`UPSTREAM_C
 snapshot's SHA-256 in `UPSTREAM_BLOCKLIST_SHA256`) onto Gym's format and unions it with
 `benchmarks/hle/search_exclusions.json`, so the Diamond list is at least as strict as Gym's HLE list.
 Gym's Tavily resource (`URLExclusionPolicy`) expresses two rule types, so two of upstream's seven rule
-families are enforced:
+families are enforced in full, one is approximated and four are not enforced; the file holds 220
+`domain` and 118 `url_substring` rules:
 
 | Upstream family | Rules | Gym rule | Enforced |
 | --- | --- | --- | --- |
 | `domains` | 220 | `domain`: exact hostname or any subdomain | yes |
 | `url_prefixes` | 66 | `url_substring`: case-insensitive substring of the URL, scheme and leading `www.` removed; a prefix becomes a substring, so at least as strict | yes |
-| `serp_url_patterns` | 12 | none | no |
+| `serp_url_patterns` | 12 | 14 `url_substring` rules naming each engine's host and search path (`SERP_PATTERN_SUBSTRINGS`) | approximately (below) |
 | `url_patterns` | 22 | none | no |
 | `patterns_case_sensitive` | 4 | none | no |
 | `answer_title_patterns` | 5 | none | no |
 | `answer_title_allow_hosts` | 7 | none | no |
 
-The unrepresented families are recorded by name and count under `unrepresented_upstream_rules` in
-the JSON, a key the parser ignores. The consequences make the search presets a **weaker leakage
-policy than upstream's protocol** (`docs/evaluation-with-tools.md`), and a with-tools number from
-them must be labelled as such:
+The unrepresented families are recorded by name and count under `unrepresented_upstream_rules` and
+the approximation under `approximated_upstream_rules`, keys the parser ignores. The consequences make
+the search presets a **weaker leakage policy than upstream's protocol**
+(`docs/evaluation-with-tools.md`), and a with-tools number from them must be labelled as such:
 
 - Only hostnames and URL substrings are inspected. No search query is refused (upstream refuses
   queries with a blocked `site:` domain or a long verbatim span of the question), and no result title,
   snippet or fetched Markdown is matched against the regex families (upstream rejects pages whose
   text matches `url_patterns` or `patterns_case_sensitive`, e.g. "Humanity's Last Exam" in several
   languages, `cais/hle`, specific arXiv ids and answer-key phrasing).
-- Raw search-engine result pages (`serp_url_patterns`) and answer-key style titles
-  (`answer_title_patterns`) are not filtered.
+- Answer-key style titles (`answer_title_patterns`) are not filtered.
 - The parser percent-decodes a URL and re-checks it, so a `url_substring` embedded in a proxy or
   archive link is caught; a `domain` rule applies to the outer hostname only, so an archive or
   proxy page that wraps a blocked host in its path passes unless a substring rule matches.
 - Upstream blocks GitHub wholesale (`github.com`, `githubusercontent.com`, `gist.github.com`,
   `api.github.com`, `github.io`), and so does this list: the agent cannot fetch any GitHub page.
+
+#### Search-engine result pages
+
+Upstream's `serp_url_patterns` are twelve regexes anchored at the start of the scheme-less URL
+(`^([a-z0-9-]+\.)*bing\.com/search`, ...). The generator approximates each by the `url_substring`
+rules in `SERP_PATTERN_SUBSTRINGS`, keyed by the exact upstream regex so that a changed or new pattern
+is reported and dropped rather than approximated silently: `google.com/search`,
+`scholar.google.com/scholar`, `bing.com/search`, `duckduckgo.com/html`, `duckduckgo.com/lite`,
+`duckduckgo.com/?q=`, `html.duckduckgo.com`, `search.yahoo.com/search`, `baidu.com/s?`, `yandex.`,
+`startpage.com`, `search.brave.com/search`, `ecosia.org/search`, `mojeek.com/search`. With them
+`find_in_page` and `scroll_page` refuse a result page (the pilot's "scroll DuckDuckGo as a search
+engine" pattern) and a result page returned by `web_search` is dropped. Remaining differences:
+
+- Narrower than upstream: Google and Google Scholar are blocked on `.com` only, where upstream
+  matches every Google top-level domain (`google.co.uk/search`, ...).
+- Wider than upstream: `yandex.` blocks every Yandex host and path and any URL containing that text
+  (a page titled "Yandex.Taxi", say), and `startpage.com` blocks the whole host, because a substring
+  cannot express "any path ending in `/search`". Other non-result pages of the engines are left alone
+  (`google.com/maps`, `duckduckgo.com/about`).
+- Not covered: result pages of engines upstream does not list, and anything fetched outside the
+  Tavily tools (the egress gate above).
+
+#### Provider-side cap on excluded domains
+
+Tavily's `/search` accepts at most 150 `exclude_domains` and answers HTTP 400 ("Max 150 domains are
+allowed") beyond that; this list has 220. The first `opencode_search` pilot (2026-10-16) sent every
+domain, so all 11 `web_search` calls failed with `Tavily HTTP 400 after 1 attempts` while
+`find_in_page`/`scroll_page` (Tavily `/extract`, which takes no domain list) worked; Gym's HLE list
+has 9 domains and never reached the limit. The Tavily resource now sends a capped subset:
+
+- `tavily_exclude_domains_limit` (default 150) bounds the provider-side list; `0` or `null` sends no
+  `exclude_domains` at all. Whatever it is set to, the full `domain` and `url_substring` policy is
+  enforced locally on every URL the agent requests and on every URL the provider returns, so the cap
+  changes which results Tavily withholds before ranking, never which pages the agent can see.
+- The subset is deterministic: the domains matching `tavily_exclude_domains_priority` first (default
+  `huggingface.co`, `hf.co`, `lastexam.ai`, `agi.safe.ai`, `safe.ai`, `scale.com`, `*.scale.com`,
+  `github.com`, `githubusercontent.com`, `archive.*`, in that order), then the rest in file order,
+  cut at the limit. On this list that sends the 15 priority hosts and the next 135 in file order; the
+  70 not sent are the last 38 of upstream's parked spam domains (`mistraltms.it` ... `autoklarheit.de`),
+  the social networks (`instagram.com`, `facebook.com`, `x.com`, `reddit.com`, `tiktok.com`,
+  `linkedin.com`, ...), `quora.com`, the StackExchange family, `autobenchaudit.com` and the jsDelivr
+  CDN. A result from one of those is dropped locally, which costs the query a result slot but never
+  shows the page.
+- The server logs one warning per start naming the number of domains not sent (70 here).
 
 Two `url_substring` rules inherited from `benchmarks/hle/search_exclusions.json`
 (`openreview.net/pdf/<40 hex characters>.pdf`) carry OpenReview document ids. They are not secrets,
@@ -702,7 +771,8 @@ they pass the repository's secrets scan unaltered, and they are kept rather than
 Refresh procedure when upstream changes its blocklist: update `UPSTREAM_COMMIT` and
 `UPSTREAM_BLOCKLIST_SHA256` together in `build_search_exclusions.py`, run
 `python benchmarks/hle_diamond/build_search_exclusions.py --download`, review the diff of
-`search_exclusions.json` (a rule family new to the generator is reported as a warning), and run
+`search_exclusions.json` (a rule family new to the generator is reported as a warning; a changed or
+new `serp_url_patterns` regex is reported as dropped until `SERP_PATTERN_SUBSTRINGS` maps it), and run
 `pytest tests/unit_tests/test_hle_diamond_search_exclusions.py`.
 
 ## Tests
@@ -710,6 +780,7 @@ Refresh procedure when upstream changes its blocklist: update `UPSTREAM_COMMIT` 
 ```bash
 pytest tests/unit_tests/test_hle_diamond.py tests/unit_tests/test_hle_diamond_search_exclusions.py \
     resources_servers/equivalence_llm_judge/tests/test_app.py \
+    resources_servers/tavily_search/tests/test_search_policy.py \
     responses_api_models/openai_model/tests/test_reasoning_item_normalizer.py
 ```
 
