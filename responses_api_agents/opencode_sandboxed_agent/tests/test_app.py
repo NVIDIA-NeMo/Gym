@@ -1092,3 +1092,125 @@ def test_rollout_behavior_writes_evidence_and_never_raises(tmp_path) -> None:
     assert anyio.run(_rollout_behavior, body, "") is None
     results_fpath.write_text('{"messages": "not a list"}')
     assert anyio.run(_rollout_behavior, body, str(results_fpath)) is None
+
+
+_OOM_ERROR = (
+    "Failed to run command failed: Sandbox 670ccf7a has ended (OOMKilled): 1/1 observed pods failed | "
+    "[SANDBOX::ENDED] Sandbox 670ccf7a has ended"
+)
+_ENDED_ERROR = "Failed to run command failed: [SANDBOX::ENDED] Sandbox 670ccf7a has ended (Evicted)"
+
+
+@mark.parametrize(
+    "case, expected_reason, expected_exit_code",
+    [
+        ("empty_session_list", "no_session", 127),
+        ("no_sessions", "no_session", 127),
+        ("sandbox_oom", "sandbox_oom", 137),
+        ("sandbox_ended", "sandbox_ended", None),
+    ],
+)
+async def test_unavailable_session_returns_masked_rollout_instead_of_raising(
+    tmp_path, case, expected_reason, expected_exit_code
+):
+    """No OpenCode session, or a sandbox that has ended: an empty, ungraded rollout rather than a retried 500."""
+    config = TestOpenCodeSandboxedAgent()._create_config()
+    config.artifacts_dir = str(tmp_path)
+    server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    sandbox = MagicMock()
+    run_failed = SimpleNamespace(stdout="Shell: bash\nopencode: not found", stderr="boom", return_code=127, error_type=None)
+    if case == "empty_session_list":
+        effects = [run_failed, SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None)]
+    elif case == "no_sessions":
+        effects = [run_failed, SimpleNamespace(stdout="[]", stderr="", return_code=0, error_type=None)]
+    else:
+        error = RuntimeError(_OOM_ERROR if case == "sandbox_oom" else _ENDED_ERROR)
+        effects = [error, error]
+    sandbox.exec = AsyncMock(side_effect=effects)
+    sandbox.download = AsyncMock()
+    server._sandbox_id_to_sandbox = {"session": sandbox}
+    server._create_opencode_config = AsyncMock(return_value={})
+    request = SimpleNamespace(
+        cookies={"sandbox_id": "session"}, session={SESSION_ID_KEY: "session"}, state=SimpleNamespace()
+    )
+    body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}])
+
+    response = await server.responses(request, body)
+
+    assert response.output == []
+    sandbox.download.assert_not_awaited()
+    run_result = server._sandbox_id_to_run_result["session"]
+    assert run_result["_ng_sandbox_lost"] == expected_reason
+    assert run_result["opencode_error_type"] == expected_reason
+    assert run_result["opencode_exit_code"] == expected_exit_code
+    assert run_result["opencode_failed"] and not run_result["opencode_export_found"]
+    receipt = json.loads((tmp_path / "session" / "generation.json").read_text())
+    assert receipt["execution"]["opencode_error_type"] == expected_reason
+    assert "_ng_sandbox_lost" not in receipt["execution"]
+
+
+async def test_other_session_list_failures_still_raise(tmp_path):
+    """A failing `session list` command (not an ended sandbox) keeps the retryable error."""
+    config = TestOpenCodeSandboxedAgent()._create_config()
+    config.artifacts_dir = str(tmp_path)
+    server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    sandbox = MagicMock()
+    sandbox.exec = AsyncMock(
+        side_effect=[
+            SimpleNamespace(stdout="Shell: bash\nOpenCode run finished", stderr="", return_code=0, error_type=None),
+            SimpleNamespace(stdout="", stderr="db locked", return_code=1, error_type=None),
+        ]
+    )
+    server._sandbox_id_to_sandbox = {"session": sandbox}
+    server._create_opencode_config = AsyncMock(return_value={})
+    request = SimpleNamespace(
+        cookies={"sandbox_id": "session"}, session={SESSION_ID_KEY: "session"}, state=SimpleNamespace()
+    )
+    body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}])
+    with raises(RuntimeError, match="Failed to export OpenCode results"):
+        await server.responses(request, body)
+    assert server._sandbox_id_to_run_result == {}
+
+
+async def test_run_masks_unavailable_session_without_grading(monkeypatch):
+    config = TestOpenCodeSandboxedAgent()._create_config()
+    seed = MagicMock(cookies={})
+    seed.json = AsyncMock(return_value={})
+    client = MagicMock(spec=ServerClient)
+    client.post = AsyncMock(return_value=seed)
+    server = OpenCodeSandboxedAgent(config=config, server_client=client)
+    sandbox = MagicMock(stop=AsyncMock(side_effect=RuntimeError("sandbox already ended")))
+    server._start_sandbox = AsyncMock(return_value=sandbox)
+    response = NeMoGymResponse(
+        id="lost", created_at=0, model="test", object="response", output=[], tool_choice="auto", tools=[],
+        parallel_tool_calls=True,
+    )
+
+    async def lost_response(*args):
+        server._sandbox_id_to_run_result["trial"] = {
+            "opencode_results_fpath": "",
+            "opencode_run_stdout": "",
+            "opencode_run_stderr": "",
+            "opencode_finished": False,
+            "opencode_export_found": False,
+            "opencode_failed": True,
+            "opencode_error_type": "sandbox_oom",
+            "opencode_exit_code": 137,
+            "_ng_sandbox_lost": "sandbox_oom",
+        }
+        return response
+
+    monkeypatch.setattr(OpenCodeSandboxedAgent, "responses", lost_response)
+    monkeypatch.setattr(app_module, "raise_for_status", AsyncMock())
+    request = MagicMock(cookies={}, session={SESSION_ID_KEY: "trial"})
+    request.state = SimpleNamespace()
+    body = OpenCodeSandboxedAgentRunRequest(responses_create_params={"input": [{"role": "user", "content": "Solve"}]})
+    result = await server.run(request, body)
+    assert result.reward == 0.0
+    assert result.mask_sample
+    assert result.opencode_exit_code == 137 and result.opencode_error_type == "sandbox_oom"
+    assert "sandbox_oom" in result.model_dump()["failure_reason"]
+    # Declares a terminal response no captured call has, so the trainer never trains the rollout's rows.
+    assert result.model_dump()["terminal_response_id"] == "unavailable:sandbox_oom"
+    assert client.post.await_count == 1  # seed_session only: the verifier is not called
+    sandbox.stop.assert_awaited_once()

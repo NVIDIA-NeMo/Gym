@@ -41,6 +41,8 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.failure_kinds import AGENT_RUN_ERROR
+from nemo_gym.token_id_capture.delivery import TERMINAL_RESPONSE_ID_KEY
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -499,6 +501,28 @@ async def _rollout_behavior(body: BaseRunRequest, results_fpath: str) -> Optiona
         return None
 
 
+# Why a rollout's OpenCode session could not be exported although the failure is neither the
+# model's nor transient: the agent's sandbox no longer exists (killed for memory, or ended for
+# another reason), or `opencode session list` comes back without a session (seen after runs that
+# finished normally in some repos, e.g. the PowerShell modules d365fo.tools and VSTeam: the run's
+# session is not listed afterwards). Retrying repeats the same failure, so these rollouts come back masked, reward 0
+# and ungraded (see _lost_sandbox_response and _run), and they are kept out of training: their
+# result declares a terminal response id no captured call has, which poisons the token-capture
+# receipt, so the trainer turns every row of the rollout into a placeholder that never trains
+# (even rows it did capture) -- their reward was never measured. A sandbox OOM also reports exit
+# code 137, as an agent OOM does. Any other export failure still raises.
+SANDBOX_OOM = "sandbox_oom"
+SANDBOX_ENDED = "sandbox_ended"
+NO_SESSION = "no_session"
+
+
+def _sandbox_lost_reason(error_text: str) -> Optional[str]:
+    """``SANDBOX_OOM`` / ``SANDBOX_ENDED`` when a sandbox exec error says the sandbox has ended."""
+    if "SANDBOX::ENDED" in error_text or "has ended" in error_text:
+        return SANDBOX_OOM if "OOMKilled" in error_text else SANDBOX_ENDED
+    return None
+
+
 def _extract_opencode_session_id(session_list_stdout: str) -> str:
     """Return the newest OpenCode session ID from ``session list`` JSON output."""
     sessions = json.loads(session_list_stdout)
@@ -894,6 +918,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             print("Starting OpenCode (runtime configuration omitted to protect credentials)", file=sys.stderr)
 
         run_error_type = None
+        run_error_text = ""
         run_started = perf_counter()
         try:
             result = await sandbox.exec(
@@ -903,6 +928,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         except Exception as exc:
             result = None
             run_error_type = type(exc).__name__
+            run_error_text = str(exc)
             print("OpenCode exec hit error.", format_exc(), file=sys.stderr)
         opencode_run_time_taken = perf_counter() - run_started
 
@@ -921,6 +947,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         # diff`, which would sweep this transcript into the patch.
         export_remote_fpath = f"/tmp/opencode_{export_fname}"
         export_started = perf_counter()
+        lost_reason = None
         try:
             session_env = {"XDG_DATA_HOME": remote_data_home} if remote_data_home is not None else None
             session_list_result = await sandbox.exec(
@@ -930,7 +957,12 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             )
             if session_list_result.return_code != 0:
                 raise RuntimeError(f"Failed to list OpenCode sessions: {session_list_result}")
-            session_id = _extract_opencode_session_id(session_list_result.stdout or "")
+            try:
+                session_id = _extract_opencode_session_id(session_list_result.stdout or "")
+            except ValueError:
+                # Listed fine but holds no session (also seen after a completed run).
+                lost_reason = NO_SESSION
+                raise
             export_result = await sandbox.exec(
                 command=(
                     "export PATH=$HOME/.opencode/bin:$PATH "
@@ -939,8 +971,21 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 env=session_env,
                 timeout_s=self.config.sandbox_timeout,
             )
-        except Exception:
-            raise RuntimeError("Failed to export OpenCode results") from None
+        except Exception as exc:
+            lost_reason = lost_reason or _sandbox_lost_reason(f"{run_error_text} {exc}")
+            if lost_reason is None:
+                raise RuntimeError("Failed to export OpenCode results") from None
+        if lost_reason is not None:
+            return self._lost_sandbox_response(
+                request,
+                body,
+                lost_reason,
+                result=result,
+                run_error_type=run_error_type,
+                run_time_taken=opencode_run_time_taken,
+                export_started=export_started,
+                observation_invocation_id=observation_invocation_id if collect_observations else None,
+            )
         if export_result.return_code != 0 or export_result.error_type:
             raise RuntimeError("OpenCode export command failed")
         if self.config.debug and export_result:
@@ -1108,6 +1153,80 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         pending.replace(results_dir / "generation.json")
         return response
 
+    def _lost_sandbox_response(
+        self,
+        request: Request,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        reason: str,
+        *,
+        result: Any,
+        run_error_type: Optional[str],
+        run_time_taken: float,
+        export_started: float,
+        observation_invocation_id: Optional[str],
+    ) -> NeMoGymResponse:
+        """Empty response for a rollout whose sandbox is gone or never ran OpenCode (see SANDBOX_OOM)."""
+        result_stdout = (result.stdout if result else "") or ""
+        result_stderr = (result.stderr if result else "") or ""
+        print(
+            f"OpenCode session unavailable ({reason}): rollout masked, not graded or retried. "
+            f"run_error={run_error_type} return_code={getattr(result, 'return_code', None)}\n"
+            f"run stdout tail:\n{result_stdout[-2000:]}\nrun stderr tail:\n{result_stderr[-2000:]}",
+            file=sys.stderr,
+        )
+        run_result = {
+            "opencode_failed": True,
+            "opencode_exit_code": 137 if reason == SANDBOX_OOM else getattr(result, "return_code", None),
+            "opencode_error_type": reason,
+            "opencode_results_fpath": "",
+            "opencode_run_stdout": result_stdout,
+            "opencode_run_stderr": result_stderr,
+            "opencode_export_found": False,
+            "opencode_finished": False,
+            "opencode_context_limited": False,
+            "opencode_run_time_taken": run_time_taken,
+            "opencode_export_time_taken": perf_counter() - export_started,
+            "opencode_tool_time_taken": 0.0,
+            "opencode_num_task_calls": 0,
+            "_ng_sandbox_lost": reason,
+        }
+        if observation_invocation_id is not None:
+            trajectory = TrajectoryRecord(task_id="", rollout_id=observation_invocation_id)
+            trajectory.gaps.append(ObservationGap(code="turns_unavailable"))
+            run_result["_ng_trajectory"] = trajectory
+            run_result["_ng_agent_observations"] = AgentObservationBundle(
+                source="opencode",
+                records=[AgentInvocation(invocation_id=observation_invocation_id, status="failed")],
+                gaps=[
+                    ObservationGap(code="agent_artifact_unavailable"),
+                    ObservationGap(code="agent_transcript_unavailable"),
+                    ObservationGap(code="model_call_ownership_unavailable"),
+                ],
+            )
+        self._sandbox_id_to_run_result[request.cookies["sandbox_id"]] = run_result
+        response = NeMoGymResponse(
+            id=f"resp_{uuid4().hex}",
+            created_at=int(time()),
+            model=body.model or self.config.model_server.name,
+            object="response",
+            output=[],
+            tool_choice=body.tool_choice,
+            tools=body.tools,
+            parallel_tool_calls=body.parallel_tool_calls,
+            usage=None,
+        )
+        results_root = (
+            Path(self.config.artifacts_dir) if self.config.artifacts_dir else Path(__file__).parent / "results"
+        )
+        results_dir = results_root / request.session[SESSION_ID_KEY]
+        results_dir.mkdir(parents=True, exist_ok=True)
+        receipt = {
+            "response": response.model_dump(mode="json"),
+            "execution": {key: value for key, value in run_result.items() if not key.startswith("_ng_")},
+        }
+        (results_dir / "generation.json").write_text(json.dumps(receipt))
+        return response
+
     async def run(
         self, request: Request, body: OpenCodeSandboxedAgentRunRequest
     ) -> OpenCodeSandboxedAgentVerifyResponse:
@@ -1161,16 +1280,30 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             run_result = self._sandbox_id_to_run_result.get(session_key, {}).copy()
             observations = run_result.pop("_ng_agent_observations", None)
             trajectory = run_result.pop("_ng_trajectory", None)
+            lost_reason = run_result.pop("_ng_sandbox_lost", None)
             verify_started = perf_counter()
-            response_dict = await verify_agent_response(
-                self.server_client,
-                self.config.resources_server,
-                body,
-                response,
-                cookies,
-                force_zero_reward=self.config.execution_failure_reward_zero
-                and run_result.get("opencode_failed", False),
-            )
+            if lost_reason is not None:
+                # Nothing to grade, and the verifier would need the agent's sandbox: an
+                # infrastructure-masked zero (BaseVerifyResponse.mask_sample), not a retried 500.
+                response_dict = body.model_dump(mode="json") | {
+                    "response": response.model_dump(mode="json"),
+                    "reward": 0.0,
+                    "mask_sample": True,
+                    "failure_kind": AGENT_RUN_ERROR,
+                    "failure_reason": f"OpenCode session unavailable ({lost_reason}); masked, not graded.",
+                    # An id no captured call carries: the receipt is poisoned and no row trains.
+                    TERMINAL_RESPONSE_ID_KEY: f"unavailable:{lost_reason}",
+                }
+            else:
+                response_dict = await verify_agent_response(
+                    self.server_client,
+                    self.config.resources_server,
+                    body,
+                    response,
+                    cookies,
+                    force_zero_reward=self.config.execution_failure_reward_zero
+                    and run_result.get("opencode_failed", False),
+                )
             verify_time_taken = perf_counter() - verify_started
         finally:
             del request.state._ng_observation_invocation_id
