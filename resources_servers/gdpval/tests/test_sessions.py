@@ -290,24 +290,27 @@ def test_a_file_that_cannot_be_downloaded_fails_the_verification_and_persists_no
     assert list((tmp_path / "persist" / "task_task-1").iterdir()) == [], "no partial directory is left behind"
 
 
-def test_a_retry_after_a_failed_download_replaces_nothing_and_then_succeeds(server, root, tmp_path):
+def test_a_failed_download_removes_an_earlier_tree_so_a_retry_cannot_reuse_it(server, root, tmp_path):
     client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
     _post_seed(client, _seed(tmp_path))
     task_dir = persisted_layout.repeat_dir(tmp_path / "persist", "task-1", 1)
     task_dir.mkdir(parents=True)
-    (task_dir / "stale.txt").write_text("from an earlier attempt")
+    (task_dir / persisted_layout.FINISH_PARAMS_FILE).write_text('{"reason": "an earlier run"}')
+    (task_dir / "report.docx").write_text("another model's deliverable")
     (root / "report.md").write_text("the report")
     client.post("/finish", json={"reason": "done", "paths": ["report.md"]})
     (root / "report.md").unlink()
 
     assert client.post("/verify", json=_verify_body().model_dump(mode="json")).status_code == 500
-    assert _files(task_dir) == {"stale.txt": "from an earlier attempt"}, "a failed collection leaves the old directory"
+    assert not task_dir.exists(), "the failed collection leaves no tree to reuse"
+    reuse = _verify_body(reuse_cached_deliverable=True, ng_rollout_index=1)
+    assert TestClient(server.setup_webserver()).post("/verify", json=reuse.model_dump(mode="json")).status_code == 404
 
     (root / "report.md").write_text("the report")
     verified = _verify(client)
 
     assert Path(verified["deliverables_dir"]) == task_dir
-    assert "stale.txt" not in _files(task_dir) and _files(task_dir)["report.md"] == "the report"
+    assert "report.docx" not in _files(task_dir) and _files(task_dir)["report.md"] == "the report"
 
 
 def test_sessions_keep_their_finish_calls_and_files_apart(server, root, tmp_path):

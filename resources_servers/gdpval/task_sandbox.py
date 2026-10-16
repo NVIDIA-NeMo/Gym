@@ -96,7 +96,8 @@ async def collect_deliverables(
     Files land under their base names, so a later path with the same name replaces an earlier one, and a reference
     file replaces a submitted file at the same path. A file
     that cannot be downloaded raises, since `/finish` confirmed it exists. ``task_dir`` is built beside its
-    final place and renamed into it, so a failure never leaves a partial directory. ``finish_params.json``
+    final place and renamed into it, so a failure never leaves a partial directory, and removes ``task_dir``
+    too. ``finish_params.json``
     holds ``null`` when the agent never finished.
     """
     staging = task_dir.with_name(f".{task_dir.name}.{uuid.uuid4().hex}")
@@ -113,6 +114,8 @@ async def collect_deliverables(
     except BaseException:
         # Synchronous so a second cancellation cannot interrupt the cleanup.
         shutil.rmtree(staging, ignore_errors=True)
+        # A multistage retry reuses the persisted tree, so leave none rather than an earlier run's.
+        shutil.rmtree(task_dir, ignore_errors=True)
         raise
 
 
