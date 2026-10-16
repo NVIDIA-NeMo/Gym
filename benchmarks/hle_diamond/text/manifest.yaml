@@ -1,0 +1,33 @@
+name: hle_diamond/text
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: knowledge
+description: HLE-Diamond text-only variant, the 728 of 1000 questions without an image across the
+  reasoning and knowledge partitions, templated with the HLE prompt and graded by LLM-as-a-judge
+  sliced by partition.
+modality: text
+licensing: MIT
+authors:
+- rshahbazyan
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+config_path: ../text.yaml
+resources_server: equivalence_llm_judge
+agent_server: simple_agent
+datasets:
+- name: hle_diamond_text
+  type: benchmark
+  jsonl_fpath: benchmarks/hle_diamond/data/hle_diamond_benchmark_text.jsonl
+  prepare_script: benchmarks/hle_diamond/prepare_text.py
+  prompt_config: benchmarks/hle/prompts/default.yaml
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+standard_prompt_config: benchmarks/hle/prompts/default.yaml
+lifecycle: active

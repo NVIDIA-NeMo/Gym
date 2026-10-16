@@ -1,0 +1,28 @@
+# HLE-Diamond text variant: the 728 questions without an image, carried as raw fields and
+# templated at rollout time with the HLE prompt (prompt_config). Composes config.yaml so the
+# judge resources server instance is shared by every hle_diamond preset (judge_openai.yaml
+# repoints that single instance); only the dataset-bearing agent is swapped.
+config_paths:
+  - benchmarks/hle_diamond/config.yaml
+
+hle_diamond_equivalence_llm_judge_simple_agent: null
+
+hle_diamond_text_equivalence_llm_judge_simple_agent:
+  _inherit_from: equivalence_llm_judge_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: hle_diamond_equivalence_llm_judge_resources_server
+      datasets:
+      - name: hle_diamond_text
+        type: benchmark
+        jsonl_fpath: benchmarks/hle_diamond/data/hle_diamond_benchmark_text.jsonl
+        prompt_config: benchmarks/hle/prompts/default.yaml
+        prepare_script: benchmarks/hle_diamond/prepare_text.py
+        num_repeats: 1
+
+hle_diamond_equivalence_llm_judge_environment_server:
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: hle_diamond_text_equivalence_llm_judge_simple_agent

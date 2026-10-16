@@ -1,0 +1,51 @@
+# HLE-Diamond: the full 1000-question cais/hle-diamond set (500 reasoning + 500 knowledge),
+# image questions included. Rows are fully materialized by prepare.py (the HLE prompt is
+# baked into responses_create_params.input and image questions carry an input_image block),
+# so prompt_config is null. Evaluating this default requires a vision-capable policy model;
+# use hle_diamond/text for the 728 questions without an image.
+# Grading reuses the official HLE judge prompt and the equivalence_llm_judge resources server,
+# with accuracy additionally sliced by the dataset's reasoning / knowledge partition.
+config_paths:
+  - resources_servers/equivalence_llm_judge/configs/equivalence_llm_judge.yaml
+
+hle_diamond_equivalence_llm_judge_resources_server:
+  _inherit_from: equivalence_llm_judge
+  resources_servers:
+    equivalence_llm_judge:
+      judge_model_server:
+        type: responses_api_models
+        name: policy_model
+      judge_responses_create_params:
+        input: []
+      judge_system_message: ""
+      judge_equal_label: "Judgement: yes"
+      judge_not_equal_label: "Judgement: no"
+      judge_prompt_template_fpath: ../../benchmarks/hle/prompts/judge.txt
+      response_extract_regex: null
+      question_extract_regex: null
+      check_twice_swap: false
+      use_per_record_regex: false
+      # Emit slices/partition/{reasoning,knowledge}/mean/reward next to the headline mean/reward.
+      report_slice_fields:
+        - partition
+
+hle_diamond_equivalence_llm_judge_simple_agent:
+  _inherit_from: equivalence_llm_judge_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: hle_diamond_equivalence_llm_judge_resources_server
+      datasets:
+      - name: hle_diamond
+        type: benchmark
+        jsonl_fpath: benchmarks/hle_diamond/data/hle_diamond_benchmark.jsonl
+        prompt_config: null
+        prepare_script: benchmarks/hle_diamond/prepare.py
+        num_repeats: 1
+
+hle_diamond_equivalence_llm_judge_environment_server:
+  _inherit_from: equivalence_llm_judge_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: hle_diamond_equivalence_llm_judge_simple_agent
