@@ -86,12 +86,29 @@ Local and sandbox execution share `runtime.OPENCODE_VERSION` and the model-call
 correlation plugin. The plugin is uploaded into each sandbox when model-call
 observability is enabled. Sessions disable automatic updates and models.dev fetches.
 
-The runner uses ordinary sandbox `exec`, with an internal deadline and a Linux
-subreaper to clean detached tool processes. Close succeeds only after confirmed
-cleanup; uncertain cleanup remains retryable and blocks verification. Successful
-close receipts are retained for `session_close_retry_window_seconds` (default 300).
+The runner uses ordinary sandbox `exec`, with an internal deadline.
+The supervisor stops live harness-group processes and reaps its children. On timeout
+or close it preserves children already adopted before the stop, typically services from
+completed tools, and drains newly adopted children within the cleanup deadline, including
+tools in separate sessions. The sandbox owner stops the preserved services later.
+Natural CLI exit cannot distinguish unfinished tools in other sessions from services;
+those processes may still change task files. The stop-time cutoff also has adoption/PID
+races and cannot classify later service forks. It is not a security boundary.
+The CLI must exit before
+SQLite observations are captured; services must use task-owned files rather than the
+agent session directory, which close removes. Capture requires confirmed termination.
+Missing evidence remains retryable; a final negative receipt skips capture and verification
+but permits connection release. Successful close receipts are retained for `session_close_retry_window_seconds` (default 300).
 Session state is process-local; use one worker. Provider TTL and the episode owner
 handle abandoned sessions. Process cleanup is not a hostile-code security boundary.
+
+Tool shells retain the task HOME and XDG directories through the shell environment hook,
+so home-directory deliverables survive agent close. The CLI keeps private HOME and XDG
+directories for configuration and SQLite state, including its separate `~/.opencode` lookup.
+Use absolute paths for native file tools and shell `workdir`; CLI-side tilde resolution uses
+its private HOME. The adapter requires a fresh successful-initialization receipt from
+the task environment hook before accepting a gradable result. A missing or invalid
+receipt fails the activation even if the CLI ignored a plugin-loading error.
 
 The session path accepts one text task, optional system/developer text and
 `instructions`. Unsupported controls, images, history replay and required external

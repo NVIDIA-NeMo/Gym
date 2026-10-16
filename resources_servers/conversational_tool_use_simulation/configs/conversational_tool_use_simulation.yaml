@@ -48,6 +48,7 @@ conversational_tool_use_simulation:
       enable_termination: true
       verification_type: message
       enforce_transfer_ground_truth: true
+      fallback_first_user_message: true
 
 conversational_tool_use_agent:
   responses_api_agents:

@@ -44,7 +44,10 @@ class ReasoningGymVerifyResponse(BaseVerifyResponse):
 
 
 class ReasoningGymResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
+    # Each verification scores the answer with its reasoning_gym task: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     config: ReasoningGymResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:

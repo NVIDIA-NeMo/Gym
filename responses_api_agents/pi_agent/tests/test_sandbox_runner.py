@@ -17,7 +17,7 @@ from nemo_gym.agent_utils import process_supervisor
 from responses_api_agents.pi_agent import sandbox_runner
 
 
-pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux subreaper and /proc are required")
+pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux process supervision is required")
 
 
 def launch(tmp_path, code, timeout=3, python=sys.executable, env=None):
@@ -81,49 +81,68 @@ def test_capture_and_stdin(tmp_path):
 
 
 @pytest.mark.skipif(shutil.which("python3.8") is None, reason="Python 3.8 is not installed")
-def test_python38_preserves_environment_and_reaps_detached_child(tmp_path, monkeypatch):
-    monkeypatch.setenv("PI_TEST_INHERITED", "inherited")
-    monkeypatch.setenv("PI_TEST_OVERRIDE", "old")
-    code = (
-        "import json,os,pathlib,subprocess,sys; "
-        "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],start_new_session=True); "
-        "pathlib.Path('child.pid').write_text(str(p.pid)); "
-        "print(json.dumps({'inherited':os.environ['PI_TEST_INHERITED'],"
-        "'override':os.environ['PI_TEST_OVERRIDE'],'prompt':sys.stdin.read()}))"
-    )
-    process = launch(tmp_path, code, python=shutil.which("python3.8"), env={"PI_TEST_OVERRIDE": "new"})
-    summary = result(tmp_path, process)
-    assert summary["return_code"] == 0, summary
-    assert summary["cleanup_confirmed"] is True
-    _, event = json.loads((tmp_path / "events.jsonl").read_text())
-    assert event == {"inherited": "inherited", "override": "new", "prompt": "task input"}
-    with pytest.raises(ProcessLookupError):
-        os.kill(int((tmp_path / "child.pid").read_text()), 0)
+def test_python38_preserves_environment_and_task_child(tmp_path, monkeypatch):
+    try:
+        monkeypatch.setenv("PI_TEST_INHERITED", "inherited")
+        monkeypatch.setenv("PI_TEST_OVERRIDE", "old")
+        code = (
+            "import json,os,pathlib,subprocess,sys; "
+            "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],start_new_session=True); "
+            "pathlib.Path('child.pid').write_text(str(p.pid)); "
+            "print(json.dumps({'inherited':os.environ['PI_TEST_INHERITED'],"
+            "'override':os.environ['PI_TEST_OVERRIDE'],'prompt':sys.stdin.read()}))"
+        )
+        process = launch(tmp_path, code, python=shutil.which("python3.8"), env={"PI_TEST_OVERRIDE": "new"})
+        summary = result(tmp_path, process)
+        assert summary["return_code"] == 0, summary
+        assert summary["cleanup_confirmed"] is True
+        _, event = json.loads((tmp_path / "events.jsonl").read_text())
+        assert event == {"inherited": "inherited", "override": "new", "prompt": "task input"}
+        pid = int((tmp_path / "child.pid").read_text())
+        assert Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+    finally:
+        if (tmp_path / "child.pid").exists():
+            try:
+                os.kill(int((tmp_path / "child.pid").read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
 
 @pytest.mark.parametrize("ending", ["natural", "timeout", "cancel"])
-def test_detached_descendants_are_gone_before_receipt(tmp_path, ending):
-    # The grandchild starts a new session, escaping process-group-only cleanup.
-    code = (
-        "import subprocess,sys,time,pathlib; "
-        "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],start_new_session=True); "
-        "pathlib.Path('child.pid').write_text(str(p.pid)); " + ("time.sleep(60)" if ending != "natural" else "pass")
-    )
-    # Allow the nested interpreters to start before testing descendant cleanup,
-    # including when subprocess coverage adds interpreter startup overhead.
-    process = launch(tmp_path, code, timeout=3)
-    if ending == "cancel":
-        for _ in range(200):
-            if (tmp_path / "child.pid").exists():
-                break
-            time.sleep(0.01)
-        process.send_signal(signal.SIGTERM)
-    summary = result(tmp_path, process)
-    assert summary["cleanup_confirmed"] is True
-    assert summary["timed_out"] is (ending == "timeout")
-    pid = int((tmp_path / "child.pid").read_text())
-    with pytest.raises(ProcessLookupError):
-        os.kill(pid, 0)
+def test_task_descendants_survive_until_owner_teardown(tmp_path, ending):
+    try:
+        # A completed tool leaves its detached service adopted before close.
+        tool = (
+            "import pathlib,subprocess,sys; "
+            "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],"
+            "start_new_session=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); "
+            "pathlib.Path('child.pid').write_text(str(p.pid))"
+        )
+        code = (
+            "import subprocess,sys,time,pathlib; "
+            f"subprocess.run([sys.executable,'-c',{tool!r}],check=True); "
+            "pathlib.Path('ready').touch(); " + ("time.sleep(60)" if ending != "natural" else "pass")
+        )
+        # Allow the nested interpreters to start before testing harness termination,
+        # including when subprocess coverage adds interpreter startup overhead.
+        process = launch(tmp_path, code, timeout=3)
+        if ending == "cancel":
+            for _ in range(200):
+                if (tmp_path / "ready").exists():
+                    break
+                time.sleep(0.01)
+            process.send_signal(signal.SIGTERM)
+        summary = result(tmp_path, process)
+        assert summary["cleanup_confirmed"] is True
+        assert summary["timed_out"] is (ending == "timeout")
+        pid = int((tmp_path / "child.pid").read_text())
+        assert Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+    finally:
+        if (tmp_path / "child.pid").exists():
+            try:
+                os.kill(int((tmp_path / "child.pid").read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
 
 def test_spawn_error_is_not_success(tmp_path):
