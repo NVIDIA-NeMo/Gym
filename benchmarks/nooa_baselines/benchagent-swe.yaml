@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Compatibility selector for the default BenchAgent and its invocation adapter.
+# Standard NOOA requirements install the matching core, CLI, and benchmark packages.
+swebench_pro_nooa_agent:
+  responses_api_agents:
+    nooa_agent:
+      nooa:
+        agent_class: nooa_bench.bench_agent:BenchAgent
+        invocation_adapter: responses_api_agents.nooa_agent.bench_agent_adapter:invoke_bench_agent
+        execution_mode: sandboxed
+        init_kwargs: {}
