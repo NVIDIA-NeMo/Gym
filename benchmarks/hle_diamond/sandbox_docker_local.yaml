@@ -3,12 +3,17 @@
 # ============================================================================================
 # Composable override that runs the hle_diamond sandboxed presets (opencode, opencode_search, pi,
 # pi_search) on the LOCAL Docker sandbox provider instead of OpenSandbox, for smoke tests and
-# pilots on a workstation. It declares no dataset, so it is not discovered by `gym list benchmarks`;
-# compose it after a preset:
+# pilots on a workstation. It declares no dataset, so it is not discovered by `gym list benchmarks`.
+# Pass it, together with judge_openai.yaml (otherwise the policy grades itself), as ONE raw Hydra
+# token: the CLI appends raw tokens after the --benchmark and --model-type configs, so the override
+# merges last and wins. Never pass it with `--config <file>`: --config is translated before
+# --benchmark in this Gym version, so the search presets' network_access (model_and_tools, which
+# fails closed on the Docker provider) and their "internet is disabled" note would silently win.
 #
 #   export OPENSANDBOX_API_KEY=unused-local-docker OPENSANDBOX_DOMAIN=unused.invalid  # see below
 #   export OPENCODE_SANDBOX_IMAGE=gym-opencode-science:local   # or PI_SANDBOX_IMAGE for the pi presets
-#   gym eval run --benchmark hle_diamond/opencode --config benchmarks/hle_diamond/sandbox_docker_local.yaml ...
+#   gym eval run --benchmark hle_diamond/opencode --split benchmark \
+#       '+config_paths=[benchmarks/hle_diamond/judge_openai.yaml,benchmarks/hle_diamond/sandbox_docker_local.yaml]' ...
 #
 # What this changes, and why every run through it must be labelled
 # "local Docker; egress not restricted; comparison infrastructure only":

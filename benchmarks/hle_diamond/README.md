@@ -203,8 +203,19 @@ policy gateway (`policy_base_url` / `policy_api_key` from `env.yaml`) serving
 the single `hle_diamond_equivalence_llm_judge_resources_server` that every preset shares:
 
 ```bash
-gym eval run --benchmark hle_diamond --config benchmarks/hle_diamond/judge_openai.yaml ...
+gym eval run --benchmark hle_diamond --split benchmark '+config_paths=[benchmarks/hle_diamond/judge_openai.yaml]' ...
 ```
+
+Composition order is load-bearing. The presets set `judge_model_server` directly and a later entry in
+`config_paths` overrides an earlier one (`GlobalConfigDictParser.load_extra_config_paths`), so the
+override has to merge after the preset. The raw Hydra token above does: the CLI appends raw tokens
+after every translated flag (`--benchmark`, `--model-type`), wherever the token stands on the command
+line. `--config <file>` does not: in this Gym version the CLI translates `--config` before
+`--benchmark`, so a `--config` override merges first and silently loses every key the preset sets
+(`judge_model_server`; for the search presets also `network_access` and the environment note). Never
+pass `judge_openai.yaml` or `sandbox_docker_local.yaml` with `--config`;
+`tests/unit_tests/test_hle_diamond.py` composes the commands in this README through the CLI's own flag
+translation to keep that true.
 
 ## Harness validation
 
@@ -217,11 +228,15 @@ Model-free checks that have been run (commands below, from the repository root):
   rendering exactly the upstream `SYSTEM_PROMPT` and `prepare.py` baking exactly it; config
   discovery and composition, the judge prompt path, manifests, the reasoning-effort knobs of all
   four sandboxed presets, `sandbox_docker_local.yaml` resolving to exactly the Docker provider with
-  inherited networking while the unused harness's block stays inert; the partition slices through
+  inherited networking while the unused harness's block stays inert; the run commands of this README
+  parsed from the file and composed through the CLI's own flag translation (the judge and Docker
+  overrides merge after the preset and win, the `--config` form merges first and loses, every
+  documented command carries `--split benchmark`); the partition slices through
   `compute_aggregate_metrics`; and the production row shape (`/verify` reply through
   `SimpleAgentVerifyResponse` into the slices). Mutation-checked: changing one word of the prompt,
   lowering either effort knob to `medium`, breaking the count check, the limit truncation, the
-  response field echo or the slice hook each makes tests fail.
+  response field echo or the slice hook, switching a README command to `--config` or dropping its
+  `--split benchmark` each makes tests fail.
 - `tests/unit_tests/test_hle_diamond_search_exclusions.py`: the generator's normalisation, dedup and
   audit trail; the rendered and the committed list loading through the real Tavily parser and
   blocking load-bearing hosts; the committed list being at least as strict as `benchmarks/hle`'s;
@@ -263,16 +278,18 @@ part of the command is load-bearing:
 
 - `--split benchmark` is required: the dataset is `type: benchmark` and the CLI has no default split
   (without it: `gym eval run: error: missing required configuration: split`).
-- `--config benchmarks/hle_diamond/judge_openai.yaml` makes the dedicated judge grade; without it
-  the policy grades itself and the number must be labelled self-judged. `--config` composes the file
-  after the preset (it is `+config_paths=[...]`), so the override's keys win.
+- `'+config_paths=[benchmarks/hle_diamond/judge_openai.yaml]'` makes the dedicated judge grade; without it
+  the policy grades itself and the number must be labelled self-judged. It has to be the raw Hydra
+  token, which the CLI appends after the `--benchmark` and `--model-type` configs so the override
+  merges last and wins; `--config <file>` merges before the preset and loses (see Scoring >
+  Dedicated judge).
 - `++responses_create_params.reasoning.effort=high` is the one sampling setting; no `--temperature`,
   `--top-p` or `--max-output-tokens` (see Prompting > Reasoning effort for how to label the run).
 - `--num-repeats 1`; `--limit 20` for the pilot, then the full set.
 
 ```bash
 gym eval run --benchmark hle_diamond --split benchmark --model-type openai_model \
-    --config benchmarks/hle_diamond/judge_openai.yaml \
+    '+config_paths=[benchmarks/hle_diamond/judge_openai.yaml]' \
     --num-repeats 1 --limit 20 \
     ++policy_model_name=<gateway model id> \
     ++responses_create_params.reasoning.effort=high \
@@ -308,8 +325,7 @@ export OPENCODE_ARTIFACTS_DIR=/abs/path/oc-artifacts          # PI_ARTIFACTS_DIR
 mkdir -p /abs/path/model-calls
 
 gym eval run --benchmark hle_diamond/opencode --split benchmark --model-type openai_model \
-    --config benchmarks/hle_diamond/judge_openai.yaml \
-    --config benchmarks/hle_diamond/sandbox_docker_local.yaml \
+    '+config_paths=[benchmarks/hle_diamond/judge_openai.yaml,benchmarks/hle_diamond/sandbox_docker_local.yaml]' \
     --num-repeats 1 --limit 20 \
     ++policy_model_name=<gateway model id> \
     ++responses_create_params.reasoning.effort=high \
@@ -317,6 +333,9 @@ gym eval run --benchmark hle_diamond/opencode --split benchmark --model-type ope
     --output results/hle_diamond_opencode_pilot.jsonl
 ```
 
+- Both overrides travel in one raw `+config_paths` token so they merge after the preset (see
+  Scoring > Dedicated judge); with `--config` the search presets' `network_access: model_and_tools`
+  would win and fail closed on the Docker provider, and the model would be told internet is disabled.
 - `sandbox_docker_local.yaml` defines a second provider block, `sandbox_docker` (the content of
   `nemo_gym/sandbox/providers/docker/configs/docker.yaml`), because the composed `sandbox:` block
   cannot be removed or re-typed by an override, and repoints `hle_diamond_opencode_agent` and

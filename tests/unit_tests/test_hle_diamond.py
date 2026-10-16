@@ -15,6 +15,8 @@
 """HLE-Diamond benchmark: preparation, config composition and partition slices."""
 
 import json
+import re
+import shlex
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -342,13 +344,15 @@ LISTED_BENCHMARKS = {
 JUDGE_SERVER = "hle_diamond_equivalence_llm_judge_resources_server"
 
 
-def _resolve(*config_files: str):
-    """Resolve hle_diamond config files the way listing does (runtime-only values tolerated)."""
-    initial = OmegaConf.merge(
-        GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
-        {"config_paths": [f"benchmarks/hle_diamond/{name}" for name in config_files]},
-    )
+def _resolve_paths(config_paths: list[str]):
+    """Compose config paths in the given order the way listing does (runtime-only values tolerated)."""
+    initial = OmegaConf.merge(GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT, {"config_paths": config_paths})
     return _parse_no_environment_tolerating_unset_values(initial)
+
+
+def _resolve(*config_files: str):
+    """Resolve hle_diamond config files, in the given order, the way listing does."""
+    return _resolve_paths([f"benchmarks/hle_diamond/{name}" for name in config_files])
 
 
 class TestConfigs:
@@ -520,6 +524,123 @@ class TestLocalDockerOverride:
 
         discovered = {p.name for p in _benchmark_config_paths(BENCHMARKS_DIR) if p.is_relative_to(HLE_DIAMOND_DIR)}
         assert discovered == {"config.yaml", "text.yaml", "opencode.yaml", "pi.yaml"}
+
+
+README = HLE_DIAMOND_DIR / "README.md"
+OVERRIDE_FILES = ("judge_openai.yaml", "sandbox_docker_local.yaml")
+CONFIG_PATHS_PREFIX = "+config_paths=["
+
+
+def _documented_command_lines() -> list[str]:
+    """Every documented `gym eval run` line (full commands and `...` fragments) in the README and in the
+    two override headers, with backslash continuations joined and comment markers stripped."""
+    lines: list[str] = []
+    for path in (README, *(HLE_DIAMOND_DIR / name for name in OVERRIDE_FILES)):
+        text = re.sub(r"\\\n#?[ \t]*", " ", path.read_text(encoding="utf-8"))
+        lines += [line.strip().lstrip("# ") for line in text.splitlines() if "gym eval run " in line]
+    return lines
+
+
+def _documented_run_commands() -> dict[str, list[str]]:
+    """The README's complete `gym eval run` commands (fenced bash blocks, no `...` elision) as argv lists
+    without the leading `gym`, keyed by their --benchmark value; placeholders become parseable tokens."""
+    commands: dict[str, list[str]] = {}
+    for block in re.findall(r"```bash\n(.*?)```", README.read_text(encoding="utf-8"), flags=re.DOTALL):
+        for line in block.replace("\\\n", " ").splitlines():
+            line = line.strip()
+            if line.startswith("gym eval run ") and not line.endswith("..."):
+                argv = shlex.split(line.replace("<gateway model id>", "policy"))[1:]
+                commands[argv[argv.index("--benchmark") + 1]] = argv
+    return commands
+
+
+def _cli_config_paths(argv: list[str]) -> tuple[list[str], object]:
+    """The config_paths `gym eval run <argv>` composes, produced by the CLI's own flag translation and
+    coalescing (nemo_gym.cli.main.main), plus the parsed namespace."""
+    from nemo_gym.cli.main import _is_positional_hydra_override, _merge_config_paths, build_parser
+
+    args, overrides = build_parser().parse_known_args(["eval", "run", *argv])
+    translated = [token for flag in args._command.flags for token in flag.translate_to_hydra(args)]
+    # main() restores a bare Hydra override that argparse captured as the optional TARGET positional.
+    if args.target and _is_positional_hydra_override(args.target):
+        overrides = [args.target, *overrides]
+    (token,) = [t for t in _merge_config_paths(translated + overrides) if t.startswith(CONFIG_PATHS_PREFIX)]
+    return token[len(CONFIG_PATHS_PREFIX) : -1].split(","), args
+
+
+class TestDocumentedCommands:
+    """The README's run commands, composed exactly as `gym eval run` composes them (D31).
+
+    The presets set `judge_model_server` (and the search presets `network_access` and the environment
+    note) directly, and a later sibling in config_paths wins, so the overrides must merge after the
+    preset. The raw `+config_paths=[...]` token is appended after every translated flag (--benchmark,
+    --model-type) wherever it stands on the command line; `--config` is translated before --benchmark
+    in this Gym version, so a `--config` override merges first and loses those keys.
+    """
+
+    COMMANDS = _documented_run_commands()
+
+    @pytest.mark.parametrize("benchmark", sorted(COMMANDS))
+    def test_readme_commands_compose_the_overrides_after_the_preset_so_they_win(self, benchmark, monkeypatch):
+        monkeypatch.delenv("HLE_DIAMOND_JUDGE_MODEL", raising=False)
+        paths, args = _cli_config_paths(self.COMMANDS[benchmark])
+
+        assert args.split == "benchmark"
+        names = [Path(p).name for p in paths]
+        (preset,) = [
+            p
+            for p in paths
+            if Path(p).resolve().parent == HLE_DIAMOND_DIR.resolve() and Path(p).name not in OVERRIDE_FILES
+        ]
+        assert names.index(Path(preset).name) < names.index("judge_openai.yaml")
+
+        resolved = _resolve_paths(paths)
+        assert (
+            get_first_server_config_dict(resolved, JUDGE_SERVER)["judge_model_server"]["name"]
+            == "hle_diamond_judge_model"
+        )
+        if "sandbox_docker_local.yaml" in names:
+            assert names.index(Path(preset).name) < names.index("sandbox_docker_local.yaml")
+            agent_name = BenchmarkConfig.from_config_path(Path(preset), strict=False).agent_name
+            agent = get_first_server_config_dict(resolved, agent_name)
+            assert (agent["sandbox_provider"], agent["network_access"]) == ("sandbox_docker", "inherit")
+            assert list(resolve_provider_config(agent["sandbox_provider"], resolved)) == ["docker"]
+            note = agent["sandbox_config"]["files"].get("/tmp/nemo-gym-environment.txt") or agent["system_prompt"]
+            assert "NOT restricted" in note and "disabled" not in note
+
+    @pytest.mark.parametrize(
+        ("benchmark", "override"),
+        [("hle_diamond", "judge_openai.yaml"), ("hle_diamond/opencode_search", "sandbox_docker_local.yaml")],
+    )
+    def test_config_flag_merges_before_the_preset_so_the_overrides_lose(self, benchmark, override, monkeypatch):
+        """Why no documented command passes these files with --config. If this fails, the CLI's flag order
+        changed: re-check the README's composition-order paragraph before deleting this case."""
+        monkeypatch.delenv("HLE_DIAMOND_JUDGE_MODEL", raising=False)
+        # --config placed last on the command line still lands first in config_paths.
+        paths, _ = _cli_config_paths(
+            ["--benchmark", benchmark, "--split", "benchmark", "--config", f"benchmarks/hle_diamond/{override}"]
+        )
+        assert Path(paths[0]).name == override
+
+        resolved = _resolve_paths(paths)
+        if override == "judge_openai.yaml":
+            assert get_first_server_config_dict(resolved, JUDGE_SERVER)["judge_model_server"]["name"] == "policy_model"
+        else:
+            agent = get_first_server_config_dict(resolved, "hle_diamond_opencode_agent")
+            assert agent["network_access"] == "model_and_tools"
+            assert "disabled" in agent["sandbox_config"]["files"]["/tmp/nemo-gym-environment.txt"]
+
+    def test_every_documented_run_line_carries_split_and_the_raw_override_token(self):
+        lines = _documented_command_lines()
+        assert len(lines) >= 4  # the README's full commands and fragment, and both override headers
+
+        for line in lines:
+            assert "--split benchmark" in line, line
+            assert "--config " not in line, line  # merges before the preset: never for these overrides
+            if any(name in line for name in OVERRIDE_FILES):
+                assert f"'{CONFIG_PATHS_PREFIX}" in line, line
+            if "sandbox_docker_local.yaml" in line:
+                assert "judge_openai.yaml" in line, line  # otherwise a copied command self-judges
 
 
 def _judge_server(report_slice_fields: list[str]) -> LLMJudgeResourcesServer:
