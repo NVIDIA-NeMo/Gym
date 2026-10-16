@@ -157,7 +157,8 @@ def control(checkpoint_id: str = "c1", *, timeout: float = 5, **extra: Any) -> d
 def provider(monkeypatch: MonkeyPatch) -> SnapshotProvider:
     provider = SnapshotProvider()
     monkeypatch.setattr("resources_servers.swebench.app.get_global_config_dict", lambda: {})
-    monkeypatch.setattr("resources_servers.swebench.app.resolve_provider_config", lambda *_: provider)
+    monkeypatch.setattr("nemo_gym.sandbox.owner.get_global_config_dict", lambda: {})
+    monkeypatch.setattr("nemo_gym.sandbox.owner.resolve_provider_config", lambda *_: provider)
     monkeypatch.setattr("resources_servers.swebench.app.resolve_provider_metadata", lambda *_: {})
     monkeypatch.setattr("resources_servers.swebench.app.patch_swebench_multilingual_sandbox", AsyncMock())
     monkeypatch.setattr(
