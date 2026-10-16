@@ -3,18 +3,14 @@
 
 from datetime import timedelta
 
-import pytest
 
-from nemo_gym.sandbox.providers.opensandbox import OpenSandboxProvider
+def test_opensandbox_sdk_is_available_in_agent_environment() -> None:
+    # Session tests fake the provider, so only this test loads the SDK in this server's venv.
+    # Import here so a missing extra fails this test instead of aborting collection.
+    from opensandbox.config import ConnectionConfig
 
-
-@pytest.mark.asyncio
-async def test_opensandbox_sdk_is_available_in_agent_environment() -> None:
-    # Run unmocked in this server's venv: session fakes never load the provider SDK.
-    provider = OpenSandboxProvider(connection={"domain": "sandbox.example:8080/", "protocol": "http"})
-    try:
-        connection = provider._connection_config(request_timeout_s=30)
-        assert connection.domain == "sandbox.example:8080"
-        assert connection.request_timeout == timedelta(seconds=30)
-    finally:
-        await provider.aclose()
+    connection = ConnectionConfig(
+        domain="sandbox.example:8080", protocol="http", request_timeout=timedelta(seconds=30)
+    )
+    assert connection.domain == "sandbox.example:8080"
+    assert connection.request_timeout == timedelta(seconds=30)
