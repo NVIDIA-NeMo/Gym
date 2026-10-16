@@ -303,6 +303,8 @@ async def _close_provider(provider: Any) -> None:
 
 
 class CritPtCustomGraderServer(SimpleResourcesServer):
+    ray_enabled = False  # grading runs in sandboxes through Gym's sandbox API; no Ray in the verify path
+
     config: CritPtCustomGraderConfig
     _grader: Any = PrivateAttr(default=None)
     _provider: Any = PrivateAttr(default=None)

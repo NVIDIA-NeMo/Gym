@@ -7,12 +7,14 @@ import os
 import pytest
 
 from resources_servers.critpt_custom_grader import reference_cache
+from resources_servers.critpt_custom_grader.execution import Grader
 from resources_servers.critpt_custom_grader.reference_cache import CachedReference, ReferenceCache
 from resources_servers.critpt_custom_grader.runner import EXIT_COMPLETED, EXIT_TIMEOUT
 from resources_servers.critpt_custom_grader.task_data import TaskData
 from resources_servers.critpt_custom_grader.tests.support import (
     CANDIDATE,
     VALUE,
+    ScriptedProvider,
     compare_result,
     exited,
     happy_script,
@@ -56,21 +58,27 @@ def reversed_keys(node):
     return node
 
 
-def key_of(task=None, policy=None, *, runtime="rt", image="img", rtol=None, atol=None):
+PROVIDER = "pkg.Provider"
+
+
+def key_of(task=None, policy=None, *, runtime="rt", image="img", rtol=None, atol=None, provider_class=PROVIDER):
     task = make_task() if task is None else task
     policy = make_policy() if policy is None else policy
-    return ReferenceCache.key(task, policy, runtime, image, rtol, atol)
+    return ReferenceCache.key(task, policy, runtime, image, rtol, atol, provider_class=provider_class)
 
 
-def test_key_covers_task_policy_runtime_image_and_defaults():
-    base = ReferenceCache.key(make_task(), make_policy(), "rt", "img", None, None)
+def test_key_covers_task_policy_runtime_image_provider_and_defaults():
+    base = ReferenceCache.key(make_task(), make_policy(), "rt", "img", None, None, provider_class=PROVIDER)
     assert len(base) == 64
-    assert base != ReferenceCache.key(other_task(), make_policy(), "rt", "img", None, None)
-    assert base != ReferenceCache.key(make_task(), make_policy(suite_timeout_s=3600), "rt", "img", None, None)
-    assert base != ReferenceCache.key(make_task(), make_policy(), "rt2", "img", None, None)
-    assert base != ReferenceCache.key(make_task(), make_policy(), "rt", "img:2", None, None)
-    assert base != ReferenceCache.key(make_task(), make_policy(), "rt", "img", "5e-12", "0")
-    assert base == ReferenceCache.key(make_task(), make_policy(), "rt", "img", None, None)
+    assert base != ReferenceCache.key(other_task(), make_policy(), "rt", "img", None, None, provider_class=PROVIDER)
+    assert base != ReferenceCache.key(
+        make_task(), make_policy(suite_timeout_s=3600), "rt", "img", None, None, provider_class=PROVIDER
+    )
+    assert base != ReferenceCache.key(make_task(), make_policy(), "rt2", "img", None, None, provider_class=PROVIDER)
+    assert base != ReferenceCache.key(make_task(), make_policy(), "rt", "img:2", None, None, provider_class=PROVIDER)
+    assert base != ReferenceCache.key(make_task(), make_policy(), "rt", "img", None, None, provider_class="pkg.Other")
+    assert base != ReferenceCache.key(make_task(), make_policy(), "rt", "img", "5e-12", "0", provider_class=PROVIDER)
+    assert base == ReferenceCache.key(make_task(), make_policy(), "rt", "img", None, None, provider_class=PROVIDER)
 
 
 def _change_expected_value(data):
@@ -119,6 +127,7 @@ def test_key_does_not_depend_on_the_key_order_of_the_task_dict():
 
 KEYED_POLICY_FIELDS = [
     ("interpreter", "/usr/bin/python3"),
+    ("exec_user", "other"),
     ("memory_limit_mib", 3072),
     ("cpu_time_limit_s", 1700),
     ("max_processes", 32),
@@ -356,3 +365,55 @@ async def test_spec_fields_outside_the_key_leave_it_alone():
     base = await grader_key(**OPERATOR_SPEC)
     assert await grader_key(**OPERATOR_SPEC) == base  # the same spec, built again
     assert await grader_key(**OPERATOR_SPEC, ttl_s=900, metadata={"team": "x"}) == base
+
+
+class OtherProvider(ScriptedProvider):
+    """Another provider class over the same scripted plane, with the same ``name``: a second runtime."""
+
+
+def disk_grader(directory, script, provider_class=ScriptedProvider, **spec_fields):
+    """A grader over a new cache on ``directory``, as a later server process builds it."""
+    provider = provider_class(script)
+    cache = ReferenceCache(str(directory))
+    return Grader(make_policy(), provider=provider, spec=make_spec(**spec_fields), reference_cache=cache), provider
+
+
+def mismatch_script():
+    return {
+        ("result", "reference"): [run_result("completed", [VALUE, VALUE])],
+        ("result", "comparator"): [compare_result(["invalid_reference", "equal"], side="reference")],
+    }
+
+
+def test_the_provider_is_named_by_its_class_not_its_name_attribute():
+    named = reference_cache.provider_class_name
+    assert OtherProvider.name == ScriptedProvider.name
+    assert named(ScriptedProvider({})) == f"{ScriptedProvider.__module__}.ScriptedProvider"
+    assert named(OtherProvider({})) != named(ScriptedProvider({}))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider_class", "image"),
+    [(OtherProvider, "example/grader:test"), (ScriptedProvider, "example/grader:other")],
+    ids=["provider", "image"],
+)
+async def test_the_same_task_under_another_runtime_is_a_separate_persisted_entry(tmp_path, provider_class, image):
+    grader, _ = disk_grader(tmp_path, happy_script())
+    assert (await grader.grade(make_task(), CANDIDATE)).category == "passed"
+    grader, provider = disk_grader(tmp_path, happy_script(), provider_class, image=image)
+    assert (await grader.grade(make_task(), CANDIDATE)).category == "passed"
+    assert len(runner_execs(provider, "reference")) == 1  # the first runtime's passed preflight was not read
+    assert len(list(tmp_path.glob("*.json"))) == 2  # one persisted entry per runtime
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_persisted_under_one_provider_is_never_read_under_another(tmp_path):
+    grader, _ = disk_grader(tmp_path, mismatch_script())
+    assert (await grader.grade(make_task(), CANDIDATE)).category == "reference_mismatch"
+    grader, provider = disk_grader(tmp_path, happy_script(), OtherProvider)  # same task, image, policy and name
+    result = await grader.grade(make_task(), CANDIDATE)
+    assert result.category == "passed" and len(runner_execs(provider, "reference")) == 1
+    grader, provider = disk_grader(tmp_path, {})  # the first provider again, in a later process
+    assert (await grader.grade(make_task(), CANDIDATE)).category == "reference_mismatch"
+    assert runner_execs(provider, "reference") == []  # its own entry was read: the reference did not run

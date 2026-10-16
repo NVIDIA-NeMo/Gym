@@ -452,12 +452,11 @@ async def test_a_refusal_class_without_a_requested_user_is_provider_create(refus
     assert provider.closed == ["fake-candidate-1"]  # start_with_setup stopped the sandbox
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "failure, category", [(exited(1), "provider_create"), (ValueError("user"), "exec_user_unsupported")]
-)
-async def test_a_failed_setup_whose_stop_also_fails_is_delete_failed(failure, category):
-    provider = ScriptedProvider({("stop", "candidate"): RuntimeError("stop failed")})
+SETUP_FAILURES = [(exited(1), "provider_create"), (ValueError("user"), "exec_user_unsupported")]
+
+
+def fail_setup(provider, failure):
+    """The setup hook's ``mkdir -p`` returns ``failure``, or raises it when it is an exception."""
     scripted = provider.exec
 
     async def setup_fails(handle, command, **kwargs):
@@ -468,12 +467,72 @@ async def test_a_failed_setup_whose_stop_also_fails_is_delete_failed(failure, ca
         return failure
 
     provider.exec = setup_fails
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure, category", SETUP_FAILURES)
+async def test_a_failed_setup_whose_stop_also_fails_is_delete_failed(failure, category):
+    stops = []
+
+    async def failing_stop():
+        stops.append(1)
+        raise RuntimeError("stop failed")
+
+    provider = ScriptedProvider({("stop", "candidate"): failing_stop})  # every stop fails
+    fail_setup(provider, failure)
+    dom = domain(provider)
+    with pytest.raises(sd.Unscorable) as info:
+        await dom.create()
+    assert info.value.category == category and provider.closed == [] and stops == [1]
+    assert dom.cleanup == "delete_failed" and dom.sandbox_id == "fake-candidate-1"
+    assert await dom.close() == "delete_failed" and stops == [1, 1]  # close() retried the stop
+    assert dom.sandbox_id == "fake-candidate-1" and provider.sandboxes["fake-candidate-1"]["live"]  # until the ttl
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure, category", SETUP_FAILURES)
+async def test_close_retries_the_stop_of_a_failed_setup(failure, category):
+    provider = ScriptedProvider({("stop", "candidate"): [RuntimeError("transient")]})  # only the first stop fails
+    fail_setup(provider, failure)
     dom = domain(provider)
     with pytest.raises(sd.Unscorable) as info:
         await dom.create()
     assert info.value.category == category and provider.closed == []
-    assert dom.cleanup == "delete_failed" and dom.sandbox_id == "fake-candidate-1"  # live until the spec's ttl
-    assert await dom.close() == "delete_failed"
+    assert dom.cleanup == "delete_failed" and dom.sandbox_id == "fake-candidate-1"
+    assert await asyncio.gather(dom.close(), dom.close()) == ["deleted", "deleted"]  # concurrent closers: one retry
+    assert provider.closed == ["fake-candidate-1"] and dom.sandbox_id == "fake-candidate-1"
+    assert await dom.close() == "deleted" and provider.closed == ["fake-candidate-1"]  # a deleted domain stays so
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_stop_of_a_failed_setup_is_retried_at_close():
+    async def cancel_self():
+        asyncio.current_task().cancel()
+        await asyncio.sleep(10)
+
+    provider = ScriptedProvider({("stop", "candidate"): [cancel_self]})  # the first stop is cancelled
+    fail_setup(provider, exited(1))
+    dom = domain(provider)
+    with pytest.raises(asyncio.CancelledError):
+        await dom.create()
+    assert dom.cleanup == "delete_failed" and dom.sandbox_id == "fake-candidate-1"
+    assert await dom.close() == "deleted" and provider.closed == ["fake-candidate-1"]
+
+
+@pytest.mark.asyncio
+async def test_the_sandbox_of_a_failed_setup_is_kept_for_close_alone():
+    provider = ScriptedProvider({("stop", "candidate"): [RuntimeError("transient")]})
+    fail_setup(provider, exited(1))
+    dom = domain(provider)
+    with pytest.raises(sd.Unscorable):
+        await dom.create()
+    with pytest.raises(RuntimeError):
+        await dom.upload({"job.json": b"{}"})
+    with pytest.raises(sd.Unscorable) as info:
+        await dom.run("run", 300)
+    assert info.value.category == "provider_exec"
+    assert provider.sandboxes["fake-candidate-1"]["files"] == {}
+    assert not any("runner.py" in call["command"] for call in provider.exec_calls)
 
 
 @pytest.mark.asyncio

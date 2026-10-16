@@ -224,7 +224,9 @@ reference does not reproduce its own expectation). Unscorable, non-terminal (`pr
 The reference cache holds a passed preflight and exactly two refusals, `task_invalid` and `reference_mismatch`: facts
 about the task itself. Every other unscorable category describes the infrastructure or the configuration, so it is
 never cached. The key covers the task, the policy limits that reach the runner, the runtime files, the operator's
-`sandbox_spec.files` and `sandbox_spec.env`, the image and the default tolerance.
+`sandbox_spec.files` and `sandbox_spec.env`, the default tolerance and the runtime the reference ran in (the
+provider's class, the image, `execution.interpreter` and `execution.exec_user`), so an entry persisted under one
+provider or image is never read under another.
 
 ## Recovery
 

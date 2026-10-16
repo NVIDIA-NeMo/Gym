@@ -31,7 +31,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from nemo_gym import failure_kinds
 from nemo_gym.sandbox.providers.base import SandboxProvider, SandboxSpec
 
-from .reference_cache import CachedReference, ReferenceCache
+from .reference_cache import CachedReference, ReferenceCache, provider_class_name
 from .runner import (
     CLEANUP_BUDGET_S,
     COMPARE_MODE,
@@ -465,6 +465,7 @@ class Grader:
         self._default_atol = default_atol
         self._cache = reference_cache
         self._runtime_digest = _runtime_digest(spec)
+        self._provider_class = provider_class_name(provider)  # names the runtime in the cache key with the image
         self._semaphore = asyncio.Semaphore(policy.max_concurrent_jobs)
         self._draining = False
         self._live: set[SandboxDomain] = set()
@@ -537,7 +538,13 @@ class Grader:
         key, cached = None, None
         if self._cache is not None:
             key = ReferenceCache.key(
-                task, policy, self._runtime_digest, self._spec.image, self._default_rtol, self._default_atol
+                task,
+                policy,
+                self._runtime_digest,
+                self._spec.image,
+                self._default_rtol,
+                self._default_atol,
+                provider_class=self._provider_class,
             )
             cached = self._cache.get(key)
             if cached is not None and cached.refusal is not None and cached.refusal not in CACHED_REFUSALS:

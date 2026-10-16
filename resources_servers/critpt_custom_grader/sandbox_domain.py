@@ -7,9 +7,10 @@ directory ``<spec.workdir>/<job>-<domain>`` made in the setup hook, ``upload`` w
 ``run`` executes the fixed runner invocation as ``exec_user`` and returns the provider-reported exit together with
 the bounded result bytes, and ``close`` stops it. A result carrying ``error_type``, a raised provider error or a
 missing exit is "no process exit" (``provider_exec``), never a verdict; an exit the protocol pairs with no result
-is ``<domain>_no_result``; a file above ``RESULT_BYTES_LIMIT`` is ``transfer_limit``. Orphan protection is the
-spec's ``ttl_s`` plus the metadata labels; there is no journal. A provider exception turned into a category is logged
-by class name only: its message may carry provider text.
+is ``<domain>_no_result``; a file above ``RESULT_BYTES_LIMIT`` is ``transfer_limit``. A sandbox whose stop did not
+complete, the stop after a failed setup included, keeps its facade, so the next ``close`` retries the stop; the spec's
+``ttl_s`` plus the metadata labels are the backstop, and there is no journal. A provider exception turned into a
+category is logged by class name only: its message may carry provider text.
 """
 
 import asyncio
@@ -89,6 +90,7 @@ class SandboxDomain:
             provider_options=dict(spec.provider_options),
         )
         self._sandbox: AsyncSandbox | None = None
+        self._created = False  # a facade kept after a failed create is there for close() alone
         self.sandbox_id: str | None = None
         self.cleanup = "not_created"
         self.wall_time_s = 0.0
@@ -117,22 +119,28 @@ class SandboxDomain:
 
         try:
             await asyncio.wait_for(sandbox.start_with_setup(self._spec, setup), timeout=self.policy.create_timeout_s)
-        except Exception as exc:
+        except BaseException as exc:
             # start_with_setup stops a sandbox whose setup failed and providers destroy half-created sandboxes. A
-            # handle the facade could not stop stays live until the spec's ttl, so it is reported, never "not_created".
+            # handle whose stop failed or was cancelled is still live: the domain keeps its facade, so close() retries
+            # the stop, and reports it as delete_failed until a stop succeeds, never "not_created". The spec's ttl
+            # stays the backstop.
             handle = getattr(sandbox, "_handle", None)
             if handle is not None and not getattr(sandbox, "_stopped", False):
+                self._sandbox = sandbox
                 self.sandbox_id = getattr(handle, "sandbox_id", None)
                 self.cleanup = "delete_failed"
+            if not isinstance(exc, Exception):
+                raise  # a cancellation propagates as it came
             logger.warning("sandbox domain %s: create failed (%s)", self.name, type(exc).__name__)
             raise Unscorable("exec_user_unsupported" if user_refused else "provider_create") from None
         self._sandbox = sandbox
+        self._created = True
         handle = getattr(sandbox, "_handle", None)
         self.sandbox_id = getattr(handle, "sandbox_id", None)
         self.cleanup = "created"
 
     def _box(self) -> AsyncSandbox:
-        if self._sandbox is None:
+        if self._sandbox is None or not self._created:
             raise RuntimeError("domain not created")
         return self._sandbox
 

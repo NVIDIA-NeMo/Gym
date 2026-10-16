@@ -2,10 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """Per-task cache of the reference-and-preflight outcome, so a task's reference runs once per process.
 
-The key digests everything that can change a reference verdict: the canonical task data, the policy numbers that
-reach the runner, the runtime files with the operator's sandbox files and environment (the caller folds them into
-``runtime_digest``), the image and the server's default tolerance. Only two outcomes are stored: a
-passed preflight and a terminal refusal (``task_invalid``, ``reference_mismatch``). Provider faults are never
+The key digests everything that can change a reference verdict: the canonical task data, the policy fields that
+reach the runner (the interpreter and the exec user included), the runtime files with the operator's sandbox files and
+environment (the caller folds them into ``runtime_digest``), the server's default tolerance and the runtime the
+reference ran in, named by the image and the provider's class. The local provider ignores the image, so the class
+namespaces every entry: an outcome persisted under one provider is never read under another. Only two outcomes are
+stored: a passed preflight and a terminal refusal (``task_invalid``, ``reference_mismatch``). Provider faults are never
 cached. Entries hold no task content.
 """
 
@@ -38,6 +40,12 @@ def _warn_persist_failure(error: OSError) -> None:
     )
 
 
+def provider_class_name(provider: Any) -> str:
+    """The provider's module-qualified class name: stable across processes, and free of endpoints and credentials."""
+    cls = type(provider)
+    return f"{cls.__module__}.{cls.__qualname__}"
+
+
 @dataclass(frozen=True)
 class CachedReference:
     refusal: str | None  # None: the preflight passed; else the terminal category to raise again
@@ -59,6 +67,8 @@ class ReferenceCache:
         image: str | None,
         default_rtol: str | None,
         default_atol: str | None,
+        *,
+        provider_class: str,
     ) -> str:
         material = {
             "task": task.model_dump(mode="json"),
@@ -66,6 +76,7 @@ class ReferenceCache:
                 name: getattr(policy, name)
                 for name in (
                     "interpreter",
+                    "exec_user",
                     "memory_limit_mib",
                     "cpu_time_limit_s",
                     "max_processes",
@@ -77,6 +88,7 @@ class ReferenceCache:
             },
             "runtime": runtime_digest,
             "image": image,
+            "provider": provider_class,  # provider_class_name(): the image alone does not name a local runtime
             "defaults": [default_rtol, default_atol],
         }
         return hashlib.sha256(json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
@@ -133,4 +145,4 @@ class ReferenceCache:
             self._memory.popitem(last=False)
 
 
-__all__ = ["CachedReference", "ReferenceCache"]
+__all__ = ["CachedReference", "ReferenceCache", "provider_class_name"]

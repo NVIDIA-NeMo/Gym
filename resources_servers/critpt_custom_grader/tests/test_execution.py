@@ -17,7 +17,7 @@ import pytest
 from pydantic import ValidationError
 
 from nemo_gym import failure_kinds
-from resources_servers.critpt_custom_grader import execution, runner, sandbox_domain, task_data
+from resources_servers.critpt_custom_grader import execution, reference_cache, runner, sandbox_domain, task_data
 from resources_servers.critpt_custom_grader.execution import (
     DOMAINS,
     ExecutionPolicy,
@@ -1253,7 +1253,10 @@ async def test_a_cached_refusal_that_is_not_terminal_here_is_a_miss(refusal):
     cache = ReferenceCache()
     grader, provider = make_grader(happy_script(), cache=cache)
     digest = execution._runtime_digest(make_spec())
-    key = ReferenceCache.key(make_task(), grader.policy, digest, make_spec().image, None, None)
+    provider_class = reference_cache.provider_class_name(provider)
+    key = ReferenceCache.key(
+        make_task(), grader.policy, digest, make_spec().image, None, None, provider_class=provider_class
+    )
     cache.put(key, CachedReference(refusal=refusal))  # an entry this build never writes
     result = await grader.grade(make_task(), CANDIDATE)
     assert (result.outcome, result.category) == ("passed", "passed")
@@ -2296,6 +2299,16 @@ async def test_exec_user_unsupported_during_a_grade_is_retryable():
     assert (result.outcome, result.category, result.reward) == ("unscorable", "exec_user_unsupported", None)
     assert result.failure_class == failure_kinds.PROVIDER_UNAVAILABLE and result.terminal is False
     assert not any(box["live"] for box in provider.sandboxes.values())
+
+
+@pytest.mark.asyncio
+async def test_a_failed_setup_whose_stop_failed_is_stopped_by_the_final_sweep():
+    script = {**happy_script(), ("stop", "comparator"): [RuntimeError("synthetic stop failure")]}
+    grader, provider = make_grader(script)
+    refuse_first_comparator_setup(provider)  # the stop start_with_setup runs after the refusal fails once
+    result = await grader.grade(make_task(), CANDIDATE)
+    assert (result.outcome, result.category) == ("unscorable", "exec_user_unsupported")
+    assert_job_cleaned(result, provider, "reference", "comparator")  # the sweep's retry stopped it: deleted, once
 
 
 @pytest.mark.asyncio
