@@ -155,11 +155,6 @@ def test_legacy_config_migrates_to_equivalent_native_job(tmp_path: Path) -> None
         "harbor_verifier": {"override_timeout_sec": 123},
         "harbor_debug": True,
         "harbor_max_retries": 3,
-        "harbor_timeout_multiplier": 1.5,
-        "harbor_agent_timeout_multiplier": 2.0,
-        "harbor_verifier_timeout_multiplier": 3.0,
-        "harbor_agent_setup_timeout_multiplier": 4.0,
-        "harbor_environment_build_timeout_multiplier": 5.0,
         "harbor_reward_key": "score",
     }
     config = HarborAgentConfig.model_validate(legacy)
@@ -170,11 +165,6 @@ def test_legacy_config_migrates_to_equivalent_native_job(tmp_path: Path) -> None
             verifier={"override_timeout_sec": 123},
             debug=True,
             retry={"max_retries": 3},
-            timeout_multiplier=1.5,
-            agent_timeout_multiplier=2.0,
-            verifier_timeout_multiplier=3.0,
-            agent_setup_timeout_multiplier=4.0,
-            environment_build_timeout_multiplier=5.0,
         )
     )
     assert config.build_job_config("task", "job") == expected.build_job_config("task", "job")

@@ -61,7 +61,7 @@ The Gym-specific `harbor_ray_task_num_cpus`, `harbor_reward_key`, `harbor_worker
 Worker environment variables are passed as task arguments and installed only for one Harbor Ray task, rather than
 stored in Ray runtime environment setup logs.
 
-Existing `harbor_*` configuration fields are accepted for compatibility, but cannot be mixed with `job`.
+The legacy fields listed below remain accepted for compatibility, but cannot be mixed with `job`.
 To migrate, move their values under `job` using this mapping:
 
 | Existing field | Native field under `job` |
@@ -70,7 +70,6 @@ To migrate, move their values under `job` using this mapping:
 | `harbor_max_retries` | `retry.max_retries` |
 | `harbor_dataset`, `harbor_agent` | `datasets`, `agents` (single-element lists) |
 | `harbor_environment`, `harbor_verifier` | `environment`, `verifier` |
-| The five `harbor_*timeout_multiplier` fields | Same names without `harbor_` |
 
 The execution constraints above apply to both forms. Previously ignored conflicting settings now raise an error.
 

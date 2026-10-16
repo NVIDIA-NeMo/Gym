@@ -119,11 +119,6 @@ class HarborAgentConfig(BaseResponsesAPIAgentConfig):
             "harbor_environment": "environment",
             "harbor_agent": "agents",
             "harbor_verifier": "verifier",
-            "harbor_timeout_multiplier": "timeout_multiplier",
-            "harbor_agent_timeout_multiplier": "agent_timeout_multiplier",
-            "harbor_verifier_timeout_multiplier": "verifier_timeout_multiplier",
-            "harbor_agent_setup_timeout_multiplier": "agent_setup_timeout_multiplier",
-            "harbor_environment_build_timeout_multiplier": "environment_build_timeout_multiplier",
         }
         supplied = value.keys() & legacy_fields.keys()
         if not supplied:
