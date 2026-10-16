@@ -20,6 +20,7 @@ from unittest.mock import MagicMock, PropertyMock
 
 from omegaconf import OmegaConf
 from omegaconf.errors import ConfigKeyError
+from pydantic import ValidationError
 from pytest import CaptureFixture, LogCaptureFixture, MonkeyPatch, mark, raises
 
 import nemo_gym.global_config
@@ -34,6 +35,7 @@ from nemo_gym.config_types import (
     ConfigError,
     ConfigMissingValuesError,
     ConfigPathNotFoundError,
+    HeadServerConfigMalformedError,
     MalformedConfigPathsError,
     NoServerInstancesError,
     ServerRefNotFoundError,
@@ -251,6 +253,15 @@ class TestGlobalConfig:
 
         global_config_dict = get_global_config_dict()
         assert "openai==2.6.0" in global_config_dict["head_server_deps"]
+
+    def test_head_server_deps_carry_provider_plugins(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_openai_topology(monkeypatch, parent_version="2.6.0")
+        self._mock_parse_environment(monkeypatch, DictConfig({}))
+        monkeypatch.setattr(nemo_gym.global_config, "plugin_distributions", lambda: ["gym-substrate"])
+        monkeypatch.setattr(nemo_gym.global_config, "installed_requirement", lambda dist, req: f"{req}==0.1.0")
+
+        global_config_dict = get_global_config_dict()
+        assert "gym-substrate==0.1.0" in global_config_dict["head_server_deps"]
 
     def test_head_server_deps_raises_on_incompatible_parent_openai(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_openai_topology(monkeypatch, parent_version="2.52.0")
@@ -1985,6 +1996,17 @@ contested: second_inner
         GlobalConfigDictParser.parse_global_config_dict_from_cli(None)
 
 
+def _discover_repo_configs(repo_root: Path, config_dirs: tuple[str, ...]) -> list[Path]:
+    # Hidden directories under a server hold local tool checkouts, such as the ether0 clone in `.ether0/`.
+    # YAML files in those checkouts are not Gym configs, so the sweep skips them.
+    return [
+        p
+        for d in config_dirs
+        for p in (repo_root / d).rglob("*.yaml")
+        if not any(part.startswith(".") for part in p.relative_to(repo_root / d).parts)
+    ]
+
+
 class TestConfigLoadErrors:
     """Actionable, fail-fast errors for bad/malformed/empty config_paths (no raw traceback)."""
 
@@ -2131,6 +2153,120 @@ class TestConfigLoadErrors:
         message = str(exc_info.value)
         assert "config_paths" in message
         assert "list" in message
+
+    @mark.parametrize(
+        ("head_server", "named_fields"),
+        [
+            ({"port": "notanint"}, ["head_server.port"]),  # what `++head_server.port=notanint` arrives as
+            ({"host": None}, ["head_server.host"]),  # setdefault keeps an explicit null
+            ({"host": None, "port": "notanint"}, ["head_server.host", "head_server.port"]),  # all at once
+        ],
+    )
+    def test_parse_malformed_head_server_raises_actionable_error(
+        self, head_server: dict, named_fields: list[str]
+    ) -> None:
+        parser = GlobalConfigDictParser()
+        parse_config = GlobalConfigDictParserConfig(
+            initial_global_config_dict=DictConfig({"head_server": head_server}),
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+        )
+        with raises(HeadServerConfigMalformedError) as exc_info:
+            parser.parse(parse_config)
+
+        message = str(exc_info.value)
+        for field in named_fields:
+            assert field in message
+        assert "++head_server.port=" in message
+        assert isinstance(exc_info.value, ValueError)  # same compat contract as the rest of the family
+        assert isinstance(exc_info.value.__cause__, ValidationError)  # `from e` keeps the pydantic detail
+
+    @mark.parametrize(
+        ("head_server", "shown_as"),
+        [
+            ("foo", "'foo'"),  # `++head_server=foo` used to die with an AttributeError on the block's first `.get`
+            # Falsy non-mappings are malformed too, not "absent": they must not fall back to the defaults.
+            (False, "False"),
+            (0, "0"),
+            ("", "''"),
+            ([], "[]"),
+        ],
+        ids=["scalar", "false", "zero", "empty-string", "empty-list"],
+    )
+    def test_parse_non_mapping_head_server_raises_actionable_error(self, head_server: object, shown_as: str) -> None:
+        parser = GlobalConfigDictParser()
+        parse_config = GlobalConfigDictParserConfig(
+            initial_global_config_dict=DictConfig({"head_server": head_server}),
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+        )
+        with raises(HeadServerConfigMalformedError) as exc_info:
+            parser.parse(parse_config)
+
+        message = str(exc_info.value)
+        assert "must be a mapping" in message
+        assert f"Got: {shown_as}." in message
+        assert "++head_server.port=" in message
+
+    def test_parse_null_head_server_takes_the_defaults(self) -> None:
+        # `head_server: null` is the one non-mapping that means "not configured".
+        parser = GlobalConfigDictParser()
+        parse_config = GlobalConfigDictParserConfig(
+            initial_global_config_dict=DictConfig({"head_server": None}),
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+        )
+
+        parsed = parser.parse(parse_config)
+
+        assert parsed["head_server"] == {"host": "127.0.0.1", "port": DEFAULT_HEAD_SERVER_PORT}
+        assert parsed["disallowed_ports"] == [DEFAULT_HEAD_SERVER_PORT]
+
+    @mark.parametrize(
+        "server_host",
+        [{"host": None}, {}],  # an explicit null, and no `host` key at all
+        ids=["null-host", "omitted-host"],
+    )
+    def test_parse_head_server_host_may_reference_a_defaulted_server_host(self, server_host: dict) -> None:
+        # The referenced host is only filled in by validate_and_populate_defaults, so the head server block must not
+        # be resolved and validated before that runs.
+        parser = GlobalConfigDictParser()
+        parse_config = GlobalConfigDictParserConfig(
+            initial_global_config_dict=DictConfig(
+                {
+                    "test_resource": {
+                        "resources_servers": {
+                            "test_server": {"entrypoint": "app.py", "domain": "other", "port": 12000, **server_host}
+                        }
+                    },
+                    "head_server": {"host": "${test_resource.resources_servers.test_server.host}"},
+                }
+            ),
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+        )
+
+        parsed = parser.parse(parse_config)
+
+        assert parsed["test_resource"]["resources_servers"]["test_server"]["host"] == "127.0.0.1"
+        assert parsed["head_server"]["host"] == "127.0.0.1"
+        assert parsed["head_server"]["port"] == DEFAULT_HEAD_SERVER_PORT
+
+    def test_parse_keeps_a_head_server_value_pydantic_can_coerce(self) -> None:
+        # The check is deliberately lax and validate-only: a quoted port in existing YAML keeps working, and the
+        # block is left exactly as written, so `gym env resolve` still prints what the user configured. The
+        # validated int is what reaches the port allocator, so the head server's port is still kept off it.
+        parser = GlobalConfigDictParser()
+        parse_config = GlobalConfigDictParserConfig(
+            initial_global_config_dict=DictConfig({"head_server": {"host": "127.0.0.1", "port": "8080"}}),
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+        )
+
+        parsed = parser.parse(parse_config)
+
+        assert parsed["head_server"] == {"host": "127.0.0.1", "port": "8080"}
+        assert parsed["disallowed_ports"] == [8080]
 
     def test_raise_on_no_server_instances_raises_when_empty(self) -> None:
         parser = GlobalConfigDictParser()
@@ -2619,7 +2755,7 @@ class TestConfigLoadErrors:
         # config in the repo so this fails fast in CI instead.
         repo_root = Path(__file__).resolve().parents[2]
         config_dirs = ("responses_api_agents", "resources_servers", "nemo_gym/sandbox/providers")
-        config_paths = [p for d in config_dirs for p in (repo_root / d).rglob("*.yaml")]
+        config_paths = _discover_repo_configs(repo_root, config_dirs)
         assert config_paths, "no config files discovered -- sweep dirs may have moved"
 
         failures = []
@@ -2630,6 +2766,16 @@ class TestConfigLoadErrors:
                 failures.append(f"{path.relative_to(repo_root)}: {e}")
 
         assert not failures, "malformed config(s) found:\n" + "\n".join(failures)
+
+    def test_repo_config_sweep_skips_hidden_directories(self, tmp_path: Path) -> None:
+        server_dir = tmp_path / "resources_servers" / "my_server"
+        (server_dir / "configs").mkdir(parents=True)
+        (server_dir / "configs" / "my_server.yaml").write_text("a: 1\n")
+        workflow_dir = server_dir / ".my_tool" / ".github" / "workflows"
+        workflow_dir.mkdir(parents=True)
+        (workflow_dir / "lint-test.yaml").write_text("run: ${{ matrix.python }}\n")
+
+        assert _discover_repo_configs(tmp_path, ("resources_servers",)) == [server_dir / "configs" / "my_server.yaml"]
 
 
 class TestOpenAIVersionMatchesNemoGymConstraint:

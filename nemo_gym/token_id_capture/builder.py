@@ -40,7 +40,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable
 
-from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry, compute_digest
+from nemo_gym.token_id_capture.records import (
+    ParentResolutionStatus,
+    TokenEntry,
+    compute_digest,
+    incomplete_reason_for_finish_reason,
+)
 
 
 @dataclass
@@ -608,13 +613,25 @@ def project_chain_to_output_items(chain: Chain) -> list[dict]:
     return items
 
 
-def project_main_chain_response(rollout_id: str, out: BuildOutput, model: str = "") -> dict:
+def project_main_chain_response(
+    rollout_id: str, out: BuildOutput, model: str = "", *, finish_reason_resolved: bool = True
+) -> dict:
     """Rebuild the main chain as a Responses object whose output items are contiguous.
 
     The result is a Gym-native Responses payload.
     It contains ``object: "response"``, ``output`` items, and ``usage``.
     Token fields describe one unbroken sequence across the rollout.
     The sequence combines items from multiple model calls.
+
+    When the delivered chain's terminal call stopped for ``length`` or ``content_filter``, the
+    payload carries ``status: "incomplete"`` with the matching ``incomplete_details.reason``
+    (``max_output_tokens`` or ``content_filter``), the verdict the Responses converter gives a
+    chat completion that ended the same way. The finish reason is recorded by the local capture
+    path (``capture_tokens``); under worker custody the ledger row carries it and
+    ``staging.rebuild.LinearizedRow.incomplete_reason`` applies the same mapping.
+    ``finish_reason_resolved=False`` withholds the verdict: terminal attribution passes it when
+    the terminal call was chosen among token-identical retries that recorded different finish
+    reasons, so the status would otherwise depend on which twin drew the smaller call id.
     """
     if not out.chains:
         raise ValueError("capture produced no safe trainable chain")
@@ -629,13 +646,23 @@ def project_main_chain_response(rollout_id: str, out: BuildOutput, model: str = 
     generated = [item for item in output if item.get("generation_token_ids") is not None]
     n_in = len(generated[0]["prompt_token_ids"]) if generated else 0
     n_out = sum(len(item["generation_token_ids"]) for item in generated)
-    return {
+    response = {
         "id": f"proj-{rollout_id}",
         "model": model,
         "object": "response",
         "output": output,
         "usage": {"input_tokens": n_in, "output_tokens": n_out},
     }
+    # Only the terminal call decides: an earlier ``length`` stop did not end the delivered
+    # chain, because a later call extended it. A complete ending, or an unrecorded finish
+    # reason, leaves ``status`` unset.
+    incomplete_reason = (
+        incomplete_reason_for_finish_reason(mains[0].links[-1].entry.finish_reason) if finish_reason_resolved else None
+    )
+    if incomplete_reason is not None:
+        response["status"] = "incomplete"
+        response["incomplete_details"] = {"reason": incomplete_reason}
+    return response
 
 
 def assert_prefix_contiguity(response: dict) -> None:

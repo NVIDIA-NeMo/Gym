@@ -15,7 +15,6 @@
 import asyncio
 import atexit
 import logging
-import math
 import os
 import re
 import shutil
@@ -33,6 +32,7 @@ from pydantic import ConfigDict, Field
 from toolsets import TOOLSETS  # pyright: ignore[reportMissingImports]
 
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
+from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
@@ -79,10 +79,6 @@ from responses_api_agents.hermes_agent.model_kwargs import _model_api_kwargs, in
 from responses_api_agents.hermes_agent.observability import HermesAgentObserver, normalize_hermes_messages
 from responses_api_agents.hermes_agent.sandbox import DEFAULT_UV_CACHE_DIR, HarnessProcessInfo, HermesSandboxSession
 
-
-# Task rows materialized from a task's own agent timeout carry it as request metadata under this key
-# (seconds, as a string); the episode's wall-clock budget is capped by it.
-AGENT_TIMEOUT_METADATA_KEY = "agent_timeout_sec"
 
 # HTTP statuses a model endpoint returns for what the request asked, after Hermes's own retries: the
 # conversation was refused (malformed or too long for the model), so the episode is a graded zero, not an
@@ -740,18 +736,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
 
     def _agent_timeout_sec(self, body: NeMoGymResponseCreateParamsNonStreaming) -> float:
         """This episode's wall-clock budget: the task's agent timeout, capped by the server's ceiling."""
-        budget = float(self.config.sandbox_runner_timeout_seconds)
-        raw = (body.metadata or {}).get(AGENT_TIMEOUT_METADATA_KEY)
-        if raw is None:
-            return budget
-        try:
-            requested = float(raw)
-        except (TypeError, ValueError):
-            requested = math.nan
-        if not math.isfinite(requested) or requested <= 0:
-            LOG.warning("Ignoring invalid %s=%r; using the configured %ss", AGENT_TIMEOUT_METADATA_KEY, raw, budget)
-            return budget
-        return min(budget, requested)
+        return resolve_agent_timeout(body.metadata, ceiling=self.config.sandbox_runner_timeout_seconds)
 
     def _conversation_params(self, body: NeMoGymResponseCreateParamsNonStreaming) -> dict[str, Any]:
         user_message, history, input_system = _split_input_to_user_and_history(body.input)

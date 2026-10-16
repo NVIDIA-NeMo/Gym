@@ -53,6 +53,7 @@ def test_simulation_roles_use_the_canonical_shared_model_and_sampling() -> None:
         assert OmegaConf.to_container(server_config[field]) == expected_params
 
     assert server_config["enforce_transfer_ground_truth"] is True
+    assert server_config["fallback_first_user_message"] is True
 
 
 def test_generation_role_models_copy_the_standard_policy_model() -> None:

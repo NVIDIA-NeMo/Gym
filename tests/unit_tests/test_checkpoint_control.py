@@ -430,6 +430,45 @@ async def test_lease_expiry_resumes_a_participant_whose_controller_went_quiet() 
     assert stale.status_code == 409 and stale.json()["error"]["code"] == "stale_checkpoint"
 
 
+async def test_a_prepare_that_waited_through_its_lease_expiry_does_not_report_a_later_checkpoint_as_its_own(
+    tmp_path: Path,
+) -> None:
+    """A prepare still waiting when its checkpoint ends replies idle, even once another checkpoint is prepared.
+
+    The first prepare waits at a gate for the participant to become ready.
+    Meanwhile its lease expires, admission reopens, and a second checkpoint is prepared.
+    Only then does the first prepare wake.
+    """
+
+    class HeldWait(FakeParticipant):
+        def __init__(self) -> None:
+            super().__init__()
+            self.waiting = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def wait_changed(self, timeout: float) -> None:
+            self.waiting.set()
+            await self.release.wait()
+
+    participant = HeldWait()
+    participant.executions["r"] = {"parked": False, "value": 1}
+    async with make_client(participant, lease_grace=0.1) as client:
+        first_prepare = asyncio.create_task(client.post("/ng-control/v1/checkpoint/prepare", json=body(timeout=0.1)))
+        await asyncio.wait_for(participant.waiting.wait(), 5)
+        await _until(lambda: participant.accepting, "the lease expired and reopened admission")
+        participant.executions["r"]["parked"] = True
+        second = (await client.post("/ng-control/v1/checkpoint/prepare", json=body("ckpt-2"))).json()
+        participant.release.set()
+        first = (await asyncio.wait_for(first_prepare, 5)).json()
+        stale_commit = await client.post("/ng-control/v1/checkpoint/commit", json=body(checkpoint_dir=str(tmp_path)))
+
+    assert second["phase"] == "prepared"
+    # The first checkpoint ended when its lease expired.
+    # Its prepare reports it idle rather than the phase of the second checkpoint.
+    assert first["phase"] == "idle"
+    assert stale_commit.json()["error"]["code"] == "stale_checkpoint"
+
+
 async def test_renew_keeps_a_slow_but_live_controller_in_charge() -> None:
     participant = FakeParticipant()
     async with make_client(participant, lease_grace=2.0) as client:
