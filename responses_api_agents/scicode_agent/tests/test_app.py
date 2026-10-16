@@ -256,6 +256,32 @@ class TestApp:
         assert "x = 1" in solutions["1.1"]
 
     @pytest.mark.asyncio
+    async def test_run_skip_verification_uses_configured_reward(self):
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {"observability_enabled": False}
+        config = _config().model_copy(update={"skip_verification": True, "skip_verification_reward": 0.25})
+        agent = ScicodeAgent(config=config, server_client=server_client)
+        model_calls = 0
+
+        def _post(server_name, url_path, json, cookies):
+            nonlocal model_calls
+            if url_path == "/v1/responses":
+                model_calls += 1
+                return _Resp(_model_json("x = 1"))
+            raise AssertionError(f"unexpected call under skip_verification: {url_path}")
+
+        agent.server_client.post = AsyncMock(side_effect=_post)
+        with patch.object(app, "raise_for_status", AsyncMock()):
+            result = await agent.run(_FakeRequest(), _run_request(problem_id="1", n_steps=2))
+
+        assert model_calls == 2  # every sub-step is still generated
+        assert result["reward"] == 0.25
+        assert result["verification_skipped"] is True
+        assert set(result["solutions"].keys()) == {"1.1", "1.2"}
+        assert result["token_usage_version"] == TOKEN_USAGE_VERSION
+        assert "response" in result
+
+    @pytest.mark.asyncio
     async def test_run_skips_prefilled_step(self):
         # Problem "62" has a prefilled step at index 0 -> no model call, no solution entry for it.
         agent = _agent()

@@ -150,6 +150,33 @@ class TestApp:
             == '{"summary":"ok"}'
         )
 
+    async def test_run_skip_verification_uses_configured_reward(self) -> None:
+        config = _config().model_copy(update={"skip_verification": True, "skip_verification_reward": 0.25})
+        server = NonExecutingSimpleAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        responses_create_params = NeMoGymResponseCreateParamsNonStreaming(input="hello")
+        model_response = _tool_call_response(arguments='{"summary":"ok"}')
+        server.server_client.post.side_effect = [
+            _mock_response({}, cookies={"session": "seeded"}),
+            _mock_response(model_response, cookies={"session": "seeded"}),
+        ]
+
+        request = MagicMock(spec=Request)
+        request.cookies = {}
+        result = await server.run(
+            request=request,
+            body=NonExecutingSimpleAgentRunRequest(responses_create_params=responses_create_params),
+        )
+
+        payload = result.model_dump(mode="json")
+        assert payload["reward"] == 0.25
+        assert payload["verification_skipped"] is True
+        assert payload["response"]["output"][0]["arguments"] == '{"summary":"ok"}'
+        # seed_session + /v1/responses only; /verify is never called.
+        assert [c.kwargs["url_path"] for c in server.server_client.post.call_args_list] == [
+            "/seed_session",
+            "/v1/responses",
+        ]
+
     async def test_aggregate_metrics_proxies_to_resource_server(self) -> None:
         server = NonExecutingSimpleAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
         aggregate_metrics = {
