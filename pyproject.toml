@@ -197,9 +197,11 @@ dependencies = [
 
     # requests: synchronous HTTP client imported at module level by nemo_gym (server_utils, server_status, cli/env, gitlab_utils).
     # It used to arrive only transitively; datasets>=5 no longer depends on it, so a fresh install without extras missed it.
-    # Updated Fri Oct 16, 2026 with requests>=2.32.4 (CVE-2024-47081 fix)
+    # No lower bound: server venvs install nemo-gym next to their own pins, and responses_api_agents/osworld_agent
+    # (osworld needs requests<2.32) and resources_servers/cvdp (requests==2.32.3) pin older releases.
+    # Updated Fri Oct 16, 2026 with requests==2.32.5
     # License: Apache 2.0 https://github.com/psf/requests/blob/main/LICENSE
-    "requests>=2.32.4",
+    "requests",
 
     # yappi: profiling tool
     # Updated Wed Aug 12, 2026 with yappi==1.7.6 for CPython 3.14 support
