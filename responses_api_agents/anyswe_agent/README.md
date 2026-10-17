@@ -110,7 +110,14 @@ sandbox, hiding toolchains that images keep there, such as R2E-Gym's
 
 SWE-bench and SWE-bench Multilingual use the official `make_test_spec` and
 `get_eval_report` path. R2E-Gym requires every fail-to-pass and pass-to-pass test
-to report `PASSED`.
+to report `PASSED` (or `XFAIL`). Required tests match pytest node ids, unittest-style
+`Class.test` names and colored output. A supplied class or file must match; it
+never falls back to an unrelated test with the same method name. Shortened or
+bare names must identify exactly one logged test, and parameter IDs are preserved.
+R2E-Gym rows without test lists are graded
+with R2E-Gym's own rule: the test-status map from the run's short test summary must
+equal the row's `expected_output_json` exactly. The grading transcript is saved as
+`eval_output.txt` next to the rollout artifacts.
 
 Resolved patches receive reward `1`; other completed attempts receive `0`.
 Agent timeouts, evaluation timeouts, sandbox failures, and accidental successes
