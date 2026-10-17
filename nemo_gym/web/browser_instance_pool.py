@@ -163,7 +163,11 @@ class LocalBrowserInstancePoolProvider:
             }
         )
         env.pop("WAYLAND_DISPLAY", None)
-        env.pop("XAUTHORITY", None)
+        # Xvfb runs with -ac, but python-xlib (PyAutoGUI) still opens an
+        # Xauthority file; give each display its own empty one.
+        xauthority = slot.tmpdir / "Xauthority"
+        xauthority.touch(mode=0o600)
+        env["XAUTHORITY"] = str(xauthority)
         deadline = time.monotonic() + self._startup_timeout
         while subprocess.run(["xdpyinfo", "-display", slot.display], env=env, capture_output=True).returncode:
             if slot.xvfb.poll() is not None or time.monotonic() > deadline:
