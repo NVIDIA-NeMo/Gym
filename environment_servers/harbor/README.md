@@ -80,8 +80,10 @@ Resource settings come from the task. `sandbox_resources_override`, `gpu_sandbox
 in this PR.
 
 `harbor:<dataset>[@<version>]` resolves the Harbor registry and fetches task folders into Gym's shared
-datasets folder (`$NEMO_GYM_DATASETS_DIR`, default `./datasets`). A local task folder, or a folder of task
-folders, works the same way. The generated run config declares the materialized rows as the agent's
+datasets folder (`$NEMO_GYM_DATASETS_DIR`, default `./datasets`). `harbor:<org>/<name>[@<tag> | @sha256:<digest>]`
+fetches a package-store dataset instead (for example `harbor:terminal-bench/terminal-bench@4.0.0`): every task
+package is downloaded by content hash into `<name>/` (`latest`), `<name>-<tag>/` or `<name>-<12 digest chars>/` (a digest pin), checked against Gym's task digest and recorded in
+`manifest.toml`. A local task folder, or a folder of task folders, works the same way. The generated run config declares the materialized rows as the agent's
 validation dataset and binds the per-taskset environment server to that agent. Running model episodes
 requires a harness that accepts `sandbox_access` in its session seed and leaves the sandbox to the server
 when its session is closed.
