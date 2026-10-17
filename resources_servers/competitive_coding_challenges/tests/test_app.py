@@ -46,6 +46,7 @@ from resources_servers.competitive_coding_challenges.app import (
     CompetitiveCodingChallengesResourcesServer,
     CompetitiveCodingChallengesResourcesServerConfig,
     CompetitiveCodingChallengesVerifyRequest,
+    _resolve_test_file,
 )
 
 
@@ -133,6 +134,23 @@ def test_setup_webserver_initializes_evaluator(server: CompetitiveCodingChalleng
     )
     assert app is not None
     assert server._evaluator is evaluator_cls.return_value
+
+
+def test_resolve_test_file_falls_back_to_the_gym_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Benchmark configs give test_file relative to the Gym root; the server runs in its own directory.
+    monkeypatch.chdir(tmp_path)
+    assert _resolve_test_file("benchmarks/ioi26/config.yaml") == str(GYM_ROOT / "benchmarks/ioi26/config.yaml")
+
+
+def test_resolve_test_file_keeps_cwd_relative_absolute_and_missing_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "test_metadata.jsonl").write_text("")
+    assert _resolve_test_file("data/test_metadata.jsonl") == "data/test_metadata.jsonl"
+    assert _resolve_test_file(str(tmp_path / "abs.jsonl")) == str(tmp_path / "abs.jsonl")
+    assert _resolve_test_file("missing.jsonl") == "missing.jsonl"
 
 
 def test_setup_webserver_warns_when_shared_dir_is_tmp(
