@@ -28,13 +28,14 @@ from pathlib import Path
 from subprocess import Popen
 from traceback import format_exc
 from typing import Any, Dict, Optional
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
-from nemo_gym.config_types import ModelServerRef
+from nemo_gym.config_types import TOKEN_CAPTURE_PATH_SEGMENT, ModelServerRef
 from nemo_gym.global_config import get_first_server_config_dict
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import AsyncSandbox, SandboxCreateError, SandboxResources, SandboxSpec
@@ -747,7 +748,11 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         )
 
         return NeMoGymResponse(
-            id=_outer_response_id(params.instance_id, saved, token_capture=self._token_id_capture_enabled()),
+            id=_outer_response_id(
+                params.instance_id,
+                saved,
+                token_capture=TOKEN_CAPTURE_PATH_SEGMENT in urlsplit(params.model_server_url).path.split("/"),
+            ),
             created_at=int(time.time()),
             model=_model_name(params),
             object="response",

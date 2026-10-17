@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from fastapi import Request
 
@@ -155,7 +156,7 @@ def _runner_global_config(model_url: str, server_name: str) -> dict:
     # training-token-capture prefix, the inner agent must know capture is on so it emits a transcript that
     # terminal attribution can join to a captured call (claude_code_agent: separate reasoning items and the
     # served response id).
-    if f"/{TOKEN_CAPTURE_PATH_SEGMENT}" in model_url:
+    if TOKEN_CAPTURE_PATH_SEGMENT in urlsplit(model_url).path.split("/"):
         global_config[TOKEN_ID_CAPTURE_BLOCK] = {"enabled": True, "all_agents": True}
     return global_config
 

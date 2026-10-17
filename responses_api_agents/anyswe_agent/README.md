@@ -75,7 +75,10 @@ harness carries the `/ng-rollout/<id>/training-token-capture` prefix that the
 model server's capture middleware keys on. The in-sandbox runner turns capture
 on for the inner agent, so it returns a transcript that terminal attribution can
 join to a captured call, and the outer response keeps the inner agent's response
-id.
+id. Both decisions follow the capture segment in the actual sandbox model URL.
+Requests without rollout indices (including direct `/v1/responses` calls) and
+custom `sandbox_model_base_url` values without that segment retain eval-mode
+inner agents and `anyswe-<instance_id>` outer response IDs.
 
 For large runs, bake `/agent_deps_mount/bin/python`, NeMo Gym, and the selected
 agent into each task image. `agent_runtime_source` controls other delivery modes:
