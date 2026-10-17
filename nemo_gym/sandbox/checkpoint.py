@@ -62,6 +62,7 @@ from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers.base import (
     ConnectableProvider,
+    SandboxHandle,
     SandboxProvider,
     SandboxSpec,
     SupportsSandboxSnapshot,
@@ -90,6 +91,12 @@ class SandboxCheckpointConfig(BaseModel):
     # What happens to the agents' sandboxes when the controller stops after a commit: "kill" frees them (the
     # restore forks from the snapshots), "none" leaves them to their TTL.
     on_stop: OnStop = "kill"
+    # Snapshots of one sandbox per commit before its export fails: the backend's commit job can fail
+    # (OpenSandbox: CommitJobFailed after its own retries) while the sandbox keeps running, and one failed
+    # snapshot otherwise fails the whole checkpoint. Every attempt is indexed, so a release deletes it.
+    snapshot_attempts: int = 3
+    # Pause between those attempts.
+    snapshot_retry_delay_s: float = 5.0
 
 
 class SandboxCheckpointState(BaseModel):
@@ -110,6 +117,14 @@ class SandboxCheckpointState(BaseModel):
     snapshot_id: str
     spec: dict[str, JsonValue]
     snapshot_at: float
+
+
+class _RetryableSnapshotError(Exception):
+    """One snapshot attempt failed; ``error`` is what the export raises once no attempt is left."""
+
+    def __init__(self, error: "SandboxCheckpointError") -> None:
+        super().__init__(str(error))
+        self.error = error
 
 
 class SandboxCheckpointError(RuntimeError):
@@ -235,9 +250,15 @@ class SandboxSessionCheckpointer:
         server_name: str,
         parallelism: int = 16,
         on_stop: OnStop = "kill",
+        snapshot_attempts: int = 1,
+        snapshot_retry_delay_s: float = 0.0,
     ) -> None:
         if parallelism < 1:
             raise ValueError("parallelism must be at least 1")
+        if snapshot_attempts < 1:
+            raise ValueError("snapshot_attempts must be at least 1")
+        self._snapshot_attempts = snapshot_attempts
+        self._snapshot_retry_delay_s = max(0.0, snapshot_retry_delay_s)
         if on_stop not in ("kill", "none"):
             raise ValueError(f"on_stop must be 'kill' or 'none', not {on_stop!r}")
         self._provider = provider
@@ -361,24 +382,24 @@ class SandboxSessionCheckpointer:
         else:
             descriptor = {"sandbox_id": handle.sandbox_id}
         async with self._semaphore:
-            try:
-                snapshot_id = await self._provider.snapshot(handle, name=f"ng-{session_id[:16]}-{int(time.time())}")
-            except Exception as error:
-                raise SandboxCheckpointError(session_id, f"could not be snapshotted: {error}") from error
-            # Indexed before anything else happens with it: a snapshot that fails, times out, or outlives a
-            # cancelled export or a crash exists on the backend all the same, and a release must find it.
-            try:
-                await asyncio.to_thread(index.mark, checkpoint_id, snapshot_id)
-            except (OSError, ValueError) as error:
-                raise SandboxCheckpointError(
-                    session_id, f"snapshot {snapshot_id!r} could not be indexed: {error}"
-                ) from error
-            try:
-                await self._provider.wait_snapshot_ready(snapshot_id)
-            except Exception as error:
-                raise SandboxCheckpointError(
-                    session_id, f"snapshot {snapshot_id!r} did not become ready: {error}"
-                ) from error
+            attempt = 1
+            while True:
+                try:
+                    snapshot_id = await self._snapshot_once(session_id, handle, index, checkpoint_id)
+                    break
+                except _RetryableSnapshotError as failure:
+                    if attempt >= self._snapshot_attempts:
+                        raise failure.error from failure.__cause__
+                    LOGGER.warning(
+                        "sandbox checkpoint snapshot attempt %d/%d failed; retrying: session_id=%s sandbox_id=%s %s",
+                        attempt,
+                        self._snapshot_attempts,
+                        session_id,
+                        handle.sandbox_id,
+                        failure.error,
+                    )
+                    attempt += 1
+                    await asyncio.sleep(self._snapshot_retry_delay_s)
         state = SandboxCheckpointState(
             provider_name=handle.provider_name,
             descriptor=descriptor,
@@ -387,6 +408,33 @@ class SandboxSessionCheckpointer:
             snapshot_at=time.time(),
         )
         return session_id, state.model_dump(mode="json")
+
+    async def _snapshot_once(
+        self, session_id: str, handle: SandboxHandle, index: "_SnapshotIndex", checkpoint_id: str
+    ) -> str:
+        """Take one snapshot and wait until it is ready. A failed submit or snapshot raises
+        :class:`_RetryableSnapshotError`; failing to index one raises :class:`SandboxCheckpointError`."""
+        try:
+            snapshot_id = await self._provider.snapshot(handle, name=f"ng-{session_id[:16]}-{int(time.time())}")
+        except Exception as error:
+            raise _RetryableSnapshotError(
+                SandboxCheckpointError(session_id, f"could not be snapshotted: {error}")
+            ) from error
+        # Indexed before anything else happens with it: a snapshot that fails, times out, or outlives a
+        # cancelled export or a crash exists on the backend all the same, and a release must find it.
+        try:
+            await asyncio.to_thread(index.mark, checkpoint_id, snapshot_id)
+        except (OSError, ValueError) as error:
+            raise SandboxCheckpointError(
+                session_id, f"snapshot {snapshot_id!r} could not be indexed: {error}"
+            ) from error
+        try:
+            await self._provider.wait_snapshot_ready(snapshot_id)
+        except Exception as error:
+            raise _RetryableSnapshotError(
+                SandboxCheckpointError(session_id, f"snapshot {snapshot_id!r} did not become ready: {error}")
+            ) from error
+        return snapshot_id
 
     async def park(self, session_ids: Iterable[str]) -> None:
         """Free what the exported sandboxes hold, as ``on_stop`` says; for a commit the controller stops after.
