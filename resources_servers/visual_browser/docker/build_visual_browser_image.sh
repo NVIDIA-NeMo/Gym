@@ -21,7 +21,7 @@ IMAGE_TAG="${2:-nemo-gym/visual-browser-runtime:${COMMIT:0:9}}"
 context="$(mktemp -d)"
 trap 'rm -rf "${context}"' EXIT
 git -C "${REPO_ROOT}" archive --format=tar "${COMMIT}" \
-  pyproject.toml uv.lock README.md LICENSE nemo_gym resources_servers/__init__.py resources_servers/visual_browser \
+  pyproject.toml uv.lock README.md LICENSE nemo_gym resources_servers/visual_browser \
   | tar -C "${context}" -xf -
 
 echo "Building ${IMAGE_TAG} from ${COMMIT}"
