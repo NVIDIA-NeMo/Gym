@@ -83,11 +83,7 @@ VLLM_PREFILL_ARGS=(
                     "kv_role": "kv_both",
                     "kv_connector_extra_config": {
                         "load_async": true,
-                        "lookup_async": true,
-                        "async_prefetch_limit": 4,
-                        "save_on_eviction": true,
-                        "eviction_save_max_blocks": 256,
-                        "eviction_save_lookahead_blocks": 2048
+                        "lookup_async": true
                     }
                 }
             ]
@@ -97,8 +93,6 @@ VLLM_PREFILL_ARGS=(
     --kv-cache-memory-bytes 54G
     --max-num-batched-tokens 16960
     --max-num-seqs 1024
-    --kv-cache-metrics
-    --kv-cache-metrics-sample 0.01
 )
 # @bxyu-nvidia: We set "enable_lookup": false for the Mooncake store connector because the prefill worker handles the prefix cache lookup and decode just needs to receive the transferred kv cache.
 VLLM_DECODE_ARGS=(
