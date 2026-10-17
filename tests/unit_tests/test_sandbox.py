@@ -452,9 +452,28 @@ async def test_background_services_uses_ordinary_exec_without_provider_override(
     assert call["user"] == "root"
 
 
+@pytest.mark.parametrize("telemetry", [False, True])
+async def test_service_preserving_exec_supports_original_provider_signature(monkeypatch, telemetry):
+    monkeypatch.setattr("nemo_gym.sandbox.api.is_span_group_enabled", lambda _: telemetry)
+
+    class LegacyProvider(FakeSandboxProvider):
+        async def exec_with_background_services(self, handle, command, *, cwd=None, timeout_s=None):
+            await super().exec(handle, command, cwd=cwd, timeout_s=timeout_s)
+            return SandboxExecResult(stdout="preserved", stderr=None, return_code=0)
+
+    provider = LegacyProvider()
+    async with AsyncSandbox(provider) as sandbox:
+        await sandbox.start(SandboxSpec(image="image:tag", workdir="/work"))
+        result = await sandbox.exec("bash solve.sh", timeout_s=None, preserve_background_services=True)
+    assert result.stdout == "preserved"
+    [call] = provider.exec_calls
+    assert call["command"] == "bash solve.sh" and call["cwd"] == "/work"
+    assert call["timeout_s"] is None
+
+
 class ServicePreservingSandboxProvider(FakeSandboxProvider):
-    async def exec_with_background_services(self, handle, command, *, cwd=None, timeout_s=None):
-        await super().exec(handle, command, cwd=cwd, timeout_s=timeout_s)
+    async def exec_with_background_services(self, handle, command, *, cwd=None, env=None, timeout_s=None, user=None):
+        await super().exec(handle, command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
         return SandboxExecResult(stdout="service-preserving execution", stderr=None, return_code=0)
 
 
@@ -471,14 +490,18 @@ async def test_exec_selects_service_preserving_execution_only_when_requested(mon
     assert provider.exec_calls[0]["timeout_s"] is None
 
 
-@pytest.mark.parametrize("overrides", [{"env": {"KEY": "value"}}, {"user": "root"}])
-async def test_service_preserving_exec_rejects_unsupported_overrides(overrides):
+@pytest.mark.parametrize(
+    "overrides", [{"env": {"KEY": "value"}}, {"user": "root"}, {"env": {"KEY": "value"}, "user": 1000}]
+)
+async def test_service_preserving_exec_passes_command_overrides(overrides):
     provider = ServicePreservingSandboxProvider()
     async with AsyncSandbox(provider) as sandbox:
         await sandbox.start(SandboxSpec(image="image:tag"))
-        with pytest.raises(ValueError, match="does not support per-command env or user"):
-            await sandbox.exec("bash solve.sh", preserve_background_services=True, **overrides)
-    assert provider.exec_calls == []
+        result = await sandbox.exec("bash solve.sh", preserve_background_services=True, **overrides)
+    assert result.stdout == "service-preserving execution"
+    [call] = provider.exec_calls
+    for key, value in overrides.items():
+        assert call[key] == value
 
 
 def test_sync_exec_can_preserve_background_services():

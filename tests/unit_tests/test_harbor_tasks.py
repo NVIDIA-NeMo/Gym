@@ -13,7 +13,14 @@ import yaml
 
 import nemo_gym.tasks.harbor.hub as hub_module
 from nemo_gym.tasks.harbor import DIGEST_KEY, HarborTaskConfig, content_hash, discover_tasks, load_task
-from nemo_gym.tasks.harbor.cli import AgentSelection, PreparedTaskset, build_run, prepare_target, resolve_agent
+from nemo_gym.tasks.harbor.cli import (
+    AgentSelection,
+    PreparedTaskset,
+    build_run,
+    prepare_target,
+    resolve_agent,
+    runs_in_sandbox,
+)
 from nemo_gym.tasks.harbor.dockerfile import base_image_only
 from nemo_gym.tasks.harbor.hub import (
     HubError,
@@ -576,7 +583,7 @@ class TestCli:
         assert len(prepared.rows_path.read_text().splitlines()) == 1
 
     def test_resolve_agent_accepts_short_name(self):
-        selection = resolve_agent("hermes")
+        selection = resolve_agent("hermes_agent")
         assert selection.instance_name == "hermes_agent"
         assert selection.impl_name == "hermes_agent"
         assert selection.config_path.name == "hermes_agent.yaml"
@@ -584,8 +591,6 @@ class TestCli:
             resolve_agent("no_such_agent_xyz")
 
     def test_build_run_writes_config_and_overrides(self, tmp_path):
-        from hydra.core.override_parser.overrides_parser import OverridesParser
-
         folder = tmp_path / "ds"
         tasks = [load_task(write_task(folder / "a"))]
         prepared = PreparedTaskset("ds", folder, tasks, tmp_path / "out" / "tasks.jsonl", tmp_path / "out")
@@ -606,9 +611,44 @@ class TestCli:
         assert "environment_servers/harbor/configs/harbor.yaml" in config_paths
         assert "resources_servers" not in config_paths
         assert "opensandbox/configs/opensandbox.yaml" in config_paths
-        parsed = OverridesParser.create().parse_overrides(tokens)
-        output = next(token.value() for token in parsed if token.key_or_group == "output_jsonl_fpath")
-        assert output == str(tmp_path / "out" / "rollouts.jsonl")
+        assert yaml.safe_load(config_path.read_text())["output_jsonl_fpath"] == str(
+            tmp_path / "out" / "rollouts.jsonl"
+        )
+        assert not any(token.lstrip("+").startswith("use_absolute_ip=") for token in tokens)
+
+    def test_resolve_agent_marks_in_sandbox_harnesses(self):
+        assert resolve_agent("terminus_2_sandboxed").runs_in_sandbox is False
+        assert resolve_agent("hermes_agent").runs_in_sandbox is True
+        assert resolve_agent("oracle").runs_in_sandbox is False
+
+    def test_runs_in_sandbox_from_config_key_or_known_harness(self):
+        assert runs_in_sandbox("anyswe_agent", {"sandbox_model_base_url": None}) is True
+        assert runs_in_sandbox("anyswe_agent", {"model_server": {"name": "policy_model"}}) is False
+        assert runs_in_sandbox("miniswe_sandboxed_agent", {}) is True
+        assert runs_in_sandbox("oracle_agent", None) is False
+
+    def _prepared(self, tmp_path):
+        folder = tmp_path / "ds"
+        tasks = [load_task(write_task(folder / "a"))]
+        prepared = PreparedTaskset("ds", folder, tasks, tmp_path / "out" / "tasks.jsonl", tmp_path / "out")
+        prepared.output_dir.mkdir(parents=True)
+        return prepared
+
+    def test_build_run_advertises_node_ip_for_in_sandbox_agent(self, tmp_path):
+        agent = resolve_agent("hermes")
+        path, _ = build_run(self._prepared(tmp_path), agent, sandbox="opensandbox", overrides=[])
+        assert yaml.safe_load(path.read_text())["use_absolute_ip"] is True
+
+    def test_build_run_leaves_host_side_agent_on_loopback(self, tmp_path):
+        agent = AgentSelection(tmp_path / "agent.yaml", "oracle_agent", "oracle_agent")
+        path, _ = build_run(self._prepared(tmp_path), agent, sandbox="docker", overrides=[])
+        assert yaml.safe_load(path.read_text()).get("use_absolute_ip", False) is False
+
+    @pytest.mark.parametrize("override", ["+use_absolute_ip=false", "++use_absolute_ip=false"])
+    def test_build_run_respects_caller_use_absolute_ip(self, tmp_path, override):
+        agent = AgentSelection(tmp_path / "agent.yaml", "hermes_agent", "hermes_agent", runs_in_sandbox=True)
+        _, tokens = build_run(self._prepared(tmp_path), agent, sandbox=None, overrides=[override])
+        assert [token for token in tokens if "use_absolute_ip" in token] == [override]
 
 
 @pytest.mark.parametrize(
@@ -833,8 +873,6 @@ def test_existing_unpinned_task_is_never_relabeled(tmp_path, registry_repo):
 
 
 def test_registry_versions_keep_distinct_rows_routes_and_outputs(tmp_path, monkeypatch):
-    from hydra.core.override_parser.overrides_parser import OverridesParser
-
     import nemo_gym.tasks.harbor.cli as harbor_cli
 
     for version in ("1.0", "2.0"):
@@ -851,9 +889,7 @@ def test_registry_versions_keep_distinct_rows_routes_and_outputs(tmp_path, monke
     for prepared, (path, tokens) in zip((first, second), configs):
         assert json.loads(prepared.rows_path.read_text())["task_id"]["taskset"] == prepared.taskset
         assert list(yaml.safe_load(path.read_text())["environment_server_routes"]) == [prepared.taskset]
-        parsed = OverridesParser.create().parse_overrides(tokens)
-        output = next(token.value() for token in parsed if token.key_or_group == "output_jsonl_fpath")
-        assert output == str(prepared.output_dir / "rollouts.jsonl")
+        assert yaml.safe_load(path.read_text())["output_jsonl_fpath"] == str(prepared.output_dir / "rollouts.jsonl")
 
 
 def test_config_overlays_win_after_real_loading_and_inheritance(tmp_path):
@@ -951,6 +987,80 @@ def test_all_unloadable_tasks_still_record_reasons(tmp_path):
     assert "task.toml" in skipped["bad"]
 
 
+class TestValidationSummary:
+    def test_summarizes_rollouts(self, tmp_path):
+        from nemo_gym.tasks.harbor.cli import summarize_validation
+
+        # Rows are the verify response as returned plus the collector's `_ng_task_id` stamp.
+        rows = [
+            {
+                "_ng_task_id": {"taskset": "ds", "task_id": "solved"},
+                "reward": 1.0,
+                "mask_sample": False,
+                "response": {"metadata": {"oracle": "solved"}},
+            },
+            {
+                "_ng_task_id": {"taskset": "ds", "task_id": "wrong"},
+                "reward": 0.0,
+                "mask_sample": False,
+                "failure_kind": "harbor:missing_reward",
+                "response": {"metadata": {"oracle": "solved"}},
+            },
+            {
+                "_ng_task_id": {"taskset": "ds", "task_id": "skipped"},
+                "reward": 0.0,
+                "mask_sample": False,
+                "response": {"metadata": {"oracle": "unvalidated"}},
+            },
+            {
+                "_ng_task_id": {"taskset": "ds", "task_id": "masked"},
+                "reward": 0.0,
+                "mask_sample": True,
+                "failure_kind": "provider_unavailable",
+            },
+        ]
+        rollouts = tmp_path / "rollouts.jsonl"
+        rollouts.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+        # An episode that failed before verification lands in the failures sidecar.
+        (tmp_path / "rollouts_failures.jsonl").write_text(
+            json.dumps(
+                {
+                    "_ng_task_id": {"taskset": "ds", "task_id": "broken"},
+                    "_ng_failure_class": "environment_server_failed",
+                    "_ng_failure_terminal": True,
+                    "_ng_failure_message": "seed exploded",
+                }
+            )
+            + "\n"
+        )
+
+        report = summarize_validation(rollouts, ["never_ran"])
+
+        lines = report.text.splitlines()
+        assert lines[0] == "task_id\tstatus\treward"
+        assert "solved\toracle solved\t1.0" in lines
+        assert "wrong\toracle solved (harbor:missing_reward)\t0.0" in lines
+        assert "skipped\tunvalidated (no solution/)\t-" in lines
+        assert "broken\tfailed: seed exploded\t-" in lines
+        assert "masked\tmasked (provider_unavailable)\t-" in lines
+        assert "never_ran\tunvalidated (no solution/)\t-" in lines
+        assert report.ok is False
+
+    def test_all_good_is_ok(self, tmp_path):
+        from nemo_gym.tasks.harbor.cli import summarize_validation
+
+        rollouts = tmp_path / "rollouts.jsonl"
+        rollouts.write_text(json.dumps({"_ng_task_id": {"taskset": "ds", "task_id": "a"}, "reward": 1.0}) + "\n")
+        report = summarize_validation(rollouts, [])
+        assert report.ok is True and "a\toracle ran\t1.0" in report.text
+
+    def test_missing_rollouts_file(self, tmp_path):
+        from nemo_gym.tasks.harbor.cli import summarize_validation
+
+        report = summarize_validation(tmp_path / "none.jsonl", [])
+        assert report.ok is False and "no rollouts written" in report.text
+
+
 def test_harbor_task_data_schema_names_the_digest_key():
     """The schema module may import only pydantic, so the key is spelled out; keep it equal to DIGEST_KEY."""
     from environment_servers.harbor.task_data import TaskData
@@ -986,6 +1096,7 @@ def test_generated_run_passes_full_config_validation(tmp_path, monkeypatch, task
     )
     monkeypatch.setattr(sys, "argv", ["e2e", *_merge_config_paths(tokens)])
     monkeypatch.setattr(global_config, "_GLOBAL_CONFIG_DICT", None)
+    monkeypatch.setattr(global_config, "gethostbyname", lambda _: "192.0.2.20")
     config = get_global_config_dict()
     servers = GlobalConfigDictParser().filter_for_server_instance_configs(config)
     environment = next(server for server in servers if server.name == environment_server_instance(taskset))
@@ -1086,6 +1197,7 @@ def test_generated_agent_can_be_overridden_for_versioned_taskset(tmp_path, monke
     from nemo_gym.global_config import get_global_config_dict
     from nemo_gym.tasks.harbor.materialize import agent_instance
 
+    monkeypatch.setattr(global_config, "gethostbyname", lambda _: "192.0.2.20")
     folder = tmp_path / "ds-2.0"
     write_task(folder / "a")
     prepared = prepare_target(str(folder), output_root=tmp_path / "out")
