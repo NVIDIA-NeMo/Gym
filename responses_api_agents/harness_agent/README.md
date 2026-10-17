@@ -28,8 +28,8 @@ prefix is present (otherwise per session). Health-based reassignment requires
 `route_around_failing_endpoints: true`; it is off by default.
 
 Passing through Gym is also required for its training token capture, but does not enable capture by
-itself. Configure run-level `env.nemo_gym.token_id_capture.enabled` and the agent's `token_id_capture`
-flag (or run-level `all_agents`) so requests carry `/ng-rollout/<id>/training-token-capture`.
+itself. Configure run-level `token_id_capture.enabled` and the agent's `token_id_capture`
+flag (or run-level `token_id_capture.all_agents`) so requests carry `/ng-rollout/<id>/training-token-capture`.
 The backend must support the configured token capture mode. Verify capture records before training.
 
 When `sandbox_model_base_url` is unset, the agent uses the referenced model config's `base_url` if
