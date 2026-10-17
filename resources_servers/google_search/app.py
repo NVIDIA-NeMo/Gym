@@ -12,12 +12,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import json
 import re
 from typing import Optional
 
-import requests
 import trafilatura
+from aiohttp import ClientTimeout
 from fastapi import FastAPI
 from pydantic import BaseModel
 
@@ -28,6 +29,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.server_utils import raise_for_status, request
 
 
 class GoogleSearchResourcesServerConfig(BaseResourcesServerConfig):
@@ -61,7 +63,7 @@ class GoogleSearchVerifyRequest(GoogleSearchRunRequest, BaseVerifyRequest):
 
 
 class GoogleSearchVerifyResponse(BaseVerifyResponse):
-    parsed_option: str
+    parsed_option: Optional[str] = None
 
 
 def box_parser(output_str: str) -> Optional[str]:
@@ -80,11 +82,11 @@ def box_parser(output_str: str) -> Optional[str]:
 
 
 def _extract_last_assistant_text(body: GoogleSearchVerifyRequest) -> str:
-    last_message = body.response.output[-1]
-    if last_message.type == "message" and last_message.role == "assistant":
-        return last_message.content
-    else:
-        return None
+    for output_item in reversed(body.response.output):
+        if output_item.type != "message" or output_item.role != "assistant":
+            continue
+        return "".join(content_item.text for content_item in output_item.content if content_item.type == "output_text")
+    return ""
 
 
 class GoogleSearchResourcesServer(SimpleResourcesServer):
@@ -106,23 +108,26 @@ class GoogleSearchResourcesServer(SimpleResourcesServer):
             "q": body.query,
         }
         try:
-            response = requests.get(
-                "https://www.googleapis.com/customsearch/v1",
+            response = await request(
+                method="GET",
+                url="https://www.googleapis.com/customsearch/v1",
                 params=request_params,
-                timeout=10,
+                timeout=ClientTimeout(total=10),
             )
-            response.raise_for_status()
-            json_str = json.dumps(response.json())
+            await raise_for_status(response)
+            json_str = json.dumps(await response.json())
             return BaseGetSearchQueryResponse(search_results=json_str)
         except Exception as e:
             return BaseGetSearchQueryResponse(search_results=f"Error: Unexpected error - {str(e)}")
 
     async def browse(self, body: BaseGetPageContentRequest) -> BaseGetPageContentResponse:
         try:
-            html = trafilatura.fetch_url(body.url)
+            response = await request(method="GET", url=body.url, timeout=ClientTimeout(total=10))
+            await raise_for_status(response)
+            html = await response.text(errors="replace")
             if html:
-                text = trafilatura.extract(html)
-                if len(text.split()) > 10000:
+                text = await asyncio.to_thread(trafilatura.extract, html)
+                if text and len(text.split()) > 10000:
                     text = text[:5000] + "..." + text[-5000:]
                 if text:
                     return BaseGetPageContentResponse(page_content=text)
