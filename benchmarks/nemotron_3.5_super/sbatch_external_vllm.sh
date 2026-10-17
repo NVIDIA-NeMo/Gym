@@ -496,7 +496,16 @@ MOONCAKE_CONFIG
     # W0924 18:25:48.906106 1830563 worker_pool.cpp:477] Worker: Cannot make connection for endpoint: 10.109.24.46:15741@mlx5_2, pausing peer rail and retrying through an alternate peer RNIC
     export MC_TE_FILTERS=mlx5_0,mlx5_1,mlx5_3,mlx5_4
 
-    uv pip install --system mooncake-transfer-engine-cuda13
+    # custom_mooncake_version.sh bakes the fork and its native dependencies into
+    # the image. The PyPI distribution owns the same files and would overwrite it.
+    mooncake_manifest=/opt/super-vl-evals/mooncake-build.env
+    if [[ -f "\$mooncake_manifest" ]]; then
+        echo "Using image-local Mooncake build:"
+        cat "\$mooncake_manifest"
+    else
+        uv pip install --system mooncake-transfer-engine-cuda13
+    fi
+    python3 -c 'from mooncake.engine import TransferEngine; from mooncake.store import MooncakeDistributedStore'
 
     # @bxyu-nvidia: Need these for mooncake connector on GB200 https://github.com/vllm-project/vllm/blob/main/docs/features/mooncake_connector_usage.md#environment-variables
     export WITH_NVIDIA_PEERMEM=0
