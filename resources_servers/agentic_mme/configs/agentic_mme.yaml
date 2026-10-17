@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+agentic_mme:
+  resources_servers:
+    agentic_mme:
+      entrypoint: app.py
+      domain: other
+      verified: false
+      description: Agentic-MME atomic visual tools and optional web retrieval, task-only scoring.
+      value: Evaluate multi-turn visual reasoning with external evidence.
+
+agentic_mme_agent:
+  responses_api_agents:
+    agentic_mme_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: agentic_mme
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      max_rounds: 15
+      max_tool_calls: 15
+      max_concurrent_rollouts: 8
+      retrieval:
+        mode: disabled
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/agentic_mme/data/example.jsonl
+        num_repeats: 1

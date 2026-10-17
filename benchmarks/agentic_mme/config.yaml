@@ -1,0 +1,35 @@
+# Agentic-MME (atomic tools) with an LLM correctness judge.
+config_paths:
+  - resources_servers/agentic_mme/configs/agentic_mme.yaml
+
+agentic_mme_judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.select:agentic_mme_judge_base_url,https://inference-api.nvidia.com/v1}
+      # Default empty: `gym eval prepare` loads this config without the run's key override.
+      openai_api_key: ${oc.env:OPENAI_API_KEY,""}
+      openai_model: ${oc.select:agentic_mme_judge_model_name,us/azure/openai/gpt-4o-mini}
+      openai_default_headers: {}
+      max_concurrent_requests: 32
+
+agentic_mme:
+  resources_servers:
+    agentic_mme:
+      judge_model_server:
+        type: responses_api_models
+        name: agentic_mme_judge_model
+      judge_model: ${oc.select:agentic_mme_judge_model_name,us/azure/openai/gpt-4o-mini}
+
+agentic_mme_agent:
+  responses_api_agents:
+    agentic_mme_agent:
+      # No round or tool-call limit: the model decides when to answer.
+      max_rounds: null
+      max_tool_calls: null
+      datasets:
+      - name: agentic_mme
+        type: benchmark
+        jsonl_fpath: benchmarks/agentic_mme/data/agentic_mme_benchmark.jsonl
+        prepare_script: benchmarks/agentic_mme/prepare.py
+        num_repeats: 1
