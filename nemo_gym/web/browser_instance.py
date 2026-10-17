@@ -327,7 +327,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--parent-pid", type=int)
     args = parser.parse_args(argv)
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    # force: importing nemo_gym has already configured the root logger, which would
+    # otherwise drop every INFO record of the driver running in this instance.
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s", force=True)
     token = os.environ.pop(TOKEN_ENV, "")
     if not token:
         print(f"{TOKEN_ENV} is required", file=sys.stderr)
