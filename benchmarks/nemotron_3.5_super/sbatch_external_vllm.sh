@@ -507,7 +507,7 @@ MOONCAKE_CONFIG
             -rpc_port=50051 \
             -rpc_thread_num=4 \
             -metrics_port=9003 \
-            -eviction_high_watermark_ratio=0.95 \
+            -eviction_high_watermark_ratio=0.9 \
             -eviction_ratio=0.1 \
             -minloglevel=1 \
             -enable_metric_reporting=false \
