@@ -32,7 +32,9 @@ class WebResourcesServerConfig(BaseResourcesServerConfig):
     browser_heartbeat_failure_limit: int = Field(default=3, ge=1, le=20)
     require_auth: bool = False
     auth_token_env: str = "VISUAL_BROWSER_RESOURCES_TOKEN"
-    site_pool_mode: Literal["unmanaged", "local_locks"] = "unmanaged"
+    site_pool_mode: Literal["unmanaged", "local_locks", "site_limits"] = "unmanaged"
+    # site_limits: concurrent sessions allowed per site (task.sites), see SiteConcurrencyLimitPool.
+    max_sessions_per_site: int = Field(default=4, ge=1)
     allowed_benchmarks: list[WebBenchmark] = Field(default_factory=lambda: list(WebBenchmark))
 
     @model_validator(mode="after")

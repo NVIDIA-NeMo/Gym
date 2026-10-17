@@ -90,3 +90,21 @@ async def test_empty_site_list_uses_benchmark_lock() -> None:
 
     assert lease.metadata["sites"] == ["benchmark:webvoyager"]
     await pool.release(lease, healthy=True)
+
+
+@pytest.mark.asyncio
+async def test_site_limits_cap_each_site_independently() -> None:
+    from nemo_gym.web.site_pool import SiteCapacityError, SiteConcurrencyLimitPool
+
+    pool = SiteConcurrencyLimitPool(2)
+    github = [await pool.acquire(f"g{i}", _task(f"GitHub--{i}", ["GitHub"])) for i in range(2)]
+    with pytest.raises(SiteCapacityError, match="github"):
+        await pool.acquire("g2", _task("GitHub--2", ["GitHub"]))
+    # Another site is unaffected by GitHub being full.
+    await pool.acquire("h0", _task("Huggingface--0", ["Huggingface"]))
+
+    await pool.release(github[0], healthy=True)
+    await pool.acquire("g2", _task("GitHub--2", ["GitHub"]))
+    health = await pool.health()
+    assert health["sessions_by_site"] == {"github": 2, "huggingface": 1}
+    assert health["rejected_seeds"] == 1
