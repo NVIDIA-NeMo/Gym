@@ -7,7 +7,7 @@ Preparation writes, under ``results/harbor/<taskset>/``:
 
 - ``tasks.jsonl``: one materialized row per loadable task;
 - ``skipped.json``: omitted task IDs and reasons (empty when all tasks load);
-- ``run_config.yaml``: the resources server, agent and environment server blocks.
+- ``run_config.yaml``: the agent and environment server blocks.
 
 Then the ordinary end-to-end rollout collection runs with that config plus the
 selected agent, environment server and model configs.
@@ -31,7 +31,7 @@ from nemo_gym.tasks.harbor.task import HarborTask, HarborTaskError, discover_tas
 logger = logging.getLogger(__name__)
 
 DEFAULT_OUTPUT_ROOT = Path("results/harbor")
-ENVIRONMENT_SERVER_CONFIG = "environment_servers/single_agent_turn/configs/single_agent_turn.yaml"
+ENVIRONMENT_SERVER_CONFIG = "environment_servers/harbor/configs/harbor.yaml"
 SANDBOX_PROVIDER_CONFIG = "nemo_gym/sandbox/providers/{provider}/configs/{provider}.yaml"
 # Harness-specific settings a Harbor run needs; keyed by the agent implementation folder.
 AGENT_OVERRIDES: dict[str, dict[str, Any]] = {

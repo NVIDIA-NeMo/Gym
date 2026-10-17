@@ -72,6 +72,12 @@ from nemo_gym.task_data import (
 from nemo_gym.task_materialization import materialize_task
 
 
+def _ref_name(ref: Any) -> Optional[str]:
+    """The ``name`` of a server reference given as a mapping, a model or nothing."""
+    name = ref.get("name") if isinstance(ref, (dict, DictConfig)) else getattr(ref, "name", None)
+    return name if isinstance(name, str) else None
+
+
 class TrainDataProcessorConfig(BaseNeMoGymCLIConfig):
     """
     Prepare and validate training data, generating metrics and statistics for datasets.
@@ -984,21 +990,61 @@ This could be due to a change in how metrics are calculated, leading to outdated
         Datasets declared by a resources server belong to its own implementation; datasets
         declared by an agent belong to the resources server the agent references. Self-contained
         agents (no resources_server reference) return None here; the validator lookup then falls
-        back to the agent's own directory.
+        back to the environment server that drives the agent, then to the agent's own directory.
         """
         if c.SERVER_TYPE == "resources_servers":
             return next(iter(c.resources_servers))
         if c.SERVER_TYPE != "responses_api_agents":
             return None
-        inner = c.get_inner_run_server_config()
-        ref = getattr(inner, "resources_server", None)
-        rs_name = ref.get("name") if isinstance(ref, (dict, DictConfig)) else getattr(ref, "name", None)
-        if not isinstance(rs_name, str):
+        rs_name = _ref_name(getattr(c.get_inner_run_server_config(), "resources_server", None))
+        if rs_name is None:
             return None
         for other in server_instance_configs:
             if other.SERVER_TYPE == "resources_servers" and other.name == rs_name:
                 return next(iter(other.resources_servers))
         return None
+
+    @staticmethod
+    def _owning_environment_server_impl(
+        c: ServerInstanceConfig, server_instance_configs: List[ServerInstanceConfig]
+    ) -> Optional[str]:
+        """The environment-server implementation that drives a self-contained agent's episodes.
+
+        An environment server that names the agent as its ``agent_server`` owns the rows the agent
+        declares (the Harbor layout: the agent block carries ``datasets`` so rollout collection
+        finds them, the environment server seeds and verifies them), so its ``task_data.py`` is
+        the schema to validate against.
+        """
+        if c.SERVER_TYPE != "responses_api_agents":
+            return None
+        for other in server_instance_configs:
+            if other.SERVER_TYPE != "environment_servers":
+                continue
+            if _ref_name(getattr(other.get_inner_run_server_config(), "agent_server", None)) == c.name:
+                return next(iter(other.environment_servers))
+        return None
+
+    @classmethod
+    def _schema_home_for(
+        cls, c: ServerInstanceConfig, server_instance_configs: List[ServerInstanceConfig]
+    ) -> Optional[tuple[str, str]]:
+        """``(implementation, base_folder)`` whose ``task_data.py`` validates ``c``'s datasets, or None.
+
+        A resources server owns its own data and the data of agents that reference it. An agent
+        without a reference is owned by the environment server that names it, else by itself. An
+        agent whose reference is dangling is skipped: its schema home is the (missing) server.
+        """
+        impl_key = cls._owning_resources_server_impl(c, server_instance_configs)
+        if impl_key is not None:
+            return impl_key, "resources_servers"
+        if c.SERVER_TYPE != "responses_api_agents":
+            return None
+        if getattr(c.get_inner_run_server_config(), "resources_server", None) is not None:
+            return None
+        impl_key = cls._owning_environment_server_impl(c, server_instance_configs)
+        if impl_key is not None:
+            return impl_key, "environment_servers"
+        return next(iter(c.responses_api_agents)), "responses_api_agents"
 
     @classmethod
     def _task_data_validator_for(
@@ -1007,19 +1053,10 @@ This could be due to a change in how metrics are calculated, leading to outdated
         d: Union[DatasetConfig, BenchmarkDatasetConfig],
         server_instance_configs: List[ServerInstanceConfig],
     ) -> Optional[TaskDataValidator]:
-        impl_key = cls._owning_resources_server_impl(c, server_instance_configs)
-        base_folder = "resources_servers"
-        if impl_key is None:
-            # No resources server owns this data. A self-contained agent (one that declares no
-            # resources_server reference at all) may own a schema itself, under
-            # responses_api_agents/<implementation>/task_data.py. An agent whose reference is
-            # dangling is skipped: its schema home is the (missing) resources server.
-            if c.SERVER_TYPE != "responses_api_agents":
-                return None
-            if getattr(c.get_inner_run_server_config(), "resources_server", None) is not None:
-                return None
-            impl_key = next(iter(c.responses_api_agents))
-            base_folder = "responses_api_agents"
+        home = cls._schema_home_for(c, server_instance_configs)
+        if home is None:
+            return None
+        impl_key, base_folder = home
         server_dir = find_server_dir(impl_key, base_folder=base_folder)
         if server_dir is None:
             return None
@@ -1038,15 +1075,10 @@ This could be due to a change in how metrics are calculated, leading to outdated
         c: ServerInstanceConfig,
         server_instance_configs: List[ServerInstanceConfig],
     ) -> DatasetMetricHook | None:
-        impl_key = cls._owning_resources_server_impl(c, server_instance_configs)
-        base_folder = "resources_servers"
-        if impl_key is None:
-            if c.SERVER_TYPE != "responses_api_agents":
-                return None
-            if getattr(c.get_inner_run_server_config(), "resources_server", None) is not None:
-                return None
-            impl_key = next(iter(c.responses_api_agents))
-            base_folder = "responses_api_agents"
+        home = cls._schema_home_for(c, server_instance_configs)
+        if home is None:
+            return None
+        impl_key, base_folder = home
         server_dir = find_server_dir(impl_key, base_folder=base_folder)
         if server_dir is None:
             return None
