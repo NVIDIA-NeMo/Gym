@@ -625,10 +625,11 @@ class AgentSessionParticipant(CheckpointParticipant):
         return [session.episode_id for session in self._sessions.values() if session.restored_pending]
 
     def commit_reply(self, records: list[CheckpointRecord]) -> dict[str, Any]:
-        # An agent owns its own /run episode; an agent session an environment server started belongs to that server.
+        # An episode an agent's own /run drives belongs to that /run;
+        # an agent session's episode belongs to the environment server that opened it.
         # The controller needs each committed episode's owner and should not read the records file to learn it.
         return {
-            "legacy_episode_ids": sorted(
+            "run_episode_ids": sorted(
                 record.episode_id.capture_key
                 for record in records
                 if isinstance(record, AgentSessionRecord) and record.episode is not None

@@ -137,16 +137,16 @@ async def test_legacy_run_steps_block_prepare_only_when_waited_on() -> None:
     assert record.episode == {"next": "verify"}
 
 
-async def test_commit_reply_names_the_episodes_legacy_runs_own(tmp_path: Path) -> None:
+async def test_commit_reply_names_the_episodes_agent_runs_drive(tmp_path: Path) -> None:
     """An agent session an environment server started belongs to that server; the agent owns only its own /run."""
     participant = AgentSessionParticipant(Hooks())
     controller = ParticipantControlPlane(participant, instance_name="agent", lease_grace_seconds=60)
-    legacy_id, session_id = EpisodeId(rollout_id="legacy"), EpisodeId(rollout_id="session", attempt=1)
+    run_id, session_id = EpisodeId(rollout_id="run"), EpisodeId(rollout_id="session", attempt=1)
     participant.open_session("session", session_id)
     verifying, session_parked, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
-    async def legacy() -> None:
-        async with participant.legacy_run("run:legacy", legacy_id) as run:
+    async def own_run() -> None:
+        async with participant.legacy_run("run:run", run_id) as run:
             await run.boundary({"next": "verify"})
             async with run.step("replay"):
                 verifying.set()
@@ -157,7 +157,7 @@ async def test_commit_reply_names_the_episodes_legacy_runs_own(tmp_path: Path) -
             await session_parked.wait()
             await activation.boundary(lambda: {"step": 2})
 
-    tasks = [asyncio.create_task(legacy()), asyncio.create_task(environment_session())]
+    tasks = [asyncio.create_task(own_run()), asyncio.create_task(environment_session())]
     await asyncio.wait_for(verifying.wait(), 5)
     prepare = asyncio.create_task(controller.prepare(CheckpointRequest(**control())))
     await asyncio.sleep(0.01)
@@ -168,25 +168,25 @@ async def test_commit_reply_names_the_episodes_legacy_runs_own(tmp_path: Path) -
     release.set()
     await asyncio.wait_for(asyncio.gather(*tasks), 5)
 
-    assert reply["episode_ids"] == ["legacy", "session-a1"]
-    assert reply["legacy_episode_ids"] == ["legacy"]
+    assert reply["episode_ids"] == ["run", "session-a1"]
+    assert reply["run_episode_ids"] == ["run"]
 
 
-async def test_a_restored_legacy_run_not_yet_reclaimed_is_still_named_in_the_commit_reply(tmp_path: Path) -> None:
-    """A checkpoint between a restore and the replacement /run must still credit the episode to its legacy run."""
+async def test_a_restored_run_episode_not_yet_reclaimed_is_still_named_in_the_commit_reply(tmp_path: Path) -> None:
+    """A checkpoint between a restore and the replacement /run must still credit the episode to its agent's own /run."""
     source = AgentSessionParticipant(Hooks())
     source_controller = ParticipantControlPlane(source, instance_name="agent", lease_grace_seconds=60)
-    episode_id = EpisodeId(rollout_id="legacy")
+    episode_id = EpisodeId(rollout_id="run")
     verifying, release = asyncio.Event(), asyncio.Event()
 
-    async def legacy() -> None:
-        async with source.legacy_run("run:legacy", episode_id) as run:
+    async def own_run() -> None:
+        async with source.legacy_run("run:run", episode_id) as run:
             await run.boundary({"next": "verify"})
             async with run.step("replay"):
                 verifying.set()
                 await release.wait()
 
-    task = asyncio.create_task(legacy())
+    task = asyncio.create_task(own_run())
     await asyncio.wait_for(verifying.wait(), 5)
     await source_controller.prepare(CheckpointRequest(**control()))
     await source_controller.commit(CommitRequest(**control(checkpoint_dir=str(tmp_path / "first"))))
@@ -200,7 +200,7 @@ async def test_a_restored_legacy_run_not_yet_reclaimed_is_still_named_in_the_com
         RestoreRequest(**control("r1", checkpoint_dir=str(tmp_path / "first"), episode_ids=[episode_id]))
     )
     await controller.resume(CheckpointRequest(**control("r1")))
-    replacement = EpisodeId(rollout_id="legacy", attempt=1)
+    replacement = EpisodeId(rollout_id="run", attempt=1)
     # No replacement /run has claimed the session yet.
     assert await restored.restored_pending() == [replacement]
     await controller.prepare(CheckpointRequest(**control("c2")))
@@ -208,8 +208,8 @@ async def test_a_restored_legacy_run_not_yet_reclaimed_is_still_named_in_the_com
         CommitRequest(**control("c2", checkpoint_dir=str(tmp_path / "second"), episode_ids=[replacement]))
     )
 
-    assert reply["episode_ids"] == ["legacy-a1"]
-    assert reply["legacy_episode_ids"] == ["legacy-a1"]
+    assert reply["episode_ids"] == ["run-a1"]
+    assert reply["run_episode_ids"] == ["run-a1"]
 
 
 async def test_retire_stops_the_activation_before_it_replies() -> None:
