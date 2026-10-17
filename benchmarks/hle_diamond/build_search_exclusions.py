@@ -29,7 +29,9 @@ leading ``www.`` removed as upstream's matching does, deduplicated), approximate
 policy is at least as strict as Gym's HLE policy. Prefix rules become substring rules, so the Gym policy is a
 superset of upstream's for the two represented families; the SERP approximation is narrower for engines with
 many top-level domains (only ``google.com``) and wider where the path cannot be expressed (``yandex.``,
-``startpage.com``).
+``startpage.com``) or where the substring also covers a longer path (``scholar.google.com/scholar`` matches
+``/scholar_lookup``). Like every ``url_substring`` rule, each SERP rule matches anywhere in the URL, so a
+result-page URL embedded in another URL is blocked as well.
 
 The remaining regex families (``url_patterns``, ``patterns_case_sensitive``, ``answer_title_patterns``,
 ``answer_title_allow_hosts``) have no equivalent in Gym's format. They are listed by name and count under the
@@ -81,7 +83,8 @@ REPRESENTED_UPSTREAM_KEYS = {"domains": "domain", "url_prefixes": "url_substring
 # so a changed or new pattern is dropped with a report instead of being approximated silently.
 SERP_PATTERN_SUBSTRINGS: dict[str, tuple[str, ...]] = {
     r"^([a-z0-9-]+\.)*google\.[a-z.]+/search": ("google.com/search",),  # narrower: google.com only
-    r"^scholar\.google\.[a-z.]+/scholar\?": ("scholar.google.com/scholar",),  # narrower: .com only
+    # narrower: .com only; wider on the path (/scholar_lookup, /scholar_case, ...; upstream requires "/scholar?")
+    r"^scholar\.google\.[a-z.]+/scholar\?": ("scholar.google.com/scholar",),
     r"^([a-z0-9-]+\.)*bing\.com/search": ("bing.com/search",),
     r"^([a-z0-9-]+\.)*duckduckgo\.com/(html|lite|\?q=)": (
         "duckduckgo.com/html",

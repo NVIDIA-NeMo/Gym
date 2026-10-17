@@ -670,10 +670,10 @@ these presets:
   `web_search` failed, queried `google.com/search`, `bing.com/search`, `html.duckduckgo.com` and
   `search.yahoo.com/search` from bash with `python -c "import requests ..."`, downloaded PDFs and
   images from arbitrary hosts, and used `tavily_scroll_page` on DuckDuckGo result pages as a search
-  engine (one row: 69 scrolls). None of those fetches passes through the policy. A reproduction-grade
-  with-tools run therefore needs the OpenSandbox provider with `network_access: model_and_tools`,
-  under which the sandbox reaches only the model and tool servers, so every fetch goes through the
-  Tavily resource and its policy.
+  engine (one row: 198 `scroll_page` calls, 154 of them on result pages). None of those fetches
+  passes through the policy. A reproduction-grade with-tools run therefore needs the OpenSandbox
+  provider with `network_access: model_and_tools`, under which the sandbox reaches only the model and
+  tool servers, so every fetch goes through the Tavily resource and its policy.
 - Answer exposure: the search presets supply the HLE-Diamond
   [exclusion list](search_exclusions.json), derived from the upstream `docs/blocklist.json` domains
   and URL prefixes by `build_search_exclusions.py` (see Search exclusions below for what is and is
@@ -732,11 +732,14 @@ is reported and dropped rather than approximated silently: `google.com/search`,
 engine" pattern) and a result page returned by `web_search` is dropped. Remaining differences:
 
 - Narrower than upstream: Google and Google Scholar are blocked on `.com` only, where upstream
-  matches every Google top-level domain (`google.co.uk/search`, ...).
+  matches every Google top-level domain (`google.co.uk/search`, `scholar.google.de/scholar?`, ...).
 - Wider than upstream: `yandex.` blocks every Yandex host and path and any URL containing that text
   (a page titled "Yandex.Taxi", say), and `startpage.com` blocks the whole host, because a substring
-  cannot express "any path ending in `/search`". Other non-result pages of the engines are left alone
-  (`google.com/maps`, `duckduckgo.com/about`).
+  cannot express "any path ending in `/search`"; `scholar.google.com/scholar` also covers the longer
+  Scholar paths upstream leaves alone (`/scholar_lookup`, `/scholar_case`). Like every
+  `url_substring` rule, each of these matches anywhere in the URL, so `mybing.com/search` and a
+  result-page URL embedded in another URL (`example.com/?u=google.com/search`) are blocked too.
+  Other non-result pages of the engines are left alone (`google.com/maps`, `duckduckgo.com/about`).
 - Not covered: result pages of engines upstream does not list, and anything fetched outside the
   Tavily tools (the egress gate above).
 
@@ -744,23 +747,27 @@ engine" pattern) and a result page returned by `web_search` is dropped. Remainin
 
 Tavily's `/search` accepts at most 150 `exclude_domains` and answers HTTP 400 ("Max 150 domains are
 allowed") beyond that; this list has 220. The first `opencode_search` pilot (2026-10-16) sent every
-domain, so all 11 `web_search` calls failed with `Tavily HTTP 400 after 1 attempts` while
-`find_in_page`/`scroll_page` (Tavily `/extract`, which takes no domain list) worked; Gym's HLE list
-has 9 domains and never reached the limit. The Tavily resource now sends a capped subset:
+domain, so all 14 `web_search` calls failed with `Tavily HTTP 400 after 1 attempts` (11 in the 9
+exported rows, 3 in the stopped row's model-call capture) while `find_in_page`/`scroll_page` (Tavily
+`/extract`, which takes no domain list) worked; Gym's HLE list has 9 domains and never reached the
+limit. The Tavily resource now sends a capped subset:
 
-- `tavily_exclude_domains_limit` (default 150) bounds the provider-side list; `0` or `null` sends no
+- `tavily_exclude_domains_limit` (default 150, also the largest value the config accepts, since a
+  longer list fails every search) bounds the provider-side list; `0` or `null` sends no
   `exclude_domains` at all. Whatever it is set to, the full `domain` and `url_substring` policy is
   enforced locally on every URL the agent requests and on every URL the provider returns, so the cap
   changes which results Tavily withholds before ranking, never which pages the agent can see.
 - The subset is deterministic: the domains matching `tavily_exclude_domains_priority` first (default
   `huggingface.co`, `hf.co`, `lastexam.ai`, `agi.safe.ai`, `safe.ai`, `scale.com`, `*.scale.com`,
-  `github.com`, `githubusercontent.com`, `archive.*`, in that order), then the rest in file order,
-  cut at the limit. On this list that sends the 15 priority hosts and the next 135 in file order; the
-  70 not sent are the last 38 of upstream's parked spam domains (`mistraltms.it` ... `autoklarheit.de`),
-  the social networks (`instagram.com`, `facebook.com`, `x.com`, `reddit.com`, `tiktok.com`,
-  `linkedin.com`, ...), `quora.com`, the StackExchange family, `autobenchaudit.com` and the jsDelivr
-  CDN. A result from one of those is dropped locally, which costs the query a result slot but never
-  shows the page.
+  `github.com`, `githubusercontent.com`, `archive.*`, in that order; matched case-insensitively
+  against the normalised hostnames), then the rest in file order, cut at the limit. On this list that
+  sends the 15 priority hosts and the next 135 in file order. Every priority host already sits inside
+  the first 150 entries, so here the priority block only reorders: the 70 not sent are upstream's
+  last 70 `domains` entries, namely 38 unlabelled hostnames (`mistraltms.it` ... `autoklarheit.de`;
+  upstream's list carries no annotation or reason for any entry), the social networks
+  (`instagram.com`, `facebook.com`, `x.com`, `reddit.com`, `tiktok.com`, `linkedin.com`, ...),
+  `quora.com`, the StackExchange family, `autobenchaudit.com` and the jsDelivr CDN. A result from one
+  of those is dropped locally, which costs the query a result slot but never shows the page.
 - The server logs one warning per start naming the number of domains not sent (70 here).
 
 Two `url_substring` rules inherited from `benchmarks/hle/search_exclusions.json`

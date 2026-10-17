@@ -177,11 +177,12 @@ def test_unrepresented_upstream_rule_families_are_counted_including_unknown_ones
 
 
 @pytest.mark.parametrize("url", SERP_URLS)
-def test_serp_approximation_is_sound_on_result_page_urls_and_the_committed_policy_blocks_them(
+def test_serp_approximation_spot_check_one_result_page_per_rule_matches_upstream_and_is_blocked(
     url, url_exclusion_policy
 ):
-    """Upstream matches its anchored regexes on the lower-cased URL without scheme or leading www.; every such
-    page must contain one of the substrings emitted for a regex that matches it, and the committed list blocks it."""
+    """One URL per emitted substring, not a proof: upstream matches its anchored regexes on the lower-cased URL
+    without scheme or leading www.; each page must contain a substring emitted for a regex that matches it, and
+    the committed list blocks it. The known divergences are pinned by test_documented_serp_divergences below."""
     stripped = re.sub(r"^https?://(www\.)?", "", url.lower())
     matching = [regex for regex in module.SERP_PATTERN_SUBSTRINGS if re.match(regex, stripped)]
     assert matching, url
@@ -193,6 +194,26 @@ def test_serp_approximation_is_sound_on_result_page_urls_and_the_committed_polic
 @pytest.mark.parametrize("url", NON_SERP_URLS)
 def test_committed_policy_leaves_non_result_pages_of_search_engines_alone(url, url_exclusion_policy):
     assert not url_exclusion_policy(DIAMOND_POLICY).blocked(url)
+
+
+# Documented divergences of the substring approximation from upstream's anchored regexes (README, "Search-engine
+# result pages"): (url, matched by an upstream regex, blocked by the committed policy).
+SERP_DIVERGENCES = [
+    ("https://scholar.google.com/scholar_lookup?title=x", False, True),  # wider on the path
+    ("https://scholar.google.com/scholar_case?case=1", False, True),
+    ("https://example.com/?u=google.com/search", False, True),  # substrings match anywhere in the URL
+    ("https://mybing.com/search?q=x", False, True),
+    ("https://www.google.co.uk/search?q=x", True, False),  # narrower: google.com only
+    ("https://scholar.google.de/scholar?q=x", True, False),
+]
+
+
+@pytest.mark.parametrize("url, upstream_matches, gym_blocks", SERP_DIVERGENCES)
+def test_documented_serp_divergences_from_upstream_hold(url, upstream_matches, gym_blocks, url_exclusion_policy):
+    """A change to SERP_PATTERN_SUBSTRINGS that closes or opens one of these must update the README bullets."""
+    stripped = re.sub(r"^https?://(www\.)?", "", url.lower())
+    assert any(re.match(regex, stripped) for regex in module.SERP_PATTERN_SUBSTRINGS) is upstream_matches
+    assert url_exclusion_policy(DIAMOND_POLICY).blocked(url) is gym_blocks
 
 
 def test_rendered_policy_loads_through_gym_parser_which_ignores_metadata_keys(tmp_path, url_exclusion_policy):
@@ -285,6 +306,9 @@ def test_committed_policy_provider_subset_is_capped_priority_first_and_the_tail_
     assert sent[15:] == [domain for domain in policy.domains if domain not in sent[:15]][:135]
     not_sent = [domain for domain in policy.domains if domain not in sent]
     assert len(not_sent) == 70
+    # Every priority host sits inside the first 150 file entries, so on this list the priority block only
+    # reorders: the 70 local-only domains are upstream's last 70 entries (README, "Provider-side cap").
+    assert not_sent == policy.domains[150:]
     local_only = {"facebook.com", "x.com", "reddit.com", "stackexchange.com", "stackoverflow.com", "quora.com"}
     assert local_only <= set(not_sent)
     for url in (
