@@ -39,6 +39,15 @@ steps / non-prefilled steps. With no eligible sub-steps, the subproblem mean is 
 `step_usage` records each step's number, status, and usage. Coverage counts are
 `num_subproblems`, `num_generated_steps`, and `num_steps_with_usage`.
 
+Generated entries also retain `response_id`, `response_status`,
+`incomplete_details`, and `error` from that step's response, independently of
+model-call capture. Missing stop metadata stays null; it does not imply a
+completed generation. Use these fields to detect limits in any generated step:
+the top-level response status describes only the final generation. Prefilled,
+context-rejected, and skipped steps have no response metadata; their step
+`status` distinguishes them from generated responses. Older rollouts may lack
+these fields and cannot establish a zero truncation rate for multi-step problems.
+
 Rollouts and aggregates use `token_usage_version: 1`. Legacy records retain
 final-step metrics. Mixing versions is rejected.
 

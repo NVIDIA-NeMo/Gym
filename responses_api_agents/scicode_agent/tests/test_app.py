@@ -415,13 +415,15 @@ async def _collect_usage(usages, problem_id="1", n_steps=None, response_override
     """Exercise the step loop and capture the payload sent to verification."""
     agent = _agent()
     responses = iter(usages)
+    overrides = iter(response_overrides) if isinstance(response_overrides, list) else None
 
     def _post(server_name, url_path, json, cookies):
         if url_path == "/v1/responses":
             usage = next(responses)
             if isinstance(usage, Exception):
                 raise usage
-            return _Resp({**_model_json("x = 1"), "usage": usage, **(response_overrides or {})})
+            extra = next(overrides) if overrides is not None else (response_overrides or {})
+            return _Resp({**_model_json("x = 1"), "usage": usage, **extra})
         return _Resp({**json, "reward": 0.0})
 
     agent.server_client.post = AsyncMock(side_effect=_post)
@@ -443,7 +445,7 @@ class TestTokenAccounting:
         row = await _collect_usage([_usage(100), _usage(300, input_tokens=20)])
         assert row["token_usage_version"] == TOKEN_USAGE_VERSION
         assert row["response"]["usage"] == _usage(400, input_tokens=30, cached_tokens=4, reasoning_tokens=6)
-        assert row["step_usage"] == [
+        assert [{k: s[k] for k in ("step_number", "status", "usage")} for s in row["step_usage"]] == [
             {"step_number": "1.1", "status": "generated", "usage": _usage(100)},
             {"step_number": "1.2", "status": "generated", "usage": _usage(300, input_tokens=20)},
         ]
@@ -672,3 +674,79 @@ async def test_collector_builds_perf_from_generated_substeps(prefilled):
     _attach_ng_perf(result, observability_enabled=True)
     assert result["ng_perf"]["token_observability_coverage"] == (expected - 1) / expected
     assert result["ng_perf"]["completion_tokens"] == (expected - 1) * 20
+
+
+class TestHeadlineRepeatIntervals:
+    @pytest.mark.asyncio
+    async def test_endpoint_exports_weighted_subtask_and_problem_intervals(self):
+        rows = [
+            {
+                **_repeat(repeat, passed, total),
+                "_ng_task_index": task,
+                "agent_ref": {"name": "scicode"},
+                "reward": float(passed == total),
+            }
+            for task, total, values in [(0, 2, [2, 1, 0]), (1, 4, [3, 4, 3])]
+            for repeat, passed in enumerate(values)
+        ]
+        result = await _agent().aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))
+        for metric, mean, sem in [("subtask_accuracy", 13 / 18, 1 / 9), ("mean/problem_accuracy", 1 / 3, 1 / 6)]:
+            assert result.key_metrics[f"mean_across_repeats/{metric}"] == pytest.approx(mean)
+            assert result.key_metrics[f"ci_low_95_across_repeats/{metric}"] == pytest.approx(
+                mean - 4.30265272975 * sem
+            )
+            assert result.key_metrics[f"ci_high_95_across_repeats/{metric}"] == pytest.approx(
+                mean + 4.30265272975 * sem
+            )
+        assert result.key_metrics["subtask_accuracy"] == pytest.approx(13 / 18)
+
+    @pytest.mark.asyncio
+    async def test_single_repeat_has_no_headline_interval(self):
+        rows = [{**_repeat(0, 1, 2), "_ng_task_index": 0, "agent_ref": {"name": "scicode"}, "reward": 0.0}]
+        result = await _agent().aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))
+        assert not any(key.startswith("ci_low_95_across_repeats/") for key in result.key_metrics)
+
+
+class TestStepStopMetadata:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "first",
+        [
+            {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}},
+            {"status": "completed"},
+            {"status": "failed", "error": {"code": "server_error", "message": "failed"}},
+            {},
+        ],
+    )
+    async def test_earlier_stop_evidence_survives_completed_final_step(self, first):
+        row = await _collect_usage(
+            [_usage(100), _usage(200)],
+            response_overrides=[{"id": "first", **first}, {"id": "last", "status": "completed"}],
+        )
+        assert row["response"]["status"] == "completed"
+        assert row["response"]["id"] == "last"
+        assert row["response"]["usage"]["output_tokens"] == 300
+        step = row["step_usage"][0]
+        assert step["response_id"] == "first"
+        assert step["response_status"] == first.get("status")
+        assert step["incomplete_details"] == first.get("incomplete_details")
+        assert step["error"] == first.get("error")
+        assert row["step_usage"][1]["response_status"] == "completed"
+
+    @pytest.mark.asyncio
+    async def test_non_generated_steps_have_no_response_metadata(self):
+        row = await _collect_usage(
+            [_usage(100), Exception("exceeds maximum input length")],
+            problem_id="62",
+            n_steps=4,
+            response_overrides={"status": "completed"},
+        )
+        assert [step["status"] for step in row["step_usage"]] == [
+            "prefilled",
+            "generated",
+            "context_window_exceeded",
+            "skipped",
+        ]
+        for i in (0, 2, 3):
+            assert "response_status" not in row["step_usage"][i]
+            assert "response_id" not in row["step_usage"][i]
