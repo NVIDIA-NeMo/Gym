@@ -51,7 +51,7 @@ def _config(**kwargs) -> KiloCodeAgentConfig:
 
 
 def _make_agent(**kwargs) -> KiloCodeAgent:
-    with patch("responses_api_agents.kilocode_agent.app.KiloCodeAgent.model_post_init"):
+    with patch("responses_api_agents.kilocode_agent.app.ensure_kilo"):
         agent = KiloCodeAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
     agent.sem = asyncio.Semaphore(agent.config.concurrency)
     return agent

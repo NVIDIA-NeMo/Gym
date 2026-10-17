@@ -25,6 +25,7 @@ import warnings
 from abc import abstractmethod
 from asyncio.exceptions import CancelledError
 from contextlib import asynccontextmanager
+from copy import deepcopy
 from functools import partial
 from importlib import import_module
 from importlib.util import find_spec
@@ -57,7 +58,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from multidict import CIMultiDict
 from omegaconf import DictConfig, OmegaConf, open_dict
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 from requests.exceptions import ConnectionError
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.routing import Match
@@ -827,13 +828,27 @@ ServerStatus = Union[Literal["success"], Literal["connection_error"], Literal["t
 class ServerClient(BaseModel):
     head_server_config: BaseServerConfig
 
-    global_config_dict: DictConfig
+    # A read-only copy of the config the client was built with.
+    # The client caches lookups in it on the request path, so it must never change underneath them.
+    global_config_dict: DictConfig = Field(frozen=True)
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    @field_validator("global_config_dict", mode="after")
+    @classmethod
+    def _freeze_global_config(cls, global_config_dict: DictConfig) -> DictConfig:
+        # Copy first so later writes to the process-wide config, such as the Ray address, do not reach the client.
+        # A write through the client then fails loudly instead of leaving its caches out of date.
+        frozen = deepcopy(global_config_dict)
+        OmegaConf.set_readonly(frozen, True)
+        return frozen
 
     # Resolved base URLs, cached by server name.
     _server_base_urls: dict[str, str] = PrivateAttr(default_factory=dict)
     _checkpoint_enabled: Optional[bool] = PrivateAttr(default=None)
+    _rollout_attribution_enabled: Optional[bool] = PrivateAttr(default=None)
+    # Whether each server name is a resources server and whether it is a model server, cached by server name.
+    _server_kinds: dict[str, tuple[bool, bool]] = PrivateAttr(default_factory=dict)
 
     def model_post_init(self, context: Any) -> None:
         # Validate the ``checkpoint:`` block once, when the client is built at startup, rather than on every request.
@@ -844,6 +859,18 @@ class ServerClient(BaseModel):
         if self._checkpoint_enabled is None:
             self._checkpoint_enabled = checkpoint_settings(self.global_config_dict) is not None
         return self._checkpoint_enabled
+
+    def rollout_attribution_enabled(self) -> bool:
+        """Return whether calls to model and resources servers carry the rollout prefix.
+
+        Checkpointing needs every model and resources call attributed to its rollout attempt,
+        so it enables the prefix even when observability is off.
+        """
+        if self._rollout_attribution_enabled is None:
+            self._rollout_attribution_enabled = bool(
+                self.global_config_dict.get(OBSERVABILITY_ENABLED_KEY_NAME, False) or self.checkpoint_enabled()
+            )
+        return self._rollout_attribution_enabled
 
     def assistant_message_header(self, model_server_name: str) -> bytes | None:
         """Read the optional header property of harnesses using this model server.
@@ -940,14 +967,10 @@ class ServerClient(BaseModel):
                 json_obj = json_obj.model_dump(exclude_unset=True)
                 kwargs["json"] = json_obj
 
-        # Checkpointing needs every model and resources call attributed to its rollout attempt,
-        # so it carries the rollout prefix even when observability is off.
-        attribute_rollout = (
-            self.global_config_dict.get(OBSERVABILITY_ENABLED_KEY_NAME, False) or self.checkpoint_enabled()
-        )
-        server_entry = self.global_config_dict.get(server_name)
+        attribute_rollout = self.rollout_attribution_enabled()
+        is_resources_server, is_model_server = self._server_kind(server_name) if attribute_rollout else (False, False)
         rollout_id = current_rollout_id()
-        if attribute_rollout and server_entry is not None and "resources_servers" in server_entry:
+        if attribute_rollout and is_resources_server:
             if url_path == "/verify":
                 rollout_id = rollout_id or maybe_rollout_id_from_run_body(json_obj)
             if rollout_id is not None and not url_path.startswith(f"/{ROLLOUT_PATH_PREFIX}/"):
@@ -956,8 +979,7 @@ class ServerClient(BaseModel):
         if (
             rollout_id is not None
             and attribute_rollout
-            and server_entry is not None
-            and "responses_api_models" in server_entry
+            and is_model_server
             and url_path.partition("?")[0] in {"/v1/responses", "/v1/chat/completions", "/v1/messages"}
             and not url_path.startswith(f"/{ROLLOUT_PATH_PREFIX}/")
         ):
@@ -1045,6 +1067,18 @@ class ServerClient(BaseModel):
         base_url = self._build_server_base_url(server_config_dict)
         self._server_base_urls[server_name] = base_url
         return base_url
+
+    def _server_kind(self, server_name: str) -> tuple[bool, bool]:
+        """Return whether ``server_name`` is a resources server and whether it is a model server."""
+        kind = self._server_kinds.get(server_name)
+        if kind is None:
+            server_entry = self.global_config_dict.get(server_name)
+            kind = (
+                server_entry is not None and "resources_servers" in server_entry,
+                server_entry is not None and "responses_api_models" in server_entry,
+            )
+            self._server_kinds[server_name] = kind
+        return kind
 
     def _build_server_base_url(self, server_config_dict: OmegaConf) -> str:
         return f"http://{server_config_dict.host}:{server_config_dict.port}"
