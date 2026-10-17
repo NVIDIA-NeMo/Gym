@@ -17,6 +17,8 @@ import asyncio
 import builtins
 import gc
 import logging
+import shutil
+import subprocess
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
@@ -26,6 +28,7 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+from omegaconf import OmegaConf
 
 from nemo_gym.sandbox.providers.base import SandboxResources, SandboxSpec, SandboxStatus
 
@@ -2740,6 +2743,49 @@ async def test_direct_create_runs_setup_commands_as_root_and_a_failure_fails_the
     assert cleaned == ["sandbox-1"]
     # The provider's environment sits under the spec's own variables.
     assert FakeSandbox.created_kwargs["env"] == {"EXECD_API_GRACE_SHUTDOWN": "50ms", "A": "spec"}
+
+
+@pytest.mark.skipif(shutil.which("sh") is None, reason="needs a POSIX shell")
+@pytest.mark.parametrize(
+    ("os_release", "sources", "expected"),
+    [
+        pytest.param(
+            "ID=debian\nVERSION_CODENAME=bullseye\n",
+            "deb http://deb.debian.org/debian bullseye main\n"
+            "deb http://deb.debian.org/debian-security bullseye-security main\n",
+            "deb http://deb.debian.org/debian bullseye main\n"
+            "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/20260831T235959Z/"
+            " bullseye-security main\n",
+            id="bullseye",
+        ),
+        pytest.param(
+            "ID=debian\nVERSION_CODENAME=bookworm\n",
+            "deb http://deb.debian.org/debian-security bookworm-security main\n",
+            "deb http://deb.debian.org/debian-security bookworm-security main\n",
+            id="bookworm",
+        ),
+        pytest.param(None, None, None, id="no-apt"),
+    ],
+)
+def test_shipped_setup_points_only_bullseye_security_at_its_snapshot(
+    tmp_path: Path, os_release: str | None, sources: str | None, expected: str | None
+) -> None:
+    """The default setup command must succeed on every image, since a failing one fails the create."""
+    config = OmegaConf.load(
+        Path(__file__).parents[2] / "nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml"
+    )
+    [command] = OmegaConf.to_container(config.sandbox.opensandbox.setup, resolve=True)["commands"]
+    etc = tmp_path / "etc"
+    if os_release is not None:
+        (etc / "apt").mkdir(parents=True)
+        (etc / "os-release").write_text(os_release)
+        (etc / "apt" / "sources.list").write_text(sources)
+
+    result = subprocess.run(["sh", "-c", command.replace("/etc/", f"{etc}/")], capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    if expected is not None:
+        assert (etc / "apt" / "sources.list").read_text() == expected
 
 
 def test_a_failed_setup_command_is_never_a_retryable_create_error() -> None:

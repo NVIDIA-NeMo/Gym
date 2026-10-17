@@ -1491,7 +1491,7 @@ class TestCli:
 
     def test_build_run_merges_caller_overlays_after_component_defaults(self, tmp_path):
         """A later config_paths entry wins and replaces lists, so a run overlay must come after the
-        component and provider defaults or `setup.commands: []` in opensandbox.yaml would erase it."""
+        component and provider defaults or the shipped `setup.commands` in opensandbox.yaml would replace it."""
         from nemo_gym.cli.main import _merge_config_paths
 
         folder = tmp_path / "ds"
