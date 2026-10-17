@@ -58,8 +58,11 @@ class VisualBrowserDriverConfig(WebResourcesServerConfig):
     def validate_visual_browser(self) -> "VisualBrowserDriverConfig":
         if self.headless:
             raise ValueError("visual computer-use actions require headed Chromium under Xvfb")
-        if self.max_sessions != 1:
-            raise ValueError("PyAutoGUI runtimes require max_sessions=1 per isolated DISPLAY")
+        if self.max_sessions != 1 and "local_process" in self.browser_session_provider:
+            raise ValueError(
+                "PyAutoGUI acts on the process DISPLAY: local_process allows max_sessions=1; "
+                "use a provider that leases one browser instance per session for more"
+            )
         return self
 
 
