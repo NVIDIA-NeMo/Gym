@@ -99,6 +99,7 @@ class AgentSeedSessionRequest(BaseModel):
     task_id: TaskId
     tool_accesses: list[ToolAccess] = Field(default_factory=list)
     sandbox_access: SandboxAccess | None = None
+    setup_deadline_unix_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
 
     @field_validator("tool_accesses")
     @classmethod
@@ -133,6 +134,7 @@ class AgentCloseSessionResponse(BaseModel):
 
     agent_session_id: str
     agent_observations: AgentObservationBundle | None = None
+    cleanup_confirmed: bool = False
     resources_cookies: dict[str, str] | None = Field(
         default=None,
         description=(
