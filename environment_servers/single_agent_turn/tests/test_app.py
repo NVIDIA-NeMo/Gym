@@ -996,7 +996,7 @@ async def test_an_agent_reply_lost_to_a_restore_is_given_again_without_running_t
         )
         environment_boundary = {"next": "invoke_agent", "handles": handles.model_dump()}
         await environment._invoke_agent(first_attempt, handles)
-        agent_records = await agent.checkpoint_participant.export(None)
+        agent_records = await agent.checkpoint_participant.export(None, checkpoint_id="c")
     observations = agent._session_state("agent-session").observations
 
     # Both are restored, and the environment server invokes the activation again.

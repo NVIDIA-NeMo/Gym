@@ -1832,7 +1832,9 @@ class TestCheckpointContinuation:
                 return _mock_response(_FINAL_RESPONSE)
             # Its verification would hold up a checkpoint, but nothing of a restart is in one.
             report = participant.readiness()
-            during_verify.append((report.ready, report.restarts, len(await participant.export(None))))
+            during_verify.append(
+                (report.ready, report.restarts, len(await participant.export(None, checkpoint_id="c")))
+            )
             return _mock_response(kwargs["json"] | {"reward": 1.0})
 
         server_client.post = AsyncMock(side_effect=post)
@@ -1895,7 +1897,7 @@ async def _session_after_two_activations() -> tuple[str, dict]:
     for question in ("first?", "second?"):
         assert client.post("/ng-rollout/rollout/v1/responses", json={"input": question}).status_code == 200
     session_id = seed.json()["agent_session_id"]
-    return session_id, (await server.export_agent_sessions([session_id]))[session_id]
+    return session_id, (await server.export_agent_sessions([session_id], checkpoint_id="c"))[session_id]
 
 
 async def _restore_and_activate(session_id: str, session: dict, boundary: dict | None) -> list[str]:
@@ -2053,7 +2055,7 @@ class TestCheckpointAcrossModelCalls:
         await _until(lambda: calls)
         # A second checkpoint while the restored activation waits on its model call.
         prepared = await controller.prepare(CheckpointRequest(**_checkpoint("c2")))
-        [record] = await participant.export(None)
+        [record] = await participant.export(None, checkpoint_id="c")
         await controller.resume(CheckpointRequest(**_checkpoint("c2")))
         reply.set()
         await asyncio.wait_for(activation, 5)
@@ -2088,7 +2090,7 @@ class TestCheckpointAcrossModelCalls:
         await asyncio.wait_for(held.wait(), 5)
         ready_with_the_reply = participant.ready()
         committed = await controller.commit(CommitRequest(**_checkpoint("c1", checkpoint_dir=str(tmp_path))))
-        [record] = await participant.export(None)
+        [record] = await participant.export(None, checkpoint_id="c")
         await controller.resume(CheckpointRequest(**_checkpoint("c1")))
         result = await asyncio.wait_for(activation, 5)
 
@@ -2755,7 +2757,7 @@ async def test_an_indexed_session_reply_and_its_replay_carry_no_trajectory_and_n
         replayed = await http.post(path, json={"input": "q"}, headers={AGENT_ACTIVATION_HEADER: "1"})
         # A caller that sends no index, such as the UserSim environment server, still reads the trajectory.
         unindexed = await http.post(path, json={"input": "q"})
-    exported = await server.export_agent_sessions([_SESSION_ID])
+    exported = await server.export_agent_sessions([_SESSION_ID], checkpoint_id="c")
 
     assert original.status_code == 200 and "_ng_trajectory" not in original.json()
     assert replayed.content == original.content
@@ -2776,7 +2778,7 @@ async def test_an_indexed_reply_is_kept_unserialized_until_a_replay_or_an_export
         original = await http.post(path, json={"input": "q"}, headers={AGENT_ACTIVATION_HEADER: "1"})
         kept = server._session_state(_SESSION_ID).completed_reply["response"]
         replayed = await http.post(path, json={"input": "q"}, headers={AGENT_ACTIVATION_HEADER: "1"})
-    exported = (await server.export_agent_sessions([_SESSION_ID]))[_SESSION_ID]["completed_reply"]
+    exported = (await server.export_agent_sessions([_SESSION_ID], checkpoint_id="c"))[_SESSION_ID]["completed_reply"]
 
     # The normal path keeps the response object; nothing is dumped until a replay or an export.
     assert isinstance(kept, NeMoGymResponse)

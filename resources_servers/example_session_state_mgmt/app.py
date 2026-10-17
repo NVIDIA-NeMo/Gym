@@ -57,7 +57,7 @@ class StatefulCounterResourcesServer(SimpleResourcesServer):
     config: StatefulCounterResourcesServerConfig
     session_id_to_counter: Dict[str, int] = Field(default_factory=dict)
 
-    async def export_session_states(self, session_ids: list[str]) -> dict[str, JsonValue]:
+    async def export_session_states(self, session_ids: list[str], *, checkpoint_id: str) -> dict[str, JsonValue]:
         # A session the server no longer holds is left out, so the participant stops tracking it.
         return {
             session_id: {"count": self.session_id_to_counter[session_id]}

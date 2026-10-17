@@ -122,9 +122,14 @@ class AgentSessionHooks(Protocol):
     A restore runs in a fresh process after a crash and rebuilds every session or raises;
     the crashed process's sandboxes are still running and can be stopped there.
     Retire stops a discarded attempt's sandbox.
+    Export receives the ID of the checkpoint being written; ``release_external_state``, which is optional,
+    receives every checkpoint the controller may still restore and deletes what the export of any other
+    checkpoint kept outside Gym, such as snapshots.
     """
 
-    async def export_agent_sessions(self, session_keys: list[str]) -> dict[str, dict[str, JsonValue]]:
+    async def export_agent_sessions(
+        self, session_keys: list[str], *, checkpoint_id: str
+    ) -> dict[str, dict[str, JsonValue]]:
         """Return the state of every session in ``session_keys``."""
 
     async def restore_agent_sessions(self, sessions: list[RestoredAgentSession]) -> None:
@@ -135,6 +140,9 @@ class AgentSessionHooks(Protocol):
     async def park_agent_sessions(self, session_keys: list[str]) -> None:
         """Free the compute these sessions' exported state holds outside the process, such as sandboxes the
         agent owns, once a commit the controller stops after is durable. Optional and best effort."""
+
+    async def release_external_state(self, kept_checkpoint_ids: list[str]) -> None:
+        """Delete what exports of checkpoints outside ``kept_checkpoint_ids`` kept outside Gym. Optional."""
 
 
 @dataclass
@@ -520,6 +528,11 @@ class AgentSessionParticipant(CheckpointParticipant):
         keys = [record.session_key for record in records if isinstance(record, AgentSessionRecord)]
         await park([key for key in keys if key in self._sessions])
 
+    async def release(self, kept_checkpoint_ids: list[str]) -> None:
+        release = getattr(self.hooks, "release_external_state", None)
+        if release is not None:  # optional: an agent that keeps nothing outside Gym
+            await release(kept_checkpoint_ids)
+
     def readiness(self) -> PrepareReport:
         legacy_blockers = {
             self._sessions[key].episode_id.capture_key if key in self._sessions else key
@@ -607,7 +620,7 @@ class AgentSessionParticipant(CheckpointParticipant):
             seeding.attempt <= episode_id.attempt for seeding in self._rollout_seeds.get(episode_id.rollout_id, ())
         )
 
-    async def export(self, episode_ids: Optional[list[EpisodeId]]) -> list[CheckpointRecord]:
+    async def export(self, episode_ids: Optional[list[EpisodeId]], *, checkpoint_id: str) -> list[CheckpointRecord]:
         legacy = self.legacy_episodes.exported()
         # Only sessions within the commit's scope:
         # another participant may report one of these episodes as a restart,
@@ -624,7 +637,9 @@ class AgentSessionParticipant(CheckpointParticipant):
         ]
         # Every session is parked, so its boundary cannot move while the hooks are awaited.
         boundaries = [self._export_boundary(session) for session in sessions]
-        states = await self.hooks.export_agent_sessions([session.key for session in sessions])
+        states = await self.hooks.export_agent_sessions(
+            [session.key for session in sessions], checkpoint_id=checkpoint_id
+        )
         missing = [session.key for session in sessions if session.key not in states]
         if missing:
             raise ControlError(f"the agent did not export sessions {missing}")

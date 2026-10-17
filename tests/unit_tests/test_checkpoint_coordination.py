@@ -69,6 +69,9 @@ class Recorder(CheckpointParticipant):
             raise ValueError("corrupt state")
         self.live = {next_attempt(record.episode_id).capture_key for record in records}
 
+    async def release(self, kept_checkpoint_ids: list[str]) -> None:
+        self.events.append(f"release {self.name} {','.join(kept_checkpoint_ids)}")
+
 
 class _Response:
     def __init__(self, response: httpx.Response) -> None:
@@ -360,6 +363,29 @@ async def test_forget_runs_callers_before_the_servers_they_call() -> None:
     assert forgets[:2] == ["forget env", "forget agent"]
     assert sorted(forgets[2:]) == ["forget policy", "forget res"]
     assert all(len(recorder.retired) == 0 for recorder in recorders.values())
+
+
+async def test_release_reaches_every_participant_with_the_kept_checkpoints() -> None:
+    client, _, events = deployment(*FULL)
+    participants = await coordination.discover(client, auth_token=TOKEN)
+
+    await coordination.release(participants, "c2", ["c2", "c1", "c2"], deadline_ts=deadline())
+
+    assert sorted(event for event in events if event.startswith("release ")) == sorted(
+        f"release {name} c1,c2" for name in ("env", "agent", "policy", "res")
+    )
+
+
+async def test_release_is_refused_while_a_checkpoint_is_open() -> None:
+    client, _, events = deployment(*FULL)
+    participants = await coordination.discover(client, auth_token=TOKEN)
+    await coordination.prepare(participants, "c1", deadline_ts=deadline())
+
+    with pytest.raises(coordination.CoordinationError) as raised:
+        await coordination.release(participants, "c0", [], deadline_ts=deadline())
+
+    assert set(raised.value.failures) == {"env", "agent", "policy", "res"}
+    assert not any(event.startswith("release ") for event in events)
 
 
 async def test_discover_reports_a_server_that_is_down_instead_of_retrying_forever(

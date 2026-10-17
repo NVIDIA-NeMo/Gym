@@ -193,8 +193,11 @@ class CoordinatedServerParticipant(CoordinatedParticipant[PrepareReport]):
     def export_records(self, episode_ids: Optional[list[EpisodeId]]) -> list[CheckpointRecord]:
         raise NotImplementedError("a coordinated participant exports its workers' records through export()")
 
-    async def export(self, episode_ids: Optional[list[EpisodeId]]) -> list[CheckpointRecord]:
-        body = {"episode_ids": None if episode_ids is None else [e.model_dump(mode="json") for e in episode_ids]}
+    async def export(self, episode_ids: Optional[list[EpisodeId]], *, checkpoint_id: str) -> list[CheckpointRecord]:
+        body = {
+            "episode_ids": None if episode_ids is None else [e.model_dump(mode="json") for e in episode_ids],
+            "checkpoint_id": checkpoint_id,
+        }
         # The controller bounds the export by the commit's deadline.
         replies = await self.collect("export", body, timeout=None)
         records = await self._one_copy_per_session(replies)
@@ -445,7 +448,8 @@ class ParticipantWorkerLink(WorkerLink):
                 raise InvalidPhaseError(f"{self.participant.kind} worker is no longer ready to commit")
             episode_ids = body["episode_ids"]
             records = await self.participant.export(
-                None if episode_ids is None else [EpisodeId.model_validate(e) for e in episode_ids]
+                None if episode_ids is None else [EpisodeId.model_validate(e) for e in episode_ids],
+                checkpoint_id=body["checkpoint_id"],
             )
             unclaimed = getattr(self.participant, "unclaimed_sessions", None)
             return {

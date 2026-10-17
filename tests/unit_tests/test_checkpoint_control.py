@@ -318,6 +318,54 @@ async def test_forget_is_refused_while_a_checkpoint_is_open() -> None:
     assert len(participant.retired) == 1
 
 
+class ReleasingParticipant(FakeParticipant):
+    """Records the checkpoint each export was for and every release it received."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.exported_for: list[str] = []
+        self.released: list[list[str]] = []
+
+    async def export(self, episode_ids: Optional[list[EpisodeId]], *, checkpoint_id: str) -> list[BaseModel]:
+        self.exported_for.append(checkpoint_id)
+        return await super().export(episode_ids, checkpoint_id=checkpoint_id)
+
+    async def release(self, kept_checkpoint_ids: list[str]) -> None:
+        self.released.append(kept_checkpoint_ids)
+
+
+async def test_release_is_admitted_only_when_idle_and_reaches_the_participant(tmp_path: Path) -> None:
+    participant = ReleasingParticipant()
+    participant.executions["r"] = {"parked": True, "value": 1}
+    route = "/ng-control/v1/checkpoint/release"
+    async with make_client(participant) as client:
+        await client.post("/ng-control/v1/checkpoint/prepare", json=body())
+        # A list computed before this checkpoint existed must not release it, whatever ID the call carries.
+        own_id = await client.post(route, json=body(kept_checkpoint_ids=[]))
+        await client.post("/ng-control/v1/checkpoint/commit", json=body(checkpoint_dir=str(tmp_path / "c1")))
+        other_id = await client.post(route, json=body("ckpt-0", kept_checkpoint_ids=[]))
+        await client.post("/ng-control/v1/checkpoint/resume", json=body())
+        released = await client.post(route, json=body(kept_checkpoint_ids=["ckpt-1"]))
+        await client.post(
+            "/ng-control/v1/checkpoint/restore",
+            json=body("restore-1", checkpoint_dir=str(tmp_path / "c1"), episode_ids=[{"rollout_id": "r"}]),
+        )
+        after_restore = await client.post(route, json=body("restore-1", kept_checkpoint_ids=[]))
+
+    for refused in (own_id, other_id, after_restore):
+        assert refused.status_code == 409 and refused.json()["error"]["code"] == "invalid_phase"
+    assert released.json() == {"released": True}
+    assert participant.released == [["ckpt-1"]]
+    assert participant.exported_for == ["ckpt-1"]
+
+
+async def test_a_participant_without_external_state_accepts_a_release() -> None:
+    async with make_client(FakeParticipant()) as client:
+        response = await client.post("/ng-control/v1/checkpoint/release", json=body(kept_checkpoint_ids=["a", "b"]))
+
+    assert response.json() == {"released": True}
+
+
 async def test_a_failed_retire_keeps_its_attempts_refused_and_a_retry_stops_them() -> None:
     participant = FakeParticipant()
     participant.executions["r"] = {"parked": False, "value": 1}
@@ -1464,7 +1512,7 @@ async def test_an_export_that_outlives_its_commit_is_awaited_by_the_retry_not_re
     release = asyncio.Event()
 
     class SlowExport(FakeParticipant):
-        async def export(self, episode_ids: Optional[list[EpisodeId]]) -> list[BaseModel]:
+        async def export(self, episode_ids: Optional[list[EpisodeId]], *, checkpoint_id: str) -> list[BaseModel]:
             exports.append("started")
             await release.wait()
             return self.export_records(episode_ids)
@@ -1561,7 +1609,7 @@ def test_the_control_connection_pool_refuses_negative_limits() -> None:
 
 async def test_resume_does_not_wait_for_an_export_nothing_will_use(tmp_path: Path) -> None:
     class HungExport(FakeParticipant):
-        async def export(self, episode_ids: Optional[list[EpisodeId]]) -> list[BaseModel]:
+        async def export(self, episode_ids: Optional[list[EpisodeId]], *, checkpoint_id: str) -> list[BaseModel]:
             await asyncio.Event().wait()
             return []
 
@@ -1632,7 +1680,7 @@ async def test_a_failed_export_is_final_for_its_checkpoint_and_a_new_one_commits
     exports: list[None] = []
 
     class FailingOnce(FakeParticipant):
-        async def export(self, episode_ids: Optional[list[EpisodeId]]) -> list[BaseModel]:
+        async def export(self, episode_ids: Optional[list[EpisodeId]], *, checkpoint_id: str) -> list[BaseModel]:
             exports.append(None)
             if len(exports) == 1:
                 raise RuntimeError("export failed")
@@ -2063,7 +2111,7 @@ async def test_an_export_that_outlives_its_commit_and_then_fails_is_final_for_it
     release = asyncio.Event()
 
     class SlowThenFailing(FakeParticipant):
-        async def export(self, episode_ids: Optional[list[EpisodeId]]) -> list[BaseModel]:
+        async def export(self, episode_ids: Optional[list[EpisodeId]], *, checkpoint_id: str) -> list[BaseModel]:
             exports.append(None)
             if len(exports) == 1:
                 await release.wait()

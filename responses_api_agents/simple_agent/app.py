@@ -226,7 +226,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             resources_cookies=dict(direct_access.cookies) if direct_access is not None else None,
         )
 
-    async def export_agent_sessions(self, session_keys: list[str]) -> dict[str, dict[str, JsonValue]]:
+    async def export_agent_sessions(
+        self, session_keys: list[str], *, checkpoint_id: str
+    ) -> dict[str, dict[str, JsonValue]]:
         return {session_key: self._export_agent_session(session_key) for session_key in session_keys}
 
     def _export_agent_session(self, session_key: str) -> dict[str, JsonValue]:

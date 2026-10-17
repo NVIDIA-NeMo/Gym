@@ -62,7 +62,7 @@ class NotesServer(SimpleResourcesServer):
         await self._sandboxes.stop(request.session[SESSION_ID_KEY], forget_snapshots=True)
         return BaseVerifyResponse(**body.model_dump(), reward=1.0)
 
-    async def export_session_states(self, session_ids: list[str]) -> dict[str, JsonValue]:
+    async def export_session_states(self, session_ids: list[str], *, checkpoint_id: str) -> dict[str, JsonValue]:
         return await self._sandboxes.export(session_ids)
 
     async def restore_session_states(self, states: dict[str, JsonValue]) -> None:
