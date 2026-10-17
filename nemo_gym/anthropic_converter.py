@@ -42,6 +42,7 @@ changing the egress contract.
 import base64
 import binascii
 import json
+import os
 from time import time
 from typing import Any, Dict, Iterator, List, Optional
 from uuid import uuid4
@@ -70,6 +71,10 @@ from nemo_gym.openai_utils import (
 
 
 SUPPORTED_ANTHROPIC_IMAGE_MEDIA_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+
+
+# Clients replay unsigned thinking blocks from vLLM as text, so a placeholder signature keeps them as thinking.
+_PLACEHOLDER_SIGNATURE = os.environ.get("NEMO_GYM_ANTHROPIC_THINKING_SIGNATURE", "")
 
 
 class AnthropicConverter:
@@ -592,7 +597,7 @@ class AnthropicConverter:
         if block_type == "text":
             return {"type": "text", "text": ""}
         if block_type == "thinking":
-            return {"type": "thinking", "thinking": ""}
+            return {"type": "thinking", "thinking": "", "signature": ""}
         if block_type == "tool_use":
             return {"type": "tool_use", "id": block["id"], "name": block["name"], "input": {}}
         raise NotImplementedError(f"Unsupported Anthropic block for SSE synthesis: {block_type}")
@@ -602,7 +607,10 @@ class AnthropicConverter:
         if block_type == "text":
             return [{"type": "text_delta", "text": block.get("text", "")}]
         if block_type == "thinking":
-            return [{"type": "thinking_delta", "thinking": block.get("thinking", "")}]
+            deltas = [{"type": "thinking_delta", "thinking": block.get("thinking", "")}]
+            if block.get("signature"):
+                deltas.append({"type": "signature_delta", "signature": block["signature"]})
+            return deltas
         if block_type == "tool_use":
             return [{"type": "input_json_delta", "partial_json": json.dumps(block.get("input", {}))}]
         raise NotImplementedError(f"Unsupported Anthropic block for SSE synthesis: {block_type}")
@@ -729,7 +737,7 @@ class AnthropicConverter:
             block = {
                 "type": "thinking",
                 "thinking": summary["text"],
-                "signature": item.get("encrypted_content") or "",
+                "signature": item.get("encrypted_content") or _PLACEHOLDER_SIGNATURE,
             }
             blocks.append(block)
         return blocks
