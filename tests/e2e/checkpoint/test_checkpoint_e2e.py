@@ -39,6 +39,7 @@ from checkpoint_deployment import (
     GymHTTP,
     Reply,
     counter_row,
+    harness_row,
     notes_row,
     weather_episode,
     weather_row,
@@ -1292,3 +1293,109 @@ async def test_release_is_refused_while_a_checkpoint_is_open(deploy, tmp_path: P
 
     assert len(committed) == 1 and snapshot_ids(deployment) == committed
     assert response.json()["reward"] == 1.0
+
+
+# -- an OpenCode-shaped harness, interrupted at a checkpoint and continued ------------------------------------------
+
+
+def harness_notes(deployment: Deployment) -> dict[str, list[str]]:
+    """The notes file of every sandbox in the fake backend, as lines."""
+    return {
+        sandbox_id: box["files"].get("notes", "").splitlines()
+        for sandbox_id, box in deployment.sandbox_state()["boxes"].items()
+    }
+
+
+def harness_boundaries(checkpoint_dir: Path) -> list[dict]:
+    return [json.loads(line)["episode"] for line in session_records(checkpoint_dir, "agent")]
+
+
+async def test_a_harness_interrupted_by_a_checkpoint_continues_after_a_crash(deploy, tmp_path: Path) -> None:
+    """The trainer-shaped path: prepare interrupts the harness, commit snapshots its sandbox, Gym dies, the restore
+    forks the snapshot and the replacement attempt relaunches the harness in the fork, which picks up where the
+    file left off at the checkpoint. Every line lands exactly once."""
+    deployment = deploy("harness", harness_lines=8, harness_interval_s=0.3)
+    async with GymHTTP(deployment.url("environment"), timeout=120) as http:
+        first = asyncio.create_task(http.post("/run", json=harness_row("h-1", lines=8)))
+        await wait_until(lambda: any(len(lines) >= 2 for lines in harness_notes(deployment).values()))
+        await checkpoint(deployment, tmp_path / "ckpt", ["h-1"])
+        at_commit = deployment.sandbox_state()
+        await crash_and_restore(deployment, tmp_path / "ckpt", ["h-1"])
+        first.cancel()
+        replacement = await http.post("/run", json=harness_row("h-1", attempt=1, lines=8))
+        after = deployment.sandbox_state()
+
+    [box] = at_commit["boxes"].values()
+    lines_at_commit = box["files"]["notes"].splitlines()
+    # Prepare interrupted the harness part way, and only then did the commit snapshot the sandbox.
+    assert box["state"] == "running" and 2 <= len(lines_at_commit) < 8
+    [snapshot] = at_commit["snapshots"].values()
+    assert snapshot["files"]["notes"].splitlines() == lines_at_commit
+    [boundary] = harness_boundaries(tmp_path / "ckpt")
+    assert boundary["next"] == "harness" and boundary["interrupted"] is True and boundary["launches"] == 1
+    assert boundary["sandbox_handle"] == box["id"]
+    # The replacement continued in the fork of the snapshot: every line once, in order.
+    assert replacement.status_code == 200, replacement.text
+    result = replacement.json()
+    assert result["reward"] == 1.0, result
+    assert result["harness_launches"] == 2 and result["harness_interrupted"] is True
+    [fork] = [b for b in after["boxes"].values() if b["from_snapshot"] == snapshot["id"]]
+    assert fork["files"]["notes"].splitlines() == [f"line {i}" for i in range(1, 9)]
+    assert after["boxes"][box["id"]]["state"] == "stopped", "the crashed process's sandbox was superseded"
+    assert fork["state"] == "stopped", "verification ended the episode and freed the sandbox"
+
+
+async def test_a_harness_interrupted_by_a_checkpoint_continues_after_the_resume(deploy, tmp_path: Path) -> None:
+    """Checkpoint and continue: no crash, nothing is paused, and the same run relaunches in the same sandbox."""
+    deployment = deploy("harness", harness_lines=8, harness_interval_s=0.3)
+    async with GymHTTP(deployment.url("environment"), timeout=120) as http:
+        run = asyncio.create_task(http.post("/run", json=harness_row("h-2", lines=8)))
+        await wait_until(lambda: any(len(lines) >= 2 for lines in harness_notes(deployment).values()))
+        await checkpoint(deployment, tmp_path / "ckpt", ["h-2"])
+        [box] = deployment.sandbox_state()["boxes"].values()
+        assert box["state"] == "running"
+        participants = await deployment.participants()
+        await coordination.resume(participants, "c1", deadline_ts=deadline())
+        response = await run
+        after = deployment.sandbox_state()
+        # The episode is over; once the controller publishes c2 and drops c1, the release deletes its snapshot.
+        await checkpoint(deployment, tmp_path / "ckpt2", [], checkpoint_id="c2")
+        await coordination.resume(participants, "c2", deadline_ts=deadline())
+        await coordination.release(participants, "c2", ["c2"], deadline_ts=deadline())
+        await wait_until(lambda: snapshot_ids(deployment) == set())
+
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["reward"] == 1.0 and result["harness_launches"] == 2 and result["harness_interrupted"] is True
+    assert list(after["boxes"]) == [box["id"]], "no fork on a continue"
+    assert after["boxes"][box["id"]]["files"]["notes"].splitlines() == [f"line {i}" for i in range(1, 9)]
+    assert len(after["snapshots"]) == 1, "verification kept the snapshot c1 still names"
+    [boundary] = harness_boundaries(tmp_path / "ckpt")
+    assert boundary["next"] == "harness" and boundary["interrupted"] is True
+
+
+async def test_a_harness_relaunched_in_the_sandbox_its_boundary_names_cannot_continue_after_a_restore(
+    deploy, tmp_path: Path
+) -> None:
+    """Negative control: the restore forked the snapshot under a new ID and stopped the sandbox the boundary names,
+    so a replacement that does not ask the owner which sandbox is current cannot continue the harness."""
+    deployment = deploy("harness", harness_lines=8, harness_interval_s=0.3, harness_refreshes_access=False)
+    async with GymHTTP(deployment.url("environment"), timeout=120) as http:
+        first = asyncio.create_task(http.post("/run", json=harness_row("h-4", lines=8)))
+        await wait_until(lambda: any(len(lines) >= 2 for lines in harness_notes(deployment).values()))
+        await checkpoint(deployment, tmp_path / "ckpt", ["h-4"])
+        at_commit = deployment.sandbox_state()
+        [box] = at_commit["boxes"].values()
+        await crash_and_restore(deployment, tmp_path / "ckpt", ["h-4"])
+        first.cancel()
+        # The restore stops the superseded sandbox in the background; the replacement starts once it has.
+        await wait_until(lambda: deployment.sandbox_state()["boxes"][box["id"]]["state"] == "stopped")
+        replacement = await http.post("/run", json=harness_row("h-4", attempt=1, lines=8))
+        after = deployment.sandbox_state()
+
+    [snapshot] = at_commit["snapshots"].values()
+    [boundary] = harness_boundaries(tmp_path / "ckpt")
+    assert boundary["sandbox_handle"] == box["id"]
+    assert replacement.status_code == 500 and "is stopped" in replacement.text, replacement.text
+    [fork] = [b for b in after["boxes"].values() if b["from_snapshot"] == snapshot["id"]]
+    assert fork["files"]["notes"] == box["files"]["notes"], "the fork never received the remaining lines"

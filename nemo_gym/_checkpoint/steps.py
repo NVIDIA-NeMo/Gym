@@ -33,6 +33,20 @@ starts the rollout over from its input.
 If nothing crashes, it just keeps running.
 An episode becomes a restart only while no checkpoint is open,
 so the episodes a checkpoint exports and the restarts it reports never change during it.
+
+A ``wait`` step can be one long external process with no boundary inside it,
+such as an agent harness running a whole rollout in a sandbox.
+The checkpoint would wait for it past any deadline,
+and the harness cannot finish while the policy model server holds its next call until resume.
+Such a step waits for a park request alongside its work.
+A checkpoint raises the request when it closes admission and withdraws it when admission reopens.
+On the request the owner stops the work at a safe point, leaves the step,
+and records a boundary that continues the work, which parks the episode until resume.
+After resume the owner continues from that boundary,
+and after a crash the replacement attempt continues from it,
+so continuing may depend only on what the checkpoint captures,
+such as a harness session saved in a sandbox whose owner snapshots it.
+A restart is never asked to park: no checkpoint waits for it.
 """
 
 import asyncio
@@ -127,6 +141,8 @@ class EpisodeSteps:
         self.closed = False
         self._open = asyncio.Event()
         self._open.set()
+        # Raised while admission is closed; see park_requested.
+        self._park_request = asyncio.Event()
 
     def _set_state(self, episode: _Episode, state: _State) -> None:
         blocked = _blocks(episode)
@@ -271,6 +287,7 @@ class EpisodeSteps:
     def close(self) -> None:
         self.closed = True
         self._open.clear()
+        self._park_request.set()
         for episode in self._episodes.values():
             if episode.state in ("parked", "replay_step"):
                 episode.suspend_deadline()
@@ -278,9 +295,24 @@ class EpisodeSteps:
     def open(self) -> None:
         self.closed = False
         self._open.set()
+        self._park_request.clear()
         for episode in self._episodes.values():
             episode.resume_deadline()
             episode.resume.set()
+
+    def park_requested(self, key: str) -> bool:
+        """Whether a checkpoint has closed admission and waits for episode ``key`` to reach a boundary."""
+        episode = self._episodes.get(key)
+        return self.closed and episode is not None and not episode.restart
+
+    async def wait_park_requested(self, key: str) -> None:
+        """Return once a checkpoint asks episode ``key`` to park, at once if one already has."""
+        while not self.park_requested(key):
+            if self.closed:
+                # A restart, which no checkpoint waits for: this checkpoint does not ask it, so wait it out.
+                await self._open.wait()
+            else:
+                await self._park_request.wait()
 
     def blocker_count(self) -> int:
         """How many episodes are between boundaries, inside a wait step, or retired but not yet stopped:
