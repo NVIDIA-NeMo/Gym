@@ -1,0 +1,9 @@
+{
+  "reason": "The plain `lake build` of lean-mlir dies before compiling anything (its cache resolution landed Cli on the wrong revision; the pre-seed step now re-pins it) and, even when it runs, does not reach three modules that proof verification needs. These are the repairs applied to produce the validated image: retry with `--try-cache` when `lake build` fails, then build the missing targets explicitly.",
+  "try_cache_fallback": true,
+  "extra_targets": [
+    "Blase.MultiWidth.Defs",
+    "SSA.Projects.CIRCT.Stream.Stream",
+    "Mathlib.Data.Stream.Init"
+  ]
+}
