@@ -20,6 +20,7 @@ import asyncio
 import datetime
 import decimal
 import sqlite3
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
@@ -29,19 +30,48 @@ ResultRow = tuple[Any, ...]
 ResultSet = list[ResultRow]
 
 
-def execute_sqlite(db_path: Path, sql: str) -> Optional[ResultSet]:
+# Extra time the outer ``wait_for`` allows beyond ``timeout_s``; see ``execute_sqlite_async``.
+_OUTER_TIMEOUT_BUFFER_S = 10.0
+# How many SQLite VM instructions run between progress-handler checks.
+_PROGRESS_HANDLER_INTERVAL = 1000
+
+
+def execute_sqlite(db_path: Path, sql: str, timeout_s: Optional[float] = None) -> Optional[ResultSet]:
     """Execute SQL against a SQLite database file and return all rows.
 
     Returns ``None`` if execution raises (syntax error, missing table, etc.).
+
+    When ``timeout_s`` is given, a SQLite progress handler aborts the query from *inside* SQLite once it has
+    been running that long, and ``TimeoutError`` is raised (distinct from the ``None`` returned for query errors).
+    The clock starts when this function starts executing in its thread, so time spent queued for a worker does
+    not count. An outer ``asyncio.wait_for`` alone only stops *waiting*: the blocking call keeps running and
+    keeps occupying a thread-pool worker, so later queries queue behind it and spuriously time out.
     """
+    # `with sqlite3.connect(...)` only commits/rolls back; it does not close the connection, so close explicitly.
+    conn = None
+    timed_out = False
     try:
-        with sqlite3.connect(str(db_path)) as conn:
-            conn.text_factory = lambda b: b.decode(errors="ignore")
-            cur = conn.cursor()
-            cur.execute(sql)
-            return cur.fetchall()
+        conn = sqlite3.connect(str(db_path))
+        conn.text_factory = lambda b: b.decode(errors="ignore")
+        if timeout_s is not None:
+            start = time.monotonic()
+
+            def abort_if_timed_out() -> int:
+                nonlocal timed_out
+                timed_out = time.monotonic() - start > timeout_s
+                return int(timed_out)
+
+            conn.set_progress_handler(abort_if_timed_out, _PROGRESS_HANDLER_INTERVAL)
+        cur = conn.cursor()
+        cur.execute(sql)
+        return cur.fetchall()
     except Exception:
+        if timed_out:
+            raise TimeoutError(f"SQLite query exceeded {timeout_s}s") from None
         return None
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 async def execute_sqlite_async(
@@ -54,10 +84,18 @@ async def execute_sqlite_async(
     """Execute SQL asynchronously in a worker thread, bounded by semaphore.
 
     Returns ``None`` on timeout (unless ``raise_on_timeout`` is True) or query exception.
+
+    ``timeout_s`` is enforced inside the query by ``execute_sqlite`` so a timed-out query frees its thread
+    before the semaphore is released. The outer ``wait_for`` is only a backstop with an extra
+    ``_OUTER_TIMEOUT_BUFFER_S``: the progress handler checks elapsed time periodically and may fire slightly
+    after the deadline, and the inner timeout must win so that no query is left running in the background.
     """
     async with semaphore:
         try:
-            return await asyncio.wait_for(asyncio.to_thread(execute_sqlite, db_path, sql), timeout=timeout_s)
+            return await asyncio.wait_for(
+                asyncio.to_thread(execute_sqlite, db_path, sql, timeout_s),
+                timeout=timeout_s + _OUTER_TIMEOUT_BUFFER_S,
+            )
         except asyncio.TimeoutError:
             if raise_on_timeout:
                 raise

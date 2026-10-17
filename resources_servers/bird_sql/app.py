@@ -116,6 +116,27 @@ class BirdSqlVerifyResponse(BaseVerifyResponse):
     failure_reason: Optional[FailureCode] = None
 
 
+# Execution failures that are logged as they happen, with running totals, so a bad run can be spotted and stopped.
+_EXECUTION_FAILURE_LABELS = {
+    FailureCode.GOLD_EXECUTION_ERROR: "gold-sql-error",
+    FailureCode.GOLD_EXECUTION_TIMEOUT: "gold-sql-timeout",
+    FailureCode.EXECUTION_ERROR: "pred-sql-error",
+    FailureCode.EXECUTION_TIMEOUT: "pred-sql-timeout",
+}
+
+# Per-rollout 0/1 scores reported next to accuracy, each over every rollout. Names are the metric names users see.
+_FAILURE_SCORE_NAMES = (
+    "no_sql",
+    "gold-sql-timeout",
+    "pred-sql-timeout",
+    "sql-timeout",
+    "gold-sql-error",
+    "pred-sql-error",
+    "sql_errors",
+    "unclean",
+)
+
+
 class BirdSqlResourcesServer(SimpleResourcesServer):
     ray_enabled = False
     config: BirdSqlResourcesServerConfig
@@ -125,6 +146,8 @@ class BirdSqlResourcesServer(SimpleResourcesServer):
         self._dev_databases_dir: Path = ensure_bird_sql(self._resolve_dir(self.config.bird_sql_dir))
         self._semaphore = asyncio.Semaphore(self.config.max_concurrency)
         self._spark_sessions: Dict[str, Any] = {}
+        self._verified_count = 0
+        self._failure_counts: Dict[str, int] = {label: 0 for label in _EXECUTION_FAILURE_LABELS.values()}
         if self.config.dialect == "spark":
             # Imported here so the default SQLite path needs neither pandas nor pyspark/JVM.
             from resources_servers.bird_sql.setup_bird_spark import ensure_bird_spark
@@ -222,15 +245,56 @@ class BirdSqlResourcesServer(SimpleResourcesServer):
 
         reward = 1.0 if execution_match else 0.0
 
+        self._log_execution_failure(body, failure_reason)
+
         return _response(
             extracted_sql=extracted_sql,
             failure_reason=failure_reason,
             had_codeblock=had_codeblock,
         )
 
+    def _log_execution_failure(self, body: BirdSqlVerifyRequest, failure_reason: FailureCode) -> None:
+        """Log each gold/pred SQL error or timeout as it happens, with running totals."""
+        self._verified_count += 1
+        label = _EXECUTION_FAILURE_LABELS.get(failure_reason)
+        if label is None:
+            return
+        self._failure_counts[label] += 1
+        totals = " ".join(f"{name}={count}" for name, count in self._failure_counts.items())
+        logger.warning(
+            "BIRD %s on id=%s db_id=%s | running totals over %d verified: %s",
+            label,
+            body.id,
+            body.db_id,
+            self._verified_count,
+            totals,
+        )
+
     @staticmethod
     def _score_fn(r: dict) -> Dict[str, float]:
-        return {"accuracy": float(r.get("reward", 0.0) > 0)}
+        """Accuracy plus the failure-breakdown scores for one rollout; every score is 0/1.
+
+        A failed LLM request is not scored here: it aborts the run (``route_failures_to_sidecar`` stays off), so
+        every row seen is a completed rollout. A row without a ``failure_reason`` is counted ``unclean``.
+        """
+        reason = r.get("failure_reason")
+        gold_timeout = reason == FailureCode.GOLD_EXECUTION_TIMEOUT
+        pred_timeout = reason == FailureCode.EXECUTION_TIMEOUT
+        gold_error = reason == FailureCode.GOLD_EXECUTION_ERROR
+        pred_error = reason == FailureCode.EXECUTION_ERROR
+        scores = {
+            "accuracy": r.get("reward", 0.0) > 0,
+            "no_sql": reason == FailureCode.NO_SQL_EXTRACTED,
+            "gold-sql-timeout": gold_timeout,
+            "pred-sql-timeout": pred_timeout,
+            "sql-timeout": gold_timeout or pred_timeout,
+            "gold-sql-error": gold_error,
+            "pred-sql-error": pred_error,
+            "sql_errors": gold_error or pred_error,
+            # Clean = ran to a verdict: correct, or a well-formed query with a wrong answer.
+            "unclean": reason not in (FailureCode.NONE, FailureCode.RESULT_MISMATCH),
+        }
+        return {name: float(value) for name, value in scores.items()}
 
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
         """BIRD metrics: overall pass@k + per-difficulty (simple/moderate/challenging) pass@k."""
@@ -247,6 +311,16 @@ class BirdSqlResourcesServer(SimpleResourcesServer):
                 "extracted_sql",
             )
         )
+        rollouts = [r for task in tasks for r in task]
+        scores = [self._score_fn(r) for r in rollouts]
+        metrics["rollouts_count"] = len(rollouts)
+        for name in _FAILURE_SCORE_NAMES:
+            metrics[f"{name}_count"] = int(sum(score[name] for score in scores))
+        logger.info(
+            "BIRD run breakdown over %d rollouts: %s",
+            len(rollouts),
+            " ".join(f"{name}={metrics[f'{name}_count']}" for name in _FAILURE_SCORE_NAMES),
+        )
         return metrics
 
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
@@ -257,6 +331,10 @@ class BirdSqlResourcesServer(SimpleResourcesServer):
 
         key.update(highest_k_metrics(agent_metrics, "pass@1[avg-of-{k}]", score_names=["accuracy"]))
         key.update(highest_k_metrics(agent_metrics, "pass@{k}", score_names=["accuracy"]))
+        key.update(highest_k_metrics(agent_metrics, "pass@1[avg-of-{k}]", score_names=list(_FAILURE_SCORE_NAMES)))
+        for name in ("rollouts", *_FAILURE_SCORE_NAMES):
+            if f"{name}_count" in agent_metrics:
+                key[f"{name}_count"] = agent_metrics[f"{name}_count"]
 
         for prefix in {k.split("/pass@")[0] for k in agent_metrics if "/pass@" in k and k[0].islower()}:
             key.update(highest_k_metrics(agent_metrics, f"{prefix}/pass@1[avg-of-{{k}}]", score_names=["accuracy"]))
