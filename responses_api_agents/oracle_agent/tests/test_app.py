@@ -65,7 +65,10 @@ class FakeSandbox:
             }
         )
         if "solve.sh" in command:
-            return self.result
+            # solve.sh output is redirected to a file in the sandbox, so the exec itself carries only the exit code.
+            return SandboxExecResult(stdout="", stderr="", return_code=self.result.return_code)
+        if command.startswith("tail -c"):
+            return SandboxExecResult(stdout=self.result.stdout, stderr="", return_code=0)
         return SandboxExecResult(stdout="", stderr="", return_code=0)
 
     async def upload(self, local_path, remote_path):
@@ -151,14 +154,11 @@ def test_oracle_runs_solution_in_borrowed_sandbox(tmp_path, monkeypatch):
     assert payload["output"][0]["content"][0]["text"] == "Done!\n"
     assert any(remote.endswith(".tar.gz") for remote in sandbox.uploads)
     run = next(call for call in sandbox.execs if "solve.sh" in call["command"])
-    assert run == {
-        "command": "bash /solution/solve.sh",
-        "cwd": "/app",
-        "env": {"DEBIAN_FRONTEND": "noninteractive", "GREETING": "hi"},
-        "timeout_s": 120.0,
-        "user": "runner",
-        "preserve_background_services": True,
-    }
+    assert run["command"] == "timeout --signal=KILL 120 bash /solution/solve.sh > /logs/agent/solve-stdout.txt 2>&1"
+    assert run["timeout_s"] == 120 + 60
+    assert (run["cwd"], run["user"]) == ("/app", "runner")
+    assert run["env"] == {"DEBIAN_FRONTEND": "noninteractive", "GREETING": "hi"}
+    assert run["preserve_background_services"] is True
 
     close = client.post(
         "/v1/agent_sessions/close",
@@ -188,7 +188,7 @@ def test_failing_solution_is_reported(tmp_path, monkeypatch):
 
     assert payload["metadata"]["oracle"] == "failed"
     assert payload["metadata"]["oracle_return_code"] == "2"
-    assert "boom" in payload["output"][0]["content"][0]["text"]
+    assert "solve.sh exited with 2" in payload["output"][0]["content"][0]["text"]
 
 
 def test_changed_folder_is_rejected(tmp_path, monkeypatch):
@@ -257,7 +257,8 @@ def test_solve_uses_task_timeout_unless_explicitly_capped(tmp_path, monkeypatch,
     client = TestClient(agent.setup_webserver())
     assert client.post("/v1/agent_sessions", json=seed_body()).status_code == 200
     assert client.post("/v1/responses", json=RESPONSES_BODY).status_code == 200
-    assert next(call for call in sandbox.execs if "solve.sh" in call["command"])["timeout_s"] == expected
+    # The exec outlives the in-container `timeout` by the grace period.
+    assert next(call for call in sandbox.execs if "solve.sh" in call["command"])["timeout_s"] == expected + 60.0
 
 
 @pytest.mark.parametrize("present", [True, False])
