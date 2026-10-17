@@ -329,7 +329,9 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                     sandbox_descriptor=await session.environment.main.serialize(),
                     sandbox_provider=session.environment.provider_config,
                     instruction=session.task.instruction,
-                    user=session.environment.role_user,
+                    # The identity this server's own commands use: an agent that runs commands itself (mini-SWE)
+                    # cannot switch users in a sandbox that starts as a non-root image user either.
+                    user=session.environment.effective_user(session.environment.role_user),
                     agent_timeout_sec=session.task.config.agent.timeout_sec if budget is None else budget,
                     mcp_servers=[s.model_dump() for s in session.task.config.environment.mcp_servers],
                     skills_dir=session.task.config.environment.skills_dir,

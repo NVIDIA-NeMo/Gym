@@ -24,6 +24,7 @@ from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.terminal_bench_4 import app as app_module
 from resources_servers.terminal_bench_4 import lifecycle, opencode
 from resources_servers.terminal_bench_4.app import TerminalBench4Config, TerminalBench4ResourcesServer
+from resources_servers.terminal_bench_4.environment import Environment
 from resources_servers.terminal_bench_4.models import SandboxedVerifyRequest, TerminalBench4RunRequest
 from resources_servers.terminal_bench_4.task import content_hash
 from resources_servers.terminal_bench_4.tests.test_environment import environment_config, make_environment
@@ -108,7 +109,7 @@ def row(ref, prompt=INSTRUCTION + TEACHER, **extra):
     }
 
 
-def make_server(tmp_path, manifest, monkeypatch, **overrides):
+def make_server(tmp_path, manifest, monkeypatch, bootstrap_uid=0, **overrides):
     server = TerminalBench4ResourcesServer(
         config=config(tmp_path, manifest, harness="opencode", **overrides),
         server_client=MagicMock(spec=ServerClient),
@@ -127,7 +128,9 @@ def make_server(tmp_path, manifest, monkeypatch, **overrides):
         session.environment = SimpleNamespace(
             main=box,
             role_user="task-user",
-            bootstrap_uid=0,
+            bootstrap_uid=bootstrap_uid,
+            # The real Environment rule, for the started sandbox's default identity.
+            effective_user=lambda user: Environment.effective_user(SimpleNamespace(bootstrap_uid=bootstrap_uid), user),
             provider_config={"opensandbox": {}},
             closed=False,
             session_id=session.session_id,
@@ -537,6 +540,21 @@ async def test_opencode_seed_returns_handle_and_a_cookieless_retry_joins_the_epi
         FakeRequest(), TerminalBench4RunRequest.model_validate(row(ref, rollout_id="terminal-bench/test/attempt-1"))
     )
     assert other.session_id != seed.session_id and len(prepared) == 2
+    await finish(server)
+
+
+@pytest.mark.parametrize("bootstrap_uid,seed_user", [(0, "task-user"), (4242, None)])
+async def test_seed_user_is_the_identity_agent_commands_can_run_as(tmp_path, monkeypatch, bootstrap_uid, seed_user):
+    # An agent that runs its own commands (mini-SWE) switches with `su`, which a sandbox started as a non-root image
+    # user cannot do; there the seed names no user, so its commands run as that default identity, which is the task
+    # user. The OpenCode launcher still gets the declared user and the start identity and handles both itself.
+    manifest, ref = local_manifest(tmp_path)
+    server, box, prepared, staged = make_server(
+        tmp_path, manifest, monkeypatch, bootstrap_uid=bootstrap_uid, opencode={"model_gateway": "http://gw:1"}
+    )
+    seed = await server.seed_session(FakeRequest(), TerminalBench4RunRequest.model_validate(row(ref)))
+    assert seed.termination is None and seed.user == seed_user
+    assert staged[0][2]["agent_user"] == "task-user" and staged[0][2]["bootstrap_uid"] == bootstrap_uid
     await finish(server)
 
 

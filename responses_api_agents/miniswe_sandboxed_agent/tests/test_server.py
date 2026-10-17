@@ -17,7 +17,7 @@ from resources_servers.terminal_bench_4.app import (
     TerminalBench4ResourcesServer,
     TerminalBench4RunRequest,
 )
-from resources_servers.terminal_bench_4.environment import execution_user
+from resources_servers.terminal_bench_4.environment import Environment, execution_user
 from resources_servers.terminal_bench_4.models import SandboxedVerifyRequest
 from resources_servers.terminal_bench_4.task import TaskSettings
 from resources_servers.terminal_bench_4.tests.test_environment import environment_config
@@ -76,6 +76,8 @@ async def fixture(tmp_path, monkeypatch):
     )
     server._loader.load = AsyncMock(return_value=task)
     envs, events, harnesses = [], [], []
+    # The UID each role's sandbox starts as (`id -u` in Environment.start); 0 = a root-start image.
+    start_uid = {"agent": 0, "verifier": 0}
 
     def create(task, config, session_id, directory, verifier=False, archive_workers=None):
         assert archive_workers is server._archive_workers
@@ -83,6 +85,7 @@ async def fixture(tmp_path, monkeypatch):
         env = SimpleNamespace(
             task=task,
             role_user=execution_user(task.config.verifier.user if verifier else task.config.agent.user),
+            bootstrap_uid=start_uid[name],
             session_id=session_id,
             closed=False,
             resources=[],
@@ -108,6 +111,7 @@ async def fixture(tmp_path, monkeypatch):
             env.closed = True
 
         env.start, env.stop = AsyncMock(side_effect=start), AsyncMock(side_effect=stop)
+        env.effective_user = lambda user: Environment.effective_user(env, user)
         envs.append(env)
         return env
 
@@ -177,6 +181,7 @@ async def fixture(tmp_path, monkeypatch):
         grade=grader,
         events=events,
         harnesses=harnesses,
+        start_uid=start_uid,
     )
     await agent.shutdown()
     await lifecycle.shutdown(list(server._sessions.values()), 0.01)
@@ -197,6 +202,19 @@ async def test_seed_passes_the_task_identity_to_mini_swe(fixture, user):
         "/seed_session",
         "/verify",
     ]
+
+
+async def test_nonroot_start_seeds_no_user_so_mini_swe_runs_as_the_image_default(fixture):
+    # An image whose last USER is the task user starts the sandbox as that user, which cannot `su` to itself
+    # ("Password: su: Authentication failure"): mini-SWE's first command must run as the default identity.
+    f = fixture
+    f.server._loader.load.return_value.config.agent.user = "archivist"
+    f.start_uid["agent"] = 4242
+    result = await f.agent.run(f.request, f.body)
+    assert result.evaluation_completed
+    assert f.envs[0].role_user == "archivist" and f.harnesses[0].context.user is None
+    pwd = f.envs[0].main.exec.await_args_list[0]
+    assert pwd.args == ("pwd",) and pwd.kwargs["user"] is None
 
 
 async def test_agent_owns_loop_and_replays_exact_result(fixture):

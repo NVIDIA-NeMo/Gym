@@ -407,6 +407,17 @@ class Environment:
             raise RuntimeError("Main sandbox is not running")
         return self.main
 
+    def effective_user(self, user: str | int | None) -> str | int | None:
+        """The identity a main-sandbox command requested as ``user`` runs as.
+
+        A sandbox that starts as the image's own user cannot switch identity (OpenSandbox drops
+        CAP_SETUID/CAP_SETGID); every role there IS that user, so the request runs as the default identity.
+        """
+        user = execution_user(user)
+        if user is not None and self.bootstrap_uid not in (None, 0):
+            return None
+        return user
+
     async def exec(self, command, *, service=None, cwd=None, env=None, timeout_sec=None, user=None):
         main = service in (None, "main")
         shell = self.config.exec_shell if main else "sh -c"
@@ -414,11 +425,7 @@ class Environment:
             command = f"{shell} {shlex.quote(command)}"
         persistent = self.task_env if main and not self.uses_compose else {}
         if main:
-            user = execution_user(user)
-            # A sandbox that starts as the image's own user cannot switch identity (OpenSandbox drops
-            # CAP_SETUID/CAP_SETGID); every role there IS that user, so the request runs as the default identity.
-            if user is not None and self.bootstrap_uid not in (None, 0):
-                user = None
+            user = self.effective_user(user)
         return await self.sandbox(service).exec(
             command,
             cwd=cwd,

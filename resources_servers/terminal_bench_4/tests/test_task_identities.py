@@ -130,6 +130,23 @@ async def test_nonroot_image_retains_setup_without_root_escalation(tmp_path, mon
     assert not (env.directory / "sandbox/session.identity.json").exists()
 
 
+@pytest.mark.parametrize("bootstrap_uid", [None, 0, 4242])
+async def test_nonroot_start_runs_every_requested_user_as_the_default_identity(tmp_path, monkeypatch, bootstrap_uid):
+    # An image whose last USER is the task user (USER archivist, uid 4242) starts the sandbox as that user, which
+    # cannot `su` to anyone, itself included. The seed's user follows the same rule.
+    env, box, *_ = make_environment(tmp_path, monkeypatch, task_config={"agent": {"user": "archivist"}})
+    env.main = box
+    env.bootstrap_uid = bootstrap_uid
+    switches = bootstrap_uid in (None, 0)
+    assert env.role_user == "archivist"
+    assert env.effective_user(env.role_user) == ("archivist" if switches else None)
+    await env.agent_workdir()
+    assert box.exec.await_args.kwargs["user"] == ("archivist" if switches else None)
+    await env.exec("trusted staging", user="root")
+    assert box.exec.await_args.kwargs["user"] == ("root" if switches else None)
+    assert env.effective_user(None) is None
+
+
 @pytest.mark.parametrize("return_code,stdout", [(1, "0\n"), (0, ""), (0, "-1"), (0, str(2**32)), (0, "not a uid")])
 async def test_unreadable_default_identity_fails_before_log_setup(tmp_path, monkeypatch, return_code, stdout):
     env, box, *_ = make_environment(tmp_path, monkeypatch)
