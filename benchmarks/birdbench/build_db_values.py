@@ -191,13 +191,22 @@ def _column_descriptions(description_dir: Path, table_name: str, dscp_fields: Li
 # --------------------------------------------------------------------------------------
 
 
-def _collect_column_values(cur: Cursor, table_names: List[str]) -> List[Dict[str, str]]:
-    """Distinct, non-numeric, short string values from every column -- the BM25 corpus."""
+def _collect_column_values(
+    cur: Cursor, table_names: List[str], limit_per_column: Optional[int] = None
+) -> List[Dict[str, str]]:
+    """Distinct, non-numeric, short string values from every column -- the BM25 corpus.
+
+    ``limit_per_column`` caps each column's ``SELECT DISTINCT`` scan (default: unbounded). Useful on very large
+    databases (e.g. BIRD train, multi-GB), where the full scan dominates runtime.
+    """
+    limit_clause = f" LIMIT {int(limit_per_column)}" if limit_per_column else ""
     corpus: List[Dict[str, str]] = []
     for table_name in table_names:
         for column_name in _column_types(cur, table_name):
             try:
-                cur.execute(f'SELECT DISTINCT "{column_name}" FROM "{table_name}" WHERE "{column_name}" IS NOT NULL;')
+                cur.execute(
+                    f'SELECT DISTINCT "{column_name}" FROM "{table_name}" WHERE "{column_name}" IS NOT NULL{limit_clause};'
+                )
             except sqlite3.OperationalError:
                 continue
             for (value,) in cur.fetchall():
@@ -447,9 +456,11 @@ class DbHandle:
         dscp: str = "name_or_col_dscp",
         dialect: str = "sqlite",
         db_id: Optional[str] = None,
+        corpus_limit_per_column: Optional[int] = None,
     ):
         """``dialect="spark"`` (needs ``db_id``) renders the schema for Spark SQL: schema-qualified, backtick-quoted
         table headings and column names, and the Spark column types the ``bird_sql`` server will actually load.
+        ``corpus_limit_per_column`` bounds the BM25 corpus scan per column (see ``_collect_column_values``).
         """
         if dialect not in ("sqlite", "spark"):
             raise ValueError(f"Unsupported dialect {dialect!r}; expected 'sqlite' or 'spark'")
@@ -473,7 +484,7 @@ class DbHandle:
         self.primary_keys_by_table = {t: _primary_key_columns(cur, t) for t in self.table_names}
         self.foreign_keys = _all_foreign_keys(cur, self.table_names, self._column_ref)
         self.sampled_values = _sample_table_values(cur, self.table_names)
-        corpus = _collect_column_values(cur, self.table_names)
+        corpus = _collect_column_values(cur, self.table_names, corpus_limit_per_column)
         self.retriever = _build_retriever(corpus) if corpus else None
 
     def _column_ref(self, table: str, column: str) -> str:

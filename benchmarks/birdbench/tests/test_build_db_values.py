@@ -430,3 +430,12 @@ class TestDbHandleSpark:
         assert "  - `name`:\n      data_type: STRING" in context
         assert "  - `dirty`:\n      data_type: STRING" in context  # fell back to string when loaded
         assert "- `school`.`notes`.`student_id` = `school`.`students`.`student_id`" in context
+
+
+def test_collect_column_values_limit_per_column_caps_the_scan(tmp_path):
+    conn = sqlite3.connect(str(tmp_path / "t.sqlite"))
+    conn.execute("CREATE TABLE t (name TEXT)")
+    conn.executemany("INSERT INTO t VALUES (?)", [(f"value{i}",) for i in range(10)])
+    cur = conn.cursor()
+    assert len(build_db_values._collect_column_values(cur, ["t"])) == 10
+    assert len(build_db_values._collect_column_values(cur, ["t"], limit_per_column=3)) == 3
