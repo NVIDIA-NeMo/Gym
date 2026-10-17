@@ -1,0 +1,12 @@
+agent:
+  type: kimi-code
+  version: 0.36.1
+  thinking: true
+  effort: xhigh
+  context_limit: 1000000
+  output_limit: 65536
+model:
+  model_name: claude-opus-5
+  model_kwargs:
+    base_url: ${ANTHROPIC_BASE_URL:-https://api.anthropic.com}
+    api_key: ${ANTHROPIC_API_KEY:-}
