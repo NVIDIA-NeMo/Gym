@@ -91,12 +91,12 @@ VLLM_PREFILL_ARGS=(
         }
     }'
     --max-cudagraph-capture-size 1200
-    --kv-cache-memory-bytes 54G
     --max-num-batched-tokens 16960
     --max-num-seqs 1024
     --kv-cache-metrics
     --kv-cache-metrics-sample 0.01
 )
+# --kv-cache-memory-bytes 54G
 # @bxyu-nvidia: We set "enable_lookup": false for the Mooncake store connector because the prefill worker handles the prefix cache lookup and decode just needs to receive the transferred kv cache.
 VLLM_DECODE_ARGS=(
     --speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":${NUM_SPECULATIVE_TOKENS}}"
