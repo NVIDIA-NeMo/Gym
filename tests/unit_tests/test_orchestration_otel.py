@@ -99,7 +99,7 @@ def test_otel_has_no_destination_by_default():
         {
             "services": {},
             "compute": {"c": {"type": "slurm", "account": "a"}},
-            "driver": {"container": "gym:latest", "benchmarks": {}},
+            "driver": {"container": "gym:latest", "benchmarks": {"b": {}}},
             "job": {"output_path": "/remote"},
         }
     )
