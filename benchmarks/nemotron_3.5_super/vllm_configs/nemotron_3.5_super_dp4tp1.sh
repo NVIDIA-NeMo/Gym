@@ -84,7 +84,10 @@ VLLM_PREFILL_ARGS=(
                     "kv_connector_extra_config": {
                         "load_async": true,
                         "lookup_async": true,
-                        "async_prefetch_limit": 4
+                        "async_prefetch_limit": 4,
+                        "save_on_eviction": true,
+                        "eviction_save_max_blocks": 256,
+                        "eviction_save_lookahead_blocks": 2048
                     }
                 }
             ]
