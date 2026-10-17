@@ -824,7 +824,7 @@ class PolicyModelParticipant(CheckpointParticipant):
             return []
         return export_model_records(self.ledger, episode_ids, [self.gate.snapshot()], self._restored_cuts)
 
-    async def export(self, episode_ids: Optional[list[EpisodeId]]) -> list[CheckpointRecord]:
+    async def export(self, episode_ids: Optional[list[EpisodeId]], *, checkpoint_id: str) -> list[CheckpointRecord]:
         if self.ledger is None:
             return []
         # Snapshot on the event loop, then read every episode's ledger off it.

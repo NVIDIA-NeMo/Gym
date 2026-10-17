@@ -520,8 +520,9 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         if lifetimes is not None and session_id is not None:
             lifetimes.ended(session_id)
 
-    async def export_session_states(self, session_ids: list[str]) -> dict[str, JsonValue]:
-        """Return each session's state for a checkpoint, leaving out sessions this server no longer holds."""
+    async def export_session_states(self, session_ids: list[str], *, checkpoint_id: str) -> dict[str, JsonValue]:
+        """Return each session's state for checkpoint ``checkpoint_id``, leaving out sessions this server no longer
+        holds."""
         raise NotImplementedError
 
     async def restore_session_states(self, states: dict[str, JsonValue]) -> None:
@@ -539,6 +540,10 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
     async def park_session_states(self, session_ids: list[str]) -> None:
         """Free what these sessions' exported state holds outside the process, such as sandboxes, once a
         commit the controller stops after is durable. Optional."""
+
+    async def release_external_state(self, kept_checkpoint_ids: list[str]) -> None:
+        """Delete what exports of checkpoints outside ``kept_checkpoint_ids`` kept outside Gym, such as snapshots.
+        Optional."""
 
     async def current_sandbox_access(self, session_id: str) -> SandboxAccess | None:
         """The access a borrower of this session's sandbox should use now, or ``None`` when there is none.
