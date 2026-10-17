@@ -159,6 +159,12 @@ blocks: they apply to everything the provider creates. That includes Compose sid
 helper containers (an Alpine image with neither Python nor `apt-get`), so a command must no-op where it does
 not apply, as the example below does.
 
+The shipped `opensandbox.yaml` sets one setup command. It points a Debian bullseye image's `bullseye-security`
+source at the signed final-LTS snapshot on `snapshot.debian.org`, because the live mirror dropped those
+packages while the index still lists them, so `apt-get install` returns 404. Other images are left
+unchanged. A config that sets `setup.commands` replaces the whole list, so copy this command into your list
+if your images include bullseye.
+
 ```yaml
 sandbox:
   opensandbox:
