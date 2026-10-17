@@ -27,7 +27,11 @@ Each JSONL line requires a `responses_create_params` field following the [OpenAI
 {"responses_create_params": {"input": [{"role": "user", "content": "What is 2+2?"}]}}
 ```
 
-Additional fields like `expected_answer` vary by resources server—the component that provides tools and reward signals.
+Task-owned fields such as `expected_answer` vary by resources server—the component that provides tools and reward signals. Inspect that server's typed schema instead of copying another environment's row shape:
+
+```bash
+gym env schema --resources-server <name>
+```
 
 ### Required Fields
 
@@ -36,18 +40,22 @@ Additional fields like `expected_answer` vary by resources server—the componen
 | `responses_create_params` | User | Input to the model during training. Contains `input` (messages) and optional `tools`, `temperature`, etc. |
 | `agent_ref` | `gym dataset collate` | Routes each row to its agent server. Auto-generated during data preparation. |
 
-### Optional Fields
+### Task-Owned Fields
 
-| Field | Description |
-|-------|-------------|
-| `expected_answer` | Ground truth for verification (task-specific). |
-| `question` | Original question text (for reference). |
-| `id` | Tracking identifier. |
+Fields such as `expected_answer`, `question`, and task identifiers are not globally defined optional fields. Each resources server declares its own flat `TaskData` schema in `resources_servers/<name>/task_data.py`. The schema describes types and required fields regardless of how an older runtime request carries them.
 
-<Tip>
-Check `resources_servers/<name>/README.md` for fields required by each resources server's `verify()` method.
+Use the placement shown by the selected server's data and schema:
 
-</Tip>
+- Put fields at the row top level when the server request model reads them there.
+- Use `verifier_metadata` only when the current server contract reads those fields exclusively from that legacy container.
+- Do not provide the same field in both locations. Equal duplicates are unnecessary; conflicting values are ambiguous and fail task-data validation.
+- Do not infer one server's contract from another server. Run `gym env schema --resources-server <name>` before preparing data.
+
+During migration, a field read exclusively from `verifier_metadata` is marked `legacy_location: verifier_metadata` in the flat `TaskData` schema. This marker lets validation detect a top-level field that the current server would not receive. It does not make `verifier_metadata` the default for new fields.
+
+<Note>
+`verifier_metadata` describes task-owned inputs to verification, not rollout provenance or framework control data. Keep framework-owned fields such as `responses_create_params` and `agent_ref` outside it.
+</Note>
 
 ### The `agent_ref` Field
 
