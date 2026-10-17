@@ -56,10 +56,15 @@ from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from responses_api_agents.opencode_sandboxed_agent import app as app_module
 from responses_api_agents.opencode_sandboxed_agent.app import (
+    OpenCodeOutcome,
     OpenCodeSandboxedAgent,
     OpenCodeSandboxedAgentConfig,
     OpenCodeSandboxedAgentRunRequest,
 )
+
+
+# The harness driver seeds and checks the reply; tests whose fake replies lack an aiohttp status patch it.
+HARNESS_RUN_RAISE_FOR_STATUS = "nemo_gym._checkpoint.harness_run.raise_for_status"
 
 
 class TestOpenCodeSandboxedAgent:
@@ -959,12 +964,11 @@ class TestOpenCodeSandboxedAgent:
         server._start_sandbox = AsyncMock(return_value=sandbox)
         rollout_started = anyio.Event()
 
-        async def responses(self, request, params):
-            self._sandbox_id_to_run_result["session-1"] = {"_ng_trajectory": "partial"}
+        async def launch_opencode(self, request, params, launch, **kwargs):
             rollout_started.set()
             await anyio.sleep_forever()
 
-        monkeypatch.setattr(OpenCodeSandboxedAgent, "responses", responses)
+        monkeypatch.setattr(OpenCodeSandboxedAgent, "_launch_opencode", launch_opencode)
         body = OpenCodeSandboxedAgentRunRequest.model_validate(
             {"responses_create_params": {"input": [{"role": "user", "content": "solve"}]}}
         )
@@ -1051,18 +1055,15 @@ class TestBenchmarkLifecycle:
         server = OpenCodeSandboxedAgent(config=self._create_config(), server_client=client)
         sandbox = MagicMock(stop=AsyncMock())
         server._start_sandbox = AsyncMock(return_value=sandbox)
-        monkeypatch.setattr(OpenCodeSandboxedAgent, "responses", AsyncMock(side_effect=error))
-        monkeypatch.setattr(app_module, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(OpenCodeSandboxedAgent, "_launch_opencode", AsyncMock(side_effect=error))
+        monkeypatch.setattr(HARNESS_RUN_RAISE_FOR_STATUS, AsyncMock())
         request = MagicMock(cookies={}, session={SESSION_ID_KEY: "trial"})
         body = OpenCodeSandboxedAgentRunRequest(
             responses_create_params={"input": [{"role": "user", "content": "Solve"}]}
         )
-        server._sandbox_id_to_run_result["trial"] = {"partial": "evidence"}
         with raises(type(error)):
             await server.run(request, body)
         sandbox.stop.assert_awaited_once()
-        assert not server._sandbox_id_to_sandbox
-        assert not server._sandbox_id_to_run_result
 
     async def test_native_mcp_uses_per_session_headers(self, monkeypatch):
         client = MagicMock(spec=ServerClient)
@@ -1079,7 +1080,7 @@ class TestBenchmarkLifecycle:
         monkeypatch.setattr(
             "nemo_gym.sandbox.agent_tools.sandbox_server_url", lambda _, **kwargs: "http://10.0.0.3:63123"
         )
-        monkeypatch.setattr(app_module, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(HARNESS_RUN_RAISE_FOR_STATUS, AsyncMock())
         request = MagicMock(cookies={"session": "original"})
         body = OpenCodeSandboxedAgentRunRequest(
             responses_create_params={"input": [{"role": "user", "content": "Solve"}]}
@@ -1129,8 +1130,8 @@ class TestBenchmarkLifecycle:
             parallel_tool_calls=True,
         )
 
-        async def failed_response(*args):
-            server._sandbox_id_to_run_result["trial"] = {
+        async def failed_launch(*args, **kwargs):
+            run_result = {
                 "opencode_results_fpath": "",
                 "opencode_run_stdout": "",
                 "opencode_run_stderr": "",
@@ -1140,10 +1141,10 @@ class TestBenchmarkLifecycle:
                 "opencode_error_type": "TimeoutError",
                 "opencode_exit_code": None,
             }
-            return response
+            return OpenCodeOutcome(response=response, run_result=run_result)
 
-        monkeypatch.setattr(OpenCodeSandboxedAgent, "responses", failed_response)
-        monkeypatch.setattr(app_module, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(OpenCodeSandboxedAgent, "_launch_opencode", failed_launch)
+        monkeypatch.setattr(HARNESS_RUN_RAISE_FOR_STATUS, AsyncMock())
         request = MagicMock(cookies={}, session={SESSION_ID_KEY: "trial"})
         request.state = SimpleNamespace()
         body = OpenCodeSandboxedAgentRunRequest(
@@ -1301,7 +1302,7 @@ async def test_terminal_length_stop_scores_zero_and_preserves_output(
     sandbox.download = AsyncMock(side_effect=download)
     server._start_sandbox = AsyncMock(return_value=sandbox)
     server._create_opencode_config = AsyncMock(return_value={})
-    monkeypatch.setattr(app_module, "raise_for_status", AsyncMock())
+    monkeypatch.setattr(HARNESS_RUN_RAISE_FOR_STATUS, AsyncMock())
     monkeypatch.setattr(app_module, "_read_opencode_child_messages", lambda *args: [])
     monkeypatch.setattr(
         app_module,

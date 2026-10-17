@@ -27,11 +27,18 @@ from traceback import format_exc
 from typing import Any, Dict, List, Literal, Optional
 from uuid import uuid4
 
-from anyio import CancelScope
 from fastapi import Request
 from openai.types.responses import ResponseInputTextParam
-from pydantic import ConfigDict, Field, FilePath
+from pydantic import BaseModel, ConfigDict, Field, FilePath, JsonValue
 
+from nemo_gym._checkpoint.harness import HarnessInterrupted, ResumeDecision, stdout_only
+from nemo_gym._checkpoint.harness_run import (
+    HarnessRunResult,
+    LaunchContext,
+    LaunchRecord,
+    LentSandbox,
+    SandboxedHarnessAgent,
+)
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
@@ -40,7 +47,6 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     Body,
-    SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import get_global_config_dict
@@ -81,7 +87,6 @@ from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import (
     SESSION_ID_KEY,
     is_nemo_gym_fastapi_entrypoint,
-    raise_for_status,
 )
 from responses_api_agents.opencode_agent.observability import append_opencode_turns, scope_opencode_trajectory
 from responses_api_agents.opencode_agent.runtime import (
@@ -462,6 +467,11 @@ class OpenCodeSandboxedAgentRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
 
 
+# The prompt a continued session gets: OpenCode's session database on the sandbox root filesystem carries the
+# turns before the interruption, so the continued run only has to pick the task back up.
+_CONTINUE_PROMPT = "Your previous session was interrupted. Continue working on the task from where you left off."
+
+
 def _build_remote_opencode_install_command(
     install_script_path: str,
     binary_path: str,
@@ -530,15 +540,34 @@ class OpenCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
         default=None,
         exclude_if=lambda value: value is None,
     )
+    # With checkpointing on: every OpenCode launch of the rollout, including the ones a checkpoint interrupted.
+    ng_harness_launches: Optional[List[LaunchRecord]] = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
 
-class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
+class OpenCodeOutcome(BaseModel):
+    """What one OpenCode launch produced: the response, the run's diagnostics, and what was observed of it."""
+
+    response: NeMoGymResponse
+    run_result: Dict[str, JsonValue]
+    observations: Optional[AgentObservationBundle] = None
+    trajectory: Optional[TrajectoryRecord] = None
+
+
+class OpenCodeSandboxedAgent(SandboxedHarnessAgent):
     config: OpenCodeSandboxedAgentConfig
+    # A legacy /run takes part in partial-rollout checkpoints through SandboxedHarnessAgent: the OpenCode step is
+    # stopped at a checkpoint's request and relaunched with ``opencode run --continue`` after the resume, or by the
+    # replacement attempt after a crash, in the sandbox the resources server names then (OpenCodeAdapter).
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
 
         self._sem = Semaphore(self.config.concurrency) if self.config.concurrency else nullcontext()
+        # Only for callers of responses() that manage the sandbox themselves, such as the ViBench agent: /run passes
+        # the sandbox and the result of a launch explicitly.
         self._sandbox_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
         self._sandbox_id_to_run_result: Dict[str, Dict[str, Any]] = dict()
 
@@ -687,9 +716,6 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         merge(config, self.config.opencode_config)
         config.setdefault("plugin", []).extend(f"file:///tmp/nemo-gym-{name}" for name in self._runtime_plugins())
-        rollout_mcp = getattr(request.state, "_ng_opencode_mcp", None)
-        if isinstance(rollout_mcp, dict):
-            config.setdefault("mcp", {}).update(rollout_mcp)
         return config
 
     async def _seed_tool_servers(self, request: Request, body: OpenCodeSandboxedAgentRunRequest) -> Dict[str, Any]:
@@ -787,9 +813,45 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        if self.config.tool_servers and not isinstance(getattr(request.state, "_ng_opencode_mcp", None), dict):
+        """One OpenCode launch in the sandbox registered under the request's ``sandbox_id`` cookie, for callers that
+        manage the sandbox themselves, such as the ViBench agent; its result goes to ``_sandbox_id_to_run_result``.
+
+        Never checkpointed: ``/run`` launches through :meth:`run_harness`.
+        """
+        sandbox_key = request.cookies["sandbox_id"]
+        observation_invocation_id = getattr(request.state, "_ng_observation_invocation_id", None)
+        observation_invocation_id = observation_invocation_id if isinstance(observation_invocation_id, str) else None
+        state: dict[str, JsonValue] = {}
+        if observation_invocation_id is not None:
+            state["data_home"] = f"/tmp/nemo-gym-opencode-{uuid4().hex}"
+        outcome = await self._launch_opencode(
+            request,
+            body,
+            LaunchContext(self._sandbox_id_to_sandbox[sandbox_key], state, resume=False, legacy_run=None),
+            mcp=getattr(request.state, "_ng_opencode_mcp", None),
+            observation_invocation_id=observation_invocation_id,
+        )
+        run_result: Dict[str, Any] = dict(outcome.run_result)
+        if observation_invocation_id is not None:
+            run_result["_ng_agent_observations"] = outcome.observations
+            run_result["_ng_trajectory"] = outcome.trajectory
+        self._sandbox_id_to_run_result[sandbox_key] = run_result
+        return outcome.response
+
+    async def _launch_opencode(
+        self,
+        request: Request,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        launch: LaunchContext,
+        *,
+        mcp: Optional[Dict[str, Any]],
+        observation_invocation_id: Optional[str],
+    ) -> OpenCodeOutcome:
+        """Launch OpenCode in ``launch.sandbox``, continuing its saved session if ``launch.resume``, and read what it
+        did. With ``launch.state["data_home"]`` OpenCode keeps its session database there."""
+        if self.config.tool_servers and not isinstance(mcp, dict):
             raise ValueError("Configured tool servers require a seeded /run request")
-        sandbox = self._sandbox_id_to_sandbox[request.cookies["sandbox_id"]]
+        sandbox = launch.sandbox
 
         query = None
         # This can be modified to handle system/developer prompts too.
@@ -833,7 +895,11 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             && echo "Downloaded OpenCode installer to $installer" \
             && VERSION={self.config.opencode_version} bash "$installer\""""
 
+        # Subclasses override _create_opencode_config(request) (ViBench rewrites the model URL), so the attempt's
+        # MCP servers are merged here rather than passed in.
         effective_config = await self._create_opencode_config(request)
+        if isinstance(mcp, dict):
+            effective_config.setdefault("mcp", {}).update(mcp)
         for name in self._runtime_plugins():
             await sandbox.upload(Path(__file__).with_name(name), f"/tmp/nemo-gym-{name}")
         build_agent = effective_config.setdefault("agent", {}).setdefault("build", {})
@@ -846,14 +912,19 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             await sandbox.upload(OBSERVABILITY_PATCH, _REMOTE_ASSISTANT_MESSAGE_PLUGIN)
             apply_observability_patch(effective_config, plugin_path=Path(_REMOTE_ASSISTANT_MESSAGE_PLUGIN))
         opencode_config_content = json.dumps(effective_config)
-        observation_invocation_id = getattr(request.state, "_ng_observation_invocation_id", None)
-        observation_invocation_id = observation_invocation_id if isinstance(observation_invocation_id, str) else None
         collect_observations = observation_invocation_id is not None
-        xdg_home_str = ""
-        remote_data_home = None
-        if collect_observations:
-            remote_data_home = f"/tmp/nemo-gym-opencode-{uuid4().hex}"
-            xdg_home_str = f"XDG_DATA_HOME={remote_data_home}"
+        # Pinned per rollout: a relaunch with --continue must find the same session database.
+        remote_data_home = launch.state.get("data_home")
+        remote_data_home = remote_data_home if isinstance(remote_data_home, str) else None
+        xdg_home_str = f"XDG_DATA_HOME={remote_data_home}" if remote_data_home is not None else ""
+        continue_str = ""
+        if launch.resume:
+            # The binary survived on the root filesystem; the session is continued, with Gym's prompt.
+            install_str = (
+                f'(test -x "$HOME/.opencode/bin/opencode" && echo "OpenCode already installed") || ({install_str})'
+            )
+            continue_str = "--continue"
+            query = _CONTINUE_PROMPT
 
         # OpenCode's glob/grep tools otherwise download rg inside the sandbox.
         ripgrep_remote_path = None
@@ -882,7 +953,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && echo "Installed OpenCode" \
         && rm -f /tmp/nemo-gym-mcp-setup-error \
         && NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps([s.name for s in self.config.tool_servers]))} OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} \
-            opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str} -- {quote(query)} \
+            opencode run {continue_str} --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str} -- {quote(query)} \
         && echo "OpenCode run finished"
         """
 
@@ -894,10 +965,12 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         run_error_type = None
         try:
-            result = await sandbox.exec(
-                command=command,
-                timeout_s=self.config.sandbox_timeout,
-            )
+            # With checkpointing, the OpenCode step is one long `wait` step with no boundary inside it: when a
+            # checkpoint asks the run to park, the launch and everything it started are stopped, and OpenCode's
+            # session database on the root filesystem goes into the snapshot taken once the run has parked.
+            result = await launch.run(command, timeout_s=self.config.sandbox_timeout)
+        except HarnessInterrupted:
+            raise
         except Exception as exc:
             result = None
             run_error_type = type(exc).__name__
@@ -1090,11 +1163,6 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             "opencode_export_found": opencode_export_found,
             "opencode_finished": opencode_finished,
         }
-        if collect_observations:
-            run_result["_ng_agent_observations"] = observations
-            run_result["_ng_trajectory"] = trajectory
-        self._sandbox_id_to_run_result[request.cookies["sandbox_id"]] = run_result
-
         response = NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
@@ -1108,78 +1176,55 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             status="incomplete" if length_limited else None,
             incomplete_details={"reason": "max_output_tokens"} if length_limited else None,
         )
-        return response
+        return OpenCodeOutcome(
+            response=response, run_result=run_result, observations=observations, trajectory=trajectory
+        )
+
+    async def _resume_decision(self, sandbox: AsyncSandbox, data_home: str) -> ResumeDecision:
+        """Whether the relaunch continues OpenCode's session in ``data_home``: only one that starts with the task.
+
+        ``opencode run --continue`` reopens the newest session and silently starts an empty one when there is none,
+        so a relaunch continues only a session that already carries the task. Any failure means starting over.
+        """
+        env = {"XDG_DATA_HOME": data_home}
+        opencode = 'export PATH="$HOME/.opencode/bin:$PATH" && opencode'
+        try:
+            listed = await sandbox.exec(stdout_only(f"{opencode} session list --format json"), env=env, timeout_s=60)
+            if listed.return_code == 0 and not (listed.stdout or "").strip():
+                return ResumeDecision(resume=False, reason="OpenCode was stopped before it saved a session")
+            if listed.return_code != 0:
+                raise RuntimeError(f"opencode session list exited with {listed.return_code}")
+            session_id = _extract_opencode_session_id(listed.stdout or "")
+            exported = await sandbox.exec(stdout_only(f"{opencode} export {quote(session_id)}"), env=env, timeout_s=60)
+            if exported.return_code != 0:
+                raise RuntimeError(f"opencode export exited with {exported.return_code}")
+            messages = json.loads(exported.stdout or "").get("messages")
+        except Exception as error:
+            return ResumeDecision(resume=False, reason=f"could not read OpenCode's saved session: {error!r}")
+        first = messages[0] if isinstance(messages, list) and messages and isinstance(messages[0], dict) else {}
+        if (first.get("info") or {}).get("role") != "user":
+            return ResumeDecision(resume=False, reason=f"OpenCode's session {session_id} does not start with the task")
+        return ResumeDecision(resume=True, reason=f"OpenCode's session {session_id} starts with the task")
 
     async def run(
         self, request: Request, body: OpenCodeSandboxedAgentRunRequest
     ) -> OpenCodeSandboxedAgentVerifyResponse:
         async with self._sem:
-            return await self._run(request, body)
+            done = await self.run_harness(request, body, OpenCodeAdapter(self, request, body))
+            return self._finish(body, done)
 
-    async def _run(
-        self, request: Request, body: OpenCodeSandboxedAgentRunRequest
+    def _finish(
+        self, body: OpenCodeSandboxedAgentRunRequest, done: HarnessRunResult["OpenCodeOutcome"]
     ) -> OpenCodeSandboxedAgentVerifyResponse:
-        cookies = request.cookies
-        session_key = request.session[SESSION_ID_KEY]
+        """The /run response: the verify reply, the launch's diagnostics, its trajectory, and the observations."""
         rollout_id = self.rollout_id_from_run(body)
-
-        seed_session_response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/seed_session",
-            json=body.model_dump(),
-            cookies=cookies,
-        )
-        await raise_for_status(seed_session_response)
-        cookies = cookies | seed_session_response.cookies
-
-        request.state._ng_opencode_mcp = await self._seed_tool_servers(request, body)
-
-        # @bxyu-nvidia: "sandbox_handle" comes from resources_servers/swebench/app.py
-        # Once we graduate to use the sandbox server, this will be in a generic seed_session type that can be model validated.
-        seed_session_result = await seed_session_response.json()
-        sandbox = await self._start_sandbox(
-            sandbox_id=seed_session_result.get("sandbox_handle"),
-            workdir=seed_session_result.get("workdir"),
-        )
-        self._sandbox_id_to_sandbox[request.session[SESSION_ID_KEY]] = sandbox
-
-        # Propagating the sandbox handle
-        cookies["sandbox_id"] = session_key
-
-        request._cookies = cookies
-        request.state._ng_observation_invocation_id = rollout_id
-        observations = None
-        try:
-            response = await self.responses(request, body.responses_create_params)
-            run_result = self._sandbox_id_to_run_result.get(session_key, {}).copy()
-            observations = run_result.pop("_ng_agent_observations", None)
-            trajectory = run_result.pop("_ng_trajectory", None)
-            response_dict = await verify_agent_response(
-                self.server_client,
-                self.config.resources_server,
-                body,
-                response,
-                cookies,
-                force_zero_reward=self.config.execution_failure_reward_zero
-                and run_result.get("opencode_failed", False),
-            )
-        finally:
-            del request.state._ng_observation_invocation_id
-            del request.state._ng_opencode_mcp
-            # A server cancels its handler when the caller disconnects, and OpenCode keeps running
-            # in its pod regardless: only stopping the sandbox ends it. Shielded because the
-            # cancellation is re-delivered at every await until the handler exits, so an unshielded
-            # stop would itself be cancelled and leave the pod generating until its TTL.
-            with CancelScope(shield=True):
-                try:
-                    await sandbox.stop()
-                except Exception:
-                    print("Failed to stop sandbox", format_exc(), file=sys.stderr)
-                finally:
-                    self._sandbox_id_to_sandbox.pop(session_key, None)
-                    self._sandbox_id_to_run_result.pop(session_key, None)
-
+        run_result: Dict[str, Any] = dict(done.outcome.run_result)
+        observations = done.outcome.observations
+        trajectory = done.outcome.trajectory
+        response_dict: Dict[str, Any] = dict(done.result)
         response_dict |= run_result
+        if self.checkpoint_participant is not None:
+            response_dict["ng_harness_launches"] = [launch.model_dump(mode="json") for launch in done.launches]
         if trajectory is not None:
             response_dict["ng_trajectory"] = scope_opencode_trajectory(trajectory, body, rollout_id)
         raw_verifier_sandbox_observation = response_dict.pop("verifier_sandbox_observation", None)
@@ -1202,6 +1247,60 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 observations.gaps.append(ObservationGap(code="verifier_sandbox_observation_unavailable"))
             response_dict["ng_agent_observations"] = observations.model_dump(mode="json")
         return OpenCodeSandboxedAgentVerifyResponse.model_validate(response_dict)
+
+
+class OpenCodeAdapter:
+    """OpenCode as a :class:`~nemo_gym._checkpoint.harness_run.HarnessAdapter`.
+
+    OpenCode keeps its session in SQLite under a per-rollout ``XDG_DATA_HOME`` on the sandbox's root filesystem,
+    outside the graded workdir, so the owner's snapshot carries it and ``opencode run --continue`` picks it up.
+    """
+
+    outcome_model = OpenCodeOutcome
+
+    def __init__(
+        self, agent: OpenCodeSandboxedAgent, request: Request, body: OpenCodeSandboxedAgentRunRequest
+    ) -> None:
+        self._agent = agent
+        self._request = request
+        self._body = body
+        # The attempt's MCP tool sessions, seeded once: a relaunch keeps them.
+        self._mcp: Optional[Dict[str, Any]] = None
+
+    def new_state(self) -> dict[str, JsonValue]:
+        return {"data_home": f"/tmp/nemo-gym-opencode-{uuid4().hex}"}
+
+    async def connect(self, lent: Optional[LentSandbox]) -> AsyncSandbox:
+        return await self._agent._start_sandbox(
+            sandbox_id=lent.sandbox_id if lent is not None else None,
+            workdir=lent.workdir if lent is not None else None,
+        )
+
+    async def resume_decision(self, sandbox: AsyncSandbox, state: dict[str, JsonValue]) -> ResumeDecision:
+        return await self._agent._resume_decision(sandbox, str(state["data_home"]))
+
+    async def launch(self, launch: LaunchContext) -> OpenCodeOutcome:
+        if self._mcp is None:
+            self._mcp = await self._agent._seed_tool_servers(self._request, self._body)
+        return await self._agent._launch_opencode(
+            self._request,
+            self._body.responses_create_params,
+            launch,
+            mcp=self._mcp,
+            observation_invocation_id=self._agent.rollout_id_from_run(self._body),
+        )
+
+    async def verify(self, cookies: dict[str, str], outcome: OpenCodeOutcome) -> dict[str, Any]:
+        agent = self._agent
+        return await verify_agent_response(
+            agent.server_client,
+            agent.config.resources_server,
+            self._body,
+            outcome.response,
+            cookies,
+            force_zero_reward=agent.config.execution_failure_reward_zero
+            and bool(outcome.run_result.get("opencode_failed", False)),
+        )
 
 
 if __name__ == "__main__":
