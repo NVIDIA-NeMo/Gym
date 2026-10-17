@@ -4675,6 +4675,29 @@ def test_responses_metadata_sampling_reaches_vllm() -> None:
     assert outbound["chat_template_kwargs"] == {"enable_thinking": True}
 
 
+def test_indic_ifeval_prepared_sampling_reaches_vllm() -> None:
+    from benchmarks.indic.ifeval.prepare import build_rows
+
+    row = build_rows(
+        [
+            {
+                "key": 1,
+                "prompt": "नमस्ते लिखिए।",
+                "instruction_id_list": ["keywords:existence"],
+                "kwargs": [{"keywords": ["नमस्ते"]}],
+                "tags": ["correct"],
+            }
+        ],
+        language="hi",
+    )[0]
+    request = NeMoGymResponseCreateParamsNonStreaming.model_validate(row["responses_create_params"])
+    outbound = _translate_responses_request(_make_minimal_audio_model(), request)
+    assert (outbound["temperature"], outbound["max_tokens"]) == (0.0, 1280)
+    assert outbound["messages"] == [{"role": "user", "content": "नमस्ते लिखिए।"}]
+    assert "top_k" not in outbound
+    assert "chat_template_kwargs" not in outbound
+
+
 class TestAudioDataSplice:
     def test_no_metadata_passthrough(self) -> None:
         """No audio_data in metadata → user message content stays a plain string."""
