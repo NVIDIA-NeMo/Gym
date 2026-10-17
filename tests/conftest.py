@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import gc
 import os
 
 import pytest
@@ -73,6 +74,19 @@ def reset_env_vars():
     # After the test, restore the original environment
     os.environ.clear()
     os.environ.update(original_env)
+
+
+@pytest.fixture(autouse=True)
+def restore_gc_state():
+    """Restore garbage-collection thresholds and unfreeze objects after each test.
+
+    Running the `gym eval run` driver entry points freezes objects and raises the thresholds for the whole process.
+    Without this, one such test would change garbage collection for every later test in the same worker.
+    """
+    thresholds = gc.get_threshold()
+    yield
+    gc.unfreeze()
+    gc.set_threshold(*thresholds)
 
 
 def pytest_configure(config):

@@ -1835,6 +1835,32 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         default=None,
         description="Run-level skills config (skills.path). Makes a directory of Agent Skills standard skills available to the agent at rollout time and stamps each result with a skills_ref. Applied to a skill-agnostic dataset; not a dataset-row field.",
     )
+    driver_gc_freeze: bool = Field(
+        default=True,
+        description=(
+            "Before collection starts, run one full garbage collection and freeze the objects that survive it, "
+            "so later collections in the driver do not scan the modules, config, and clients loaded at startup. "
+            "Applies only to the process that `gym eval run` starts for the driver; "
+            "a library caller of run_examples keeps its own garbage-collection state."
+        ),
+    )
+    driver_gc_thresholds: Optional[Tuple[int, int, int]] = Field(
+        default=(50000, 50, 100),
+        description=(
+            "Garbage-collection thresholds for the `gym eval run` driver process, passed to gc.set_threshold "
+            "before collection starts. Every rollout's dispatch and result handling run on one event loop in the "
+            "driver, so each collection pauses all of them, and Python's default of (700, 10, 10) collects often "
+            "at the driver's allocation rate. Set to null to keep Python's defaults. Each value must be at least 1, "
+            "because a zero turns off automatic collection."
+        ),
+    )
+
+    @field_validator("driver_gc_thresholds")
+    @classmethod
+    def _validate_driver_gc_thresholds(cls, value: Optional[Tuple[int, int, int]]) -> Optional[Tuple[int, int, int]]:
+        if value is not None and min(value) < 1:
+            raise ValueError(f"driver_gc_thresholds values must be >= 1, got {list(value)}")
+        return value
 
     @field_validator("num_repeats", mode="before")
     @classmethod

@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import gc
 import json
 import subprocess
 import sys
@@ -23,16 +24,19 @@ from types import SimpleNamespace
 import pytest
 import requests
 from omegaconf import DictConfig
+from pydantic import ValidationError
 from pytest import MonkeyPatch
 
 import nemo_gym.cli.eval as cli_eval
 import nemo_gym.global_config
 import nemo_gym.server_utils
+import nemo_gym.telemetry.setup as telemetry_setup
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME
 from nemo_gym.cli.eval import _validate_prepared_split_file_exists, _validate_split_datasets_declared
 from nemo_gym.cli.main import main
 from nemo_gym.config_types import ConfigError, ResponsesAPIAgentServerInstanceConfig
 from nemo_gym.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
+from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 
 
 def _make_agent_instance_config(name: str, dataset_specs: list) -> ResponsesAPIAgentServerInstanceConfig:
@@ -295,3 +299,112 @@ class TestEvalRunNoServeWithoutHeadServer:
         assert "Start it with: `gym env start`." in captured.out
         assert "Traceback" not in captured.out + captured.err
         assert "ValueError" not in captured.out + captured.err
+
+
+class TestDriverGcTuning:
+    """`gym eval run` applies the driver garbage-collection settings before collection starts."""
+
+    # The autouse `restore_gc_state` fixture in tests/conftest.py unfreezes and restores the thresholds after each test.
+
+    @staticmethod
+    def _record_gc_state_at_collection(monkeypatch: MonkeyPatch) -> list:
+        """Replace collection with a stub that records the GC state the driver sees when collection starts."""
+        seen = []
+
+        async def fake_run_from_config(self, config):
+            seen.append((gc.get_threshold(), gc.get_freeze_count()))
+            return []
+
+        monkeypatch.setattr(RolloutCollectionHelper, "run_from_config", fake_run_from_config)
+        return seen
+
+    def _run_no_serve_driver(self, tmp_path: Path, monkeypatch: MonkeyPatch, overrides: dict) -> list:
+        seen = self._record_gc_state_at_collection(monkeypatch)
+        config = {
+            "input_jsonl_fpath": str(tmp_path / "in.jsonl"),
+            "output_jsonl_fpath": str(tmp_path / "out.jsonl"),
+            **overrides,
+        }
+        monkeypatch.setattr(cli_eval, "get_global_config_dict", lambda: DictConfig(config))
+        monkeypatch.setattr(telemetry_setup, "telemetry_config_from_global_config", lambda global_config: None)
+        monkeypatch.setattr(telemetry_setup, "configure_telemetry_env", lambda telemetry_config: None)
+        monkeypatch.setattr(telemetry_setup, "init_telemetry", lambda **kwargs: None)
+        monkeypatch.setattr(telemetry_setup, "shutdown_telemetry", lambda: None)
+
+        cli_eval.collect_rollouts()
+        return seen
+
+    def test_no_serve_driver_applies_default_thresholds_and_freeze_before_collection(
+        self, tmp_path: Path, monkeypatch: MonkeyPatch
+    ) -> None:
+        gc.set_threshold(700, 10, 10)
+
+        seen = self._run_no_serve_driver(tmp_path, monkeypatch, {})
+
+        assert len(seen) == 1
+        thresholds, freeze_count = seen[0]
+        assert thresholds == (50000, 50, 100)
+        assert freeze_count > 0
+
+    def test_no_serve_driver_applies_configured_thresholds(self, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+        seen = self._run_no_serve_driver(
+            tmp_path, monkeypatch, {"driver_gc_thresholds": [20000, 20, 30], "driver_gc_freeze": False}
+        )
+
+        assert seen == [((20000, 20, 30), 0)]
+
+    def test_no_serve_driver_leaves_gc_alone_when_disabled(self, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+        gc.set_threshold(700, 10, 10)
+
+        seen = self._run_no_serve_driver(
+            tmp_path, monkeypatch, {"driver_gc_thresholds": None, "driver_gc_freeze": False}
+        )
+
+        assert seen == [((700, 10, 10), 0)]
+
+    def test_serving_driver_applies_thresholds_and_freeze_before_collection(
+        self, tmp_path: Path, monkeypatch: MonkeyPatch
+    ) -> None:
+        gc.set_threshold(700, 10, 10)
+        seen = self._record_gc_state_at_collection(monkeypatch)
+        output_fpath = tmp_path / "out.jsonl"
+        prepared_dir = output_fpath.with_suffix("") / "preprocessed_datasets"
+        prepared_dir.mkdir(parents=True)
+        (prepared_dir / "benchmark.jsonl").write_text("")
+        config = {
+            "output_jsonl_fpath": str(output_fpath),
+            "split": "benchmark",
+            "reuse_existing_data_preparation": True,
+            "disable_aggregation": True,
+        }
+        events = []
+
+        class FakeRunHelper:
+            def start(self, global_config_dict_parser_config):
+                events.append(("servers started", gc.get_freeze_count()))
+
+            def shutdown(self):
+                pass
+
+        monkeypatch.setattr(cli_eval, "get_global_config_dict", lambda: DictConfig(config))
+        monkeypatch.setattr(cli_eval, "_validate_split_datasets_declared", lambda split, configs: None)
+        monkeypatch.setattr(cli_eval, "RunHelper", FakeRunHelper)
+
+        cli_eval.e2e_rollout_collection()
+
+        assert events[0] == ("servers started", 0)
+        assert len(seen) == 1
+        thresholds, freeze_count = seen[0]
+        assert thresholds == (50000, 50, 100)
+        assert freeze_count > 0
+
+    @pytest.mark.parametrize("thresholds", [[0, 10, 10], [700, -1, 10], [700, 10], [700, 10, 10, 10], "fast"])
+    def test_config_rejects_invalid_thresholds(self, tmp_path: Path, thresholds) -> None:
+        with pytest.raises(ValidationError, match="driver_gc_thresholds"):
+            RolloutCollectionConfig.model_validate(
+                {
+                    "input_jsonl_fpath": str(tmp_path / "in.jsonl"),
+                    "output_jsonl_fpath": str(tmp_path / "out.jsonl"),
+                    "driver_gc_thresholds": thresholds,
+                }
+            )
