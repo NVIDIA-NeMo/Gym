@@ -117,6 +117,7 @@ from nemo_gym.token_id_capture import (
     clear_token_captures_for_rollouts,
     stamp_lineage,
 )
+from nemo_gym.token_id_capture.config import TokenIdCaptureConfig
 from nemo_gym.token_id_capture.delivery import (
     MASK_SAMPLE_KEY,
     TOKEN_CAPTURE_KEY,
@@ -5428,6 +5429,86 @@ class TestRolloutCollection:
 
         assert MASK_SAMPLE_KEY not in result
         assert TOKEN_CAPTURE_KEY not in result
+
+    async def test_run_from_config_validates_the_token_capture_config_a_constant_number_of_times(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The participation check reuses one validated token-capture config for every row and rollout.
+
+        The global config is static during a run.
+        Validating it again for each row or finished rollout repeats the same work on the collector's event loop.
+        The test runs a small and a large input and requires the same number of validations for both.
+        It also requires the finalizer to see exactly the participating agent's rollouts.
+        """
+        capture_dir = tmp_path / "tokens"
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "get_global_config_dict",
+            lambda: {
+                "token_id_capture": {"enabled": True, "dir": str(capture_dir)},
+                "captured": {"responses_api_agents": {"implementation": {"token_id_capture": True}}},
+                "ordinary": {"responses_api_agents": {"implementation": {"token_id_capture": False}}},
+            },
+        )
+        original_model_validate = TokenIdCaptureConfig.model_validate
+        validations = 0
+
+        def counting_model_validate(cls, *args, **kwargs):
+            nonlocal validations
+            validations += 1
+            return original_model_validate(*args, **kwargs)
+
+        monkeypatch.setattr(TokenIdCaptureConfig, "model_validate", classmethod(counting_model_validate))
+        finalized_agents: list[str] = []
+
+        async def finalize(result, token_source, **kwargs):
+            finalized_agents.append(result["agent"])
+            return None
+
+        monkeypatch.setattr(nemo_gym.rollout_collection, "finalize_rollout_token_capture", finalize)
+
+        class Helper(RolloutCollectionHelper):
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                futures = []
+                for example in examples:
+                    future = Future()
+                    future.set_result(
+                        _CompletedRollout(
+                            row=example,
+                            result={
+                                "response": {"output": [], "usage": {}},
+                                "agent": example[AGENT_REF_KEY_NAME]["name"],
+                            },
+                            rollout_latency_ms=None,
+                        )
+                    )
+                    futures.append(future)
+                return futures
+
+        async def run(rows_per_agent: int) -> int:
+            nonlocal validations
+            validations = 0
+            finalized_agents.clear()
+            input_fpath = tmp_path / f"input_{rows_per_agent}.jsonl"
+            input_fpath.write_bytes(
+                b"".join(
+                    orjson.dumps({"responses_create_params": {"input": []}, AGENT_REF_KEY_NAME: {"name": agent}})
+                    + b"\n"
+                    for _ in range(rows_per_agent)
+                    for agent in ("captured", "ordinary")
+                )
+            )
+            config = RolloutCollectionConfig(
+                input_jsonl_fpath=str(input_fpath),
+                output_jsonl_fpath=str(tmp_path / f"output_{rows_per_agent}.jsonl"),
+                resume_from_cache=False,
+                disable_aggregation=True,
+            )
+            await Helper().run_from_config(config)
+            assert finalized_agents == ["captured"] * rows_per_agent
+            return validations
+
+        assert await run(rows_per_agent=1) == await run(rows_per_agent=20)
 
     async def test_run_from_config_requires_source_before_dispatch(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
