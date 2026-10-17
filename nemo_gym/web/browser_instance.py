@@ -109,7 +109,20 @@ class RemoteWebBackend:
         return WebVerifierResult.model_validate(self._call("/evaluate", {"final_answer": final_answer})["result"])
 
     def close(self) -> None:
-        self._call("/close", {})
+        # A close that fails cannot leave a live browser behind: the instance
+        # exits after a failed close, and the pool restarts any instance that
+        # is unreachable or still busy when its lease comes back. Raising here
+        # would only keep the session's capacity slot occupied by a retry that
+        # can no longer reach the same instance.
+        try:
+            self._call("/close", {})
+        except (BrowserInstanceUnavailableError, RuntimeError) as exc:
+            LOG.warning(
+                "event=browser_instance_close_failed session=%s endpoint=%s error=%s",
+                self._session_id,
+                self._endpoint,
+                exc,
+            )
 
     def _call(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         request = urllib.request.Request(

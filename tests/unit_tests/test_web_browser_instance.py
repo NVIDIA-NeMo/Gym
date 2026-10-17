@@ -143,8 +143,7 @@ def test_a_failed_close_retires_the_instance(instance) -> None:
     handle, thread, result = instance
     backend = _backend(handle)
     backend.reset(_task("close-fails"))
-    with pytest.raises(RuntimeError, match="browser handles retained"):
-        backend.close()
+    backend.close()  # reported in the log; the instance retires itself instead
     thread.join(timeout=10)
     assert result["exit"] == 1
 
