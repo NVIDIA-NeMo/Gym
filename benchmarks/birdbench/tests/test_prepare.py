@@ -17,8 +17,11 @@ class _FakeDbHandle:
 
     instances = []
 
-    def __init__(self, cur, description_dir, dscp="name_or_col_dscp", dialect="sqlite", db_id=None):
+    def __init__(
+        self, cur, description_dir, dscp="name_or_col_dscp", dialect="sqlite", db_id=None, corpus_limit_per_column=None
+    ):
         del cur, description_dir, dscp
+        self.corpus_limit_per_column = corpus_limit_per_column
         self.dialect, self.db_id = dialect, db_id
         _FakeDbHandle.instances.append(self)
 
@@ -113,3 +116,67 @@ class TestPrepareDialect:
     def test_output_has_one_row_per_task_never_repeated(self, prepared):
         rows = prepared([_entry(question="q1"), _entry(question="q2")])
         assert [r["id"] for r in rows] == [0, 1]
+
+
+class TestBuildUberset:
+    @staticmethod
+    def _train(n):
+        return [{"db_id": "db1", "question": f"q{i}", "SQL": f"orig{i}"} for i in range(n)]
+
+    def test_verified_rows_replace_originals_by_position_even_when_question_was_edited(self):
+        verified = [
+            {"question_id": 1, "db_id": "db1", "question": "q1 fixed", "original_question": "q1", "SQL": "new1"},
+            {"question_id": 2, "db_id": "db1", "question": "q2", "original_question": None, "SQL": "new2"},
+        ]
+        uberset = birdbench_prepare.build_uberset(self._train(4), verified)
+        assert [(e["question"], e["SQL"]) for e in uberset] == [
+            ("q0", "orig0"),
+            ("q3", "orig3"),
+            ("q1 fixed", "new1"),
+            ("q2", "new2"),
+        ]
+
+    def test_mismatching_original_raises(self):
+        verified = [{"question_id": 1, "db_id": "db1", "question": "x", "original_question": "other", "SQL": "s"}]
+        with pytest.raises(ValueError, match="do not match train.json"):
+            birdbench_prepare.build_uberset(self._train(3), verified)
+
+
+class TestPrepareSplit:
+    @pytest.fixture
+    def train_run(self, tmp_path, monkeypatch):
+        train_dir = tmp_path / "train"
+        db_dir = train_dir / "train_databases" / "db1"
+        db_dir.mkdir(parents=True)
+        sqlite3.connect(str(db_dir / "db1.sqlite")).close()
+        entries = [{"db_id": "db1", "question": "q0", "SQL": "SELECT 0", "evidence": "e0"}]
+        (train_dir / "train.json").write_text(json.dumps(entries))
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        (data_dir / "bird_verified_train.json").write_text("[]")  # cached, so nothing is downloaded
+        monkeypatch.setattr(birdbench_prepare, "DATA_DIR", data_dir)
+        monkeypatch.setattr(birdbench_prepare, "DbHandle", _FakeDbHandle)
+        _FakeDbHandle.instances.clear()
+        return lambda **kw: birdbench_prepare.prepare(split="train", train_dir=str(train_dir), **kw)
+
+    def test_train_split_writes_train_file_with_null_difficulty_and_caps_corpus(self, train_run):
+        path = train_run()
+        assert path.name == "birdbench_train_sqlite.jsonl"
+        row = json.loads(path.read_text())
+        assert (row["question"], row["difficulty"]) == ("e0\nq0", None)
+        assert _FakeDbHandle.instances[0].corpus_limit_per_column == birdbench_prepare.TRAIN_CORPUS_LIMIT_PER_COLUMN
+
+    def test_dev_split_keeps_unbounded_corpus_scan(self, prepared):
+        prepared([_entry()])
+        assert _FakeDbHandle.instances[0].corpus_limit_per_column is None
+
+    def test_missing_train_databases_raises(self, tmp_path):
+        with pytest.raises(FileNotFoundError, match="train_databases"):
+            birdbench_prepare.prepare(split="train", train_dir=str(tmp_path))
+
+    def test_unsupported_split_raises(self, prepared):
+        with pytest.raises(ValueError, match="Unsupported split"):
+            prepared([_entry()], split="test")
+
+    def test_dev_output_name_is_unchanged(self):
+        assert birdbench_prepare.output_fpath_for("sqlite").name == "birdbench_sqlite_benchmark.jsonl"
