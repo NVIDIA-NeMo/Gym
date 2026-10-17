@@ -82,6 +82,21 @@ class TaskStrategy(ABC):
         """
         return None
 
+    def runtime_options(self) -> Dict[str, bool]:
+        """Return task-specific switches for the shared Stirrup runtime.
+
+        The defaults preserve the wrapper's historical behavior. A benchmark
+        with a stricter protocol can override capabilities without adding
+        benchmark-name checks to the shared agent loop.
+        """
+        return {
+            "allow_web_tools": True,
+            "require_exec_provider": False,
+            "use_abandon_finish_tool": False,
+            "skip_input_file_listing": False,
+            "tool_response_as_user": True,
+        }
+
     # ------------------------------------------------------------------
     # Response metadata
     # ------------------------------------------------------------------
