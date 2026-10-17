@@ -307,8 +307,10 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             instance_name=self.config.name,
         )
 
-    async def export_agent_sessions(self, session_keys: list[str]) -> dict[str, dict[str, JsonValue]]:
-        """Return the state of every session in ``session_keys`` for a checkpoint."""
+    async def export_agent_sessions(
+        self, session_keys: list[str], *, checkpoint_id: str
+    ) -> dict[str, dict[str, JsonValue]]:
+        """Return the state of every session in ``session_keys`` for checkpoint ``checkpoint_id``."""
         raise NotImplementedError
 
     async def restore_agent_sessions(self, sessions: list[RestoredAgentSession]) -> None:
@@ -327,6 +329,14 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             if type(self)._close_agent_session_state is not SimpleResponsesAPIAgent._close_agent_session_state:
                 await self._close_agent_session_state(record.state)
             record.state = None
+
+    async def park_agent_sessions(self, session_keys: list[str]) -> None:
+        """Free what these sessions' exported state holds outside the process, such as sandboxes the agent
+        owns, once a commit the controller stops after is durable. Optional."""
+
+    async def release_external_state(self, kept_checkpoint_ids: list[str]) -> None:
+        """Delete what exports of checkpoints outside ``kept_checkpoint_ids`` kept outside Gym, such as snapshots
+        of sandboxes the agent owns. Optional."""
 
     def effective_tool_accesses(self, request: AgentSeedSessionRequest) -> list[ToolAccess]:
         """Overlay episode-scoped tool access onto configured declarations by name."""

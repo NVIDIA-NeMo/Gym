@@ -95,6 +95,9 @@ sandbox:
       retries: 10
       retry_delay_s: 5.0
       retry_max_delay_s: 90.0
+      renew_ttl_s: 1200
+      renew_interval_s: 300
+      renew_timeout_s: 30
     probe:
       timeout_s: 60
       deadline_s: 180
@@ -112,6 +115,17 @@ Keep `create.skip_health_check: false` to avoid commands racing sandbox readines
 Keep `create.timeout_s` above the task's `ready_timeout_s`: the shipped mini-SWE
 values are 1500 and 1200 seconds respectively. Adjust them together.
 
+The shipped config keeps every sandbox on a lease. Each sandbox is created with
+`create.renew_ttl_s` (20 minutes) instead of the spec's `ttl_s`. The process that
+created it renews it every `create.renew_interval_s` (5 minutes, jittered by 10%),
+with `create.renew_timeout_s` per call. Stopping a sandbox stops its renewal, and
+so does a crash of the process that created it. The service then deletes the
+sandbox within one `renew_ttl_s`, so a crashed Gym does not leave sandboxes
+running for the spec's whole lifetime. A failed renewal is logged and retried at
+the next interval. If the OpenSandbox API is unreachable for longer than
+`renew_ttl_s - renew_interval_s` (15 minutes), live sandboxes expire. Remove
+`renew_ttl_s` and `renew_interval_s` to use the spec's `ttl_s` as a fixed lifetime instead.
+
 Run an agent with the provider config by passing it alongside the agent and model configs:
 
 ```bash
@@ -126,7 +140,7 @@ The provider constructor accepts four optional config sections:
 | Section | Purpose |
 | --- | --- |
 | `connection` | OpenSandbox SDK connection settings: domain, API key, protocol, request timeout, server proxy mode, and `tls_verify`. |
-| `create` | Sandbox create timeout, retry, image pull policy, and health-check behavior. |
+| `create` | Sandbox create timeout, retry, image pull policy, health-check behavior, and the lease (`renew_ttl_s`, `renew_interval_s`, `renew_timeout_s`). |
 | `probe` | Post-create command probe used to verify command execution before the sandbox is returned. |
 | `operations` | Retry and timeout behavior for SDK operations after create, including command retries, close timeout, background command polling, and the dedicated `status_poll_timeout_s` budget for background status polls. |
 

@@ -22,6 +22,7 @@ The participant order is a Gym invariant:
 - ``forget`` runs in the same order.
   A retired attempt stays refused everywhere until then:
   a request its caller sent just before the caller's retire can reach a server after that server's retire finished.
+- ``release`` fans out to every participant at once.
 
 What the controller still owns:
 
@@ -44,6 +45,10 @@ What the controller still owns:
   Once a rollout it retired or restored is finished for good, so nothing of any of its attempts can still run,
   the controller calls ``forget`` for it.
   Until then every participant keeps one entry for the rollout.
+- Releasing.
+  After every checkpoint it publishes, once it has pruned old ones, the controller calls ``release`` with every
+  checkpoint it may still restore, so servers delete what other checkpoints kept outside Gym, such as sandbox
+  snapshots; and with none once the run is complete for good, never on a stop it will be restarted from.
 
 Restore is all-or-nothing: if any participant fails, the replacement attempts are retired everywhere,
 which frees the restored state, every participant is resumed,
@@ -251,6 +256,28 @@ async def forget(
             await _in_retire_order(participants, "forget", body, deadline_ts)
 
 
+async def release(
+    participants: Participants, checkpoint_id: str, kept_checkpoint_ids: Iterable[str], *, deadline_ts: float
+) -> None:
+    """Tell every participant which checkpoints the controller may still restore, so each frees external state,
+    such as sandbox snapshots, that only other checkpoints referred to.
+
+    Call it after publishing a checkpoint and pruning old ones, with ``checkpoint_id`` naming the checkpoint just
+    published and ``kept_checkpoint_ids`` every checkpoint the controller could restore, that one included.
+    The list must be complete: a checkpoint it leaves out can no longer be restored. If it cannot be computed,
+    skip the call; the next one catches up. Pass an empty list only once the run is complete for good.
+    Refused while a checkpoint is open: resume first. Participants may free the state after replying.
+    """
+    body = {
+        "checkpoint_id": checkpoint_id,
+        "deadline_ts": deadline_ts,
+        "kept_checkpoint_ids": sorted(set(kept_checkpoint_ids)),
+    }
+    with _coordinating("release", checkpoint_id, participants) as span:
+        span.set(kept=len(body["kept_checkpoint_ids"]))
+        await _fan_out(participants, participants.members, "release", body, deadline_ts)
+
+
 async def _in_retire_order(
     participants: Participants, operation: str, body: dict[str, Any], deadline_ts: float
 ) -> None:
@@ -267,18 +294,22 @@ async def commit(
     episode_ids: Iterable[EpisodeId],
     *,
     deadline_ts: float,
+    stop: bool = False,
 ) -> dict[str, dict[str, Any]]:
     """Write every participant's state for the episodes the controller will continue.
 
     ``episode_ids`` must name every episode the controller continues: each episode in flight,
     and each episode restored earlier whose replacement has not started yet, named by that replacement attempt.
     Restored state of an episode the scope leaves out is retired after the write.
+    With ``stop``, the controller stops after this checkpoint instead of resuming,
+    and participants free what their exported state holds outside the process.
     """
     body = {
         "checkpoint_id": checkpoint_id,
         "deadline_ts": deadline_ts,
         "checkpoint_dir": checkpoint_dir,
         "episode_ids": [episode_id.model_dump(mode="json") for episode_id in episode_ids],
+        "stop": stop,
     }
     with _coordinating("commit", checkpoint_id, participants) as span:
         span.set(episodes=len(body["episode_ids"]))

@@ -20,7 +20,10 @@ The control plane here owns everything that is the same for every participant:
   a harness of a crashed attempt that outlived the crash may still call the restored servers;
 - the readiness wait, deadlines, and manifest-last storage, with one write per checkpoint that resume stops;
 - a lease: if the controller that started a checkpoint stops calling, the participant resumes on its
-  own when the lease expires, which is the same as an abort.
+  own when the lease expires, which is the same as an abort;
+- release: after publishing a checkpoint and pruning old ones, the controller names every checkpoint it may
+  still restore, and participants free external state, such as sandbox snapshots, that only other checkpoints
+  referred to. Admitted only when idle, so the checkpoint being written is never released.
 
 ``resume`` also aborts: it reopens admission and lets parked work continue whether or not the checkpoint
 was published. Resuming remembers the checkpoint ID, so a delayed call from a stale controller cannot
@@ -134,6 +137,11 @@ class CommitRequest(CheckpointRequest):
         description="The episodes the controller continues from this checkpoint. Participants that keep "
         "state for every episode they ever served, such as the model ledger, export only these.",
     )
+    stop: bool = Field(
+        default=False,
+        description="The controller stops after this checkpoint instead of resuming. Once the write is durable, "
+        "participants free the compute their exported state holds outside the process, such as sandboxes.",
+    )
 
 
 class RestoreRequest(CheckpointRequest):
@@ -152,6 +160,16 @@ class ForgetRequest(CheckpointRequest):
     rollout_ids: list[str] = Field(
         min_length=1,
         description="Rollouts that are finished for good: nothing of any of their attempts can still run.",
+    )
+
+
+class ReleaseRequest(CheckpointRequest):
+    kept_checkpoint_ids: list[Annotated[str, Field(min_length=1, max_length=128, pattern=CHECKPOINT_ID_PATTERN)]] = (
+        Field(
+            description="Every checkpoint the controller may still restore, including the one it just published. "
+            "Participants free external state that only other checkpoints referred to. Empty once the run is "
+            "complete and nothing will ever be restored."
+        )
     )
 
 
@@ -403,6 +421,20 @@ class CheckpointParticipant(ABC):
         """Stop refusing these rollouts' retired attempts. Override to tell other processes as well."""
         self.retired.forget(rollout_ids)
 
+    async def park_exported(self, records: list[CheckpointRecord]) -> None:
+        """Free the compute the exported state of ``records`` holds outside the process, such as sandboxes.
+
+        Called once a commit with ``stop`` is durable: the controller stops instead of resuming, and a restore
+        rebuilds that state from the checkpoint. Default: nothing is held outside the process.
+        """
+
+    async def release(self, kept_checkpoint_ids: list[str]) -> None:
+        """Free external state that only checkpoints outside ``kept_checkpoint_ids`` referred to, such as snapshots.
+
+        Called while idle, after the controller published a checkpoint and pruned old ones; an empty list means
+        the run is complete. It may return before the state is freed. Default: nothing is kept outside Gym.
+        """
+
     async def restored_pending(self) -> list[EpisodeId]:
         """Restored episodes whose replacement has not started here yet, as the attempts that continue them.
 
@@ -422,8 +454,10 @@ class CheckpointParticipant(ABC):
         """
         await self.retire(episode_id)
 
-    async def export(self, episode_ids: Optional[list[EpisodeId]]) -> list[CheckpointRecord]:
-        """Export for a commit. Override to keep slow I/O off the event loop; the default is synchronous."""
+    async def export(self, episode_ids: Optional[list[EpisodeId]], *, checkpoint_id: str) -> list[CheckpointRecord]:
+        """Export for the commit of ``checkpoint_id``.
+        Override to keep slow I/O off the event loop, or to tag external state with the checkpoint that names it,
+        so a later ``release`` can find it; the default is synchronous."""
         return self.export_records(episode_ids)
 
     async def install(self, records: list[CheckpointRecord], scope: list[EpisodeId]) -> None:
@@ -480,6 +514,7 @@ class _Write:
     # The manifest it published and the size of its records file in bytes.
     task: Optional["asyncio.Task[tuple[dict[str, Any], int]]"] = None
     cleanup: Optional["asyncio.Task[None]"] = None
+    park: Optional["asyncio.Task[None]"] = None
     # Stopped by resume: the writer stops before its next record and never publishes the manifest.
     stop: WriteStop = field(default_factory=WriteStop)
 
@@ -704,6 +739,20 @@ class ParticipantControlPlane:
                 await _within(request, lambda: self.participant.forget(request.rollout_ids))
             return {"forgotten_count": len(set(request.rollout_ids))}
 
+    async def release(self, request: ReleaseRequest) -> dict[str, Any]:
+        """Free external state that only checkpoints the controller no longer keeps referred to.
+
+        Admitted only when idle with no checkpoint open, stricter than retire and forget:
+        a list the controller computed before a checkpoint existed must never release that checkpoint.
+        """
+        with self._operation("release", request.checkpoint_id) as span:
+            span.set(kept=len(request.kept_checkpoint_ids))
+            async with self._lock:
+                if self.phase != CheckpointPhase.IDLE or self.checkpoint_id is not None:
+                    raise InvalidPhaseError(f"not valid in phase {self.phase.value}; resume first")
+                await _within(request, lambda: self.participant.release(request.kept_checkpoint_ids))
+            return {"released": True}
+
     def _admit_outside_checkpoint(self, request: CheckpointRequest) -> None:
         if self.phase not in (CheckpointPhase.IDLE, CheckpointPhase.RESTORED):
             raise InvalidPhaseError(f"not valid in phase {self.phase.value}; resume first")
@@ -818,6 +867,20 @@ class ParticipantControlPlane:
             if write.cleanup is None or _failed(write.cleanup):
                 write.cleanup = _background(self._delete_unscoped(request.episode_ids))
             await _within(request, lambda: asyncio.shield(write.cleanup))
+            if request.stop:
+                # This participant's records are durable; what the stopped process leaves running is a cost,
+                # not a loss. Like the cleanup, the park outlives a deadline: the process is stopping anyway,
+                # so the kills run to completion even when the controller stops waiting.
+                if write.park is None or _failed(write.park):
+                    write.park = _background(self.participant.park_exported(records))
+                try:
+                    await _within(request, lambda: asyncio.shield(write.park))
+                except Exception:
+                    LOGGER.warning(
+                        "checkpoint %s: parking the exported state for the stop failed",
+                        request.checkpoint_id,
+                        exc_info=True,
+                    )
             self.phase = CheckpointPhase.COMMITTED
             result = {
                 "phase": self.phase.value,
@@ -845,7 +908,9 @@ class ParticipantControlPlane:
             # One that fails is final for this checkpoint:
             # exporting again could take a later cut than the other participants already committed.
             if write.export is None:
-                write.export = _background(self.participant.export(request.episode_ids))
+                write.export = _background(
+                    self.participant.export(request.episode_ids, checkpoint_id=request.checkpoint_id)
+                )
             export = write.export
             with checkpoint_span("gym.checkpoint.export") as span:
                 try:
@@ -1131,6 +1196,7 @@ _OPERATION_REQUESTS: dict[str, type[CheckpointRequest]] = {
     "renew": CheckpointRequest,
     "retire": RetireRequest,
     "forget": ForgetRequest,
+    "release": ReleaseRequest,
     "commit": CommitRequest,
     "restore": RestoreRequest,
     "resume": CheckpointRequest,
