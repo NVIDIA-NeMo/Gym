@@ -20,11 +20,13 @@ from unittest.mock import MagicMock
 import app as app_module
 import pytest
 from app import InteractiveBrowserConfig, InteractiveBrowserResourcesServer
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from nemo_gym.base_resources_server import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+from nemo_gym.testing.session_conformance import check_resources_session_contract
 
 
 class _Browser:
@@ -233,12 +235,24 @@ class TestCloseRacingTheSeed:
 
         async def run():
             await server.close_resources_session(_request(), _typed_close())
-            with pytest.raises(ValueError, match="already closed"):
+            with pytest.raises(HTTPException, match="already closed") as refused:
                 await server.seed_session(_request(), _typed_seed())
+            assert refused.value.status_code == 409
 
         asyncio.run(run())
 
         assert browsers.created == []
+
+
+def test_typed_sessions_follow_the_session_contract(browsers) -> None:
+    server = _server()
+    check_resources_session_contract(
+        server.setup_webserver(),
+        _typed_seed("contract-session"),
+        keeps_state=True,
+        holds_state=lambda resources_session_id: resources_session_id in server._session_id_to_state,
+    )
+    assert all(browser.closed == 1 for browser in browsers.created)
 
 
 def test_more_than_one_worker_is_refused() -> None:
