@@ -179,6 +179,49 @@ class TestDigest:
         (task / "notes.txt").write_text("not covered")
         assert content_hash(task) == second
 
+    @pytest.mark.parametrize("linked_path", ["tests/data", "tests", "tests/__pycache__/data"])
+    @pytest.mark.parametrize("external", [False, True])
+    def test_directory_symlinks_are_refused(self, tmp_path, linked_path, external):
+        task = write_task(tmp_path / "t")
+        target = (tmp_path if external else task) / "payload"
+        link = task / linked_path
+        if link.exists():
+            link.rename(target)
+        else:
+            target.mkdir()
+            link.parent.mkdir(parents=True, exist_ok=True)
+        (target / "data.txt").write_text("test input")
+        link.symlink_to(target, target_is_directory=True)
+
+        message = "escapes the task folder" if external else "directory symlinks are not supported"
+        with pytest.raises(HarborTaskError, match=message):
+            load_task(task)
+
+    def test_retargeted_directory_link_cannot_reuse_materialized_digest(self, tmp_path):
+        task = write_task(tmp_path / "t")
+        for name in ("one", "two"):
+            (task / "tests" / name).mkdir()
+            (task / "tests" / name / "data.txt").write_text(name)
+        link = task / "tests" / "data"
+        for name in ("one", "two"):
+            link.symlink_to(name, target_is_directory=True)
+            # Neither target may produce a valid row with an untracked directory link.
+            with pytest.raises(HarborTaskError, match="directory symlinks are not supported"):
+                load_task(task)
+            link.unlink()
+
+    def test_internal_file_symlink_keeps_the_file_content_digest(self, tmp_path):
+        task = write_task(tmp_path / "t")
+        source = task / "tests" / "test.sh"
+        link = task / "tests" / "linked-test.sh"
+        link.write_bytes(source.read_bytes())
+        expected = content_hash(task)
+        link.unlink()
+        link.symlink_to("test.sh")
+        assert load_task(task).digest == expected
+        source.write_text("changed test input")
+        assert load_task(task).digest != expected
+
 
 class TestLoadTask:
     def test_hello_world_shape(self, tmp_path):
@@ -636,7 +679,7 @@ def test_prebuilt_image_ignores_all_dockerfile_settings(tmp_path):
     assert (task.image, task.workdir, task.env, task.user) == ("prebuilt:1", None, {}, None)
 
 
-@pytest.mark.parametrize("failure", ["encoding", "escape", "io"])
+@pytest.mark.parametrize("failure", ["encoding", "escape", "directory_link", "dangling_link", "io"])
 def test_discovery_keeps_file_errors_inside_task_boundary(tmp_path, monkeypatch, failure):
     write_task(tmp_path / "ds" / "good")
     bad = write_task(tmp_path / "ds" / "bad")
@@ -646,6 +689,10 @@ def test_discovery_keeps_file_errors_inside_task_boundary(tmp_path, monkeypatch,
         marker = tmp_path / "marker"
         marker.write_text("private marker")
         (bad / "tests" / "leak").symlink_to(marker)
+    elif failure == "directory_link":
+        (bad / "tests" / "data").symlink_to("../solution", target_is_directory=True)
+    elif failure == "dangling_link":
+        (bad / "tests" / "data").symlink_to("missing", target_is_directory=True)
     else:
         original = Path.open
 
