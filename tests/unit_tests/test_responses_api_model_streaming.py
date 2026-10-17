@@ -973,11 +973,24 @@ class TestResponsesDispatchRoute:
         assert server.last_params.input[0].summary[0].text == "Inspect multiply"
         assert server.last_params.input[0].id.startswith("rs_")
 
+    def test_streaming_reasoning_without_summary_preserves_encrypted_continuation(self) -> None:
+        client, server = _client(_EchoModel)
+        encrypted = "synthetic-opaque-continuation"
+        response = client.post(
+            "/v1/responses",
+            json={"stream": True, "input": [{"type": "reasoning", "encrypted_content": encrypted}]},
+        )
+        assert response.status_code == 200
+        assert "event: response.completed" in response.text
+        assert len(server.last_params.input) == 1
+        assert server.last_params.input[0].summary == []
+        assert server.last_params.input[0].encrypted_content == encrypted
+        assert server.last_params.input[0].id.startswith("rs_")
+
     @pytest.mark.parametrize(
         "reasoning",
         [
             {"summary": None},
-            {},
             {"summary": [{"type": "unknown", "text": "Do not drop this"}]},
             {"summary": [], "id": None},
             {"summary": [], "content": ["Do not drop this"]},

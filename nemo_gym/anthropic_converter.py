@@ -72,6 +72,9 @@ from nemo_gym.openai_utils import (
 SUPPORTED_ANTHROPIC_IMAGE_MEDIA_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
 
 
+_ENCRYPTED_REASONING_PREFIX = "litellm_encrypted_reasoning:"
+
+
 class AnthropicConverter:
     ############################################################################
     # Egress: NeMo Gym Responses  ->  Anthropic Messages request
@@ -392,7 +395,23 @@ class AnthropicConverter:
                     NeMoGymResponseReasoningItem(
                         id=f"rs_{uuid4().hex}",
                         summary=[NeMoGymSummary(text=block.get("thinking", ""), type="summary_text")],
-                        encrypted_content=block.get("signature"),
+                        encrypted_content=(
+                            block["signature"][len(_ENCRYPTED_REASONING_PREFIX) :]
+                            if (block.get("signature") or "").startswith(_ENCRYPTED_REASONING_PREFIX)
+                            else block.get("signature")
+                        ),
+                        type="reasoning",
+                    )
+                )
+            elif block_type == "redacted_thinking":
+                data = block["data"]
+                if not data.startswith(_ENCRYPTED_REASONING_PREFIX):
+                    raise ValueError("Unsupported unmarked redacted reasoning for Responses")
+                flush_message()
+                items.append(
+                    NeMoGymResponseReasoningItem(
+                        id=f"rs_{uuid4().hex}",
+                        encrypted_content=data[len(_ENCRYPTED_REASONING_PREFIX) :],
                         type="reasoning",
                     )
                 )
@@ -490,7 +509,7 @@ class AnthropicConverter:
             if item_type == "message":
                 content.extend(self._output_message_to_anthropic_blocks(item))
             elif item_type == "reasoning":
-                content.extend(self._reasoning_item_to_anthropic_blocks(item))
+                content.extend(self._reasoning_item_to_anthropic_blocks(item, opaque_carrier=True))
             elif item_type == "function_call":
                 content.append(self._function_call_to_tool_use(item))
                 has_tool_use = True
@@ -593,6 +612,8 @@ class AnthropicConverter:
             return {"type": "text", "text": ""}
         if block_type == "thinking":
             return {"type": "thinking", "thinking": ""}
+        if block_type == "redacted_thinking":
+            return {"type": "redacted_thinking", "data": block["data"]}
         if block_type == "tool_use":
             return {"type": "tool_use", "id": block["id"], "name": block["name"], "input": {}}
         raise NotImplementedError(f"Unsupported Anthropic block for SSE synthesis: {block_type}")
@@ -602,7 +623,12 @@ class AnthropicConverter:
         if block_type == "text":
             return [{"type": "text_delta", "text": block.get("text", "")}]
         if block_type == "thinking":
-            return [{"type": "thinking_delta", "thinking": block.get("thinking", "")}]
+            return [
+                {"type": "thinking_delta", "thinking": block.get("thinking", "")},
+                {"type": "signature_delta", "signature": block.get("signature", "")},
+            ]
+        if block_type == "redacted_thinking":
+            return []
         if block_type == "tool_use":
             return [{"type": "input_json_delta", "partial_json": json.dumps(block.get("input", {}))}]
         raise NotImplementedError(f"Unsupported Anthropic block for SSE synthesis: {block_type}")
@@ -721,18 +747,26 @@ class AnthropicConverter:
     def _system_parts_to_anthropic_blocks(self, system_parts: List[str]) -> List[Dict[str, str]]:
         return [{"type": "text", "text": text} for text in system_parts if text]
 
-    def _reasoning_item_to_anthropic_blocks(self, item: Dict[str, Any]) -> List[Dict[str, Any]]:
-        blocks = []
-        for summary in item.get("summary", []):
-            # Anthropic's ThinkingBlock requires a signature; open-model backends don't
-            # produce one, so default to "" (the synthesized SSE never emits it anyway).
-            block = {
-                "type": "thinking",
-                "thinking": summary["text"],
-                "signature": item.get("encrypted_content") or "",
-            }
-            blocks.append(block)
-        return blocks
+    def _reasoning_item_to_anthropic_blocks(
+        self, item: Dict[str, Any], *, opaque_carrier: bool = False
+    ) -> List[Dict[str, Any]]:
+        encrypted = item.get("encrypted_content")
+        summaries = item.get("summary", [])
+        if opaque_carrier and encrypted is not None:
+            # LiteLLM's carrier keeps Responses ciphertext opaque through an Anthropic client.
+            # Native provider requests must retain their actual signatures instead.
+            carrier = _ENCRYPTED_REASONING_PREFIX + encrypted
+            if not summaries:
+                return [{"type": "redacted_thinking", "data": carrier}]
+            return [
+                {"type": "thinking", "thinking": summary["text"], "signature": carrier if index == 0 else ""}
+                for index, summary in enumerate(summaries)
+            ]
+        if encrypted is not None and not summaries:
+            raise ValueError("Encrypted-only reasoning cannot be sent to a native Anthropic provider")
+        return [
+            {"type": "thinking", "thinking": summary["text"], "signature": encrypted or ""} for summary in summaries
+        ]
 
     def _function_call_to_tool_use(self, item: Dict[str, Any]) -> Dict[str, Any]:
         return {
