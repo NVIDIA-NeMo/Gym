@@ -620,6 +620,41 @@ async def test_undelivered_rows_are_excluded_on_any_capture_path(tmp_path: Path)
     assert '"c1"' in rows and '"c2"' not in rows
 
 
+async def test_a_call_abandoned_while_held_is_left_out_of_the_commit_and_dropped_at_resume(tmp_path: Path) -> None:
+    """A harness interrupted at the checkpoint gives up on its held call. The ledger recorded the call (here a
+    row; in the external path often a failure row for a request that ended without coordinates). The commit
+    leaves it out, and the resume drops it from the live ledger, so neither the restored attempt nor the
+    continued one carries a call no trajectory contains."""
+    ledger = FileLineageStore(tmp_path / "store")
+    await ledger.record(_commit(_call_record("c1"), [USER_1], [ASSISTANT_1], rollout_id="r", staging_chain=("r/c1",)))
+    participant = PolicyModelParticipant(ledger)
+    controller = ParticipantControlPlane(participant, instance_name="policy", lease_grace_seconds=60)
+    release = asyncio.Event()
+    app = _captured_app(participant, ledger, release)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://m") as client:
+        call = asyncio.create_task(client.post("/ng-rollout/r/v1/chat/completions"))
+        await asyncio.sleep(0.05)
+        await controller.prepare(CheckpointRequest(**control()))
+        # The client (the interrupted harness) goes away while the response is held.
+        call.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await call
+        await asyncio.sleep(0.05)
+        live_rows = [row["model_call_id"] for row in ledger.export_rows("r")]
+        snapshot = participant.gate.snapshot()
+        commit = await controller.commit(_commit_request("c1", tmp_path / "ckpt", [{"rollout_id": "r"}]))
+        await controller.resume(CheckpointRequest(**control()))
+        await asyncio.sleep(0.05)
+        after_resume = [row["model_call_id"] for row in ledger.export_rows("r")]
+
+    rows = (tmp_path / "ckpt" / "gym" / "model" / "policy" / commit["manifest"]["records_file"]).read_text()
+    assert live_rows == ["c1", "c2"], "the abandoned call's row was in the live ledger"
+    assert snapshot.abandoned == {"c2": "r"} and participant.gate.tickets == set()
+    assert '"c1"' in rows and '"c2"' not in rows, "the commit left the abandoned call out"
+    assert after_resume == ["c1"], "the resume dropped it from the live ledger"
+    assert participant.gate.abandoned == {}, "cleared for the next checkpoint"
+
+
 async def test_each_model_server_continues_only_its_own_restored_cut() -> None:
     first, second = PolicyModelParticipant(), PolicyModelParticipant()
     continuation = GenerationCutContinuation(

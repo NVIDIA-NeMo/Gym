@@ -134,6 +134,10 @@ class CheckpointableLedger(Protocol):
 
     async def delete_unstarted(self, rollout_ids: Sequence[str]) -> dict: ...
 
+    def discard_calls(self, rollout_id: str, model_call_ids: Sequence[str]) -> int:
+        """Drop the rows of these calls from a live ledger; return how many were dropped."""
+        ...
+
 
 class EpisodeCut(BaseModel):
     """A durable cut of one undelivered call, keyed by the episode that will continue it."""
@@ -174,6 +178,10 @@ class GateSnapshot(BaseModel):
     # Undelivered model calls (model_call_id -> capture key): the commit leaves their ledger rows out.
     undelivered: dict[str, str]
     cuts: list[EpisodeCut]
+    # Calls whose client went away while the checkpoint held their response (model_call_id -> capture key).
+    # The agent that issued them was interrupted at the checkpoint and re-issues the call afterwards, so the
+    # commit leaves their rows out like an undelivered call's, and the resume discards them from the live ledger.
+    abandoned: dict[str, str] = {}
 
 
 class RestoredCuts(Protocol):
@@ -355,6 +363,8 @@ class PolicyGate:
         self.served = False
         # Restored attempts no call has reached here yet, by capture key.
         self.restored_targets: set[str] = set()
+        # Calls abandoned by their client while a checkpoint held their response; see GateSnapshot.abandoned.
+        self.abandoned: dict[str, str] = {}
 
     async def admit(self, capture_key: Optional[str]) -> None:
         """Wait while a checkpoint is open, then admit the call unless its attempt was retired.
@@ -419,6 +429,11 @@ class PolicyGate:
         return ticket
 
     async def exit(self, ticket: _Ticket) -> None:
+        if not self.accepting and not ticket.response_started and ticket.capture is not None:
+            # The client gave up on a held response: a harness interrupted at the checkpoint. Whatever the
+            # ledger recorded for the call (a row, or a failure row for a request that ended without
+            # coordinates) describes a call no trajectory contains.
+            self.abandoned[ticket.capture.model_call_id] = ticket.capture_key
         self.tickets.discard(ticket)
         try:
             await self.restored_cuts.settle(ticket)
@@ -525,7 +540,13 @@ class PolicyGate:
                 for ticket in undelivered
                 if ticket.cut_record is not None
             ],
+            abandoned=dict(self.abandoned),
         )
+
+    def take_abandoned(self) -> dict[str, str]:
+        """The calls abandoned during the checkpoint that is ending, cleared for the next one."""
+        abandoned, self.abandoned = self.abandoned, {}
+        return abandoned
 
     async def _cut_all(self, request: CheckpointRequest) -> None:
         by_backend: dict[str, list[_Ticket]] = {}
@@ -625,7 +646,7 @@ def export_model_records(
     if episode_ids is None:
         raise ControlError("model commit needs the episode_ids the controller continues from this checkpoint")
     snapshots = list(snapshots)
-    undelivered = {call_id for snapshot in snapshots for call_id in snapshot.undelivered}
+    undelivered = {call_id for snapshot in snapshots for call_id in (*snapshot.undelivered, *snapshot.abandoned)}
     # One cut per episode: when a client retried a call the server was still running,
     # both calls are undelivered and cut, but only the latest is still awaited and will be re-issued after a restore.
     latest: dict[str, EpisodeCut] = {}
@@ -670,6 +691,29 @@ def staging_keys_by_episode(records: Iterable[CheckpointRecord]) -> dict[str, li
     since a restored attempt's record carries the rows of the attempt it continues.
     """
     return {record.episode_id.capture_key: retained_staging_keys([record]) for record in records}
+
+
+def discard_abandoned_calls(ledger: CheckpointableLedger, abandoned: Mapping[str, str]) -> None:
+    """Drop the live ledger rows of calls a checkpoint abandoned (``GateSnapshot.abandoned``).
+
+    The commit already left them out; this is for the episode that continues without a crash, whose live
+    ledger would otherwise carry a row, or a failure row, for a call its harness never consumed and re-issued
+    after the resume. Best effort: a ledger without ``discard_calls`` keeps the rows and the finalizer sees them.
+    """
+    discard = getattr(ledger, "discard_calls", None)
+    if discard is None:
+        LOGGER.warning("capture ledger %s cannot discard %d abandoned call(s)", type(ledger).__name__, len(abandoned))
+        return
+    by_key: dict[str, list[str]] = {}
+    for model_call_id, capture_key in abandoned.items():
+        by_key.setdefault(capture_key, []).append(model_call_id)
+    for capture_key, model_call_ids in by_key.items():
+        try:
+            dropped = discard(capture_key, model_call_ids)
+        except Exception:
+            LOGGER.warning("could not discard abandoned calls %s of %s", model_call_ids, capture_key, exc_info=True)
+            continue
+        LOGGER.info("discarded %d abandoned call row(s) of %s after the checkpoint", dropped, capture_key)
 
 
 async def retire_ledgers(ledger: Optional[CheckpointableLedger], episode_ids: Iterable[EpisodeId]) -> None:
@@ -789,7 +833,10 @@ class PolicyModelParticipant(CheckpointParticipant):
         await self.gate.close(request)
 
     async def open_admission(self) -> None:
+        abandoned = self.gate.take_abandoned()
         self.gate.open()
+        if abandoned and self.ledger is not None:
+            await asyncio.to_thread(discard_abandoned_calls, self.ledger, abandoned)
 
     async def mark_retired(self, episode_ids: list[EpisodeId]) -> None:
         await super().mark_retired(episode_ids)
