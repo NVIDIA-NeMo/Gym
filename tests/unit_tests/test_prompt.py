@@ -19,6 +19,7 @@ import pytest
 import yaml
 
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, PARENT_DIR, _resolve_under_cwd_or_install
+from nemo_gym.config_types import ConfigPathNotFoundError, PromptConfigMalformedError
 from nemo_gym.prompt import (
     PromptConfig,
     apply_prompt_to_row,
@@ -55,13 +56,34 @@ class TestLoadPromptConfig:
     def test_missing_user_key_raises(self, tmp_path):
         config_path = tmp_path / "prompt.yaml"
         config_path.write_text(yaml.dump({"system": "Hello"}))
-        with pytest.raises(Exception):
+        with pytest.raises(PromptConfigMalformedError, match=r"must be a mapping with a `user` template.*user: Field"):
             load_prompt_config(str(config_path))
 
     def test_non_mapping_yaml_raises(self, tmp_path):
         config_path = tmp_path / "prompt.yaml"
         config_path.write_text("- item1\n- item2\n")
-        with pytest.raises(Exception):
+        with pytest.raises(PromptConfigMalformedError, match="must be a mapping with a `user` template"):
+            load_prompt_config(str(config_path))
+
+    def test_invalid_yaml_raises(self, tmp_path):
+        config_path = tmp_path / "prompt.yaml"
+        config_path.write_text("user: [unclosed\n")
+        with pytest.raises(PromptConfigMalformedError, match="is not valid YAML") as exc_info:
+            load_prompt_config(str(config_path))
+        assert str(config_path) in str(exc_info.value)
+
+    def test_missing_file_raises(self, tmp_path):
+        config_path = tmp_path / "missing.yaml"
+        with pytest.raises(ConfigPathNotFoundError, match="Prompt config '.*missing.yaml' was not found"):
+            load_prompt_config(str(config_path))
+
+    def test_errors_keep_their_builtin_bases(self, tmp_path):
+        # Callers such as environment/validation.py catch OSError / ValueError around this loader.
+        with pytest.raises(FileNotFoundError):
+            load_prompt_config(str(tmp_path / "missing.yaml"))
+        config_path = tmp_path / "prompt.yaml"
+        config_path.write_text(yaml.dump({"system": "Hello"}))
+        with pytest.raises(ValueError):
             load_prompt_config(str(config_path))
 
     def test_caching(self, tmp_path):
@@ -285,3 +307,12 @@ class TestMaterializePrompts:
             materialize_prompts(str(input_path), str(prompt_path), str(output_path))
         # No partial output file should be written
         assert not output_path.exists()
+
+    def test_missing_input_raises_before_creating_output_dir(self, tmp_path):
+        prompt_path = tmp_path / "prompt.yaml"
+        prompt_path.write_text(yaml.dump({"user": "{question}"}))
+        output_path = tmp_path / "nested" / "output.jsonl"
+
+        with pytest.raises(ConfigPathNotFoundError, match=r"Input file not found: '.*missing.jsonl' \(--input\)"):
+            materialize_prompts(str(tmp_path / "missing.jsonl"), str(prompt_path), str(output_path))
+        assert not output_path.parent.exists()
