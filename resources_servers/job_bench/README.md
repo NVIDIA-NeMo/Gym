@@ -11,7 +11,8 @@ so scores are not an exact reproduction of published numbers:
 - The judge sees at most 120,000 bytes of extracted output text. Long files keep their beginning and end.
 - `venv`, `.venv`, `node_modules`, `.git`, `.cache`, and `__pycache__` directories are not graded.
 
-Judge API failures go to the failures file instead of being scored as zero.
+Judge API failures and responses truncated by the completion budget go to the failures file instead of being
+scored as zero.
 
 Each judge call asks for 200,000 completion tokens, as upstream does. A judge served with a smaller
 context window (for example a self-hosted 262k-context model) rejects every grading prompt longer than
@@ -20,5 +21,6 @@ and keep it fixed across compared runs.
 
 ## Optional artifact retention
 
-Set `artifact_root` to save each trial's request, rubrics, output archive, judge receipts, and result. Passing a saved
-`artifact_id` to `/verify` regrades that trial without rerunning the agent.
+Set `artifact_root` to save each trial's request, rubrics, output archive, judge receipts, and result. Each receipt
+records the configured completion budget. Passing a saved `artifact_id` to `/verify` regrades that trial without
+rerunning the agent.

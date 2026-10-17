@@ -82,6 +82,47 @@ def _records(bundle, record_type):
     return [record for record in bundle.records if isinstance(record, record_type)]
 
 
+@pytest.mark.parametrize("interrupted", [False, True])
+async def test_sandbox_unicode_crlf_events_preserve_response_and_observations(interrupted: bool) -> None:
+    text = "line\u2028break and\u0085next"
+    message = {"role": "assistant", "content": [{"type": "text", "text": text}], "stopReason": "stop"}
+    raw = (
+        "\r\n".join(
+            json.dumps([float(i), event], ensure_ascii=False)
+            for i, event in enumerate(
+                [{"type": "message_end", "message": message}, {"type": "agent_end", "messages": [message]}]
+            )
+        )
+        + "\r\n\r\n"
+    )
+    state = SimpleNamespace(
+        runtime="/runtime",
+        request=SimpleNamespace(episode_id=SimpleNamespace(capture_key="rollout-1")),
+        runtime_info=SimpleNamespace(hostname="sandbox", pid=123),
+        upload_json=AsyncMock(),
+        execute=AsyncMock(side_effect=RuntimeError("interrupted") if interrupted else None, return_value=raw),
+        session=SimpleNamespace(
+            session_dir="/session",
+            workdir="/work",
+            sandbox=SimpleNamespace(upload=AsyncMock()),
+            artifacts=raw,
+            cleanup={"error": None, "return_code": 0, "timed_out": False},
+        ),
+    )
+    agent = _make_agent(model="test-model", pi_version="0.80.2")
+    body = NeMoGymResponseCreateParamsNonStreaming(input="solve")
+    with patch.object(agent, "_build_models_config", return_value={"providers": {"nemo": {}}}):
+        if interrupted:
+            with pytest.raises(RuntimeError, match="interrupted"):
+                await agent._sandbox_response(state, body, prompt="solve", system="")
+        else:
+            response = await agent._sandbox_response(state, body, prompt="solve", system="")
+            assert response.output[0].content[0].text == text
+    [invocation] = _records(state.observations, AgentInvocation)
+    assert invocation.conversation[-1].content[0].text == text
+    assert invocation.status == ("incomplete" if interrupted else "completed")
+
+
 class TestSanity:
     def test_config_defaults(self) -> None:
         cfg = _config()

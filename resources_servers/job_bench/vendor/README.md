@@ -15,6 +15,8 @@ this input-preparation variant must be reported separately from the published pr
 
 Gym also distinguishes terminal transport failures from malformed judge replies
 across retries, so an earlier malformed reply cannot hide a later API failure.
+Responses with `finish_reason="length"` are retried and become judge failures if retries are exhausted,
+including when their partial content parses as JSON.
 
 The completion budget of each judge call, fixed at 200000 upstream, is a parameter
 (`max_completion_tokens`, default 200000) so a judge with a smaller context window can be used;

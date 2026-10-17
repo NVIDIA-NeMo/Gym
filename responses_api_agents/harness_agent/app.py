@@ -239,7 +239,9 @@ class HarnessAgent(SimpleResponsesAPIAgent):
             base_url = urlunsplit((parsed.scheme or "http", netloc, parsed.path, parsed.query, parsed.fragment))
             base = base_url
         prefix = _RUN_CONTEXT.get().get("url_prefix") or self.url_path_for_request("", request)
-        return f"{base.rstrip('/')}{prefix}"
+        model_url = f"{base.rstrip('/')}{prefix}"
+        LOG.info("sandbox model URL: %s", model_url)
+        return model_url
 
     def _runner(self) -> tuple[str, dict, str]:
         script = (Path(__file__).parent / "agent_runner.py").read_text()
@@ -391,7 +393,7 @@ class HarnessAgent(SimpleResponsesAPIAgent):
             # Split on "\n" only: str.splitlines() also breaks on U+2028, U+2029, U+0085 and
             # other separators that model_dump_json() leaves unescaped inside strings, so a
             # response quoting such text would look like several rows.
-            lines = [line for line in local.read_text().split("\n") if line.strip()]
+            lines = [line.rstrip("\r") for line in local.read_text().split("\n") if line.strip()]
             if len(lines) != 1:
                 raise RuntimeError(f"expected one JSON row in {path}, got {len(lines)}")
             return json.loads(lines[0])

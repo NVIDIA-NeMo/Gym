@@ -682,7 +682,12 @@ IMPORTANT:
                 temperature=0.0,
                 timeout=timeout_sec,
             )
-            raw_response = response.choices[0].message.content.strip()
+            choice = response.choices[0]
+            raw_response = (choice.message.content or "").strip()
+            # An incomplete verdict is a failed judge call even if its JSON happens to parse.
+            if getattr(choice, "finish_reason", None) == "length":
+                parse_status = "truncated"
+                raise ValueError(f"Judge response truncated at max_completion_tokens={max_completion_tokens}")
             received_response = bool(raw_response)
             parsed, parse_status = parse_judge_json(raw_response)
 

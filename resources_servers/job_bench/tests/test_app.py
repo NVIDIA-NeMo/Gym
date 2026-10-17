@@ -9,8 +9,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+import httpx
 import pytest
 from fastapi import Request
+from openai import BadRequestError
 
 from nemo_gym.judge import JudgeError
 from resources_servers.job_bench import app, dataset
@@ -88,7 +90,9 @@ async def test_verify_collects_regular_outputs_without_runtime_links(
     )
     server = app.JobBenchResourcesServer.model_construct(
         config=app.JobBenchConfig.model_construct(
-            judge_model="judge", artifact_root=tmp_path / "saved" if mode != "temporary" else None
+            judge_model="judge",
+            judge_max_completion_tokens=32768,
+            artifact_root=tmp_path / "saved" if mode != "temporary" else None,
         )
     )
     server._sandboxes = {"session": sandbox}
@@ -107,6 +111,7 @@ async def test_verify_collects_regular_outputs_without_runtime_links(
                 [
                     {
                         "result": {"index": 0},
+                        "max_completion_tokens": self.config.judge_max_completion_tokens,
                         "debug": {"api_exit_code": 2 if mode == "restart" and judge_calls == 1 else 0},
                     }
                 ]
@@ -172,6 +177,7 @@ async def test_verify_collects_regular_outputs_without_runtime_links(
         assert not (saved / "result.json").exists()
         first_receipts = {path.name: path.read_bytes() for path in saved.glob("judge-receipt-*.json")}
         assert len(first_receipts) == 1
+        assert all(json.loads(content)[0]["max_completion_tokens"] == 32768 for content in first_receipts.values())
         rubrics_file.unlink()  # Replay must use the frozen rubric, not the original task directory.
         restarted = app.JobBenchResourcesServer.model_construct(config=server.config)
         recovered = await restarted.verify(request, body)
@@ -196,6 +202,8 @@ async def test_verify_collects_regular_outputs_without_runtime_links(
             restarted = app.JobBenchResourcesServer.model_construct(config=server.config)
             assert await restarted.verify(request, body) == result
             assert len(list(saved.glob("judge-receipt-*.json"))) == 1
+            receipt = next(saved.glob("judge-receipt-*.json"))
+            assert json.loads(receipt.read_text())[0]["max_completion_tokens"] == 32768
             assert (saved / "output.tar.gz").read_bytes() == snapshot
             assert judge_calls == 1
             sandbox.download.assert_awaited_once()
@@ -303,6 +311,70 @@ def test_server_passes_configured_completion_budget(monkeypatch, tmp_path: Path)
     )
     server._judge(output_dir, rubrics_file)
     assert budgets == [32768]
+    receipts = json.loads((tmp_path / "judge-receipt.json").read_text())
+    assert [row["max_completion_tokens"] for row in receipts] == [32768]
+
+
+@pytest.mark.parametrize(
+    ("kind", "content"),
+    [
+        ("context_error", None),
+        ("truncated", None),
+        ("truncated", ""),
+        ("truncated", '{"rubric_passed":'),
+        ("truncated", '{"rubric_passed": true}'),
+        ("truncated", '{"rubric_passed": false}'),
+        ("negative", '{"criteria_results": [{"passed": false}], "rubric_passed": false}'),
+    ],
+)
+def test_judge_budget_failure_is_not_scored(monkeypatch, tmp_path: Path, kind: str, content: str | None) -> None:
+    output = tmp_path / "output"
+    output.mkdir()
+    (output / "answer.txt").write_text("answer")
+    rubrics = tmp_path / "rubrics.json"
+    rubrics.write_text(json.dumps({"rubrics": [{"rubric": "required", "weight": 1}]}))
+    monkeypatch.setattr(app.judge, "extract_all_file_contents", lambda _: "answer")
+    monkeypatch.setattr(app.judge, "collect_image_attachments", lambda _: [])
+    monkeypatch.setattr(app.judge.time, "sleep", lambda _: None)
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content=content), finish_reason="length" if kind == "truncated" else "stop"
+            )
+        ]
+    )
+    create = Mock(return_value=response)
+    if kind == "context_error":
+        create.side_effect = BadRequestError(
+            "maximum context length exceeded",
+            response=httpx.Response(400, request=httpx.Request("POST", "https://judge.example/chat/completions")),
+            body={"code": "context_length_exceeded"},
+        )
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    monkeypatch.setattr(app.judge, "get_openai_client", lambda *_: client)
+    server = app.JobBenchResourcesServer.model_construct(
+        config=app.JobBenchConfig.model_construct(
+            judge_model="judge",
+            judge_base_url="https://judge.example",
+            judge_api_key="test",
+            judge_max_completion_tokens=32768,
+            max_judge_workers=1,
+        )
+    )
+
+    if kind == "negative":
+        scorecard, _ = server._judge(output, rubrics)
+        assert scorecard["normalized_score"] == 0
+    else:
+        with pytest.raises(JudgeError, match="context length" if kind == "context_error" else "truncated"):
+            server._judge(output, rubrics)
+    assert create.call_count == (1 if kind == "negative" else 3)
+    receipt = json.loads((tmp_path / "judge-receipt.json").read_text())[0]
+    assert receipt["max_completion_tokens"] == 32768
+    assert receipt["debug"]["api_exit_code"] == (0 if kind == "negative" else 2)
+    assert receipt["debug"]["raw_response"] == (content or "")
+    if kind == "truncated":
+        assert receipt["debug"]["parse_status"] == "truncated"
 
 
 @pytest.mark.parametrize("terminal_transport_error", [False, True])
@@ -520,6 +592,7 @@ def test_judge_failure_is_not_scored(monkeypatch, tmp_path: Path, caplog, receip
     retained = (tmp_path / "judge-receipt.json").read_text()
     assert "secret" not in retained and "api_base" not in retained and "api_key" not in retained
     receipts = json.loads(retained)
+    assert all(row["max_completion_tokens"] == 200000 for row in receipts)
     assert [row["debug"]["api_exit_code"] for row in receipts] == [0, 2]
     assert receipts[0]["result"]["result"]["score"] == 1
     assert all(row["debug"]["raw_response"] == "verdict" for row in receipts)

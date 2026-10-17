@@ -208,20 +208,24 @@ def test_sandbox_model_url_uses_explicit_override(hostname):
     resolve.assert_not_called()
 
 
-def test_sandbox_model_url_preserves_training_rollout_prefix():
+def test_sandbox_model_url_preserves_training_rollout_prefix(caplog: pytest.LogCaptureFixture) -> None:
     agent = _make_agent()
     agent.server_client.global_config_dict = MagicMock()
     request = SimpleNamespace(path_params={}, url=SimpleNamespace(path="/run"))
     token = _RUN_CONTEXT.set({"url_prefix": "/ng-rollout/rollout-1/training-token-capture"})
     try:
-        with patch(
-            "responses_api_agents.harness_agent.app.get_first_server_config_dict",
-            return_value={"base_url": "http://model:8000/v1"},
+        with (
+            caplog.at_level("INFO", logger="responses_api_agents.harness_agent.app"),
+            patch(
+                "responses_api_agents.harness_agent.app.get_first_server_config_dict",
+                return_value={"base_url": "http://model:8000/v1"},
+            ),
         ):
             url = agent._sandbox_model_url(request)
     finally:
         _RUN_CONTEXT.reset(token)
     assert url == "http://model:8000/ng-rollout/rollout-1/training-token-capture"
+    assert f"sandbox model URL: {url}" in caplog.messages
 
 
 async def test_run_preserves_rollout_path_and_verifier_fields():
@@ -565,7 +569,7 @@ async def test_download_json_keeps_unicode_line_separators():
     row = {"output": [{"type": "message", "content": "line\u2028break and\u0085next"}]}
     agent = _make_agent()
     agent._provider.download_file = AsyncMock(
-        side_effect=lambda _, __, path: path.write_text(json.dumps(row, ensure_ascii=False) + "\n")
+        side_effect=lambda _, __, path: path.write_text("\r\n" + json.dumps(row, ensure_ascii=False) + "\r\n")
     )
 
     assert await agent._download_json(MagicMock(), "/work/response.json") == row

@@ -178,6 +178,7 @@ class JobBenchResourcesServer(SimpleResourcesServer):
         receipt = [
             {
                 "result": result,
+                "max_completion_tokens": self.config.judge_max_completion_tokens,
                 "debug": {
                     key: debug[key]
                     for key in (
