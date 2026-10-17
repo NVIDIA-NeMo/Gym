@@ -316,6 +316,50 @@ async def test_a_snapshot_that_does_not_become_ready_fails_the_export_and_stays_
     assert "snap-2" in provider.snapshots and checkpointer.indexed_snapshots == {"c1": ["snap-2"]}
 
 
+async def test_a_snapshot_that_fails_is_taken_again_and_every_attempt_is_indexed(state_dir: Path) -> None:
+    # OpenSandbox's commit job can fail (CommitJobFailed) while the sandbox keeps running.
+    provider = FakeSnapshotProvider()
+    checkpointer = await seeded(provider, state_dir, "s1", snapshot_attempts=3)
+    provider.fail[("wait_snapshot_ready", "snap-2")] = RuntimeError("CommitJobFailed")
+
+    exported = await checkpointer.export(["s1"], checkpoint_id="c1")
+
+    assert state_of(exported, "s1").snapshot_id == "snap-3", "the second snapshot is the one a restore forks"
+    assert checkpointer.indexed_snapshots == {"c1": ["snap-2", "snap-3"]}, "a release deletes the failed one too"
+
+
+async def test_a_refused_snapshot_submit_is_retried(state_dir: Path) -> None:
+    provider = FakeSnapshotProvider()
+    checkpointer = await seeded(provider, state_dir, "s1", snapshot_attempts=2)
+    refusals = iter([RuntimeError("INVALID_SOURCE_STATE")])
+    original = provider.snapshot
+
+    async def snapshot(handle: Any, *, name: str | None = None) -> str:
+        error = next(refusals, None)
+        if error is not None:
+            raise error
+        return await original(handle, name=name)
+
+    provider.snapshot = snapshot  # type: ignore[method-assign]
+
+    exported = await checkpointer.export(["s1"], checkpoint_id="c1")
+
+    assert state_of(exported, "s1").snapshot_id == "snap-2"
+
+
+async def test_the_export_fails_once_every_snapshot_attempt_failed(state_dir: Path) -> None:
+    provider = FakeSnapshotProvider()
+    checkpointer = await seeded(provider, state_dir, "s1", snapshot_attempts=2)
+    provider.fail[("wait_snapshot_ready", "snap-2")] = RuntimeError("CommitJobFailed")
+    provider.fail[("wait_snapshot_ready", "snap-3")] = RuntimeError("CommitJobFailed")
+
+    with pytest.raises(SandboxCheckpointError, match="'s1'.*snapshot 'snap-3' did not become ready"):
+        await checkpointer.export(["s1"], checkpoint_id="c1")
+
+    assert checkpointer.indexed_snapshots == {"c1": ["snap-2", "snap-3"]}
+    assert provider.boxes["sb-1"]["state"] == "running"
+
+
 async def test_an_export_cancelled_mid_wait_still_indexes_the_snapshot(state_dir: Path) -> None:
     """A commit that misses its deadline is cancelled by the controller's resume; the snapshot exists anyway."""
     provider = FakeSnapshotProvider()
