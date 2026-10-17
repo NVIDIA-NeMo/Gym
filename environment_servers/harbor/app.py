@@ -33,18 +33,26 @@ import os
 import re
 import shlex
 import shutil
+import tarfile
 import tempfile
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Literal
 from uuid import uuid4
 
 from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError
 from fastapi import Body, FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, PositiveFloat
 
-from environment_servers.harbor.sandbox_io import _exec_as_root, download_dir, upload_dir
+from environment_servers.harbor.sandbox_io import (
+    SandboxTransferError,
+    _exec_as_root,
+    download_dir,
+    download_path,
+    upload_dir,
+    upload_path,
+)
 from nemo_gym import RESULTS_DIR, failure_kinds
 from nemo_gym.base_environment_server import (
     BaseEnvironmentServer,
@@ -64,13 +72,14 @@ from nemo_gym.global_config import TOKEN_ID_CAPTURE_BLOCK, get_first_server_conf
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.rollout_observability import AgentObservationBundle
-from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
+from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
 from nemo_gym.single_agent_turn_types import SingleAgentTurnFailure, SingleAgentTurnRequest, SingleAgentTurnResult
 from nemo_gym.tasks.harbor import DIGEST_KEY, HarborTask, load_task
+from nemo_gym.tasks.harbor.models import HarborArtifact, HarborEnvironment
 from nemo_gym.tasks.harbor.task import HarborTaskError
 
 
@@ -79,6 +88,7 @@ LOGGER = logging.getLogger(__name__)
 TESTS_DIR = "/tests"
 VERIFIER_LOGS_DIR = "/logs/verifier"
 AGENT_LOGS_DIR = "/logs/agent"
+ARTIFACTS_DIR = "/logs/artifacts"
 VERIFIER_STDOUT = f"{VERIFIER_LOGS_DIR}/test-stdout.txt"
 
 # Namespaced failure kinds for outcomes the shared vocabulary does not name.
@@ -105,6 +115,8 @@ class HarborEpisodeResult(SingleAgentTurnResult):
     verifier_return_code: int | None = None
     verifier_logs_dir: str | None = None
     verifier_seconds: float | None = None
+    # "shared": test.sh ran in the agent's sandbox; "separate": in its own sandbox from [verifier.environment].
+    verifier_mode: Literal["shared", "separate"] | None = None
 
 
 class HarborEpisodeResponse(BaseEpisodeResponse[HarborEpisodeResult]):
@@ -165,6 +177,10 @@ class HarborSession:
     identity: tuple[EpisodeId, TaskId]
     sandbox: AsyncSandbox
     workdir: str
+    # The episode key the sandbox is owned under (see ``_sandboxes``).
+    session_id: str
+    # Separate verification stops the agent's sandbox before test.sh runs; cleanup must not stop it twice.
+    agent_sandbox_stopped: bool = False
 
 
 _ENV_TEMPLATE = re.compile(r"\$\{([^}:]+)(?::-(.*))?\}")
@@ -228,8 +244,19 @@ def select_reward(rewards: dict[str, float]) -> float | None:
     return None
 
 
-def _sandbox_resources(task: HarborTask) -> dict[str, Any]:
-    environment = task.config.environment
+def _verifier_image(task: HarborTask) -> str | None:
+    """The prebuilt image a separate verifier runs in: ``[verifier.environment].docker_image``, else the agent's."""
+    if task.config.is_shared_verifier:
+        return None
+    environment = task.config.verifier.environment
+    if environment is not None and environment.docker_image:
+        return environment.docker_image
+    if environment is None:
+        return task.image
+    return None
+
+
+def _sandbox_resources(environment: HarborEnvironment) -> dict[str, Any]:
     resources: dict[str, Any] = {}
     if environment.cpus is not None:
         resources["cpu"] = environment.cpus
@@ -295,10 +322,17 @@ class HarborEnvironmentServer(
     # -- lifecycle -------------------------------------------------------------------------
 
     async def _stop_sandbox(self, episode_key: str) -> None:
-        """Stop the episode's sandbox; a failed stop keeps it owned for the next attempt or shutdown."""
+        """Stop the episode's sandbox; a failed stop keeps it owned for the next attempt or shutdown.
+
+        Separate verification stops the agent's sandbox itself (``HarborSession.stop_agent_side``) while the
+        episode key stays reserved, so a redelivered episode cannot start a second sandbox under it; the
+        reservation is released here without a second stop.
+        """
         sandbox = self._sandboxes.get(episode_key)
+        session = self._sessions.get(episode_key)
         if sandbox is not None:
-            await sandbox.stop()
+            if session is None or not session.agent_sandbox_stopped:
+                await sandbox.stop()
             del self._sandboxes[episode_key]
         self._sessions.pop(episode_key, None)
 
@@ -366,25 +400,41 @@ class HarborEnvironmentServer(
 
     # -- sandbox ---------------------------------------------------------------------------
 
-    def _sandbox_spec(self, task: HarborTask, workdir: str | None) -> SandboxSpec:
+    def _sandbox_spec(
+        self,
+        task: HarborTask,
+        workdir: str | None,
+        *,
+        environment: HarborEnvironment | None = None,
+        image: str | None = None,
+        role: str = "agent",
+        ttl: float | None = None,
+    ) -> SandboxSpec:
+        """The agent's sandbox by default; pass the verifier's environment for a separate verifier."""
         global_config_dict = get_global_config_dict()
+        if environment is None:
+            # The agent's sandbox: Dockerfile ENV recorded by the loader, overridden by `[environment.env]`.
+            environment, task_env = task.config.environment, task.env
+        else:
+            task_env = environment.env
         metadata = (
             resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
             | self.config.sandbox_metadata
-            | {"nemo_gym_environment_server": self.config.name, "harbor_task": task.task_id[:63]}
+            | {"nemo_gym_environment_server": self.config.name, "harbor_task": task.task_id[:63], "harbor_role": role}
         )
-        ttl = (
-            self.config.default_episode_timeout_seconds
-            + self.config.cleanup_timeout_seconds
-            + self.config.sandbox_ttl_slack_s
-        )
+        if ttl is None:
+            ttl = (
+                self.config.default_episode_timeout_seconds
+                + self.config.cleanup_timeout_seconds
+                + self.config.sandbox_ttl_slack_s
+            )
         # The override replaces only the keys it names, so a GPU task routed to the GPU provider keeps `gpu`.
-        resources = _sandbox_resources(task) | (self.config.sandbox_resources_override or {})
-        env = dict(self.config.sandbox_env) | resolve_env_templates(task.env)
+        resources = _sandbox_resources(environment) | (self.config.sandbox_resources_override or {})
+        env = dict(self.config.sandbox_env) | resolve_env_templates(task_env)
         if self.config.derive_cpu_env:
             env = cpu_cap_env(resources.get("cpu")) | env
         return SandboxSpec(
-            image=task.image,
+            image=image or task.image,
             ttl_s=ttl,
             ready_timeout_s=self.config.sandbox_ready_timeout_s,
             workdir=workdir,
@@ -402,17 +452,22 @@ class HarborEnvironmentServer(
         return sandbox
 
     async def _create_sandbox_within_deadline(self, task: HarborTask, episode_key: str) -> AsyncSandbox:
-        """``_create_sandbox`` bounded by the configured ready timeout, whatever the provider's retry budget.
+        """The agent's ``_create_sandbox`` under the ready deadline; the timeout is a seed failure, retried."""
+        return await self._within_ready_deadline(self._create_sandbox(task, task.workdir, episode_key=episode_key))
+
+    async def _within_ready_deadline[T](self, create: Awaitable[T]) -> T:
+        """A sandbox create bounded by the configured ready timeout, whatever the provider's retry budget.
 
         The provider retries a create on its own schedule and its request may block as long as the cluster
         takes to allocate the pod; `sandbox_ready_timeout_s` is this server's promise, so it is enforced
-        here too. The timeout is a provider-side seed failure, retried like any other.
+        here too, on the agent's sandbox and on the separate verifier's alike. The timeout raises
+        ``HarborSeedTimeoutError``; the cancelled provider attempt deletes the sandbox it may have started.
         """
         deadline_s = self.config.sandbox_ready_timeout_s + SEED_CREATE_GRACE_S
         deadline = asyncio.timeout(deadline_s)
         try:
             async with deadline:
-                return await self._create_sandbox(task, task.workdir, episode_key=episode_key)
+                return await create
         except TimeoutError as exc:
             if not deadline.expired():
                 raise
@@ -420,6 +475,25 @@ class HarborEnvironmentServer(
                 f"the sandbox was not ready within {deadline_s:g}s "
                 f"(sandbox_ready_timeout_s={self.config.sandbox_ready_timeout_s:g} plus {SEED_CREATE_GRACE_S:g}s grace)"
             ) from exc
+
+    async def _create_verifier_sandbox(self, task: HarborTask, *, episode_key: str | None = None) -> AsyncSandbox:
+        """A separate verifier runs in its own sandbox, sized by ``[verifier.environment]``."""
+        environment = task.config.verifier.environment or task.config.environment
+        spec = self._sandbox_spec(
+            task,
+            None,
+            environment=environment,
+            image=_verifier_image(task),
+            role="verifier",
+            ttl=task.config.verifier.timeout_sec + self.config.sandbox_ttl_slack_s,
+        )
+        provider_config = resolve_provider_config(self.config.sandbox_provider, get_global_config_dict())
+        sandbox = AsyncSandbox(provider_config)
+        if episode_key is not None:
+            # Owned from before start(), like the agent's sandbox, so a failed or interrupted stop is retried.
+            self._sandboxes[_verifier_key(episode_key)] = sandbox
+        await self._within_ready_deadline(sandbox.start(spec))
+        return sandbox
 
     async def _prepare_workdir(self, sandbox: AsyncSandbox, task: HarborTask, workdir: str | None) -> str:
         """Create the working directory, or resolve the image's own WORKDIR when the task sets none."""
@@ -486,7 +560,13 @@ class HarborEnvironmentServer(
         # Register before anything is provisioned, so a cancelled or timed-out seed still stops what it started.
         # Final cleanup runs after run() returns, outside the episode deadline, and retries a failed stop at shutdown.
         async def close_sandbox() -> None:
-            await self._stop_sandbox(episode_key)
+            try:
+                await self._stop_sandbox(episode_key)
+            finally:
+                # A separate verifier owned under the derived key (started, or interrupted while starting)
+                # belongs to this episode too.
+                if _verifier_key(episode_key) in self._sandboxes:
+                    await self._stop_sandbox(_verifier_key(episode_key))
 
         cleanup.register_cleanup("harbor episode key", release_key)
         cleanup.register_cleanup("harbor sandbox", close_sandbox)
@@ -618,20 +698,29 @@ class HarborEnvironmentServer(
             raise HTTPException(
                 422, f"Task {task.task_id!r} declares no image; sandbox-less tasks are not supported yet"
             )
-        if not task.config.is_shared_verifier:
-            raise HTTPException(422, "Separate verification is not supported yet")
+        if not task.config.is_shared_verifier and _verifier_image(task) is None:
+            raise HTTPException(
+                422,
+                f"Task {task.task_id!r} needs a separate verifier built from tests/Dockerfile; "
+                "only prebuilt verifier images are supported yet",
+            )
         if task.user is not None:
             raise HTTPException(422, "Agent user overrides ([agent].user or Dockerfile USER) are not supported yet")
         # Fail before provisioning; retain templates in the snapshot and resolve at use time.
         resolve_env_templates(task.env)
         resolve_env_templates(task.config.verifier.env)
+        if task.config.verifier.environment is not None:
+            resolve_env_templates(task.config.verifier.environment.env)
         if self._shutting_down:
             raise HTTPException(503, "Environment server is shutting down")
-        if episode_key in self._sandboxes:
-            # Left by a finished attempt whose stop failed (run() refuses the key while an attempt is live).
-            # Retry the stop here; the repeat goes ahead only once the old sandbox is gone.
+        for stale_key in (episode_key, _verifier_key(episode_key)):
+            if stale_key not in self._sandboxes:
+                continue
+            # Left by a finished attempt whose stop failed (run() refuses the key while an attempt is live):
+            # the agent's sandbox or its separate verifier. Retry the stop here; the repeat goes ahead only
+            # once the old sandbox is gone.
             try:
-                await self._stop_sandbox(episode_key)
+                await self._stop_sandbox(stale_key)
             except Exception as exc:
                 LOGGER.exception(f"Could not stop the sandbox of a previous attempt of {episode_key}")
                 raise HTTPException(
@@ -657,6 +746,7 @@ class HarborEnvironmentServer(
             identity=(request.episode_id, request.task.task_id),
             sandbox=sandbox,
             workdir=workdir,
+            session_id=episode_key,
         )
         self._sessions[episode_key] = session
         return session
@@ -695,23 +785,158 @@ class HarborEnvironmentServer(
     # -- verification ----------------------------------------------------------------------
 
     async def _run_verifier(self, session: HarborSession) -> dict[str, Any]:
+        """Run ``tests/test.sh`` and read the reward it wrote, in the agent's sandbox or a separate one."""
+        if session.task.config.is_shared_verifier:
+            return await self._run_shared_verifier(session) | {"verifier_mode": "shared"}
+        return await self._run_separate_verifier(session) | {"verifier_mode": "separate"}
+
+    def _reserve_logs_dir(self) -> Path:
+        """A fresh host directory for one verification's logs.
+
+        Episode IDs are opaque caller input, never host paths. Reserve a fresh directory so
+        neither traversal nor stale output from a reused ID can supply verifier files.
+        """
+        if self._artifacts_dir.resolve() != self._artifacts_dir:
+            raise RuntimeError("Verifier artifact root was redirected after server startup")
+        self._artifacts_dir.mkdir(parents=True, exist_ok=True)
+        logs_dir = self._artifacts_dir / f"session-{uuid4().hex}"
+        # Exclusive mkdir keeps the directory fresh while honoring the process umask and parent ACLs.
+        logs_dir.mkdir()
+        logs_dir = logs_dir.resolve()
+        if not logs_dir.is_relative_to(self._artifacts_dir):
+            raise RuntimeError("Verifier log directory escapes the configured artifact root")
+        return logs_dir
+
+    async def _collect_reward(
+        self, sandbox: AsyncSandbox, task: HarborTask, logs_dir: Path, *, timed_out: bool
+    ) -> tuple[dict[str, float] | None, str | None]:
+        """Download the reward files, then whatever else the verifier wrote.
+
+        Reward transfer is required; optional diagnostics cannot invalidate a measured score, and
+        a timed-out run has no reward to transfer but its partial logs are still worth keeping.
+        """
+        rewards = problem = None
+        if not timed_out:
+            await download_dir(sandbox, VERIFIER_LOGS_DIR, logs_dir, names=("reward.json", "reward.txt"))
+            rewards, problem = parse_reward_file(logs_dir)
+        try:
+            await download_dir(sandbox, VERIFIER_LOGS_DIR, logs_dir, skip_unsafe=True)
+        except Exception:
+            LOGGER.warning("Could not collect optional verifier logs for %s", task.task_id, exc_info=True)
+        return rewards, problem
+
+    async def _run_separate_verifier(self, session: HarborSession) -> dict[str, Any]:
+        """Harbor's separate mode: collect the agent's artifacts, stop its sandbox, verify in a fresh one.
+
+        The verifier sandbox comes from ``[verifier.environment]`` (or the task image when the
+        mode is ``separate`` without one). ``/logs/artifacts`` and every ``artifacts`` entry are
+        copied through the host into the same paths, then ``tests/`` is uploaded and ``test.sh``
+        runs there. Sidecar (Compose) artifacts and hooks are not collected yet.
+        """
+        task = session.task
+        settings = task.config.verifier
+        started = asyncio.get_running_loop().time()
+        try:
+            logs_dir = self._reserve_logs_dir()
+        except (OSError, RuntimeError) as exc:
+            LOGGER.exception("Could not create verifier logs under %s", self._artifacts_dir)
+            return self._masked(
+                failure_kinds.PERSISTENCE_FAILED,
+                f"Could not create verifier logs under {self._artifacts_dir}: {type(exc).__name__}: {exc}",
+            )
+        artifacts_dir = logs_dir / "artifacts"
+        verifier: AsyncSandbox | None = None
+        try:
+            for hook in settings.collect:
+                if hook.service not in (None, "main"):
+                    LOGGER.warning(
+                        f"{task.task_id}: collect hook for sidecar {hook.service!r} skipped (no Compose yet)"
+                    )
+                    continue
+                result = await session.sandbox.exec(
+                    hook.command, cwd=session.workdir, timeout_s=hook.timeout_sec + 30, user=hook.user
+                )
+                if result.return_code:
+                    LOGGER.warning(f"{task.task_id}: collect hook exited {result.return_code}: {hook.command!r}")
+            restored: list[tuple[Path, str]] = []
+            for artifact in _collected_artifacts(task):
+                if artifact.service not in (None, "main"):
+                    LOGGER.warning(
+                        f"{task.task_id}: artifact {artifact.source!r} on sidecar {artifact.service!r} skipped"
+                    )
+                    continue
+                host = artifacts_dir / artifact.host_path
+                # Best effort per artifact, as Harbor collects them: what the agent left behind (an
+                # unreadable tree, a link that escapes the folder, a file where a folder was expected)
+                # cannot mask the sample. Symbolic links travel as links, because the restore target is
+                # another sandbox, not the host. Anything else (a lost sandbox, a full disk, a dropped
+                # connection) is Gym's outage and still masks.
+                try:
+                    kind = await download_path(session.sandbox, artifact.source, host, links="keep")
+                except (
+                    SandboxTransferError,
+                    tarfile.TarError,
+                    FileExistsError,
+                    IsADirectoryError,
+                    NotADirectoryError,
+                ) as exc:
+                    LOGGER.warning(f"{task.task_id}: artifact {artifact.source!r} not collected: {exc}")
+                    continue
+                if kind is not None:
+                    restored.append((host, artifact.source))
+            # Harbor stops the agent's container before the verifier starts; nothing may keep running.
+            # The episode key stays reserved until the episode's final cleanup, which releases it without
+            # stopping the agent side again.
+            await session.sandbox.stop()
+            session.agent_sandbox_stopped = True
+
+            verifier = await self._create_verifier_sandbox(task, episode_key=session.session_id)
+            prepare = await _exec_as_root(
+                verifier,
+                f"mkdir -p {TESTS_DIR} {VERIFIER_LOGS_DIR} {ARTIFACTS_DIR} && chmod 777 {TESTS_DIR} {VERIFIER_LOGS_DIR}",
+                timeout_s=60,
+            )
+            if prepare.return_code != 0:
+                raise RuntimeError(f"Could not prepare verifier directories: {prepare.stderr or prepare.stdout}")
+            await upload_dir(verifier, task.path / "tests", TESTS_DIR)
+            for host, source in restored:
+                await upload_path(verifier, host, source)
+            budget = int(settings.timeout_sec)
+            result = await verifier.exec(
+                f"chmod +x {TESTS_DIR}/test.sh; timeout --signal=KILL {budget} bash {TESTS_DIR}/test.sh > {VERIFIER_STDOUT} 2>&1",
+                env=resolve_env_templates(settings.env),
+                timeout_s=settings.timeout_sec + self.config.verifier_grace_s,
+                user=settings.user,
+            )
+            timed_out = result.error_type == "timeout" or result.return_code == 137
+            if result.error_type not in (None, "timeout"):
+                return self._masked(failure_kinds.VERIFIER_ERROR, f"test.sh could not run: {result.error_type}")
+            rewards, problem = await self._collect_reward(verifier, task, logs_dir, timed_out=timed_out)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            LOGGER.exception(f"Separate verification infrastructure failed for {task.task_id}")
+            return self._masked(failure_kinds.PROVIDER_UNAVAILABLE, f"{type(exc).__name__}: {exc}")
+        finally:
+            # Owned from before start(): a create that failed or timed out is released here too.
+            if _verifier_key(session.session_id) in self._sandboxes:
+                try:
+                    await self._stop_sandbox(_verifier_key(session.session_id))
+                except Exception:
+                    # Still owned: shutdown retries the stop.
+                    LOGGER.exception(f"Could not stop the verifier sandbox for {task.task_id}")
+        return self._score(
+            task, settings, result, logs_dir, started, timed_out=timed_out, rewards=rewards, problem=problem
+        )
+
+    async def _run_shared_verifier(self, session: HarborSession) -> dict[str, Any]:
         """Run ``tests/test.sh`` in the agent's sandbox and read the reward it wrote."""
         task = session.task
         sandbox = session.sandbox
         settings = task.config.verifier
         started = asyncio.get_running_loop().time()
         try:
-            # Episode IDs are opaque caller input, never host paths. Reserve a fresh directory
-            # so neither traversal nor stale output from a reused ID can supply verifier files.
-            if self._artifacts_dir.resolve() != self._artifacts_dir:
-                raise RuntimeError("Verifier artifact root was redirected after server startup")
-            self._artifacts_dir.mkdir(parents=True, exist_ok=True)
-            logs_dir = self._artifacts_dir / f"session-{uuid4().hex}"
-            # Exclusive mkdir keeps the directory fresh while honoring the process umask and parent ACLs.
-            logs_dir.mkdir()
-            logs_dir = logs_dir.resolve()
-            if not logs_dir.is_relative_to(self._artifacts_dir):
-                raise RuntimeError("Verifier log directory escapes the configured artifact root")
+            logs_dir = self._reserve_logs_dir()
         except (OSError, RuntimeError) as exc:
             LOGGER.exception("Could not create verifier logs under %s", self._artifacts_dir)
             return self._masked(
@@ -755,16 +980,29 @@ class HarborEnvironmentServer(
             timed_out = result.error_type == "timeout" or result.return_code == 137
             if result.error_type not in (None, "timeout"):
                 return self._masked(failure_kinds.VERIFIER_ERROR, f"test.sh could not run: {result.error_type}")
-            if not timed_out:
-                # Reward transfer is required; optional diagnostics cannot invalidate a measured score.
-                await download_dir(sandbox, VERIFIER_LOGS_DIR, logs_dir, names=("reward.json", "reward.txt"))
-                rewards, problem = parse_reward_file(logs_dir)
+            rewards, problem = await self._collect_reward(sandbox, task, logs_dir, timed_out=timed_out)
         except HTTPException:
             raise
         except Exception as exc:
             LOGGER.exception(f"Verification infrastructure failed for {task.task_id}")
             return self._masked(failure_kinds.PROVIDER_UNAVAILABLE, f"{type(exc).__name__}: {exc}")
+        return self._score(
+            task, settings, result, logs_dir, started, timed_out=timed_out, rewards=rewards, problem=problem
+        )
 
+    def _score(
+        self,
+        task: HarborTask,
+        settings: Any,
+        result: SandboxExecResult,
+        logs_dir: Path,
+        started: float,
+        *,
+        timed_out: bool,
+        rewards: dict[str, float] | None,
+        problem: str | None,
+    ) -> dict[str, Any]:
+        """Turn the verifier's exit and the reward it wrote into the reward fields."""
         # Absolute, so the row names a folder that exists from wherever the run was launched; the server
         # process runs from its own folder, where a relative artifacts_dir would otherwise resolve.
         extras = {
@@ -772,11 +1010,6 @@ class HarborEnvironmentServer(
             "verifier_logs_dir": str(Path(logs_dir).resolve()),
             "verifier_seconds": round(asyncio.get_running_loop().time() - started, 1),
         }
-        # Keep whatever the verifier wrote, including on a timeout, so a slow test.sh can be diagnosed.
-        try:
-            await download_dir(sandbox, VERIFIER_LOGS_DIR, logs_dir, skip_unsafe=True)
-        except Exception:
-            LOGGER.warning("Could not collect optional verifier logs for %s", task.task_id, exc_info=True)
         if timed_out:
             return (
                 self._measured(
@@ -804,6 +1037,19 @@ class HarborEnvironmentServer(
     @staticmethod
     def _masked(kind: str, reason: str) -> dict[str, Any]:
         return {"reward": 0.0, "mask_sample": True, "failure_kind": kind, "failure_reason": reason[:2000]}
+
+
+def _verifier_key(episode_key: str) -> str:
+    """The ownership key of an episode's separate-verifier sandbox."""
+    return f"{episode_key}/verifier"
+
+
+def _collected_artifacts(task: HarborTask) -> list[HarborArtifact]:
+    """``/logs/artifacts`` first, then the task's own ``artifacts`` entries."""
+    entries = list(task.config.artifacts)
+    if not any(a.source.rstrip("/") == ARTIFACTS_DIR and a.service in (None, "main") for a in entries):
+        entries.insert(0, HarborArtifact(source=ARTIFACTS_DIR))
+    return entries
 
 
 def _stdout_tail(logs_dir: Path, limit: int = 600) -> str:
