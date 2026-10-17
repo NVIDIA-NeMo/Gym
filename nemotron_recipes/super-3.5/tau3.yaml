@@ -1,0 +1,61 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Tau3-Banking (agentic tool use, Artificial Analysis setup): 97 customer-service tasks x 8
+# repeats. The model is a bank agent with BM25 + grep search over the bank's documents and
+# account tools; a user-simulator model (gpt-5.4-mini-2026-03-17) plays the customer. A task
+# scores 1 if the final account state (for 9 tasks, the agent's actions) matches the expected
+# outcome.
+#
+#   nemotron_recipes/super-3.5/run.sh tau3
+#
+# Tech report (key_metrics of tau2_banking_knowledge_bm25_grep_artificial_analysis_agent):
+#   Tau3 Banking: macro_average x100
+#
+# Set in .env: POLICY_API_KEY, JUDGE_API_KEY
+#
+# Needs a simulator endpoint (judge_base_url in env.yaml, or tau3_user_simulator_base_url for
+# this recipe only) serving gpt-5.4-mini-2026-03-17 on Chat Completions
+# (<base_url>/chat/completions).
+#
+# run.sh first sources tau3.setup.sh, which pins the tasks
+# (https://github.com/bxyu-nvidia/tau2-bench) to the published run's commit, 7245a8f6, and
+# clears agent data left by an earlier tau2 or tau3 run. The tau2 package and the agent's data
+# then come from branch bxyu/nemo_gym_stable, as in that run.
+
+# Gym commit the published number was produced with; run.sh pins to it.
+gym_commit: 538886bff48f31a1567670fd5ed29c9ddfea59dd
+# Gym benchmark config this recipe builds on.
+benchmark_config: benchmarks/tau2/configs/banking_bm25_grep_artificial_analysis.yaml
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      # As in the published run (Gym's default is true): a conversation that ends with
+      # reasoning but no answer is not sent back to the model to continue.
+      sequential_reasoning_allowed: false
+
+# User simulator: gpt-5.4-mini-2026-03-17 at reasoning effort medium, as the benchmark
+# config sets. Endpoint and key come from env.yaml; set tau3_user_simulator_model_name there
+# only if your provider serves this model under a different id.
+gpt-5_4-mini-2026-03-17:
+  responses_api_models:
+    openai_model:
+      openai_base_url: ${oc.select:tau3_user_simulator_base_url,${judge_base_url}}
+      openai_api_key: ${oc.select:tau3_user_simulator_api_key,${judge_api_key}}
+      openai_model: ${oc.select:tau3_user_simulator_model_name,gpt-5.4-mini-2026-03-17}
+      # As in the published run: no max_output_tokens in the simulator's requests.
+      extra_body:
+        _delete_key: max_output_tokens

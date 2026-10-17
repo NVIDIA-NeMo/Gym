@@ -95,6 +95,7 @@ def traces(monkeypatch):
     set_enabled_span_groups(GymSpanGroup.resolve("all"))
     monkeypatch.setattr(telemetry_setup, "_TELEMETRY_HANDLE", handle)
     monkeypatch.setattr(telemetry_setup, "_INITIALISED", True)
+    monkeypatch.setattr(telemetry_setup, "_TRACES_EXPORTING", True)
 
     def finished_spans():
         trace.get_tracer_provider().force_flush()
@@ -337,3 +338,15 @@ async def test_no_spans_when_the_http_client_group_is_disabled(two_gym_servers, 
     await _drive_one_request(two_gym_servers)
 
     assert _by_kind(traces(), "CLIENT") == [], "a client span was emitted with every span group disabled"
+
+
+async def test_without_traces_no_client_span_or_traceparent_is_produced(two_gym_servers, traces, monkeypatch):
+    """With traces off, span groups stay enabled, so `server_utils.request` must check the exporter itself."""
+    monkeypatch.setattr(telemetry_setup, "_TRACES_EXPORTING", False)
+
+    await _drive_one_request(two_gym_servers)
+    spans = traces()
+
+    assert _by_kind(spans, "CLIENT") == []
+    downstream = next(s for s in _by_kind(spans, "SERVER") if "/work" in s.name)
+    assert downstream.parent is None, "a traceparent crossed the hop although traces are off"

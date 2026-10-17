@@ -59,6 +59,9 @@ apt-get purge -y \
     libmp3lame* \
     2>/dev/null || true
 
+# Gym never imports dbus or GObject; drop the base image's Python bindings.
+apt-get purge -y python3-dbus python3-gi
+
 apt-get autoremove -y
 
 # CVE-2026-45447: PKCS#7/S-MIME use-after-free in OpenSSL's PKCS7_verify().
@@ -174,7 +177,7 @@ COPY --from=nemo-gym --chown=${RUNTIME_UID}:${RUNTIME_GID} \
 # an environment variable — they would have to rebuild. Off remains the default: the code
 # is inert until NEMO_LENS_ENABLED=1.
 RUN uv venv --seed && \
-    uv sync --link-mode symlink --locked --extra vllm --extra telemetry --extra dev --no-install-project
+    uv sync --link-mode symlink --locked --extra vllm --extra telemetry --extra dev --extra ray --no-install-project
 
 ENV PATH="/opt/nemo_gym_venv/bin:$PATH"
 
@@ -210,7 +213,7 @@ COPY --from=nemo-gym --chown=${RUNTIME_UID}:${RUNTIME_GID} \
 # worktree was created for the runtime UID in the base stage, so restore build ownership
 # before setuptools invokes Git.
 RUN chown root:root /opt/nemo-gym && \
-    UV_LINK_MODE=symlink uv sync --locked --extra vllm --extra telemetry --extra dev
+    UV_LINK_MODE=symlink uv sync --locked --extra vllm --extra telemetry --extra dev --extra ray
 
 # Seed the runtime uv cache with the full dependency set (including the dev
 # extra and the project itself) so that CI scripts can run offline: setup_dev.sh
@@ -220,7 +223,7 @@ RUN chown root:root /opt/nemo-gym && \
 ENV UV_CACHE_DIR=/opt/nemo-gym/cache/uv
 RUN uv venv /opt/nemo-gym/cache/seed-venv && \
     UV_PROJECT_ENVIRONMENT=/opt/nemo-gym/cache/seed-venv \
-        uv sync --locked --extra vllm --extra telemetry --extra dev && \
+        uv sync --locked --extra vllm --extra telemetry --extra dev --extra ray && \
     rm -rf /opt/nemo-gym/cache/seed-venv && \
     chown -R "${RUNTIME_UID}:${RUNTIME_GID}" /opt/nemo-gym/cache/uv
 

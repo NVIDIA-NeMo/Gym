@@ -239,7 +239,10 @@ def _extract_verdict(response_text: str, yes_label: str, no_label: str) -> str:
 class MultiChallengeServer(SimpleResourcesServer):
     """MultiChallenge evaluation server."""
 
-    ray_enabled = False
+    # Each verification grades the request's rubric with judge calls: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
 
     config: MultiChallengeConfig
 
