@@ -1,0 +1,34 @@
+agentdojo_agent:
+  responses_api_agents:
+    agentdojo_agent:
+      entrypoint: app.py
+      domain: safety
+      description: Official AgentDojo suites executed by the upstream harness through a NeMo Gym model server.
+      value: Measure agent utility and indirect prompt-injection security with upstream task and attack verifiers.
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      # Fixed at 1: upstream pipeline state is process-wide and not safe for concurrent
+      # rollouts. Scale out with more agent processes. The config rejects any other value.
+      concurrency: 1
+      benchmark_version: v1.2.2
+      # Upstream important_instructions interpolates a model-family name by
+      # inspecting pipeline.name. "local" preserves AgentDojo's generic local
+      # model behavior; set an upstream-recognized model id for hosted parity.
+      attack_model_alias: local
+      # Set to `system` for deployments that reject the `developer` role.
+      model_system_role: developer
+      defense_model_alias: null
+      metric_prefix: agentdojo
+      # null, tool_filter, transformers_pi_detector, spotlighting_with_delimiting or
+      # repeat_user_prompt. A row's own `defense` takes precedence.
+      default_defense: null
+      system_message: null
+      system_message_name: null
+      tool_output_format: null
+      token_id_capture: true
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: responses_api_agents/agentdojo_agent/data/example.jsonl
+          license: MIT
