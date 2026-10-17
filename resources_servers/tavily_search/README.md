@@ -34,9 +34,13 @@ policies apply to all Tavily configurations, including removal of the aggregate
 
 Tavily's `/search` accepts at most 150 `exclude_domains` (HTTP 400 beyond). A
 longer policy is pre-filtered provider-side with a deterministic subset of
-`tavily_exclude_domains_limit` domains (default 150; `0` or `null` sends none):
-the hosts matching `tavily_exclude_domains_priority` first (default: dataset
-hubs, benchmark publishers, code hosts and archive mirrors), then file order.
-The server logs one warning per start with the number of domains not sent.
-Every `domain` and `url_substring` rule is still enforced locally on requested
-and returned URLs, so the cap never widens what an agent can see.
+`tavily_exclude_domains_limit` domains (default 150, also the largest value the
+config accepts; `0` or `null` sends none): the hosts matching
+`tavily_exclude_domains_priority` first (default: dataset hubs, benchmark
+publishers, code hosts and archive mirrors; patterns are matched
+case-insensitively against the normalised hostnames), then file order. Only
+the set of domains is preserved for a policy within the limit: priority hosts
+move to the front and a duplicate rule is sent once. The server logs one
+warning per start with the number of domains not sent. Every `domain` and
+`url_substring` rule is still enforced locally on requested and returned URLs,
+so the cap never widens what an agent can see.

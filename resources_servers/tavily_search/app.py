@@ -59,6 +59,7 @@ TAVILY_EXCLUDE_DOMAINS_LIMIT = 150
 # Policy domains sent to the provider ahead of the rest when the policy exceeds the limit: dataset hubs,
 # benchmark publishers, code hosts and archive mirrors, the hosts most likely to surface an answer key.
 # Shell-style patterns matched against the policy's normalised hostnames; a bare hostname matches only itself.
+# Patterns are normalised the same way (IDNA, lower-case, trailing dot removed), so their case does not matter.
 DEFAULT_EXCLUDE_DOMAINS_PRIORITY = (
     "huggingface.co",
     "hf.co",
@@ -89,9 +90,12 @@ class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
     max_cached_pages: int = Field(default=128, ge=0)
     max_cached_page_chars: Optional[int] = Field(default=None, ge=1)
     max_scroll_words: Optional[int] = Field(default=None, ge=1)
-    # Provider-side pre-filtering only; 0 or null sends no exclude_domains to Tavily. The full domain and
-    # url_substring policy is enforced locally on requested and returned URLs whatever this is set to.
-    tavily_exclude_domains_limit: Optional[int] = Field(default=TAVILY_EXCLUDE_DOMAINS_LIMIT, ge=0)
+    # Provider-side pre-filtering only; 0 or null sends no exclude_domains to Tavily. A value above Tavily's limit
+    # is rejected here because every /search would then fail with HTTP 400. The full domain and url_substring
+    # policy is enforced locally on requested and returned URLs whatever this is set to.
+    tavily_exclude_domains_limit: Optional[int] = Field(
+        default=TAVILY_EXCLUDE_DOMAINS_LIMIT, ge=0, le=TAVILY_EXCLUDE_DOMAINS_LIMIT
+    )
     tavily_exclude_domains_priority: List[str] = Field(default_factory=lambda: list(DEFAULT_EXCLUDE_DOMAINS_PRIORITY))
 
 
@@ -226,6 +230,11 @@ class TavilySearchAIOHTTPClient(BaseModel):
         return cls(headers=client.headers, base_url=str(client.base_url), debug=debug, **kwargs)
 
 
+def normalize_hostname(value: str) -> str:
+    """IDNA-encode, lower-case and strip the trailing dot: the one form every hostname comparison here uses."""
+    return value.encode("idna").decode().lower().rstrip(".")
+
+
 class URLExclusionPolicy:
     """Domain and URL-pattern checks shared by search results and page extraction."""
 
@@ -235,7 +244,7 @@ class URLExclusionPolicy:
         for prop in properties:
             if prop["type"] == "domain":
                 try:
-                    self.domains.append(prop["value"].encode("idna").decode().lower().rstrip("."))
+                    self.domains.append(normalize_hostname(prop["value"]))
                 except UnicodeError as exc:
                     raise ValueError(f"Invalid exclusion domain in {path}: {prop['value']!r}") from exc
         self.substrings = [p["value"].lower() for p in properties if p["type"] == "url_substring"]
@@ -254,7 +263,7 @@ class URLExclusionPolicy:
                     or parts.password
                 ):
                     return True
-                host = parts.hostname.encode("idna").decode().lower().rstrip(".")
+                host = normalize_hostname(parts.hostname)
                 canonical = urlunsplit((parts.scheme.lower(), host, parts.path, parts.query, "")).lower()
                 if any(host == domain or host.endswith("." + domain) for domain in self.domains):
                     return True
@@ -276,13 +285,22 @@ def select_provider_domains(
 
     Returns ``None`` when ``limit`` is ``None`` or 0 (no provider-side exclusion). Otherwise the domains matching
     the ``priority`` patterns come first, in pattern order and then policy order, followed by the remaining
-    domains in policy order, truncated to ``limit``. Every domain stays enforced locally regardless.
+    domains in policy order, truncated to ``limit``. Patterns are normalised like the policy's hostnames before
+    matching (an invalid pattern raises ``ValueError``). A policy within ``limit`` is sent as the same set of
+    domains in this order with duplicates removed: the set is preserved, the file order is not. Every domain
+    stays enforced locally regardless.
     """
     if not limit:
         return None
     ordered: List[str] = []
     for pattern in priority:
-        ordered.extend(domain for domain in domains if fnmatchcase(domain, pattern) and domain not in ordered)
+        try:
+            normalized_pattern = normalize_hostname(pattern)
+        except UnicodeError as exc:
+            raise ValueError(f"Invalid tavily_exclude_domains_priority pattern: {pattern!r}") from exc
+        ordered.extend(
+            domain for domain in domains if fnmatchcase(domain, normalized_pattern) and domain not in ordered
+        )
     ordered.extend(domain for domain in domains if domain not in ordered)
     return ordered[:limit]
 

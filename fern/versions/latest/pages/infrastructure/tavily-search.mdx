@@ -121,9 +121,11 @@ These behaviors apply to all Tavily configurations:
   identified; entries are never silently dropped.
 - Tavily's `/search` accepts at most 150 `exclude_domains`, so a longer policy is
   pre-filtered with a deterministic subset of `tavily_exclude_domains_limit` domains
-  (default 150; `0` or `null` sends none): hosts matching `tavily_exclude_domains_priority`
-  first, then file order. One warning per start names the domains not sent, and the
-  full policy stays enforced locally on requested and returned URLs.
+  (default 150, also the largest accepted value; `0` or `null` sends none): hosts
+  matching `tavily_exclude_domains_priority` first (case-insensitive), then file order;
+  only the set is preserved, not the file order. One warning per start names the
+  domains not sent, and the full policy stays enforced locally on requested and
+  returned URLs.
 - Rate-limit retries are bounded rather than indefinite. `max_http_attempts` defaults
   to 3 total attempts; retryable HTTP failures, connection errors, incomplete response
   bodies, and timeouts share this budget. Retries use exponential delays starting at

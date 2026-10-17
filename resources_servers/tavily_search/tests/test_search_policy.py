@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from pydantic import ValidationError
 
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.tavily_search import app as module
@@ -410,3 +411,29 @@ def test_select_provider_domains_honours_custom_priority_and_short_policies():
     assert select_provider_domains(domains, 150, DEFAULT_EXCLUDE_DOMAINS_PRIORITY) == domains
     assert select_provider_domains(domains, 2, ["c.*"]) == ["c.test", "a.test"]
     assert select_provider_domains(domains, 0, ["c.*"]) is None
+    # Within the limit only the set is preserved: a priority host moves forward and a duplicate rule is sent once.
+    assert select_provider_domains(["b.test", "github.com", "b.test"], 150, DEFAULT_EXCLUDE_DOMAINS_PRIORITY) == [
+        "github.com",
+        "b.test",
+    ]
+
+
+def test_priority_patterns_match_regardless_of_case_and_idna_form():
+    """Patterns are normalised like the policy's hostnames. The priority hosts sit at the tail here, where an
+    unmatched pattern would leave them to be cut by the limit."""
+    domains = ["a.test", "b.test", "github.com", "archive.ph", "xn--bcher-kva.de"]
+    assert select_provider_domains(domains, 3, ["GitHub.com", "Archive.*", "Bücher.de."]) == [
+        "github.com",
+        "archive.ph",
+        "xn--bcher-kva.de",
+    ]
+    with pytest.raises(ValueError, match="tavily_exclude_domains_priority"):
+        select_provider_domains(domains, 3, ["a" * 64 + ".test"])
+
+
+def test_exclude_domains_limit_above_tavily_maximum_is_rejected_at_config_validation(capped_policy):
+    """Above 150 every /search fails with HTTP 400 (with-tools pilot P-T1), so such a config must not start."""
+    with pytest.raises(ValidationError, match="tavily_exclude_domains_limit"):
+        make_server(capped_policy, tavily_exclude_domains_limit=module.TAVILY_EXCLUDE_DOMAINS_LIMIT + 1)
+    server = make_server(capped_policy, tavily_exclude_domains_limit=module.TAVILY_EXCLUDE_DOMAINS_LIMIT)
+    assert len(server._provider_exclude_domains) == module.TAVILY_EXCLUDE_DOMAINS_LIMIT
