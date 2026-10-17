@@ -259,6 +259,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                     episode_id=request.episode_id,
                     task_id=request.task.task_id,
                     task_data=task_input.task_data,
+                    rollout_index=request.rollout_index,
                 ).model_dump(mode="json"),
             )
             await raise_for_status(seed_http_response)
