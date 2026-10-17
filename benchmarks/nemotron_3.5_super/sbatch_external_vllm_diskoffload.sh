@@ -549,7 +549,7 @@ MOONCAKE_CONFIG
             -enable_offload=true \
             -rpc_thread_num=4 \
             -metrics_port=9003 \
-            -eviction_high_watermark_ratio=0.9 \
+            -eviction_high_watermark_ratio=0.7 \
             -eviction_ratio=0.1 \
             -minloglevel=0 \
             -enable_metric_reporting=true \
@@ -593,6 +593,8 @@ DISK_CHECK
     mooncake_disk_dir=\$(mktemp -d "/mooncake-ssd/mooncake-\$SLURM_JOB_ID-\${SLURM_RESTART_COUNT:-0}.XXXXXX")
     export MOONCAKE_OFFLOAD_FILE_STORAGE_PATH="\$mooncake_disk_dir"
     export MOONCAKE_OFFLOAD_STORAGE_BACKEND_DESCRIPTOR=bucket_storage_backend
+    # Drain pending SSD persistence promptly so RAM replicas become evictable.
+    export MOONCAKE_OFFLOAD_HEARTBEAT_INTERVAL_SECONDS=1
     export MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY=lru
     export MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE="\$disk_quota_bytes"
     export MOONCAKE_OFFLOAD_BUCKET_MAX_PHYSICAL_BYTES="\$disk_quota_bytes"
