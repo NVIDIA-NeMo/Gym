@@ -1,0 +1,39 @@
+agentdyn_agent:
+  responses_api_agents:
+    agentdyn_agent:
+      entrypoint: app.py
+      domain: safety
+      description: AgentDyn dynamic suites executed by the pinned upstream harness through a NeMo Gym model server.
+      value: Measure utility and indirect prompt-injection security under dynamic, helpful, long-horizon workflows.
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      concurrency: 1
+      benchmark_version: v1.2.2
+      attack_model_alias: local
+      model_system_role: developer
+      defense_model_alias: gpt-4o-2024-08-06
+      # Meta's canonical, gated repository. An ungated mirror with byte-identical weights is
+      # documented in benchmarks/agentdyn/README.md for runs without Meta access.
+      prompt_guard_2_model_name: meta-llama/Llama-Prompt-Guard-2-86M
+      prompt_guard_2_model_revision: a8ded8e697ce7c355e395a0df51f94adb4a2fd27 # pragma: allowlist secret
+      prompt_guard_2_local_path: null
+      # PIGuard ships custom modeling code that upstream loads with trust_remote_code=True,
+      # so the revision is pinned rather than resolved from a moving Hub main.
+      piguard_model_name: leolee99/PIGuard
+      piguard_model_revision: dd78b24e330193a22d2293ac66922dd4f982f563 # pragma: allowlist secret
+      piguard_local_path: null
+      # transformers_pi_detector's classifier, pinned for the same reason.
+      transformers_pi_model_name: protectai/deberta-v3-base-prompt-injection-v2
+      transformers_pi_model_revision: 90c9989b1a342275dd0d1a95aad283c04e075671 # pragma: allowlist secret
+      transformers_pi_local_path: null
+      metric_prefix: agentdyn
+      default_defense: null
+      system_message: null
+      system_message_name: null
+      tool_output_format: null
+      token_id_capture: true
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: responses_api_agents/agentdyn_agent/data/example.jsonl

@@ -1,0 +1,22 @@
+[project]
+name = "agentdyn-agent"
+version = "0.1.0"
+requires-python = ">=3.13.14"
+dependencies = [
+    "nemo-gym[dev]",
+    "agentdojo[transformers] @ git+https://github.com/SaFo-Lab/AgentDyn.git@5353cf7615b135cace8d07c8f12dac53a16b6db3",
+    "boto3",
+    "jsonschema",
+    "z3-solver",
+]
+
+[build-system]
+build-backend = "setuptools.build_meta"
+requires = ["setuptools"]
+
+[tool.setuptools.packages.find]
+where = [".."]
+include = ["agentdyn_agent", "agentdojo_family"]
+
+[tool.uv]
+sources.nemo-gym = { path = "../..", editable = true }
