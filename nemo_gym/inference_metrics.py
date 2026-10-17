@@ -33,6 +33,20 @@ from nemo_gym.server_utils import request
 
 logger = logging.getLogger(__name__)
 MOONCAKE_STORAGE_GAUGES = {"master_allocated_bytes", "master_total_capacity_bytes"}
+MOONCAKE_EVICTION_GAUGES = {
+    "master_eviction_memory_bytes",
+    "master_eviction_blocked_bytes",
+    "master_eviction_snapshot_timestamp_seconds",
+    "master_offload_pending_bytes",
+    "master_offload_pending_objects",
+    "master_offload_oldest_age_seconds",
+}
+# Family names omit `_total`, including counters whose native names lack it.
+MOONCAKE_EVICTION_COUNTERS = {
+    f"master_{metric}{tier}"
+    for metric in ("successful_evictions", "attempted_evictions", "evicted_key_count", "evicted_size_bytes")
+    for tier in ("", "_mem", "_nof")
+}
 # These SGLang gauges describe ratios or averages, not additive quantities.
 SGLANG_MEAN_GAUGES = {
     "token_usage",
@@ -59,7 +73,7 @@ class InferenceMetricsConfig(BaseModel, extra="forbid"):
     endpoints: dict[str, HttpUrl] = Field(default_factory=dict, description="Replica name to full /metrics URL.")
     router_endpoints: dict[str, HttpUrl] = Field(default_factory=dict, description="Router name to /metrics URL.")
     mooncake_endpoint: HttpUrl | None = Field(
-        default=None, description="Single Mooncake master /metrics URL for cluster-wide storage usage."
+        default=None, description="Single Mooncake master /metrics URL for storage usage and eviction metrics."
     )
     interval_s: float = Field(default=5.0, gt=0, allow_inf_nan=False)
     timeout_s: float = Field(default=2.0, gt=0, allow_inf_nan=False)
@@ -67,7 +81,7 @@ class InferenceMetricsConfig(BaseModel, extra="forbid"):
         default=None,
         description=(
             "Optional exact sample allowlist; by default export all vLLM, SGLang and router gauges, counters, "
-            "and histogram samples plus Mooncake storage gauges, excluding creation timestamps."
+            "and histogram samples plus Mooncake storage and eviction metrics, excluding creation timestamps."
         ),
     )
 
@@ -111,22 +125,24 @@ class InferenceMetricsCollector:
             if family.type not in {"gauge", "counter", "histogram"}:
                 continue
             for sample in family.samples:
-                is_mooncake_storage = (
-                    replica == "mooncake" and family.type == "gauge" and sample.name in MOONCAKE_STORAGE_GAUGES
+                is_mooncake_master = replica == "mooncake" and (
+                    (family.type == "gauge" and sample.name in MOONCAKE_STORAGE_GAUGES | MOONCAKE_EVICTION_GAUGES)
+                    or (family.type == "counter" and family.name.removesuffix("_total") in MOONCAKE_EVICTION_COUNTERS)
                 )
                 if (
-                    (not sample.name.startswith(("vllm:", "sglang:", "vllm_router_")) and not is_mooncake_storage)
+                    (not sample.name.startswith(("vllm:", "sglang:", "vllm_router_")) and not is_mooncake_master)
                     # Prometheus exposes creation timestamps as separate gauges.
                     or sample.name.endswith("_created")
                     or (self.config.metrics is not None and sample.name not in self.config.metrics)
                     or not math.isfinite(sample.value)
                 ):
                     continue
-                if is_mooncake_storage:
-                    # Master gauges already describe all segments; never sum them with per-segment usage.
-                    result[f"mooncake/total/{sample.name.removeprefix('master_')}"] = sample.value
-                    continue
-                if sample.name.startswith("vllm_router_"):
+                metric_replica = replica
+                if is_mooncake_master:
+                    # Master metrics are cluster totals; exclude per-segment duplicates.
+                    namespace, name = "mooncake", sample.name.removeprefix("master_")
+                    metric_replica = "total"
+                elif sample.name.startswith("vllm_router_"):
                     namespace, name = "router", sample.name.removeprefix("vllm_router_")
                 else:
                     namespace, name = sample.name.split(":", 1)
@@ -139,7 +155,7 @@ class InferenceMetricsCollector:
                     # Keep rank, mode, priority and histogram labels distinct.
                     and not (namespace == "sglang" and label == "engine_type")
                 )
-                key = f"{namespace}/{replica}/{name}{suffix}"
+                key = f"{namespace}/{metric_replica}/{name}{suffix}"
                 series_key = f"{key}/{labels}"
                 result[key] = result.get(key, 0.0) + sample.value
                 if family.type == "gauge" and (
@@ -149,7 +165,7 @@ class InferenceMetricsCollector:
                 if family.type in {"counter", "histogram"}:
                     previous = self.previous.get(series_key)
                     self.previous[series_key] = (sampled_at, sample.value)
-                    rate_key = f"{namespace}/{replica}/{name.removesuffix('_total')}_per_second{suffix}"
+                    rate_key = f"{namespace}/{metric_replica}/{name.removesuffix('_total')}_per_second{suffix}"
                     if previous is not None:
                         previous_time, previous_value = previous
                         # A reset has an unknown start time: establish a fresh baseline.

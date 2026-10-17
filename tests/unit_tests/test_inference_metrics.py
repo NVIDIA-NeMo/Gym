@@ -89,6 +89,61 @@ def test_mooncake_storage_usage_and_allowlist():
     assert collector.parse("mooncake", partial, 12) == {"mooncake/total/allocated_bytes": 50}
 
 
+@pytest.mark.parametrize("tier", ["", "_mem", "_nof"])
+@pytest.mark.parametrize(
+    "metric", ["successful_evictions", "attempted_evictions", "evicted_key_count", "evicted_size_bytes"]
+)
+def test_mooncake_eviction_counters_rates_and_resets(tier, metric):
+    # The master mixes native counter names with and without a `_total` suffix.
+    native = f"master_{metric}{tier}"
+    if not tier and metric in {"successful_evictions", "attempted_evictions"}:
+        native += "_total"
+    collector = InferenceMetricsCollector(config())
+
+    def payload(value):
+        return f"# TYPE {native} counter\n{native} {value}\n"
+
+    total = f"mooncake/total/{metric}{tier}_total"
+    rate = f"mooncake/total/{metric}{tier}_per_second"
+    assert collector.parse("mooncake", payload(100), 10) == {total: 100}
+    assert collector.parse("mooncake", payload(160), 12) == {total: 160, rate: 30}
+    assert collector.parse("mooncake", payload(5), 14) == {total: 5}
+    assert collector.parse("mooncake", payload(25), 16) == {total: 25, rate: 10}
+    assert collector.parse("replica0", payload(25), 16) == {}
+    restricted = InferenceMetricsCollector(config(metrics=[native.removesuffix("_total") + "_total"]))
+    assert restricted.parse("mooncake", payload(100), 10) == {total: 100}
+    assert InferenceMetricsCollector(config(metrics=[])).parse("mooncake", payload(100), 10) == {}
+
+
+def test_mooncake_eviction_diagnostics_preserve_reasons_and_exclude_segments():
+    payload = """# TYPE master_eviction_memory_bytes gauge
+master_eviction_memory_bytes 1000
+# TYPE master_eviction_blocked_bytes gauge
+master_eviction_blocked_bytes{reason="lease"} 600
+master_eviction_blocked_bytes{reason="processing"} 200
+# TYPE master_eviction_snapshot_timestamp_seconds gauge
+master_eviction_snapshot_timestamp_seconds 1234
+# TYPE master_offload_pending_bytes gauge
+master_offload_pending_bytes 400
+# TYPE master_offload_pending_objects gauge
+master_offload_pending_objects 2
+# TYPE master_offload_oldest_age_seconds gauge
+master_offload_oldest_age_seconds 5
+# TYPE segment_evicted_size_bytes counter
+segment_evicted_size_bytes{segment="worker0"} 999
+"""
+    collector = InferenceMetricsCollector(config())
+    assert collector.parse("mooncake", payload, 10) == {
+        "mooncake/total/eviction_memory_bytes": 1000,
+        "mooncake/total/eviction_blocked_bytes/reason/lease": 600,
+        "mooncake/total/eviction_blocked_bytes/reason/processing": 200,
+        "mooncake/total/eviction_snapshot_timestamp_seconds": 1234,
+        "mooncake/total/offload_pending_bytes": 400,
+        "mooncake/total/offload_pending_objects": 2,
+        "mooncake/total/offload_oldest_age_seconds": 5,
+    }
+
+
 @pytest.mark.parametrize("allocated,capacity", [(0, 0), (10, -1), (-1, 100), (10, "NaN"), ("+Inf", 100)])
 def test_mooncake_usage_omitted_for_invalid_or_zero_capacity(allocated, capacity):
     collector = InferenceMetricsCollector(config())
