@@ -172,6 +172,25 @@ def test_sandbox_model_url_prefers_backend_base_url_and_strips_v1():
     assert url == "http://vllm-node:9000"
 
 
+def test_sandbox_model_url_spreads_rollouts_over_endpoints():
+    agent = _make_agent()
+    agent.server_client.global_config_dict = MagicMock()
+    endpoints = ["http://vllm-a:8000/v1", "http://vllm-b:8000/v1", "http://vllm-c:8000/v1"]
+    with patch(
+        "responses_api_agents.harness_agent.app.get_first_server_config_dict", return_value={"base_url": endpoints}
+    ):
+        urls = [agent._sandbox_model_url(MagicMock()) for _ in range(6)]
+    assert urls == ["http://vllm-a:8000", "http://vllm-b:8000", "http://vllm-c:8000"] * 2
+
+
+def test_sandbox_model_url_override_may_list_endpoints():
+    agent = _make_agent(sandbox_model_base_url=["http://gw-1:8000/v1", "http://gw-2:8000/v1"])
+    with patch("responses_api_agents.harness_agent.app.get_first_server_config_dict") as get_config:
+        urls = [agent._sandbox_model_url(MagicMock()) for _ in range(3)]
+    assert urls == ["http://gw-1:8000", "http://gw-2:8000", "http://gw-1:8000"]
+    get_config.assert_not_called()
+
+
 @pytest.mark.parametrize("hostname", ["sandbox-gateway", "localhost"])
 def test_sandbox_model_url_uses_explicit_override(hostname):
     agent = _make_agent(sandbox_model_base_url=f"http://{hostname}:8000/v1")
@@ -538,6 +557,18 @@ async def test_download_json_requires_exactly_one_row():
 
     with pytest.raises(RuntimeError, match="expected one JSON row.*got 2"):
         await agent._download_json(MagicMock(), "/work/rollouts.jsonl")
+
+
+async def test_download_json_keeps_unicode_line_separators():
+    # A response quoting document text carries U+2028 / U+0085 inside strings; model_dump_json()
+    # leaves them unescaped, and they must not split the single JSONL row.
+    row = {"output": [{"type": "message", "content": "line\u2028break and\u0085next"}]}
+    agent = _make_agent()
+    agent._provider.download_file = AsyncMock(
+        side_effect=lambda _, __, path: path.write_text(json.dumps(row, ensure_ascii=False) + "\n")
+    )
+
+    assert await agent._download_json(MagicMock(), "/work/response.json") == row
 
 
 def test_gym_source_prebuilt_path_and_url():

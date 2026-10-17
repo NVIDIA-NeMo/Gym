@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import itertools
 import json
 import logging
 import re
@@ -137,7 +138,7 @@ class HarnessAgentConfig(BaseResponsesAPIAgentConfig):
     agent_kwargs: dict[str, Any] = Field(default_factory=dict)
 
     sandbox_provider: str | dict[str, Any]
-    sandbox_model_base_url: str | None = None
+    sandbox_model_base_url: str | list[str] | None = None
     sandbox_image: str = "python:3.12-slim"
     sandbox_spec: dict[str, Any] = Field(default_factory=dict)
     setup_commands: list[str] = Field(default_factory=list)
@@ -175,6 +176,7 @@ class HarnessAgent(SimpleResponsesAPIAgent):
         self._provider = create_provider(provider_config)
         self._gym_tar = None
         self._gym_source_url = None
+        self._sandbox_endpoint_cursor = itertools.count()
         if self.config.gym_source == "auto":
             self._gym_tar = self._build_gym_tar()
         elif "://" in self.config.gym_source:
@@ -218,7 +220,11 @@ class HarnessAgent(SimpleResponsesAPIAgent):
             cfg = get_first_server_config_dict(self.server_client.global_config_dict, self.config.model_server.name)
             base = cfg.get("base_url") or self.server_client._build_server_base_url(cfg)
         if isinstance(base, (list, ListConfig)):
-            base = base[0]
+            # The sandboxed agent sends every model call of its rollout to this one URL. Always
+            # taking base[0] put every sandboxed rollout of a multi-endpoint model server on the first
+            # endpoint; hand endpoints out round-robin per rollout instead (a rollout still stays on
+            # one endpoint, so its prefix cache stays warm).
+            base = base[next(self._sandbox_endpoint_cursor) % len(base)]
         base = re.sub(r"/v1/?$", "", str(base))
         if not self.config.sandbox_model_base_url:
             parsed = urlsplit(base if "://" in base else f"http://{base}")
@@ -382,7 +388,10 @@ class HarnessAgent(SimpleResponsesAPIAgent):
         with tempfile.TemporaryDirectory() as td:
             local = Path(td) / "out"
             await self._provider.download_file(handle, path, local)
-            lines = local.read_text().splitlines()
+            # Split on "\n" only: str.splitlines() also breaks on U+2028, U+2029, U+0085 and
+            # other separators that model_dump_json() leaves unescaped inside strings, so a
+            # response quoting such text would look like several rows.
+            lines = [line for line in local.read_text().split("\n") if line.strip()]
             if len(lines) != 1:
                 raise RuntimeError(f"expected one JSON row in {path}, got {len(lines)}")
             return json.loads(lines[0])
