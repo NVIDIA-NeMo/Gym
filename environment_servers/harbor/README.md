@@ -174,6 +174,11 @@ refuses it with that wording. A `tests/docker-compose.yaml` may declare `main` o
 honoured): Harbor builds and starts any other service as the verifier's Compose project, this server starts a single
 verifier sandbox, so such a task is refused by the loader and at prepare before any build.
 
+A task that declares `[environment].docker_image` runs that image, unless `builds.force` is set: then its
+Dockerfile is built anyway and the recorded build wins, as Harbor's `--force-build` does (SWE-Interact's
+declared images lack the helper its Dockerfiles copy in). The record names the tasks built under `force`
+(`forced_tasks`); a recorded `main` is not substituted for a task pinned to an image otherwise.
+
 The image is named the way Harbor names it, `hb__<hash>`, where the hash is Harbor's 32-character content
 hash of the `environment/` folder, its environment id (vendored from Harbor v0.22.0 in
 `nemo_gym/tasks/harbor/harbor_compat.py`), so identical contexts get the same image name in Harbor and in
@@ -187,6 +192,7 @@ builds:
   repository: registry/path  # push built images under this path; default: $NEMO_GYM_BUILD_REPOSITORY
   platform: linux/amd64    # the platform asked of the tool; default linux/amd64
   enabled: true            # false never builds; tasks that need a build are skipped with a message
+  force: false             # true also builds the Dockerfile of a task that declares docker_image
 ```
 
 With `builds.repository` (or the `NEMO_GYM_BUILD_REPOSITORY` variable) the image is named
