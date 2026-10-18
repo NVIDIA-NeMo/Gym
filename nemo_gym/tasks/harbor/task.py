@@ -30,7 +30,7 @@ from nemo_gym.tasks.harbor.dockerfile import (
     resolve_dockerfile,
 )
 from nemo_gym.tasks.harbor.errors import HarborTaskError
-from nemo_gym.tasks.harbor.models import HarborTaskConfig
+from nemo_gym.tasks.harbor.models import HarborStep, HarborTaskConfig
 from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE, IMAGE_CONFIGS_FILE, read_built_images, read_image_configs
 
 
@@ -38,7 +38,24 @@ logger = logging.getLogger(__name__)
 
 TASK_FILE = "task.toml"
 INSTRUCTION_FILE = "instruction.md"
+STEPS_DIR = "steps"
+# Per-step Harbor features this loader does not run yet; a task using one is refused by name.
+UNSUPPORTED_STEP_FILES = ("workdir", "setup.sh")
 DOCKERFILE = Path("environment") / "Dockerfile"
+
+
+@dataclass(frozen=True)
+class HarborTurn:
+    """One ``[[steps]]`` entry read from disk: the instruction the agent gets for that turn."""
+
+    name: str
+    instruction: str
+    config: HarborStep
+
+    @property
+    def tests_dir(self) -> Path:
+        """Relative to the task folder; may be absent, in which case the task's ``tests/`` is used alone."""
+        return Path(STEPS_DIR) / self.name / "tests"
 
 
 @dataclass(frozen=True)
@@ -88,6 +105,10 @@ class HarborTask:
     commands run beside them. They are known whenever the image's configuration is, with or without an
     entrypoint. ``image_healthcheck`` is the recorded Dockerfile ``HEALTHCHECK`` block (``Test``,
     ``Interval``, ... as Docker records them), or ``None``.
+
+    ``turns`` holds the task's ``[[steps]]`` in order; empty for a single-turn task. A multi-turn task
+    never sends ``instruction`` to the agent: each turn sends its own, and the top-level file may hold
+    material the agent must not see (SWE-Interact puts the full hidden specification there).
     """
 
     path: Path
@@ -108,6 +129,7 @@ class HarborTask:
     entrypoint_workdir: str | None = None
     image_healthcheck: dict[str, Any] | None = None
     overlay_workdirs: tuple[OverlayWorkdir, ...] = ()
+    turns: tuple[HarborTurn, ...] = ()
 
     @property
     def needs_sandbox(self) -> bool:
@@ -221,6 +243,9 @@ def load_task(path: Path, *, image_configs: Mapping[str, Any] | None = None) -> 
     phases = {"environment": config.environment, "agent": config.agent, "verifier": config.verifier}
     if config.verifier.environment is not None:
         phases["verifier.environment"] = config.verifier.environment
+    for step in config.steps:
+        phases[f"steps.{step.name}.agent"] = step.agent
+        phases[f"steps.{step.name}.verifier"] = step.verifier
     for name, phase in phases.items():
         if phase.network_mode not in (None, "public") or phase.allowed_hosts:
             raise HarborTaskError(f"{path}: {name} network restrictions are not supported yet")
@@ -232,12 +257,14 @@ def load_task(path: Path, *, image_configs: Mapping[str, Any] | None = None) -> 
             raise HarborTaskError(f"{path}: {name} Windows tasks are not supported yet")
 
     instruction_path = path / INSTRUCTION_FILE
-    if not instruction_path.is_file():
+    turns = _load_turns(path, config)
+    # Harbor reads a multi-step task's instructions from its steps; the top-level file is then optional.
+    if not turns and not instruction_path.is_file():
         raise HarborTaskError(f"{path} has no {INSTRUCTION_FILE}")
-    if not (path / "tests").is_dir():
+    if not turns and not (path / "tests").is_dir():
         raise HarborTaskError(f"{path} has no tests/ folder")
     try:
-        instruction = read_instruction(instruction_path)
+        instruction = read_instruction(instruction_path) if instruction_path.is_file() else ""
     except (OSError, UnicodeDecodeError) as exc:
         raise HarborTaskError(f"{instruction_path}: {exc}") from exc
     if not config.is_shared_verifier and not config.artifacts:
@@ -393,7 +420,42 @@ def load_task(path: Path, *, image_configs: Mapping[str, Any] | None = None) -> 
         entrypoint_workdir=entrypoint_workdir,
         image_healthcheck=image_healthcheck,
         overlay_workdirs=overlay_workdirs,
+        turns=turns,
     )
+
+
+def _load_turns(path: Path, config: HarborTaskConfig) -> tuple[HarborTurn, ...]:
+    """Read every ``[[steps]]`` entry as a turn, refusing the per-step features the server does not run yet.
+
+    Each turn needs ``steps/<name>/instruction.md`` and a ``test.sh``, its own under
+    ``steps/<name>/tests/`` or the task's under ``tests/``, which is the script Harbor runs for the step.
+    """
+    turns: list[HarborTurn] = []
+    for step in config.steps:
+        where = f"{path / TASK_FILE} step {step.name!r}"
+        step_dir = path / STEPS_DIR / step.name
+        if not step_dir.is_dir():
+            raise HarborTaskError(f"{where}: {step_dir} does not exist")
+        for name in UNSUPPORTED_STEP_FILES:
+            if (step_dir / name).exists():
+                raise HarborTaskError(f"{where}: steps/{step.name}/{name} is not supported yet")
+        if step.healthcheck is not None or step.artifacts:
+            raise HarborTaskError(f"{where}: per-step healthcheck and artifacts are not supported yet")
+        if step.verifier.environment_mode == "separate" or step.verifier.environment is not None:
+            raise HarborTaskError(f"{where}: separate per-step verification is not supported yet")
+        if not (step_dir / "tests" / "test.sh").is_file() and not (path / "tests" / "test.sh").is_file():
+            raise HarborTaskError(f"{where}: no test.sh in steps/{step.name}/tests/ or tests/")
+        instruction_path = step_dir / INSTRUCTION_FILE
+        if not instruction_path.is_file():
+            raise HarborTaskError(f"{where}: steps/{step.name}/{INSTRUCTION_FILE} is missing")
+        try:
+            instruction = read_instruction(instruction_path)
+        except (OSError, UnicodeDecodeError) as exc:
+            raise HarborTaskError(f"{instruction_path}: {exc}") from exc
+        turns.append(HarborTurn(name=step.name, instruction=instruction, config=step))
+    if turns and not config.is_shared_verifier:
+        raise HarborTaskError(f"{path / TASK_FILE}: multi-step tasks with a separate verifier are not supported yet")
+    return tuple(turns)
 
 
 def task_digest(folder_digest: str, dataset: GymDatasetConfig, task_id: str) -> str:

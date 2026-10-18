@@ -21,6 +21,7 @@ import math
 import posixpath
 import shlex
 import tarfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -75,6 +76,15 @@ TIMEOUT_WRAPPER_GUARD = "command -v timeout >/dev/null 2>&1 && command -v bash >
 VERIFIER_TIMEOUT_KIND = "harbor:verifier_timeout"
 MISSING_REWARD_KIND = "harbor:missing_reward"
 INVALID_REWARD_KIND = "harbor:invalid_reward"
+
+
+@dataclass(frozen=True)
+class VerifierSettings:
+    """The verifier settings one shared ``test.sh`` run uses: the task's, or a step's over the task's."""
+
+    timeout_sec: float
+    env: dict[str, str]
+    user: str | int | None
 
 
 def parse_reward_file(directory: Path) -> tuple[dict[str, float] | None, str | None]:
@@ -608,15 +618,28 @@ class HarborVerificationMixin:
                 restored.append((archive, kind, artifact.source))
         return restored
 
-    async def _run_shared_verifier(self, session: HarborSession) -> dict[str, Any]:
-        """Run ``tests/test.sh`` in the agent's sandbox and read the reward it wrote.
+    async def _run_shared_verifier(
+        self,
+        session: HarborSession,
+        *,
+        settings: VerifierSettings | None = None,
+        test_dirs: tuple[Path, ...] | None = None,
+    ) -> dict[str, Any]:
+        """Run ``test.sh`` in the agent's sandbox and read the reward it wrote.
 
         ``[[verifier.collect]]`` hooks run first, as in Harbor: what they produce under ``/logs/artifacts``
         is there for ``test.sh``, and for the run's logs.
+
+        ``test_dirs`` are uploaded to ``/tests`` in order, each over the last (a step's ``tests/`` over the
+        task's). By default the task's ``tests/`` and ``[verifier]`` apply.
         """
         task = session.task
         sandbox = session.sandbox
-        settings = task.config.verifier
+        if settings is None:
+            verifier = task.config.verifier
+            settings = VerifierSettings(timeout_sec=verifier.timeout_sec, env=verifier.env, user=_verifier_user(task))
+        if test_dirs is None:
+            test_dirs = (task.path / "tests",)
         started = asyncio.get_running_loop().time()
         try:
             logs_dir = self._reserve_logs_dir()
@@ -632,7 +655,7 @@ class HarborVerificationMixin:
                 if died is not None:
                     await self._collect_entrypoint_log(sandbox, task, logs_dir / ENTRYPOINT_LOG_NAME)
                     return self._masked(ENTRYPOINT_FAILED_KIND, died) | {"verifier_logs_dir": str(logs_dir.resolve())}
-            await self._run_collect_hooks(session, settings.collect)
+            await self._run_collect_hooks(session, task.config.verifier.collect)
             # Replace agent-planted directory links before cleanup: find does not follow its starting
             # symlink, while tar does. Unlink /logs first without touching its former target.
             roots = (str(Path(VERIFIER_LOGS_DIR).parent), TESTS_DIR, VERIFIER_LOGS_DIR, AGENT_LOGS_DIR)
@@ -651,7 +674,8 @@ class HarborVerificationMixin:
             )
             if prepare.return_code != 0:
                 raise RuntimeError(f"Could not prepare verifier directories: {prepare.stderr or prepare.stdout}")
-            await upload_dir(sandbox, task.path / "tests", TESTS_DIR)
+            for tests in test_dirs:
+                await upload_dir(sandbox, tests, TESTS_DIR)
             await _make_test_script_executable(sandbox)
             # One plain exec for the whole run. The provider keeps it alive for as long as
             # `timeout_s` says (OpenSandbox polls a background command, Docker streams), and
@@ -665,7 +689,7 @@ class HarborVerificationMixin:
                 cwd=session.workdir,
                 env=resolve_env_templates(settings.env),
                 timeout_s=settings.timeout_sec + self.config.verifier_grace_s,
-                user=_verifier_user(task),
+                user=settings.user,
             )
             if result.error_type not in (None, "timeout"):
                 return self._masked(failure_kinds.VERIFIER_ERROR, f"test.sh could not run: {result.error_type}")

@@ -2559,6 +2559,7 @@ def test_server_config_holds_only_deployment_settings():
         "request_gpu_type",
         "verifier_grace_s",
         "artifacts_dir",
+        "task_mcp_grants",
     }
     source = inspect.getsource(HarborEnvironmentServerConfig).lower()
     assert not any(word in source for word in ("terminal", "tb4", "tb2", "swe", "nextjs", "hello-world"))
