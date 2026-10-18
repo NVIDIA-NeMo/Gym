@@ -68,6 +68,21 @@ a sandbox group when a `compose-images.json` with the sidecar images' recorded O
 the task folders, written by `gym dataset fetch`; on OpenSandbox the provider block also needs
 `networking.enabled: true` (with `loopback_forwarding`) and `runtime_requirements.shm_size_metadata_key` (see
 [Compose tasks on OpenSandbox](#compose-tasks-on-opensandbox)); each service's working directory is created once its sandbox is up, as Docker creates a missing `working_dir` or `WORKDIR` at container create. `[environment.healthcheck]` is polled at seed.
+A Compose file's `${NAME}` resolves as Harbor's `docker compose` would: Gym's infrastructure variables, the task's
+`[environment].env`, the process environment, then `environment/.env`; a name none of them sets is an empty string
+at prepare, with one warning. The server's `compose_variables` fill such names at seed, below everything the task
+and Harbor set: each maps a name to a literal `value`, a process `env` variable, or a `model_server`, whose
+sandbox-reachable URL with the episode's rollout prefix becomes the value (a sidecar's model calls are then
+recorded with the rollout and never become training tokens). A name still unset at seed fails the episode
+terminally, before provisioning. A document holding such values is written to a private folder removed once the
+group starts, not under `artifacts_dir`.
+
+```yaml
+compose_variables:
+  LITELLM_BASE_URL: {model_server: user_model}
+  LITELLM_API_KEY: {env: USER_MODEL_API_KEY}
+  SIM_USER_MODEL: {value: gpt-5.5}
+```
 Tasks that declare GPUs run on the `gpu_sandbox_provider` block when one is set. The task's
 `[[environment.mcp_servers]]` and `skills_dir` are written to `/tmp/.nemo-gym/task.json` in the agent's
 sandbox for harnesses that drive task MCP servers from inside it (mini-SWE does). With `task_mcp_grants:
@@ -248,7 +263,8 @@ stands, as under Compose. The section is interpolated as Compose interpolates it
 (the process environment, the task's `[environment].env` and Harbor's variables, with `environment/.env` under
 them), so `${VAR:?message}` with no value fails that task's build naming the task and the variable instead of
 passing an empty build arg, while a bare `${VAR}` nobody sets is an empty string with one warning, as Compose
-makes it. The task's Compose file is read at build time, not at planning, and checked on this path as on the
+makes it (at prepare; the seed resolves the same name strictly, see "Compose template variables and `env_file`").
+The task's Compose file is read at build time, not at planning, and checked on this path as on the
 docker path before anything is built, so a file the loader would refuse is never built and pushed under the
 `hb__` name, and a file one task gets wrong leaves that task out without touching the rest of the dataset. Each
 service with a `build:` section is one `buildah bud` or `podman build` of its own context and Dockerfile, `main`
@@ -305,8 +321,13 @@ read as Compose's dotenv reader reads them: an unquoted or double-quoted value i
 the build's environment and the lines above it (so `NET=${X:-host}` in `.env` is `host`), a single-quoted value
 is literal, and `COMPOSE_ENV_FILES` set in the build's environment fails the build, as it would point Compose at
 files the check does not read. A bare `${VAR}` nobody sets is an empty string with one warning naming the task
-and the variable, as `docker compose build` makes it and as the loader resolves the same file at seed, so the
-file checked is the file built; `${VAR:?message}` fails the build with the message. The build and the loader
+and the variable, as `docker compose build` makes it; `${VAR:?message}` fails the build with the message. The
+loader resolves the same file at seed with the deployment's `compose_variables` in hand, and a name the Compose
+file (or an overlay file) still leaves unset then fails the episode terminally before anything is provisioned (see
+[Supported task behavior](#supported-task-behavior)), so the file checked is the file built, or the episode is
+refused rather than started with an empty value. `environment/.env` is the exception: its values are resolved with
+Compose's empty substitution at prepare and seed alike, before the deployment's values are merged, so a `.env` line
+that reads an unset name is empty at seed too and never sees `compose_variables`. The build and the loader
 read the same sources (the process environment, the task's `[environment].env`, Harbor's variables and
 `environment/.env`), so prepare and the environment server have to run with the same variables exported for the
 file built to be the file started. Prepare refuses, naming the service and key: build `secrets`, `ssh`, `extra_hosts`, `entitlements` and `privileged` (BuildKit's
@@ -694,10 +715,17 @@ from these sources, the first that defines a name wins:
 3. the process environment of the command;
 4. `environment/.env` next to the Compose file, read as Compose's dotenv reader reads it (unquoted and
    double-quoted values are themselves interpolated against the sources above and the lines before them,
-   single-quoted values are literal);
-5. the default in the expression (`${VAR:-default}`, `${VAR-default}`);
-6. otherwise an empty string, with one warning naming the task and the variable, as docker compose does.
-   `${VAR:?message}` and `${VAR?message}` fail prepare with the message instead.
+   single-quoted values are literal). A `.env` value is resolved this way at prepare and seed alike, with an unset
+   name empty and warned about once; it never sees source 5;
+5. at seed, the environment server's `compose_variables` (a literal `value`, a process `env` variable or a
+   `model_server`'s sandbox-reachable URL; see "Supported task behavior"): the deployment's values, below every
+   source above, so they fill only the names the task and Harbor leave unset. Prepare has none;
+6. the default in the expression (`${VAR:-default}`, `${VAR-default}`);
+7. otherwise, at prepare, an empty string with one warning naming the task and the variable, as docker compose
+   does; at seed, with the deployment's values in hand, a name the Compose document or an overlay file still
+   leaves unset fails the episode terminally before anything is provisioned (a `.env` value's unset name stays
+   empty, as source 4 says). `${VAR:?message}` and `${VAR?message}` fail prepare, or the seed, with the message
+   instead.
 
 Source 3 is a trust boundary. `compose_variables()` includes the whole environment of the process that runs
 prepare or the server (Harbor parity: Harbor interpolates with `include_os_env=True`), so a task's

@@ -16,7 +16,9 @@ import asyncio
 import json
 import logging
 import math
+import os
 import random
+import shutil
 import tempfile
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
@@ -24,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from fastapi import HTTPException
 
 from environment_servers.harbor.overlay import HarborOverlayError
 from environment_servers.harbor.session import _task_sandbox_env, resolve_env_templates
@@ -31,6 +34,7 @@ from environment_servers.harbor.users import _creation_user
 from environment_servers.harbor.verifier import _verifier_image, _verifier_key, _verifier_runs_task_image
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox, AsyncSandboxCompose, SandboxSpec, clamp_resource_requests
+from nemo_gym.sandbox.agent_tools import sandbox_server_url
 from nemo_gym.sandbox.compose_config import (
     adapt_non_root_sidecars,
     deployment_platform,
@@ -43,6 +47,7 @@ from nemo_gym.sandbox.compose_fields import service_gpus
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata, resolve_provider_volume_sources
 from nemo_gym.sandbox.providers.base import ORPHAN_REAP_TIMEOUT_S, SandboxCreateError
 from nemo_gym.sandbox.utils import cpu_cap_env
+from nemo_gym.server_utils import apply_rollout_prefix
 from nemo_gym.tasks.harbor import HarborTask
 from nemo_gym.tasks.harbor.errors import HarborTaskError
 from nemo_gym.tasks.harbor.image_configs import (
@@ -141,6 +146,14 @@ def _pull_retry_delay(attempt: int) -> float:
 def _provider_name(provider_config: Any) -> str | None:
     """The registry name of a resolved single-key provider config; ``None`` for a provider instance (tests)."""
     return next(iter(provider_config)) if isinstance(provider_config, Mapping) else None
+
+
+def _discard_private_document(done: "asyncio.Task[tuple[dict[str, Any], Path]]") -> None:
+    """Remove the private Compose document a write finished after its seed was cancelled (``_create_compose``)."""
+    if done.cancelled() or done.exception() is not None:
+        return
+    _, path = done.result()
+    shutil.rmtree(path.parent, ignore_errors=True)
 
 
 class HarborSandboxMixin:
@@ -317,7 +330,7 @@ class HarborSandboxMixin:
             )
         return json.loads(path.read_text())
 
-    def _compose_document(self, task: HarborTask) -> dict[str, Any]:
+    def _compose_document(self, task: HarborTask, episode_key: str | None = None) -> dict[str, Any]:
         """The published overlay resolved against recorded image metadata, ready for the Compose adapter."""
         image_configs = self._compose_image_configs(task)
         global_config_dict = get_global_config_dict()
@@ -325,7 +338,8 @@ class HarborSandboxMixin:
         # The same reader prepare used: env_file inlined, ${VAR} resolved from the task, not the process, and the
         # images prepare built standing in for the sidecars it built (and main when the task runs from its built
         # image), their build: and a pull_policy: build dropped. The record was read once by load_task: no hashing here.
-        document = load_compose_document(task)
+        # The deployment's compose_variables fill the names the task leaves to it (a name still unset fails here).
+        document = load_compose_document(task, operator_variables=self._compose_variable_values(episode_key))
         if task.built_image is None:
             # A pull or overlay task's main build: (and the pull_policy: build that goes with it) that only restates
             # Harbor's own build of the Dockerfile is dropped; a key that would change the image is the task's
@@ -376,13 +390,30 @@ class HarborSandboxMixin:
             )
         return document
 
-    def _write_compose_document(self, task: HarborTask) -> tuple[dict[str, Any], Path]:
-        """Resolve the task's Compose document and write it where the adapter reads it (blocking file work)."""
-        document = self._compose_document(task)
-        # Episode IDs are opaque caller input, never host paths: the document gets a fresh folder.
-        self._artifacts_dir.mkdir(parents=True, exist_ok=True)
-        path = Path(tempfile.mkdtemp(prefix="compose-", dir=self._artifacts_dir)) / "compose.yaml"
-        path.write_text(yaml.safe_dump(document, sort_keys=False))
+    def _write_compose_document(
+        self, task: HarborTask, episode_key: str | None = None, *, private: bool = False
+    ) -> tuple[dict[str, Any], Path]:
+        """Resolve the task's Compose document and write it where the adapter reads it (blocking file work).
+
+        ``private`` puts it in a folder of its own outside ``artifacts_dir`` (the caller removes it once the group
+        has started): a document with deployment values in it may hold credentials.
+        """
+        # The shared document (one per task digest) has no episode; the private one carries the episode's values.
+        document = self._compose_document(task, episode_key) if private else self._compose_document(task)
+        if private:
+            folder = Path(tempfile.mkdtemp(prefix="nemo-gym-compose-"))
+        else:
+            # Episode IDs are opaque caller input, never host paths: the document gets a fresh folder.
+            self._artifacts_dir.mkdir(parents=True, exist_ok=True)
+            folder = Path(tempfile.mkdtemp(prefix="compose-", dir=self._artifacts_dir))
+        path = folder / "compose.yaml"
+        try:
+            path.write_text(yaml.safe_dump(document, sort_keys=False))
+        except BaseException:
+            if private:
+                # A write that failed after the folder was made leaves no partial document with the values in it.
+                shutil.rmtree(folder, ignore_errors=True)
+            raise
         return document, path
 
     async def _compose_document_for(self, task: HarborTask) -> tuple[dict[str, Any], Path]:
@@ -407,8 +438,41 @@ class HarborSandboxMixin:
         return pending.result() if pending.done() else await asyncio.shield(pending)
 
     async def _create_compose(self, task: HarborTask, episode_key: str) -> AsyncSandboxCompose:
-        """Start the task's Compose group; the ``main`` service is the agent's sandbox."""
-        document, path = await self._compose_document_for(task)
+        """Start the task's Compose group; the ``main`` service is the agent's sandbox.
+
+        With ``compose_variables`` the document is the episode's (a model server URL carries the rollout prefix)
+        and may hold credentials: the adapter reads it once, at start, from a private folder removed right after,
+        never under ``artifacts_dir``. Without them it is the task's, resolved and written once per digest.
+        """
+        private = bool(self.config.compose_variables)
+        if private:
+            # The write runs in a worker thread, which a cancelled await does not stop: the write stays owned past the
+            # cancellation (an episode deadline, a shutdown), so a document the worker finishes after it is removed
+            # as soon as it is done, instead of staying behind with the deployment's values in it.
+            writing = asyncio.create_task(
+                asyncio.to_thread(self._write_compose_document, task, episode_key, private=True)
+            )
+            try:
+                document, path = await asyncio.shield(writing)
+            except asyncio.CancelledError:
+                writing.add_done_callback(_discard_private_document)
+                raise
+        else:
+            document, path = await self._compose_document_for(task)
+        try:
+            return await self._start_compose_group(task, episode_key, document, path)
+        finally:
+            # The private document goes with every exit, a refusal before any group exists (`_sandbox_spec` refusing
+            # an agent user the provider cannot run as, a sidecar's provider block) as much as the start's return.
+            if private:
+                shutil.rmtree(path.parent, ignore_errors=True)
+
+    async def _start_compose_group(
+        self, task: HarborTask, episode_key: str, document: dict[str, Any], path: Path
+    ) -> AsyncSandboxCompose:
+        """Start the group ``document`` (written at ``path``, where the adapter reads it) describes, for ``_create_compose``:
+        the service specs, providers and volume mappings from the task and the document, the overlay's RUN lines on
+        ``main`` for an overlay task, then the start with its pull retries."""
         # An overlay task's main service starts without the task workdir, as its single sandbox would (see
         # `_create_sandbox_within_deadline`); the sidecars derive from it and start in their images' own.
         main_spec = self._sandbox_spec(task, None if task.overlay else task.workdir)
@@ -469,7 +533,8 @@ class HarborSandboxMixin:
 
             service_setup["main"] = run_overlay
         # Ownership starts before start(): a group that fails half-way is still stopped whole, and a pull
-        # failure of any service is retried with a fresh group, like a single sandbox's.
+        # failure of any service is retried with a fresh group, like a single sandbox's. A private document
+        # is read by every attempt and removed by `_create_compose` once the last one has returned.
         try:
             return await self._start_with_pull_retries(
                 task,
@@ -642,3 +707,27 @@ class HarborSandboxMixin:
         if not self.config.gpu_sandbox_provider:
             return None
         return resolve_provider_volume_sources(self.config.gpu_sandbox_provider, global_config_dict)
+
+    def _compose_variable_values(self, episode_key: str | None) -> dict[str, str]:
+        """The deployment's ``compose_variables`` resolved for one episode.
+
+        A ``model_server`` value is that server's sandbox-reachable root URL with the episode's rollout prefix
+        (no training-capture segment), so a sidecar's model calls are kept with the rollout's evaluation
+        capture and never become training tokens. A missing environment variable or an unreachable model
+        server is a configuration error (422).
+        """
+        values: dict[str, str] = {}
+        for name, source in self.config.compose_variables.items():
+            if source.value is not None:
+                values[name] = source.value
+            elif source.env is not None:
+                if source.env not in os.environ:
+                    raise HTTPException(422, f"compose_variables.{name}: environment variable {source.env!r} is unset")
+                values[name] = os.environ[source.env]
+            else:
+                try:
+                    base_url = sandbox_server_url(source.model_server, require_reachable=True)
+                except Exception as exc:
+                    raise HTTPException(422, f"compose_variables.{name}: {type(exc).__name__}: {exc}") from exc
+                values[name] = apply_rollout_prefix(base_url, episode_key)
+        return values

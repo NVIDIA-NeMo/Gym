@@ -49,7 +49,7 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from fastapi import Body, FastAPI, HTTPException
-from pydantic import BaseModel, ConfigDict, Field, PositiveFloat
+from pydantic import BaseModel, ConfigDict, Field, PositiveFloat, model_validator
 
 from environment_servers.harbor.entrypoint import (
     EntrypointLaunch,
@@ -100,8 +100,10 @@ from nemo_gym.single_agent_turn_types import SingleAgentTurnFailure, SingleAgent
 from nemo_gym.tasks.harbor import DIGEST_KEY, HarborTask, load_task
 from nemo_gym.tasks.harbor.dataset_config import DATASET_FILE
 from nemo_gym.tasks.harbor.errors import HarborTaskError
+from nemo_gym.tasks.harbor.image_configs import load_compose_document
 from nemo_gym.tasks.harbor.materialize import STEP_METADATA_KEY, HarborTaskInput
 from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE
+from nemo_gym.tasks.harbor.registry import ImageConfigError
 from nemo_gym.tasks.harbor.task import HarborTurn
 from nemo_gym.tasks.harbor.verifier_env import TESTS_DOCKERFILE
 from nemo_gym.tool_access import MCPStreamableHTTPConnection, MCPToolAccess, ToolAccess
@@ -190,6 +192,26 @@ class HarborEpisodeResponse(BaseEpisodeResponse[HarborEpisodeResult]):
     failure: SingleAgentTurnFailure | None = None
 
 
+class ComposeVariable(BaseModel):
+    """The deployment's value for one ``${NAME}`` a task's Compose file leaves undefined: exactly one source.
+
+    ``value`` is literal, ``env`` names a variable of this server's process, and ``model_server`` names a Gym
+    model server whose sandbox-reachable URL (with the episode's rollout prefix) becomes the value.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    value: str | None = None
+    env: str | None = None
+    model_server: str | None = None
+
+    @model_validator(mode="after")
+    def one_source(self) -> "ComposeVariable":
+        if sum(source is not None for source in (self.value, self.env, self.model_server)) != 1:
+            raise ValueError("A compose variable takes exactly one of value, env or model_server")
+        return self
+
+
 class HarborTasksetConfig(BaseModel):
     """Where one taskset's folders live and which digest each task was materialized with.
 
@@ -258,6 +280,9 @@ class HarborEnvironmentServerConfig(BaseEnvironmentServerConfig):
     # Grant the task's `[[environment.mcp_servers]]` URL entries to the agent as MCP tool accesses. "off" keeps
     # them in /tmp/.nemo-gym/task.json only; "required" makes an agent that cannot connect fail its seed.
     task_mcp_grants: Literal["off", "optional", "required"] = "off"
+    # Values for the `${NAME}` references a task's Compose file leaves to the deployment, such as a sidecar's
+    # model endpoint and key. Resolved at seed; the task and Harbor's own variables take precedence.
+    compose_variables: dict[str, ComposeVariable] = Field(default_factory=dict)
 
 
 def min_reward_failure(rewards: dict[str, float] | None, min_reward: float | dict[str, float] | None) -> str | None:
@@ -967,6 +992,13 @@ class HarborEnvironmentServer(
             # The sources the turn's verifier resolves its env from (`_verifier_env`: the server's secrets, then the
             # process environment), so a judge key only `secrets` supplies passes here as it does at the task level.
             resolve_env_templates(turn.config.verifier.env, self.config.secrets)
+        if task.needs_compose:
+            # A Compose file the deployment leaves incomplete (a variable no compose_variables entry sets) is a
+            # configuration error: refused before anything is provisioned, and not retried.
+            try:
+                load_compose_document(task, operator_variables=self._compose_variable_values(episode_key))
+            except ImageConfigError as exc:
+                raise HTTPException(422, f"Compose file of task {task.task_id!r}: {exc}") from exc
         if task.turns:
             budget = sum(
                 task.config.step_agent_timeout_sec(turn.config)

@@ -3667,6 +3667,7 @@ def test_server_config_holds_only_deployment_settings():
         "image_pull_retries",
         "separate_verifier_for_artifacts",
         "task_mcp_grants",
+        "compose_variables",
     }
     source = inspect.getsource(HarborEnvironmentServerConfig).lower()
     assert not any(word in source for word in ("terminal", "tb4", "tb2", "swe", "nextjs", "hello-world"))
