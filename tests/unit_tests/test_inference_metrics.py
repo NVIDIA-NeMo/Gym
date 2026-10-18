@@ -800,6 +800,8 @@ sglang:generation_tokens_total{{model_name="test",engine_type="{role}",is_stream
 INVENTORY = """# TYPE vllm:mooncake_cache_layout gauge
 vllm:mooncake_cache_layout{scope="model",prefix="model@rank0",kind="mamba"} 1
 vllm:mooncake_cache_layout{scope="model",prefix="model@rank1",kind="mamba"} 1
+vllm:mooncake_cache_layout{scope="model",prefix="lineage",kind="mamba_lineage"} 1
+vllm:mooncake_cache_layout{scope="model",prefix="retired",kind="mamba_retired"} 1
 # TYPE vllm:cache_inventory gauge
 vllm:cache_inventory{engine="0",kind="mamba",measure="distinct_prefixes"} 12
 vllm:cache_inventory{engine="1",kind="mamba",measure="distinct_prefixes"} 8
@@ -824,7 +826,14 @@ async def test_inventory_http_expected_layout_and_zero_counts(monkeypatch):
         bodies.append(await request.json())
         return web.json_response(
             {
-                "counts": {"mamba.complete_prefixes": 0, "mamba.incomplete_prefixes": 3},
+                "counts": {
+                    "mamba.complete_prefixes": 0,
+                    "mamba.incomplete_prefixes": 3,
+                    "mamba.retired.incomplete_prefixes": 2,
+                    "mamba.retired.ready_bytes": 4096,
+                    "mamba.anchor_or_unknown.incomplete_prefixes": 1,
+                    "mamba.tip.complete_prefixes": 0,
+                },
                 "snapshot_timestamp_seconds": 123,
                 "scan_seconds": 0.01,
             }
@@ -849,14 +858,20 @@ async def test_inventory_http_expected_layout_and_zero_counts(monkeypatch):
         {
             "tenant_id": "default",
             "namespaces": [
+                {"scope": "model", "prefix": "lineage", "kind": "mamba_lineage"},
                 {"scope": "model", "prefix": "model@rank0", "kind": "mamba"},
                 {"scope": "model", "prefix": "model@rank1", "kind": "mamba"},
+                {"scope": "model", "prefix": "retired", "kind": "mamba_retired"},
             ],
         }
     ]
     assert publish.call_args.args[0] == {
         "mooncake/total/cache_inventory/mamba/complete_prefixes": 0,
         "mooncake/total/cache_inventory/mamba/incomplete_prefixes": 3,
+        "mooncake/total/cache_inventory/mamba/retired/incomplete_prefixes": 2,
+        "mooncake/total/cache_inventory/mamba/retired/ready_bytes": 4096,
+        "mooncake/total/cache_inventory/mamba/anchor_or_unknown/incomplete_prefixes": 1,
+        "mooncake/total/cache_inventory/mamba/tip/complete_prefixes": 0,
         "mooncake/total/cache_inventory/snapshot_timestamp_seconds": 123,
         "mooncake/total/cache_inventory/scan_seconds": 0.01,
     }
