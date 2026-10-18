@@ -2685,7 +2685,6 @@ dependencies = [
     { name = "httptools" },
     { name = "hydra-core" },
     { name = "itsdangerous" },
-    { name = "jinja2" },
     { name = "jsonschema" },
     { name = "mcp" },
     { name = "omegaconf" },
@@ -2699,7 +2698,7 @@ dependencies = [
     { name = "pydot" },
     { name = "pyjwt" },
     { name = "python-multipart" },
-    { name = "ray", extra = ["default"] },
+    { name = "requests" },
     { name = "rich" },
     { name = "scipy" },
     { name = "tqdm" },
@@ -2717,6 +2716,7 @@ all = [
     { name = "defusedxml" },
     { name = "e2b" },
     { name = "gitpython" },
+    { name = "huggingface-hub" },
     { name = "jinja2" },
     { name = "mlflow" },
     { name = "mlflow-skinny" },
@@ -2738,6 +2738,7 @@ all = [
 dev = [
     { name = "coverage" },
     { name = "defusedxml" },
+    { name = "huggingface-hub" },
     { name = "mypy" },
     { name = "pre-commit" },
     { name = "pytest" },
@@ -2769,7 +2770,6 @@ sandbox = [
 ]
 telemetry = [
     { name = "nemo-lens", extra = ["sdk"] },
-    { name = "opentelemetry-instrumentation-aiohttp-client" },
     { name = "opentelemetry-instrumentation-fastapi" },
 ]
 vllm = [
@@ -2807,9 +2807,9 @@ requires-dist = [
     { name = "fonttools", specifier = ">=4.60.2" },
     { name = "gitpython", marker = "extra == 'wandb'", specifier = ">=3.1.61" },
     { name = "httptools" },
+    { name = "huggingface-hub", marker = "extra == 'dev'", specifier = "<2" },
     { name = "hydra-core" },
     { name = "itsdangerous" },
-    { name = "jinja2", specifier = ">=3.1" },
     { name = "jinja2", marker = "extra == 'ray'", specifier = ">=3.1" },
     { name = "jsonschema", specifier = ">=4.18,<5" },
     { name = "mcp", specifier = ">=1.28.1,<2" },
@@ -2817,12 +2817,11 @@ requires-dist = [
     { name = "mlflow-skinny", marker = "extra == 'mlflow'", specifier = ">=3.16.1" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.8.0" },
     { name = "nemo-gym", extras = ["dev", "mlflow", "ray", "sandbox", "wandb"], marker = "extra == 'all'" },
-    { name = "nemo-lens", extras = ["sdk"], marker = "extra == 'telemetry'", git = "https://github.com/NVIDIA-NeMo/Lens.git?rev=b0f977d414b2f89938604a0b7eaa78ee08bc8700" },
+    { name = "nemo-lens", extras = ["sdk"], marker = "extra == 'telemetry'", git = "https://github.com/NVIDIA-NeMo/Lens.git?rev=4d045c03186b90afdc815db46b671f6a21bc7e98" },
     { name = "omegaconf" },
     { name = "openai", specifier = "==2.44.0" },
     { name = "opensandbox", marker = "extra == 'sandbox'", specifier = ">=0.1.15" },
     { name = "openshell", marker = "extra == 'openshell'", specifier = ">=0.0.92,<0.1" },
-    { name = "opentelemetry-instrumentation-aiohttp-client", marker = "extra == 'telemetry'", specifier = ">=0.60b0" },
     { name = "opentelemetry-instrumentation-fastapi", marker = "extra == 'telemetry'", specifier = ">=0.60b0" },
     { name = "orjson", specifier = ">=3.11.6" },
     { name = "packaging", specifier = ">=24.2" },
@@ -2839,8 +2838,8 @@ requires-dist = [
     { name = "pytest-cov", marker = "extra == 'dev'" },
     { name = "pytest-xdist", marker = "extra == 'dev'" },
     { name = "python-multipart", specifier = ">=0.0.27" },
-    { name = "ray", extras = ["default"], specifier = ">=2.58.0" },
     { name = "ray", extras = ["default"], marker = "extra == 'ray'", specifier = ">=2.58.0" },
+    { name = "requests" },
     { name = "requests-mock", marker = "extra == 'dev'" },
     { name = "rich" },
     { name = "ruff", marker = "extra == 'dev'" },
@@ -2868,8 +2867,8 @@ codec = [
 
 [[package]]
 name = "nemo-lens"
-version = "0.2.0+b0f977d"
-source = { git = "https://github.com/NVIDIA-NeMo/Lens.git?rev=b0f977d414b2f89938604a0b7eaa78ee08bc8700#b0f977d414b2f89938604a0b7eaa78ee08bc8700" }
+version = "0.2.0+4d045c0"
+source = { git = "https://github.com/NVIDIA-NeMo/Lens.git?rev=4d045c03186b90afdc815db46b671f6a21bc7e98#4d045c03186b90afdc815db46b671f6a21bc7e98" }
 dependencies = [
     { name = "opentelemetry-api" },
 ]

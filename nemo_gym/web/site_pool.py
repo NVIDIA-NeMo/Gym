@@ -53,6 +53,67 @@ class UnmanagedSitePool:
         }
 
 
+class SiteCapacityError(RuntimeError):
+    """A site already has its maximum number of concurrent sessions."""
+
+
+class SiteConcurrencyLimitPool:
+    """Cap concurrent sessions per site; tasks on other sites are unaffected.
+
+    Public sites rate-limit by client IP. When many rollouts share one egress
+    IP, a burst of sessions on one site (GitHub, Hugging Face) triggers those
+    limits and turns tasks into site-access failures. A full site rejects the
+    seed instead of queueing it, so the caller retries later and the slot it
+    would have held stays free for other sites.
+    """
+
+    def __init__(self, max_sessions_per_site: int) -> None:
+        if max_sessions_per_site < 1:
+            raise ValueError("max_sessions_per_site must be at least 1")
+        self._limit = max_sessions_per_site
+        self._lock = asyncio.Lock()
+        self._active: dict[str, tuple[str, ...]] = {}
+        self._counts: Counter[str] = Counter()
+        self._rejected = 0
+
+    async def acquire(self, session_id: str, task: WebTask) -> SiteLease:
+        sites = LocalSiteLockPool._sites(task)
+        lease_id = f"site-limits:{session_id}"
+        async with self._lock:
+            if lease_id in self._active:
+                raise RuntimeError(f"duplicate site lease {lease_id!r}")
+            full = [site for site in sites if self._counts[site] >= self._limit]
+            if full:
+                self._rejected += 1
+                raise SiteCapacityError(f"site {', '.join(full)} has {self._limit} active sessions")
+            self._counts.update(sites)
+            self._active[lease_id] = sites
+        return SiteLease(
+            lease_id=lease_id,
+            isolated=False,
+            metadata={"benchmark": task.benchmark.value, "sites": list(sites), "limit": self._limit},
+        )
+
+    async def release(self, lease: SiteLease, *, healthy: bool) -> None:
+        del healthy
+        async with self._lock:
+            for site in self._active.pop(lease.lease_id, ()):
+                self._counts[site] -= 1
+                if self._counts[site] <= 0:
+                    del self._counts[site]
+
+    async def health(self) -> dict[str, Any]:
+        async with self._lock:
+            return {
+                "mode": "site_limits",
+                "isolated": False,
+                "max_sessions_per_site": self._limit,
+                "active_leases": len(self._active),
+                "sessions_by_site": dict(sorted(self._counts.items())),
+                "rejected_seeds": self._rejected,
+            }
+
+
 @dataclass(frozen=True, slots=True)
 class _LocalLeaseState:
     sites: tuple[str, ...]

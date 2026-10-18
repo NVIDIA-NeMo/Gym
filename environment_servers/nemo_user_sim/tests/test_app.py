@@ -29,14 +29,14 @@ from environment_servers.nemo_user_sim.app import (
     _ParticipantActivationError,
     _to_responses_input_items,
 )
+from environment_servers.nemo_user_sim.episode_contracts import UserSimEpisodeRequest, UserSimEpisodeResult
 from nemo_gym.config_types import AgentServerRef, ModelServerRef, ResourcesServerRef
 from nemo_gym.episode_types import EpisodeId, MaterializedTask, TaskId
 from nemo_gym.rollout_collection import _episode_record
 from nemo_gym.server_utils import SESSION_ID_KEY, BaseServerConfig, ServerClient
+from nemo_gym.task_materialization import materialize_task
 from resources_servers.nemo_user_sim.app import UserSimResourcesServer, UserSimResourcesServerConfig
 from resources_servers.nemo_user_sim.episode_contracts import (
-    UserSimEpisodeRequest,
-    UserSimEpisodeResult,
     UserSimSimulationResult,
     UserSimTaskInput,
     UserSimVerification,
@@ -115,6 +115,20 @@ def test_episode_result_projects_verification_into_gym_scoring_contract() -> Non
     assert record["verification"]["verifier_data"]["assistant_eval"] == {"axes": {}}
     assert record["verification"]["usersim_result"] is None
     assert record["usersim_result"]["conversation_status"] is True
+
+
+def test_example_rows_materialize_as_episode_requests() -> None:
+    examples_path = Path(__file__).parents[3] / "resources_servers/nemo_user_sim/data/example.jsonl"
+    rows = [orjson.loads(line) for line in examples_path.read_bytes().splitlines() if line]
+
+    assert len(rows) == 5
+    for index, row in enumerate(rows):
+        task = materialize_task(row, taskset="nemo_user_sim:example", task_index=index)
+        request = UserSimEpisodeRequest.model_validate(
+            {"episode_id": {"rollout_id": f"{index}-0", "attempt": 0}, "task": task}
+        )
+        assert request.task.task_id == TaskId(taskset="nemo_user_sim:example", task_id=row["task_id"])
+        assert request.task.task_input.resolved_row == row["resolved_row"]
 
 
 def test_assistant_tool_calls_and_results_convert_to_responses_items() -> None:
@@ -790,6 +804,8 @@ async def test_committed_activation_fixtures_round_trip_through_real_bridge(
     assert result.response["reasoning_content"]
     assert len(bridge.invocations) == 1
     assert bridge.invocations[0].role == "assistant"
+    # With checkpointing on, the agent refuses a session activation whose path does not name its attempt.
+    assert client.calls[0][1] == f"/ng-rollout/{request.episode_id.capture_key}/v1/responses"
     sent_tools = client.calls[0][2]["json"].tools
     if probe_type == "tool_calling":
         assert [tool["name"] for tool in sent_tools] == ["get_weather"]

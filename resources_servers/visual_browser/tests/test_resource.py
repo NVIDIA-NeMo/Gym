@@ -312,7 +312,7 @@ def test_webvoyager_evaluator_exposes_evidence_only_for_external_judging() -> No
 
 
 def test_visual_browser_requires_one_session_per_display(tmp_path) -> None:
-    with pytest.raises(ValueError, match="max_sessions=1 per isolated DISPLAY"):
+    with pytest.raises(ValueError, match="local_process allows max_sessions=1"):
         VisualBrowserResourcesServerConfig.model_validate(
             {
                 "name": "visual-browser",

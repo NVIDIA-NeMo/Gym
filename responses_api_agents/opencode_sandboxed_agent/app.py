@@ -269,6 +269,20 @@ def parse_opencode_observations(
                 "running": "incomplete",
                 "pending": "incomplete",
             }.get(native_status, "unknown")
+            if native_status == "completed" and part.get("tool") == "bash":
+                # Completion describes the tool lifecycle, not shell success. Timeout/abort
+                # can complete that lifecycle with a null exit code in the native artifact.
+                metadata = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
+                exit_code = metadata.get("exit")
+                if type(exit_code) is int:
+                    status = "completed" if exit_code == 0 else "failed"
+                else:
+                    status = "unknown"
+                    gaps.append(
+                        ObservationGap(
+                            code="tool_outcome_unavailable", invocation_id=session_id, detail=observed_call_id
+                        )
+                    )
             if observed_call_id is not None:
                 tools.append(
                     ToolCallObservation(
@@ -280,7 +294,7 @@ def parse_opencode_observations(
                         duration_ms=duration_ms,
                         timing_source="artifact" if started_at is not None else None,
                         status=status,
-                        error_type="tool_error" if native_status == "error" else None,
+                        error_type="tool_error" if status == "failed" else None,
                     )
                 )
             else:
@@ -519,7 +533,6 @@ class OpenCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
 
 
 class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
-    ray_enabled = False
     config: OpenCodeSandboxedAgentConfig
 
     def model_post_init(self, context: Any, /) -> None:
@@ -864,7 +877,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         echo "Shell: $SHELL" \
         && {install_str} \
         {ripgrep_install_str} \
-        && export PATH=$HOME/.opencode/bin:$PATH \
+        && export PATH="$HOME/.opencode/bin:$PATH" \
         && test "$(opencode --version)" = {quote(self.config.opencode_version)} \
         && echo "Installed OpenCode" \
         && rm -f /tmp/nemo-gym-mcp-setup-error \
@@ -908,7 +921,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         session_env = {"XDG_DATA_HOME": remote_data_home} if remote_data_home is not None else None
         try:
             session_list_result = await sandbox.exec(
-                command="export PATH=$HOME/.opencode/bin:$PATH && opencode session list --format json",
+                command='export PATH="$HOME/.opencode/bin:$PATH" && opencode session list --format json',
                 env=session_env,
                 timeout_s=self.config.sandbox_timeout,
             )
@@ -917,7 +930,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             session_id = _extract_opencode_session_id(session_list_result.stdout or "")
             export_result = await sandbox.exec(
                 command=(
-                    "export PATH=$HOME/.opencode/bin:$PATH "
+                    'export PATH="$HOME/.opencode/bin:$PATH" '
                     f"&& opencode export {quote(session_id)} > {quote(export_remote_fpath)}"
                 ),
                 env=session_env,
@@ -967,7 +980,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 # VACUUM INTO includes committed WAL data in one consistent, standalone snapshot.
                 snapshot_sql = "VACUUM INTO '" + snapshot_remote_fpath.replace("'", "''") + "'"
                 snapshot_result = await sandbox.exec(
-                    command=f"export PATH=$HOME/.opencode/bin:$PATH && opencode db {quote(snapshot_sql)}",
+                    command=f'export PATH="$HOME/.opencode/bin:$PATH" && opencode db {quote(snapshot_sql)}',
                     env=session_env,
                     timeout_s=self.config.sandbox_timeout,
                 )

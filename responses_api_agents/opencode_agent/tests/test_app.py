@@ -20,9 +20,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
-import yaml
+from omegaconf import OmegaConf
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.global_config import GlobalConfigDictParser
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymEasyInputMessage,
@@ -74,9 +75,8 @@ def _compactions(bundle: AgentObservationBundle) -> list[ContextCompactionObserv
 
 
 def _make_agent(**kwargs) -> OpenCodeAgent:
-    with patch("responses_api_agents.opencode_agent.app.OpenCodeAgent.model_post_init"):
-        agent = OpenCodeAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
-    agent.sem = asyncio.Semaphore(agent.config.concurrency)
+    agent = OpenCodeAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
+    agent._ensure_local_runtime = AsyncMock()
     return agent
 
 
@@ -719,11 +719,107 @@ class TestConfigYaml:
         app_path = Path(__file__).resolve().parent.parent / "app.py"
         compile(app_path.read_text(), str(app_path), "exec")
 
-    def test_config_yaml_parses(self) -> None:
+    @pytest.mark.parametrize("training_capture", [None, False, True])
+    def test_config_yaml_parses(self, monkeypatch: pytest.MonkeyPatch, training_capture: bool | None) -> None:
+        monkeypatch.chdir(Path(__file__).resolve().parents[3])
         cfg_path = Path(__file__).resolve().parent.parent / "configs" / "opencode_agent.yaml"
-        data = yaml.safe_load(cfg_path.read_text())
+        _, configs = GlobalConfigDictParser().load_extra_config_paths([str(cfg_path)])
+        data = OmegaConf.to_container(OmegaConf.merge(*configs, {"policy_model_name": "test-model"}), resolve=True)
         assert "opencode_agent" in data
         inner = data["opencode_agent"]["responses_api_agents"]["opencode_agent"]
-        assert inner["entrypoint"] == "app.py"
-        assert inner["concurrency"] == 8
-        assert inner["command"] == "opencode"
+        if training_capture is not None:
+            inner["token_id_capture"] = training_capture
+        config = OpenCodeAgentConfig.model_validate(inner | {"host": "localhost", "port": 8000, "name": "opencode"})
+        assert config.entrypoint == "app.py"
+        assert "execution_mode" not in type(config).model_fields
+        assert config.thinking is True
+        assert config.timeout == 10800
+        assert config.model == "test-model"
+        assert config.sandbox_provider is None
+        assert config.sandbox_install_timeout_seconds == 600
+        assert config.session_close_timeout_seconds == 60
+        assert config.resources_server is None
+        assert config.model_server.name == "policy_model"
+        assert config.opencode_config["permission"]["bash"]["*"] == "allow"
+        assert config.opencode_config["permission"]["bash"]["*git submodule update*"] == "deny"
+        assert config.opencode_config["tools"]["webfetch"] is False
+
+        assert config.token_id_capture is (training_capture is True)
+        client = MagicMock(spec=ServerClient)
+        client.global_config_dict = {"observability_enabled": True, "token_id_capture": {"enabled": True}}
+        agent = OpenCodeAgent(config=config, server_client=client)
+        capture_path = "/training-token-capture" if training_capture else ""
+        assert (
+            agent.base_url_for_run("http://model", {"_ng_task_index": 0, "_ng_rollout_index": 0})
+            == f"http://model/ng-rollout/0-0{capture_path}"
+        )
+
+
+@pytest.mark.parametrize(
+    "exit_code,status", [(0, "completed"), (7, "failed"), (-15, "failed"), (None, "unknown"), (True, "unknown")]
+)
+@pytest.mark.parametrize("sandboxed", [False, True])
+def test_bash_exit_code_is_execution_outcome(
+    tmp_path: Path, exit_code: int | None, status: str, sandboxed: bool
+) -> None:
+    from responses_api_agents.opencode_sandboxed_agent.app import parse_opencode_observations
+
+    db = _session_db(
+        tmp_path,
+        [
+            (
+                "assistant",
+                [
+                    {
+                        "type": "tool",
+                        "callID": "shell",
+                        "tool": "bash",
+                        "state": {
+                            "status": "completed",
+                            "input": {"command": "exit 7"},
+                            "output": "stdout",
+                            "metadata": {"exit": exit_code},
+                        },
+                    }
+                ],
+            )
+        ],
+    )
+    parser = parse_opencode_observations if sandboxed else _parse_opencode_session
+    bundle = parser(db, "fallback")
+    tool = _tool_calls(bundle)[0]
+    assert tool.status == status
+    assert tool.error_type == ("tool_error" if status == "failed" else None)
+    assert any(gap.code == "tool_outcome_unavailable" for gap in bundle.gaps) == (status == "unknown")
+
+
+@pytest.mark.parametrize("override,expected", [({}, {"field": "reasoning_content"}), ({"interleaved": True}, True)])
+def test_gym_provider_preserves_interleaved_override(override: dict, expected: dict | bool) -> None:
+    agent = _make_agent(
+        model="policy",
+        model_server=ModelServerRef(type="responses_api_models", name="policy"),
+        opencode_config={"provider": {"nemo": {"models": {"policy": override}}}},
+    )
+    with patch.object(agent, "_resolve_model_base_url", return_value="http://model/v1"):
+        config = agent._build_opencode_config("1-2")
+    assert config["provider"]["nemo"]["models"]["policy"]["interleaved"] == expected
+
+
+@pytest.mark.parametrize("budget,expected", [(None, 1800), ("12.5", 12.5), ("3600", 1800), ("invalid", 1800)])
+async def test_task_timeout_reaches_local_subprocess_wait(tmp_path: Path, budget: str | None, expected: float) -> None:
+    agent = _make_agent(timeout=1800, workspace_root=str(tmp_path))
+    body = NeMoGymResponseCreateParamsNonStreaming(
+        input="task", metadata=None if budget is None else {"agent_timeout_sec": budget}
+    )
+    process = MagicMock(returncode=0)
+    process.communicate = AsyncMock(return_value=(b"", b""))
+    module = "responses_api_agents.opencode_agent.app"
+    with (
+        patch(f"{module}.asyncio.create_subprocess_exec", AsyncMock(return_value=process)),
+        patch(f"{module}.asyncio.wait_for", wraps=asyncio.wait_for) as wait,
+    ):
+        episode = await agent._create_episode(body, collect_observations=False)
+    wait.assert_awaited_once()
+    assert wait.await_args.kwargs["timeout"] == expected
+    assert episode.response.metadata == {"agent_timeout_sec": str(float(expected))}
+    assert agent.config.timeout == 1800

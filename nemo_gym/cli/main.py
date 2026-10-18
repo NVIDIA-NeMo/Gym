@@ -639,8 +639,12 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
                 # written instead of being swallowed or raising MarkupError.
                 rich.print(f"[red]failed[/red] {benchmark.benchmark}: {escape(benchmark.error or '')}")
             else:
+                executor_label = {"slurm": "Slurm job", "kubernetes": "Kubernetes Job"}.get(
+                    record.executor, f"{record.executor} job"
+                )
                 rich.print(
-                    f"[green]submitted[/green] {benchmark.benchmark} → Slurm job [bold]{benchmark.job_id}[/bold]"
+                    f"[green]submitted[/green] {benchmark.benchmark} → {executor_label} "
+                    f"[bold]{benchmark.job_id}[/bold]"
                 )
 
     if record.failed:
@@ -650,8 +654,41 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
 
 
 def _eval_run(args: argparse.Namespace, overrides: list[str]) -> None:
+    target = getattr(args, "target", None)
+    if target:
+        # A task folder or `harbor:<dataset>` reference: prepare it, then run end to end.
+        from nemo_gym.tasks.harbor.cli import run_target
+
+        run_target(args, overrides)
+        return
     target = "nemo_gym.cli.eval:collect_rollouts" if args.no_serve else "nemo_gym.cli.eval:e2e_rollout_collection"
     dispatch(target, overrides)
+
+
+# `gym eval run <target>`: a Harbor task folder, a folder of task folders, or `harbor:<dataset>[@<version>]`.
+# Register-only: the target is consumed by `_eval_run`, not translated to a Hydra override.
+TASK_TARGET = Flag(
+    register=lambda p: p.add_argument(
+        "target",
+        nargs="?",
+        metavar="TARGET",
+        help=(
+            "Harbor task folder, folder of task folders, or `harbor:<dataset>[@<version>]` hub reference. "
+            "Existing folders (including expanded ~user paths) and explicit ./, ../, /, or ~/ paths "
+            "take precedence over Hydra overrides. Prefix an ambiguous relative path with ./; "
+            "otherwise key=value and ~key are configuration overrides."
+        ),
+    ),
+)
+
+# `--sandbox <provider>`: load the named sandbox provider config (nemo_gym/sandbox/providers/<provider>/configs).
+SANDBOX = Flag(
+    register=lambda p: p.add_argument(
+        "--sandbox",
+        metavar="PROVIDER",
+        help="Sandbox provider for task containers (e.g. opensandbox, docker). Used with a task TARGET.",
+    ),
+)
 
 
 def _eval_health_check(args: argparse.Namespace, overrides: list[str]) -> None:
@@ -1022,6 +1059,15 @@ COMMANDS = {
         target=_eval_run,
         summary="Collate data, start servers, and collect rollouts.",
         flags=(
+            TASK_TARGET,
+            SANDBOX,
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--skip-unloadable",
+                    action="store_true",
+                    help="Run the loadable subset of a Harbor TARGET; record omitted tasks in skipped.json.",
+                )
+            ),
             CONFIG,
             BENCHMARK,
             ENVIRONMENT,
@@ -1412,6 +1458,32 @@ def _extra_roots_from_search_dir(search_dirs: list[str] | None):
             logger.debug(f"Restored {NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME}={original}")
 
 
+def _is_positional_hydra_override(token: str) -> bool:
+    # Explicit paths and existing folders win, even when '=' or '~' also fits Hydra's grammar.
+    # Do not treat '/' inside an override value or a deletion's config-group name as a path prefix.
+    if token == "~" or token.startswith(("./", "../", "/", "~/", "harbor:")):
+        return False
+    try:
+        if Path(token).is_dir() or Path(token).expanduser().is_dir():
+            return False
+    except (OSError, RuntimeError):
+        # Probing an override as a path can fail (e.g. a long value or unknown ~user).
+        # A failed probe does not rule out a valid Hydra override.
+        pass
+    if "=" in token:
+        return True
+    if not token.startswith("~"):
+        return False
+    # Only syntactically valid, otherwise unclaimed deletions belong to Hydra.
+    from hydra.core.override_parser.overrides_parser import OverridesParser
+    from hydra.errors import HydraException
+
+    try:
+        return OverridesParser.create().parse_override(token).is_delete()
+    except HydraException:
+        return False
+
+
 def main() -> None:
     parser = build_parser()
     args, overrides = parser.parse_known_args()
@@ -1453,6 +1525,12 @@ def main() -> None:
             translated = [token for flag in command.flags for token in flag.translate_to_hydra(args)]
         except ValueError as exc:
             getattr(args, "_parser", parser).error(str(exc))
+
+        # argparse can capture a bare Hydra override in eval run's optional TARGET slot.
+        # Restore it before coalescing, keeping translated flags before raw overrides.
+        if command.target is _eval_run and args.target and _is_positional_hydra_override(args.target):
+            overrides = [args.target, *overrides]
+            args.target = None
 
         # --config and the asset selectors all emit +config_paths; coalesce them into one token.
         overrides = _merge_config_paths(translated + overrides)

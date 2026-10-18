@@ -938,3 +938,15 @@ async def test_reaper_closes_expired_sessions(tmp_path, monkeypatch: pytest.Monk
 
     manager.close_session.assert_awaited_once_with("stale")
     await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_site_limit_rejection_is_a_retryable_capacity_error(tmp_path) -> None:
+    manager, _ = _manager(tmp_path, max_sessions=4, site_pool_mode="site_limits", max_sessions_per_site=1)
+    await manager.seed_session("session-a", WebSeedSessionRequest(task=_task("0")))
+    with pytest.raises(CapacityUnavailableError, match="shopping has 1 active sessions"):
+        await manager.seed_session("session-b", WebSeedSessionRequest(task=_task("1")))
+    # The rejected seed left no reservation behind; after a close the site has room again.
+    await manager.close_session("session-a")
+    await manager.seed_session("session-b", WebSeedSessionRequest(task=_task("1")))
+    await manager.stop()

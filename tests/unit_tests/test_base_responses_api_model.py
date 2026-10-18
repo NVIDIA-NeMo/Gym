@@ -865,6 +865,58 @@ def test_exception_http_details_tolerates_lazy_response_failure():
     assert _exception_http_details(error) == (503, b"")
 
 
+def test_context_overflow_error_fields_reads_the_engine_body_and_the_marked_code():
+    from nemo_gym.base_responses_api_model import (
+        CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
+        PROPAGATED_REFUSAL_CODE_ATTRIBUTE,
+        context_overflow_error_fields,
+        is_propagated_refusal,
+    )
+
+    overflow = (
+        "This model's maximum context length is 4096 tokens. However, you requested 256 output tokens and "
+        "your prompt contains 4000 input tokens, for a total of 4256 tokens. Please reduce the length of the "
+        "input prompt or the number of requested output tokens."
+    )
+
+    # vLLM 0.10.1 and later nest the message, param and integer code inside an "error" object: the
+    # message and param come back verbatim, and the code defaults to OpenAI's overflow code.
+    error = RuntimeError("400, message='Bad Request'")
+    error.response_content = json.dumps(
+        {"error": {"message": overflow, "type": "BadRequestError", "param": "input_tokens", "code": 400}}
+    ).encode()
+    assert context_overflow_error_fields(error) == (overflow, CONTEXT_LENGTH_EXCEEDED_ERROR_CODE, "input_tokens")
+    assert not is_propagated_refusal(error)
+
+    # The code is whatever the server stored when it marked the error; a refusal of the request's own
+    # max_tokens carries none, and the attribute's presence still marks the error.
+    setattr(error, PROPAGATED_REFUSAL_CODE_ATTRIBUTE, None)
+    assert is_propagated_refusal(error)
+    error.response_content = json.dumps(
+        {"error": {"message": "max_tokens must be at least 1, got 0.", "param": None, "code": 400}}
+    ).encode()
+    assert context_overflow_error_fields(error) == ("max_tokens must be at least 1, got 0.", None, None)
+
+    # Older engines put the message at the top level; that shape is still read.
+    flat = RuntimeError("400, message='Bad Request'")
+    flat.response_content = json.dumps(
+        {"object": "error", "message": "maximum context length is 4096 tokens", "code": 400}
+    ).encode()
+    assert context_overflow_error_fields(flat) == (
+        "maximum context length is 4096 tokens",
+        CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
+        None,
+    )
+
+    # A non-JSON body, or JSON without a message string in either shape, falls back to the raw text
+    # so no information is lost; a missing body yields an empty message rather than an exception.
+    flat.response_content = b"upstream exploded in a non-JSON way"
+    assert context_overflow_error_fields(flat)[0] == "upstream exploded in a non-JSON way"
+    flat.response_content = b'{"error": "nested string"}'
+    assert context_overflow_error_fields(flat)[0] == '{"error": "nested string"}'
+    assert context_overflow_error_fields(RuntimeError("bare")) == ("", CONTEXT_LENGTH_EXCEEDED_ERROR_CODE, None)
+
+
 # --- capture-store config + init failure ---
 def test_model_call_capture_keys_are_reserved_global_config():
     assert {"observability_enabled", "model_call_capture_dir", "token_id_capture"} <= set(
@@ -2014,3 +2066,142 @@ def test_capture_uses_supplied_assistant_header_or_none(tmp_path, header):
     assert captured.client_assistant_message_id == ("persisted-reply" if header else None)
     [absent] = read_model_call_records(CaptureStore(tmp_path), "no-configured-header")
     assert absent.client_assistant_message_id is None
+
+
+def test_capture_store_pending_claims_are_scoped_to_one_rollout(tmp_path):
+    store = CaptureStore(tmp_path)
+
+    store.mark_pending("1-0-retry1", "call-1")
+
+    # The dot after the rollout id keeps a prefix from matching a longer id.
+    assert store.has_pending("1-0-retry1") is True
+    assert store.has_pending("1-0") is False
+
+    store.clear_pending("1-0-retry1", "call-1")
+    assert store.has_pending("1-0-retry1") is False
+
+
+def test_capture_store_pending_token_survives_an_unsafe_model_call_id(tmp_path):
+    store = CaptureStore(tmp_path)
+
+    store.mark_pending("1-0", "a/b c.d")
+
+    assert store.has_pending("1-0") is True
+    assert store.pending_path_for("1-0", "a/b c.d").name == "1-0.a_b_c_d.capture.pending"
+
+
+@pytest.mark.asyncio
+async def test_await_quiescence_waits_for_a_detached_write_to_land(tmp_path):
+    import asyncio
+
+    from nemo_gym.base_responses_api_model import await_model_call_capture_quiescence
+
+    store = CaptureStore(tmp_path)
+    store.mark_pending("2-0", "call-1")
+
+    async def late_write():
+        await asyncio.sleep(0.2)
+        store.record("2-0", _capture_exchange("responses", "A", {}, {"id": "resp-A"}))
+        store.clear_pending("2-0", "call-1")
+
+    task = asyncio.create_task(late_write())
+    # The race is real at this point: snapshotting now would miss the row.
+    assert store.read("2-0") == []
+
+    quiesced = await await_model_call_capture_quiescence("2-0", [tmp_path])
+    await task
+
+    assert quiesced is True
+    assert len(store.read("2-0")) == 1
+
+
+@pytest.mark.asyncio
+async def test_await_quiescence_gives_up_on_a_stranded_claim(tmp_path):
+    from nemo_gym.base_responses_api_model import await_model_call_capture_quiescence
+
+    CaptureStore(tmp_path).mark_pending("3-0", "call-1")
+
+    assert await await_model_call_capture_quiescence("3-0", [tmp_path], timeout_s=0.05, poll_s=0.01) is False
+
+
+def test_merge_capture_flags_a_claim_that_never_landed(tmp_path):
+    from nemo_gym.base_responses_api_model import merge_model_call_capture_into_record
+
+    store = CaptureStore(tmp_path)
+    store.record("4-0", _capture_exchange("responses", "A", {}, {"id": "resp-A"}))
+    store.mark_pending("4-0", "call-2")
+
+    record = {"_ng_task_index": 4, "_ng_rollout_index": 0}
+    merge_model_call_capture_into_record(record, [tmp_path])
+
+    assert "model_call_capture_pending" in [gap["code"] for gap in record["ng_model_call_capture"]["gaps"]]
+
+
+def test_clear_captures_for_rollouts_drops_stale_pending_claims(tmp_path):
+    from nemo_gym.base_responses_api_model import clear_model_call_captures_for_rollouts
+
+    store = CaptureStore(tmp_path)
+    store.mark_pending("5-0", "call-1")
+
+    clear_model_call_captures_for_rollouts([{"_ng_task_index": 5, "_ng_rollout_index": 0}], [tmp_path])
+
+    assert store.has_pending("5-0") is False
+
+
+def test_capture_claim_is_visible_while_the_call_is_still_in_flight(tmp_path):
+    """The claim must exist for the call's whole lifetime, not just its write.
+
+    A claim taken at write time does not exist yet while the call is in flight, so a reader can
+    poll, see nothing outstanding, and snapshot the rollout before the row lands.
+    """
+    import asyncio
+
+    from nemo_gym.base_responses_api_model import _CaptureMiddleware, await_model_call_capture_quiescence
+
+    store = CaptureStore(tmp_path)
+
+    async def run() -> None:
+        in_flight = asyncio.Event()
+        release = asyncio.Event()
+
+        async def app(scope, receive, send) -> None:
+            del scope
+            await receive()
+            in_flight.set()
+            await release.wait()
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b'{"id":"resp-1"}', "more_body": False})
+
+        async def receive() -> dict:
+            return {"type": "http.request", "body": b'{"input":"x"}', "more_body": False}
+
+        async def send(_message: dict) -> None:
+            pass
+
+        task = asyncio.create_task(
+            _CaptureMiddleware(
+                app, store=store, model_server_name="srv", assistant_message_header=b"x-assistant-message-id"
+            )(
+                {
+                    "type": "http",
+                    "path": "/ng-rollout/r-inflight/v1/responses",
+                    "raw_path": b"/ng-rollout/r-inflight/v1/responses",
+                    "headers": [(b"x-assistant-message-id", b"assistant-inflight")],
+                },
+                receive,
+                send,
+            )
+        )
+        await in_flight.wait()
+        # The row is not on disk yet, so only the claim can tell a reader to wait.
+        assert store.read("r-inflight") == []
+        assert store.has_pending("r-inflight") is True
+        assert await await_model_call_capture_quiescence("r-inflight", [tmp_path], timeout_s=0.05) is False
+
+        release.set()
+        await task
+        assert await await_model_call_capture_quiescence("r-inflight", [tmp_path], timeout_s=5.0) is True
+        assert store.has_pending("r-inflight") is False
+        assert len(store.read("r-inflight")) == 1
+
+    asyncio.run(run())

@@ -40,7 +40,14 @@ from nemo_gym.web.session import (
     SessionNotFoundError,
     WebSessionState,
 )
-from nemo_gym.web.site_pool import LocalSiteLockPool, SiteLease, SitePool, UnmanagedSitePool
+from nemo_gym.web.site_pool import (
+    LocalSiteLockPool,
+    SiteCapacityError,
+    SiteConcurrencyLimitPool,
+    SiteLease,
+    SitePool,
+    UnmanagedSitePool,
+)
 
 
 LOG = logging.getLogger("nemo_gym.web.session_manager")
@@ -248,7 +255,11 @@ class WebSessionManager:
         backend: WebEnvironmentBackend | None = None
         operation_runner: WebOperationRunner | None = None
         try:
-            lease = await self._site_pool.acquire(session_id, body.task)
+            try:
+                lease = await self._site_pool.acquire(session_id, body.task)
+            except SiteCapacityError as exc:
+                # Retryable like a full server: the agent backs off and seeds again.
+                raise CapacityUnavailableError(str(exc)) from exc
             browser_lease = await self._acquire_browser_lease(session_id, body.task)
             backend = self._backend_factory(self.config, session_id, self._artifacts, browser_lease)
             operation_runner = self._shared_operation_runner or self._make_operation_runner(session_id)
@@ -943,6 +954,8 @@ class WebSessionManager:
     def _make_site_pool(config: WebResourcesServerConfig) -> SitePool:
         if config.site_pool_mode == "local_locks":
             return LocalSiteLockPool()
+        if config.site_pool_mode == "site_limits":
+            return SiteConcurrencyLimitPool(config.max_sessions_per_site)
         return UnmanagedSitePool()
 
     def _validate_task(self, task: WebTask) -> None:
