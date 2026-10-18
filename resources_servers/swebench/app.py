@@ -13,21 +13,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import sys
 from functools import partial
 from glob import glob
 from pathlib import Path
+from shlex import quote
 from shutil import rmtree
 from time import monotonic, time
 from traceback import format_exc
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, ClassVar, Dict, Optional, Tuple
+from uuid import uuid4
 
-from fastapi import Request
-from pydantic import BaseModel, Field
+from anyio import CancelScope
+from docker.models.containers import ExecResult
+from fastapi import FastAPI, Request
+from pydantic import BaseModel, Field, PrivateAttr
 from swebench.harness.run_evaluation import make_test_spec
 from swebench.harness.test_spec.test_spec import LATEST, TestSpec
 
-from docker.models.containers import ExecResult
 from nemo_gym.base_resources_server import (
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
@@ -35,12 +39,14 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
 )
 from nemo_gym.global_config import get_global_config_dict
+from nemo_gym.judge import judge_failsafe
 from nemo_gym.rollout_observability import SandboxObservation
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_metadata
 from nemo_gym.sandbox.owner import SandboxOwnerConfig, SandboxOwnerResourcesServer
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.telemetry.endpoints import traced_verify_endpoint
 from resources_servers.swebench.swebench_patches import (
     patch_swebench_multilingual_golden_patch_pass,
     patch_swebench_multilingual_log_parsing,
@@ -93,6 +99,15 @@ class SWEBenchInstanceRequest(BaseModel):
 
 class SWEBenchVerifyRequest(SWEBenchInstanceRequest, BaseVerifyRequest):
     pass
+
+
+class SWEBenchPreparedVerifyRequest(SWEBenchVerifyRequest):
+    # Required even for an empty diff: this route never reads an agent sandbox.
+    model_patch: str
+
+
+class SWEBenchPreparedPatch(BaseModel):
+    model_patch: str
 
 
 class SWEBenchVerifyResponse(BaseVerifyResponse):
@@ -202,7 +217,9 @@ class DockerContainer(BaseModel):
 
     async def cleanup(self) -> None:
         try:
-            await self._inner_container.stop()
+            # A cancelled verification still stops its sandbox.
+            with CancelScope(shield=True):
+                await self._inner_container.stop()
         except Exception as exc:
             self._sandbox_error_type = self._sandbox_error_type or type(exc).__name__
             print("Failed to stop verification sandbox", format_exc(), file=sys.stderr)
@@ -244,6 +261,62 @@ class SwebenchResourcesServer(SandboxOwnerResourcesServer):
     """Each session owns the sandbox the agent works in, from /seed_session until /verify extracts the patch."""
 
     config: SwebenchResourcesServerConfig
+    # Prepared verification: /prepare_verify captures the patch and ends the session (a short wait step for the
+    # caller, which records the patch in its bookmark); /verify_prepared grades that patch in a fresh sandbox and
+    # touches no session state, so a checkpoint neither waits for the grading nor keeps the agent's sandbox for it.
+    checkpoint_replayable_paths: ClassVar[tuple[str, ...]] = ("/verify_prepared",)
+    # Only for a /prepare_verify reply lost after the sandbox was stopped: the retry gets the same patch.
+    _prepared_patches: Dict[str, str] = PrivateAttr(default_factory=dict)
+    _prepare_locks: Dict[str, asyncio.Lock] = PrivateAttr(default_factory=dict)
+
+    def setup_webserver(self) -> FastAPI:
+        app = super().setup_webserver()
+        app.post("/prepare_verify")(self.prepare_verify)
+        app.post("/verify_prepared")(
+            traced_verify_endpoint(
+                judge_failsafe(self.verify_prepared),
+                static_attributes={"nemo.gym.server.name": self.config.name},
+            )
+        )
+        return app
+
+    async def prepare_verify(self, request: Request, body: SWEBenchVerifyRequest) -> SWEBenchPreparedPatch:
+        """Capture the agent's patch and end the session, stopping its sandbox; a retry gets the same patch."""
+        session_id = request.session[SESSION_ID_KEY]
+        async with self._prepare_locks.setdefault(session_id, asyncio.Lock()):
+            result = await self._prepare_verification_patch(session_id, body)
+        self.checkpoint_session_ended(request)
+        return result
+
+    async def _prepare_verification_patch(self, session_id: str, body: SWEBenchVerifyRequest) -> SWEBenchPreparedPatch:
+        """Capture the patch once per session, then end the session; a failed capture leaves the sandbox running."""
+        if session_id not in self._prepared_patches:
+            if self.config.is_verifying_golden_patch:
+                patch = body.patch
+            else:
+                # 409 for a session without a sandbox: an empty patch would grade as reward 0.
+                sandbox = self.require_session_sandbox(session_id)
+                workdir = self._workdirs.get(session_id) or (await sandbox.exec("pwd")).stdout.strip()
+                captured = await sandbox.exec(f"cd {quote(workdir)} && git --no-pager diff")
+                if captured.return_code != 0 or captured.error_type:
+                    raise RuntimeError(
+                        f"Failed to capture the generated patch of session {session_id}: "
+                        f"return_code={captured.return_code}, error_type={captured.error_type}, "
+                        f"stderr={captured.stderr!r}"
+                    )
+                patch = captured.stdout or ""
+            self._prepared_patches[session_id] = patch
+        # The continuation now lives in the caller's bookmark, which holds the patch.
+        await self.end_session_sandbox(session_id)
+        return SWEBenchPreparedPatch(model_patch=self._prepared_patches[session_id])
+
+    async def verify_prepared(self, request: Request, body: SWEBenchPreparedVerifyRequest) -> SWEBenchVerifyResponse:
+        """Grade a patch /prepare_verify captured, in a fresh sandbox, without reading or changing an agent sandbox."""
+        session_id = request.session[SESSION_ID_KEY]
+        self._prepared_patches.pop(session_id, None)
+        self._prepare_locks.pop(session_id, None)
+        verify_body = SWEBenchVerifyRequest.model_validate(body.model_dump(exclude={"model_patch"}))
+        return await self._evaluate_patch(request, verify_body, body.model_patch)
 
     def lends_sandboxes(self) -> bool:
         # A golden-patch instance grades the dataset's own patch and never seeds: it lends no sandbox.
@@ -391,25 +464,59 @@ Stderr:
             # The episode is over; its snapshots stay until a release drops the checkpoints that name them.
             await self.end_session_sandbox(session_id)
 
-        run_id = request.session[SESSION_ID_KEY]
+        return await self._evaluate_patch(
+            request,
+            body,
+            model_patch,
+            eval_sandbox=eval_sandbox,
+            started_at=verifier_sandbox_lifecycle_started_at,
+            start_time_taken=eval_sandbox_start_time_taken,
+        )
+
+    async def _evaluate_patch(
+        self,
+        request: Request,
+        body: SWEBenchVerifyRequest,
+        model_patch: str,
+        *,
+        eval_sandbox: Optional[AsyncSandbox] = None,
+        started_at: Optional[float] = None,
+        start_time_taken: Optional[float] = None,
+    ) -> SWEBenchVerifyResponse:
+        """Grade ``model_patch`` in ``eval_sandbox``, or in a fresh sandbox for the instance."""
+        test_spec = self._make_test_spec(body)
+        verifier_sandbox_lifecycle_started_at = monotonic() if started_at is None else started_at
+        if eval_sandbox is None:
+            eval_sandbox = await self._create_sandbox(test_spec)
+        eval_sandbox_start_time_taken = (
+            monotonic() - verifier_sandbox_lifecycle_started_at if start_time_taken is None else start_time_taken
+        )
+
+        # A replayed /verify_prepared may grade while the original still runs: they must not share log files.
+        run_id = f"{request.session[SESSION_ID_KEY]}-{uuid4().hex[:8]}"
         mock_container = DockerContainer(id=run_id, instance_id=test_spec.instance_id)
         mock_container._inner_container = eval_sandbox
 
         # Res has 2 keys: completed (whether evaluation completed or not), resolved (whether the issue is resolved)
         start_time = time()
-        res = await run_instance(
-            test_spec=test_spec,
-            pred={
-                "instance_id": test_spec.instance_id,
-                "model_patch": model_patch,
-            },
-            rm_image=False,
-            force_rebuild=False,
-            client=mock_container,
-            run_id=run_id,
-            timeout=self.config.evaluation_timeout,
-            rewrite_reports=False,
-        )
+        try:
+            res = await run_instance(
+                test_spec=test_spec,
+                pred={
+                    "instance_id": test_spec.instance_id,
+                    "model_patch": model_patch,
+                },
+                rm_image=False,
+                force_rebuild=False,
+                client=mock_container,
+                run_id=run_id,
+                timeout=self.config.evaluation_timeout,
+                rewrite_reports=False,
+            )
+        finally:
+            # run_instance normally stops the sandbox; a failure or cancellation before its cleanup starts must too.
+            if eval_sandbox.handle is not None:
+                await mock_container.cleanup()
         patch_verification_time_taken = time() - start_time
         verifier_sandbox_wall_time_s = monotonic() - verifier_sandbox_lifecycle_started_at
 

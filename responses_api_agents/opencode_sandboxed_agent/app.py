@@ -86,7 +86,9 @@ from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_me
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import (
     SESSION_ID_KEY,
+    get_response_json,
     is_nemo_gym_fastapi_entrypoint,
+    raise_for_status,
 )
 from responses_api_agents.opencode_agent.observability import append_opencode_turns, scope_opencode_trajectory
 from responses_api_agents.opencode_agent.runtime import (
@@ -462,6 +464,9 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     concurrency: Optional[int] = Field(default=None)
     preinstalled_opencode: bool = False
     execution_failure_reward_zero: bool = False
+    # With checkpointing: verify in two steps, /prepare_verify (capture the patch, end the session) then a
+    # replayable /verify_prepared, so a checkpoint never waits for grading. Needs a resources server with both routes.
+    prepare_verification: bool = False
     # With checkpointing: a checkpoint pauses OpenCode and everything it started (SIGSTOP), and the same process
     # continues once the checkpoint opens. False stops it (SIGINT, then SIGKILL) and relaunches it on the saved
     # session. A pause that cannot be confirmed falls back to the stop; after a crash, OpenCode is relaunched anyway.
@@ -1334,12 +1339,48 @@ class OpenCodeAdapter:
             self._body,
             outcome.response,
             cookies,
-            force_zero_reward=agent.config.execution_failure_reward_zero
-            and bool(outcome.run_result.get("opencode_failed", False)),
+            force_zero_reward=self._force_zero_reward(outcome),
         )
+
+    def prepares_verification(self) -> bool:
+        return self._agent.config.prepare_verification and self._agent.checkpoint_participant is not None
 
     def pauses_at_checkpoints(self) -> bool:
         return self._agent.config.pause_at_checkpoints
+
+    async def prepare_verification(self, cookies: dict[str, str], outcome: OpenCodeOutcome) -> dict[str, JsonValue]:
+        agent = self._agent
+        reply = await agent.server_client.post(
+            server_name=agent.config.resources_server.name,
+            url_path="/prepare_verify",
+            cookies=cookies,
+            json=self._body.model_dump(mode="json") | {"response": outcome.response.model_dump(mode="json")},
+        )
+        await raise_for_status(reply)
+        patch = (await get_response_json(reply)).get("model_patch")
+        if not isinstance(patch, str):
+            raise ValueError(f"/prepare_verify returned no model_patch: {patch!r}")
+        return {"model_patch": patch}
+
+    async def verify_prepared(
+        self, cookies: dict[str, str], outcome: OpenCodeOutcome, prepared: dict[str, JsonValue]
+    ) -> dict[str, Any]:
+        agent = self._agent
+        return await verify_agent_response(
+            agent.server_client,
+            agent.config.resources_server,
+            self._body,
+            outcome.response,
+            cookies,
+            force_zero_reward=self._force_zero_reward(outcome),
+            url_path="/verify_prepared",
+            extra={"model_patch": prepared["model_patch"]},
+        )
+
+    def _force_zero_reward(self, outcome: OpenCodeOutcome) -> bool:
+        return self._agent.config.execution_failure_reward_zero and bool(
+            outcome.run_result.get("opencode_failed", False)
+        )
 
 
 if __name__ == "__main__":

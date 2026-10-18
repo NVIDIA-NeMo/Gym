@@ -108,7 +108,16 @@ def normalize_tool_name(name: str, server_name: Optional[str] = None) -> str:
 
 # Tool names that would collide with the resources server's own endpoints if advertised over MCP.
 RESERVED_MCP_TOOL_NAMES = frozenset(
-    {"verify", "seed_session", "close_session", "sandbox_access", "aggregate_metrics", "mcp"}
+    {
+        "verify",
+        "prepare_verify",
+        "verify_prepared",
+        "seed_session",
+        "close_session",
+        "sandbox_access",
+        "aggregate_metrics",
+        "mcp",
+    }
 )
 
 
@@ -365,6 +374,9 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
     # Each waits out a checkpoint before its handler runs, needs a rollout prefix,
     # and binds the session to that rollout when it succeeds.
     checkpoint_session_starts: ClassVar[tuple[str, ...]] = ("/seed_session",)
+    # Further routes that are safe to run again after a crash and change no checkpointed session state, such as
+    # grading an already captured patch: a checkpoint neither waits for them nor refuses them while it is open.
+    checkpoint_replayable_paths: ClassVar[tuple[str, ...]] = ()
     _checkpoint: Optional[ResourcesParticipant] = PrivateAttr(default=None)
     _mcp_token_serializer: Any = PrivateAttr(default=None)
     routes_sessions_to_owner = True
@@ -421,11 +433,10 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
                 raise ValueError(
                     f"{type(self).__name__} declares {name}={getattr(self, name)!r}; expected one of {get_args(allowed)}"
                 )
-        if not all(isinstance(path, str) and path.startswith("/") for path in self.checkpoint_session_starts):
-            raise ValueError(
-                f"{type(self).__name__} declares checkpoint_session_starts={self.checkpoint_session_starts!r}; "
-                "expected a tuple of route paths"
-            )
+        for name in ("checkpoint_session_starts", "checkpoint_replayable_paths"):
+            paths = getattr(self, name)
+            if not all(isinstance(path, str) and path.startswith("/") for path in paths):
+                raise ValueError(f"{type(self).__name__} declares {name}={paths!r}; expected a tuple of route paths")
         settings = checkpoint_settings(getattr(self.server_client, "global_config_dict", None))
         if settings is None:
             return
@@ -444,7 +455,9 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
                 raise ValueError(
                     f"{type(self).__name__} declares checkpoint_mode='exported' but does not implement {missing}"
                 )
-        participant = ResourcesParticipant(self, mode, verify_mode=self.checkpoint_verify)
+        participant = ResourcesParticipant(
+            self, mode, verify_mode=self.checkpoint_verify, replayable_paths=self.checkpoint_replayable_paths
+        )
         self._checkpoint = participant
         install_server_participant(
             app,

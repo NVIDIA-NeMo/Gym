@@ -370,6 +370,43 @@ async def test_a_verify_for_a_session_without_a_sandbox_is_refused_not_graded(
     assert len(ops(provider, "create")) == creates_after_first, "a refused verify starts no grading sandbox"
 
 
+async def test_prepared_verification_captures_then_grades_while_a_checkpoint_is_open(
+    provider: SnapshotProvider, tmp_path: Path
+) -> None:
+    server, client = make_server(tmp_path / "state")
+    async with client:
+        await client.post("/ng-rollout/r-a1/seed_session", json=SEED)
+        prepared = await client.post("/ng-rollout/r-a1/prepare_verify", json=VERIFY)
+        ended = (server._checkpointer().session_ids, provider.boxes["sb-1"]["state"])
+        # The reply was lost: the retry gets the same patch although the sandbox is gone.
+        retried = await client.post("/ng-rollout/r-a1/prepare_verify", json=VERIFY)
+        await client.post("/ng-control/v1/checkpoint/prepare", json=control(), headers=AUTH)
+        # Grading a captured patch changes no session state: it runs while the checkpoint is open.
+        graded = await client.post(
+            "/ng-rollout/r-a1/verify_prepared", json=VERIFY | {"model_patch": prepared.json()["model_patch"]}
+        )
+        commit = await client.post(
+            "/ng-control/v1/checkpoint/commit", json=control(checkpoint_dir=str(tmp_path)), headers=AUTH
+        )
+        await client.post("/ng-control/v1/checkpoint/resume", json=control(), headers=AUTH)
+
+    assert prepared.status_code == 200, prepared.text
+    assert prepared.json() == {"model_patch": "diff --git a/f b/f\n+fixed\n"}
+    assert ended == ([], "stopped"), "the prepare ended the session and stopped the agent's sandbox"
+    assert retried.status_code == 200 and retried.json() == prepared.json(), retried.text
+    assert graded.status_code == 200, graded.text
+    assert graded.json()["reward"] == 1 and graded.json()["model_patch"] == prepared.json()["model_patch"]
+    assert commit.status_code == 200 and commit.json()["manifest"]["record_count"] == 0, commit.text
+
+
+async def test_a_prepare_for_a_session_without_a_sandbox_is_refused(provider: SnapshotProvider, tmp_path: Path) -> None:
+    _, client = make_server(tmp_path / "state")
+    async with client:
+        refused = await client.post("/ng-rollout/r-a1/prepare_verify", json=VERIFY)
+
+    assert refused.status_code == 409 and "has no sandbox" in refused.json()["detail"], refused.text
+
+
 async def test_sandbox_access_names_the_sessions_sandbox_and_checkout(
     provider: SnapshotProvider, tmp_path: Path
 ) -> None:
