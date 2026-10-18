@@ -10,7 +10,6 @@ how fast the policy model is.
 """
 
 import asyncio
-import json
 import os
 from typing import Any, Callable
 
@@ -25,7 +24,6 @@ from responses_api_agents.simple_agent.app import SimpleAgent
 
 HOLD_FIRST_MUTATED_BOUNDARY_ENV = "NEMO_GYM_TEST_HOLD_FIRST_MUTATED_BOUNDARY"
 WORKPLACE_PREFIX_AFTER_MUTATION_ENV = "NEMO_GYM_TEST_WORKPLACE_PREFIX_AFTER_MUTATION"
-PREFIX_MIN_TOKENS_ENV = "NEMO_GYM_TEST_PREFIX_MIN_TOKENS"
 
 
 def _after_first_tool_call(snapshot: Callable[[], dict[str, Any]]) -> bool:
@@ -76,43 +74,9 @@ class CheckpointTestAgent(SimpleAgent):
         if os.environ.get(WORKPLACE_PREFIX_AFTER_MUTATION_ENV) != "1" or turn_index < 2:
             return body
 
-        try:
-            min_tokens = int(os.environ.get(PREFIX_MIN_TOKENS_ENV, "384"))
-        except ValueError as error:
-            raise ValueError(f"{PREFIX_MIN_TOKENS_ENV} must be an integer") from error
-        if min_tokens < 0:
-            raise ValueError(f"{PREFIX_MIN_TOKENS_ENV} must not be negative")
-        if min_tokens == 0:
-            # Natural length: the closing response stops at its own EOS within the row's budget. Forcing
-            # min_tokens past EOS leaves near-tied argmax tokens that flip between otherwise identical runs.
-            return body.model_copy(update={"tool_choice": "none", "parallel_tool_calls": False})
-
-        metadata = dict(body.metadata or {})
-        raw_extra_body = metadata.get("extra_body")
-        if raw_extra_body is None:
-            extra_body: dict[str, object] = {}
-        elif isinstance(raw_extra_body, str):
-            parsed = json.loads(raw_extra_body)
-            if not isinstance(parsed, dict):
-                raise ValueError("metadata.extra_body must encode an object")
-            extra_body = parsed
-        elif isinstance(raw_extra_body, dict):
-            extra_body = dict(raw_extra_body)
-        else:
-            raise ValueError("metadata.extra_body must be an object or JSON string")
-        extra_body["min_tokens"] = min_tokens
-        metadata["extra_body"] = json.dumps(extra_body, sort_keys=True)
-
-        # Keep the first turn's tool schema in the lineage envelope, but prevent
-        # another calendar mutation while making the closing response long.
-        return body.model_copy(
-            update={
-                "tool_choice": "none",
-                "parallel_tool_calls": False,
-                "max_output_tokens": min_tokens,
-                "metadata": metadata,
-            }
-        )
+        # Stop further tool calls on the closing turn and keep its natural length: forcing min_tokens past
+        # EOS leaves near-tied argmax tokens that flip between otherwise identical runs.
+        return body.model_copy(update={"tool_choice": "none", "parallel_tool_calls": False})
 
     def setup_agent_checkpoint(self, app: FastAPI) -> None:
         # Called from both setup_webserver and setup_checkpoint_participant: install once, as the base does,

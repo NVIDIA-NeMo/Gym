@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
-import json
 import time
 from unittest.mock import MagicMock
 
@@ -15,7 +14,6 @@ from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.checkpoint_test_agent.app import (
     HOLD_FIRST_MUTATED_BOUNDARY_ENV,
-    PREFIX_MIN_TOKENS_ENV,
     WORKPLACE_PREFIX_AFTER_MUTATION_ENV,
     CheckpointTestAgent,
     CheckpointTestParticipant,
@@ -123,7 +121,6 @@ def test_workplace_prefix_mode_rewrites_only_later_model_calls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv(WORKPLACE_PREFIX_AFTER_MUTATION_ENV, "1")
-    monkeypatch.setenv(PREFIX_MIN_TOKENS_ENV, "512")
     agent = _agent()
     request = NeMoGymResponseCreateParamsNonStreaming(
         input="create the event",
@@ -145,50 +142,9 @@ def test_workplace_prefix_mode_rewrites_only_later_model_calls(
     first = agent._prepare_model_request_for_turn(request, turn_index=1)
     assert first == request
 
+    # The closing turn keeps its tool schema, length budget and metadata; it only stops calling tools.
     second = agent._prepare_model_request_for_turn(request, turn_index=2)
-    assert second.tools == request.tools
-    assert second.tool_choice == "none"
-    assert second.parallel_tool_calls is False
-    assert second.max_output_tokens == 512
-    assert second.metadata["existing"] == "value"
-    assert json.loads(second.metadata["extra_body"]) == {"min_tokens": 512}
-
-
-def test_workplace_prefix_mode_zero_min_tokens_keeps_natural_length(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv(WORKPLACE_PREFIX_AFTER_MUTATION_ENV, "1")
-    monkeypatch.setenv(PREFIX_MIN_TOKENS_ENV, "0")
-    request = NeMoGymResponseCreateParamsNonStreaming(
-        input="create the event, then list numbers",
-        tool_choice="auto",
-        parallel_tool_calls=True,
-        max_output_tokens=2048,
-        metadata={"existing": "value"},
-    )
-
-    second = _agent()._prepare_model_request_for_turn(request, turn_index=2)
-
-    assert second.tool_choice == "none"
-    assert second.parallel_tool_calls is False
-    assert second.max_output_tokens == 2048
-    assert second.metadata == {"existing": "value"}
-
-
-@pytest.mark.parametrize(("value", "message"), [("zero", "must be an integer"), ("-1", "must not be negative")])
-def test_workplace_prefix_mode_rejects_invalid_min_tokens(
-    monkeypatch: pytest.MonkeyPatch,
-    value: str,
-    message: str,
-) -> None:
-    monkeypatch.setenv(WORKPLACE_PREFIX_AFTER_MUTATION_ENV, "1")
-    monkeypatch.setenv(PREFIX_MIN_TOKENS_ENV, value)
-
-    with pytest.raises(ValueError, match=message):
-        _agent()._prepare_model_request_for_turn(
-            NeMoGymResponseCreateParamsNonStreaming(input="test"),
-            turn_index=2,
-        )
+    assert second == request.model_copy(update={"tool_choice": "none", "parallel_tool_calls": False})
 
 
 def test_the_checkpoint_participant_is_installed_once_per_app() -> None:
