@@ -28,6 +28,7 @@ from pytest import MonkeyPatch
 from environment_servers.harbor.app import (
     HarborEnvironmentServer,
     HarborEnvironmentServerConfig,
+    HarborEpisodeRequest,
     HarborEpisodeResponse,
 )
 from environment_servers.harbor.verifier import EXIT_RECORD_NAME
@@ -35,7 +36,6 @@ from nemo_gym.base_responses_api_agent import AgentSeedSessionRequest
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxSpec
 from nemo_gym.server_utils import BaseServerConfig, ServerClient
-from nemo_gym.single_agent_turn_types import SingleAgentTurnRequest
 from nemo_gym.tasks.harbor import DIGEST_KEY, load_task
 from nemo_gym.tasks.harbor.digest import context_digest
 from nemo_gym.tasks.harbor.dockerfile import RECORD_VERSION
@@ -411,8 +411,8 @@ def make_server(
     return server, task, sandbox, created
 
 
-def episode(task, *, rollout="r1", attempt=0, digest=None, task_id="hello", taskset="ds") -> SingleAgentTurnRequest:
-    return SingleAgentTurnRequest.model_validate(
+def episode(task, *, rollout="r1", attempt=0, digest=None, task_id="hello", taskset="ds") -> HarborEpisodeRequest:
+    return HarborEpisodeRequest.model_validate(
         {
             "episode_id": {"rollout_id": rollout, "attempt": attempt},
             "task": {
