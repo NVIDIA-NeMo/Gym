@@ -22,6 +22,7 @@ import pytest
 import yaml
 from fastapi import HTTPException
 
+from nemo_gym.agent_utils import uv_bootstrap
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionRequest,
@@ -134,7 +135,7 @@ class TestSanity:
         sandbox = AsyncMock()
         sandbox.exec.return_value = MagicMock(return_code=0, stdout="", stderr="")
         connect = AsyncMock(return_value=sandbox)
-        monkeypatch.setattr("responses_api_agents.hermes_agent.sandbox.shutil.which", lambda name: "/test/uv")
+        monkeypatch.setattr("nemo_gym.agent_utils.uv_bootstrap.shutil.which", lambda name: "/test/uv")
         monkeypatch.setattr(
             "responses_api_agents.hermes_agent.app.get_global_config_dict",
             lambda: {"runtime": {}},
@@ -200,7 +201,7 @@ class TestSanity:
         monkeypatch.setattr(
             "responses_api_agents.hermes_agent.app.AsyncSandbox.connect", AsyncMock(return_value=sandbox)
         )
-        monkeypatch.setattr("responses_api_agents.hermes_agent.sandbox.shutil.which", lambda _name: "/usr/bin/uv")
+        monkeypatch.setattr("nemo_gym.agent_utils.uv_bootstrap.shutil.which", lambda _name: "/usr/bin/uv")
 
         hermes._session_records["session"] = _AgentSessionRecord()
         await hermes._initialize_agent_session_state(
@@ -221,7 +222,7 @@ class TestSanity:
         assert len(install) == 1 and "rm -rf" in install[0]
         # The import is checked before installing and again after.
         assert sum("import run_agent" in command for command in commands) == 2
-        assert sandbox.upload.await_args_list[0].args[0] == "/usr/bin/uv"
+        assert sandbox.upload.await_args_list[0].args[0] == Path("/usr/bin/uv")
 
     @pytest.mark.parametrize(
         "sandbox_config, install_timeout, runner_timeout, expected_ttl",
@@ -556,6 +557,109 @@ class TestSanity:
         stop = [command for command in sandbox.commands if "stop.request" in command and "kill -TERM" in command]
         assert len(stop) == 1
 
+    @staticmethod
+    def _sandbox_with_saved_transcript(result: dict):
+        class _Sandbox:
+            def __init__(self) -> None:
+                self.commands: list[str] = []
+
+            async def upload(self, *_args) -> None:
+                pass
+
+            async def download(self, remote_path, local_path) -> None:
+                output = {"result": result, "runtime": {"hostname": "sandbox", "pid": 1, "python": "python"}}
+                Path(local_path).write_text(json.dumps(output))
+
+            # Mirrors AsyncSandbox.exec so an unsupported argument fails here too.
+            async def exec(
+                self, command, *, cwd=None, env=None, timeout_s=180, user=None, preserve_background_services=False
+            ) -> SandboxExecResult:
+                self.commands.append(command)
+                if "supervisor.pid" in command and "exec " in command:
+                    return SandboxExecResult(stdout=None, stderr="timed out", return_code=124, error_type="timeout")
+                return SandboxExecResult(stdout="", stderr="", return_code=0)
+
+        return _Sandbox()
+
+    async def test_early_provider_timeout_with_a_transcript_stays_a_failure(self, monkeypatch) -> None:
+        # A transport TimeoutError long before the agent deadline is an infrastructure failure, even
+        # though a transcript was saved: it must not become a gradable wall_time outcome.
+        sandbox = self._sandbox_with_saved_transcript(
+            {"messages": [{"role": "assistant", "content": "partial"}], "final_response": None, "completed": False}
+        )
+        hermes, request, _ = self._sandbox_session(monkeypatch, sandbox)
+        clock = iter([0.0, 5.0])
+        monkeypatch.setattr("responses_api_agents.hermes_agent.app.monotonic", lambda: next(clock))
+
+        with pytest.raises(TimeoutError, match="exceeded its execution deadline"):
+            await hermes.responses(
+                request,
+                NeMoGymResponseCreateParamsNonStreaming(input="fix bug", metadata={"agent_timeout_sec": "600"}),
+            )
+
+    async def test_provider_timeout_at_the_agent_deadline_returns_the_partial_transcript(self, monkeypatch) -> None:
+        sandbox = self._sandbox_with_saved_transcript(
+            {"messages": [{"role": "assistant", "content": "partial"}], "final_response": None, "completed": False}
+        )
+        hermes, request, _ = self._sandbox_session(monkeypatch, sandbox)
+        clock = iter([0.0, 600.5])
+        monkeypatch.setattr("responses_api_agents.hermes_agent.app.monotonic", lambda: next(clock))
+
+        response = await hermes.responses(
+            request,
+            NeMoGymResponseCreateParamsNonStreaming(input="fix bug", metadata={"agent_timeout_sec": "600"}),
+        )
+
+        assert response.metadata["stop_reason"] == "wall_time"
+        assert response.metadata["hermes_error_type"] == "TimeoutError"
+
+    async def test_runner_recorded_deadline_counts_as_deadline_evidence(self, monkeypatch) -> None:
+        # The supervisor stopped Hermes at the deadline and the runner wrote a wall_time transcript; the
+        # provider's own timeout fired a little later. No wall clock needed.
+        sandbox = self._sandbox_with_saved_transcript(
+            {
+                "messages": [],
+                "final_response": None,
+                "completed": False,
+                "interrupted": True,
+                "stop_reason": "wall_time",
+            }
+        )
+        hermes, request, _ = self._sandbox_session(monkeypatch, sandbox)
+        clock = iter([0.0, 1.0])
+        monkeypatch.setattr("responses_api_agents.hermes_agent.app.monotonic", lambda: next(clock))
+
+        response = await hermes.responses(
+            request,
+            NeMoGymResponseCreateParamsNonStreaming(input="fix bug", metadata={"agent_timeout_sec": "600"}),
+        )
+
+        assert response.metadata["stop_reason"] == "wall_time"
+
+    async def test_cleanup_cancellation_after_an_early_provider_timeout_stays_a_failure(self, monkeypatch) -> None:
+        # An early provider TimeoutError makes the session clean up: close publishes stop.request, the
+        # supervisor signals the runner, and the runner records an interrupted transcript with
+        # stop_reason "cancelled". That interruption is a consequence of the failure, not deadline
+        # evidence, so the failure must stand rather than become a scoreable wall_time outcome.
+        sandbox = self._sandbox_with_saved_transcript(
+            {
+                "messages": [],
+                "final_response": None,
+                "completed": False,
+                "interrupted": True,
+                "stop_reason": "cancelled",
+            }
+        )
+        hermes, request, _ = self._sandbox_session(monkeypatch, sandbox)
+        clock = iter([0.0, 1.0])
+        monkeypatch.setattr("responses_api_agents.hermes_agent.app.monotonic", lambda: next(clock))
+
+        with pytest.raises(TimeoutError, match="exceeded its execution deadline"):
+            await hermes.responses(
+                request,
+                NeMoGymResponseCreateParamsNonStreaming(input="fix bug", metadata={"agent_timeout_sec": "900"}),
+            )
+
     async def test_close_during_activation_stops_the_runner(self, monkeypatch) -> None:
         class _Sandbox:
             def __init__(self) -> None:
@@ -808,6 +912,23 @@ class TestResultClassification:
             )
 
     @pytest.mark.parametrize(
+        "error", ["HTTP 400: controlled model failure", "HTTP 413: payload too large", "HTTP 422: bad params"]
+    )
+    def test_terminal_model_rejection_is_a_gradable_outcome(self, error) -> None:
+        # The model endpoint refused the request for what it asked, after Hermes's retries. The conformance
+        # suite's model_error scenario expects this to reach the verifier as an unmasked zero.
+        hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        response = hermes._response_from_result(
+            body=NeMoGymResponseCreateParamsNonStreaming(input="hi"),
+            result={"failed": True, "error": error, "messages": []},
+            model_name="model",
+        )
+        assert response.status == "failed"
+        assert response.error is not None and response.error.message == error
+        assert response.metadata["model_rejected"] == error.split()[1].rstrip(":")
+        assert "provider_failed" not in response.metadata
+
+    @pytest.mark.parametrize(
         "outcome",
         [
             {"failed": True, "error": "First response truncated due to output length limit"},
@@ -815,6 +936,7 @@ class TestResultClassification:
             {"partial": True, "error": "Context length exceeded (100 tokens). Cannot compress further."},
             {"partial": True, "error": "Model generated invalid tool call: invalid"},
             {"completed": True},
+            {"completed": False, "stop_reason": "max_iterations"},
         ],
     )
     def test_model_outcomes_remain_gradable_with_partial_trajectory(self, outcome) -> None:
@@ -826,18 +948,33 @@ class TestResultClassification:
         )
         assert response.output[0].content[0].text == "Applied a partial patch"
         assert response.metadata["partial"] == str(bool(outcome.get("partial"))).lower()
+        if outcome.get("stop_reason") == "max_iterations":
+            assert response.status == "incomplete"
+            assert response.error is None
+            assert response.metadata["stop_reason"] == "max_iterations"
 
-    async def test_host_path_retains_provider_failure_for_masked_verification(self, monkeypatch) -> None:
+    @pytest.mark.parametrize("totals", [None, (0, 0), (20, 10)])
+    async def test_host_path_retains_provider_failure_for_masked_verification(self, monkeypatch, totals) -> None:
         hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient, global_config_dict={}))
         monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *args: "http://model:8000/v1")
         monkeypatch.setattr(HermesAgent, "_ensure_sigterm_handler", lambda *_: None)
         runner = MagicMock()
         runner.run_conversation.return_value = {"failed": True, "error": "HTTP 500", "messages": []}
+        if totals is not None:
+            runner.session_prompt_tokens, runner.session_completion_tokens = totals
+            runner.session_cache_read_tokens = 0
+            runner.session_reasoning_tokens = 0
         monkeypatch.setattr("run_agent.AIAgent", MagicMock(return_value=runner))
         response = await hermes._create_response(NeMoGymResponseCreateParamsNonStreaming(input="hi"))
         assert response.status == "failed"
         assert response.error.message == "HTTP 500"
         assert response.metadata["provider_failed"] == "true"
+        if totals is None:
+            assert response.usage is None
+        else:
+            assert response.usage.input_tokens == totals[0]
+            assert response.usage.output_tokens == totals[1]
+            assert response.usage.total_tokens == sum(totals)
 
 
 class TestSandboxHermesInstall:
@@ -1144,7 +1281,7 @@ class TestObservability:
             runtime_gap,
         ]
 
-    @pytest.mark.parametrize("provider_failed", [False, True])
+    @pytest.mark.parametrize("provider_failed", [False, True, "model_rejected"])
     def test_run_returns_observations_without_leaking_internal_attachment(self, provider_failed) -> None:
         server_client = MagicMock(spec=ServerClient)
         server_client.global_config_dict = {"observability_enabled": True}
@@ -1161,7 +1298,11 @@ class TestObservability:
                 "tools": [],
             }
         )
-        if provider_failed:
+        if provider_failed == "model_rejected":
+            # A terminal HTTP 400 from the model: graded, not masked (conformance model_error scenario).
+            response = response.model_copy(update={"metadata": {"model_rejected": "400"}, "status": "failed"})
+            provider_failed = False
+        elif provider_failed:
             response = response.model_copy(
                 update={
                     "metadata": {"provider_failed": "true"},
@@ -1241,3 +1382,52 @@ class TestObservability:
                     rollout_id="rid",
                 )
             )
+
+
+class TestSandboxUv:
+    """Seed uploads the uv build chosen for the sandbox's platform (see tests/unit_tests/test_uv_bootstrap.py)."""
+
+    async def test_seed_passes_the_configured_uv_cache_dir(self, monkeypatch, tmp_path) -> None:
+        hermes = HermesAgent(config=_config(uv_cache_dir=str(tmp_path)), server_client=MagicMock(spec=ServerClient))
+        sandbox = AsyncMock()
+        import_results = iter([1, 0])
+
+        async def exec_(command, **_kwargs):
+            if "import run_agent" in command:
+                return MagicMock(return_code=next(import_results), stdout="", stderr="")
+            if command == uv_bootstrap._PLATFORM_PROBE:
+                return MagicMock(return_code=0, stdout="Linux\nx86_64\ngnu\n", stderr="")
+            return MagicMock(return_code=0, stdout="", stderr="")
+
+        sandbox.exec.side_effect = exec_
+        monkeypatch.setattr(uv_bootstrap.shutil, "which", lambda name: "/usr/bin/uv")
+        monkeypatch.setattr(uv_bootstrap.platform, "machine", lambda: "aarch64")
+        monkeypatch.setattr(uv_bootstrap.platform, "system", lambda: "Linux")
+        monkeypatch.setattr(uv_bootstrap, "_host_uv_version", lambda uv: "0.12.3")
+        monkeypatch.setattr(
+            uv_bootstrap, "_download_uv", lambda v, t, d: (d.parent.mkdir(parents=True), d.write_bytes(b"uv"))
+        )
+        monkeypatch.setattr("responses_api_agents.hermes_agent.app.get_global_config_dict", lambda: {"runtime": {}})
+        monkeypatch.setattr("responses_api_agents.hermes_agent.app.resolve_provider_config", MagicMock())
+        monkeypatch.setattr("responses_api_agents.hermes_agent.app.create_provider", lambda config: AsyncMock())
+        monkeypatch.setattr(
+            "responses_api_agents.hermes_agent.app.AsyncSandbox.connect", AsyncMock(return_value=sandbox)
+        )
+
+        hermes._session_records["session"] = _AgentSessionRecord()
+        await hermes._initialize_agent_session_state(
+            "session",
+            AgentSeedSessionRequest(
+                agent_session_id="session",
+                episode_id=EpisodeId(rollout_id="rollout"),
+                task_id=TaskId(taskset="test", task_id="task"),
+                sandbox_access=SandboxAccess(
+                    connection=DirectSandboxConnection(provider_config_ref="runtime", descriptor={}),
+                    workdir="/app",
+                ),
+            ),
+        )
+
+        uploaded = sandbox.upload.await_args_list[0].args[0]
+        # An aarch64 host driving an x86_64 glibc pod uploads the static musl build for x86_64.
+        assert uploaded == tmp_path / "0.12.3" / "x86_64-unknown-linux-musl" / "uv"

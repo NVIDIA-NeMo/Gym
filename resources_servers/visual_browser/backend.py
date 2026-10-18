@@ -259,9 +259,22 @@ def visual_browser_backend_factory(
     artifacts: WebArtifactStore,
     browser_lease: BrowserSessionHandle,
 ):
-    """Compose the dedicated browser with its evidence-only evaluator."""
+    """Compose the dedicated browser with its evidence-only evaluator.
 
+    A ``browser_instance`` lease runs this same composition inside the leased
+    instance, which calls back into this factory with a local lease.
+    """
+
+    from nemo_gym.web.browser_instance import TRANSPORT, RemoteWebBackend
     from nemo_gym.web.composed_backend import ComposedWebBackend
+
+    if browser_lease.transport == TRANSPORT:
+        return RemoteWebBackend(
+            handle=browser_lease,
+            config=config,
+            session_id=session_id,
+            backend_factory="resources_servers.visual_browser.backend:visual_browser_backend_factory",
+        )
     from resources_servers.visual_browser.evaluators import WebVoyagerEvidenceEvaluator
 
     return ComposedWebBackend(

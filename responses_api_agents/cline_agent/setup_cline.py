@@ -15,6 +15,7 @@
 
 import logging
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -31,7 +32,8 @@ LOG = logging.getLogger(__name__)
 # an older Cline on PATH, and silently reusing it invalidates the event-stream contract.
 _CLINE_PKG = "cline"
 _NODE_VERSION = "22.15.0"
-_NODE_DIST_URL = f"https://nodejs.org/dist/v{_NODE_VERSION}/node-v{_NODE_VERSION}-linux-x64.tar.xz"
+_NODE_ARCH = "arm64" if platform.machine().lower() in ("aarch64", "arm64") else "x64"
+_NODE_DIST_URL = f"https://nodejs.org/dist/v{_NODE_VERSION}/node-v{_NODE_VERSION}-linux-{_NODE_ARCH}.tar.xz"
 _LOCAL_PREFIX = Path(__file__).parent / ".cline_node"
 
 

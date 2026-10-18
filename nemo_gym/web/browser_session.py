@@ -128,14 +128,22 @@ class LocalProcessBrowserSessionProvider:
             )
 
 
-_PROVIDER_REGISTRY: dict[str, type[BrowserSessionProvider]] = {
+def _local_instance_pool(**kwargs: Any) -> BrowserSessionProvider:
+    # Imported lazily: the pool module depends on this one.
+    from nemo_gym.web.browser_instance_pool import LocalBrowserInstancePoolProvider
+
+    return LocalBrowserInstancePoolProvider(**kwargs)
+
+
+_PROVIDER_REGISTRY: dict[str, Callable[..., BrowserSessionProvider]] = {
     LocalProcessBrowserSessionProvider.name: LocalProcessBrowserSessionProvider,
+    "local_instance_pool": _local_instance_pool,
 }
 
 
 def register_browser_session_provider(
     name: str,
-    provider_class: type[BrowserSessionProvider],
+    provider_class: Callable[..., BrowserSessionProvider],
     *,
     override: bool = False,
 ) -> None:

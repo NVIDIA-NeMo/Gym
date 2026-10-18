@@ -72,6 +72,9 @@ def _make_entry(
         generation_log_probs=[-0.1] * len(generation),
         output_items=[{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": text}]}],
         token_item_index=0,
+        # A non-default value, so the round trip proves a store persists the field that
+        # decides the rebuilt response's truncation verdict.
+        finish_reason="length",
         # Fixed so an idempotent retry can resend byte-identical payloads.
         created_at=1700000000.0,
     )

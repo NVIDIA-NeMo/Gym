@@ -165,7 +165,6 @@ def _parse_model_response(res: str, target_files: List[str]) -> Optional[Dict[st
 
 
 class CVDPResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: CVDPResourcesServerConfig
 
     def model_post_init(self, context: Any) -> None:

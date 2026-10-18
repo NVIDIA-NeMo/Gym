@@ -299,8 +299,6 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
     fast rule-based validators and async LLM-as-a-judge validators.
     """
 
-    ray_enabled = False
-
     config: TuringVIFResourcesServerConfig
     _judge_client: Optional[NeMoGymAsyncOpenAI] = None
     _definition_cache: Dict[Tuple[str, str], Tuple[str, bool]] = {}
