@@ -84,7 +84,8 @@ VLLM_PREFILL_ARGS=(
                     "kv_connector_extra_config": {
                         "load_async": true,
                         "lookup_async": true,
-                        "external_cache_only": true
+                        "external_cache_only": true,
+                        "retire_mamba_checkpoints": true
                     }
                 }
             ]
