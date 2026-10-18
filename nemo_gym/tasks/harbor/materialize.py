@@ -1,20 +1,85 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Turn loaded tasks into single-agent-turn rows and the run config that serves them."""
+"""Turn loaded tasks into episode rows and the run config that serves them."""
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
+from typing_extensions import Self
+
 from nemo_gym.episode_types import MaterializedTask, TaskId
-from nemo_gym.single_agent_turn_types import SingleAgentTurnTaskInput
+from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.tasks.harbor.digest import DATASET_DIGEST_KEY, DIGEST_KEY
 from nemo_gym.tasks.harbor.errors import HarborTaskError
 from nemo_gym.tasks.harbor.task import HarborTask, is_task_folder
 
 
 AGENT_TIMEOUT_METADATA_KEY = "agent_timeout_sec"
+# The Harbor step a turn's request belongs to, in its `responses_create_params.metadata`.
+STEP_METADATA_KEY = "harbor_step"
+
+
+class HarborTurnInput(BaseModel):
+    """One turn of a multi-step task: the Harbor step's name and the request the agent receives."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1)
+    responses_create_params: NeMoGymResponseCreateParamsNonStreaming
+
+
+class HarborTaskInput(BaseModel):
+    """A Harbor row's input: one ``responses_create_params`` for a single-turn task, or one per turn.
+
+    ``task_data`` carries the folder digest; the server reads everything else from the pinned folder.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    responses_create_params: NeMoGymResponseCreateParamsNonStreaming | None = None
+    task_data: dict[str, JsonValue]
+    turns: list[HarborTurnInput] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_flat_task_input(cls, value: object) -> object:
+        """Fold flat task fields into ``task_data``, keeping both request-envelope fields where they are.
+
+        The flat single-turn input (the task fields beside ``responses_create_params``, as
+        ``SingleAgentTurnTaskInput`` accepts them) is the canonical row once validated, so a client that sends
+        ``{"responses_create_params": ..., "_ng_digest": ...}`` runs as the row does. Only the keys the input set
+        are passed on, so a row that names no ``responses_create_params`` (a multi-step row) keeps the field unset
+        and its serialized form (``exclude_unset``) carries no ``null``.
+        """
+        if not isinstance(value, Mapping):
+            return value
+        fields = dict(value)
+        envelope = {key: fields.pop(key) for key in ("responses_create_params", "turns") if key in fields}
+        task_data = fields.pop("task_data", {})
+        if not isinstance(task_data, Mapping):
+            return value  # Let the field validator report the malformed canonical container.
+        for key in fields.keys() & task_data.keys():
+            if fields[key] != task_data[key]:
+                raise ValueError(f"Conflicting task field {key!r} inside and outside task_data")
+        return {**envelope, "task_data": dict(task_data) | fields}
+
+    @model_validator(mode="after")
+    def one_shape(self) -> Self:
+        if (self.responses_create_params is None) == (not self.turns):
+            raise ValueError("A Harbor row has either responses_create_params or turns, not both")
+        return self
+
+
+def _turn_params(instruction: str, timeout_sec: float, step: str | None = None) -> dict[str, Any]:
+    metadata = {AGENT_TIMEOUT_METADATA_KEY: str(timeout_sec)}
+    if step is not None:
+        metadata[STEP_METADATA_KEY] = step
+    return {"input": [{"role": "user", "content": instruction}], "metadata": metadata}
+
 
 # Instance names in the generated run config, per taskset.
 ENVIRONMENT_SERVER_IMPL = "harbor"
@@ -40,26 +105,38 @@ def environment_server_instance(taskset: str) -> str:
 
 def materialize_task(
     task: HarborTask, taskset: str, *, dataset_digest: str | None = None
-) -> MaterializedTask[SingleAgentTurnTaskInput]:
+) -> MaterializedTask[HarborTaskInput]:
     """One row: the instruction as a user message, the folder digest in ``task_data``.
+
+    A multi-step task gets one turn per step, each with that step's instruction and agent budget. The
+    top-level ``instruction.md`` is never sent for such a task.
 
     With ``dataset_digest``, the row also carries the dataset's digest (``manifest.toml``'s
     ``[dataset].digest``). Rollout collection copies the ``_ng_*`` keys of ``task_data`` onto every
     results row it writes, so each row then says which task folder and which dataset it ran.
     """
-    task_data = {DIGEST_KEY: task.digest}
+    task_data: dict[str, JsonValue] = {DIGEST_KEY: task.digest}
     if dataset_digest is not None:
         task_data[DATASET_DIGEST_KEY] = dataset_digest
-    return MaterializedTask(
-        task_id=TaskId(taskset=taskset, task_id=task.task_id),
-        task_input=SingleAgentTurnTaskInput(
-            responses_create_params={
-                "input": [{"role": "user", "content": task.instruction}],
-                "metadata": {AGENT_TIMEOUT_METADATA_KEY: str(task.config.agent.timeout_sec)},
-            },
+    if task.turns:
+        task_input = HarborTaskInput(
             task_data=task_data,
-        ),
-    )
+            turns=[
+                HarborTurnInput(
+                    name=turn.name,
+                    responses_create_params=_turn_params(
+                        turn.instruction, task.config.step_agent_timeout_sec(turn.config), step=turn.name
+                    ),
+                )
+                for turn in task.turns
+            ],
+        )
+    else:
+        task_input = HarborTaskInput(
+            responses_create_params=_turn_params(task.instruction, task.config.agent.timeout_sec),
+            task_data=task_data,
+        )
+    return MaterializedTask(task_id=TaskId(taskset=taskset, task_id=task.task_id), task_input=task_input)
 
 
 def _validate_task_ids(tasks: list[HarborTask]) -> None:

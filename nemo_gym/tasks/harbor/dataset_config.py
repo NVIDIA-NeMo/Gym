@@ -227,8 +227,36 @@ def apply_dataset_config(config: HarborTaskConfig, task_id: str, dataset: GymDat
     if verifier_update:
         verifier = verifier.model_copy(update=verifier_update)
     agent = config.agent
+    steps = config.steps
     if defaults.timeout_multiplier != 1:
         agent = agent.model_copy(update={"timeout_sec": agent.timeout_sec * defaults.timeout_multiplier})
-    return config.model_copy(
-        update={"environment": environment, "agent": agent, "verifier": verifier, "artifacts": artifacts}
+        # A step's own `[steps.agent]` and `[steps.verifier]` budgets are authored against Harbor's runtime like
+        # the task's, so they scale once here. A budget a step does not name stays unnamed, so the step keeps
+        # inheriting it through the config's step accessors: the task's scaled agent budget, and for the verifier
+        # the default `step_verifier_timeout_sec` reads, scaled by the multiplier the effective config carries, as
+        # Harbor grades such a step within its step default times the multiplier (multi_step.py's
+        # `_step_verifier_timeout_sec` through `_resolve_timeout_sec`).
+        steps = [_scale_step_timeouts(step, defaults.timeout_multiplier) for step in config.steps]
+    effective = config.model_copy(
+        update={
+            "environment": environment,
+            "agent": agent,
+            "verifier": verifier,
+            "artifacts": artifacts,
+            "steps": steps,
+        }
     )
+    effective._timeout_multiplier = defaults.timeout_multiplier
+    return effective
+
+
+def _scale_step_timeouts(step: Any, multiplier: float) -> Any:
+    """One ``[[steps]]`` entry with its own ``[steps.agent].timeout_sec`` and ``[steps.verifier].timeout_sec`` scaled
+    once; a budget the step does not name stays ``None``, inherited through :class:`HarborTaskConfig`'s step accessors
+    (the loader's hint about steps graded within the step default keys on that)."""
+    update: dict[str, Any] = {}
+    if step.agent.timeout_sec is not None:
+        update["agent"] = step.agent.model_copy(update={"timeout_sec": step.agent.timeout_sec * multiplier})
+    if step.verifier.timeout_sec is not None:
+        update["verifier"] = step.verifier.model_copy(update={"timeout_sec": step.verifier.timeout_sec * multiplier})
+    return step.model_copy(update=update) if update else step

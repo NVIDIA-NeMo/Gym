@@ -27,6 +27,7 @@ import nemo_gym.sandbox.providers.base as sandbox_base
 from environment_servers.harbor.app import (
     HarborEnvironmentServer,
     HarborEnvironmentServerConfig,
+    HarborEpisodeRequest,
 )
 from environment_servers.harbor.sandboxes import SEED_CREATE_GRACE_S, _is_image_pull_failure
 from environment_servers.harbor.tests.conftest import (
@@ -73,6 +74,7 @@ from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxHandle, Sa
 from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS, cpu_cap_env
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.tasks.harbor import load_task
+from nemo_gym.tasks.harbor.digest import DIGEST_KEY
 from nemo_gym.tasks.harbor.dockerfile import RECORD_VERSION
 from nemo_gym.tasks.harbor.errors import HarborTaskError
 from nemo_gym.tasks.harbor.models import HarborEnvironment
@@ -254,6 +256,36 @@ class TestEpisode:
         assert payload["episode_id"] == {"rollout_id": "r1", "attempt": 0}
         assert "sb-1" not in response.text and "sandbox" not in payload["result"]
         assert sandbox.stopped
+
+    async def test_a_flat_single_turn_row_runs_as_the_canonical_one(self, tmp_path, monkeypatch):
+        """Review (CI bot, round 34): a single-turn `/run` request with the task fields beside
+        `responses_create_params` (the flat shape `SingleAgentTurnTaskInput` accepted before `HarborTaskInput`
+        replaced it) was rejected by the request schema before execution. It is the canonical row once validated,
+        and runs as it does."""
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
+        canonical = episode(task)
+        flat = HarborEpisodeRequest.model_validate(
+            {
+                "episode_id": {"rollout_id": "r1", "attempt": 0},
+                "task": {
+                    "task_id": {"taskset": "ds", "task_id": "hello"},
+                    "task_input": {
+                        "responses_create_params": {"input": [{"role": "user", "content": "Create hello.txt"}]},
+                        DIGEST_KEY: task.digest,
+                    },
+                },
+            }
+        )
+        assert flat.task.task_input == canonical.task.task_input
+        assert flat.model_dump(mode="json", exclude_unset=True) == canonical.model_dump(
+            mode="json", exclude_unset=True
+        )
+
+        response = await server.run_request(flat)
+
+        assert response.failure is None, response.failure
+        assert response.result.reward == 1.0 and response.result.verifier_rewards == {"reward": 1.0}
+        assert any("test.sh" in call["command"] and "timeout" in call["command"] for call in sandbox.execs)
 
     async def test_episodes_parse_and_hash_the_task_once(self, tmp_path, monkeypatch):
         server, task, _, created = make_server(tmp_path, monkeypatch)
@@ -3634,6 +3666,7 @@ def test_server_config_holds_only_deployment_settings():
         "harness_setup_allowance_s",
         "image_pull_retries",
         "separate_verifier_for_artifacts",
+        "task_mcp_grants",
     }
     source = inspect.getsource(HarborEnvironmentServerConfig).lower()
     assert not any(word in source for word in ("terminal", "tb4", "tb2", "swe", "nextjs", "hello-world"))

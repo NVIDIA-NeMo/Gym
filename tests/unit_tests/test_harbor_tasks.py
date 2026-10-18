@@ -16,7 +16,9 @@ import yaml
 import nemo_gym.tasks.harbor.build_options as build_options
 import nemo_gym.tasks.harbor.hub as hub_module
 import nemo_gym.tasks.harbor.manifest as manifest_module
+import nemo_gym.tasks.harbor.materialize as materialize_module
 import nemo_gym.tasks.harbor.prepare_builds as prepare_builds
+from nemo_gym.task_data import TaskDataValidator, load_task_data_schema
 from nemo_gym.tasks.harbor import DIGEST_KEY, HarborTaskConfig, content_hash, discover_tasks, load_task
 from nemo_gym.tasks.harbor.cli import (
     AgentSelection,
@@ -147,9 +149,29 @@ class TestTaskConfig:
         with pytest.raises(ValueError, match="Conflicting"):
             HarborTaskConfig.model_validate({"environment": {"memory": "1G", "memory_mb": 512}})
 
-    def test_multi_step_is_rejected_for_now(self):
-        with pytest.raises(ValueError, match="Multi-step"):
-            HarborTaskConfig.model_validate({"steps": [{"name": "a"}]})
+    def test_steps_are_parsed_with_harbor_fallbacks(self):
+        config = HarborTaskConfig.model_validate(
+            {
+                "agent": {"timeout_sec": 600},
+                "verifier": {"timeout_sec": 120},
+                "multi_step_reward_strategy": "final",
+                "steps": [
+                    {"name": "plan", "agent": {"timeout_sec": 30}, "min_reward": 0.5},
+                    {"name": "build", "verifier": {"timeout_sec": 900, "env": {"K": "v"}}},
+                ],
+            }
+        )
+        plan, build = config.steps
+        assert config.is_multi_turn and config.multi_step_reward_strategy == "final"
+        assert (config.step_agent_timeout_sec(plan), config.step_verifier_timeout_sec(plan)) == (30, 120)
+        assert (config.step_agent_timeout_sec(build), config.step_verifier_timeout_sec(build)) == (600, 900)
+        assert plan.min_reward == 0.5 and build.verifier.env == {"K": "v"}
+        assert HarborTaskConfig.model_validate({}).multi_step_reward_strategy == "mean"
+
+    @pytest.mark.parametrize("steps", [[{"name": "a"}, {"name": "a"}], [{"name": "../up"}]])
+    def test_step_names_are_unique_portable_folders(self, steps):
+        with pytest.raises(ValueError, match="Step name"):
+            HarborTaskConfig.model_validate({"steps": steps})
 
     def test_docker_image_is_optional(self):
         assert HarborTaskConfig.model_validate({}).environment.docker_image is None
@@ -820,6 +842,40 @@ class TestMaterialize:
         assert params["metadata"] == {"agent_timeout_sec": "120.0"}
         assert row["task_input"]["task_data"] == {DIGEST_KEY: task.digest}
 
+    def test_a_flat_single_turn_input_is_the_canonical_row(self, tmp_path):
+        """Review (CI bot, round 34): `HarborTaskInput` replaced `SingleAgentTurnTaskInput`, whose before-validator
+        folded flat task fields into `task_data`, with a model that forbade them, so a single-turn `/run` request
+        shaped `{"responses_create_params": ..., "_ng_digest": ...}` was rejected before execution. The flat shape is
+        normalized again, with both request-envelope fields reserved; conflicting values and a malformed container
+        are still refused (pydantic's ValidationError is a ValueError), and a generated multi-step row carries no
+        `responses_create_params` key at all."""
+        task = load_task(write_task(tmp_path / "hello-world"))
+        canonical = materialize_task(task, "hello").task_input
+        params = canonical.responses_create_params.model_dump(mode="json", exclude_unset=True)
+        validate = materialize_module.HarborTaskInput.model_validate
+        flat = validate({"responses_create_params": params, DIGEST_KEY: task.digest})
+        assert flat == canonical and flat.model_fields_set == {"responses_create_params", "task_data"}
+        assert flat.model_dump(mode="json", exclude_unset=True) == canonical.model_dump(
+            mode="json", exclude_unset=True
+        )
+        with pytest.raises(ValueError, match="Conflicting task field '_ng_digest'"):
+            validate({"responses_create_params": params, "task_data": {DIGEST_KEY: "other"}, DIGEST_KEY: task.digest})
+        with pytest.raises(ValueError, match="task_data"):
+            validate({"responses_create_params": params, "task_data": "not a mapping"})
+        with pytest.raises(ValueError, match="either responses_create_params or turns"):
+            validate({DIGEST_KEY: task.digest})
+        with pytest.raises(ValueError, match="either responses_create_params or turns"):
+            validate(
+                {
+                    "responses_create_params": params,
+                    "turns": [{"name": "a", "responses_create_params": params}],
+                    DIGEST_KEY: task.digest,
+                }
+            )
+        multi = materialize_task(load_task(write_multi_step_task(tmp_path / "t")), "ds")
+        assert multi.task_input.model_fields_set == {"task_data", "turns"}
+        assert "responses_create_params" not in multi.model_dump(mode="json", exclude_unset=True)["task_input"]
+
     def test_write_rows_and_run_config(self, tmp_path):
         folder = tmp_path / "ds"
         tasks = [load_task(write_task(folder / "a")), load_task(write_task(folder / "b"))]
@@ -854,6 +910,96 @@ class TestMaterialize:
         assert "resources_server" not in agent["responses_api_agents"]["hermes_agent"]
         assert agent["responses_api_agents"]["hermes_agent"]["enabled_toolsets"] == ["terminal"]
         assert "resources_servers" not in " ".join(config)
+
+
+MULTI_STEP_TOML = (
+    'multi_step_reward_strategy = "final"\n'
+    + HELLO_TOML
+    + """
+[[steps]]
+name = "01_plan"
+[steps.agent]
+timeout_sec = 2400.0
+
+[[steps]]
+name = "02_implement"
+"""
+)
+
+
+def write_multi_step_task(root: Path, *, hidden_spec: str = "The full spec only the simulated user may read.") -> Path:
+    write_task(root, toml=MULTI_STEP_TOML)
+    (root / "instruction.md").write_text(hidden_spec)
+    for name, instruction in (("01_plan", "Agree on a plan with the maintainer."), ("02_implement", "Implement it.")):
+        (root / "steps" / name / "tests").mkdir(parents=True)
+        (root / "steps" / name / "instruction.md").write_text(instruction)
+        (root / "steps" / name / "tests" / "test.sh").write_text("#!/bin/bash\necho 1 > /logs/verifier/reward.txt\n")
+    return root
+
+
+class TestMultiStepTasks:
+    def test_steps_load_as_turns_with_their_own_instructions(self, tmp_path):
+        task = load_task(write_multi_step_task(tmp_path / "t"))
+        assert [(turn.name, turn.instruction) for turn in task.turns] == [
+            ("01_plan", "Agree on a plan with the maintainer."),
+            ("02_implement", "Implement it."),
+        ]
+        assert task.config.multi_step_reward_strategy == "final"
+
+    def test_rows_carry_one_input_per_turn_and_never_the_top_level_instruction(self, tmp_path):
+        hidden = "The full spec only the simulated user may read."
+        task = load_task(write_multi_step_task(tmp_path / "t", hidden_spec=hidden))
+        row = materialize_task(task, "ds").model_dump(mode="json", exclude_unset=True)
+        assert hidden not in json.dumps(row)
+        assert "responses_create_params" not in row["task_input"]
+        turns = row["task_input"]["turns"]
+        assert [turn["name"] for turn in turns] == ["01_plan", "02_implement"]
+        assert [turn["responses_create_params"]["metadata"] for turn in turns] == [
+            {"agent_timeout_sec": "2400.0", "harbor_step": "01_plan"},
+            # A step without its own budget falls back to the task's [agent].timeout_sec.
+            {"agent_timeout_sec": "120.0", "harbor_step": "02_implement"},
+        ]
+
+    def test_a_multi_step_rows_turns_are_not_task_fields(self, tmp_path):
+        """Review (round 32): the row's `turns` sit beside `task_data`, and the validator merged that sibling into
+        the task-owned fields, so every multi-step row reported `turns` as an unknown key: a false warning at
+        collation, or a rejected row under `task_data_validation: error`. Through the real Harbor TaskData schema."""
+        task = load_task(write_multi_step_task(tmp_path / "t"))
+        row = materialize_task(task, "ds").model_dump(mode="json", exclude_unset=True)
+        assert [turn["name"] for turn in row["task_input"]["turns"]] == ["01_plan", "02_implement"]
+        harbor_dir = Path(__file__).resolve().parents[2] / "environment_servers" / "harbor"
+        validator = TaskDataValidator("harbor", load_task_data_schema(harbor_dir), "rows.jsonl")
+        validator.validate_row(0, row)
+        assert validator.report.clean, validator.report.summary()
+
+    def test_top_level_instruction_and_tests_are_optional_for_steps(self, tmp_path):
+        root = write_multi_step_task(tmp_path / "t")
+        (root / "instruction.md").unlink()
+        (root / "tests" / "test.sh").unlink()
+        (root / "tests").rmdir()
+        assert [turn.name for turn in load_task(root).turns] == ["01_plan", "02_implement"]
+
+    @pytest.mark.parametrize(
+        ("change", "message"),
+        [
+            (lambda root: (root / "steps" / "01_plan" / "setup.sh").write_text("true\n"), "setup.sh"),
+            (lambda root: (root / "steps" / "01_plan" / "workdir").mkdir(), "workdir"),
+            (lambda root: (root / "steps" / "02_implement" / "instruction.md").unlink(), "instruction.md"),
+        ],
+    )
+    def test_unsupported_or_incomplete_steps_are_refused_by_name(self, tmp_path, change, message):
+        root = write_multi_step_task(tmp_path / "t")
+        change(root)
+        with pytest.raises(HarborTaskError, match=message):
+            load_task(root)
+
+    def test_a_step_needs_a_test_script_of_its_own_or_the_tasks(self, tmp_path):
+        root = write_multi_step_task(tmp_path / "t")
+        (root / "steps" / "01_plan" / "tests" / "test.sh").unlink()
+        assert load_task(root).turns  # the task's tests/test.sh stands in
+        (root / "tests" / "test.sh").unlink()
+        with pytest.raises(HarborTaskError, match="no test.sh"):
+            load_task(root)
 
 
 class TestTasksetMapping:
@@ -1355,7 +1501,7 @@ class TestCli:
             prepared = prepare_target(str(folder), output_root=tmp_path / "out")
         assert [t.task_id for t in prepared.tasks] == ["a"]
         assert list(prepared.skipped) == ["bad"]
-        assert "Multi-step" in prepared.skipped["bad"]
+        assert "step 'x'" in prepared.skipped["bad"]
         assert any("Skipping task bad" in r.getMessage() for r in caplog.records)
         assert len(prepared.rows_path.read_text().splitlines()) == 1
 
@@ -2321,6 +2467,37 @@ class TestDatasetConfig:
             15360,
             0,
         )
+
+    def test_defaults_scale_a_steps_own_timeouts_once(self, tmp_path):
+        """Review (round 32): the multiplier scaled the task's `[agent]` and `[verifier]` timeouts only, so a step
+        with its own `timeout_sec` kept the unscaled value in the row's metadata, the turn's budgets and the
+        episode bound, while a step inheriting the task's agent budget was scaled. A step's own values scale once;
+        a budget a step does not name stays unnamed (`None`), inherited through the config's step accessors, which
+        read the task's scaled agent budget and the scaled step verifier default (the effective config carries the
+        multiplier for it), so nothing is double-scaled and the loader's hint about steps graded within the step
+        default still sees which steps named none."""
+        folder = tmp_path / "ds"
+        steps = (
+            '\n[[steps]]\nname = "a"\n[steps.agent]\ntimeout_sec = 30.0\n[steps.verifier]\ntimeout_sec = 40.0\n'
+            '\n[[steps]]\nname = "b"\n'
+        )
+        write_task(folder / "hello", toml=HELLO_TOML + steps)
+        for name in ("a", "b"):
+            (folder / "hello" / "steps" / name).mkdir(parents=True)
+            (folder / "hello" / "steps" / name / "instruction.md").write_text(f"Step {name}\n")
+        (folder / "dataset.toml").write_text("[gym.defaults]\ntimeout_multiplier = 2.0\n")
+        task = load_task(folder / "hello")
+        a, b = task.config.steps
+        assert (a.agent.timeout_sec, a.verifier.timeout_sec) == (60.0, 80.0)
+        assert (task.config.step_agent_timeout_sec(a), task.config.step_verifier_timeout_sec(a)) == (60.0, 80.0)
+        assert b.agent.timeout_sec is None and task.config.step_agent_timeout_sec(b) == 240.0
+        assert b.verifier.timeout_sec is None and task.config._timeout_multiplier == 2.0
+        row = materialize_task(task, "ds").model_dump(mode="json")
+        turns = row["task_input"]["turns"]
+        assert [turn["responses_create_params"]["metadata"]["agent_timeout_sec"] for turn in turns] == [
+            "60.0",
+            "240.0",
+        ]
 
     @pytest.mark.parametrize(
         "text,match",
