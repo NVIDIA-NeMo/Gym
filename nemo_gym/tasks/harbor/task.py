@@ -38,6 +38,7 @@ from nemo_gym.tasks.harbor.records import (
     VERIFIER_SERVICE,
     read_built_images,
     read_image_configs,
+    recorded_forced_tasks,
     recorded_service_images,
 )
 from nemo_gym.tasks.harbor.verifier_env import (
@@ -368,14 +369,17 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
     built: str | None = None
     context_id: str | None = None
     built_images: dict[str, str] = {}
+    forced_tasks: set[str] = set()
 
     def recorded_builds() -> dict[str, str]:
         # Harbor's hash of environment/ is paid once per task, here, off the server's event loop (load_task runs
         # in a thread there): the build-mode branches and the Compose loader both read the record through it.
-        nonlocal context_id, built_images
+        nonlocal context_id, built_images, forced_tasks
         if context_id is None and dockerfile.parent.is_dir():
             context_id = context_digest(dockerfile.parent)
-            built_images = recorded_service_images(read_built_images(root).get(context_id))
+            record = read_built_images(root).get(context_id)
+            built_images = recorded_service_images(record)
+            forced_tasks = recorded_forced_tasks(record)
         return built_images
 
     # What Docker starts the image with: the record of the image the sandbox runs (built image), or the
@@ -393,11 +397,15 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
         try:
             parsed = parse_dockerfile(dockerfile_text)
         except DockerfileNeedsBuild as exc:
-            if image is None:
-                # Build mode: prepare built the context once and recorded the image next to the tasks.
-                built = recorded_builds().get(MAIN_SERVICE)
-                if built is None:
-                    raise _build_required(dockerfile, exc, root) from exc
+            # Build mode: prepare built the context once and recorded the image next to the tasks. A task that
+            # declares docker_image runs it, unless prepare built its own Dockerfile for it under `builds.force`
+            # (Harbor's --force-build) and recorded the task as forced: that build then wins, as it does in Harbor.
+            # A record of main made for another task of the context, or before the override, is not this task's.
+            built = recorded_builds().get(MAIN_SERVICE)
+            if image is not None and path.name not in forced_tasks:
+                built = None
+            if built is None and image is None:
+                raise _build_required(dockerfile, exc, root) from exc
             parsed = None
         if built is not None:
             # The built image is pulled like a prebuilt one; its recorded configuration gives the

@@ -129,7 +129,10 @@ def _build_dockerfiles(folder: Path, build: BuildOptions, *, select) -> dict[str
     while True:
         conflicts = {}  # task id -> BuildConflict, filled by plan_builds
         services = plan_builds(
-            folder, select=lambda name: name not in refused and (select is None or select(name)), conflicts=conflicts
+            folder,
+            select=lambda name: name not in refused and (select is None or select(name)),
+            conflicts=conflicts,
+            force=build.force,
         )
         found = {task_id: str(error) for task_id, error in refused_before_build(services).items()}
         # A conflict with a task refused this round is not a refusal: without that task the plan may hold this one.
@@ -217,7 +220,11 @@ def _build_dockerfiles(folder: Path, build: BuildOptions, *, select) -> dict[str
             continue
         try:
             results += build_images(
-                folder, builder=builder, select=lambda name: name in tasks, contexts={entry.digest}
+                folder,
+                builder=builder,
+                select=lambda name: name in tasks,
+                contexts={entry.digest},
+                force=build.force,
             )
         except BuildError as exc:
             reason = f"Could not build the Dockerfile image(s) for task(s) {', '.join(entry.tasks[:3])}: {exc}"
