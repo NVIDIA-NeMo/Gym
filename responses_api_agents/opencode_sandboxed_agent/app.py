@@ -1209,9 +1209,8 @@ class OpenCodeSandboxedAgent(SandboxedHarnessAgent):
     async def run(
         self, request: Request, body: OpenCodeSandboxedAgentRunRequest
     ) -> OpenCodeSandboxedAgentVerifyResponse:
-        async with self._sem:
-            done = await self.run_harness(request, body, OpenCodeAdapter(self, request, body))
-            return self._finish(body, done)
+        done = await self.run_harness(request, body, OpenCodeAdapter(self, request, body), slot=self._sem)
+        return self._finish(body, done)
 
     def _finish(
         self, body: OpenCodeSandboxedAgentRunRequest, done: HarnessRunResult["OpenCodeOutcome"]

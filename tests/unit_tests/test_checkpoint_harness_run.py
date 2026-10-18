@@ -265,6 +265,58 @@ async def test_an_interrupted_launch_parks_and_the_resume_continues_it_in_the_sa
     assert not adapter.box.stopped, "the owner checkpoints the sandbox and ends it at verify"
 
 
+async def test_a_run_queued_for_a_slot_is_exported_at_its_seed_bookmark_and_runs_after_resume() -> None:
+    # Parked runs keep their slots, so a checkpoint cannot wait for the queue: the queued run must be exported.
+    resources = Resources()
+    first, queued = FakeAdapter("until_park", "finish"), FakeAdapter("finish")
+    driver = make_driver(resources)
+    participant = driver.checkpoint_participant
+    slot = asyncio.Semaphore(1)
+
+    def run_body(rollout_id: str) -> BaseRunRequest:
+        key = EpisodeId(rollout_id=rollout_id).capture_key
+        return BaseRunRequest.model_validate({"responses_create_params": {"input": []}, "_ng_rollout_id": key})
+
+    holder = asyncio.create_task(driver.run_harness(request(), run_body("r"), first, slot=slot))
+    await asyncio.wait_for(first.started.wait(), 5)
+    waiter = asyncio.create_task(driver.run_harness(request(), run_body("q"), queued, slot=slot))
+    await wait_until(lambda: participant.has_session("run:q"))
+    await participant.close_admission(CLOSE)
+    await wait_until(lambda: participant.readiness().ready)
+    report = participant.readiness()
+    records = {record.session_key: record for record in await participant.export(None, checkpoint_id="c")}
+    await participant.open_admission()
+    await asyncio.wait_for(asyncio.gather(holder, waiter), 5)
+
+    assert report.blockers == [] and report.restarts == [], "waiting for a slot neither blocks nor restarts"
+    assert set(records) == {"run:r", "run:q"}, "the queued run is in the checkpoint"
+    assert records["run:r"].episode["next"] == "harness"
+    assert records["run:q"].episode == SeedBookmark().model_dump(mode="json")
+    assert queued.launched == [({"folder": "f1"}, False)], "the queued run starts once it gets the slot"
+    assert queued.verified == [Outcome(text="launch 1")]
+
+
+async def test_a_slot_that_comes_free_while_admission_is_closed_parks_the_run_before_it_seeds() -> None:
+    resources, adapter = Resources(), FakeAdapter("finish")
+    driver = make_driver(resources)
+    participant = driver.checkpoint_participant
+    slot = asyncio.Semaphore(0)
+
+    run = asyncio.create_task(driver.run_harness(request(), body(), adapter, slot=slot))
+    await wait_until(lambda: participant.has_session("run:r"))
+    await participant.close_admission(CLOSE)
+    await wait_until(lambda: participant.readiness().ready)
+    slot.release()
+    await asyncio.sleep(0.05)
+    assert resources.calls == [], "no task work while a checkpoint is open"
+    [record] = await participant.export(None, checkpoint_id="c")
+    await participant.open_admission()
+    await asyncio.wait_for(run, 5)
+
+    assert record.episode == SeedBookmark().model_dump(mode="json")
+    assert resources.calls[0] == "/seed_session"
+
+
 @pytest.mark.parametrize("lender", ["restart_header", "no_sandbox"])
 async def test_a_lender_that_cannot_capture_the_session_makes_the_run_a_restart_that_stops_its_sandbox(
     lender: str,

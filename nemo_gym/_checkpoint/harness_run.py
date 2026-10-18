@@ -25,7 +25,7 @@ sandbox when it ends, as an agent does that owns its sandbox or whose lender can
 import asyncio
 import logging
 import time
-from contextlib import AbstractAsyncContextManager, nullcontext
+from contextlib import AbstractAsyncContextManager, AsyncExitStack, nullcontext
 from dataclasses import dataclass
 from typing import Annotated, Any, ClassVar, Generic, Literal, Optional, Protocol, TypeVar, Union
 
@@ -260,15 +260,38 @@ class SandboxedHarnessAgent(SimpleResponsesAPIAgent):
     # -- the run -----------------------------------------------------------------------------------------------
 
     async def run_harness(
-        self, request: Request, body: BaseRunRequest, adapter: HarnessAdapter[OutcomeT]
+        self,
+        request: Request,
+        body: BaseRunRequest,
+        adapter: HarnessAdapter[OutcomeT],
+        *,
+        slot: Optional[AbstractAsyncContextManager[Any]] = None,
     ) -> HarnessRunResult[OutcomeT]:
-        """Seed, run the harness until it finishes, and verify; checkpointed when checkpointing is on."""
+        """Seed, run the harness until it finishes, and verify; checkpointed when checkpointing is on.
+
+        ``slot``, such as the agent's concurrency semaphore, is held for the whole run. With checkpointing on, the
+        run is registered before it waits for the slot: parked runs keep their slots, so a run queued behind them
+        must be exported at its bookmark instead of staying invisible to a checkpoint that cannot wait for it.
+        """
         participant = self.checkpoint_participant
         if participant is None:
-            return await _HarnessRun(self, request, body, adapter, None).drive()
+            async with slot if slot is not None else nullcontext():
+                return await _HarnessRun(self, request, body, adapter, None).drive()
         episode_id = EpisodeId.from_capture_key(require_rollout(self.rollout_id_from_run(body)))
         async with participant.legacy_run(f"{LEGACY_SESSION_PREFIX}{episode_id.rollout_id}", episode_id) as run:
-            return await _HarnessRun(self, request, body, adapter, run).drive()
+            async with AsyncExitStack() as held:
+                if slot is not None:
+                    # Nothing of the task has run yet, so the bookmark it continues from is a safe point.
+                    bookmark = run.continuation
+                    if bookmark is None:
+                        bookmark = SeedBookmark().model_dump(mode="json")
+                    await run.boundary(bookmark)
+                    # Waiting for a process-local slot is safe to replay from that bookmark.
+                    async with run.step("replay"):
+                        await held.enter_async_context(slot)
+                    # A slot may come free while a checkpoint has admission closed: park before any task work.
+                    await run.boundary(bookmark)
+                return await _HarnessRun(self, request, body, adapter, run).drive()
 
     async def refresh_lent_sandbox(
         self, cookies: dict[str, str], hint: Optional[LentSandbox]
