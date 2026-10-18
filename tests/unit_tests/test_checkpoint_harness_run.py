@@ -159,6 +159,33 @@ class FakeAdapter:
         return {"reward": 1.0, "text": outcome.text}
 
 
+class PreparingAdapter(FakeAdapter):
+    """Verifies in two steps: prepare captures a patch (and the owner ends the session), then grading replays."""
+
+    def __init__(self, *script: str) -> None:
+        super().__init__(*script)
+        self.prepared: list[Outcome] = []
+        self.graded: list[dict[str, JsonValue]] = []
+        self.grading = asyncio.Event()
+        self.release_grading: Optional[asyncio.Event] = None
+
+    def prepares_verification(self) -> bool:
+        return True
+
+    async def prepare_verification(self, cookies: dict[str, str], outcome: Outcome) -> dict[str, JsonValue]:
+        self.prepared.append(outcome)
+        return {"model_patch": f"patch of {outcome.text}"}
+
+    async def verify_prepared(
+        self, cookies: dict[str, str], outcome: Outcome, prepared: dict[str, JsonValue]
+    ) -> dict[str, Any]:
+        self.graded.append(prepared)
+        self.grading.set()
+        if self.release_grading is not None:
+            await self.release_grading.wait()
+        return {"reward": 1.0, "text": outcome.text, "graded": prepared["model_patch"]}
+
+
 class PausingAdapter(FakeAdapter):
     """Pauses its harness at checkpoints instead of having it stopped."""
 
@@ -448,6 +475,67 @@ async def test_a_continuation_at_return_returns_the_stored_result() -> None:
 
     assert done.result == {"reward": 0.5} and done.outcome == Outcome(text="kept")
     assert adapter.verified == [] and resources.calls == []
+
+
+async def test_prepared_verification_does_not_hold_up_a_checkpoint_for_grading() -> None:
+    resources, adapter = Resources(), PreparingAdapter("finish")
+    adapter.release_grading = asyncio.Event()
+    driver = make_driver(resources)
+    participant = driver.checkpoint_participant
+
+    run = asyncio.create_task(driver.run_harness(request(), body(), adapter))
+    await asyncio.wait_for(adapter.grading.wait(), 5)
+    await participant.close_admission(CLOSE)
+    await wait_until(lambda: participant.readiness().ready)
+    report = participant.readiness()
+    [record] = await participant.export(None, checkpoint_id="c")
+    adapter.release_grading.set()
+    await participant.open_admission()
+    done = await asyncio.wait_for(run, 5)
+
+    assert report.blockers == [], "grading is a replay step"
+    assert record.episode["next"] == "verify" and record.episode["prepared"] == {"model_patch": "patch of launch 1"}
+    assert adapter.verified == [] and adapter.prepared == [Outcome(text="launch 1")]
+    assert done.result == {"reward": 1.0, "text": "launch 1", "graded": "patch of launch 1"}
+    assert "/close_session" not in resources.calls, "the prepare ended the session"
+    assert not adapter.box.stopped
+
+
+async def test_a_continuation_at_a_prepared_verify_grades_the_saved_capture_without_preparing_again() -> None:
+    resources, adapter = Resources(), PreparingAdapter()
+    driver = make_driver(resources)
+    await install(
+        driver,
+        {
+            "v": 1,
+            "next": "verify",
+            "cookies": {},
+            "verify_mode": "wait",
+            "outcome": {"text": "kept"},
+            "launches": [],
+            "prepared": {"model_patch": "saved"},
+        },
+    )
+
+    done = await driver.run_harness(request(), body(attempt=1), adapter)
+
+    assert adapter.prepared == [] and adapter.graded == [{"model_patch": "saved"}]
+    assert done.result["graded"] == "saved" and resources.calls == []
+
+
+async def test_a_run_that_fails_after_preparing_does_not_close_the_ended_session() -> None:
+    resources, adapter = Resources(), PreparingAdapter("finish")
+
+    async def failing(*_: Any) -> dict[str, Any]:
+        raise RuntimeError("grading failed")
+
+    adapter.verify_prepared = failing  # type: ignore[method-assign]
+    driver = make_driver(resources)
+
+    with pytest.raises(RuntimeError, match="grading failed"):
+        await driver.run_harness(request(), body(), adapter)
+
+    assert adapter.prepared and "/close_session" not in resources.calls
 
 
 def test_a_bookmark_of_another_version_or_shape_is_refused() -> None:

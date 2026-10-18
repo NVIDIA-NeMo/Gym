@@ -98,7 +98,7 @@ async def run_instance(
     # Set up logger
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / LOG_INSTANCE
-    logger = setup_logger(instance_id, log_file)
+    logger = setup_logger(f"{run_id}-{instance_id}", log_file)
 
     # Run the instance
     container = None
@@ -250,10 +250,11 @@ async def run_instance(
         if rm_image:
             remove_image(client, test_spec.instance_image_key, logger)
         close_logger(logger)
-        return {
-            "completed": eval_completed,
-            "resolved": report.get(instance_id, {}).get("resolved", False),
-        }
+    # Returning from finally would swallow cancellation of an interrupted verification.
+    return {
+        "completed": eval_completed,
+        "resolved": report.get(instance_id, {}).get("resolved", False),
+    }
 
 
 ########################################
