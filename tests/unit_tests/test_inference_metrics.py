@@ -795,3 +795,100 @@ sglang:generation_tokens_total{{model_name="test",engine_type="{role}",is_stream
         assert result[f"sglang/max/{name}/tp_rank/0"] == 0.6
     assert result["sglang/min/cache_hit_rate/tp_rank/0"] == 0.2
     assert all(key.startswith("sglang/") for key in result)
+
+
+INVENTORY = """# TYPE vllm:mooncake_cache_layout gauge
+vllm:mooncake_cache_layout{scope="model",prefix="model@rank0",kind="mamba"} 1
+vllm:mooncake_cache_layout{scope="model",prefix="model@rank1",kind="mamba"} 1
+# TYPE vllm:cache_inventory gauge
+vllm:cache_inventory{engine="0",kind="mamba",measure="distinct_prefixes"} 12
+vllm:cache_inventory{engine="1",kind="mamba",measure="distinct_prefixes"} 8
+"""
+
+
+async def test_inventory_default_off_never_requests_master(monkeypatch):
+    collector = InferenceMetricsCollector(config(mooncake_endpoint="http://localhost:9003/metrics"))
+    request = AsyncMock()
+    monkeypatch.setattr(metrics_module, "request", request)
+    assert collector.parse("replica0", GAUGES + INVENTORY, 10) == {"vllm/replica0/num_requests_running": 7}
+    assert not collector.cache_layouts
+    await collector.report_cache_inventory()
+    request.assert_not_called()
+
+
+async def test_inventory_http_expected_layout_and_zero_counts(monkeypatch):
+    app = web.Application()
+    bodies = []
+
+    async def serve(request):
+        bodies.append(await request.json())
+        return web.json_response(
+            {
+                "counts": {"mamba.complete_prefixes": 0, "mamba.incomplete_prefixes": 3},
+                "snapshot_timestamp_seconds": 123,
+                "scan_seconds": 0.01,
+            }
+        )
+
+    app.router.add_post("/cache_inventory", serve)
+    publish = MagicMock()
+    monkeypatch.setattr(metrics_module, "export_metrics", publish)
+    async with TestServer(app) as server, ClientSession() as session:
+        monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT", session)
+        collector = InferenceMetricsCollector(
+            config(cache_inventory=True, mooncake_endpoint=str(server.make_url("/metrics")))
+        )
+        values = collector.parse("replica0", INVENTORY, 10)
+        assert values == {
+            "vllm/replica0/cache_inventory/engine/0/kind/mamba/measure/distinct_prefixes": 12,
+            "vllm/replica0/cache_inventory/engine/1/kind/mamba/measure/distinct_prefixes": 8,
+        }
+        collector.parse("replica1", INVENTORY, 10)
+        await collector.report_cache_inventory()
+    assert bodies == [
+        {
+            "tenant_id": "default",
+            "namespaces": [
+                {"scope": "model", "prefix": "model@rank0", "kind": "mamba"},
+                {"scope": "model", "prefix": "model@rank1", "kind": "mamba"},
+            ],
+        }
+    ]
+    assert publish.call_args.args[0] == {
+        "mooncake/total/cache_inventory/mamba/complete_prefixes": 0,
+        "mooncake/total/cache_inventory/mamba/incomplete_prefixes": 3,
+        "mooncake/total/cache_inventory/snapshot_timestamp_seconds": 123,
+        "mooncake/total/cache_inventory/scan_seconds": 0.01,
+    }
+
+
+async def test_slow_inventory_does_not_block_scrapes_and_is_cancelled(monkeypatch):
+    collector = InferenceMetricsCollector(
+        config(cache_inventory=True, interval_s=0.001, mooncake_endpoint="http://localhost:9003/metrics")
+    )
+    stop, started, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    samples = 0
+
+    async def scrape(replica, url):
+        nonlocal samples
+        if replica == "replica0":
+            samples += 1
+            collector.parse(replica, INVENTORY, samples)
+            if samples == 3:
+                stop.set()
+        return {"vllm/replica0/num_requests_running": 1}
+
+    async def inventory():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    monkeypatch.setattr(collector, "scrape", scrape)
+    monkeypatch.setattr(collector, "report_cache_inventory", inventory)
+    monkeypatch.setattr(metrics_module, "export_metrics", MagicMock())
+    await asyncio.wait_for(collector.run(stop), 1)
+    assert samples == 3
+    assert started.is_set() and cancelled.is_set()
+    assert collector._inventory_task is None

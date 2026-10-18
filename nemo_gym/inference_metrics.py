@@ -20,7 +20,7 @@ import math
 from contextlib import asynccontextmanager
 from time import monotonic
 from typing import AsyncIterator
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
 from aiohttp import ClientTimeout
 from prometheus_client.openmetrics.parser import text_string_to_metric_families as openmetrics_to_metric_families
@@ -75,6 +75,10 @@ class InferenceMetricsConfig(BaseModel, extra="forbid"):
     mooncake_endpoint: HttpUrl | None = Field(
         default=None, description="Single Mooncake master /metrics URL for storage usage and eviction metrics."
     )
+    cache_inventory: bool = Field(default=False, description="Enable expensive debug cache inventory snapshots.")
+    cache_inventory_interval_s: float = Field(default=10.0, ge=10, allow_inf_nan=False)
+    cache_inventory_timeout_s: float = Field(default=10.0, gt=0, allow_inf_nan=False)
+    mooncake_tenant_id: str = "default"
     interval_s: float = Field(default=5.0, gt=0, allow_inf_nan=False)
     timeout_s: float = Field(default=2.0, gt=0, allow_inf_nan=False)
     metrics: list[str] | None = Field(
@@ -108,10 +112,14 @@ class InferenceMetricsCollector:
         self.config = config
         self.previous: dict[str, tuple[float, float]] = {}
         self.failed: set[str] = set()
+        self.cache_layouts: dict[str, set[tuple[str, str, str]]] = {}
+        self._next_inventory_at = 0.0
+        self._inventory_task: asyncio.Task[None] | None = None
 
     def parse(self, replica: str, payload: str, sampled_at: float, *, content_type: str = "") -> dict[str, float]:
         """Aggregate labeled series and derive reset-aware counter and histogram rates."""
         result = {}
+        cache_layout: set[tuple[str, str, str]] = set()
         gauge_counts = {}
         incomplete_rates = set()
         # OpenMetrics declares counters without the sample's `_total` suffix.
@@ -125,6 +133,16 @@ class InferenceMetricsCollector:
             if family.type not in {"gauge", "counter", "histogram"}:
                 continue
             for sample in family.samples:
+                if sample.name == "vllm:mooncake_cache_layout":
+                    if (
+                        self.config.cache_inventory
+                        and sample.value == 1
+                        and all(sample.labels.get(k) for k in ("scope", "prefix", "kind"))
+                    ):
+                        cache_layout.add(tuple(sample.labels[k] for k in ("scope", "prefix", "kind")))
+                    continue
+                if sample.name == "vllm:cache_inventory" and not self.config.cache_inventory:
+                    continue
                 is_mooncake_master = replica == "mooncake" and (
                     (family.type == "gauge" and sample.name in MOONCAKE_STORAGE_GAUGES | MOONCAKE_EVICTION_GAUGES)
                     or (family.type == "counter" and family.name.removesuffix("_total") in MOONCAKE_EVICTION_COUNTERS)
@@ -150,7 +168,8 @@ class InferenceMetricsCollector:
                 suffix = "".join(
                     f"/{label}/{value.strip('/')}"
                     for label, value in sorted(sample.labels.items())
-                    if label not in {"engine", "model_name"}
+                    if label != "model_name"
+                    and (label != "engine" or name == "cache_inventory")
                     # Role is already captured by replica names (prefill0/decode0).
                     # Keep rank, mode, priority and histogram labels distinct.
                     and not (namespace == "sglang" and label == "engine_type")
@@ -181,6 +200,8 @@ class InferenceMetricsCollector:
             result[key] /= count
         for key in incomplete_rates:
             result.pop(key, None)
+        if self.config.cache_inventory:
+            self.cache_layouts[replica] = cache_layout
         self.add_derived_metrics(result, f"vllm/{replica}/")
         allocated = result.get("mooncake/total/allocated_bytes")
         capacity = result.get("mooncake/total/total_capacity_bytes")
@@ -221,6 +242,7 @@ class InferenceMetricsCollector:
                 self.failed.remove(replica)
             return metrics
         except Exception as exc:
+            self.cache_layouts.pop(replica, None)
             if replica not in self.failed:
                 # Avoid logging endpoint URLs, which may contain credentials.
                 logger.warning(
@@ -229,8 +251,65 @@ class InferenceMetricsCollector:
                 self.failed.add(replica)
             return None
 
+    async def report_cache_inventory(self) -> None:
+        """Ask the master for logical objects, using the expected worker namespaces.
+
+        This observes metadata only: no Get calls, leases, or recency changes.
+        Complete Mamba prefixes do not imply complete attention coverage.
+        """
+        if not self.config.cache_inventory:
+            return
+        namespaces = sorted(set().union(*self.cache_layouts.values())) if self.cache_layouts else []
+        if self.config.mooncake_endpoint is None or not namespaces:
+            return
+        parts = urlsplit(str(self.config.mooncake_endpoint))
+        path = parts.path.removesuffix("/metrics").rstrip("/") + "/cache_inventory"
+        url = urlunsplit(parts._replace(path=path, query="", fragment=""))
+        payload = {
+            "tenant_id": self.config.mooncake_tenant_id,
+            "namespaces": [{"scope": scope, "prefix": prefix, "kind": kind} for scope, prefix, kind in namespaces],
+        }
+        try:
+            async with asyncio.timeout(self.config.cache_inventory_timeout_s):
+                response = await request(
+                    "POST",
+                    url,
+                    json=payload,
+                    _max_connection_retries=0,
+                    timeout=ClientTimeout(total=self.config.cache_inventory_timeout_s),
+                )
+                async with response:
+                    response.raise_for_status()
+                    snapshot = await response.json()
+            values = dict(snapshot["counts"])
+            values["snapshot_timestamp_seconds"] = snapshot["snapshot_timestamp_seconds"]
+            values["scan_seconds"] = snapshot["scan_seconds"]
+            if not all(isinstance(v, (int, float)) and math.isfinite(v) and v >= 0 for v in values.values()):
+                raise ValueError("Invalid cache inventory counts")
+            export_metrics(
+                {f"mooncake/total/cache_inventory/{key.replace('.', '/')}": value for key, value in values.items()}
+            )
+            logger.info("Mooncake cache inventory (logical objects; Mamba completeness only): %s", values)
+            self.failed.discard("cache_inventory")
+        except Exception as exc:
+            if "cache_inventory" not in self.failed:
+                logger.warning(
+                    "Mooncake cache inventory unavailable (%s); continuing (requires a master with /cache_inventory)",
+                    type(exc).__name__,
+                )
+                self.failed.add("cache_inventory")
+
     async def run(self, stop: asyncio.Event) -> None:
         """Sample immediately, then periodically until the rollout scope closes."""
+        try:
+            await self._sample_loop(stop)
+        finally:
+            if self._inventory_task is not None:
+                self._inventory_task.cancel()
+                await asyncio.gather(self._inventory_task, return_exceptions=True)
+                self._inventory_task = None
+
+    async def _sample_loop(self, stop: asyncio.Event) -> None:
         while not stop.is_set():
             endpoints = [*self.config.endpoints.items(), *self.config.router_endpoints.items()]
             if self.config.mooncake_endpoint is not None:
@@ -238,6 +317,15 @@ class InferenceMetricsCollector:
             snapshots = await asyncio.gather(
                 *(self.scrape(name, url) for name, url in endpoints),
             )
+            if (
+                self.config.cache_inventory
+                and self.config.mooncake_endpoint is not None
+                and any(self.cache_layouts.values())
+                and (self._inventory_task is None or self._inventory_task.done())
+                and monotonic() >= self._next_inventory_at
+            ):
+                self._next_inventory_at = monotonic() + self.config.cache_inventory_interval_s
+                self._inventory_task = asyncio.create_task(self.report_cache_inventory())
             aggregates = {}
             for namespace in ("vllm", "sglang"):
                 # Match metric and label paths; missing replicas/series are not zeros.
@@ -256,6 +344,8 @@ class InferenceMetricsCollector:
                     values = [metrics[metric] for metrics in replica_metrics]
                     total = sum(values)
                     name = metric.split("/", 1)[0]
+                    if name == "cache_inventory":
+                        continue  # Keep per-engine inventories; hashes are not globally additive.
                     nonadditive = namespace == "sglang" and name in SGLANG_MEAN_GAUGES
                     if name != "prefix_cache_hit_rate" and not nonadditive:
                         aggregates[f"{namespace}/total/{metric}"] = total

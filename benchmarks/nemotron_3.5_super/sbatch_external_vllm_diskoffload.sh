@@ -34,6 +34,12 @@ set -euo pipefail
 # caches. Keep the same GPU type and
 # serving config; changed kernels/configs may need fresh tuning. Mounted model
 # weights, GPU memory and CUDA graphs are not captured. Output must not already exist.
+# Opt-in debug inventory: 0 disables all scans; 10 samples every ten seconds.
+VLLM_CACHE_INVENTORY_INTERVAL="${VLLM_CACHE_INVENTORY_INTERVAL:-0}"
+if [[ ! "$VLLM_CACHE_INVENTORY_INTERVAL" =~ ^(0|[1-9][0-9]{1,5})$ ]]; then
+    echo "ERROR: VLLM_CACHE_INVENTORY_INTERVAL must be 0 or an integer from 10 to 999999." >&2
+    exit 1
+fi
 VLLM_MODE="${VLLM_MODE:-pd}"
 VLLM_ENGINES_PER_NODE="${VLLM_ENGINES_PER_NODE:-1}"
 case "$VLLM_MODE" in
@@ -212,6 +218,9 @@ read -r -a nodes <<< "\$ALL_NODES"
                 "\$replica_index" "\${nodes[node_index]}" "\$worker_port"
         done
     done
+    if (( $VLLM_CACHE_INVENTORY_INTERVAL > 0 )); then
+        printf '  cache_inventory: true\n  cache_inventory_interval_s: %s\n' "$VLLM_CACHE_INVENTORY_INTERVAL"
+    fi
     printf '  router_endpoints:\n    main: "http://%s:$ROUTER_METRICS_PORT/metrics"\n' "\$ROUTER_NODE"
     if (( $ENABLE_MOONCAKE )); then
         printf '  mooncake_endpoint: "http://%s:9003/metrics"\n' "\${nodes[0]}"
@@ -270,6 +279,7 @@ set -euo pipefail
 
 # Generic vLLM environment variables.
 export VLLM_USE_FASTOKENS=1
+export VLLM_CACHE_INVENTORY_INTERVAL=$VLLM_CACHE_INVENTORY_INTERVAL
 export VLLM_ENGINE_READY_TIMEOUT_S="$VLLM_ENGINE_READY_TIMEOUT_S"
 
 # @bxyu-nvidia: This timeout keep_alive helps reduce connection reset errors between vllm-router and the prefill/decode instances.
