@@ -91,27 +91,31 @@ code. Invalid exec configuration and sandbox errors confirmed stopped by a statu
 immediately. Running or unknown sandboxes may retry transient probe failures. With
 `probe.deadline_s: null`, the first failed probe raises rather than polling indefinitely.
 
-Failed or cancelled creation attempts cleanup before returning. Cleanup can extend the readiness
+Failed or cancelled creates attempt cleanup before returning. Cleanup can extend the readiness
 deadline: each close attempt is bounded by `operations.close_timeout_s` (60 seconds by default).
 When allocation is still in flight, the provider allows that same cleanup budget to obtain its
 id and terminate it. If no id arrives in time, it cancels the local request and logs the App name;
 a remote allocation may still exist and its TTL is the final cleanup backstop. The TTL also
 protects against the client process being killed; it does not replace normal `stop()` calls.
 
-SDK timeout exceptions and the SDK's `-1` exit sentinel return
-`SandboxExecResult(error_type="timeout", return_code=125)`. Worker-side deadlines can instead
-surface as signal exits (for example, 137). The provider classifies signal-range exit codes
-129–192 as timeouts when dispatch-to-wait-completion time meets the timeout passed to Modal
+Modal 1.5.5 and 1.6.1 return `-1` when the client deadline expires; this is the common timeout
+result observed in live validation with 1.5.5. That sentinel and SDK timeout exceptions return
+`SandboxExecResult(error_type="timeout", return_code=125)`. As a fallback, a worker kill that
+arrives before the client deadline can surface as a signal exit (for example, 137). The provider
+classifies signal-range exit codes 129–192 as timeouts when dispatch-to-wait-completion time meets the timeout passed to Modal
 (rounded up to whole seconds). This is a heuristic: a coincident explicit exit, OOM, unrelated
-signal, or delayed dispatch can be indistinguishable from a deadline. Live validation of this
-worker-timeout path is still pending. Early signals, signals without a deadline, and ordinary
-nonzero exits retain their process result. Slow output draining does not affect classification.
+signal, or delayed dispatch can be indistinguishable from a deadline. The live timeout check
+exercised the `-1` sentinel, not this signal fallback. Early signals, signals without a deadline,
+and ordinary nonzero exits retain their process result. Slow output draining does not affect
+classification.
 
 A sandbox that disappears, rejects exec, or loses its client/transport returns
 `error_type="sandbox"` with code 125, without replaying the command. Both error types retain
 captured stdout and stderr, decoded with UTF-8 replacement. Exec sends EOF and drains stdin
-concurrently with output and process waiting, so stdin readers can finish. Expected stdin-close
-errors after confirmed process exit do not replace the exit result.
+concurrently with output and process waiting, so stdin readers can finish. Once process waiting
+returns an exit code, stdin-drain errors do not replace that result. Transport errors, including
+`grpclib.exceptions.StreamTerminatedError`, return sandbox errors when the exit is unconfirmed
+or output collection fails.
 
 Modal limits the combined exec argv to 65,536 characters, including the shell wrapper and any
 user rewrite. An oversized command returns a sandbox error before dispatch; upload a script
@@ -126,19 +130,14 @@ Use an explicit exec timeout and let the owner coordinate cleanup before reusing
 On an owned handle, cancellation can remove logs; use exec's `timeout_s` to retain the sandbox
 and its files after a command deadline. Cleanup failures preserve the original interruption.
 
-
-File operations use Modal's streaming filesystem API. Reads have the SDK's 5 GB limit. Missing
-remote files become `FileNotFoundError`; other SDK filesystem errors are preserved.
-
 `close()` waits for remote termination and detaches the SDK connection within its cleanup
-budget. The handle is retained if cleanup fails so it can be retried. Serialized handles
-reconnect through `modal.Sandbox.from_id`.
+budget. The handle is retained if cleanup fails so it can be retried.
 
 ## Files, Ports, and Reconnection
 
-Uploads and downloads use Modal's streaming filesystem APIs. Uploads create missing parent
-directories; downloads use the SDK's atomic local replacement behavior. A missing remote path
-becomes `FileNotFoundError`, while permission and other filesystem errors retain their SDK
+Uploads and downloads use Modal's streaming filesystem APIs. Reads have the SDK's 5 GB limit.
+Uploads create missing parent directories; downloads use the SDK's atomic local replacement
+behavior. A missing remote path becomes `FileNotFoundError`, while permission and other filesystem errors retain their SDK
 types.
 
 The default `create.port_mode: encrypted` places Modal TLS termination in front of a plaintext

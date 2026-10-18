@@ -288,6 +288,8 @@ class ModalProbeConfig:
     def __post_init__(self) -> None:
         if self.command is not None and (not isinstance(self.command, str) or not self.command.strip()):
             raise ValueError("probe.command must be a non-empty string or null")
+        if self.expected_stdout is not None and not isinstance(self.expected_stdout, str):
+            raise ValueError("probe.expected_stdout must be a string or null")
         _validate_optional_number("probe.timeout_s", self.timeout_s, positive=True, allow_none=False)
         _validate_optional_number("probe.deadline_s", self.deadline_s, positive=True)
         _validate_positive_int("probe.stable_count", self.stable_count)
@@ -367,6 +369,8 @@ class _ModalSandbox:
     declared_ports: tuple[int, ...]
     app_name: str
     port_mode: str = "encrypted"
+    # Ownership is local, never serialized. connect() borrows: interruption
+    # preserves the owner's sandbox, but explicit close() always terminates it.
     owns_sandbox: bool = True
 
 
@@ -425,6 +429,10 @@ class ModalProvider:
 
     def _exception_types(self, modal: Any) -> dict[str, tuple[type, ...]]:
         """Group Modal exception classes by how the provider should treat them."""
+        # Imported only after Modal is required; grpclib is its transport dependency.
+        # The command router can re-raise this unchanged after exhausting retries.
+        from grpclib.exceptions import StreamTerminatedError
+
         exc = getattr(modal, "exception", None)
 
         def pick(*names: str) -> tuple[type, ...]:
@@ -455,7 +463,7 @@ class ModalProvider:
                 "InternalError",
                 "ServiceError",
             )
-            + (ConnectionError,),
+            + (ConnectionError, StreamTerminatedError),
             "stdin_closed": pick("ConflictError", "NotFoundError"),
             "retryable": pick("ConnectionError", "InternalError", "ServiceError"),
         }
@@ -824,7 +832,11 @@ class ModalProvider:
         return descriptor
 
     async def connect(self, descriptor: Mapping[str, Any]) -> SandboxHandle:
-        """Rebuild a live handle from ``Sandbox.from_id``."""
+        """Reconnect as a borrower; ownership is not part of the descriptor.
+
+        Interruption preserves the owner's sandbox. Explicit ``close()`` still
+        terminates it, regardless of ownership.
+        """
         if not isinstance(descriptor, Mapping):
             raise TypeError("modal descriptor must be a mapping")
         sandbox_id = descriptor.get("sandbox_id")
@@ -959,12 +971,14 @@ class ModalProvider:
             async def drain_stdin() -> None:
                 try:
                     await process.stdin.drain.aio()
-                except types["stdin_closed"]:
-                    # A short process may exit before EOF is acknowledged.
+                except Exception as exc:
+                    # Once wait() returns an exit code, a failed EOF acknowledgement
+                    # must not turn that process result into a sandbox error.
                     if wait_task.done() and not wait_task.cancelled() and wait_task.exception() is None:
                         return
-                    if await process.poll.aio() is None:
-                        raise
+                    if isinstance(exc, types["stdin_closed"]) and await process.poll.aio() is not None:
+                        return
+                    raise
 
             tasks = [
                 wait_task,

@@ -873,3 +873,138 @@ async def test_readiness_retries_and_consecutive_success_contract(fake_modal, sc
         else:
             await provider.create(_spec())
     assert len(calls) == {"transient": 2, "unknown": 2, "consecutive": 4, "no_deadline": 1}[scenario]
+
+
+@pytest.mark.parametrize("error", ["ServiceError", "ConnectionError", "builtin", "stream", "ValueError"])
+@pytest.mark.parametrize("returncode", [0, 7])
+async def test_completed_exit_wins_over_any_stdin_drain_error(fake_modal, error, returncode):
+    modal, created = fake_modal()
+    from grpclib.exceptions import StreamTerminatedError
+
+    exception = {
+        "builtin": ConnectionError,
+        "stream": StreamTerminatedError,
+        "ValueError": ValueError,
+    }.get(error, getattr(modal.exception, error, None))
+    provider = _provider(probe={"command": None})
+    handle = await provider.create(_spec())
+    process = FakeProcess(stdout="saved output", returncode=returncode)
+    exited = asyncio.Event()
+
+    async def wait():
+        exited.set()
+        return returncode
+
+    async def drain():
+        await exited.wait()
+        raise exception("EOF acknowledgement lost")
+
+    process.wait = _Aio(wait)
+    process.stdin.drain = _Aio(drain)
+    created[0].exec_script = {"work": process}
+    result = await provider.exec(handle, "work")
+    assert (result.return_code, result.error_type, result.stdout, result.stderr) == (
+        returncode,
+        None,
+        "saved output",
+        "",
+    )
+    assert created[0].terminated == 0 and handle.raw is not None
+
+
+@pytest.mark.parametrize("phase", ["dispatch", "stdout", "wait", "stdin"])
+async def test_router_stream_termination_is_a_sandbox_result_without_replay(fake_modal, phase):
+    _, created = fake_modal()
+    from grpclib.exceptions import StreamTerminatedError
+
+    provider = _provider(probe={"command": None}, operations={"retries": 3})
+    handle = await provider.create(_spec())
+    process = FakeProcess(wait_delay=30)
+
+    async def fail():
+        raise StreamTerminatedError("router stream lost")
+
+    class PartialStream:
+        async def __aiter__(self):
+            yield b"partial output"
+            raise StreamTerminatedError("router stream lost")
+
+    if phase == "stdout":
+        process.stdout = PartialStream()
+    elif phase == "wait":
+        process.wait = _Aio(fail)
+    elif phase == "stdin":
+        process.stdin.drain = _Aio(fail)
+    created[0].exec_script = {"work": StreamTerminatedError("router stream lost") if phase == "dispatch" else process}
+    async with asyncio.timeout(0.5):
+        result = await provider.exec(handle, "work")
+    assert result.return_code == 125 and result.error_type == "sandbox"
+    assert "router stream lost" in result.stderr
+    if phase == "stdout":
+        assert result.stdout == "partial output"
+    assert len(created[0].exec_calls) == 1
+
+
+@pytest.mark.parametrize("value", [1, True, [], {}])
+def test_probe_expected_stdout_rejected_before_allocation(fake_modal, value):
+    modal, created = fake_modal()
+    with pytest.raises(ValueError, match="expected_stdout"):
+        _provider(probe={"expected_stdout": value})
+    assert not modal.App.lookups and not created
+
+
+@pytest.mark.parametrize("expected_stdout", [None, ""])
+async def test_probe_accepts_optional_or_empty_expected_stdout(fake_modal, expected_stdout):
+    fake_modal(exec_script={"printf ok": FakeProcess(stdout="anything")})
+    await _provider(probe={"expected_stdout": expected_stdout}).create(_spec())
+
+
+async def test_probe_waits_for_expected_stdout_and_sleeps_between_attempts(fake_modal, monkeypatch):
+    from nemo_gym.sandbox.providers.modal import provider as module
+
+    outputs = iter(["starting", "ok"])
+    _, created = fake_modal(exec_script={"printf ok": lambda argv, kwargs: FakeProcess(stdout=next(outputs))})
+    sleeps = []
+    real_sleep = asyncio.sleep
+
+    async def recording_sleep(delay):
+        sleeps.append(delay)
+        await real_sleep(0)
+
+    monkeypatch.setattr(module.asyncio, "sleep", recording_sleep)
+    await _provider(probe={"stable_delay_s": 0.25}).create(_spec())
+    assert len(created[0].exec_calls) == 2 and sleeps == [0.25]
+
+
+async def test_signal_timeout_clock_starts_before_exec_dispatch(fake_modal, monkeypatch):
+    from nemo_gym.sandbox.providers.modal import provider as module
+
+    _, created = fake_modal()
+    provider = _provider(probe={"command": None})
+    handle = await provider.create(_spec())
+    now = [0.0]
+    process = FakeProcess(returncode=137)
+
+    async def dispatch(*argv, **kwargs):
+        # A worker deadline can start before the exec-start response arrives.
+        now[0] = 0.5
+        return process
+
+    async def wait():
+        now[0] = 2.2
+        return 137
+
+    process.wait = _Aio(wait)
+    created[0].exec = _Aio(dispatch)
+    monkeypatch.setattr(module, "monotonic", lambda: now[0])
+    result = await provider.exec(handle, "work", timeout_s=2)
+    assert result.return_code == 125 and result.error_type == "timeout"
+
+
+async def test_lifecycle_options_reach_sandbox_create(fake_modal):
+    _, created = fake_modal()
+    await _provider(probe={"command": None}).create(
+        _spec(provider_options={"idle_timeout_s": 1.2, "cloud": "oci", "name": "task-17"})
+    )
+    kwargs = created[0].create_kwargs
+    assert (kwargs["idle_timeout"], kwargs["cloud"], kwargs["name"]) == (2, "oci", "task-17")
