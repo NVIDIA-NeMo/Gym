@@ -319,6 +319,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         loop_started = time.monotonic()
         deadline = loop_started + self.config.rollout_timeout_s if self.config.rollout_timeout_s is not None else None
         timed_out = False
+        stop_reason = None  # why the loop ended: answered / max_steps / context_full / timeout
         model_response = None
 
         # --- Progress board state (ported from the reference harness) ---
@@ -551,6 +552,8 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             usage = accumulate_response_usage(usage, model_response.usage)
 
             if model_response.incomplete_details and model_response.incomplete_details.reason == "max_output_tokens":
+                # The model server also returns this for a context overflow (empty, length-cut response).
+                stop_reason = "context_full"
                 break
 
             # --- If the model decided to answer (no tool calls), we are done ---
@@ -559,6 +562,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 o for o in output if o.type == "message" and o.role == "assistant"
             ]
             if not all_fn_calls and all_output_messages:
+                stop_reason = "answered"
                 break
 
             # --- Execute tool calls ---
@@ -729,6 +733,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             # Check if max steps is not None and if we have exhausted it.
             if self.config.max_steps and step >= self.config.max_steps:
                 print(f"[browsecomp][max_steps][{qid}] step={step} max_steps={self.config.max_steps}", flush=True)
+                stop_reason = "max_steps"
                 break
 
         # --- Board-answer fallback (ported from an internal reference harness): if the run
@@ -814,6 +819,8 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         model_response.num_tool_calls = num_tool_calls
         model_response.pre_reset_warning_steps = pre_reset_warning_steps
         model_response.timed_out = timed_out
+        # RL mask rules key on this field (e.g. env.mask_sample_rules: field response.stop_reason).
+        model_response.stop_reason = "timeout" if timed_out else stop_reason
         if timed_out:
             model_response.status = "incomplete"
         return model_response
