@@ -817,6 +817,21 @@ class TestComposeVariablesAndEnvFile:
         }
         assert record_compose_images([task], tmp_path, client=FakeClient()) is not None
 
+    def test_a_deployment_value_with_dollars_is_literal_to_the_document_too(self, tmp_path):
+        """Review (round 32): the deployment's `compose_variables` were merged in raw while every other source is
+        escaped, so a seed value `abc$XYZ` failed the residual check and `pa$$word` reached the service as
+        `pa$word`."""
+        write_task(
+            tmp_path,
+            "ctr",
+            compose="services:\n  api:\n    image: redis:7\n    environment:\n      - KEY=${KEY}\n      - PASS=${PASS}\n",
+        )
+        (task,) = discover_tasks(tmp_path)
+        document = load_compose_document(task, operator_variables={"KEY": "abc$XYZ", "PASS": "pa$$word"})
+        environment = document["services"]["api"]["environment"]
+        assert environment == {"KEY": "abc$$XYZ", "PASS": "pa$$$$word"}
+        assert _compose_literals(environment) == {"KEY": "abc$XYZ", "PASS": "pa$$word"}
+
     def test_a_residual_is_reported_by_its_key_path_and_no_host_value_reaches_the_message(self, tmp_path, monkeypatch):
         monkeypatch.setenv("DB_PASS", "$2b$12$abcHASH")
         write_task(
