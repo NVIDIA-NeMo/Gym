@@ -68,6 +68,21 @@ a sandbox group when a `compose-images.json` with the sidecar images' recorded O
 the task folders, written by `gym dataset fetch`; on OpenSandbox the provider block also needs
 `networking.enabled: true` (with `loopback_forwarding`) and `runtime_requirements.shm_size_metadata_key` (see
 [Compose tasks on OpenSandbox](#compose-tasks-on-opensandbox)); each service's working directory is created once its sandbox is up, as Docker creates a missing `working_dir` or `WORKDIR` at container create. `[environment.healthcheck]` is polled at seed.
+A Compose file's `${NAME}` resolves as Harbor's `docker compose` would: Gym's infrastructure variables, the task's
+`[environment].env`, the process environment, then `environment/.env`; a name none of them sets is an empty string
+at prepare, with one warning. The server's `compose_variables` fill such names at seed, below everything the task
+and Harbor set: each maps a name to a literal `value`, a process `env` variable, or a `model_server`, whose
+sandbox-reachable URL with the episode's rollout prefix becomes the value (a sidecar's model calls are then
+recorded with the rollout and never become training tokens). A name still unset at seed fails the episode
+terminally, before provisioning. A document holding such values is written to a private folder removed once the
+group starts, not under `artifacts_dir`.
+
+```yaml
+compose_variables:
+  LITELLM_BASE_URL: {model_server: user_model}
+  LITELLM_API_KEY: {env: USER_MODEL_API_KEY}
+  SIM_USER_MODEL: {value: gpt-5.5}
+```
 Tasks that declare GPUs run on the `gpu_sandbox_provider` block when one is set. The task's
 `[[environment.mcp_servers]]` and `skills_dir` are written to `/tmp/.nemo-gym/task.json` in the agent's
 sandbox for harnesses that drive task MCP servers from inside it (mini-SWE does). With `task_mcp_grants:
