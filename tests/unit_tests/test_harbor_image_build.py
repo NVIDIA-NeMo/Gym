@@ -138,6 +138,54 @@ class TestPrepareBuilds:
         )
         assert "Built image recorded for a, b" in capsys.readouterr().out
 
+    def test_a_forced_task_is_recorded_when_every_image_of_its_context_is_already_recorded(
+        self, tmp_path, fake_builder, monkeypatch
+    ):
+        """Review (CI bot, round 34): two tasks share a context, `d` builds its Dockerfile and `e` declares a
+        `docker_image`. A prepare under `builds.force` after `main` is recorded plans `e` as forced, but the
+        complete-record return skipped `build_images`, whose reuse path is where forced names were recorded, so `e`
+        was absent from `forced_tasks` and the loader kept its declared image: the requested Dockerfile additions
+        silently missing on every repeat preparation. The fast path records them too, and still needs no build tool."""
+        from nemo_gym.tasks.harbor import image_configs
+        from nemo_gym.tasks.harbor.build_options import BuildOptions
+        from nemo_gym.tasks.harbor.cli import prepare_target
+
+        folder = tmp_path / "ds"
+        write_task(folder / "d")
+        write_task(folder / "e", toml=TOML + 'docker_image = "org/prebuilt:1"\n')
+        write_base_record(folder)
+        write_base_record(folder, "org/prebuilt:1")
+        digest = harbor_hash(folder / "d" / "environment")
+
+        prepared = prepare_target(str(folder), output_root=tmp_path / "out", build=BuildOptions())
+
+        assert len(fake_builder) == 1 and prepared.skipped == {}
+        images = {task.task_id: task.image for task in prepared.tasks}
+        built = images["d"]
+        assert built.startswith(f"hb__{digest}") or f"/hb__{digest}" in built
+        assert images["e"] == "org/prebuilt:1"
+        recorded = json.loads((folder / BUILT_IMAGES_FILE).read_text())[digest]
+        assert recorded["tasks"] == ["d"] and "forced_tasks" not in recorded
+
+        # The repeat under force: every image is recorded, so no build tool (and no registry) may be needed.
+        class NoRegistry:
+            def __init__(self, *args, **kwargs):
+                raise AssertionError("the registry was consulted")
+
+        monkeypatch.setattr(image_configs, "RegistryClient", NoRegistry)
+        monkeypatch.setattr(
+            prepare_builds, "ImageBuilder", lambda **kwargs: pytest.fail("a build tool was looked for")
+        )
+
+        prepared = prepare_target(str(folder), output_root=tmp_path / "out", build=BuildOptions(force=True))
+
+        assert prepared.skipped == {}
+        recorded = json.loads((folder / BUILT_IMAGES_FILE).read_text())[digest]
+        assert (recorded["tasks"], recorded["forced_tasks"]) == (["d"], ["e"])
+        assert {task.task_id: task.image for task in prepared.tasks} == {"d": built, "e": built}
+        # And the loader, on its own, now takes the recorded build for e as Harbor's --force-build does.
+        assert load_task(folder / "e").image == built
+
     def test_a_sidecar_named_verifier_is_built_like_any_service_and_not_refused_before_the_build(
         self, tmp_path, fake_builder, monkeypatch
     ):
@@ -535,6 +583,10 @@ class TestBuildOptions:
             BuildOptions.from_config({"builds": {"tool": "kaniko"}})
         with pytest.raises(ValueError, match="`builds.enabled` must be true or false; got 'no'"):
             BuildOptions.from_config({"builds": {"enabled": "no"}})
+        with pytest.raises(ValueError, match="`builds.force` must be true or false; got 'yes'"):
+            BuildOptions.from_config({"builds": {"force": "yes"}})
+        assert BuildOptions.from_config({"builds": {"force": True}}).force is True
+        assert BuildOptions.from_config({}).force is False
         with pytest.raises(ValueError, match="`builds.platform` must be a string; got 1"):
             BuildOptions.from_config({"builds": {"platform": 1}})
         with pytest.raises(ValueError, match="`builds` must be a mapping of tool, repository, platform, enabled"):

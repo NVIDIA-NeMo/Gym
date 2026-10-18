@@ -38,6 +38,7 @@ from nemo_gym.tasks.harbor.records import (
     VERIFIER_SERVICE,
     read_built_images,
     read_image_configs,
+    recorded_forced_tasks,
     recorded_service_images,
 )
 from nemo_gym.tasks.harbor.verifier_env import (
@@ -116,8 +117,10 @@ class HarborTask:
     ``sandbox_user`` is the user the sandbox runs commands as when no user is asked for: the
     default user of the image the sandbox starts from. For a Dockerfile Gym runs itself that is
     the base image's recorded ``User`` (``None`` is root), not the Dockerfile's final ``USER`` or
-    ``[agent].user``; for a declared ``docker_image`` built from a pull-mode Dockerfile it is that
-    Dockerfile's final ``USER``. When neither is known the task's ``user`` stands in for it.
+    ``[agent].user``; for an image prepare built (forced over a declared ``docker_image`` too) it is
+    the built image's recorded ``User``, whatever ``[agent].user`` says; for a declared ``docker_image``
+    built from a pull-mode Dockerfile it is that Dockerfile's final ``USER``. When neither is known the
+    task's ``user`` stands in for it.
 
     ``built_image`` is the image prepare built from the task's ``environment/`` folder when the
     Dockerfile needed a build (``built-images.json``); ``image`` is then that image and the task
@@ -238,6 +241,13 @@ def built_image(task_folder: Path, root: Path | None = None) -> str | None:
     ``root`` is the dataset folder the record sits in (the task's parent by default).
     """
     return built_service_images(task_folder, root).get(MAIN_SERVICE)
+
+
+def _recorded_as_forced(root: Path, task_name: str) -> bool:
+    """Whether any ``built-images.json`` entry of ``root`` records ``task_name`` as built under ``builds.force``
+    over its declared image: one file read, so a declared-image task whose Dockerfile the loader can run pays
+    Harbor's hash of ``environment/`` (the key its own record sits under) only when such a record may exist."""
+    return any(task_name in recorded_forced_tasks(entry) for entry in read_built_images(root).values())
 
 
 def _build_required(dockerfile: Path, reason: Exception, root: Path) -> HarborTaskError:
@@ -370,14 +380,17 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
     built: str | None = None
     context_id: str | None = None
     built_images: dict[str, str] = {}
+    forced_tasks: set[str] = set()
 
     def recorded_builds() -> dict[str, str]:
         # Harbor's hash of environment/ is paid once per task, here, off the server's event loop (load_task runs
         # in a thread there): the build-mode branches and the Compose loader both read the record through it.
-        nonlocal context_id, built_images
+        nonlocal context_id, built_images, forced_tasks
         if context_id is None and dockerfile.parent.is_dir():
             context_id = context_digest(dockerfile.parent)
-            built_images = recorded_service_images(read_built_images(root).get(context_id))
+            record = read_built_images(root).get(context_id)
+            built_images = recorded_service_images(record)
+            forced_tasks = recorded_forced_tasks(record)
         return built_images
 
     # What Docker starts the image with: the record of the image the sandbox runs (built image), or the
@@ -395,12 +408,25 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
         try:
             parsed = parse_dockerfile(dockerfile_text)
         except DockerfileNeedsBuild as exc:
-            if image is None:
-                # Build mode: prepare built the context once and recorded the image next to the tasks.
-                built = recorded_builds().get(MAIN_SERVICE)
-                if built is None:
-                    raise _build_required(dockerfile, exc, root) from exc
+            # Build mode: prepare built the context once and recorded the image next to the tasks. A task that
+            # declares docker_image runs it, unless prepare built its own Dockerfile for it under `builds.force`
+            # (Harbor's --force-build) and recorded the task as forced: that build then wins, as it does in Harbor.
+            # A record of main made for another task of the context, or before the override, is not this task's.
+            built = recorded_builds().get(MAIN_SERVICE)
+            if image is not None and path.name not in forced_tasks:
+                built = None
+            if built is None and image is None:
+                raise _build_required(dockerfile, exc, root) from exc
             parsed = None
+        if parsed is not None and image is not None and _recorded_as_forced(root, path.name):
+            # A pull or overlay mode Dockerfile next to a declared image contributes its settings to that image,
+            # unless prepare built it for this task under `builds.force` (Harbor's --force-build builds the file
+            # whatever it holds): the recorded build then runs as is, its RUN lines, USER and WORKDIR baked in.
+            built = recorded_builds().get(MAIN_SERVICE)
+            if path.name in forced_tasks and built is not None:
+                parsed = None
+            else:
+                built = None
         if built is not None:
             # The built image is pulled like a prebuilt one; its recorded configuration gives the
             # Dockerfile's final WORKDIR, ENV and USER.
@@ -481,8 +507,9 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
     dockerfile_user = user
     if config.agent.user is not None:
         user = str(config.agent.user)
-    # The default user of the image the sandbox starts from (see HarborTask.sandbox_user).
-    if environment.docker_image is None and base_known:
+    # The default user of the image the sandbox starts from (see HarborTask.sandbox_user). A build forced over a
+    # declared docker_image is the image the sandbox starts from too: its own recorded User, never the override.
+    if (environment.docker_image is None or built is not None) and base_known:
         sandbox_user = base_user
     elif environment.docker_image is not None and resolved is not None and (base_known or dockerfile_user):
         sandbox_user = dockerfile_user
