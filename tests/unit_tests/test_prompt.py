@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import json
+import os
 
 import pytest
 import yaml
@@ -85,6 +86,16 @@ class TestLoadPromptConfig:
         config_path.write_text(yaml.dump({"system": "Hello"}))
         with pytest.raises(ValueError):
             load_prompt_config(str(config_path))
+
+    def test_reads_a_pipe(self):
+        # `--prompt-config <(...)` passes a /dev/fd path, which exists but is not a regular file.
+        read_fd, write_fd = os.pipe()
+        os.write(write_fd, b'user: "{question}"\n')
+        os.close(write_fd)
+        try:
+            assert load_prompt_config(f"/dev/fd/{read_fd}").user == "{question}"
+        finally:
+            os.close(read_fd)
 
     def test_caching(self, tmp_path):
         config_path = tmp_path / "prompt.yaml"
@@ -316,3 +327,20 @@ class TestMaterializePrompts:
         with pytest.raises(ConfigPathNotFoundError, match=r"Input file not found: '.*missing.jsonl' \(--input\)"):
             materialize_prompts(str(tmp_path / "missing.jsonl"), str(prompt_path), str(output_path))
         assert not output_path.parent.exists()
+
+    def test_reads_input_from_a_pipe(self, tmp_path):
+        # `-i <(...)` and `-i /dev/stdin` pass a pipe, which exists but is not a regular file.
+        prompt_path = tmp_path / "prompt.yaml"
+        prompt_path.write_text(yaml.dump({"user": "{question}"}))
+        output_path = tmp_path / "output.jsonl"
+        read_fd, write_fd = os.pipe()
+        os.write(write_fd, (json.dumps({"question": "1+1?"}) + "\n").encode())
+        os.close(write_fd)
+        try:
+            materialize_prompts(f"/dev/fd/{read_fd}", str(prompt_path), str(output_path))
+        finally:
+            os.close(read_fd)
+
+        assert json.loads(output_path.read_text())["responses_create_params"]["input"] == [
+            {"role": "user", "content": "1+1?"}
+        ]

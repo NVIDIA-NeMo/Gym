@@ -54,7 +54,7 @@ def load_prompt_config(path: str) -> PromptConfig:
     traceback, and they keep their ``FileNotFoundError`` / ``ValueError`` bases for callers that catch those.
     """
     resolved = _resolve_under_cwd_or_install(path)
-    if not resolved.is_file():
+    if not resolved.exists():
         raise ConfigPathNotFoundError(
             f"Prompt config '{path}' was not found. Check the path is spelled correctly and is relative to your "
             "working directory, an extra root (NEMO_GYM_EXTRA_ROOTS / --search-dir), or the Gym install root."
@@ -140,7 +140,7 @@ def materialize_prompts(input_jsonl: str, prompt_config: str, output_jsonl: str)
     prompt_cfg = load_prompt_config(prompt_config)
     resolved_prompt_path = str(_resolve_under_cwd_or_install(prompt_config))
     # Checked before the output directory is created, so a mistyped input path leaves nothing behind.
-    if not Path(input_jsonl).is_file():
+    if not Path(input_jsonl).exists():
         raise ConfigPathNotFoundError(
             f"Input file not found: '{input_jsonl}' (--input). Check the path is spelled correctly."
         )
