@@ -110,6 +110,21 @@ uv run --project resources_servers/visual_browser playwright install chromium
 ./.venv/bin/gym eval prepare --benchmark webvoyager
 ```
 
+The component servers run from their own venvs, which `uv sync --frozen` does
+not cover: they are resolved when Gym first builds them. To build them with the
+package versions of the scored WebVoyager runs, pass the component constraints
+to uv when the venvs are created:
+
+```bash
+export UV_CONSTRAINT="$PWD/benchmarks/webvoyager/component-constraints.txt"
+```
+
+Without it, a later build picks up newer releases (Pillow 13 instead of 12.3,
+for example); full runs on such venvs had two to three times as many
+unparseable model actions. The visual browser image installs the same versions
+from
+`resources_servers/visual_browser/docker/requirements.lock`.
+
 Install missing Xvfb or xclip system packages before starting the browser. The
 prepare command downloads the maintained source, verifies its SHA-256 and exact
 552-task denominator, renders the dated questions for the reference date in

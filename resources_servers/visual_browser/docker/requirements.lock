@@ -1,9 +1,9 @@
-# Pins for the visual-browser runtime image, exported with 'uv pip freeze' from the
-# visual_browser component venv that ran the WebVoyager 552 reference (Gym
-# 252f0cf33 runtime on cw-dfw, 2026-10-17). Editable Gym installs are omitted;
-# the image installs the checked-out source editable on top of these pins.
+# Pins for the visual-browser runtime image. Same versions as the visual_browser component
+# venv of the WebVoyager 552 reference runtime (Gym ed29912c8, cw-dfw, 2026-10-11) and as
+# benchmarks/webvoyager/component-constraints.txt. Editable Gym installs are omitted; the
+# image installs the checked-out source editable on top of these pins.
 aiohappyeyeballs==2.7.1
-aiohttp==3.14.5
+aiohttp==3.14.4
 aiohttp-cors==0.8.1
 aiosignal==1.4.0
 annotated-doc==0.0.5
@@ -20,19 +20,19 @@ click==8.5.0
 colorful==0.5.8
 cryptography==50.0.2
 datasets==5.1.0
-devtools==0.13.0
+devtools==0.12.2
 dill==0.4.1
-distlib==0.4.4
+distlib==0.4.3
 distro==1.9.0
 docstring-parser==0.18.0
 executing==2.3.0
-fastapi==0.143.3
-filelock==4.2.0
-fonttools==4.67.0
+fastapi==0.143.0
+filelock==4.1.0
+fonttools==4.66.1
 frozenlist==1.8.0
 fsspec==2026.7.0
 google-api-core==2.42.0
-google-auth==2.62.0
+google-auth==2.61.0
 googleapis-common-protos==1.75.5
 greenlet==3.5.6
 grpcio==1.84.0
@@ -59,7 +59,7 @@ mcp==1.30.0
 mdurl==0.1.2
 mouseinfo==0.1.3
 msgpack==1.2.3
-multidict==7.1.0
+multidict==6.9.1
 multiprocess==0.70.19
 numpy==2.5.4
 omegaconf==2.3.1
@@ -74,11 +74,11 @@ opentelemetry-semantic-conventions==0.66b1
 orjson==3.13.0
 packaging==26.3
 pandas==3.0.6
-pillow==13.0.0
+pillow==12.3.0
 pip==26.2.1
-platformdirs==4.13.3
+platformdirs==4.12.4
 playwright==1.55.0
-pluggy==1.7.0
+pluggy==1.6.0
 prometheus-client==0.26.0
 propcache==0.5.4
 proto-plus==1.29.0
@@ -90,9 +90,9 @@ pyasn1==0.6.4
 pyasn1-modules==0.4.2
 pyautogui==0.9.54
 pycparser==3.11
-pydantic==2.14.1
-pydantic-core==2.50.1
-pydantic-settings==2.16.0
+pydantic==2.14.0
+pydantic-core==2.50.0
+pydantic-settings==2.15.0
 pydot==4.0.1
 pyee==13.0.1
 pygetwindow==0.0.9
@@ -106,7 +106,7 @@ pyscreeze==1.0.1
 pytest==9.1.1
 pytest-asyncio==1.4.0
 python-dateutil==2.9.0.post0
-python-discovery==1.6.3
+python-discovery==1.6.2
 python-dotenv==1.2.4
 python-multipart==0.0.32
 python3-xlib==0.15
@@ -119,19 +119,19 @@ rich==15.0.0
 rpds-py==2026.9.1
 scipy==1.18.1
 six==1.17.0
-smart-open==8.0.3
+smart-open==8.0.2
 sniffio==1.3.1
 sse-starlette==3.5.0
-starlette==1.8.0
+starlette==1.7.0
 tqdm==4.70.1
-truststore==0.10.5
+truststore==0.10.4
 typing-extensions==4.16.0
 typing-inspection==0.4.4
 urllib3==2.8.0
 uvicorn==0.54.0
 uvloop==0.23.0
-virtualenv==21.14.8
-wrapt==2.5.1
+virtualenv==21.14.6
+wrapt==2.5.0
 xxhash==4.0.1
 yappi==1.7.6
 yarl==1.25.1
