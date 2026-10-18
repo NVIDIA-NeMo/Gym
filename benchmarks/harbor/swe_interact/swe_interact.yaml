@@ -1,0 +1,36 @@
+# Deployment overlay for SWE-Interact (https://github.com/scaleapi/SWE-Interact) on the Harbor task shape:
+#
+#   gym eval run <SWE-Interact>/data/multiturn --agent codex_agent --sandbox opensandbox \
+#     --config benchmarks/harbor/swe_interact/swe_interact.yaml \
+#     --model-type openai_model --model <model> --model-url <url>
+#
+# Every task runs its five [[steps]] as turns in one Compose group: `main` holds the repository and the agent,
+# and the `user-server` sidecar is the simulated user the agent reaches through the `ask_user` MCP tool.
+
+# The tasks' declared images lack repo_exec_server.py, which their Dockerfiles copy in; the published run
+# configs pass Harbor's --force-build for the same reason. Each task's user-server sidecar is built too.
+builds:
+  force: true
+
+harbor_environment_server:
+  environment_servers:
+    harbor:
+      # The agent must reach the sidecar's ask_user tool; an agent that cannot fails its seed instead of
+      # running without the user.
+      task_mcp_grants: required
+      # Atlas refactoring tasks budget about 26,000 s of agent and verifier time across their turns.
+      default_episode_timeout_seconds: 32400
+      # The simulated user's model: a Gym model server, reached from inside the sandbox under the episode's
+      # rollout prefix, so its calls are recorded with the rollout and never become training tokens.
+      compose_variables:
+        LITELLM_BASE_URL: {model_server: user_model}
+        LITELLM_API_KEY: {value: unused}
+        SIM_USER_MODEL: {value: gpt-5.5}
+
+user_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.env:USER_MODEL_BASE_URL}
+      openai_api_key: ${oc.env:USER_MODEL_API_KEY}
+      openai_model: ${oc.env:USER_MODEL_NAME,gpt-5.5}
