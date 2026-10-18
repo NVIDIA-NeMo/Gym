@@ -8,6 +8,7 @@ with a build section and the separate verifier's tests entry.
 """
 
 import hashlib
+import json
 import shutil
 
 import pytest
@@ -15,6 +16,9 @@ import pytest
 from nemo_gym.tasks.harbor.build_plan import BuildConflict, BuildError, detect_tool, needs_build, plan_builds
 from nemo_gym.tasks.harbor.digest import context_digest
 from nemo_gym.tasks.harbor.harbor_compat import environment_content_hash
+from nemo_gym.tasks.harbor.image_build import build_images
+from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE
+from nemo_gym.tasks.harbor.task import load_task
 from tests.unit_tests.harbor_build_helpers import (
     BUILD_DOCKERFILE,
     OVERLAY_DOCKERFILE,
@@ -23,6 +27,7 @@ from tests.unit_tests.harbor_build_helpers import (
     TOML,
     UBUNTU_RECORD,
     harbor_hash,
+    local_docker,
     settled,
     tagged_buildah,
     write_base_record,
@@ -186,6 +191,41 @@ class TestPlan:
         task = write_task(tmp_path / "solo")
         (plan,) = plan_builds(task)
         assert plan.tasks == ("solo",)
+
+    def test_force_builds_the_dockerfile_of_a_task_that_declares_an_image(self, tmp_path):
+        # Harbor's --force-build: SWE-Interact's declared images lack what its Dockerfiles COPY in.
+        folder = tmp_path / "ds"
+        write_task(folder / "e", toml=TOML + 'docker_image = "org/prebuilt:1"\n')
+        assert plan_builds(folder) == []
+        (entry,) = plan_builds(folder, force=True)
+        assert (entry.tasks, entry.service) == (("e",), "main")
+
+    def test_a_recorded_build_wins_over_the_declared_image(self, tmp_path):
+        folder = tmp_path / "ds"
+        task_dir = write_task(folder / "e", toml=TOML + 'docker_image = "org/prebuilt:1"\n')
+        assert load_task(task_dir).image == "org/prebuilt:1"
+        built = f"{REPO}/hb__{'2' * 32}@sha256:{'f' * 64}"
+        record = {"image": built}
+        (folder / BUILT_IMAGES_FILE).write_text(json.dumps({context_digest(task_dir / "environment"): record}))
+        # A record of main alone is another task's build of the context, or one from before the override.
+        assert load_task(task_dir).image == "org/prebuilt:1"
+        record["forced_tasks"] = ["e"]
+        (folder / BUILT_IMAGES_FILE).write_text(json.dumps({context_digest(task_dir / "environment"): record}))
+        assert load_task(task_dir).image == built
+
+    def test_a_forced_build_is_recorded_for_its_tasks_built_or_reused(self, tmp_path):
+        folder = tmp_path / "ds"
+        write_task(folder / "d")  # shares the context: its main is planned with or without force
+        write_task(folder / "e", toml=TOML + 'docker_image = "org/prebuilt:1"\n')
+        builder, _ = local_docker()
+        (result,) = build_images(folder, builder=builder, log=lambda _: None)
+        recorded = json.loads((folder / BUILT_IMAGES_FILE).read_text())[result.digest]
+        assert recorded["tasks"] == ["d"] and "forced_tasks" not in recorded
+        # Under force the recorded main is reused for e and the record names e as forced; d is not.
+        assert build_images(folder, builder=builder, log=lambda _: None, force=True) == []
+        recorded = json.loads((folder / BUILT_IMAGES_FILE).read_text())[result.digest]
+        assert (recorded["tasks"], recorded["forced_tasks"]) == (["d"], ["e"])
+        assert load_task(folder / "e").image == result.image and load_task(folder / "d").image == result.image
 
     # G2: counselbench's and kumo's shapes, main with a build section, one sidecar without image: and one with.
     SIDECAR_COMPOSE = (

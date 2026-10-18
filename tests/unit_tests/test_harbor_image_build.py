@@ -439,6 +439,10 @@ class TestBuildOptions:
             BuildOptions.from_config({"builds": {"tool": "kaniko"}})
         with pytest.raises(ValueError, match="`builds.enabled` must be true or false; got 'no'"):
             BuildOptions.from_config({"builds": {"enabled": "no"}})
+        with pytest.raises(ValueError, match="`builds.force` must be true or false; got 'yes'"):
+            BuildOptions.from_config({"builds": {"force": "yes"}})
+        assert BuildOptions.from_config({"builds": {"force": True}}).force is True
+        assert BuildOptions.from_config({}).force is False
         with pytest.raises(ValueError, match="`builds.platform` must be a string; got 1"):
             BuildOptions.from_config({"builds": {"platform": 1}})
         with pytest.raises(ValueError, match="`builds` must be a mapping of tool, repository, platform, enabled"):
