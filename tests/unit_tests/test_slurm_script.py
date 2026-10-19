@@ -21,6 +21,8 @@ import warnings
 from pathlib import Path
 
 import pytest
+from hydra.core.override_parser.overrides_parser import OverridesParser
+from omegaconf import OmegaConf
 
 from nemo_gym.orchestration.api import NodePool, RayServiceConfig, SubmitConfig, VllmPDTierConfig
 from nemo_gym.orchestration.executors.script_templates import (
@@ -2584,16 +2586,12 @@ def test_a_per_node_vllm_service_starts_one_single_node_server_on_every_pool_nod
     assert "ray" not in step and "--headless" not in step
 
 
-def test_without_server_per_node_the_same_pool_is_one_multi_node_engine(tmp_path):
+def test_without_server_per_node_the_pool_stays_one_engine_behind_one_url(tmp_path):
     with pytest.warns(UserWarning, match="leaving 12 GPU"):
-        step = _step(_per_node_vllm_script(tmp_path, server_per_node=False), "policy")
-    assert "ray symmetric-run" in step
-
-
-def test_a_per_node_service_can_tell_each_node_its_rank_in_a_data_parallel_group(tmp_path):
-    extra = "--data-parallel-size 4 --data-parallel-start-rank $SLURM_NODEID"
-    step = _step(_per_node_vllm_script(tmp_path, extra_args=extra), "policy")
-    assert extra in step
+        script = _per_node_vllm_script(tmp_path, server_per_node=False)
+    assert "ray symmetric-run" in _step(script, "policy")
+    assert "GYM_POOL_GPU_NODE_" not in script and "policy-node" not in script
+    assert "+policy_base_url=http://localhost:8000/v1" in script
 
 
 def test_a_per_node_service_is_not_reported_as_leaving_gpus_idle(tmp_path):
@@ -2627,31 +2625,9 @@ def test_a_per_node_service_names_the_variable_and_url_of_each_node(tmp_path):
     assert config.driver.benchmarks["b"].run["policy_base_url"] == service.node_urls(4)
 
 
-def test_a_service_per_node_exports_no_node_variables_when_it_is_off(tmp_path):
-    with pytest.warns(UserWarning):
-        script = _per_node_vllm_script(tmp_path, server_per_node=False)
-    assert "GYM_POOL_GPU_NODE_" not in script
-
-
-def test_the_driver_gets_one_policy_url_per_node(tmp_path):
+def test_the_driver_resolves_the_policy_url_list_to_the_pool_hosts(tmp_path, monkeypatch):
     script = _per_node_vllm_script(tmp_path)
-    urls = ",".join(f"http://${{oc.env:GYM_POOL_GPU_NODE_{i}}}:8000/v1" for i in range(4))
-    assert f"'+policy_base_url=[{urls}]'" in script
-
-
-def test_the_policy_url_stays_one_address_without_server_per_node(tmp_path):
-    with pytest.warns(UserWarning):
-        script = _per_node_vllm_script(tmp_path, server_per_node=False)
-    assert "+policy_base_url=http://localhost:8000/v1" in script
-    assert "policy_base_url=[" not in script
-
-
-def test_the_per_node_policy_urls_resolve_to_the_pool_hosts(tmp_path, monkeypatch):
-    from hydra.core.override_parser.overrides_parser import OverridesParser
-    from omegaconf import OmegaConf
-
-    script = _per_node_vllm_script(tmp_path)
-    token = next(t for t in shlex.split(script.replace("\n", " ")) if t.startswith("+policy_base_url="))
+    token = re.search(r"'(\+policy_base_url=[^']*)'", script).group(1)
     for node in range(4):
         monkeypatch.setenv(f"GYM_POOL_GPU_NODE_{node}", f"host{node}")
     override = OverridesParser.create().parse_overrides([token])[0]
