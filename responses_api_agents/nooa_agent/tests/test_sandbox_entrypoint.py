@@ -2,6 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from types import ModuleType
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -196,9 +199,10 @@ async def test_main_initializes_shared_transport_and_always_closes_it(monkeypatc
     async def shutdown():
         events.append("close")
 
-    async def execute(p):
+    async def execute(p, *, on_progress):
         assert events == ["open"]
         events.append("execute")
+        on_progress(run_result())
         if fails:
             raise RuntimeError("unexpected bootstrap failure")
         return entrypoint.SandboxResult(
@@ -225,3 +229,59 @@ async def test_main_initializes_shared_transport_and_always_closes_it(monkeypatc
         assert entrypoint.SandboxResult.model_validate_json(destination.read_text()).observations.source == "nooa"
         assert not destination.with_suffix(".tmp").exists()
     assert events == ["open", "execute", "close"]
+    checkpoint = entrypoint.SandboxCheckpoint.model_validate_json((tmp_path / "checkpoint.json").read_text())
+    assert checkpoint.partial is True
+    assert checkpoint.response.status == "incomplete"
+
+
+def test_checkpoint_is_explicit_partial_evidence_and_excludes_python_return_values(tmp_path) -> None:
+    result = run_result()
+    result.return_value = ModuleType("runtime_only")
+    path = tmp_path / "checkpoint.json"
+    entrypoint.write_checkpoint(path, result)
+    checkpoint = entrypoint.SandboxCheckpoint.model_validate_json(path.read_text())
+    assert checkpoint.partial is True
+    assert checkpoint.response.status == "incomplete"
+    assert checkpoint.response.output == result.episode.response.output
+    assert checkpoint.termination_reason is None
+    assert checkpoint.error is None
+    assert "partial_checkpoint" in {gap.code for gap in checkpoint.observations.gaps}
+    assert "runtime_only" not in path.read_text()
+    with pytest.raises(ValidationError, match="partial"):
+        entrypoint.SandboxResult.model_validate_json(path.read_text())
+    with pytest.raises(ValidationError, match="partial"):
+        entrypoint.SandboxCheckpoint.model_validate(checkpoint.model_dump(exclude={"partial"}))
+
+
+def test_interrupted_checkpoint_replacement_preserves_last_valid_evidence(monkeypatch, tmp_path) -> None:
+    path = tmp_path / "checkpoint.json"
+    result = run_result()
+    entrypoint.write_checkpoint(path, result)
+    previous = path.read_bytes()
+
+    def interrupt(source, destination):
+        assert source.parent == destination.parent
+        assert entrypoint.SandboxCheckpoint.model_validate_json(source.read_text()).partial
+        raise InterruptedError("worker interrupted before publication")
+
+    monkeypatch.setattr(Path, "replace", interrupt)
+    result.model_cookies["model"] = "newer"
+    with pytest.raises(InterruptedError, match="before publication"):
+        entrypoint.write_checkpoint(path, result)
+    assert path.read_bytes() == previous
+    assert list(tmp_path.iterdir()) == [path]
+
+
+def test_concurrent_atomic_writes_never_publish_partial_json(tmp_path) -> None:
+    path = tmp_path / "checkpoint.json"
+    entrypoint.write_checkpoint(path, run_result())
+
+    def publish(index: int) -> None:
+        result = run_result()
+        result.model_cookies["sequence"] = str(index)
+        entrypoint.write_checkpoint(path, result)
+        assert entrypoint.SandboxCheckpoint.model_validate_json(path.read_text()).partial
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(publish, range(32)))
+    assert list(tmp_path.iterdir()) == [path]

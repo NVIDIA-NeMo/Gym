@@ -3,8 +3,12 @@
 """JSON boundary for running the existing NOOA harness in a task sandbox."""
 
 import asyncio
+import os
 import signal
 import sys
+import tempfile
+from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 from typing import Literal
 
@@ -13,7 +17,7 @@ from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field
 
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_correlation import rollout_context
-from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle, TrajectoryRecord
+from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle, ObservationGap, TrajectoryRecord
 from nemo_gym.server_utils import (
     GlobalAIOHTTPAsyncClientConfig,
     request,
@@ -69,6 +73,51 @@ class SandboxResult(BaseModel):
         )
 
 
+class SandboxCheckpoint(SandboxResult):
+    """Partial evidence only; its presence never establishes a terminal outcome."""
+
+    partial: Literal[True]
+
+
+def _write_json(path: Path, value: BaseModel) -> None:
+    # Serialize before opening the temporary file. A failed or interrupted write
+    # leaves the previous complete snapshot intact; unique paths avoid temp races.
+    serialized = value.model_dump_json()
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", delete=False
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(serialized)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def write_checkpoint(path: Path, result: NOOARunResult) -> None:
+    """Atomically persist serializable evidence without arbitrary return values."""
+    gap = ObservationGap(
+        code="partial_checkpoint", detail="Partial NOOA checkpoint: evidence only, not a terminal or gradable result."
+    )
+    checkpoint = SandboxCheckpoint(
+        partial=True,
+        response=result.episode.response.model_copy(update={"status": "incomplete", "error": None}),
+        observations=result.episode.observations.model_copy(update={"gaps": [*result.episode.observations.gaps, gap]}),
+        trajectory=(
+            result.trajectory.model_copy(update={"gaps": [*result.trajectory.gaps, gap]})
+            if result.trajectory is not None
+            else None
+        ),
+        model_cookies=result.model_cookies,
+        resource_cookies=result.resource_cookies,
+    )
+    _write_json(path, checkpoint)
+
+
 class _ModelClient:
     def __init__(self, base_url: str) -> None:
         self.base_url = base_url.rstrip("/")
@@ -93,7 +142,9 @@ class _ModelClient:
         )
 
 
-async def execute(payload: SandboxInput) -> SandboxResult:
+async def execute(
+    payload: SandboxInput, *, on_progress: Callable[[NOOARunResult], None] | None = None
+) -> SandboxResult:
     """Run once, retaining evidence on both exceptions and graceful cancellation."""
     result = None
     error = None
@@ -103,6 +154,7 @@ async def execute(payload: SandboxInput) -> SandboxResult:
             server_client=_ModelClient(str(payload.model_base_url)),
             model_server_name=payload.model_server_name,
             max_policy_calls=payload.max_policy_calls,
+            on_progress=on_progress,
         )
         with rollout_context(payload.request.rollout_id):
             result = await runner.run(payload.request)
@@ -134,16 +186,16 @@ async def execute(payload: SandboxInput) -> SandboxResult:
 
 async def _main(input_path: Path, output_path: Path) -> None:
     payload = SandboxInput.model_validate_json(input_path.read_text())
-    task = asyncio.create_task(execute(payload))
+    task = asyncio.create_task(
+        execute(payload, on_progress=partial(write_checkpoint, output_path.with_name("checkpoint.json")))
+    )
     asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, task.cancel)
     client = set_global_aiohttp_client(GlobalAIOHTTPAsyncClientConfig())
     try:
         result = await task
     finally:
         await client.close()
-    temporary = output_path.with_suffix(".tmp")
-    temporary.write_text(result.model_dump_json())
-    temporary.replace(output_path)
+    _write_json(output_path, result)
 
 
 if __name__ == "__main__":

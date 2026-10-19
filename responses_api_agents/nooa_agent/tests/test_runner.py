@@ -33,6 +33,7 @@ from responses_api_agents.nooa_agent.runner import (
     NOOARunFailure,
     NOOARunRequest,
 )
+from responses_api_agents.nooa_agent.sandbox_entrypoint import SandboxCheckpoint, write_checkpoint
 from responses_api_agents.nooa_agent.termination import NOOATerminationReason
 from responses_api_agents.nooa_agent.tests.test_gym_llm import FakeHTTPResponse, model_response
 from responses_api_agents.nooa_agent.tests.test_resource_tools import FakeResponse as FakeResourceResponse
@@ -345,8 +346,16 @@ async def test_cancellation_preserves_evidence_without_swallowing_cancellation()
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", [200])
-async def test_real_code_and_resource_outputs_join_to_their_own_invocations(status: int) -> None:
+async def test_real_code_and_resource_outputs_join_to_their_own_invocations(status: int, tmp_path) -> None:
     runner, _ = policy_runner(ResourceUsingAgent)
+    checkpoints = []
+
+    def checkpoint(result):
+        assert result.return_value is None
+        write_checkpoint(tmp_path / "checkpoint.json", result)
+        checkpoints.append(SandboxCheckpoint.model_validate_json((tmp_path / "checkpoint.json").read_text()))
+
+    runner._on_progress = checkpoint
     model_requests = []
     code_arguments = json.dumps({"code": "print(await self.get_weather(city='Paris'))"})
 
@@ -379,6 +388,21 @@ async def test_real_code_and_resource_outputs_join_to_their_own_invocations(stat
         )
     )
     assert result.return_value == "done"
+    # The NOOA code prefill, model response, resource completion within live
+    # code, code completion, final model response, and return_result completion.
+    assert [len(item.trajectory.turns) for item in checkpoints] == [0, 1, 1, 1, 2, 2]
+    assert len(checkpoints[0].trajectory.tool_calls) > 0
+    pending_code = next(tool for tool in checkpoints[2].trajectory.tool_calls if tool.tool_call_id == "call-1")
+    assert pending_code.tool_name == "execute_python"
+    assert pending_code.status == "incomplete"
+    assert pending_code.output is None
+    assert not any(
+        item.type == "function_call_output" and item.call_id == pending_code.tool_call_id
+        for item in checkpoints[2].response.output
+    )
+    completed_code = next(tool for tool in checkpoints[3].trajectory.tool_calls if tool.tool_call_id == "call-1")
+    assert completed_code.status == "completed"
+    assert all(item.partial and item.response.status == "incomplete" for item in checkpoints)
     assert len(model_requests) == 2
     code = next(tool for tool in result.trajectory.tool_calls if tool.tool_call_id == "call-1")
     resource = next(tool for tool in result.trajectory.tool_calls if tool.tool_name == "get_weather")

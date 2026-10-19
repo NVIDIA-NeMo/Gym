@@ -183,6 +183,46 @@ def test_failed_and_cancelled_code_keeps_matching_output(error: BaseException) -
     assert json.loads(output.output)["error_type"] == type(error).__name__
 
 
+@pytest.mark.asyncio
+async def test_parallel_tool_completions_checkpoint_only_finished_outputs() -> None:
+    snapshots = []
+
+    def checkpoint() -> None:
+        episode, trajectory = trace.project(
+            create_params=NeMoGymResponseCreateParamsNonStreaming(input="task"),
+            state=RolloutLLMState(max_policy_calls=None),
+            task_id="task",
+            rollout_id="rollout",
+        )
+        # Serialize inside the callback while the event state is stable.
+        snapshots.append((episode.response.model_dump(mode="json"), trajectory.model_dump(mode="json")))
+
+    trace = GymTraceHooks(on_progress=checkpoint)
+    first_done = asyncio.Event()
+    both_started = asyncio.Event()
+
+    async def first() -> None:
+        call = trace.before_tool_execution(tool_name="first", arguments={}, execution_id="first")
+        await both_started.wait()
+        trace.after_tool_execution(context=call, result={"value": 1}, exception=None)
+        first_done.set()
+
+    async def second() -> None:
+        call = trace.before_tool_execution(tool_name="second", arguments={}, execution_id="second")
+        both_started.set()
+        await first_done.wait()
+        trace.after_tool_execution(context=call, result=None, exception=ValueError("tool failed"))
+
+    await asyncio.gather(first(), second())
+    assert len(snapshots) == 2
+    assert [tool["status"] for tool in snapshots[0][1]["tool_calls"]] == ["completed", "incomplete"]
+    assert [item["call_id"] for item in snapshots[0][0]["output"] if item["type"] == "function_call_output"] == [
+        "first"
+    ]
+    assert [tool["status"] for tool in snapshots[1][1]["tool_calls"]] == ["completed", "failed"]
+    assert json.loads(snapshots[1][1]["tool_calls"][1]["output"])["error_type"] == "ValueError"
+
+
 class TypedAnswer(BaseModel):
     value: int
 
