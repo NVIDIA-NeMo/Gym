@@ -1,5 +1,7 @@
 -e nemo-gym[dev] @ ../../
 tavily-python==0.7.21
+# Fuzzy search-cache matching (search_cache.py fuzzy_threshold).
+rapidfuzz==3.14.1
 # In-process read-only shell replacing the bash subprocess.
 # Vendored into this server dir so the harness is self-contained; the relative
 # path resolves against this requirements.txt.
