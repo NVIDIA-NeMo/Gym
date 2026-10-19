@@ -21,6 +21,7 @@ from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass, field
 from functools import wraps
+from inspect import signature
 from time import monotonic
 from typing import Any, ClassVar, Optional
 from warnings import warn
@@ -39,6 +40,13 @@ from nemo_gym._checkpoint.control import install_participant
 from nemo_gym._checkpoint.errors import StaleAttemptError
 from nemo_gym._checkpoint.settings import checkpoint_settings
 from nemo_gym._checkpoint.steps import CHECKPOINT_RESTART_HEADER
+from nemo_gym.agent_activation_types import (
+    AgentActivationRequest,
+    AgentActivationResponse,
+    AgentContinuationCapabilities,
+    AgentContinuationRequirements,
+)
+from nemo_gym.agent_utils.ordered_operations import OrderedOperationLedger
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
     AggregateMetricsRequest,
@@ -58,7 +66,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body, rollout_context
-from nemo_gym.rollout_observability import AgentObservationBundle
+from nemo_gym.rollout_observability import AgentObservationBundle, TrajectoryRecord
 from nemo_gym.sandbox.access import SandboxAccess
 from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
@@ -114,6 +122,7 @@ class AgentSeedSessionRequest(BaseModel):
     task_id: TaskId
     tool_accesses: list[ToolAccess] = Field(default_factory=list)
     sandbox_access: SandboxAccess | None = None
+    continuation: AgentContinuationRequirements | None = None
 
     @field_validator("tool_accesses")
     @classmethod
@@ -130,6 +139,7 @@ class AgentSeedSessionResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     agent_session_id: str
+    capabilities: AgentContinuationCapabilities | None = None
 
 
 class AgentCloseSessionRequest(BaseModel):
@@ -148,6 +158,7 @@ class AgentCloseSessionResponse(BaseModel):
 
     agent_session_id: str
     agent_observations: AgentObservationBundle | None = None
+    cleanup_confirmed: bool = False
     resources_cookies: dict[str, str] | None = Field(
         default=None,
         description=(
@@ -155,6 +166,9 @@ class AgentCloseSessionResponse(BaseModel):
             "None or an empty jar leaves the Environment Server's jar from the Resources seed unchanged."
         ),
     )
+
+    trajectory: TrajectoryRecord | None = None
+    activations: list[AgentActivationResponse] = Field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -223,6 +237,8 @@ class _AgentSessionRecord:
     episode_id: EpisodeId | None = None
     close_response: AgentCloseSessionResponse | None = None
     expires_at: float = float("inf")
+    activations: OrderedOperationLedger[AgentActivationResponse] = field(default_factory=OrderedOperationLedger)
+    close_task: asyncio.Task[AgentCloseSessionResponse] | None = None
 
 
 class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, SimpleServer):
@@ -437,13 +453,28 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         self.setup_agent_checkpoint(app)
 
         agent_attributes = {"nemo.gym.server.name": self.config.name}
-        traced_responses = traced_endpoint(GymSpanGroup.AGENT, "gym.agent.responses", self.responses, agent_attributes)
+        ordinary_responses = self.responses
+        accepts_request = "request" in signature(ordinary_responses).parameters
+
+        async def responses(request: Request, body: AgentActivationRequest | NeMoGymResponseCreateParamsNonStreaming):
+            if isinstance(body, AgentActivationRequest):
+                return await self.activate_agent_session(request, body)
+            if accepts_request:
+                return await ordinary_responses(request=request, body=body)
+            return await ordinary_responses(body=body)
+
+        # Preserve custom request schemas and parameter names on existing adapters.
+        # Only native-continuation adapters opt into the activation envelope.
+        handler = responses if self._agent_continuation_capabilities() is not None else ordinary_responses
+        traced_responses = traced_endpoint(GymSpanGroup.AGENT, "gym.agent.responses", handler, agent_attributes)
         app.post("/v1/responses")(traced_responses)
         # A self-call made with ``url_path_for_run`` lands on a prefixed twin.
         # ``responses`` recovers the rollout id from the path.
         # The same handler serves prefixed and unprefixed calls.
         app.post(f"/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/v1/responses")(traced_responses)
-        app.post(f"/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/{TOKEN_CAPTURE_PATH_SEGMENT}/v1/responses")(traced_responses)
+        app.post(
+            f"/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/{TOKEN_CAPTURE_PATH_SEGMENT}/v1/responses",
+        )(traced_responses)
 
         # Traced *inside* rollout_context, not outside it. The span reads
         # `current_rollout_id()` when it starts, so wrapping the other way round would
@@ -477,6 +508,13 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         if self._restart_only is not None and response is not None:
             # This agent cannot capture the session, so the episode that seeds it starts over after a crash.
             response.headers[CHECKPOINT_RESTART_HEADER] = "1"
+        capabilities = self._agent_continuation_capabilities()
+        if body.continuation is not None:
+            if capabilities is None or capabilities.mode != body.continuation.mode:
+                raise HTTPException(422, "Agent does not support the required native continuation mode")
+            missing = set(body.continuation.observations) - set(capabilities.observations)
+            if missing:
+                raise HTTPException(422, f"Agent lacks required continuation observations: {sorted(missing)}")
         current = self._agent_session_id_from_request(request)
         if current is not None and current != body.agent_session_id:
             raise HTTPException(409, "agent_session_id does not match the session cookie")
@@ -515,7 +553,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             elif record.state.request != body:
                 raise HTTPException(409, "agent_session_id is already bound to another seed request")
             request.session[AGENT_SESSION_COOKIE_KEY] = body.agent_session_id
-            return AgentSeedSessionResponse(agent_session_id=body.agent_session_id)
+            return AgentSeedSessionResponse(agent_session_id=body.agent_session_id, capabilities=capabilities)
 
     async def close_agent_session(
         self,
@@ -541,7 +579,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             if record.state is None:
                 if current is not None:
                     raise HTTPException(409, "Agent close receipt has expired")
-                result = AgentCloseSessionResponse(agent_session_id=body.agent_session_id)
+                result = AgentCloseSessionResponse(agent_session_id=body.agent_session_id, cleanup_confirmed=True)
             else:
                 result = await self._close_session_state(body.agent_session_id, record)
             record.state = None
@@ -575,7 +613,12 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         if participant is not None and not await participant.close_session(agent_session_id):
             raise StaleAttemptError(f"agent session {agent_session_id!r} was retired while it closed")
         self._require_current_session(agent_session_id, record)
-        result = await self._close_agent_session_state(record.state)
+        if record.close_task is None or (
+            record.close_task.done() and (record.close_task.cancelled() or record.close_task.exception() is not None)
+        ):
+            record.close_task = asyncio.create_task(self._close_agent_session_record(record))
+            record.close_task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+        result = await asyncio.shield(record.close_task)
         self._require_current_session(agent_session_id, record)
         if self._restart_only is not None and record.episode_id is not None:
             self._restart_only.close_session(agent_session_id, record.episode_id)
@@ -615,6 +658,50 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         if record is not None and record.close_response is None:
             self._session_records.pop(agent_session_id, None)
             self._release_agent_session_claim(agent_session_id)
+
+    def _agent_continuation_capabilities(self) -> AgentContinuationCapabilities | None:
+        """Opt into native continuation; existing one-activation adapters stay unchanged."""
+        return None
+
+    async def activate_agent_session(self, request: Request, body: AgentActivationRequest) -> AgentActivationResponse:
+        """Append one ordered input delta, joining identical retries across HTTP disconnects."""
+        if self._agent_session_id_from_request(request) != body.agent_session_id:
+            raise HTTPException(409, "Activation requires the seeded agent session cookie")
+        async with self._locked_agent_session(body.agent_session_id) as record:
+            state = self._require_agent_session(body.agent_session_id)
+            if state.request.episode_id != body.episode_id:
+                raise HTTPException(409, "episode_id does not match the seeded agent session")
+            if state.request.continuation is None:
+                raise HTTPException(422, "Session was not seeded for native continuation")
+            rollout_id = getattr(request, "path_params", {}).get("rollout_id")
+            if rollout_id is not None and rollout_id != state.request.episode_id.capture_key:
+                raise HTTPException(409, "Activation rollout does not match the seeded session")
+            # Capture input before the shared task starts; no caller may mutate its binding.
+            activation = body.model_copy(deep=True)
+
+        async def execute() -> AgentActivationResponse:
+            result = await self._activate_agent_session_state(state, activation, request)
+            if result.activation_id != activation.activation_id:
+                raise ValueError("Agent returned a different activation_id")
+            return result.model_copy(deep=True)
+
+        return await record.activations.execute(index=activation.activation_id, request=activation, operation=execute)
+
+    async def _activate_agent_session_state(
+        self, state: AgentSessionState, body: AgentActivationRequest, request: Request
+    ) -> AgentActivationResponse:
+        """Run one delta using the retained native conversation, HOME, and sandbox."""
+        raise NotImplementedError("This agent does not implement native continuation")
+
+    async def _close_agent_session_record(self, record: _AgentSessionRecord) -> AgentCloseSessionResponse:
+        await record.activations.close(timeout=getattr(self.config, "session_close_timeout_seconds", 180))
+        assert record.state is not None
+        result = await self._close_agent_session_state(record.state)
+        if record.state.request.continuation is not None:
+            if not result.cleanup_confirmed:
+                raise RuntimeError("Interactive agent cleanup was not confirmed")
+            result = result.model_copy(update={"activations": record.activations.completed}, deep=True)
+        return result
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> AgentSessionState:
         """Validate grants and initialize harness state.

@@ -25,13 +25,19 @@ from asyncio import Semaphore
 from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 from shlex import quote
-from time import time
+from time import monotonic, time
 from typing import Any, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field, PrivateAttr
 
+from nemo_gym.agent_activation_types import (
+    AgentActivationObservation,
+    AgentActivationRequest,
+    AgentActivationResponse,
+    AgentContinuationCapabilities,
+)
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
 from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
@@ -78,6 +84,12 @@ from responses_api_agents.opencode_agent.artifacts import (
     _parse_opencode_session,
     parse_opencode_export,
     parse_opencode_session,
+)
+from responses_api_agents.opencode_agent.continuation import (
+    classify_native_outcome,
+    native_input_acceptance,
+    parse_activation_events,
+    visible_activation_log,
 )
 from responses_api_agents.opencode_agent.observability import scope_opencode_trajectory
 from responses_api_agents.opencode_agent.runtime import (
@@ -156,6 +168,10 @@ fi
         bootstrap + f"python3 -I -c {quote(validate_paths)} {quote(workdir)} "
         f"{quote(str(PurePosixPath(directory).parent))} {quote(runtime)} && mkdir -p {quote(directory)}"
     )
+
+
+class _ActivationDeadlineExpired(Exception):
+    """The immutable activation window elapsed before process launch."""
 
 
 class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
@@ -499,6 +515,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         if session_id is not None:
             state = self._require_agent_session(session_id)
             assert isinstance(state, OpenCodeSandboxSession)
+            if state.request.continuation is not None or state.conversation_directory is not None:
+                raise HTTPException(409, "OpenCode continuation requests require activation_id")
             if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
                 raise HTTPException(409, "OpenCode activation does not match the seeded session and rollout")
             prompt, system = self._session_input(body)
@@ -718,7 +736,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             source="opencode", gaps=[ObservationGap(code="agent_activation_interrupted")]
         )
         return AgentCloseSessionResponse(
-            agent_session_id=state.request.agent_session_id, agent_observations=observations
+            agent_session_id=state.request.agent_session_id,
+            agent_observations=observations,
+            trajectory=state.trajectory,
+            cleanup_confirmed=state.session.cleanup_confirmed,
         )
 
     def _session_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
@@ -837,9 +858,128 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             total.output_tokens_details.reasoning_tokens = None
         return total
 
+    def _agent_continuation_capabilities(self) -> AgentContinuationCapabilities:
+        return AgentContinuationCapabilities(
+            observations=["ordered_events", "timing", "native_tools", "reasoning", "compaction"],
+        )
+
+    async def _activate_agent_session_state(
+        self,
+        state: AgentSessionState,
+        body: AgentActivationRequest,
+        request: Request,
+    ) -> AgentActivationResponse:
+        """Append one user delta and explicitly resume the persisted conversation."""
+        assert isinstance(state, OpenCodeSandboxSession)
+        if state.task is not None:
+            raise HTTPException(409, "Cannot mix single-turn and continuation activation APIs")
+        prompt, system = self._session_input(body.responses_create_params)
+        if state.system_instructions is None:
+            state.system_instructions = system
+        else:
+            params = body.responses_create_params
+            explicit_system = bool(
+                params.instructions or (not isinstance(params.input, str) and len(params.input) > 1)
+            )
+            if explicit_system and system != state.system_instructions:
+                raise HTTPException(422, "OpenCode continuation cannot replace session instructions")
+        if body.activation_id > 0 and state.native_session_id is None:
+            raise HTTPException(409, "OpenCode has no persisted conversation to resume")
+        started = monotonic()
+        try:
+            timeout = min(self.config.timeout, body.timeout_seconds)
+            deadline = started + timeout
+            await state.prepare_activation(
+                body.activation_id, timeout=min(timeout, self.config.session_close_timeout_seconds)
+            )
+            response = await self._session_response(
+                state,
+                body.responses_create_params,
+                prompt=prompt,
+                system=state.system_instructions,
+                activation=body,
+                deadline=deadline,
+            )
+        except _ActivationDeadlineExpired:
+            response = NeMoGymResponse(
+                id=f"resp_{uuid4().hex}",
+                created_at=int(time()),
+                model=self.config.model_server.name,
+                object="response",
+                output=[],
+                status="incomplete",
+                usage=None,
+                parallel_tool_calls=body.responses_create_params.parallel_tool_calls,
+                tool_choice=body.responses_create_params.tool_choice,
+                tools=body.responses_create_params.tools,
+                metadata={
+                    "launch_attempted": "false",
+                    "native_input_accepted": "false",
+                    "policy_input_observed": "unknown",
+                    "opencode_session_id": state.native_session_id or "",
+                    "native_conversation_id": state.native_session_id or "",
+                },
+            )
+        launched = (response.metadata or {}).get("launch_attempted") == "true"
+        events = parse_activation_events(state.activation_log) if launched else []
+        if response.status == "completed" and not any(
+            event.kind == "step_finish" and event.metadata.get("part", {}).get("reason") == "stop" for event in events
+        ):
+            gap = ObservationGap(
+                code="native_event_stream_terminal_missing", detail=f"Activation {body.activation_id}"
+            )
+            if state.observations is not None:
+                state.observations.gaps.append(gap)
+            if state.activation_observations is not None:
+                state.activation_observations.gaps.append(gap.model_copy(deep=True))
+        stop_reason = None
+        if response.status == "incomplete":
+            if state.session.cleanup is not None and state.session.cleanup["timed_out"]:
+                stop_reason = "activation_timeout"
+            elif (response.metadata or {}).get("native_interruption") == "permission_denied":
+                stop_reason = "permission_denied"
+            elif (response.metadata or {}).get("launch_attempted") == "false":
+                stop_reason = "activation_timeout"
+            elif any(
+                event.kind == "step_finish" and event.metadata.get("part", {}).get("reason") == "length"
+                for event in events
+            ):
+                stop_reason = "model_budget_exhausted"
+            elif any(
+                event.kind == "step_finish" and event.metadata.get("part", {}).get("reason") == "content_filter"
+                for event in events
+            ):
+                stop_reason = "content_filter"
+            else:
+                stop_reason = "interrupted"
+        return AgentActivationResponse(
+            activation_id=body.activation_id,
+            response=response,
+            turn_complete=response.status == "completed",
+            stop_reason=stop_reason,
+            observation=AgentActivationObservation(
+                events=events,
+                raw_log=visible_activation_log(state.activation_log) if launched else "",
+                duration_seconds=monotonic() - started,
+                harness_steps=sum(event.kind == "step_finish" for event in events),
+                agent_observations=state.activation_observations if launched else None,
+            ),
+        )
+
     async def _session_response(
-        self, state: OpenCodeSandboxSession, body: NeMoGymResponseCreateParamsNonStreaming, *, prompt: str, system: str
+        self,
+        state: OpenCodeSandboxSession,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        prompt: str,
+        system: str,
+        activation: AgentActivationRequest | None = None,
+        deadline: float | None = None,
     ) -> NeMoGymResponse:
+        timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
+        if activation is not None:
+            timeout = min(timeout, activation.timeout_seconds)
+        previous_session_id = state.native_session_id
         base_url = self.resolve_model_base_url(self.config.model_server.name, state.request.episode_id.capture_key)
         config = {
             "model": "nemo_gym/dummy_model",
@@ -873,25 +1013,27 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         if system:
             config["instructions"] = [f"{state.session.session_dir}/instructions.md"]
         if self._model_call_capture_enabled():
-            apply_observability_patch(config, plugin_path=Path(state.session.session_dir) / OBSERVABILITY_PATCH.name)
+            apply_observability_patch(config, plugin_path=Path(state.persistent_directory) / OBSERVABILITY_PATCH.name)
         config.setdefault("plugin", []).append((Path(state.session.session_dir) / "task_environment.mjs").as_uri())
-        timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
         command = [f"{state.runtime}/opencode", "run", "--format", "json", "--title", "NeMo Gym"]
         if self.config.thinking:
             command.append("--thinking")
+        if state.native_session_id:
+            command.extend(["--session", state.native_session_id])
         payload = {
             "instructions": system,
             "directory": state.session.session_dir,
             "cwd": state.session.workdir,
             "command": command,
             "prompt": prompt,
+            "native_session_id": state.native_session_id,
+            "previous_message_ids": state.message_ids,
             "env": {
-                # OpenCode also scans HOME/.opencode independently of XDG config.
-                "HOME": f"{state.session.session_dir}/home",
-                "XDG_DATA_HOME": f"{state.session.session_dir}/data",
-                "XDG_CONFIG_HOME": f"{state.session.session_dir}/config",
-                "XDG_CACHE_HOME": f"{state.session.session_dir}/cache",
-                "XDG_STATE_HOME": f"{state.session.session_dir}/state",
+                "HOME": f"{state.persistent_directory}/home",
+                "XDG_DATA_HOME": f"{state.persistent_directory}/data",
+                "XDG_CONFIG_HOME": f"{state.persistent_directory}/config",
+                "XDG_CACHE_HOME": f"{state.persistent_directory}/cache",
+                "XDG_STATE_HOME": f"{state.persistent_directory}/state",
                 "OPENCODE_CONFIG_CONTENT": json.dumps(config),
                 "OPENCODE_DISABLE_PROJECT_CONFIG": "true",
                 "OPENCODE_DISABLE_AUTOUPDATE": "true",
@@ -903,12 +1045,21 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         export = {}
         failure = None
         try:
-            async with self.sem:
+            async with asyncio.timeout_at(deadline):
+                await self.sem.acquire()
+            try:
                 await state.execute(
                     payload,
                     timeout=timeout,
                     close_timeout=self.config.session_close_timeout_seconds,
+                    deadline=deadline,
                 )
+            finally:
+                self.sem.release()
+        except TimeoutError as exc:
+            if activation is not None and not state.session.launch_started:
+                raise _ActivationDeadlineExpired from None
+            failure = exc
         except BaseException as exc:
             failure = exc
         if state.observations is None:
@@ -953,40 +1104,34 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             state.observations.gaps.append(ObservationGap(code="runtime_info_unavailable"))
         if result is not None and result["return_code"] is None:
             state.observations.gaps.append(ObservationGap(code="worker_exit_code_unavailable"))
-        if result is not None:
-            error = error or result["error"]
-            if result["return_code"] not in (0, None) and not result["timed_out"]:
-                error = error or f"OpenCode exited with code {result['return_code']}"
-        assistants = [
-            message["info"] for message in export.get("messages", []) if message["info"].get("role") == "assistant"
-        ]
-        for info in assistants:
-            if info.get("error"):
-                error = error or json.dumps(info["error"])
-        if not assistants:
-            error = error or "OpenCode produced no assistant result"
-        incomplete = result is not None and result["timed_out"]
-        if assistants and not incomplete:
-            last = assistants[-1]
-            finish = last.get("finish")
-            if finish in {"length", "content-filter", "tool-calls"}:
-                incomplete = True
-            elif finish != "stop" or not last.get("time", {}).get("completed"):
-                error = error or f"OpenCode ended without a successful terminal assistant result (finish={finish!r})"
-        status = "failed" if error or failure else "incomplete" if incomplete else "completed"
+        outcome = classify_native_outcome(
+            export,
+            cleanup=result,
+            previous_session_id=previous_session_id,
+            session_id=state.native_session_id,
+            stdout=state.activation_log,
+            continuation=activation is not None,
+        )
+        error = error or outcome.error
+        status = outcome.status
+        if error or failure:
+            status = "failed"
         # Artifact message completion records a model turn, not the entire invocation.
         for record in state.observations.records:
             if isinstance(record, AgentInvocation) and record.parent_invocation_id is None:
                 record.status = "incomplete" if isinstance(failure, asyncio.CancelledError) else status
-                record.error_type = (
-                    "cancelled"
-                    if isinstance(failure, asyncio.CancelledError)
-                    else "server_error"
-                    if error or failure
-                    else "timeout"
-                    if result and result["timed_out"]
-                    else None
-                )
+                record.error_type = outcome.error_type
+                if isinstance(failure, asyncio.CancelledError):
+                    record.error_type = "cancelled"
+                elif error or failure:
+                    record.error_type = "server_error"
+        if state.activation_observations is not None:
+            for record in state.activation_observations.records:
+                if isinstance(record, AgentInvocation) and record.parent_invocation_id is None:
+                    record.status = "incomplete" if isinstance(failure, asyncio.CancelledError) else status
+                    record.error_type = (
+                        "cancelled" if isinstance(failure, asyncio.CancelledError) else outcome.error_type
+                    )
         if result is not None:
             state.observations.records.append(
                 SandboxObservation(
@@ -1029,8 +1174,14 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             metadata={
                 "harness_execution": "sandbox",
                 "opencode_version": self.config.opencode_version,
+                "opencode_session_id": state.native_session_id or "",
+                "native_conversation_id": state.native_session_id or "",
+                "launch_attempted": str(state.session.launch_started).lower(),
+                "native_input_accepted": native_input_acceptance(export, prompt=prompt),
+                "policy_input_observed": "unknown",
+                **({"native_interruption": "permission_denied"} if outcome.error_type == "permission_denied" else {}),
                 **({"harness_hostname": runtime.hostname, "harness_pid": str(runtime.pid)} if runtime else {}),
-                AGENT_TIMEOUT_METADATA_KEY: str(timeout),
+                AGENT_TIMEOUT_METADATA_KEY: str(float(timeout)),
             },
         )
 

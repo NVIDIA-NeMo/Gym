@@ -153,3 +153,30 @@ stricter, single-activation contract described above. The intentional difference
 Both paths honor configured `thinking` and declare interleaved `reasoning_content`.
 Different prompt placement can affect results; this integration does not establish
 local/session score parity or migrate existing benchmark defaults.
+
+## Native continuation
+
+Seed with `continuation: {mode: native_conversation}` and a borrowed sandbox,
+then call `/v1/responses` using zero-based increasing activation IDs.
+An activation carries one new user message. The adapter records the native session
+ID after activation 0 and resumes that exact session for each later input. Retries
+replay the original result; output items, usage, and activation observations contain
+only the new work. Close returns cumulative observations and the native trajectory.
+Runtime installation happens at seed using the existing pinned online installer.
+
+Each activation uses the Responses endpoint with `agent_session_id`, `episode_id`,
+`activation_id`, `responses_create_params`, and a positive `timeout_seconds`.
+Ordinary single-turn Responses requests still use the existing request shape.
+The adapter converts seconds to a local monotonic deadline, covering the concurrency
+queue and file staging as well as execution. Expiration stops the harness while
+leaving the native conversation resumable. The environment owns its total episode
+budget; no clock synchronization or shared interaction-budget object is required.
+A native permission rejection preserves the conversation for feedback without
+granting the denied tool. Unsupported continuation requirements fail at seed.
+
+Activation response metadata separates `launch_attempted` from
+`native_input_accepted`: the latter is `true` only when a new root user message in
+the native checkpoint contains this activation's prompt. It is `unknown` after a
+launch without that evidence and `false` when no launch was attempted.
+`policy_input_observed` remains `unknown`; confirming model consumption requires
+the captured model request, not a process PID or staged input file.
