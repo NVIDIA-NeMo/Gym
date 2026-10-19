@@ -184,6 +184,13 @@ def _load_openshell_provider() -> ProviderClass:
     return OpenShellProvider
 
 
+def _load_cwsandbox_provider() -> ProviderClass:
+    from nemo_gym.sandbox.providers.cwsandbox import CWSandboxProvider
+
+    return CWSandboxProvider
+
+
+_BUILTIN_PROVIDER_LOADERS["cwsandbox"] = _load_cwsandbox_provider
 _BUILTIN_PROVIDER_LOADERS["apptainer"] = _load_apptainer_provider
 _BUILTIN_PROVIDER_LOADERS["daytona"] = _load_daytona_provider
 _BUILTIN_PROVIDER_LOADERS["docker"] = _load_docker_provider
