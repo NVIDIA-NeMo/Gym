@@ -2650,19 +2650,20 @@ def test_the_driver_resolves_the_policy_url_list_to_the_pool_hosts(per_node_scri
     ]
 
 
-def test_a_per_node_service_needs_a_node_pool(per_node_config):
-    with pytest.raises(ValueError, match="has no node_pool"):
-        per_node_config(node_pool=None)
-
-
-def test_a_per_node_service_runs_one_instance_per_node(per_node_config):
-    with pytest.raises(ValueError, match="number_of_instances must be 1"):
-        per_node_config(number_of_instances=4)
-
-
-def test_a_per_node_service_cannot_use_the_ray_serve_gateway(per_node_config):
-    with pytest.raises(ValueError, match="drop use_ray_serve"):
-        per_node_config(use_ray_serve=True)
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"node_pool": None}, "has no node_pool"),
+        ({"number_of_instances": 4}, "number_of_instances must be 1"),
+        ({"use_ray_serve": True}, "drop use_ray_serve"),
+    ],
+    ids=["no_pool", "several_instances", "ray_serve"],
+)
+def test_a_per_node_service_refuses_a_setting_that_leaves_one_server_per_node_undefined(
+    per_node_config, overrides, message
+):
+    with pytest.raises(ValueError, match=message):
+        per_node_config(**overrides)
 
 
 def test_a_prefill_decode_tier_still_cannot_set_server_per_node(tmp_path):
