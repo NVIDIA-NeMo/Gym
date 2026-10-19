@@ -75,6 +75,7 @@ Prefill/decode disaggregated vLLM: two vLLM tiers behind a `vllm-router`. A sing
 | `nixl_side_channel_port` | `5600` | Prefill's NIXL side-channel port. Decode uses this plus 1. Set on the `vllm_pd` entry, not on a tier. |
 | `prefill_policy`, `decode_policy` | `cache_aware` | Router routing policies. |
 | `intra_node_data_parallel_size` | `1` | Passed to the router. |
+| `router_metrics_port` | unset | Port the router serves its own Prometheus metrics on. When set, the router is started with `--prometheus-host 0.0.0.0 --prometheus-port <port>` and the [job collector](/main/observability/eval-submit-collector) scrapes it in place of the router's API port. |
 | `request_timeout_secs` | `86400` | Router request timeout. Long because agentic benchmarks hold requests open. |
 | `log_level` | `error` | Router log level. |
 | `kv_connector` | `NixlConnector` | KV-transfer connector for both tiers. |

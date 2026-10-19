@@ -72,6 +72,7 @@ The tiers inherit `container`, `model`, and `served_model_name` from the `vllm_p
 | `server_per_node` | `false` | Run an independent server on every node of each tier, and list each as a router endpoint, instead of one data-parallel engine across a tier. Requires `number_of_instances: 1` on each tier. |
 | `prefill_policy`, `decode_policy` | `cache_aware` | Router routing policy per tier. |
 | `request_timeout_secs` | `86400` | Raise or lower the router timeout. The default is long because agentic benchmarks keep requests open for a long time. |
+| `router_metrics_port` | unset | Serve the router's own Prometheus metrics on this port, and scrape them with the job collector. They are the `vllm_router_*` series: per-worker load, running requests, request counts and durations, and routing-policy decisions. |
 | `kv_load_failure_policy` | `fail` | Fail loudly if a KV transfer breaks, instead of silently recomputing the prefill. |
 | `nixl_side_channel_port` | `5600` | Prefill's NIXL port; decode uses the next port. |
 

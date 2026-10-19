@@ -225,6 +225,9 @@ class VllmPDServiceConfig(BaseModelServiceConfig):
     prefill_policy: str = "cache_aware"
     decode_policy: str = "cache_aware"
     intra_node_data_parallel_size: int = 1
+    # Port the router serves its own Prometheus metrics on, apart from its API port. When set, the
+    # router is started with it and the job's collector scrapes it; when None the router exposes none.
+    router_metrics_port: int | None = None
     # An agentic benchmark holds a request open for a long time; the router must not give up on it.
     request_timeout_secs: int = 86400
     log_level: str = "error"

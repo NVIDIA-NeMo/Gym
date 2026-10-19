@@ -817,3 +817,48 @@ def test_the_batch_script_exports_a_hostname_for_every_node_the_exporters_run_on
     )
     script = _script(quiet)
     assert [i for i in range(5) if f"export GYM_NODE_{i}_HOST=" in script] == [0, 4]
+
+
+# ---------------------------------------------------------------------------
+# router metrics
+# ---------------------------------------------------------------------------
+
+
+def _router_port(config):
+    return scrape_targets(config)["policy"]
+
+
+def test_the_router_is_scraped_on_its_serving_port_by_default():
+    assert _router_port(_pd_config()) == 8000
+
+
+def test_the_router_is_scraped_on_its_metrics_port_when_it_has_one():
+    config = _pd_config()
+    pd = config.services["policy"].model_copy(update={"router_metrics_port": 29000})
+    config = config.model_copy(update={"services": {"policy": pd}})
+    assert _router_port(config) == 29000
+    # The tiers keep their serving ports; only the router changes.
+    assert scrape_targets(config)["policy-prefill"] == 8001
+
+
+def test_the_collector_scrapes_the_router_metrics_port_beside_itself():
+    config = _config(
+        services={
+            "policy": {
+                "type": "vllm_pd",
+                "container": "vllm:latest",
+                "model": "m",
+                "router_metrics_port": 29000,
+                "prefill": {"node_pool": "prefill"},
+                "decode": {"node_pool": "decode"},
+            }
+        },
+        compute={
+            "cluster-a": {
+                "type": "slurm",
+                "account": "acct",
+                "node_pools": {"prefill": {"partition": "batch"}, "decode": {"partition": "batch"}},
+            }
+        },
+    )
+    assert _jobs(config)["gym-vllm/policy"] == [{"targets": ["localhost:29000"], "labels": {"gym_service": "policy"}}]
