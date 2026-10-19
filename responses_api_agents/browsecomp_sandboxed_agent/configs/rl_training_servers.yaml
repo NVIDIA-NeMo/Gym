@@ -1,0 +1,35 @@
+# Gym-side servers for BrowseComp search RL trained beside other environments under NeMo RL ledger token
+# capture. The RL recipe lists this file in env.nemo_gym.config_paths and sets the remaining harness, agent
+# and judge fields. These entries live on the Gym side because they reference Gym globals that NeMo RL injects
+# (policy_base_url, policy_api_key, policy_model_name) and keys from the job environment, which NeMo RL must
+# neither resolve nor print.
+
+# The policy engines (same base_url and model as policy_model) for the browsecomp agents only.
+# sequential_reasoning_allowed: true: after a reasoning-only turn the browsecomp loop calls the model again;
+# with false, Gym answers that call with an empty completion and the loop spins to max_steps. OpenCode agents
+# keep policy_model and its own setting. return_token_id_information: false, as NeMo RL sets on policy_model
+# under ledger capture; capture itself is global (token_id_capture.all_agents) and the ledger is shared, so
+# rollouts on this server reach the same control plane.
+policy_model_search:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${policy_base_url}
+      api_key: ${policy_api_key}
+      model: ${policy_model_name}
+      return_token_id_information: false
+      request_prompt_and_generation_token_ids: false
+      uses_reasoning_parser: true
+      sequential_reasoning_allowed: true
+
+# Keys, read from the job environment (the launcher loads them into the sbatch environment).
+judge_model:
+  responses_api_models:
+    vllm_model:
+      api_key: ${oc.env:INFERENCE_API_KEY}
+
+browsecomp_rl_resources_server:
+  resources_servers:
+    browsecomp_advanced_harness:
+      # A JSON list of Exa keys.
+      exa_api_key: ${oc.decode:${oc.env:BC_EXA_API_KEYS_JSON}}
