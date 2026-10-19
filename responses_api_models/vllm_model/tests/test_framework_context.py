@@ -229,6 +229,35 @@ def test_measurement_uses_same_candidate_without_ledger_writes(monkeypatch, tmp_
     assert harness.manifest("attempt") == before
 
 
+@pytest.mark.parametrize("original_question", ["unchanged", "omitted", "changed"])
+def test_string_input_continuity_matches_measurement_and_generation(monkeypatch, tmp_path, original_question):
+    harness = make_capture_harness(monkeypatch, tmp_path)
+    first = assert_clean(harness.post("attempt", "old question"))
+    before = harness.manifest("attempt")
+    history = first["output"] + [{"role": "user", "content": "continue"}]
+    if original_question != "omitted":
+        question = "old question" if original_question == "unchanged" else "different question"
+        history.insert(0, {"role": "user", "content": question})
+    measured = []
+
+    async def tokenize(client, **body):
+        measured.append(CaptureAdmission.model_validate(body[NG_CAPTURE_FIELD]))
+        return {"prompt_token_count": 19, "ng_context_measured": True}
+
+    monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_tokenize", tokenize)
+    assert_clean(harness.client.post("/context/attempt/measure", json={"input": history}))
+    assert harness.manifest("attempt") == before
+    assert_clean(harness.post("attempt", history))
+    generated = harness.worker_calls[-1][0]
+    expected_parent = before.records[0].model_call_id if original_question == "unchanged" else None
+    for admission in [measured[0], generated]:
+        assert admission.mode == ("candidate" if expected_parent is not None else "text")
+        assert admission.parent_call_id == expected_parent
+        assert admission.prev_len == (before.records[0].cum_len if expected_parent is not None else 0)
+    after = harness.manifest("attempt")
+    assert not after.failures and not after.pending_call_ids
+
+
 def test_lost_capture_ack_is_terminal_and_preserves_attempt_identity(monkeypatch, tmp_path):
     harness = make_capture_harness(monkeypatch, tmp_path)
     harness.omit_coords = True

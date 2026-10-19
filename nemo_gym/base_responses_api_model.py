@@ -218,11 +218,12 @@ def _request_messages(body: Any) -> list[dict]:
         turns = [m if isinstance(m, dict) else m.model_dump() for m in messages if m is not None]
     else:
         items = getter("input", None)
-        turns = (
-            [i if isinstance(i, dict) else i.model_dump() for i in items if i is not None]
-            if isinstance(items, list)
-            else []
-        )
+        if isinstance(items, str):
+            turns = [{"role": "user", "content": items}]
+        elif isinstance(items, list):
+            turns = [i if isinstance(i, dict) else i.model_dump() for i in items if i is not None]
+        else:
+            turns = []
     return _request_envelope(getter) + turns
 
 
