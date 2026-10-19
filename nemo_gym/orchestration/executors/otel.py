@@ -37,6 +37,7 @@ from nemo_gym.orchestration.api import (
     BaseModelServiceConfig,
     SlurmComputeConfig,
     SubmitConfig,
+    VllmPDServiceConfig,
     VllmPDTierConfig,
     VllmServiceConfig,
 )
@@ -74,9 +75,15 @@ SHUTDOWN_WAIT_SECONDS = 30
 
 
 def scrape_targets(config: SubmitConfig) -> dict[str, int]:
-    """Service name to serving port for every service that exposes a model (and so `/metrics`)."""
+    """Service name to the port it answers `/metrics` on, for every service that exposes a model.
+
+    That is the serving port, except for a prefill/decode router with a metrics port of its own,
+    which serves its metrics there and not on its API port.
+    """
     return {
-        name: service.port
+        name: service.router_metrics_port
+        if isinstance(service, VllmPDServiceConfig) and service.router_metrics_port is not None
+        else service.port
         for name, service in config.deployed_services.items()
         if isinstance(service, BaseModelServiceConfig)
     }

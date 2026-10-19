@@ -423,6 +423,12 @@ def _build_router_command(router: VllmPDServiceConfig, offsets: dict[str, tuple[
         # A per-node tier is one server per node; otherwise the tier's API rank is its head.
         for i in range(count if router.server_per_node else 1):
             endpoints += f' {flag} "http://{_pool_head(start + i)}:{tier.port}"'
+    # The router serves metrics on a port of its own, on all interfaces so the collector reaches it.
+    metrics = (
+        f" --prometheus-host 0.0.0.0 --prometheus-port {router.router_metrics_port}"
+        if router.router_metrics_port is not None
+        else ""
+    )
     return (
         "vllm-router"
         f" --prefill-policy {shlex.quote(router.prefill_policy)}"
@@ -432,6 +438,7 @@ def _build_router_command(router: VllmPDServiceConfig, offsets: dict[str, tuple[
         # All interfaces: the driver and the health probe reach it over localhost.
         " --host 0.0.0.0"
         f" --port {router.port}"
+        f"{metrics}"
         f" --intra-node-data-parallel-size {router.intra_node_data_parallel_size}"
         f" --request-timeout-secs {router.request_timeout_secs}"
         f" --log-level {shlex.quote(router.log_level)}"

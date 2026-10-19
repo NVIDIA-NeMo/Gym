@@ -2107,6 +2107,16 @@ def test_a_pd_service_renders_the_three_service_form_it_replaced(per_node):
     assert script == (Path(__file__).parent / "fixtures" / fixture).read_text()
 
 
+def test_the_router_serves_no_metrics_port_unless_asked_to(tmp_path):
+    router = _step(_pd_script(tmp_path), "policy")
+    assert "--prometheus" not in router
+
+
+def test_the_router_metrics_port_is_passed_to_the_router_on_all_interfaces(tmp_path):
+    router = _step(_pd_script(tmp_path, services=_pd_services(router_metrics_port=29000)), "policy")
+    assert " --port 8000 --prometheus-host 0.0.0.0 --prometheus-port 29000 " in router
+
+
 def test_a_pd_service_deploys_as_two_tiers_and_a_router(tmp_path):
     config = _pd_config(tmp_path)
     assert list(config.deployed_services) == ["policy-prefill", "policy-decode", "policy"]
