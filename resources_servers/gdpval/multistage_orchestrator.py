@@ -2406,7 +2406,7 @@ async def run_e2e_multistage(
     """
     from contextlib import nullcontext
 
-    from nemo_gym.base_responses_api_model import observability_enabled_from_config
+    from nemo_gym.observability.model_calls import observability_enabled_from_config
     from nemo_gym.rollout_collection import RolloutCollectionHelper, _attach_ng_perf
 
     multistage_config = parse_multistage_config(global_config_dict.get("multistage") or {})
