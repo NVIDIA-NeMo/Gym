@@ -35,8 +35,9 @@ Both files are required. `rollouts.jsonl` alone is not sufficient because many r
 <Note>
 Ordinary re-scoring supports fresh manifest-backed runs when their files contain no superseded attempts. Write the
 new scores to a separate output. If a saved answer was superseded by a newer attempt, first export the selected
-results using `gym eval aggregate`. Judge-only recovery of manifest-backed runs and appending reverified results
-back into those runs remain follow-ups; see [evaluation resume](/main/evaluation/resume).
+results using `gym eval aggregate`. Judge-only recovery also supports selected saved answers from manifest-backed
+runs into a separate output. Recovery from superseded histories and appending reverified results back into managed
+runs remain follow-ups; see [evaluation resume](/main/evaluation/resume).
 
 For manifest- or journal-backed sources, the output and its supporting files cannot overwrite the source run's
 manifest, saved inputs, results, failures or other recovery files, including when `--rollouts` names the run's
@@ -48,9 +49,6 @@ set of sidecars beside that link. If both the link and its target have companion
 them without changing saved files. This also applies to a fresh `--overwrite` and an output named after the alias's
 `_failures` or `_materialized_inputs` file, even when neither side has a manifest or journal. Back up and reconcile
 the files first, or choose an unambiguous output path. New outputs put companions beside the resolved target.
-This preservation guarantee excludes `--retry-invalid-judge-responses`: its legacy migration replaces the output
-path atomically and can replace a symlink with a regular file. Back up and reconcile legacy alias-side companions
-beside the target, then use the original target path when requesting that migration.
 </Note>
 
 ### Relay ATIF trajectories

@@ -103,10 +103,9 @@ Invalid or colliding IDs are configuration errors before dispatch.
 
 Tasks drained before dispatch by `dispatch_budget_s` consume no attempt and remain available on resume.
 The opt-in `retry_terminal_timeouts` and `dispatch_longest_first` controls
-also apply to manifest-backed runs. Invalid-judge migration preserves the run and attempt identities; an interrupted
-sidecar-first migration can be reconciled, while conflicting or foreign payloads still fail validation.
-Incomplete final writes are repaired after history validation and before migration reads them. Cached-deliverable reuse
-survives an interrupted retry, but a newer recorded outcome can supersede that instruction.
+also apply to manifest-backed runs. Incomplete final writes are repaired after history validation;
+conflicting or foreign payloads still fail validation. Core collection retries unfinished tasks from their inputs.
+GDPVal manages its own cached-deliverable reuse; core invalid-judge migration options are no longer supported.
 
 Offline aggregation accepts the same `+retry_terminal_timeouts=true` option. Coverage records the active
 `retry_terminal_timeouts` and `max_rollout_attempts` policy alongside `failure_budget_exhausted`; use the same settings as
@@ -259,6 +258,8 @@ async def collect_outcomes(input_rows):
 
 Configure and start the referenced Gym servers before calling the helper. Callers supplying explicit rollout IDs can skip
 preprocessing. The direct API does not save files, retry tasks, or make training decisions. Its caller owns those operations.
+When stopping early, await the returned iterator's `aclose()` to cancel unfinished client requests, or `aclose_and_drain()`
+to also retrieve completed, unconsumed outcomes. These methods wait for local client tasks, not server or sandbox cleanup.
 Expected HTTP, JSON, and completed-result validation errors become failure records; programming errors and cancellation
 still propagate. A malformed completed result must not be interpreted as a reward-zero sample.
 
@@ -269,7 +270,11 @@ not copied into the failure record. Completed masked results remain completed di
 The evaluation runner validates HTTP result shape and native task/attempt identity regardless of failure routing.
 Agents cannot return a full collector-owned `RolloutFailure` record or choose its source/delivery observations.
 They report failures through the episode contract, HTTP errors, or supported legacy markers. Its sidecar retains the existing
-`_ng_failure_*` routing aliases for row-oriented consumers and stores the canonical record under `_ng_failure_record`. Those aliases can be removed after
+`_ng_failure_*` routing aliases for row-oriented consumers and stores the canonical record under `_ng_failure_record`.
+`_ng_failure_class` follows the canonical failure kind. If a legacy producer supplied a different routing class, the
+collector also saves it as `_ng_failure_legacy_class`. Live and offline `count_failure_classes_as_zero` selection matches
+either name and counts the row once, preserving existing explicit scoring policies. Row-oriented consumers that need
+the original producer class should prefer `_ng_failure_legacy_class` when present. Those aliases can be removed after
 the consumers and the producer migration in [#3180](https://github.com/NVIDIA-NeMo/Gym/issues/3180) adopt the new contract.
 When routing is disabled, exceptions and malformed failure payloads can stop the run. Well-formed explicit failures are
 still accepted as data. Diagnostic observations, trajectories, and captured model calls are retained in the surrounding

@@ -2937,6 +2937,81 @@ class TestRolloutCollection:
         )
         assert orjson.loads(metrics_fpath.read_bytes())[0]["key_metrics"] == {"mean/reward": expected_mean}
 
+    @pytest.mark.parametrize(
+        "counted_classes",
+        [[], ["reference_missing"], ["gdpval:reference_missing"], ["reference_missing", "gdpval:reference_missing"]],
+    )
+    async def test_legacy_class_and_kind_keep_score_selection_through_resume_and_aggregation(
+        self, tmp_path, monkeypatch, empty_global_config, counted_classes
+    ) -> None:
+        input_path = tmp_path / "input.jsonl"
+        input_path.write_text(
+            "".join(
+                json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my_agent"}, "x": i})
+                + "\n"
+                for i in range(2)
+            )
+        )
+        output_path = tmp_path / "output.jsonl"
+        dispatches, metrics = [], []
+
+        async def post(server_name, url_path, json, **kwargs):
+            if url_path == "/run":
+                dispatches.append(json["x"])
+                if json["x"] == 0:
+                    return FakeResponse(200, {"reward": 1.0, "response": {}})
+                # GDPVal uses distinct routing and shared kind names. A stale echo
+                # must not be allowed to replace the collector's original-class evidence.
+                return FakeResponse(
+                    200,
+                    {
+                        NG_FAILURE_CLASS_KEY: "reference_missing",
+                        "failure_kind": "gdpval:reference_missing",
+                        "failure_reason": "Reference not found",
+                        "mask_sample": True,
+                        "_ng_failure_legacy_class": "stale_input_class",
+                    },
+                )
+            result = compute_aggregate_metrics(json.verify_responses)
+            metrics.append(result.key_metrics)
+            assert all("_ng_failure_legacy_class" not in row for row in json.verify_responses)
+            return FakeResponse(200, result.model_dump())
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_path),
+            output_jsonl_fpath=str(output_path),
+            route_failures_to_sidecar=True,
+            count_failure_classes_as_zero=counted_classes,
+            disable_health_check=True,
+        )
+        helper = RolloutCollectionHelper()
+        await helper.run_from_config(config)
+        saved_results = output_path.read_bytes()
+        first_count = len(dispatches)
+        config.resume_from_cache = True
+        await helper.run_from_config(config)
+        assert dispatches[first_count:] == [1]
+        assert output_path.read_bytes() == saved_results
+        failures_path = _failures_path_for(output_path)
+        saved_failures = failures_path.read_bytes()
+        for failure in map(orjson.loads, saved_failures.splitlines()):
+            assert failure[NG_FAILURE_CLASS_KEY] == "gdpval:reference_missing"
+            assert failure["_ng_failure_legacy_class"] == "reference_missing"
+            assert failure["_ng_failure_record"]["failure"]["failure_kind"] == "gdpval:reference_missing"
+            assert "reward" not in failure
+
+        await RolloutAggregationHelper().run_from_config(
+            RolloutAggregationConfig(
+                input_glob=str(output_path),
+                output_jsonl_fpath=str(tmp_path / "aggregate.jsonl"),
+                count_failure_classes_as_zero=counted_classes,
+                disable_health_check=True,
+            )
+        )
+        assert metrics == [{"mean/reward": 0.5 if counted_classes else 1.0}] * 3
+        assert failures_path.read_bytes() == saved_failures
+
     @pytest.mark.parametrize("count_judge_failure", [False, True])
     async def test_masked_judge_failure_counts_as_zero_only_when_opted_in(
         self,

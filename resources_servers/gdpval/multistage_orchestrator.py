@@ -89,6 +89,7 @@ from nemo_gym.path_utils import failures_path_for, materialized_path_for
 from nemo_gym.rollout_collection import (
     _NO_RESULT_FAILURE_CLASSES,
     _RUN_FAILURE_ERRORS,
+    AGENT_REQUEST_FAILED_FAILURE_CLASS,
     ENVIRONMENT_SERVER_FAILURE_CLASS,
     NG_DISPATCH_DRAINED_KEY,
     NG_ENVIRONMENT_SERVER_KEY,
@@ -1559,10 +1560,17 @@ async def run_multistage_stages(
             "num_rollouts": len(stage_rows),
             # Only an accepted partial-stage policy can waive unresolved rows.
             # Terminal/exhausted rows are already absent from unresolved_keys.
+            # A collector request outage can recover on a later allocation too;
+            # keep the in-process retry and partial-waiver policies unchanged.
             "num_retryable": 0
             if partial_outcome is not None
             else sum(
-                _stage_key(row) in unresolved_keys and (row.get(NG_NO_PERSIST_KEY) or _is_retryable_failure(row))
+                _stage_key(row) in unresolved_keys
+                and (
+                    row.get(NG_NO_PERSIST_KEY)
+                    or _is_retryable_failure(row)
+                    or row.get(NG_FAILURE_CLASS_KEY) == AGENT_REQUEST_FAILED_FAILURE_CLASS
+                )
                 for row in new_tagged
             )
             + len(unresolved_keys - {_stage_key(row) for row in new_tagged}),

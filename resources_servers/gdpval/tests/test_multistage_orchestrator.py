@@ -4672,3 +4672,74 @@ async def test_multistage_driver_completion_and_resume_are_bounded(tmp_path, mon
     assert len(dispatches) - initial_dispatches == (0 if kind in {"terminal", "exhausted"} else 1)
     if kind in {"terminal", "exhausted", "drained"}:
         assert failures_path_for(Path(config.output_jsonl_fpath)).read_bytes() == original_failures
+
+
+@pytest.mark.parametrize("recovers", [False, True])
+async def test_multistage_http_outage_resumes_until_recovery_or_budget(tmp_path, monkeypatch, recovers):
+    from nemo_gym.rollout_recovery import IncompleteEvaluationError
+    from tests.unit_tests.test_rollout_collection import FakeResponse, http_error, install_fake_server_client
+
+    dispatches = []
+
+    class Helper(rollout_collection_module.RolloutCollectionHelper):
+        def _preprocess_rows_from_config(self, config):
+            return _materialized_rows(["t0", "t1"])
+
+        async def _call_aggregate_metrics(self, results, rows, output_fpath, **kwargs):
+            return None
+
+    async def post(**kwargs):
+        row = kwargs["json"]
+        attempt = row.get(ATTEMPT_INDEX_KEY_NAME, 0)
+        dispatches.append((row["task_id"], attempt))
+        if row["task_id"] == "t1" and not (recovers and attempt == 1):
+            raise http_error(503, "Temporary gateway unavailable")
+        ref = row["reference_ids"][0]
+        return FakeResponse(
+            200,
+            {
+                "task_id": row["task_id"],
+                "reward": 1.0,
+                "response": {},
+                "per_reference": {ref: {"wins": 1, "losses": 0, "ties": 0, "reference_elo": REF_ELOS[ref]}},
+            },
+        )
+
+    monkeypatch.setattr(rollout_collection_module, "RolloutCollectionHelper", Helper)
+    monkeypatch.setattr(
+        multistage_module, "ensure_distribution", lambda *args, **kwargs: (_distribution(["t0", "t1"]), None)
+    )
+    monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "3")
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post), agent_names=("gdpval_stirrup_agent",))
+    output = tmp_path / "rollouts.jsonl"
+    config = rollout_collection_module.RolloutCollectionConfig(
+        input_jsonl_fpath=str(tmp_path / "input.jsonl"),
+        output_jsonl_fpath=str(output),
+        require_complete=True,
+        route_failures_to_sidecar=True,
+    )
+    global_config = {
+        "multistage": {"enabled": True, "stages": ["2"], "seed": 0},
+        "gdpval": {
+            "resources_servers": {"gdpval": {"reference_models": {k: {"elo": v} for k, v in REF_ELOS.items()}}}
+        },
+    }
+    with pytest.raises(IncompleteEvaluationError) as error:
+        await run_e2e_multistage(config, global_config)
+    assert error.value.exit_code == 75
+    [first_failure] = [json.loads(line) for line in failures_path_for(output).read_text().splitlines()]
+    assert first_failure[NG_FAILURE_CLASS_KEY] == "agent_request_failed"
+    assert first_failure["_ng_failure_http_status"] == 503
+    initial_success = output.read_bytes()
+    config.resume_from_cache = True
+    if recovers:
+        await run_e2e_multistage(config, global_config)
+        assert len(output.read_text().splitlines()) == 2
+        assert output.read_bytes().startswith(initial_success)
+    else:
+        for expected in (75, 76, 76):
+            with pytest.raises(IncompleteEvaluationError) as error:
+                await run_e2e_multistage(config, global_config)
+            assert error.value.exit_code == expected
+        assert output.read_bytes() == initial_success
+    assert sorted(dispatches) == [("t0", 0), ("t1", 0), ("t1", 1)] + ([] if recovers else [("t1", 2)])

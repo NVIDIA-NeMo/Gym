@@ -70,6 +70,17 @@ _COLLECTION_OPTIONS = frozenset(
         "count_failure_classes_as_zero",
         "count_missing_rollouts_as_zero",
         "route_failures_to_sidecar",
+        # Timing/queue reports observe the run; they do not change task execution.
+        "dispatch_start_report_within_s",
+        "dispatch_start_report_min_fraction",
+        "dispatch_all_started_within_s",
+        "server_queue_metrics_urls",
+        "server_queue_max_waiting_ratio",
+        "server_queue_sample_interval_s",
+        "long_rollout_s",
+        "long_rollout_max_fraction",
+        "timing_summary_interval_s",
+        "timed_out_max_fraction",
     }
 )
 # Server addresses and credentials are resolved anew when a job restarts. Keep model

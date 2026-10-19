@@ -1831,3 +1831,80 @@ def test_run_lock_refusal_names_owner_and_releases_after_exit(tmp_path, monkeypa
         assert "12345" in str(error.value)
     with run_lock(output):
         pass  # Persisted owner metadata is not itself a lock.
+
+
+@pytest.mark.parametrize(
+    ("field", "before", "after"),
+    [
+        ("dispatch_start_report_within_s", 60, 30),
+        ("dispatch_start_report_min_fraction", 0.99, 0.9),
+        ("dispatch_all_started_within_s", 60, 90),
+        ("server_queue_metrics_urls", ["http://node-a:8000"], ["http://node-b:8000"]),
+        ("server_queue_max_waiting_ratio", 0.1, 0.2),
+        ("server_queue_sample_interval_s", 30, 60),
+        ("long_rollout_s", 60, 90),
+        ("long_rollout_max_fraction", 0.05, 0.1),
+        ("timing_summary_interval_s", 60, 30),
+        ("timed_out_max_fraction", 0.01, 0.02),
+    ],
+)
+def test_resume_accepts_changed_monitoring_but_checks_task_settings(saved_manifest, field, before, after):
+    source, rows, materialized, config, servers, _, path = saved_manifest
+    config[field] = before
+    saved = RunManifest.create(source, rows, config, servers)
+    saved.write(path)
+    config[field] = after
+    current = RunManifest.create(source, rows, config, servers)
+    resumed = validate_resume(path, current, materialized)
+    assert resumed.run_id == saved.run_id
+    assert resumed.identity_overridden is False
+
+    # These spellings inside task data are still part of the experiment.
+    config["task_parameters"] = {field: before}
+    RunManifest.create(source, rows, config, servers).write(path)
+    config["task_parameters"][field] = after
+    with pytest.raises(ConfigError, match="incompatible resolved configuration"):
+        validate_resume(path, RunManifest.create(source, rows, config, servers), materialized)
+
+
+@pytest.mark.parametrize("drain", [False, True])
+async def test_run_outcomes_early_close_cancels_requests_and_can_drain_typed_results(monkeypatch, drain):
+    entered = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def post(**kwargs):
+        task = kwargs["json"]["_ng_task_index"]
+        if task == 2:
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+        payload = (
+            {"reward": 1.0, "response": {}}
+            if task == 0
+            else {"_ng_failure_class": "judge_failed", "failure_reason": "Judge unavailable"}
+        )
+        return FakeResponse(200, payload)
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    outcomes = RolloutCollectionHelper().run_outcomes([failing_row(i) for i in range(3)])
+    try:
+        async with asyncio.timeout(5):
+            first = await next(outcomes)
+            await entered.wait()
+            if drain:
+                remaining = [await future for future in await outcomes.aclose_and_drain()]
+                by_task = {row["_ng_task_index"]: result for row, result in [first, *remaining]}
+                assert set(by_task) == {0, 1}
+                assert by_task[0] == {"reward": 1.0, "response": {}}
+                assert isinstance(by_task[1], RolloutFailure)
+                assert by_task[1].failure.failure_kind == "judge_failed"
+                assert await outcomes.aclose_and_drain() == []
+            else:
+                await outcomes.aclose()
+            assert cancelled.is_set()
+            with pytest.raises(StopIteration):
+                next(outcomes)
+    finally:
+        await outcomes.aclose()

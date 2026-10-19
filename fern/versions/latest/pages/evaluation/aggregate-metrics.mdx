@@ -28,6 +28,14 @@ After upgrading, aggregate those outputs again before comparing them. Use a new 
 reports, and compare using that same output path. Do not assume an older link-side metrics file is selected.
 </Note>
 
+## Explicit failure scoring
+
+Failures are excluded from scores by default. `count_failure_classes_as_zero` explicitly includes selected failures
+as zero-valued metric inputs without changing saved outcomes. It matches either the canonical `_ng_failure_class`
+or the original producer name saved in `_ng_failure_legacy_class`, when present. For example, a GDPVal failure with
+kind `gdpval:reference_missing` still matches an existing `reference_missing` selection. Selecting both names counts
+the task once. Collection and offline aggregation use the same rule; see [evaluation resume](/main/evaluation/resume).
+
 ## Output Format
 
 The output file is a JSON array with one entry per agent:

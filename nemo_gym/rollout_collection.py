@@ -26,7 +26,7 @@ import time
 import warnings
 from asyncio import Future, Semaphore
 from collections import Counter, defaultdict, deque
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from contextlib import AsyncExitStack, nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
@@ -239,6 +239,7 @@ def _masking_step_metrics(agent_name: str, scored: Counter, dropped: Counter) ->
 # ---------------------------------------------------------------------------
 
 NG_FAILURE_CLASS_KEY = "_ng_failure_class"
+NG_FAILURE_LEGACY_CLASS_KEY = "_ng_failure_legacy_class"
 NG_NO_PERSIST_KEY = "_ng_no_persist"
 # Set only by Gym, on the result it builds for a row the dispatch budget never started.
 NG_DISPATCH_DRAINED_KEY = "_ng_dispatch_drained"
@@ -1126,7 +1127,8 @@ class SharedRolloutCollectionConfig(RemovedRolloutOptionsMixin, UploadRolloutsCo
         description=(
             "Failure classes from the failures sidecar to count in aggregate metrics, e.g. "
             "['agent_run_error'], so a failed rollout lands in the denominator. A row that carries "
-            "no reward is scored zero for the metrics only; no artifact is changed."
+            "no reward is scored zero for the metrics only; no artifact is changed. "
+            "Matches the canonical class or the saved original legacy producer class."
         ),
     )
 
@@ -2204,8 +2206,13 @@ def _latest_failure_rows(failures_fpaths: List[Path]) -> Dict[Tuple[Any, Any], D
     return latest_by_key
 
 
+def _matches_failure_class(row: Mapping[str, Any], failure_classes: Collection[str]) -> bool:
+    """Match the canonical class or the original legacy producer's routing class."""
+    return row.get(NG_FAILURE_CLASS_KEY) in failure_classes or row.get(NG_FAILURE_LEGACY_CLASS_KEY) in failure_classes
+
+
 def _counted_failure_rows(rows: List[Dict], failure_classes: List[str]) -> List[Dict]:
-    return [_counted_failure_row(row) for row in rows if row.get(NG_FAILURE_CLASS_KEY) in failure_classes]
+    return [_counted_failure_row(row) for row in rows if _matches_failure_class(row, failure_classes)]
 
 
 def _failure_rows_counted_as_zero(
@@ -2537,7 +2544,7 @@ class _EagerCompletionIterator:
 
 
 class _RowResultIterator:
-    """What ``run_examples`` returns: ``(row, result)`` awaitables in completion order.
+    """Map completion metadata to ``(row, result)`` for the direct collection APIs.
 
     A thin map over the internal completion iterator that keeps its ``aclose()`` reachable, so a
     direct caller can stop collecting and cancel the rollouts still in flight.
@@ -2556,7 +2563,7 @@ class _RowResultIterator:
         return self._without_metadata(next(self._completions))
 
     @staticmethod
-    async def _without_metadata(future: Future) -> Tuple[Dict, Dict]:
+    async def _without_metadata(future: Future) -> Tuple[Dict, Dict | RolloutFailure]:
         completed = await future
         return completed.row, completed.result
 
@@ -2578,7 +2585,7 @@ class _RowResultIterator:
         self._closed = True
         await self._completions.aclose()
 
-    async def aclose_and_drain(self) -> list[Future[Tuple[Dict, Dict]]]:
+    async def aclose_and_drain(self) -> list[Future[Tuple[Dict, Dict | RolloutFailure]]]:
         """Stop admission, cancel unfinished client tasks, and preserve completed outcomes.
 
         Before its first suspension, this operation stops admitting rollouts and snapshots
@@ -3525,6 +3532,11 @@ class RolloutCollectionHelper(BaseModel):
                 structured_failure = isinstance(result, RolloutFailure)
                 if structured_failure:
                     compatibility = _failure_compatibility_row(result, verification_response)
+                    # The canonical alias must agree with the typed record. Keep a distinct
+                    # producer class as collector-owned evidence for existing score selectors.
+                    legacy_class = diagnostics.get(NG_FAILURE_CLASS_KEY)
+                    if isinstance(legacy_class, str) and legacy_class != result.sidecar_failure_class:
+                        compatibility[NG_FAILURE_LEGACY_CLASS_KEY] = legacy_class
                     # Keep producer evidence without making it the canonical failure reason.
                     if diagnostics.get("error"):
                         compatibility.pop("error")
@@ -4624,7 +4636,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         semaphore: Optional[Semaphore] = None,
         *,
         run_id: str | None = None,
-    ) -> Iterator[Future]:
+    ) -> _RowResultIterator:
         """Yield ``(row, completed_dict | RolloutFailure)`` in completion order.
 
         Expected HTTP, JSON and result-shape failures become bounded records. Programming
@@ -4634,6 +4646,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         a run, overriding any row stamp. Without it, existing row stamps are preserved;
         unstamped rows share a new invocation ID. Returned rows are invocation-owned copies;
         input rows are not modified. ``run_examples`` retains its behavior.
+
+        On early stopping, await the iterator's ``aclose()`` to cancel and join unfinished
+        client tasks, or ``aclose_and_drain()`` to also retrieve settled, unconsumed outcomes.
+        Both have the same server/agent cleanup limitations documented by ``run_examples``.
         """
         owner = run_id or str(uuid4())
         examples = [dict(row, **{RUN_ID_KEY: run_id or row.get(RUN_ID_KEY) or owner}) for row in examples]
@@ -4642,12 +4658,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 raise ValueError("run_outcomes requires rollout ids; call preprocess_examples first.")
             logical_rollout_id(row)  # Enforce the shared EpisodeId rules before any HTTP dispatch.
 
-        async def without_metadata(future: Future) -> Tuple[Dict, Dict | RolloutFailure]:
-            completed = await future
-            return completed.row, completed.result
-
-        return map(
-            without_metadata,
+        return _RowResultIterator(
             self._run_examples_with_metadata(
                 examples, head_server_config=head_server_config, semaphore=semaphore, typed_outcomes=True
             ),
@@ -4808,7 +4819,8 @@ class RolloutAggregationConfig(BaseNeMoGymCLIConfig):
             "Failure classes from the failures sidecar to count in aggregate metrics, e.g. "
             "['agent_run_error'], so a failed rollout lands in the denominator. A row that carries "
             "no reward is scored zero for the metrics only; no artifact is changed. Each shard's "
-            "sidecar is read against that shard's own rows, so runs on different environment "
+            "sidecar matches the canonical class or saved original legacy producer class and "
+            "is read against that shard's own rows, so runs on different environment "
             "servers that reuse task indices do not hide each other's failures."
         ),
     )
@@ -5073,7 +5085,7 @@ class RolloutAggregationHelper(BaseModel):
             _counted_failure_row(row)
             for identity, row in latest_failures.items()
             if identity not in result_ids
-            and row.get(NG_FAILURE_CLASS_KEY) in wanted
+            and _matches_failure_class(row, wanted)
             and _routing_identity(row) is not None
         ]
         materialized_fpaths = [materialized_path_for(path) for path in legacy_paths]
@@ -5139,7 +5151,7 @@ class RolloutAggregationHelper(BaseModel):
             row[NG_FAILURE_CLASS_KEY]
             for history in histories
             for row in history.failures()
-            if row[NG_FAILURE_CLASS_KEY] not in config.count_failure_classes_as_zero
+            if not _matches_failure_class(row, config.count_failure_classes_as_zero)
         )
         components = [history.coverage() for history in histories]
         inventory_known = not legacy_paths
