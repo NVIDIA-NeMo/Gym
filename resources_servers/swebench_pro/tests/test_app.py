@@ -31,6 +31,7 @@ from nemo_gym.base_resources_server import (
     ResourcesSeedSessionRequest,
 )
 from nemo_gym.episode_types import EpisodeId, TaskId
+from nemo_gym.failure_kinds import SESSION_LOST
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from nemo_gym.testing.session_conformance import check_resources_session_contract
@@ -419,6 +420,7 @@ def test_episode_session_follows_the_session_contract(monkeypatch: MonkeyPatch) 
         ),
         keeps_state=True,
         holds_state=lambda resources_session_id: resources_session_id in server._session_id_to_sandbox,
+        verify_body=request_body(),
     )
 
 
@@ -620,7 +622,7 @@ def test_environment_server_episode_http_lifecycle_preserves_verdict_and_private
 
 
 @pytest.mark.asyncio
-async def test_repeated_verify_of_a_typed_session_fails_after_task_sandbox_is_consumed(
+async def test_repeated_verify_of_a_typed_session_is_masked_after_task_sandbox_is_consumed(
     monkeypatch: MonkeyPatch,
 ) -> None:
     server = make_server(golden=False, apply_anti_cheating=False)
@@ -658,10 +660,12 @@ async def test_repeated_verify_of_a_typed_session_fails_after_task_sandbox_is_co
     request = SimpleNamespace(session={SESSION_ID_KEY: "session"})
 
     first = await server.verify(request, body)
-    with pytest.raises(ValueError, match="task sandbox is no longer available"):
-        await server.verify(request, body)
+    repeated = await server.verify(request, body)
 
     assert first.reward == 1.0
+    # Grading again would score an empty patch; the repeated verify is a masked lost session instead.
+    assert (repeated.reward, repeated.mask_sample, repeated.failure_kind) == (0.0, True, SESSION_LOST)
+    assert "task sandbox is no longer available" in repeated.failure_reason
     task_sandbox.stop.assert_awaited_once()
 
 

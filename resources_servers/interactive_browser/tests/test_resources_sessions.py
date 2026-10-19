@@ -25,6 +25,7 @@ from fastapi.testclient import TestClient
 
 from nemo_gym.base_resources_server import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
 from nemo_gym.episode_types import EpisodeId, TaskId
+from nemo_gym.failure_kinds import SESSION_LOST
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from nemo_gym.testing.session_conformance import check_resources_session_contract
 
@@ -130,8 +131,10 @@ class TestTypedSessionsOverHttp:
         client = TestClient(_server().setup_webserver())
         client.post("/seed_session", json=_seed_json())
 
-        with pytest.raises(ValueError, match="already bound"):
-            client.post("/seed_session", json=_seed_json(episode={"rollout_id": "other", "attempt": 0}))
+        refused = client.post("/seed_session", json=_seed_json(episode={"rollout_id": "other", "attempt": 0}))
+
+        assert refused.status_code == 409, "a conflict no retry can fix is refused as final"
+        assert "already bound" in refused.json()["detail"]
         assert len(browsers.created) == 1
 
     def test_closing_an_episode_that_never_reached_verify_releases_its_browser(self, browsers) -> None:
@@ -156,12 +159,25 @@ class TestTypedSessionsOverHttp:
         assert again.status_code == 200
         assert browsers.created[0].closed == 1
 
+    def test_a_tool_call_without_a_browser_is_a_lost_session(self, browsers) -> None:
+        """Told in-band that its browser is gone, the model would keep acting on nothing; a 404 ends the turn."""
+        client = TestClient(_server().setup_webserver())
+        client.post("/seed_session", json=_seed_json())
+        client.post("/close_session", json=_close_json())
+
+        response = client.post("/browser_navigate", json={"url": "https://example.com"})
+
+        assert response.status_code == 404
+        assert response.json()["detail"]["failure_kind"] == SESSION_LOST
+
     def test_a_close_for_another_episode_is_refused(self, browsers) -> None:
         client = TestClient(_server().setup_webserver())
         client.post("/seed_session", json=_seed_json())
 
-        with pytest.raises(ValueError, match="does not match"):
-            client.post("/close_session", json=_close_json(episode={"rollout_id": "other", "attempt": 0}))
+        refused = client.post("/close_session", json=_close_json(episode={"rollout_id": "other", "attempt": 0}))
+
+        assert refused.status_code == 409
+        assert "does not match" in refused.json()["detail"]
         assert browsers.created[0].closed == 0
 
     def test_a_malformed_close_is_a_validation_error_not_a_silent_success(self, browsers) -> None:
@@ -245,12 +261,15 @@ class TestCloseRacingTheSeed:
 
 
 def test_typed_sessions_follow_the_session_contract(browsers) -> None:
+    from test_verify_reporting import _body
+
     server = _server()
     check_resources_session_contract(
         server.setup_webserver(),
         _typed_seed("contract-session"),
         keeps_state=True,
         holds_state=lambda resources_session_id: resources_session_id in server._session_id_to_state,
+        verify_body=_body().model_dump(mode="json"),
     )
     assert all(browser.closed == 1 for browser in browsers.created)
 
@@ -261,8 +280,8 @@ def test_more_than_one_worker_is_refused() -> None:
         _server(num_workers=2)
 
 
-def test_verify_after_close_reports_the_missing_browser(browsers) -> None:
-    """A verify that arrives after the close has nothing to score, and says so rather than scoring zero."""
+def test_verify_after_close_is_a_masked_lost_session(browsers) -> None:
+    """A verify that arrives after the close has nothing to score, so the sample is masked rather than scored 0."""
     from test_verify_reporting import _body
 
     server = _server()
@@ -275,6 +294,7 @@ def test_verify_after_close_reports_the_missing_browser(browsers) -> None:
 
     response = asyncio.run(run())
 
+    assert (response.reward, response.mask_sample, response.failure_kind) == (0.0, True, SESSION_LOST)
     assert response.failure_reason == "browser session not found at verify"
 
 

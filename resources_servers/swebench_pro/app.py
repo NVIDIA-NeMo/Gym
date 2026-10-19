@@ -40,10 +40,13 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
+    ResourcesSeedRejectedError,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
+    ResourcesSessionConflictError,
     ResourcesSessionFence,
     SimpleResourcesServer,
+    lost_session_verification,
 )
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.global_config import get_global_config_dict
@@ -254,12 +257,12 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             closed_episode_id = self._fence.closed_episode(session_id)
             if closed_episode_id is not None:
                 if typed.episode_id != closed_episode_id:
-                    raise ValueError("episode_id does not match the closed resources session")
+                    raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
                 request.session.pop(SESSION_ID_KEY, None)
                 return ResourcesCloseSessionResponse(resources_session_id=session_id)
             identity = self._session_id_to_identity.get(session_id)
             if identity is not None and typed.episode_id != identity[0]:
-                raise ValueError("episode_id does not match the seeded resources session")
+                raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")
             await self._stop_session_sandbox(session_id)
             self._session_id_to_identity.pop(session_id, None)
             self._fence.mark_closed(session_id, typed.episode_id)
@@ -364,11 +367,16 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             identity = self._session_id_to_identity.get(session_id)
             if identity is not None:
                 if identity != (body.episode_id, body.task_id):
-                    raise ValueError("resources_session_id is already bound to another episode or task")
+                    raise ResourcesSessionConflictError(
+                        "resources_session_id is already bound to another episode or task"
+                    )
                 return await self._typed_seed_response(session_id)
-            task = SWEBenchProInstanceRequest.model_validate(body.task_data)
+            try:
+                task = SWEBenchProInstanceRequest.model_validate(body.task_data)
+            except ValidationError as error:
+                raise ResourcesSeedRejectedError(f"task_data is not a SWE-bench Pro instance: {error}") from error
             if body.task_id.task_id != task.instance_id:
-                raise ValueError("TaskId does not match the SWE-bench Pro instance_id")
+                raise ResourcesSeedRejectedError("TaskId does not match the SWE-bench Pro instance_id")
             await self._seed_session(session_id, task)
             try:
                 response = await self._typed_seed_response(session_id)
@@ -493,14 +501,31 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         body: SWEBenchProVerifyRequest,
     ) -> SWEBenchProVerifyResponse:
         session_id = request.session[SESSION_ID_KEY]
-        # A typed session's sandbox is consumed by its first verify. Grading again would score an empty
-        # patch with a normal-looking reward, so a repeated verify fails instead.
+        # A typed session whose task sandbox an earlier verify consumed, or that a close released, has nothing left to
+        # grade: grading would score an empty patch as a policy that changed nothing, so the sample is masked. A
+        # failed patch extraction from a live sandbox stays an unmasked failure, since the agent can cause it.
         if (
             not self.config.is_verifying_golden_patch
-            and session_id in self._session_id_to_identity
             and session_id not in self._session_id_to_sandbox
+            and (session_id in self._session_id_to_identity or self._fence.closed_episode(session_id) is not None)
         ):
-            raise ValueError("SWE-bench Pro task sandbox is no longer available")
+            return SWEBenchProVerifyResponse.model_validate(
+                body.model_dump()
+                | lost_session_verification("SWE-bench Pro task sandbox is no longer available")
+                | {
+                    "evaluation_completed": False,
+                    "resolved": False,
+                    "patch_applied": False,
+                    "eval_sandbox_start_time_taken": 0.0,
+                    "patch_verification_time_taken": 0.0,
+                    "instance_id": body.instance_id,
+                    "model_patch": None,
+                    "test_results": None,
+                    "test_output": "",
+                    "error": "SWE-bench Pro task sandbox is no longer available",
+                    "log_dir": "",
+                }
+            )
         extraction_error = None
         if self.config.is_verifying_golden_patch:
             model_patch = body.patch
