@@ -11,8 +11,8 @@ geobenchx_resources_server:
         jsonl_fpath: resources_servers/geobenchx/data/benchmark.jsonl
         num_repeats: 1
         license: MIT
-      # Fixed split from task_data.split_of(): 148 train, 54 validation tasks,
-      # stratified by group and task kind. Train only on `train`.
+      # Fixed split from task_data.split_of(): 149 train, 53 validation tasks,
+      # with near-duplicate families kept on one side. Train only on `train`.
       - name: train
         type: train
         jsonl_fpath: resources_servers/geobenchx/data/train.jsonl

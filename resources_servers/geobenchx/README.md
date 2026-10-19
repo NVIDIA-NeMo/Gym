@@ -40,15 +40,18 @@ This writes four files to `data/`:
 | File | Rows | Use |
 | --- | --- | --- |
 | `benchmark.jsonl` | 202 | Full benchmark, for baselines |
-| `train.jsonl` | 148 | GRPO training only |
-| `validation.jsonl` | 54 | Held-out evaluation before and after training |
+| `train.jsonl` | 149 | GRPO training only |
+| `validation.jsonl` | 53 | Held-out evaluation before and after training |
 | `example.jsonl` | 5 | First five training rows, for smoke tests |
 
-The split is fixed and stratified by group and task kind (`task_data.split_of`).
-The system prompt carries a fixed benchmark date, so rebuilding does not change
-the rows. Many unsolvable tasks are edits of solvable ones, so near-duplicate
-task text can appear on both sides of the split; compare validation scores only
-against other runs on the same split.
+The split is fixed (`task_data.split_of`) and keeps near-duplicates on one side.
+Many tasks are templates of each other, and many unsolvable tasks are edits of
+solvable ones, so `task_data.task_families` first groups tasks into families:
+prompts that are nearly the same, reference solutions that load the same
+datasets with the same tool sequence, or an unsolvable task close to a solvable
+one. Whole families then go to validation, stratified by group and task kind,
+with every group and kind represented. The system prompt carries a fixed
+benchmark date, so rebuilding does not change the rows.
 
 ## Run
 

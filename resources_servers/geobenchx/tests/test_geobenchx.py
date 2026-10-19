@@ -27,6 +27,7 @@ from resources_servers.geobenchx.task_data import (
     materialize,
     primary_group,
     split_of,
+    task_families,
     task_kind,
 )
 
@@ -78,8 +79,15 @@ def test_train_and_validation_partition_the_benchmark(tmp_path) -> None:
     validation = {row["task_id"] for row in _read(tmp_path / "validation.jsonl")}
     assert not train & validation
     assert train | validation == set(TASKS)
-    assert len(validation) == 54
+    assert len(validation) == 53
     assert {row["task_id"] for row in _read(tmp_path / "example.jsonl")} <= train
+
+
+def test_split_keeps_each_near_duplicate_family_on_one_side() -> None:
+    split = split_of()
+    families = task_families()
+    assert sorted(task_id for family in families for task_id in family) == sorted(TASKS)
+    assert all(len({split[task_id] for task_id in family}) == 1 for family in families)
 
 
 def test_split_covers_every_group_and_kind_in_validation() -> None:

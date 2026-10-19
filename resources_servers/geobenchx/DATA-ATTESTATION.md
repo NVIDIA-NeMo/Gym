@@ -49,7 +49,7 @@ environment runs without the snapshot.
 of the 202 official task records into NemoGym Responses API rows. They add the paper's
 system rules, a fixed benchmark date, and tool JSON schemas; they do not add synthetic task
 or answer content. `train.jsonl` and
-`validation.jsonl` partition the 202 tasks (148 / 54) with the fixed split in
+`validation.jsonl` partition the 202 tasks (149 / 53) with the fixed split in
 `task_data.split_of`.
 
 Rollout files written by local runs (for example `data/*rollouts*.jsonl`) contain model
