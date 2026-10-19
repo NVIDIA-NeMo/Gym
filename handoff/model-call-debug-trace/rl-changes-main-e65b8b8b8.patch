@@ -1,0 +1,437 @@
+diff --git a/docs/design-docs/token-capture-ledger.md b/docs/design-docs/token-capture-ledger.md
+index b48fd9b0c..f1dcd5e86 100644
+--- a/docs/design-docs/token-capture-ledger.md
++++ b/docs/design-docs/token-capture-ledger.md
+@@ -114,6 +114,24 @@ response. Gym consequently commits an ordinary token-free `CallRecord` before
+ the response is released to the agent. No local metadata ledger or rollout-end
+ conversion is involved in the active path.
+ 
++### Debug echo of staged tokens
++
++Gym's model-call debug trace (`model_call_debug_trace` in the Gym global
++config, set under `env.nemo_gym`) records each call's text beside its token
++data. Because both backends strip token arrays from captured responses, Gym
++asks for an echo with `ng_debug_tokens: true`: a top-level request field for
++the vLLM worker and an `offload_params` key for MInf. After staging, the vLLM
++worker's `_finish_request_capture` and `TQMegatronTokenStager` return the
++staged call's `prompt_token_ids`, `generation_token_ids`, and
++`generation_log_probs` (plus an `error` string when the payload could not be
++read) under the response field `ng_debug_tokens`. MInf merges stager metadata
++into the HTTP response. Gym's model server reads and removes the field before
++the response reaches the agent. The echo never changes what is staged or
++committed, and a request without the flag gets no echo. With token capture
++disabled and the trace enabled, the NemoGym environment stamps each row's
++`_ng_rollout_id` from its group id, generation index, and group attempt, so
++every traced call still carries its rollout id.
++
+ ![Token capture custody](../assets/token-capture-ledger-queue-data-flow.png)
+ 
+ ### Multimodal rollouts on Megatron Inference
+diff --git a/nemo_rl/environments/nemo_gym.py b/nemo_rl/environments/nemo_gym.py
+index 60582fdae..b83a6afbb 100644
+--- a/nemo_rl/environments/nemo_gym.py
++++ b/nemo_rl/environments/nemo_gym.py
+@@ -80,6 +80,11 @@ from nemo_rl.experience.failures import (
+     RolloutDataFailure,
+     http_status_is_infra,
+ )
++from nemo_rl.experience.interfaces import (
++    NEMO_GYM_GROUP_ATTEMPT_KEY,
++    NEMO_GYM_GROUP_ID_KEY,
++    NEMO_GYM_ROLLOUT_INDEX_KEY,
++)
+ from nemo_rl.models.generation.interfaces import (
+     resolve_routed_experts_dtype_name_for_model,
+     should_use_async_rollouts,
+@@ -427,6 +432,27 @@ _TOKEN_CAPTURE_CONTROL_ENV = "NEMO_GYM_TOKEN_CAPTURE_CONTROL_TOKEN"
+ _POLICY_API_KEY_ENV = "NEMO_RL_POLICY_API_KEY"
+ 
+ 
++def _stamp_trace_rollout_ids(nemo_gym_examples: list[dict]) -> None:
++    """Give each row a Gym rollout id, so its model calls carry ``/ng-rollout/<id>``.
++
++    Token capture stamps its gate-registered ids. Without it, Gym's model-call
++    debug trace would record every call with no rollout to group it by. The id
++    joins the group, generation index, and group attempt that the rollout
++    manager stamps on every row, so a retried group gets fresh ids.
++    """
++    for row in nemo_gym_examples:
++        if row.get(_NG_ROLLOUT_ID_BODY_KEY):
++            continue
++        group_id = row.get(NEMO_GYM_GROUP_ID_KEY)
++        generation_index = row.get(NEMO_GYM_ROLLOUT_INDEX_KEY)
++        if group_id is None or generation_index is None:
++            continue
++        group_attempt = row.get(NEMO_GYM_GROUP_ATTEMPT_KEY) or 0
++        row[_NG_ROLLOUT_ID_BODY_KEY] = (
++            f"{group_id}_g{generation_index}_t{group_attempt}"
++        )
++
++
+ def _external_staging_backend(token_capture: Dict[str, Any]) -> str:
+     """Map the setup-derived generation backend to Gym's capture backend."""
+     generation_backend = token_capture.get("generation_backend")
+@@ -675,6 +701,8 @@ class NemoGym(EnvironmentInterface):
+         # _spinup replaces this from cfg. Keep restarted/unspun actors internally
+         # complete so diagnostics and focused tests do not fail with AttributeError.
+         self._token_capture_enabled = False
++        # Set at spinup: stamp rollout ids for Gym's model-call debug trace.
++        self._stamp_trace_rollout_ids = False
+         self._pad_dynamic_image_shapes = bool(cfg.get("pad_dynamic_image_shapes"))
+         # Reconstruct the processor inside the actor (rather than serializing it
+         # per rollout call) for full-trajectory multimodal postprocessing.
+@@ -818,6 +846,10 @@ Depending on your data shape, you may want to change these values."""
+         self._token_capture_enabled = bool(
+             token_capture and token_capture.get("enabled")
+         )
++        debug_trace = initial_global_config_dict.get("model_call_debug_trace") or {}
++        self._stamp_trace_rollout_ids = not self._token_capture_enabled and bool(
++            debug_trace.get("enabled")
++        )
+         self._server_client = None
+         self._control_headers: Dict[str, str] = {}
+         self._control_timeout_s = 60.0
+@@ -1084,6 +1116,8 @@ Depending on your data shape, you may want to change these values."""
+         # for text-only rows and already-qualified URLs.
+         # Megatron's HTTP backend consumes the same normalized Responses payload.
+         normalize_media_in_examples(nemo_gym_examples)
++        if self._stamp_trace_rollout_ids:
++            _stamp_trace_rollout_ids(nemo_gym_examples)
+ 
+         timer = Timer()
+         timer.start("_run_rollouts_total")
+diff --git a/nemo_rl/models/generation/megatron/token_capture.py b/nemo_rl/models/generation/megatron/token_capture.py
+index e40f475dc..e656e38ff 100644
+--- a/nemo_rl/models/generation/megatron/token_capture.py
++++ b/nemo_rl/models/generation/megatron/token_capture.py
+@@ -463,7 +463,7 @@ class TQMegatronTokenStager:
+         if not isinstance(uid, str) or not uid:
+             raise ValueError("MInf request UID must be a non-empty string")
+         # Deferred: nemo_gym is an optional extra absent in non-gym runs.
+-        from nemo_gym.token_id_capture import NG_CAPTURE_FIELD
++        from nemo_gym.token_id_capture import NG_CAPTURE_FIELD, NG_DEBUG_TOKENS_FIELD
+ 
+         capture_payload = (offload_params or {}).get(NG_CAPTURE_FIELD)
+         if capture_payload is None:
+@@ -474,6 +474,7 @@ class TQMegatronTokenStager:
+                 capture_payload=capture_payload,
+                 finished_metadata=finished_metadata,
+                 minf_params=(offload_params or {}).get(MINF_CAPTURE_PARAMS_FIELD),
++                echo_tokens=bool((offload_params or {}).get(NG_DEBUG_TOKENS_FIELD)),
+             )
+         except Exception:  # noqa: BLE001 — capture failure must not fail generation
+             logging.getLogger(__name__).exception(
+@@ -503,8 +504,15 @@ class TQMegatronTokenStager:
+         capture_payload: Any,
+         finished_metadata: Any,
+         minf_params: Any = None,
++        echo_tokens: bool = False,
+     ) -> RequestPayloadStageResult:
+-        """Validate and stage traffic that carries a Gym capture admission."""
++        """Validate and stage traffic that carries a Gym capture admission.
++
++        With ``echo_tokens`` (Gym's model-call debug trace), the response
++        metadata also carries the call's prompt ids, generated ids, and log
++        probabilities. MInf merges that metadata into the HTTP response, whose
++        own token arrays it drops for an offloaded payload.
++        """
+         # Deferred: nemo_gym is an optional extra absent in non-gym runs.
+         from nemo_gym.token_id_capture.staging.records import CaptureAdmission
+ 
+@@ -519,8 +527,14 @@ class TQMegatronTokenStager:
+         from megatron.core.inference.inference_request import (
+             RequestPayloadStageResult,
+         )
+-        from nemo_gym.token_id_capture import NG_COMMIT_COORDS_FIELD
++        from nemo_gym.token_id_capture import (
++            NG_COMMIT_COORDS_FIELD,
++            NG_DEBUG_TOKENS_FIELD,
++        )
+ 
++        debug_metadata = (
++            {NG_DEBUG_TOKENS_FIELD: self._debug_tokens(payload)} if echo_tokens else {}
++        )
+         try:
+             media = _new_media_tensors(payload, minf_params)
+         except (TypeError, ValueError, RuntimeError) as error:
+@@ -529,7 +543,8 @@ class TQMegatronTokenStager:
+             )
+             return RequestPayloadStageResult(
+                 response_metadata={
+-                    NG_COMMIT_COORDS_FIELD: coords.model_dump(mode="json")
++                    NG_COMMIT_COORDS_FIELD: coords.model_dump(mode="json"),
++                    **debug_metadata,
+                 }
+             )
+         coords = self._capture.complete_call_from_response(
+@@ -538,5 +553,25 @@ class TQMegatronTokenStager:
+         return RequestPayloadStageResult(
+             response_metadata={
+                 NG_COMMIT_COORDS_FIELD: coords.model_dump(mode="json"),
++                **debug_metadata,
+             }
+         )
++
++    def _debug_tokens(self, payload: Any) -> dict[str, Any]:
++        """Read the call's token arrays the way staging does, reporting rather than raising."""
++        adapter = self._capture.adapter
++        tokens: dict[str, Any] = {
++            "prompt_token_ids": None,
++            "generation_token_ids": None,
++            "generation_log_probs": None,
++            "error": None,
++        }
++        try:
++            tokens["prompt_token_ids"] = adapter.extract_prompt_ids(payload)
++            (
++                tokens["generation_token_ids"],
++                tokens["generation_log_probs"],
++            ) = adapter.extract_generation(payload)
++        except (TypeError, ValueError) as error:
++            tokens["error"] = f"{type(error).__name__}: {error}"
++        return tokens
+diff --git a/nemo_rl/models/generation/vllm/vllm_worker_async.py b/nemo_rl/models/generation/vllm/vllm_worker_async.py
+index 9cf24fa67..c5794b5eb 100644
+--- a/nemo_rl/models/generation/vllm/vllm_worker_async.py
++++ b/nemo_rl/models/generation/vllm/vllm_worker_async.py
+@@ -908,7 +908,10 @@ class VllmAsyncGenerationWorkerImpl(
+         media ride as opaque attachments beside the record), so ``staged``
+         coords vouch for both and any failure is ``capture_failed`` at call
+         time. Token ids, logprobs, and routes are stripped after staging, so
+-        the worker->gate hop carries the completion and coords only.
++        the worker->gate hop carries the completion and coords only. A request
++        that sets ``ng_debug_tokens`` also gets the staged prompt ids,
++        generated ids, and log probabilities back under that field, for Gym's
++        model-call debug trace.
+         """
+         state = self._capture_calls.pop(id(request), None)
+         if state is None:
+@@ -927,11 +930,17 @@ class VllmAsyncGenerationWorkerImpl(
+             # digest-covered extras; the pixels themselves are attachments.
+             payload[MEDIA_SPANS_FIELD] = [item.to_dict() for item in state.media.items]
+         adapter = self.token_capture.adapter
++        generated_token_ids: list[int] = []
++        generated_log_probs: list[float] = []
++        extraction_error: str | None = None
+         if adapter is not None:
+             try:
+-                generated_token_ids, _ = adapter.extract_generation(payload)
+-            except Exception:  # capture core will report the authoritative failure
+-                generated_token_ids = []
++                generated_token_ids, generated_log_probs = adapter.extract_generation(
++                    payload
++                )
++            # The capture core reports the authoritative failure.
++            except Exception as error:
++                extraction_error = f"{type(error).__name__}: {error}"
+             self._delta_align_routed_experts(
+                 payload,
+                 prev_len=call.admission.prev_len,
+@@ -943,6 +952,17 @@ class VllmAsyncGenerationWorkerImpl(
+             payload,
+             attachments=state.media.tensors if state.media is not None else None,
+         )
++        if getattr(request, "ng_debug_tokens", None):
++            # Gym's model-call debug trace asked for the arrays this call staged.
++            # Optional Gym dependency: only captured calls reach here.
++            from nemo_gym.token_id_capture import NG_DEBUG_TOKENS_FIELD
++
++            content[NG_DEBUG_TOKENS_FIELD] = {
++                "prompt_token_ids": list(prompt_token_ids),
++                "generation_token_ids": list(generated_token_ids),
++                "generation_log_probs": list(generated_log_probs),
++                "error": extraction_error,
++            }
+         for choice in content.get("choices") or []:
+             choice.pop("logprobs", None)
+             # Token arrays and delta-aligned routes were staged to TQ above;
+@@ -1275,6 +1295,9 @@ class VllmAsyncGenerationWorkerImpl(
+             # Ledger-authoritative token capture: the call identity the ledger
+             # attaches (rollout_id, call_id, parent_call_id, prev_len, mode).
+             ng_capture: Optional[dict[str, Any]] = None
++            # Gym's model-call debug trace: echo the staged token arrays back
++            # under the same response field (nemo_gym NG_DEBUG_TOKENS_FIELD).
++            ng_debug_tokens: Optional[bool] = None
+ 
+         # vLLM 0.25 routes both /v1/chat/completions and /tokenize through
+         # OnlineRenderer.preprocess_chat, so the prefix-token override
+diff --git a/tests/unit/data_plane/test_tq_token_sink.py b/tests/unit/data_plane/test_tq_token_sink.py
+index 89daab542..139c0b484 100644
+--- a/tests/unit/data_plane/test_tq_token_sink.py
++++ b/tests/unit/data_plane/test_tq_token_sink.py
+@@ -712,6 +712,56 @@ def test_megatron_stager_passes_media_tensors_as_attachments(media_tensors):
+         assert media_tensors["imgs"].dtype == torch.float32
+ 
+ 
++@pytest.mark.parametrize("debug_tokens", [False, True])
++def test_megatron_stager_echoes_staged_tokens_only_on_request(debug_tokens):
++    """Gym's model-call debug trace sets ``ng_debug_tokens`` in offload_params;
++    MInf merges the stager's response metadata into the HTTP response, so the
++    arrays it would otherwise drop for an offloaded payload reach Gym."""
++    from nemo_gym.token_id_capture.adapters.megatron import MegatronCaptureAdapter
++
++    stager = TQMegatronTokenStager(MagicMock(spec=TQTokenSink, media_pixel_dtype=None))
++    capture = MagicMock(adapter=MegatronCaptureAdapter())
++    capture.complete_call_from_response.return_value = MagicMock(
++        model_dump=lambda mode: {"disposition": "staged"}
++    )
++    stager._capture = capture
++    offload_params = {
++        "ng_capture": nemo_gym.CaptureAdmission(
++            rollout_id="r0", model_call_id="c1", mode="text"
++        ).model_dump(mode="json")
++    }
++    if debug_tokens:
++        offload_params["ng_debug_tokens"] = True
++
++    result = stager.stage(
++        "minf-response-1",
++        _minf_payload(multimodal=False),
++        finished_metadata=SimpleNamespace(policy_epoch=[(0, 0)]),
++        offload_params=offload_params,
++    )
++
++    expected = {"ng_commit_coords": {"disposition": "staged"}}
++    if debug_tokens:
++        expected["ng_debug_tokens"] = {
++            "prompt_token_ids": [10, 11],
++            "generation_token_ids": [12, 13],
++            "generation_log_probs": [-0.25, -0.5],
++            "error": None,
++        }
++    assert result.response_metadata == expected
++
++
++def test_megatron_stager_echo_reports_an_unreadable_payload():
++    from nemo_gym.token_id_capture.adapters.megatron import MegatronCaptureAdapter
++
++    stager = TQMegatronTokenStager(MagicMock(spec=TQTokenSink, media_pixel_dtype=None))
++    stager._capture = MagicMock(adapter=MegatronCaptureAdapter())
++    echo = stager._debug_tokens(_minf_payload_without("generated_log_probs"))
++    assert echo["prompt_token_ids"] == [10, 11]
++    assert echo["generation_token_ids"] is None
++    assert echo["error"].startswith("ValueError")
++
++
+ def _split_delta(record) -> tuple[list[int], list[int], list[float]]:
+     """Split a fixture record's delta into (prompt ids, generated ids, logprobs)."""
+     generated_start = record.token_mask_delta.index(1.0)
+diff --git a/tests/unit/environments/test_nemo_gym_token_capture.py b/tests/unit/environments/test_nemo_gym_token_capture.py
+index e5daf577f..060170e41 100644
+--- a/tests/unit/environments/test_nemo_gym_token_capture.py
++++ b/tests/unit/environments/test_nemo_gym_token_capture.py
+@@ -21,7 +21,11 @@ from unittest.mock import AsyncMock
+ 
+ import pytest
+ 
+-from nemo_rl.environments.nemo_gym import NemoGym, _external_staging_backend
++from nemo_rl.environments.nemo_gym import (
++    NemoGym,
++    _external_staging_backend,
++    _stamp_trace_rollout_ids,
++)
+ 
+ # Receipt assembly imports nemo_gym at call time (resolve_terminal etc.), so
+ # these tests must run in the Nemo_Gym shard, not the base-env Environments one.
+@@ -50,6 +54,25 @@ def test_external_staging_backend_maps_generation_backend(
+     assert token_capture == {"generation_backend": generation_backend}
+ 
+ 
++def test_trace_rollout_ids_are_stamped_per_generation_and_attempt() -> None:
++    """Without token capture, Gym's debug trace still needs a rollout id per row."""
++    rows = [
++        {"_ng_group_id": "grp", "_ng_rollout_index": 0, "_ng_group_attempt": 0},
++        {"_ng_group_id": "grp", "_ng_rollout_index": 1, "_ng_group_attempt": 2},
++        {"_ng_group_id": "grp", "_ng_rollout_index": 0, "_ng_rollout_id": "gate-id"},
++        {"_ng_rollout_index": 0},
++    ]
++
++    _stamp_trace_rollout_ids(rows)
++
++    assert [row.get("_ng_rollout_id") for row in rows] == [
++        "grp_g0_t0",
++        "grp_g1_t2",
++        "gate-id",
++        None,
++    ]
++
++
+ @pytest.mark.parametrize(
+     "token_capture",
+     [{}, {"generation_backend": None}, {"generation_backend": "sglang"}],
+diff --git a/tests/unit/models/generation/test_vllm_token_capture_hosting.py b/tests/unit/models/generation/test_vllm_token_capture_hosting.py
+index 3414010f0..0f967bbf6 100644
+--- a/tests/unit/models/generation/test_vllm_token_capture_hosting.py
++++ b/tests/unit/models/generation/test_vllm_token_capture_hosting.py
+@@ -335,6 +335,71 @@ def test_request_capture_round_trip_stages_and_rides_coords(
+     assert worker._capture_calls == {}
+ 
+ 
++@pytest.mark.parametrize("debug_tokens", [None, True])
++def test_request_capture_echoes_staged_tokens_only_on_request(debug_tokens) -> None:
++    """Gym's model-call debug trace sets ``ng_debug_tokens``; the worker then
++    returns the arrays it staged, after staging, and never otherwise."""
++    sink = _MemorySink()
++    worker = _worker_with_capture(sink)
++    request = _FakeRequest(
++        ng_capture={
++            "rollout_id": "r0",
++            "model_call_id": "c1",
++            "parent_call_id": None,
++            "prev_len": 0,
++            "mode": "text",
++        },
++        ng_debug_tokens=debug_tokens,
++        stream=False,
++    )
++    VllmAsyncGenerationWorkerImpl._begin_request_capture(worker, request, [10, 11, 12])
++    content = VllmAsyncGenerationWorkerImpl._finish_request_capture(
++        worker, request, _served_content([13, 14], [-0.1, -0.2])
++    )
++
++    assert sink.records[0].token_ids_delta == [10, 11, 12, 13, 14]
++    assert content["ng_commit_coords"]["disposition"] == "staged"
++    assert content["choices"] == [
++        {"index": 0, "message": {"role": "assistant", "content": "x"}}
++    ]
++    if debug_tokens:
++        assert content["ng_debug_tokens"] == {
++            "prompt_token_ids": [10, 11, 12],
++            "generation_token_ids": [13, 14],
++            "generation_log_probs": [-0.1, -0.2],
++            "error": None,
++        }
++    else:
++        assert "ng_debug_tokens" not in content
++
++
++def test_request_capture_echo_reports_unreadable_generation() -> None:
++    sink = _MemorySink()
++    worker = _worker_with_capture(sink)
++    request = _FakeRequest(
++        ng_capture={
++            "rollout_id": "r0",
++            "model_call_id": "c1",
++            "parent_call_id": None,
++            "prev_len": 0,
++            "mode": "text",
++        },
++        ng_debug_tokens=True,
++        stream=False,
++    )
++    VllmAsyncGenerationWorkerImpl._begin_request_capture(worker, request, [10, 11])
++    content = {"choices": [{"index": 0, "message": {"role": "assistant"}}]}
++    content = VllmAsyncGenerationWorkerImpl._finish_request_capture(
++        worker, request, content
++    )
++
++    assert content["ng_commit_coords"]["disposition"] == "capture_failed"
++    echo = content["ng_debug_tokens"]
++    assert echo["prompt_token_ids"] == [10, 11]
++    assert echo["generation_token_ids"] == []
++    assert echo["error"].startswith("ValueError")
++
++
+ def test_request_capture_token_in_prev_len_chains():
+     sink = _MemorySink()
+     worker = _worker_with_capture(sink)

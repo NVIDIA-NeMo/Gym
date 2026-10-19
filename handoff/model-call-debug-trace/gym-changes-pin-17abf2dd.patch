@@ -1,0 +1,1135 @@
+diff --git a/nemo_gym/base_responses_api_model.py b/nemo_gym/base_responses_api_model.py
+index b0674f21f..23cfce764 100644
+--- a/nemo_gym/base_responses_api_model.py
++++ b/nemo_gym/base_responses_api_model.py
+@@ -45,11 +45,12 @@ import orjson
+ from fastapi import Body, FastAPI, Request, Response
+ from fastapi.exceptions import RequestValidationError
+ from fastapi.responses import StreamingResponse
+-from pydantic import BaseModel, Field, ValidationError, model_validator
++from pydantic import BaseModel, Field, PrivateAttr, ValidationError, model_validator
+ 
+ from nemo_gym.anthropic_converter import AnthropicConverter
+ from nemo_gym.chat_streaming import sanitize_streaming_chat_body, synthesize_chat_completion_sse
+ from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT, ModelServerRef
++from nemo_gym.model_call_debug_trace import MODEL_CALL_ID_STATE_KEY, ModelCallDebugTrace, trace_model_call
+ from nemo_gym.openai_utils import (
+     NeMoGymChatCompletion,
+     NeMoGymChatCompletionCreateParamsNonStreaming,
+@@ -64,7 +65,7 @@ from nemo_gym.responses_streaming import (
+     synthesize_responses_sse,
+     validate_streaming_responses_params,
+ )
+-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
++from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body, rollout_context
+ from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap, join_model_call_observations
+ from nemo_gym.server_utils import (
+     BaseRunServerInstanceConfig,
+@@ -191,6 +192,8 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
+     # Subclasses can declare successful metadata or health routes here.
+     # Unknown successful routes fail closed during training-token capture.
+     non_generating_model_routes: ClassVar[frozenset[tuple[str, str]]] = frozenset()
++    # Built per serving process by setup_webserver when model_call_debug_trace is enabled.
++    _model_call_debug_trace: Optional[ModelCallDebugTrace] = PrivateAttr(default=None)
+ 
+     async def _finalize_served_response(self, response: Any) -> None:
+         """Finalize capture after conversion to the response returned to the client."""
+@@ -221,6 +224,10 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
+             ),
+         )
+ 
++        self._model_call_debug_trace = ModelCallDebugTrace.from_global_config(
++            self.server_client.global_config_dict, server_name=self.config.name
++        )
++
+         model_attributes = {"nemo.gym.server.name": self.config.name}
+         app.post("/v1/chat/completions")(
+             traced_endpoint(
+@@ -341,21 +348,24 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
+         # all of them.
+         # Resolve the parent from the received request before dispatch.
+         # Exact prefix supply and capture share this decision.
+-        if current_capture_context() is not None:
+-            request_messages = _request_messages(params)
+-            await resolve_parent(request_messages)
+-            await register_call_intent()
+-        else:
+-            request_messages = None
+-        if "request" in inspect.signature(self.chat_completions).parameters:
+-            completion = await self.chat_completions(request=request, body=params)
+-        else:
+-            completion = await self.chat_completions(body=params)
+-        await capture_tokens(
+-            completion,
+-            request_messages=request_messages,
+-        )
+-        return completion
++        async with trace_model_call(self._model_call_debug_trace, request, params) as trace:
++            if current_capture_context() is not None:
++                request_messages = _request_messages(params)
++                await resolve_parent(request_messages)
++                await register_call_intent()
++            else:
++                request_messages = None
++            if "request" in inspect.signature(self.chat_completions).parameters:
++                completion = await self.chat_completions(request=request, body=params)
++            else:
++                completion = await self.chat_completions(body=params)
++            await capture_tokens(
++                completion,
++                request_messages=request_messages,
++            )
++            if trace is not None:
++                trace.response = completion
++            return completion
+ 
+     async def messages(self, request: Request, body: dict = Body()):
+         """Default Anthropic Messages <-> Responses mapping shared by every Gym model server.
+@@ -387,24 +397,27 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
+         # all of them.
+         # Resolve the parent from the received request before dispatch.
+         # Exact prefix supply and capture share this decision.
+-        if current_capture_context() is not None:
+-            request_messages = _request_messages(params)
+-            await resolve_parent(request_messages)
+-            await register_call_intent()
+-        else:
+-            request_messages = None
+-        if "request" in inspect.signature(self.responses).parameters:
+-            response = await self.responses(request=request, body=params)
+-        else:
+-            response = await self.responses(body=params)
+-        # Capture before streaming dispatch wraps the response.
+-        # Anthropic mapping drops the token fields.
+-        # The assembled response still carries them here for every dialect.
+-        await capture_tokens(
+-            response,
+-            request_messages=request_messages,
+-        )
+-        return response
++        async with trace_model_call(self._model_call_debug_trace, request, params) as trace:
++            if current_capture_context() is not None:
++                request_messages = _request_messages(params)
++                await resolve_parent(request_messages)
++                await register_call_intent()
++            else:
++                request_messages = None
++            if "request" in inspect.signature(self.responses).parameters:
++                response = await self.responses(request=request, body=params)
++            else:
++                response = await self.responses(body=params)
++            # Capture before streaming dispatch wraps the response.
++            # Anthropic mapping drops the token fields.
++            # The assembled response still carries them here for every dialect.
++            await capture_tokens(
++                response,
++                request_messages=request_messages,
++            )
++            if trace is not None:
++                trace.response = response
++            return response
+ 
+ 
+ def _validate_responses_params(body: dict) -> NeMoGymResponseCreateParamsNonStreaming:
+@@ -1424,11 +1437,14 @@ class _CaptureMiddleware:
+                 await _mark_unobserved_incomplete("completed without starting a response")
+             return
+         if (self._store is None and not capture_wanted) or rollout_from_path is None or dialect is None:
+-            await self._app(scope, receive, send)
++            with rollout_context(rollout_from_path):
++                await self._app(scope, receive, send)
+             return
+ 
+         rollout_id = rollout_from_path
+         model_call_id = uuid4().hex
++        # Debug tracing joins its record to this call's capture records by this id.
++        scope.setdefault("state", {})[MODEL_CALL_ID_STATE_KEY] = model_call_id
+         client_session_id = _unique_request_header(scope.get("headers") or [], _CLIENT_SESSION_HEADER)
+ 
+         # Give the model server a token sink keyed to this call.
+@@ -1470,7 +1486,8 @@ class _CaptureMiddleware:
+                 await send(message)
+ 
+             try:
+-                await self._app(scope, receive, _send_training_only)
++                with rollout_context(rollout_id):
++                    await self._app(scope, receive, _send_training_only)
+             finally:
+                 await _fail_uncommitted_external_call(capture_context)
+                 if sink_token is not None:
+@@ -1526,7 +1543,8 @@ class _CaptureMiddleware:
+                 await send(message)
+ 
+         try:
+-            await self._app(scope, _receive, _send)
++            with rollout_context(rollout_id):
++                await self._app(scope, _receive, _send)
+         except (Exception, asyncio.CancelledError) as exc:
+             completed_at = time.time()
+             exception_status, exception_body = _exception_http_details(exc)
+diff --git a/nemo_gym/global_config.py b/nemo_gym/global_config.py
+index bc434adf4..9141ef2c8 100644
+--- a/nemo_gym/global_config.py
++++ b/nemo_gym/global_config.py
+@@ -112,6 +112,9 @@ MODEL_CALL_CAPTURE_DIR_KEY_NAME = "model_call_capture_dir"
+ # Run-wide training-token capture settings.
+ # See ``nemo_gym/token_id_capture/config.py``.
+ TOKEN_ID_CAPTURE_BLOCK = "token_id_capture"
++# Per-model-call debug records written by model servers.
++# See ``nemo_gym/model_call_debug_trace.py``.
++MODEL_CALL_DEBUG_TRACE_BLOCK = "model_call_debug_trace"
+ COMPONENT_NAME_KEY_NAME = "component_name"
+ SKIP_VERIFICATION_KEY_NAME = "skip_verification"
+ SKIP_VERIFICATION_REWARD_KEY_NAME = "skip_verification_reward"
+@@ -153,6 +156,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
+     OBSERVABILITY_ENABLED_KEY_NAME,
+     MODEL_CALL_CAPTURE_DIR_KEY_NAME,
+     TOKEN_ID_CAPTURE_BLOCK,
++    MODEL_CALL_DEBUG_TRACE_BLOCK,
+     COMPONENT_NAME_KEY_NAME,
+     SKIP_VERIFICATION_KEY_NAME,
+     SKIP_VERIFICATION_REWARD_KEY_NAME,
+diff --git a/nemo_gym/model_call_debug_trace.py b/nemo_gym/model_call_debug_trace.py
+new file mode 100644
+index 000000000..0ce5d48e6
+--- /dev/null
++++ b/nemo_gym/model_call_debug_trace.py
+@@ -0,0 +1,345 @@
++# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++# SPDX-License-Identifier: Apache-2.0
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++"""Record every model call a Gym model server serves, for debugging.
++
++```yaml
++model_call_debug_trace:
++  enabled: true
++  dir: /absolute/path/model-call-debug   # Shared by every model server and worker process.
++  request_token_data: true               # Ask the engine for token data the server would not request.
++```
++
++Each serving process appends one JSON line per model call to ``<dir>/<model_server>.<pid>.jsonl``.
++A line holds the request the client sent, the response it received, and the call's prompt token ids,
++generated token ids, and generation log probabilities from the first source that has them:
++
++1. ``engine_staged``: the arrays an inference worker staged for external token capture.
++   The worker echoes them under ``ng_debug_tokens`` only when the request asks for it.
++2. ``served_response``: the token fields on the response returned to the client.
++3. ``engine_response``: the token fields on the raw engine response, read before the server removes them.
++
++``request_token_data`` adds the request fields that make the engine return token data.
++The model server removes the extra data again, so the client receives the same response either way.
++Tracing never fails or delays a model call: one background thread per process writes the lines.
++Lines are flushed but not fsynced.
++"""
++
++from __future__ import annotations
++
++import logging
++import os
++import time
++from collections.abc import AsyncIterator, Mapping
++from concurrent.futures import ThreadPoolExecutor
++from contextlib import asynccontextmanager
++from contextvars import ContextVar
++from copy import deepcopy
++from dataclasses import dataclass, field
++from pathlib import Path
++from typing import Any
++from uuid import uuid4
++
++import orjson
++from fastapi import Request
++from pydantic import BaseModel, ConfigDict, model_validator
++
++from nemo_gym.rollout_correlation import current_rollout_id
++from nemo_gym.token_id_capture.adapters.vllm import extract_generation_token_info
++from nemo_gym.token_id_capture.records import TOKEN_FIELDS, extract_token_fields
++from nemo_gym.token_id_capture.sink import NG_CAPTURE_FIELD, NG_DEBUG_TOKENS_FIELD, current_capture_context
++
++
++logger = logging.getLogger(__name__)
++
++TRACE_SCHEMA_VERSION = 1
++# Request-state key under which the capture middleware publishes the call's ``model_call_id``.
++MODEL_CALL_ID_STATE_KEY = "nemo_gym_model_call_id"
++_TOKEN_KEYS = ("prompt_token_ids", "generation_token_ids", "generation_log_probs")
++
++
++class ModelCallDebugTraceSettings(BaseModel):
++    """The ``model_call_debug_trace`` global-config block."""
++
++    model_config = ConfigDict(extra="forbid")
++
++    enabled: bool = False
++    # Absolute directory that receives one JSONL file per model server process.
++    dir: Path | None = None
++    # Add engine request fields that return token data, and remove that data before responding.
++    request_token_data: bool = True
++
++    @model_validator(mode="after")
++    def _require_absolute_dir(self) -> "ModelCallDebugTraceSettings":
++        if self.enabled and (self.dir is None or not self.dir.is_absolute()):
++            raise ValueError("model_call_debug_trace.enabled requires an absolute model_call_debug_trace.dir")
++        return self
++
++
++class _GlobalConfig(BaseModel):
++    model_config = ConfigDict(extra="ignore")
++
++    model_call_debug_trace: ModelCallDebugTraceSettings = ModelCallDebugTraceSettings()
++
++
++@dataclass
++class CallTrace:
++    """Debug evidence collected while one model call is served."""
++
++    request_token_data: bool
++    started_at: float = field(default_factory=time.time)
++    started_perf: float = field(default_factory=time.perf_counter)
++    response: Any = None
++    engine_tokens: dict[str, Any] | None = None
++    engine_tokens_source: str | None = None
++    token_errors: list[str] = field(default_factory=list)
++    # Engine request fields this trace added; their response data is removed before responding.
++    added_request_fields: set[str] = field(default_factory=set)
++
++
++_CALL_TRACE: ContextVar[CallTrace | None] = ContextVar("nemo_gym_model_call_debug_trace", default=None)
++
++
++def current_call_trace() -> CallTrace | None:
++    """Return the trace of the model call being served, or ``None`` when tracing is off."""
++    return _CALL_TRACE.get()
++
++
++def request_engine_token_data(request_payload: dict[str, Any], *, megatron_engine: bool) -> None:
++    """Ask the engine to return the call's token data, when the active trace requests it.
++
++    A call admitted for external capture asks the worker to echo the arrays it stages.
++    Any other call requests the engine's ordinary token fields.
++    """
++    trace = _CALL_TRACE.get()
++    if trace is None or not trace.request_token_data or request_payload.get("n") not in (None, 1):
++        return
++    if NG_CAPTURE_FIELD in request_payload:
++        request_payload[NG_DEBUG_TOKENS_FIELD] = True
++        trace.added_request_fields.add(NG_DEBUG_TOKENS_FIELD)
++        return
++    offload_params = request_payload.get("offload_params")
++    if isinstance(offload_params, dict) and NG_CAPTURE_FIELD in offload_params:
++        # Megatron Inference hands offload_params to the stager, whose metadata reaches the response.
++        offload_params[NG_DEBUG_TOKENS_FIELD] = True
++        trace.added_request_fields.add(NG_DEBUG_TOKENS_FIELD)
++        return
++    if not request_payload.get("logprobs"):
++        # top_logprobs=0 returns only the selected token's log probability.
++        request_payload.update(logprobs=True, top_logprobs=0, return_tokens_as_token_ids=True)
++        trace.added_request_fields.add("logprobs")
++    token_ids_field = "return_tokenized_data" if megatron_engine else "return_token_ids"
++    if not request_payload.get(token_ids_field):
++        request_payload[token_ids_field] = True
++        trace.added_request_fields.add(token_ids_field)
++
++
++def note_engine_response(response_payload: dict[str, Any]) -> None:
++    """Record the token data on a raw engine response, then remove what tracing added.
++
++    Call this before the model server converts or strips the engine response.
++    """
++    trace = _CALL_TRACE.get()
++    if trace is None:
++        return
++    staged = response_payload.pop(NG_DEBUG_TOKENS_FIELD, None)
++    try:
++        if isinstance(staged, Mapping):
++            if staged.get("error"):
++                trace.token_errors.append(f"engine_staged: {staged['error']}")
++            tokens, source = _token_bundle(staged), "engine_staged"
++        else:
++            tokens, source = _engine_response_tokens(response_payload), "engine_response"
++    except (KeyError, TypeError, ValueError) as error:
++        trace.token_errors.append(f"engine_response: {type(error).__name__}: {error}")
++    else:
++        if tokens is not None:
++            trace.engine_tokens, trace.engine_tokens_source = tokens, source
++    _remove_added_token_data(response_payload, trace.added_request_fields)
++
++
++def _token_bundle(source: Mapping[str, Any]) -> dict[str, Any] | None:
++    bundle = {key: source.get(key) for key in _TOKEN_KEYS}
++    return bundle if any(value is not None for value in bundle.values()) else None
++
++
++def _engine_response_tokens(response_payload: dict[str, Any]) -> dict[str, Any] | None:
++    """Read token data from a Chat Completions engine response in any supported shape."""
++    choices = response_payload.get("choices") or []
++    if len(choices) != 1 or not isinstance(choices[0], dict):
++        return None
++    choice = choices[0]
++    message = choice.get("message") or {}
++    bundle = {
++        "prompt_token_ids": message.get("prompt_token_ids") or response_payload.get("prompt_token_ids"),
++        "generation_token_ids": message.get("generation_token_ids") or choice.get("token_ids"),
++        "generation_log_probs": message.get("generation_log_probs"),
++    }
++    if bundle["generation_log_probs"] is None and (choice.get("logprobs") or {}).get("content") is not None:
++        bundle["generation_token_ids"], bundle["generation_log_probs"] = extract_generation_token_info(choice)
++    return _token_bundle(bundle)
++
++
++def _remove_added_token_data(response_payload: dict[str, Any], added: set[str]) -> None:
++    """Remove the response data that only exists because tracing changed the request."""
++    if "return_token_ids" in added:
++        response_payload.pop("prompt_token_ids", None)
++    for choice in response_payload.get("choices") or []:
++        if not isinstance(choice, dict):
++            continue
++        if "return_token_ids" in added:
++            choice.pop("token_ids", None)
++        if "logprobs" in added:
++            choice.pop("logprobs", None)
++        message = choice.get("message")
++        if not isinstance(message, dict):
++            continue
++        if "logprobs" in added:
++            # The NeMo RL vLLM server attaches these whenever token-id logprobs are requested.
++            for key in _TOKEN_KEYS:
++                message.pop(key, None)
++        if "return_tokenized_data" in added:
++            message.pop("prompt_token_ids", None)
++            message.pop("generation_token_ids", None)
++
++
++def _jsonable(value: Any) -> Any:
++    if isinstance(value, BaseModel):
++        return value.model_dump(mode="json")
++    return deepcopy(value)
++
++
++def _without_token_fields(payload: Any) -> Any:
++    """Drop token arrays from a served-response copy; the record keeps them once, under ``tokens``."""
++    if not isinstance(payload, dict):
++        return payload
++    items = list(payload.get("output") or [])
++    items += [choice.get("message") for choice in payload.get("choices") or [] if isinstance(choice, dict)]
++    for item in items:
++        if isinstance(item, dict):
++            for key in TOKEN_FIELDS:
++                item.pop(key, None)
++    return payload
++
++
++def _state_model_call_id(request: Request) -> str | None:
++    """Return the id the capture middleware assigned to this call, if it assigned one."""
++    model_call_id = (request.scope.get("state") or {}).get(MODEL_CALL_ID_STATE_KEY)
++    return model_call_id if isinstance(model_call_id, str) else None
++
++
++class ModelCallDebugTrace:
++    """Write one debug record per model call served by this process."""
++
++    def __init__(self, settings: ModelCallDebugTraceSettings, *, server_name: str) -> None:
++        if settings.dir is None:
++            raise ValueError("model_call_debug_trace requires a directory")
++        self._directory = settings.dir
++        self._server_name = server_name
++        self._request_token_data = settings.request_token_data
++        # One writer thread keeps this process's lines whole and in call-completion order.
++        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="model-call-debug-trace")
++        self._directory.mkdir(parents=True, exist_ok=True)
++
++    @classmethod
++    def from_global_config(cls, global_config_dict: Any, *, server_name: str) -> "ModelCallDebugTrace | None":
++        """Build the trace writer for this process, or return ``None`` when tracing is disabled."""
++        settings = _GlobalConfig.model_validate(global_config_dict or {}).model_call_debug_trace
++        if not settings.enabled:
++            return None
++        return cls(settings, server_name=server_name)
++
++    @asynccontextmanager
++    async def call(self, request: Request, params: BaseModel) -> AsyncIterator[CallTrace]:
++        """Trace one model call; a nested call reuses the outer call's trace."""
++        outer = _CALL_TRACE.get()
++        if outer is not None:
++            yield outer
++            return
++        trace = CallTrace(request_token_data=self._request_token_data)
++        reset_token = _CALL_TRACE.set(trace)
++        error: BaseException | None = None
++        try:
++            yield trace
++        except BaseException as exc:
++            error = exc
++            raise
++        finally:
++            _CALL_TRACE.reset(reset_token)
++            try:
++                self._submit(trace, request, params, error)
++            except Exception:
++                logger.warning("Could not record a model-call debug trace.", exc_info=True)
++
++    def _submit(self, trace: CallTrace, request: Request, params: BaseModel, error: BaseException | None) -> None:
++        response = _jsonable(trace.response) if trace.response is not None else None
++        tokens, tokens_source = trace.engine_tokens, trace.engine_tokens_source
++        if tokens_source != "engine_staged" and isinstance(response, dict):
++            try:
++                served = extract_token_fields(response)
++            except ValueError as served_error:
++                trace.token_errors.append(f"served_response: {served_error}")
++            else:
++                if served is not None:
++                    tokens, tokens_source = _token_bundle(served), "served_response"
++        response = _without_token_fields(response)
++        context = current_capture_context()
++        completed_at = time.time()
++        record = {
++            "schema_version": TRACE_SCHEMA_VERSION,
++            "trace_id": uuid4().hex,
++            "rollout_id": current_rollout_id() or (context.rollout_id if context is not None else None),
++            "model_call_id": context.model_call_id if context is not None else _state_model_call_id(request),
++            "model_server": self._server_name,
++            "path": request.url.path,
++            "pid": os.getpid(),
++            "started_at": trace.started_at,
++            "completed_at": completed_at,
++            "latency_ms": round((time.perf_counter() - trace.started_perf) * 1000.0, 2),
++            "external_staging": bool(context is not None and context.external_staging),
++            "commit_coords": context.external_commit_coords if context is not None else None,
++            "request": params.model_dump(mode="json", exclude_unset=True),
++            "response": response,
++            "tokens": tokens,
++            "tokens_source": tokens_source,
++            "token_errors": trace.token_errors,
++            "error": {"type": type(error).__name__, "message": str(error)} if error is not None else None,
++        }
++        self._executor.submit(self._append, record)
++
++    def _append(self, record: dict[str, Any]) -> None:
++        path = self._directory / f"{self._server_name}.{os.getpid()}.jsonl"
++        try:
++            line = orjson.dumps(record, default=str) + b"\n"
++            with path.open("ab") as handle:
++                handle.write(line)
++        except (OSError, TypeError):
++            logger.warning("Could not append a model-call debug trace to %s.", path, exc_info=True)
++
++    def flush(self) -> None:
++        """Wait for every submitted record to be written."""
++        self._executor.submit(lambda: None).result()
++
++
++@asynccontextmanager
++async def trace_model_call(
++    tracer: ModelCallDebugTrace | None, request: Request, params: BaseModel
++) -> AsyncIterator[CallTrace | None]:
++    """Trace one model call when ``tracer`` is configured; otherwise yield ``None``."""
++    if tracer is None:
++        yield None
++        return
++    async with tracer.call(request, params) as trace:
++        yield trace
+diff --git a/nemo_gym/token_id_capture/__init__.py b/nemo_gym/token_id_capture/__init__.py
+index 1b446c3a5..1e4993f84 100644
+--- a/nemo_gym/token_id_capture/__init__.py
++++ b/nemo_gym/token_id_capture/__init__.py
+@@ -90,6 +90,7 @@ from nemo_gym.token_id_capture.records import (
+ from nemo_gym.token_id_capture.sink import (
+     NG_CAPTURE_FIELD,
+     NG_COMMIT_COORDS_FIELD,
++    NG_DEBUG_TOKENS_FIELD,
+     CaptureContext,
+     capture_health_snapshot,
+     capture_tokens,
+@@ -141,6 +142,7 @@ __all__ = [
+     "CaptureContext",
+     "NG_CAPTURE_FIELD",
+     "NG_COMMIT_COORDS_FIELD",
++    "NG_DEBUG_TOKENS_FIELD",
+     "UNCOMMITTED_CALL_REASON",
+     "UNRESOLVED_PARENT_REASON",
+     "set_token_sink",
+diff --git a/nemo_gym/token_id_capture/external_capture.py b/nemo_gym/token_id_capture/external_capture.py
+index ee8fed83f..83b4faca3 100644
+--- a/nemo_gym/token_id_capture/external_capture.py
++++ b/nemo_gym/token_id_capture/external_capture.py
+@@ -20,6 +20,7 @@ from nemo_gym.token_id_capture.records import (
+ from nemo_gym.token_id_capture.sink import (
+     NG_CAPTURE_FIELD,
+     NG_COMMIT_COORDS_FIELD,
++    NG_DEBUG_TOKENS_FIELD,
+     CaptureContext,
+     current_capture_context,
+     mark_external_staging_committed,
+@@ -62,6 +63,7 @@ class ExternalCaptureHandler(Protocol):
+ def _strip_capture_transport_fields(payload: dict[str, Any]) -> None:
+     """Keep token IDs, logprobs, routes, and coordinates off the agent hop."""
+     payload.pop(NG_COMMIT_COORDS_FIELD, None)
++    payload.pop(NG_DEBUG_TOKENS_FIELD, None)
+     payload.pop("prompt_token_ids", None)
+     for choice in payload.get("choices") or []:
+         if not isinstance(choice, dict):
+diff --git a/nemo_gym/token_id_capture/sink.py b/nemo_gym/token_id_capture/sink.py
+index 1cd7fa3c7..cc72b31e5 100644
+--- a/nemo_gym/token_id_capture/sink.py
++++ b/nemo_gym/token_id_capture/sink.py
+@@ -58,6 +58,11 @@ if TYPE_CHECKING:
+ # response under ``NG_COMMIT_COORDS_FIELD``.
+ NG_CAPTURE_FIELD = "ng_capture"
+ NG_COMMIT_COORDS_FIELD = "ng_commit_coords"
++# Debug tracing (``model_call_debug_trace``) sets this flag on an admitted request.
++# The worker then echoes the arrays it staged under the same response field:
++# ``prompt_token_ids``, ``generation_token_ids``, and ``generation_log_probs``.
++# The model server reads and removes the echo before the response reaches the agent.
++NG_DEBUG_TOKENS_FIELD = "ng_debug_tokens"
+ 
+ 
+ @dataclass
+diff --git a/responses_api_models/vllm_model/app.py b/responses_api_models/vllm_model/app.py
+index 6668b7910..fc7543283 100644
+--- a/responses_api_models/vllm_model/app.py
++++ b/responses_api_models/vllm_model/app.py
+@@ -32,6 +32,7 @@ from nemo_gym.base_responses_api_model import (
+     Body,
+     SimpleResponsesAPIModel,
+ )
++from nemo_gym.model_call_debug_trace import note_engine_response, request_engine_token_data
+ from nemo_gym.openai_utils import (
+     REQUIRED_TOKEN_METADATA_FIELDS,
+     TOKEN_METADATA_FIELDS,
+@@ -288,6 +289,8 @@ class VLLMModel(SimpleResponsesAPIModel):
+         "required_prefix_token_ids",
+     )
+     _external_capture_handler: ExternalCaptureHandler | None = PrivateAttr(default=None)
++    # Megatron Inference returns token ids for return_tokenized_data instead of return_token_ids.
++    _megatron_engine: bool = PrivateAttr(default=False)
+ 
+     def setup_exception_middleware(self, app) -> None:
+         @app.middleware("http")
+@@ -366,6 +369,7 @@ class VLLMModel(SimpleResponsesAPIModel):
+             self._external_capture_handler = make_external_capture_handler(
+                 capture_config.token_id_capture.external_staging_backend
+             )
++            self._megatron_engine = capture_config.token_id_capture.external_staging_backend == "megatron_worker"
+ 
+         self._chat_template_tokenizer = None
+         if self.config.use_completions_api and self.config.render_chat_template:
+@@ -725,6 +729,9 @@ class VLLMModel(SimpleResponsesAPIModel):
+             body_dict = self._external_capture_handler.prepare_request(body_dict)
+         else:
+             body_dict = self._apply_prefix_supply(body_dict)
++        if not self.config.return_token_id_information:
++            # Debug tracing only; the token-echo path already requests this data.
++            request_engine_token_data(body_dict, megatron_engine=self._megatron_engine)
+ 
+         return body_dict
+ 
+@@ -935,6 +942,8 @@ class VLLMModel(SimpleResponsesAPIModel):
+                 )
+             raise
+ 
++        # Debug tracing reads the engine's token data before conversion or capture strips it.
++        note_engine_response(chat_completion_dict)
+         if transport_io_enabled:
+             finished_ns = time_ns()
+             _append_transport_io(
+diff --git a/responses_api_models/vllm_model/tests/test_app.py b/responses_api_models/vllm_model/tests/test_app.py
+index bd4082e07..1318d4a0d 100644
+--- a/responses_api_models/vllm_model/tests/test_app.py
++++ b/responses_api_models/vllm_model/tests/test_app.py
+@@ -55,8 +55,10 @@ from nemo_gym.openai_utils import (
+     NeMoGymResponseReasoningItem,
+     NeMoGymSummary,
+ )
++from nemo_gym.model_call_debug_trace import _CALL_TRACE, CallTrace
+ from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+ from nemo_gym.token_id_capture import (
++    NG_DEBUG_TOKENS_FIELD,
+     CaptureContext,
+     InMemoryLineageStore,
+     TokenCaptureStore,
+@@ -838,6 +840,139 @@ class TestApp:
+             else:
+                 assert '"finish_reason": "length"' in response.text
+ 
++    @staticmethod
++    def _traced_chat_call(server: VLLMModel, client: MagicMock, context: CaptureContext | None = None):
++        server._clients = [client]
++        request = MagicMock()
++        request.session = {SESSION_ID_KEY: "session-1"}
++        request.headers = {}
++        trace = CallTrace(request_token_data=True)
++        trace_token = _CALL_TRACE.set(trace)
++        sink_token = set_token_sink(context) if context is not None else None
++        try:
++            response = asyncio.run(
++                server.chat_completions(
++                    request,
++                    NeMoGymChatCompletionCreateParamsNonStreaming(messages=[{"role": "user", "content": "go"}]),
++                )
++            )
++        finally:
++            if sink_token is not None:
++                reset_token_sink(sink_token)
++            _CALL_TRACE.reset(trace_token)
++        return response, trace
++
++    def test_debug_trace_reads_engine_tokens_and_serves_the_untraced_response(self, monkeypatch: MonkeyPatch) -> None:
++        server = self._setup_server(monkeypatch)
++        client = MagicMock(spec=NeMoGymAsyncOpenAI)
++        # The NeMo RL vLLM server answers a token-id logprob request at every location below.
++        client.create_chat_completion = AsyncMock(
++            return_value={
++                "id": "chatcmpl-1",
++                "object": "chat.completion",
++                "created": FIXED_TIME,
++                "model": "dummy_model",
++                "prompt_token_ids": [10, 11],
++                "choices": [
++                    {
++                        "index": 0,
++                        "finish_reason": "stop",
++                        "token_ids": [12, 13],
++                        "logprobs": {
++                            "content": [
++                                {"token": "token_id:12", "logprob": -0.1, "bytes": None, "top_logprobs": []},
++                                {"token": "token_id:13", "logprob": -0.2, "bytes": None, "top_logprobs": []},
++                            ]
++                        },
++                        "message": {
++                            "role": "assistant",
++                            "content": "done",
++                            "prompt_token_ids": [10, 11],
++                            "generation_token_ids": [12, 13],
++                            "generation_log_probs": [-0.1, -0.2],
++                        },
++                    }
++                ],
++            }
++        )
++
++        response, trace = self._traced_chat_call(server, client)
++
++        outbound = client.create_chat_completion.await_args.kwargs
++        assert outbound["logprobs"] is True
++        assert outbound["top_logprobs"] == 0
++        assert outbound["return_tokens_as_token_ids"] is True
++        assert outbound["return_token_ids"] is True
++        assert trace.engine_tokens == {
++            "prompt_token_ids": [10, 11],
++            "generation_token_ids": [12, 13],
++            "generation_log_probs": [-0.1, -0.2],
++        }
++        assert trace.engine_tokens_source == "engine_response"
++        served = response.model_dump()
++        assert "prompt_token_ids" not in served
++        assert "token_ids" not in served["choices"][0]
++        assert served["choices"][0]["logprobs"] is None
++        assert served["choices"][0]["message"]["content"] == "done"
++        for field_name in ("prompt_token_ids", "generation_token_ids", "generation_log_probs"):
++            assert field_name not in served["choices"][0]["message"], field_name
++
++    def test_debug_trace_asks_the_vllm_worker_to_echo_staged_tokens(self, monkeypatch: MonkeyPatch) -> None:
++        server = self._setup_server(monkeypatch, external_staging_backend="vllm_worker")
++        staged = {"prompt_token_ids": [10, 11], "generation_token_ids": [12], "generation_log_probs": [-0.1]}
++        client = MagicMock(spec=NeMoGymAsyncOpenAI)
++        client.create_chat_completion = AsyncMock(
++            return_value={
++                "id": "chatcmpl-1",
++                "object": "chat.completion",
++                "created": FIXED_TIME,
++                "model": "dummy_model",
++                "ng_commit_coords": {"staging_key": "rollout-1/c1"},
++                NG_DEBUG_TOKENS_FIELD: staged,
++                "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "ok"}}],
++            }
++        )
++        context = CaptureContext(
++            rollout_id="rollout-1",
++            model_call_id="c1",
++            token_sink=None,
++            external_staging=True,
++            capture_admission=CaptureAdmission(rollout_id="rollout-1", model_call_id="c1", mode="text"),
++        )
++
++        response, trace = self._traced_chat_call(server, client, context)
++
++        outbound = client.create_chat_completion.await_args.kwargs
++        assert outbound[NG_DEBUG_TOKENS_FIELD] is True
++        assert "return_token_ids" not in outbound
++        assert trace.engine_tokens == staged
++        assert trace.engine_tokens_source == "engine_staged"
++        assert context.external_commit_coords == {"staging_key": "rollout-1/c1"}
++        assert NG_DEBUG_TOKENS_FIELD not in response.model_dump()
++
++    def test_debug_trace_asks_the_megatron_stager_through_offload_params(self, monkeypatch: MonkeyPatch) -> None:
++        server = self._setup_server(monkeypatch, external_staging_backend="megatron_worker")
++        context = CaptureContext(
++            rollout_id="rollout-1",
++            model_call_id="c1",
++            token_sink=None,
++            external_staging=True,
++            capture_admission=CaptureAdmission(rollout_id="rollout-1", model_call_id="c1", mode="text"),
++        )
++        trace_token = _CALL_TRACE.set(CallTrace(request_token_data=True))
++        sink_token = set_token_sink(context)
++        try:
++            outbound = server._preprocess_chat_completion_create_params(
++                MagicMock(), {"messages": [{"role": "user", "content": "go"}]}
++            )
++        finally:
++            reset_token_sink(sink_token)
++            _CALL_TRACE.reset(trace_token)
++
++        assert outbound["offload_params"][NG_DEBUG_TOKENS_FIELD] is True
++        assert NG_DEBUG_TOKENS_FIELD not in outbound
++        assert "return_tokenized_data" not in outbound
++
+     def test_megatron_capture_handler_prepares_an_admitted_child_request(self, monkeypatch: MonkeyPatch) -> None:
+         server = self._setup_server(monkeypatch, external_staging_backend="megatron_worker")
+         context = CaptureContext(
+diff --git a/tests/unit_tests/test_model_call_debug_trace.py b/tests/unit_tests/test_model_call_debug_trace.py
+new file mode 100644
+index 000000000..1e3f807a7
+--- /dev/null
++++ b/tests/unit_tests/test_model_call_debug_trace.py
+@@ -0,0 +1,328 @@
++# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++# SPDX-License-Identifier: Apache-2.0
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++import json
++from pathlib import Path
++from time import time
++from unittest.mock import MagicMock
++
++import pytest
++from fastapi import Body, Request
++from fastapi.testclient import TestClient
++from omegaconf import OmegaConf
++from pydantic import ValidationError
++
++from nemo_gym.base_responses_api_model import BaseResponsesAPIModelConfig, SimpleResponsesAPIModel
++from nemo_gym.global_config import MODEL_CALL_DEBUG_TRACE_BLOCK, NEMO_GYM_RESERVED_TOP_LEVEL_KEYS
++from nemo_gym.model_call_debug_trace import (
++    _CALL_TRACE,
++    CallTrace,
++    ModelCallDebugTrace,
++    ModelCallDebugTraceSettings,
++    _GlobalConfig,
++    note_engine_response,
++    request_engine_token_data,
++)
++from nemo_gym.openai_utils import (
++    NeMoGymChatCompletion,
++    NeMoGymChatCompletionCreateParamsNonStreaming,
++    NeMoGymResponse,
++    NeMoGymResponseCreateParamsNonStreaming,
++)
++from nemo_gym.server_utils import ServerClient
++from nemo_gym.token_id_capture import NG_CAPTURE_FIELD, NG_DEBUG_TOKENS_FIELD
++
++
++PROMPT_IDS = [101, 102, 103]
++GENERATION_IDS = [7, 8]
++GENERATION_LOG_PROBS = [-0.25, -1.5]
++TOKENS = {
++    "prompt_token_ids": PROMPT_IDS,
++    "generation_token_ids": GENERATION_IDS,
++    "generation_log_probs": GENERATION_LOG_PROBS,
++}
++
++
++def _response(text: str, *, with_tokens: bool) -> NeMoGymResponse:
++    item = {
++        "type": "message",
++        "id": "msg_1",
++        "role": "assistant",
++        "status": "completed",
++        "content": [{"type": "output_text", "text": text, "annotations": []}],
++    }
++    if with_tokens:
++        item |= TOKENS
++    return NeMoGymResponse(
++        id="resp_1",
++        created_at=int(time()),
++        model="policy",
++        object="response",
++        output=[item],
++        tool_choice="auto",
++        parallel_tool_calls=True,
++        tools=[],
++    )
++
++
++def _chat_completion(text: str, *, extra_message_fields: dict | None = None) -> dict:
++    return {
++        "id": "chatcmpl-1",
++        "object": "chat.completion",
++        "created": 1,
++        "model": "policy",
++        "choices": [
++            {
++                "index": 0,
++                "finish_reason": "stop",
++                "message": {"role": "assistant", "content": text, **(extra_message_fields or {})},
++            }
++        ],
++    }
++
++
++class _TracedModel(SimpleResponsesAPIModel):
++    """Serve fixed answers; ``engine_response`` stands in for a raw inference-engine reply."""
++
++    config: BaseResponsesAPIModelConfig
++    model_config = {"arbitrary_types_allowed": True}
++    served_tokens: bool = True
++    engine_response: dict | None = None
++    fail: bool = False
++
++    async def responses(
++        self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
++    ) -> NeMoGymResponse:
++        if self.fail:
++            raise RuntimeError("engine exploded")
++        if self.engine_response is not None:
++            note_engine_response(self.engine_response)
++        return _response("the answer", with_tokens=self.served_tokens)
++
++    async def chat_completions(
++        self, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
++    ) -> NeMoGymChatCompletion:
++        return NeMoGymChatCompletion.model_validate(_chat_completion("chat answer", extra_message_fields=TOKENS))
++
++
++def _server(tmp_path: Path, *, enabled: bool = True, **fields) -> tuple[TestClient, _TracedModel]:
++    global_config = {"model_call_debug_trace": {"enabled": enabled, "dir": str(tmp_path / "traces")}}
++    server = _TracedModel(
++        config=BaseResponsesAPIModelConfig(host="0.0.0.0", port=8099, entrypoint="", name="policy_model"),
++        server_client=MagicMock(spec=ServerClient, global_config_dict=global_config),
++        **fields,
++    )
++    return TestClient(server.setup_webserver(), raise_server_exceptions=False), server
++
++
++def _records(server: _TracedModel, tmp_path: Path) -> list[dict]:
++    server._model_call_debug_trace.flush()
++    lines = []
++    for path in sorted((tmp_path / "traces").glob("policy_model.*.jsonl")):
++        lines.extend(json.loads(line) for line in path.read_text().splitlines())
++    return lines
++
++
++RESPONSES_BODY = {"input": [{"role": "user", "content": "question"}]}
++
++
++class TestSettings:
++    def test_block_is_a_reserved_global_config_key(self) -> None:
++        # A non-reserved top-level block would be parsed as a server instance.
++        assert MODEL_CALL_DEBUG_TRACE_BLOCK in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS
++        assert MODEL_CALL_DEBUG_TRACE_BLOCK in _GlobalConfig.model_fields
++
++    def test_enabled_requires_absolute_dir(self) -> None:
++        with pytest.raises(ValidationError, match="absolute"):
++            ModelCallDebugTraceSettings(enabled=True)
++        with pytest.raises(ValidationError, match="absolute"):
++            ModelCallDebugTraceSettings(enabled=True, dir="relative/traces")
++
++    def test_disabled_builds_no_tracer(self) -> None:
++        assert ModelCallDebugTrace.from_global_config({}, server_name="srv") is None
++        assert ModelCallDebugTrace.from_global_config(None, server_name="srv") is None
++
++    def test_reads_an_omegaconf_global_config(self, tmp_path: Path) -> None:
++        config = OmegaConf.create({"model_call_debug_trace": {"enabled": True, "dir": str(tmp_path)}, "other": 1})
++        assert isinstance(ModelCallDebugTrace.from_global_config(config, server_name="srv"), ModelCallDebugTrace)
++
++
++class TestModelServerRecords:
++    def test_responses_call_records_text_and_served_tokens_once(self, tmp_path: Path) -> None:
++        client, server = _server(tmp_path)
++        response = client.post("/ng-rollout/3-1/v1/responses", json=RESPONSES_BODY)
++        assert response.status_code == 200
++        # The client still receives the token fields that the server serves.
++        assert response.json()["output"][0]["generation_token_ids"] == GENERATION_IDS
++
++        (record,) = _records(server, tmp_path)
++        assert record["rollout_id"] == "3-1"
++        assert record["model_server"] == "policy_model"
++        assert record["path"] == "/v1/responses"
++        assert record["request"]["input"] == RESPONSES_BODY["input"]
++        assert record["response"]["output"][0]["content"][0]["text"] == "the answer"
++        assert record["tokens"] == TOKENS
++        assert record["tokens_source"] == "served_response"
++        assert "generation_token_ids" not in record["response"]["output"][0]
++        assert record["error"] is None
++
++    def test_anthropic_messages_call_keeps_tokens_the_conversion_drops(self, tmp_path: Path) -> None:
++        client, server = _server(tmp_path)
++        response = client.post(
++            "/v1/messages",
++            json={"model": "policy", "max_tokens": 16, "messages": [{"role": "user", "content": "question"}]},
++        )
++        assert response.status_code == 200
++        assert "generation_token_ids" not in json.dumps(response.json())
++
++        (record,) = _records(server, tmp_path)
++        assert record["path"] == "/v1/messages"
++        assert record["tokens"] == TOKENS
++
++    def test_streaming_chat_call_is_recorded_once(self, tmp_path: Path) -> None:
++        client, server = _server(tmp_path)
++        response = client.post(
++            "/v1/chat/completions", json={"stream": True, "messages": [{"role": "user", "content": "question"}]}
++        )
++        assert response.status_code == 200
++        assert "chat answer" in response.text
++
++        (record,) = _records(server, tmp_path)
++        assert record["path"] == "/v1/chat/completions"
++        assert record["response"]["choices"][0]["message"]["content"] == "chat answer"
++        assert record["tokens"] == TOKENS
++
++    def test_worker_staged_echo_wins_over_the_served_response(self, tmp_path: Path) -> None:
++        staged = {"prompt_token_ids": [9, 9], "generation_token_ids": [4], "generation_log_probs": [-0.1]}
++        engine_response = _chat_completion("the answer") | {NG_DEBUG_TOKENS_FIELD: staged}
++        client, server = _server(tmp_path, engine_response=engine_response, served_tokens=False)
++        assert client.post("/v1/responses", json=RESPONSES_BODY).status_code == 200
++
++        (record,) = _records(server, tmp_path)
++        assert record["tokens"] == staged
++        assert record["tokens_source"] == "engine_staged"
++        assert NG_DEBUG_TOKENS_FIELD not in server.engine_response
++
++    def test_failed_call_is_recorded_with_its_error(self, tmp_path: Path) -> None:
++        client, server = _server(tmp_path, fail=True)
++        assert client.post("/v1/responses", json=RESPONSES_BODY).status_code == 500
++
++        (record,) = _records(server, tmp_path)
++        assert record["error"] == {"type": "RuntimeError", "message": "engine exploded"}
++        assert record["response"] is None
++        assert record["tokens"] is None
++
++    def test_disabled_trace_writes_nothing(self, tmp_path: Path) -> None:
++        client, server = _server(tmp_path, enabled=False)
++        assert client.post("/v1/responses", json=RESPONSES_BODY).status_code == 200
++        assert server._model_call_debug_trace is None
++        assert not (tmp_path / "traces").exists()
++
++
++@pytest.fixture
++def active_trace():
++    trace = CallTrace(request_token_data=True)
++    reset_token = _CALL_TRACE.set(trace)
++    yield trace
++    _CALL_TRACE.reset(reset_token)
++
++
++class TestEngineRequest:
++    def test_admitted_vllm_call_asks_the_worker_for_its_staged_arrays(self, active_trace: CallTrace) -> None:
++        payload = {NG_CAPTURE_FIELD: {"rollout_id": "r"}, "logprobs": True, "top_logprobs": 0}
++        request_engine_token_data(payload, megatron_engine=False)
++        assert payload[NG_DEBUG_TOKENS_FIELD] is True
++        assert "return_token_ids" not in payload
++
++    def test_admitted_megatron_call_asks_through_offload_params(self, active_trace: CallTrace) -> None:
++        payload = {"offload_params": {NG_CAPTURE_FIELD: {"rollout_id": "r"}}}
++        request_engine_token_data(payload, megatron_engine=True)
++        assert payload["offload_params"][NG_DEBUG_TOKENS_FIELD] is True
++        assert NG_DEBUG_TOKENS_FIELD not in payload
++
++    @pytest.mark.parametrize(
++        ("megatron_engine", "token_ids_field"), [(False, "return_token_ids"), (True, "return_tokenized_data")]
++    )
++    def test_uncaptured_call_requests_engine_token_fields(
++        self, active_trace: CallTrace, megatron_engine: bool, token_ids_field: str
++    ) -> None:
++        payload = {"messages": []}
++        request_engine_token_data(payload, megatron_engine=megatron_engine)
++        assert payload["logprobs"] is True
++        assert payload["top_logprobs"] == 0
++        assert payload["return_tokens_as_token_ids"] is True
++        assert payload[token_ids_field] is True
++
++    def test_client_requested_logprobs_are_left_alone(self, active_trace: CallTrace) -> None:
++        payload = {"logprobs": True, "top_logprobs": 5}
++        request_engine_token_data(payload, megatron_engine=False)
++        assert payload["top_logprobs"] == 5
++        assert "return_tokens_as_token_ids" not in payload
++        assert active_trace.added_request_fields == {"return_token_ids"}
++
++    def test_request_is_unchanged_without_an_opted_in_trace(self, active_trace: CallTrace) -> None:
++        payload = {"n": 2}
++        request_engine_token_data(payload, megatron_engine=False)
++        assert payload == {"n": 2}
++        active_trace.request_token_data = False
++        payload = {"messages": []}
++        request_engine_token_data(payload, megatron_engine=False)
++        assert payload == {"messages": []}
++
++    def test_untraced_call_is_unchanged(self) -> None:
++        payload = {"messages": []}
++        request_engine_token_data(payload, megatron_engine=False)
++        note_engine_response(_chat_completion("x"))
++        assert payload == {"messages": []}
++
++
++class TestEngineResponse:
++    def test_reads_and_removes_the_token_data_tracing_added(self, active_trace: CallTrace) -> None:
++        request_engine_token_data({"messages": []}, megatron_engine=False)
++        # NeMo RL's vLLM server returns message token fields alongside vLLM's own token-id fields.
++        response = _chat_completion("hi", extra_message_fields=TOKENS) | {"prompt_token_ids": PROMPT_IDS}
++        response["choices"][0] |= {"token_ids": GENERATION_IDS, "logprobs": {"content": []}}
++
++        note_engine_response(response)
++
++        assert active_trace.engine_tokens == TOKENS
++        assert active_trace.engine_tokens_source == "engine_response"
++        assert response == _chat_completion("hi")
++
++    def test_parses_plain_vllm_token_id_logprobs(self, active_trace: CallTrace) -> None:
++        response = _chat_completion("hi") | {"prompt_token_ids": PROMPT_IDS}
++        response["choices"][0]["logprobs"] = {
++            "content": [
++                {"token": f"token_id:{token_id}", "logprob": log_prob}
++                for token_id, log_prob in zip(GENERATION_IDS, GENERATION_LOG_PROBS)
++            ]
++        }
++        note_engine_response(response)
++        assert active_trace.engine_tokens == TOKENS
++        # The client asked for these logprobs, so they stay on the response.
++        assert response["choices"][0]["logprobs"]["content"]
++
++    def test_unparseable_logprobs_are_reported_not_raised(self, active_trace: CallTrace) -> None:
++        response = _chat_completion("hi")
++        response["choices"][0]["logprobs"] = {"content": [{"token": "hello", "logprob": -0.1}]}
++        note_engine_response(response)
++        assert active_trace.engine_tokens is None
++        assert active_trace.token_errors and active_trace.token_errors[0].startswith("engine_response: ValueError")
++
++    def test_staged_echo_error_is_reported(self, active_trace: CallTrace) -> None:
++        response = _chat_completion("hi") | {NG_DEBUG_TOKENS_FIELD: {"error": "capture failed"}}
++        note_engine_response(response)
++        assert active_trace.engine_tokens is None
++        assert active_trace.token_errors == ["engine_staged: capture failed"]
++        assert NG_DEBUG_TOKENS_FIELD not in response
