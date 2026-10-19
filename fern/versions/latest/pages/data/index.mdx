@@ -63,7 +63,7 @@ The `task_source` field names the config instance that declared the row's datase
 **You don't create `task_source` manually.** The `gym dataset collate` tool adds it based on your config file. The agent is chosen at run time, so collated rows carry no `agent_ref`, and collation strips any `agent_ref` already in the source data. To send selected rows to a different agent, pass `+agent_map`, keyed by the `task_source` value (for example `'+agent_map={math_with_judge_simple_agent: my_agent}'`).
 
 <Note>
-Datasets collated before NeMo Gym v0.6.0 carry `agent_ref` without `task_source`. They still run, but this routing format is deprecated and logs a `DeprecationWarning`. Collate them again with current NeMo Gym.
+Datasets collated before NeMo Gym v0.6.0 carry `agent_ref` without `task_source`. They still run, but this routing format is deprecated. Collate them again with current NeMo Gym.
 </Note>
 
 ### Example Data

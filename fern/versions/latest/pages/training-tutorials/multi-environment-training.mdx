@@ -57,7 +57,7 @@ gym dataset collate \
     --output-dir results/multiverifier
 ```
 
-This writes the example rows of both environments to `results/multiverifier/example.jsonl`. To collate training data instead, use `--mode train_preparation --download`, which writes each environment's `train` and `validation` datasets to `train.jsonl` and `validation.jsonl`.
+This writes the example rows of both environments to `results/multiverifier/example.jsonl`. For environments with downloadable `train` and `validation` datasets, `--mode train_preparation --download` collates those into `train.jsonl` and `validation.jsonl` instead; the two example environments here have no public training data.
 
 ## Rollout Collection
 

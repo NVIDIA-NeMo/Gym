@@ -58,7 +58,7 @@ done
 
 This preserves an existing `agent_ref`, including rows collated by older Gym versions that do not have `task_source`.
 
-For an environment that declares its datasets on its resources server, `task_source` names the resources server; set `name` to the agent instance that `gym env start` prints for it instead.
+For an environment that declares its datasets on its resources server, `task_source` names the resources server; set `name` to the agent that NeMo Gym routes it to instead: the agent its datasets pin with an `agent` key, or else the one agent instance whose config references that resources server.
 
 ## 2. Set environment variables
 
