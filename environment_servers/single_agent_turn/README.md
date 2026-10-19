@@ -20,4 +20,6 @@ environment_servers:
 
 `direct_http` grants the Agent Server scoped HTTP access to the Resources Server. `mcp` requires the Resources seed response to provide HTTP MCP connection metadata. Selecting neither transport sends `tool_accesses=[]` when the agent session is seeded.
 
+With partial-rollout checkpointing on, an episode that grants `mcp` access restarts from its input after a crash instead of continuing from a checkpoint. Its agent holds an MCP session token that names the episode's attempt, and the Resources Server refuses that token once a restore replaces the attempt.
+
 The server supports `num_workers > 1`. Episode state and cleanup remain local to the worker handling that request. `max_concurrent_episodes` and queue admission are also enforced independently by each worker, so the deployment-wide concurrency limit is approximately `num_workers * max_concurrent_episodes`.

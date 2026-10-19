@@ -171,6 +171,28 @@ class TestSandboxAPI:
         assert spec.provider_options == {"platform": {"arch": "amd64"}}
         assert spec.files == {"/tmp/input": "data"}
 
+    def test_agent_network_policy_applies_to_agent_box_only(self) -> None:
+        policy = {"defaultAction": "deny", "egress": [{"action": "allow", "target": "10.0.0.0/16"}]}
+        params = SimpleNamespace(
+            sandbox_spec={"provider_options": {"platform": {"arch": "amd64"}}},
+            sandbox_default_metadata={},
+            swebench_agent_timeout=100,
+            swebench_tests_timeout=200,
+            instance_id="astropy__astropy-12907",
+            container="image:tag",
+            resolved_sandbox_provider={"opensandbox": {}},
+            agent_network_policy=policy,
+        )
+        agent_spec = AnySweAgent._sandbox_spec(params, agent=True)
+        grading_spec = AnySweAgent._sandbox_spec(params)
+        assert agent_spec.provider_options == {"platform": {"arch": "amd64"}, "network_policy": policy}
+        assert grading_spec.provider_options == {"platform": {"arch": "amd64"}}
+
+        params.agent_network_policy = policy
+        params.resolved_sandbox_provider = {"docker": {}}
+        with pytest.raises(ValueError, match="opensandbox"):
+            AnySweAgent._sandbox_spec(params, agent=True)
+
     def test_agent_config_is_forwarded_without_harness_specific_changes(self) -> None:
         params = SimpleNamespace(
             body=SimpleNamespace(model="model", temperature=1.0, top_p=0.95, max_output_tokens=None),

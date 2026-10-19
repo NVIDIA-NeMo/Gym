@@ -150,6 +150,12 @@ class TestParseGenRMOutput:
         with pytest.raises(GenRMOutputParseError):
             parse_genrm_output(output, 3.0, 3.5, raise_on_fail=True)
 
+    @pytest.mark.parametrize("key", ["score_1", "score_2", "ranking"])
+    def test_boolean_scores_are_parse_failures(self, key: str) -> None:
+        output = json.dumps({"score_1": 4, "score_2": 2, "ranking": 1} | {key: True})
+        with pytest.raises(GenRMOutputParseError):
+            parse_genrm_output(output, 3.0, 3.5, raise_on_fail=True)
+
     def test_rubric_mean(self) -> None:
         output = """```json
 {"rubric_evaluations": [
