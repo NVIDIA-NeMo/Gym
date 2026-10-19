@@ -508,7 +508,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         if session_id is not None:
             state = self._require_agent_session(session_id)
             assert isinstance(state, OpenCodeSandboxSession)
-            if state.request.continuation is not None:
+            if state.is_continuation:
                 return await self.activate_agent_session(request, body)
             if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
                 raise HTTPException(409, "OpenCode activation does not match the seeded session and rollout")
@@ -722,13 +722,13 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             )
 
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
-        """Release only after capture and positive cleanup; retain failed closes for retry."""
+        """Finalize and release the connection; retain release failures for retry."""
         assert isinstance(state, OpenCodeSandboxSession)
         await state.close(self.config.session_close_timeout_seconds)
         observations = state.observations or AgentObservationBundle(
             source="opencode", gaps=[ObservationGap(code="agent_activation_interrupted")]
         )
-        if state.request.continuation is not None:
+        if state.is_continuation:
             return AgentCloseSessionResponse(
                 agent_session_id=state.request.agent_session_id,
                 agent_observations=observations,
@@ -949,7 +949,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             usage=usage,
             status=outcome.status,
             incomplete_details=IncompleteDetails(reason=outcome.incomplete_reason)
-            if state.activation_id is not None and outcome.incomplete_reason
+            if state.is_continuation and outcome.incomplete_reason
             else None,
             tool_choice=body.tool_choice,
             tools=body.tools,
@@ -961,7 +961,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 AGENT_TIMEOUT_METADATA_KEY: str(timeout),
             },
         )
-        if state.activation_id is not None:
+        if state.is_continuation:
             response.metadata.update({"activation_id": str(state.activation_id)})
             if state.native_session_id is not None:
                 response.metadata["native_conversation_id"] = state.native_session_id
@@ -1043,11 +1043,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 "XDG_CONFIG_HOME": f"{state.persistent_directory}/config",
                 "XDG_CACHE_HOME": f"{state.persistent_directory}/cache",
                 "XDG_STATE_HOME": f"{state.persistent_directory}/state",
-                **(
-                    {"NEMO_GYM_OPENCODE_ACTIVATION_ID": state.invocation_prefix}
-                    if state.activation_id is not None
-                    else {}
-                ),
+                **({"NEMO_GYM_OPENCODE_ACTIVATION_ID": state.invocation_prefix} if state.is_continuation else {}),
                 "OPENCODE_CONFIG_CONTENT": json.dumps(config),
                 "OPENCODE_DISABLE_PROJECT_CONFIG": "true",
                 "OPENCODE_DISABLE_AUTOUPDATE": "true",
@@ -1071,17 +1067,17 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             finally:
                 self.sem.release()
         except TimeoutError as exc:
-            if state.activation_id is not None and not state.session.launch_started:
+            if state.is_continuation and not state.session.launch_started:
                 raise _ActivationDeadlineExpired from None
             failure = exc
         except BaseException as exc:
             failure = exc
-        observations = state.activation_observations if state.activation_id is not None else state.observations
+        observations = state.activation_observations if state.is_continuation else state.observations
         if observations is None:
             observations = AgentObservationBundle(
                 source="opencode", gaps=[ObservationGap(code="observation_capture_failed")]
             )
-        if state.activation_id is not None:
+        if state.is_continuation:
             state.activation_observations = observations
         else:
             state.observations = observations
@@ -1129,7 +1125,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             previous_session_id=previous_session_id,
             session_id=state.native_session_id,
             stdout=state.activation_log,
-            continuation=state.activation_id is not None,
+            continuation=state.is_continuation,
         )
         error = error or outcome.error
         status = outcome.status
@@ -1139,7 +1135,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         for record in observations.records:
             if isinstance(record, AgentInvocation) and record.parent_invocation_id is None:
                 record.status = "incomplete" if isinstance(failure, asyncio.CancelledError) else status
-                if state.activation_id is not None:
+                if state.is_continuation:
                     record.duration_ms = (monotonic() - started) * 1000
                     record.stop_reason = outcome.error_type
                 record.error_type = outcome.error_type
@@ -1171,7 +1167,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 detail="Usage comes from OpenCode persisted assistant messages; compare against captured Gym model calls.",
             )
         )
-        if state.activation_id is not None:
+        if state.is_continuation:
             state.retain_activation()
         if failure is not None:
             raise failure

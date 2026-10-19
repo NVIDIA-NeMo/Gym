@@ -167,14 +167,31 @@ async def test_close_cancels_active_turn_and_fences(agent):
         await activate(agent, request)
 
 
-async def test_failed_cleanup_blocks_receipt_and_can_retry(agent):
+async def test_negative_cleanup_receipt_is_final_and_replayed(agent):
     request, body = await seed(agent)
     agent._cleanup_ok = False
-    with pytest.raises(RuntimeError, match="cleanup was not confirmed"):
-        await agent.close_agent_session(request, close(body))
+    receipt = await agent.close_agent_session(request, close(body))
+    assert receipt.cleanup_confirmed is False
+    assert agent._session_records[body.agent_session_id].state is None
     agent._cleanup_ok = True
+    assert await agent.close_agent_session(request, close(body)) == receipt
+    assert agent._close_count == 1
+
+
+async def test_cleanup_exception_retains_state_for_retry(agent, monkeypatch):
+    request, body = await seed(agent)
+    cleanup = agent._close_agent_session_state
+
+    async def unavailable(state):
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(agent, "_close_agent_session_state", unavailable)
+    with pytest.raises(RuntimeError, match="provider unavailable"):
+        await agent.close_agent_session(request, close(body))
+    assert agent._session_records[body.agent_session_id].state is not None
+    monkeypatch.setattr(agent, "_close_agent_session_state", cleanup)
     assert (await agent.close_agent_session(request, close(body))).cleanup_confirmed
-    assert agent._close_count == 2
+    assert agent._close_count == 1
 
 
 @pytest.mark.parametrize("continuation", [False, True])

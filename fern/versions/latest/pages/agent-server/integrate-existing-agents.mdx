@@ -235,8 +235,10 @@ Emit one invocation per activation, recording the native session as context, and
 each trajectory turn with its activation. OpenCode's header plugin uses that
 activation-scoped invocation identity to attribute captured model calls. Responses
 carry only new output, usage and evidence; close supplies the cumulative record.
-`cleanup_confirmed` is omitted when an adapter does not report it, and required to
-be true before a native continuation close succeeds.
+`cleanup_confirmed` is omitted when an adapter does not report it. A final negative
+termination receipt fails the activation and skips verification; close releases
+the borrowed connection and returns `cleanup_confirmed: false`. Failures to release
+the connection remain retryable.
 
 ## Tools in Agent vs. Resources Server
 

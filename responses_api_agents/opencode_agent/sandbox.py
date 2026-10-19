@@ -86,8 +86,14 @@ class OpenCodeSandboxSession(AgentSessionState):
     activation_id: int | None = None
 
     @property
+    def is_continuation(self) -> bool:
+        """Whether the seed opted into native continuation, including before its first launch."""
+        return self.request.continuation is not None
+
+    @property
     def invocation_prefix(self) -> str:
         """Unique process-activation identity, also passed to the native header plugin."""
+        assert self.activation_id is not None
         return f"{self.request.agent_session_id}:activation-{self.activation_id}"
 
     @property
@@ -97,6 +103,7 @@ class OpenCodeSandboxSession(AgentSessionState):
 
     async def prepare_activation(self, activation_id: int, *, timeout: float) -> None:
         """Keep one conversation while rearming the supervised execution lifecycle."""
+        assert self.is_continuation
         self.activation_id = activation_id
         self.activation_log = ""
         self.activation_observations = None
@@ -178,7 +185,7 @@ class OpenCodeSandboxSession(AgentSessionState):
             await upload_text(
                 self.session.sandbox, path=f"{self.session.session_dir}/instructions.md", text=payload["instructions"]
             )
-        if self.conversation_directory is not None:
+        if self.is_continuation:
             await self.session.sandbox.upload(
                 Path(__file__).with_name("task_environment.mjs"), f"{self.session.session_dir}/task_environment.mjs"
             )
@@ -206,7 +213,7 @@ class OpenCodeSandboxSession(AgentSessionState):
             if self.stderr:
                 raise RuntimeError(format_sandbox_error(str(error), stderr=self.stderr)) from error
             raise
-        if self.conversation_directory is None:
+        if not self.is_continuation:
             await self._check_task_environment()
         try:
             export_text = await self.read_text("export.json")
@@ -218,7 +225,7 @@ class OpenCodeSandboxSession(AgentSessionState):
                     "OpenCode sandbox runner returned no valid result", output=logs, stderr=self.stderr
                 )
             ) from error
-        if self.conversation_directory:
+        if self.is_continuation:
             native_id = export.get("session_id")
             if not isinstance(native_id, str) or not native_id:
                 raise RuntimeError("OpenCode did not persist a resumable session ID")
@@ -244,11 +251,10 @@ class OpenCodeSandboxSession(AgentSessionState):
                     trajectory,
                     require_terminal_finish=True,
                     model_ref=self.model_ref,
-                    message_ids=set(export.get("activation_message_ids", []))
-                    if self.conversation_directory is not None
-                    else None,
+                    message_ids=set(export.get("activation_message_ids", [])) if self.is_continuation else None,
                 )
-                if self.activation_id is not None:
+                if self.is_continuation:
+                    assert self.activation_id is not None
                     scope_opencode_activation(
                         observations,
                         trajectory,
@@ -268,7 +274,7 @@ class OpenCodeSandboxSession(AgentSessionState):
                     ObservationGap(code="observation_capture_failed"),
                 ],
             )
-            if self.activation_id is not None:
+            if self.is_continuation:
                 self.activation_observations = observations
             else:
                 self.observations = observations
@@ -279,7 +285,7 @@ class OpenCodeSandboxSession(AgentSessionState):
             runtime = None
         self.runtime_info = parse_runtime_info(runtime)
         try:
-            if self.conversation_directory is not None:
+            if self.is_continuation:
                 await self._check_task_environment()
         except Exception as error:
             # A resumed process can exhaust its relative budget before plugins load.

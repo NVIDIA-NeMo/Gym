@@ -153,11 +153,52 @@ def roots(observations):
     ]
 
 
+@pytest.mark.parametrize("activation_count", [1, 2])
+@pytest.mark.parametrize("disconnect_failure", [False, True])
+def test_negative_cleanup_releases_borrowed_session_and_replays_receipt(
+    setup, tmp_path, activation_count, disconnect_failure
+):
+    agent, sandbox = setup
+    install_artifact_runner(sandbox, tmp_path)
+    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
+        request = start(client)
+        state = agent._require_agent_session(request.agent_session_id)
+        for index in range(1, activation_count):
+            assert activate(client, index).status_code == 200
+        sandbox.result["cleanup_confirmed"] = False
+        assert activate(client, activation_count).status_code == 500
+        assert state.session.termination_error is not None
+        # The failed launch must not snapshot an unconfirmed process tree.
+        assert state.session.artifacts is None
+        if disconnect_failure:
+            sandbox.disconnect.side_effect = [RuntimeError("provider unavailable"), None]
+            failed_close = client.post(
+                "/v1/agent_sessions/close",
+                json={"agent_session_id": request.agent_session_id, "episode_id": request.episode_id.model_dump()},
+            )
+            assert failed_close.status_code == 500
+            assert agent._session_records[request.agent_session_id].state is state
+        receipt = close(client, request)
+        assert receipt["cleanup_confirmed"] is False
+        assert close(client, request) == receipt
+        assert state.session.closed and not state.session.cleanup_confirmed
+        assert agent._session_records[request.agent_session_id].state is None
+        assert activate(client, activation_count + 1).status_code == 409
+        assert [
+            r["activation_id"] for r in roots(receipt["agent_observations"]) if r["status"] == "completed"
+        ] == list(range(1, activation_count))
+    assert sandbox.disconnect.await_count == (2 if disconnect_failure else 1)
+    sandbox.stop.assert_not_awaited()
+
+
 def test_plain_http_delta_replay_and_cumulative_close(setup, tmp_path):
     agent, sandbox = setup
     payloads = install_artifact_runner(sandbox, tmp_path)
     with TestClient(agent.setup_webserver()) as client:
         request = start(client)
+        state = agent._require_agent_session(request.agent_session_id)
+        assert state.is_continuation
+        assert state.conversation_directory is None and state.activation_id is None
         results = []
         for index, prompt in enumerate(("First version", "Correction: handle empty inputs"), 1):
             response = activate(client, index, prompt)
@@ -438,6 +479,7 @@ def test_ordinary_seed_does_not_add_continuation_capabilities(setup):
     with TestClient(agent.setup_webserver()) as client:
         response = client.post("/v1/agent_sessions", json=request.model_dump(mode="json"))
         assert response.status_code == 200, response.text
+        assert not agent._require_agent_session(request.agent_session_id).is_continuation
         assert response.json() == {"agent_session_id": request.agent_session_id}
         receipt = close(client, request)
         assert "cleanup_confirmed" not in receipt and "trajectory" not in receipt

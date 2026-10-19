@@ -548,7 +548,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
     ) -> AgentCloseSessionResponse:
         """Retain successful close responses for a bounded retry window, including observations.
 
-        Failed cleanup keeps state for retry. Closing an unknown ID prevents a delayed seed
+        Failed release keeps state for retry. Closing an unknown ID prevents a delayed seed
         within the same window. No timer cancels active sessions: the episode owner and sandbox
         provider retain responsibility for normal and crash cleanup.
         """
@@ -710,10 +710,9 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
     async def _close_agent_session_record(self, record: _AgentSessionRecord) -> AgentCloseSessionResponse:
         await record.activations.close(timeout=self._continuation_close_timeout())
         assert record.state is not None
-        result = await self._close_agent_session_state(record.state)
-        if result.cleanup_confirmed is not True:
-            raise RuntimeError("Native continuation cleanup was not confirmed")
-        return result
+        # The adapter may release a borrowed connection after a final negative
+        # termination receipt. Preserve that receipt; release errors still raise.
+        return await self._close_agent_session_state(record.state)
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> AgentSessionState:
         """Validate grants and initialize harness state.

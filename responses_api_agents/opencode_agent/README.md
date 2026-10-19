@@ -194,7 +194,9 @@ Output and usage include only new work. Each invocation records its `activation_
 and `native_session_id`; every trajectory turn carries its activation. The native
 header plugin namespaces `X-Session-Id` by the staged activation identity, including
 child invocations, so captured model calls join to the activation that made them.
-Close fences new work, confirms cleanup and returns cumulative observations and
-trajectory. The task sandbox remains available to its owner for verification.
+Close fences new work and returns cumulative observations, trajectory and cleanup
+confirmation. A final negative termination receipt fails the activation and skips
+verification; close releases the borrowed connection with `cleanup_confirmed: false`.
+The task sandbox remains available to its owner for verification or teardown.
 
 Ordinary single-turn sessions keep their existing protocol and evidence shape.
