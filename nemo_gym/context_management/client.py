@@ -148,7 +148,7 @@ class ContextManagedResponsesClient:
             body = self._call(prepared)
             response = await self.server_client.post(
                 server_name=self.model_server.name,
-                url_path=f"/context/{self.logical_rollout_id}/measure",
+                url_path=f"{rollout_path_prefix(self.logical_rollout_id, token_capture=True)}/context/measure",
                 json=body,
                 cookies=self.cookies,
                 _retry=False,

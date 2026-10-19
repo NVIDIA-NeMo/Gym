@@ -163,6 +163,7 @@ async def test_measurement_and_generation_use_same_history_without_parent_hint()
     for measurement, generation in zip(calls[::2], calls[1::2], strict=True):
         assert measurement["url_path"].endswith("/measure")
         assert generation["url_path"].endswith("/v1/responses")
+        assert measurement["url_path"] == generation["url_path"].removesuffix("/v1/responses") + "/context/measure"
         assert measurement["json"] == generation["json"]
         assert "x-nemo-gym-capture-parent" not in measurement.get("headers", {})
         assert "x-nemo-gym-capture-parent" not in generation.get("headers", {})

@@ -6,7 +6,7 @@ Use the regular `vllm_model` server with framework-owned external capture. NeMo-
 
 The result contains one logical attempt ID, ordered selected response IDs and an outcome. NeMo-RL owns serving-prefix decisions, captured model inputs, training-row planning, logical advantages, and processed media. This agent keeps policy decisions, tool execution and verification. Its reasoning-only/empty-output termination follows the ordinary simple agent.
 
-Configure `context_history.enabled`, the recency policy, optional turn-chunk schedule and guards. Token-budget guards call `/context/{attempt}/measure`; that endpoint uses the worker's generation preprocessing without staging a call. The initial path rejects streaming, concurrent calls, provider session state and resampling. A lost response acknowledgement terminates the attempt instead of automatically replaying a model or tool call.
+Configure `context_history.enabled`, the recency policy, optional turn-chunk schedule and guards. Token-budget guards call `/ng-rollout/{attempt}/training-token-capture/context/measure`; that endpoint uses the worker's generation preprocessing without staging a call. The initial path rejects streaming, concurrent calls, provider session state and resampling. A lost response acknowledgement terminates the attempt instead of automatically replaying a model or tool call.
 
 CPU tests cover policy, original-image retention, adapter parity and HTTP custody. Real model and verifier smoke rollouts remain required for release.
 
