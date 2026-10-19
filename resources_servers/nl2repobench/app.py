@@ -178,6 +178,11 @@ class NL2RepoBenchResourcesServerConfig(BaseResourcesServerConfig):
     enforce_agent_no_network: bool = True
     sandbox_model_server: ModelServerRef | None = None
     agent_network_mode: AgentNetworkMode = "official"
+    # None (default): verify sandbox uses the real pinned per-task image (task_image(task)),
+    # exactly like upstream. Set to a generic image (e.g. _AGENT_SANDBOX_IMAGE) for a task set
+    # with no pinned, deps-preinstalled grading image of its own - test_commands must then
+    # install deps itself (e.g. `pip install -e .`) since the image won't have them pre-baked.
+    verify_image_override: str | None = None
     sandbox_config: dict[str, Any]
 
     logs_dir: Path = Path("resources_servers/nl2repobench/logs")
@@ -377,8 +382,14 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
         # (deps pre-installed), instead of the generic image - the held-out test files it also
         # ships get stripped out below, before the agent gets a turn.
         agent_image = task_image(task) if mode == "no_internet_preinstalled" else _AGENT_SANDBOX_IMAGE
+        # verify_image_override: for task sets with no pinned, deps-preinstalled grading image
+        # (e.g. a custom held-out split derived outside upstream NL2RepoBench's 104), point the
+        # verifier sandbox at a generic image instead and let its test_commands install deps
+        # fresh (pip install -e . etc.) at verify time. None (default) reproduces upstream
+        # behavior exactly - the real pinned per-task image, no network needed.
+        verify_image = self.config.verify_image_override or task_image(task)
         spec = SandboxSpec(
-            image=agent_image if phase == "agent" else task_image(task),
+            image=agent_image if phase == "agent" else verify_image,
             ttl_s=self.config.sandbox_config.get("ttl_s"),
             ready_timeout_s=self.config.sandbox_config.get("ready_timeout_s"),
             workdir="/workspace",
@@ -619,7 +630,15 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
         return tar_bytes, None
 
     async def _run_verifier(self, sandbox: AsyncSandbox, task: Task, workspace_tar: bytes) -> VerifierResult:
-        mkdir_result = await sandbox.exec("mkdir -p /workspace", timeout_s=60)
+        # cwd="/" is required, not just defensive - same reasoning as the agent-phase mkdir
+        # (_create_sandbox): exec()'s default cwd is SandboxSpec.workdir ("/workspace"), and at
+        # least one provider (OpenSandbox) validates the cwd exists before running the command at
+        # all, so without this the call fails with "working directory does not exist: /workspace"
+        # before mkdir ever runs. Latent for upstream (whose pinned per-task images always have
+        # /workspace pre-created by their own Dockerfile WORKDIR, so this path never executes
+        # there) - surfaced by verify_image_override pointing at a generic image instead
+        # (confirmed via a real failed run, 100% of verifies failing on this exact error).
+        mkdir_result = await sandbox.exec("mkdir -p /workspace", cwd="/", timeout_s=60)
         if mkdir_result.return_code != 0:
             return VerifierResult(
                 evaluation_completed=False,
