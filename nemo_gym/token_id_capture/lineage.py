@@ -57,6 +57,8 @@ from nemo_gym.token_id_capture.fingerprint import (
     FINGERPRINT_VERSION,
     assistant_fingerprint,
     conversation_digest,
+    tool_call_turn_fingerprint,
+    trailing_assistant_turn,
 )
 from nemo_gym.token_id_capture.fingerprint import (
     canonicalize_tool_arguments as canonicalize_tool_arguments,
@@ -115,6 +117,7 @@ _CUSTODY_FIELDS = (
     "output_fingerprint",
     "continuation_fingerprint",
     "fingerprint_version",
+    "finish_reason",
 )
 
 
@@ -142,6 +145,7 @@ def _custody_columns(record: CallRecord, staging_chain: tuple[str, ...] | list[s
         "output_fingerprint": record.output_fingerprint or None,
         "continuation_fingerprint": record.continuation_fingerprint or None,
         "fingerprint_version": record.fingerprint_version,
+        "finish_reason": record.finish_reason,
     }
 
 
@@ -216,6 +220,8 @@ def _manifest_from_rows(rollout_id: str, rows: list[dict]) -> dict:
                     fingerprint_version=int(row.get("fingerprint_version") or 0),
                     # Set on rows a checkpoint restore carried over from an earlier attempt.
                     capture_key=row.get("capture_key"),
+                    # A row written before the column existed reads as an unstated reason.
+                    finish_reason=row.get("finish_reason") or None,
                 )
             )
     manifest = RolloutManifest(rollout_id=rollout_id, records=records, failures=failures)
@@ -259,6 +265,9 @@ class RolloutLineage:
 
     by_fingerprint: dict[str, list[str]] = field(default_factory=dict)
     by_call_id: dict[str, LineageNode] = field(default_factory=dict)
+    # Full model-turn identity, ignoring only tool arguments. A known ID alone
+    # must not attach additional, missing, or altered model output to a parent.
+    by_tool_call_turn: dict[str, list[str]] = field(default_factory=dict)
     # Cache the cumulative token count for memory bounds.
     total_tokens: int = 0
 
@@ -278,22 +287,48 @@ class RolloutLineage:
             for call_id in call_ids
             if (node := self.by_call_id.get(call_id)) is not None and self._continues(node, messages)
         ]
+        reason = ""
+        if not candidates:
+            # Only arguments may differ, and every model item after the recorded
+            # context must belong to the captured output turn.
+            candidates = self._candidates_by_tool_call_turn(messages)
+            reason = "tool_call_turn"
         if len(candidates) > 1:
-            # Calls with identical cumulative tokens are interchangeable.
-            # Keep different token sequences unresolved.
+            # Calls with identical cumulative tokens are interchangeable on either path.
             digests = {(node.digest, node.cum_len) for node in candidates}
             if len(digests) == 1 and candidates[0].digest:
                 candidates = [min(candidates, key=lambda node: node.call_id)]
         if len(candidates) != 1:
             return ParentResolutionStatus.UNRESOLVED, None, "no_match" if not candidates else "ambiguous"
-        return ParentResolutionStatus.RESOLVED, candidates[0], ""
+        return ParentResolutionStatus.RESOLVED, candidates[0], reason
+
+    def _candidates_by_tool_call_turn(self, messages: list[dict]) -> list["LineageNode"]:
+        """Find complete output turns with unchanged context and only rewritten arguments."""
+        key = tool_call_turn_fingerprint(trailing_assistant_turn(messages))
+        if not key:
+            return []
+        return [
+            node
+            for call_id in self.by_tool_call_turn.get(key) or []
+            if (node := self.by_call_id.get(call_id)) is not None
+            and self._continues(node, messages)
+            # The context check covers the prefix, while the lookup covers only
+            # the trailing turn. Account for every model item between them too.
+            and tool_call_turn_fingerprint(messages[node.context_len :]) == key
+        ]
+
+    def _index_tool_call_turn(self, call_id: str, response_items: list[dict]) -> None:
+        """Index a newly admitted call's complete output, omitting only tool arguments."""
+        key = tool_call_turn_fingerprint(response_items)
+        if key:
+            self.by_tool_call_turn.setdefault(key, []).append(call_id)
 
     def resolve(self, messages: list[dict]) -> LineageResolution:
         """Return the immutable parent decision for this request.
 
         A request without model-authored history is a root.
         A request with unverified history is unresolved.
-        Never guess among calls with identical output.
+        Calls with identical cumulative tokens resolve to the smallest call ID.
         """
         status, node, reason = self.resolve_node(messages)
         if status != ParentResolutionStatus.RESOLVED:
@@ -302,6 +337,7 @@ class RolloutLineage:
             raise ValueError("metadata-only lineage node requires caller-side materialization")
         return LineageResolution(
             ParentResolutionStatus.RESOLVED,
+            reason=reason,
             match=LineageMatch(
                 model_call_id=node.call_id,
                 cumulative_token_ids=tuple(node.cum_tokens),
@@ -359,6 +395,7 @@ class RolloutLineage:
         self.total_tokens += node.cum_len
         self.by_call_id[entry.model_call_id] = node
         self.by_fingerprint.setdefault(entry.continuation_fingerprint, []).append(entry.model_call_id)
+        self._index_tool_call_turn(entry.model_call_id, list(entry.output_items or []))
 
     def record(
         self,
@@ -376,7 +413,9 @@ class RolloutLineage:
         """Index a completed call by its continuation fingerprint.
 
         ``context_len`` counts the request items before the model response.
-        The default assumes one synthesized response item.
+        The default assumes one synthesized response item. Multi-item responses
+        (for example, text plus tool calls) must pass the request item count explicitly
+        so the fallback indexes the complete output turn.
         ``cum_len`` must be passed explicitly for token-free custody rows,
         where ``cum_tokens`` is empty; a child's ``prev_len`` reads it.
         """
@@ -403,6 +442,7 @@ class RolloutLineage:
         fingerprint = assistant_fingerprint(messages)
         if fingerprint:
             self.by_fingerprint.setdefault(fingerprint, []).append(call_id)
+        self._index_tool_call_turn(call_id, list((messages or [])[node.context_len :]))
 
 
 class LineageIndex:
@@ -505,17 +545,18 @@ class InMemoryLineageStore:
             if existing != row:
                 raise ValueError(f"conflicting lineage record for model call {record.model_call_id}")
             return
-        self.index.for_rollout(commit.rollout_id).record(
-            record.model_call_id,
-            list(commit.request_items) + list(commit.response_items),
-            [],
-            record.cumulative_hash,
-            context_len=len(commit.request_items),
-            staging_key=record.staging_key,
-            parent_staging_chain=list(commit.staging_chain),
-            cum_len=record.cum_len,
-            chain_hash=record.chain_hash,
-        )
+        if record.fingerprint_version == FINGERPRINT_VERSION:
+            self.index.for_rollout(commit.rollout_id).record(
+                record.model_call_id,
+                list(commit.request_items) + list(commit.response_items),
+                [],
+                record.cumulative_hash,
+                context_len=len(commit.request_items),
+                staging_key=record.staging_key,
+                parent_staging_chain=list(commit.staging_chain),
+                cum_len=record.cum_len,
+                chain_hash=record.chain_hash,
+            )
         rows.append(row)
 
     async def record_failure(self, rollout_id: str, model_call_id: str, reason: str) -> None:
@@ -775,6 +816,7 @@ class IncrementalLineageStore:
             )
             return LineageResolution(
                 ParentResolutionStatus.RESOLVED,
+                reason=reason,
                 match=LineageMatch(
                     model_call_id=node.call_id,
                     cumulative_token_ids=tuple(tokens),
@@ -875,7 +917,7 @@ class FileLineageStore(IncrementalLineageStore):
         return entries
 
     # --- CaptureLedger surface -------------------------------------------
-    # External staging commits token-bearing ledger rows through ``record``
+    # External staging commits token-free custody rows through ``record``
     # instead of TokenEntry JSONL, so resolution falls back to those rows
     # when the incremental entry index has no match.
 
@@ -968,41 +1010,52 @@ class FileLineageStore(IncrementalLineageStore):
 
     def _resolve(self, rollout_id: str, request_items: list[dict]) -> LineageResolution:
         resolution = super()._resolve(rollout_id, request_items)
-        if resolution.status != ParentResolutionStatus.UNRESOLVED:
+        if resolution.status != ParentResolutionStatus.UNRESOLVED or resolution.reason != "no_match":
             return resolution
-        match = self._resolve_row(rollout_id, request_items)
-        if match is not None:
-            return LineageResolution(ParentResolutionStatus.RESOLVED, match=match)
-        return resolution
+        return self._resolve_row(rollout_id, request_items)
 
-    def _resolve_row(self, rollout_id: str, request_items: list[dict]) -> LineageMatch | None:
-        fingerprint = assistant_fingerprint(request_items)
-        if not fingerprint:
-            return None
+    def _resolve_row(self, rollout_id: str, request_items: list[dict]) -> LineageResolution:
+        """Apply the shared matcher to versioned, token-free custody metadata.
+
+        Older ledgers lack ``tool_call_turn_fingerprint`` and remain strict-only:
+        custody rows have no output items from which to reconstruct a safe key.
+        ``_read`` refreshes appended rows, including their new optional column.
+        """
         with self._locked(rollout_id):
-            # Failure rows and fingerprints from incompatible algorithms cannot resolve as parents.
-            records = [
-                record
+            records = {
+                str(record["model_call_id"]): record
                 for record in self._read(rollout_id)
-                if record.get("fingerprint") == fingerprint
-                and record.get("fingerprint_version") == FINGERPRINT_VERSION
-            ]
-        if len(records) != 1:
-            return None
-        record = records[0]
-        context_len = int(record["context_len"])
-        if len(request_items) < context_len:
-            return None
-        if conversation_digest(request_items[:context_len]) != record["context_digest"]:
-            return None
-        return LineageMatch(
-            model_call_id=str(record["model_call_id"]),
-            # Token-free custody rows omit the column; legacy rows keep it.
-            cumulative_token_ids=tuple(int(token) for token in record.get("cumulative_token_ids") or ()),
-            digest=str(record["digest"]),
-            staging_chain=tuple(record.get("staging_chain") or []),
-            prev_len=int(record.get("cum_len") or 0),
-            chain_hash=str(record.get("chain_hash") or ""),
+                if record.get("fingerprint") and record.get("fingerprint_version") == FINGERPRINT_VERSION
+            }
+        lineage = RolloutLineage()
+        for call_id, record in records.items():
+            lineage.by_call_id[call_id] = LineageNode(
+                call_id=call_id,
+                cum_tokens=None,
+                cum_len=int(record.get("cum_len") or len(record.get("cumulative_token_ids") or ())),
+                digest=str(record["digest"]),
+                context_len=int(record["context_len"]),
+                context_digest=str(record["context_digest"]),
+            )
+            lineage.by_fingerprint.setdefault(record["fingerprint"], []).append(call_id)
+            if key := record.get("tool_call_turn_fingerprint"):
+                lineage.by_tool_call_turn.setdefault(key, []).append(call_id)
+        status, node, reason = lineage.resolve_node(request_items)
+        if status != ParentResolutionStatus.RESOLVED:
+            return LineageResolution(status, reason=reason)
+        record = records[node.call_id]
+        return LineageResolution(
+            status,
+            reason=reason,
+            match=LineageMatch(
+                model_call_id=node.call_id,
+                # Token-free custody rows omit the column; legacy rows keep it.
+                cumulative_token_ids=tuple(int(token) for token in record.get("cumulative_token_ids") or ()),
+                digest=node.digest,
+                staging_chain=tuple(record.get("staging_chain") or []),
+                prev_len=node.cum_len,
+                chain_hash=str(record.get("chain_hash") or ""),
+            ),
         )
 
     async def record(self, commit: CaptureLedgerCommit) -> None:
@@ -1017,6 +1070,7 @@ class FileLineageStore(IncrementalLineageStore):
         record = {
             "model_call_id": model_call_id,
             "fingerprint": assistant_fingerprint(request_items + list(commit.response_items)),
+            "tool_call_turn_fingerprint": tool_call_turn_fingerprint(list(commit.response_items)),
             "context_len": len(request_items),
             "context_digest": conversation_digest(request_items),
             "digest": commit.record.cumulative_hash,
@@ -1029,7 +1083,15 @@ class FileLineageStore(IncrementalLineageStore):
                 return
             matches = [existing for existing in records if existing["model_call_id"] == model_call_id]
             if matches:
-                if matches[0] != record:
+                # A replay of a pre-column row remains a no-op. Without the original
+                # output in that row, a reader cannot safely backfill its fallback key.
+                existing = matches[0]
+                comparable = (
+                    record
+                    if "tool_call_turn_fingerprint" in existing
+                    else {key: value for key, value in record.items() if key != "tool_call_turn_fingerprint"}
+                )
+                if existing != comparable:
                     raise ValueError(f"conflicting lineage record for model call {model_call_id}")
                 return
             self._append(commit.rollout_id, record, records)

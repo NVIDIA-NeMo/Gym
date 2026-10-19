@@ -112,7 +112,7 @@ def test_a_payload_the_check_accepts_is_restored_unchanged_or_fails_the_commit_b
         assert name.replace("_", "-") in str(error)
         return
 
-    [restored] = read_participant_state(tmp_path, kind="fake", instance="f")[1]
+    _, [restored], _ = read_participant_state(tmp_path, kind="fake", instance="f")
     assert _same(restored["state"], _as_json(value)), f"{name} was accepted but restored as {restored['state']!r}"
 
 

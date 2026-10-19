@@ -24,12 +24,14 @@ import pytest
 from pytest import approx, fixture, raises
 
 from benchmarks.gdp_pdf.prepare import (
+    _PROMPT_RESTORES,
     EXAMPLE_PDF_SIZE_WARN_BYTES,
     _prepare_rows,
     _resolve_hf_token,
     build_gym_row,
     extract_criteria,
     fetch_example_media,
+    restore_original_prompt,
     write_example,
 )
 from nemo_gym.config_types import ModelServerRef
@@ -736,6 +738,30 @@ class TestPrepare:
 
         assert [r["verifier_metadata"]["task_id"] for r in rows] == ["good"]
         assert downloaded == ["pdfs/a.pdf"]
+
+    def test_mirror_placeholder_prompt_is_restored(self, monkeypatch, tmp_path: Path) -> None:
+        task_id, (placeholder, original) = next(iter(_PROMPT_RESTORES.items()))
+        downloaded: list = []
+        self._patch_hf(
+            monkeypatch,
+            [{**self._source_row(task_id, "a.pdf"), "prompt": placeholder}, self._source_row("t2", "b.pdf")],
+            downloaded,
+        )
+
+        rows = _prepare_rows(
+            output_path=tmp_path / "out.jsonl", media_dir=tmp_path / "media", documents_dir=tmp_path / "documents"
+        )
+
+        assert rows[0]["verifier_metadata"]["prompt"] == original
+        assert rows[0]["responses_create_params"]["input"][0]["content"][0]["text"] == original
+        assert rows[1]["verifier_metadata"]["prompt"] == PROMPT
+
+    def test_restore_leaves_non_placeholder_prompts_alone(self) -> None:
+        task_id, (_, original) = next(iter(_PROMPT_RESTORES.items()))
+        corrected = {"task_id": task_id, "prompt": "Already fixed upstream."}
+        assert restore_original_prompt(corrected) is corrected
+        unrelated = {"task_id": "other", "prompt": original}
+        assert restore_original_prompt(unrelated) is unrelated
 
     def test_explicit_token_takes_precedence(self, monkeypatch, tmp_path: Path) -> None:
         import benchmarks.gdp_pdf.prepare as prepare_module
