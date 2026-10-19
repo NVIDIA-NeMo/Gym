@@ -24,8 +24,10 @@ is that expanded prompt set. This module keeps one row per prompt.
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import json
+from collections import Counter
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -159,21 +161,29 @@ def load_qa_tree(root: Path) -> list[dict[str, Any]]:
             elif image_path:
                 record = {**record, "image_path": str(root / image_path)}
             rows.extend(iter_rows([record], split=split))
+    if not rows:
+        raise FileNotFoundError(f"No questions under {root}; expected Single/qa.json or Temporal/qa.json")
     return rows
 
 
+HF_DATASET = "aialliance/GEOBench-VLM"
+HF_REVISION = "b3485fe4971213ee13f91960638ddc5c4a098e70"
+SINGLE_PARQUET_SHA256 = "81bb88e17456a7c32be157a49e07be38f51de24e80c14c0ccf8f3d78f0d15a98"
+
 # The 1,557-question perception subset: eight single-image classification and
-# counting tasks. "Sptatial" is the upstream task name.
-PERCEPTION_TASKS = (
-    "Sptatial Relation Classification",
-    "Aircraft Type Classification",
-    "Ship Type Classification",
-    "General Aircraft Counting",
-    "Specific Aircraft Type Counting",
-    "General Vehicle Counting",
-    "Specific Vehicle Type Counting",
-    "Building Counting",
-)
+# counting tasks, with their question counts at HF_REVISION. "Sptatial" is the
+# upstream task name.
+PERCEPTION_COUNTS = {
+    "Sptatial Relation Classification": 466,
+    "Aircraft Type Classification": 100,
+    "Ship Type Classification": 207,
+    "General Aircraft Counting": 100,
+    "Specific Aircraft Type Counting": 140,
+    "General Vehicle Counting": 150,
+    "Specific Vehicle Type Counting": 224,
+    "Building Counting": 170,
+}
+PERCEPTION_TASKS = tuple(PERCEPTION_COUNTS)
 PERCEPTION_INSTRUCTION = "Answer with only the option letter."
 
 
@@ -187,12 +197,16 @@ def _jpeg_data_url(raw: bytes) -> str:
 
 def perception_row(record: dict[str, Any], *, blind: bool = False) -> dict[str, Any]:
     """One row per question (first prompt), text before the image; ``blind`` drops the image."""
+    question_id = record.get("question_id")
+    if not record.get("prompts") or not record.get("options") or not record.get("ground_truth_option"):
+        raise ValueError(f"Question {question_id} is missing its prompt, options, or gold option")
     text = f"{record['prompts'][0]}\n{record['options']}\n{PERCEPTION_INSTRUCTION}"
     content: list[dict[str, str]] = [{"type": "input_text", "text": text}]
     if not blind:
-        content.append(
-            {"type": "input_image", "image_url": _jpeg_data_url(record["image"]["bytes"]), "detail": "high"}
-        )
+        image = (record.get("image") or {}).get("bytes")
+        if not image:
+            raise ValueError(f"Question {question_id} has no image bytes")
+        content.append({"type": "input_image", "image_url": _jpeg_data_url(image), "detail": "high"})
     return {
         "activity": "geobench_vlm",
         "split": "single",
@@ -209,12 +223,28 @@ def perception_row(record: dict[str, Any], *, blind: bool = False) -> dict[str, 
     }
 
 
-def materialize_perception(parquet: Path, data_dir: Path) -> list[Path]:
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1 << 24), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def materialize_perception(parquet: Path, data_dir: Path, *, check_sha256: bool = True) -> list[Path]:
     """Write ``perception_1557.jsonl`` and its no-image ``perception_1557_blind.jsonl``
-    from a local copy of the Hugging Face ``Single.parquet``."""
+    from a local copy of the Hugging Face ``Single.parquet`` at ``HF_REVISION``."""
     import pyarrow.parquet as pq
 
-    records = [r for r in pq.read_table(parquet).to_pylist() if r["task"] in PERCEPTION_TASKS]
+    if check_sha256 and (actual := _sha256(parquet)) != SINGLE_PARQUET_SHA256:
+        raise ValueError(
+            f"{parquet} has SHA-256 {actual}, expected {SINGLE_PARQUET_SHA256} "
+            f"({HF_DATASET} at revision {HF_REVISION}). Pass check_sha256=False to build anyway."
+        )
+    records = [r for r in pq.read_table(parquet).to_pylist() if r["task"] in PERCEPTION_COUNTS]
+    counts = Counter(r["task"] for r in records)
+    if counts != Counter(PERCEPTION_COUNTS):
+        raise ValueError(f"Perception task counts {dict(counts)} differ from {PERCEPTION_COUNTS}")
     data_dir.mkdir(parents=True, exist_ok=True)
     paths = []
     for name, blind in (("perception_1557.jsonl", False), ("perception_1557_blind.jsonl", True)):

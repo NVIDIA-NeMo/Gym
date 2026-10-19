@@ -17,6 +17,8 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock
 
+import pytest
+
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 from resources_servers.geobench_vlm.app import (
@@ -24,13 +26,15 @@ from resources_servers.geobench_vlm.app import (
     GeoBenchVLMResourcesServerConfig,
     GeoBenchVLMVerifyRequest,
 )
-from resources_servers.geobench_vlm.scoring import score_answer
+from resources_servers.geobench_vlm.scoring import predicted_letter, score_answer
 from resources_servers.geobench_vlm.task_data import (
+    PERCEPTION_COUNTS,
     PERCEPTION_TASKS,
     dataset_row,
     example_rows,
     load_qa_tree,
     materialize,
+    materialize_perception,
     perception_row,
 )
 
@@ -57,6 +61,34 @@ def test_first_character_rule_rejects_a_leading_word() -> None:
     scored = score_answer("Answer: D", "D", "Drought")
     assert scored["geobench_vlm_correct"] is True
     assert scored["geobench_vlm_first_letter_correct"] is False
+
+
+@pytest.mark.parametrize(
+    ("text", "letter"),
+    [
+        ("\nB", "B"),
+        ("**B**", "B"),
+        ("(C)", "C"),
+        ("[D]", "D"),
+        ("C)", "C"),
+        ("b", "B"),
+        ("E. Nimitz-class aircraft carrier", "E"),
+        ("The answer is **D**.", "D"),
+        ("The answer is C, not option A.", "C"),
+        ("The answer is not A. Final answer: C", "C"),
+        ("I would pick option B", "B"),
+        ("Considering the shapes, E.", "E"),
+        ("<think>option A looks likely</think>C", "C"),
+        ("reasoning without an opening tag </think>\nE", "E"),
+        ("The answer is a harbor.", None),
+        ("Based on the image, it is a harbor.", None),
+        ("A harbor.", None),
+        ("Answer: Harbor", None),
+        ("", None),
+    ],
+)
+def test_predicted_letter_reads_formatting_but_not_words(text: str, letter: str | None) -> None:
+    assert predicted_letter(text) == letter
 
 
 def test_example_rows_cover_single_and_temporal_prompts() -> None:
@@ -132,6 +164,39 @@ def test_perception_row_puts_text_first_and_blind_drops_the_image() -> None:
     blind = perception_row(record, blind=True)
     assert [block["type"] for block in blind["responses_create_params"]["input"][0]["content"]] == ["input_text"]
     assert len(PERCEPTION_TASKS) == 8
+
+
+def test_perception_row_rejects_a_question_without_an_image() -> None:
+    record = {
+        "question_id": 8,
+        "task": PERCEPTION_TASKS[0],
+        "prompts": ["q"],
+        "options": "A. x",
+        "ground_truth": "x",
+        "ground_truth_option": "A",
+    }
+    with pytest.raises(ValueError, match="no image bytes"):
+        perception_row(record)
+    assert perception_row(record, blind=True)["question_id"] == "8"
+
+
+def test_perception_builder_checks_the_pinned_file_and_task_counts(tmp_path) -> None:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    parquet = tmp_path / "Single.parquet"
+    pq.write_table(pa.table({"task": [PERCEPTION_TASKS[0]], "question_id": [1]}), parquet)
+    with pytest.raises(ValueError, match="expected 81bb88e1"):
+        materialize_perception(parquet, tmp_path / "data")
+    with pytest.raises(ValueError, match="task counts"):
+        materialize_perception(parquet, tmp_path / "data", check_sha256=False)
+    assert not (tmp_path / "data").exists()
+    assert sum(PERCEPTION_COUNTS.values()) == 1557
+
+
+def test_qa_tree_without_question_files_fails(tmp_path) -> None:
+    with pytest.raises(FileNotFoundError, match="Single/qa.json"):
+        load_qa_tree(tmp_path)
 
 
 async def test_verify_scores_an_example_row() -> None:

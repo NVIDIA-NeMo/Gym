@@ -56,9 +56,13 @@ Point the dataset entry in `configs/geobench_vlm.yaml` at that file.
 and counting tasks (`PERCEPTION_TASKS`) in the Hugging Face `Single.parquet`:
 one row per question, text before the image, temperature 0, and
 8,192 output tokens. It also writes a blind copy with no image, which
-measures how much the options alone give away:
+measures how much the options alone give away. The builder checks the
+parquet's SHA-256 and the per-task counts (`PERCEPTION_COUNTS`) against
+revision `HF_REVISION`, and stops before writing if either differs:
 
 ```bash
+huggingface-cli download aialliance/GEOBench-VLM Single.parquet --repo-type dataset \
+  --revision b3485fe4971213ee13f91960638ddc5c4a098e70 --local-dir /path/to
 .venv/bin/python -c "
 from pathlib import Path
 from resources_servers.geobench_vlm.task_data import materialize_perception

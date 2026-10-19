@@ -14,7 +14,7 @@ This file records provenance and the data-use boundary for this server.
 
 ## Dataset
 
-- Hugging Face: `aialliance/GEOBench-VLM`
+- Hugging Face: `aialliance/GEOBench-VLM`, revision `b3485fe4971213ee13f91960638ddc5c4a098e70`; `Single.parquet` SHA-256 `81bb88e17456a7c32be157a49e07be38f51de24e80c14c0ccf8f3d78f0d15a98`
 - Single-image split in this release: 3,211 questions in `Single.parquet`, about 1.4 GB including images
 - Additional archives on the dataset repo: `Single.zip`, `Temporal.zip`, `Captioning.zip`, `Ref-Det.zip`, `Ref-Seg.zip`
 - The paper reports more than 10,000 manually verified instructions. The released single-image records expand to that count through multiple prompts per question.
