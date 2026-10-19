@@ -189,7 +189,7 @@ The OpenTelemetry collector that runs beside every benchmark job. It is **enable
 
 ## Cross-field validation
 
-Validation runs when the config is composed, before anything is rendered or contacted:
+Schema validation runs when the config is composed, before anything is rendered or contacted. `--resolve-only` performs these checks and stops. The pool-agreement checks listed at the end are made later, while the script is rendered, so use `--dry-run` to verify them:
 
 - **One compute resource.** More than one is rejected. A service's `placement` must name it.
 - **Node pool references.** A service's `node_pool`, and every pool in a ray service's `node_pools`, must exist in the compute's `node_pools`.
@@ -203,5 +203,6 @@ Validation runs when the config is composed, before anything is rendered or cont
 - **Multi-node data parallelism** requires `number_of_instances` to be evenly divisible by the number of nodes, unless the Ray Serve gateway is in use.
 - **Policy wiring** conflicts, as described above.
 - **Benchmark `command`** combined with `run` or `resumable` is rejected.
+- **Pool agreement** (checked at render time, not by `--resolve-only`). Pools used together by one job must agree on `partition`, tasks, GPUs, and extra directives. A mismatch fails `--dry-run` and the real submit.
 
 Mount source existence, SSH reachability, and OTel destination checks happen later, at submit time.

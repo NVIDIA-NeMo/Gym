@@ -92,6 +92,12 @@ gym eval submit -c submit.yaml --dry-run
 
 This prints the `sbatch` script for each benchmark and stops. Read it once before your first submission: it shows the `#SBATCH` directives, the `srun` step for each service, the health checks, and the driver command. See [Slurm Executor](/orchestration/slurm-executor) for how to read it.
 
+<Warning>
+
+`--dry-run` prints the generated script with `host:` values resolved, including `HF_TOKEN`. Unlike `--resolve-only`, its output is not redacted. Do not share it or capture it in public logs.
+
+</Warning>
+
 ## 4. Submit
 
 ```bash

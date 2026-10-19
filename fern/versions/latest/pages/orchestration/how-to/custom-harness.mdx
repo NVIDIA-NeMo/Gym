@@ -11,12 +11,14 @@ driver:
   policy_model: policy
   gym_install:
     ref: main
+  mounts:
+    - /lustre/my-project/harness:/harness:ro
   benchmarks:
     my-harness:
       prepare:
         split: benchmark
       command: |
-        python run_my_harness.py \
+        python /harness/run_my_harness.py \
           --base-url "$NEMO_GYM_POLICY_BASE_URL" \
           --model "$NEMO_GYM_POLICY_MODEL_NAME" \
           --api-key "$NEMO_GYM_POLICY_API_KEY" \
@@ -31,6 +33,8 @@ driver:
 | `NEMO_GYM_POLICY_BASE_URL` | The policy's OpenAI-compatible base URL. Set when `driver.policy_model` is set. |
 | `NEMO_GYM_POLICY_MODEL_NAME` | The served model name. Set when `driver.policy_model` is set. |
 | `NEMO_GYM_POLICY_API_KEY` | The API key to present. Set when `driver.policy_model` is set. |
+
+The driver clones Gym into a fresh temporary checkout when `gym_install` is set, so a script that sits next to your submit config is not copied there. Put the harness on a shared cluster path, mount it with `driver.mounts`, and call it by absolute path, as `/harness/run_my_harness.py` above.
 
 The variables from `driver.env` are present too, and `driver.container` and `driver.mounts` apply as usual.
 

@@ -66,15 +66,19 @@ What this does:
 A `ray` service starts a Ray cluster for benchmarks that manage their own device placement. The head starts on the driver's node, and every other node of the spanned pools joins it as a worker:
 
 ```yaml
-node_pools:
-  main:
-    partition: batch
-    nodes: 1
-    gpus_per_node: 8
-  aux:
-    partition: batch
-    nodes: 2
-    gpus_per_node: 8
+compute:
+  cluster:
+    type: slurm
+    account: my-account
+    node_pools:
+      main:
+        partition: batch
+        nodes: 1
+        gpus_per_node: 8
+      aux:
+        partition: batch
+        nodes: 2
+        gpus_per_node: 8
 
 services:
   cluster:

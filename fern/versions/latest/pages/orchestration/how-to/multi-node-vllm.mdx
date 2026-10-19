@@ -49,11 +49,15 @@ The job runs one `vllm serve` per node. The first node serves the API and coordi
 When a single instance needs more GPUs than a node has, leave `number_of_instances` at 1 and set TP x PP to the total:
 
 ```yaml
-node_pools:
-  main:
-    partition: batch
-    nodes: 2
-    gpus_per_node: 8
+compute:
+  cluster:
+    type: slurm
+    account: my-account
+    node_pools:
+      main:
+        partition: batch
+        nodes: 2
+        gpus_per_node: 8
 
 services:
   policy:
@@ -79,11 +83,15 @@ For many instances where each one itself spans nodes, vLLM's own data parallelis
 - the allocation has more than one node, `number_of_instances` is greater than 1, and TP x PP exceeds the largest `gpus_per_node` among the pools.
 
 ```yaml
-node_pools:
-  main:
-    partition: batch
-    nodes: 4
-    gpus_per_node: 8
+compute:
+  cluster:
+    type: slurm
+    account: my-account
+    node_pools:
+      main:
+        partition: batch
+        nodes: 4
+        gpus_per_node: 8
 
 services:
   policy:
