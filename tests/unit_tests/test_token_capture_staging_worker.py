@@ -215,6 +215,28 @@ def test_generation_chunk_record_contains_only_new_generated_tokens() -> None:
     assert chunk.weight_version == 7
 
 
+def test_generation_chunk_record_commits_optional_extras() -> None:
+    capture, _ = _capture()
+    call = capture.begin_call(_root())
+    extras = {"routed_experts": [[[-1]], [[7]]]}
+
+    chunk = capture.build_generation_chunk_record(
+        call,
+        generated_token_ids=[13, 14],
+        generated_logprobs=[-0.5, -0.75],
+        extras=extras,
+    )
+    plain_chunk = capture.build_generation_chunk_record(
+        call,
+        generated_token_ids=[13, 14],
+        generated_logprobs=[-0.5, -0.75],
+    )
+
+    assert chunk.extras == extras
+    assert chunk.extras_digest != plain_chunk.extras_digest
+    assert chunk.digest != plain_chunk.digest
+
+
 def test_generation_cut_resume_preserves_old_generation_masks_and_logprobs() -> None:
     original_capture, sink = _capture(weight_version=7)
     original = original_capture.begin_call(_root())

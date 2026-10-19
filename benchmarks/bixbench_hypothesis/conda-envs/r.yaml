@@ -1,0 +1,36 @@
+channels:
+  - conda-forge
+dependencies:
+  - r-base
+  - r-r.utils
+  - r-recommended
+  - r-irkernel
+  - r-tidyverse
+  - r-readxl
+  - r-seurat
+  - rpy2
+  - r-factominer
+  - r-rcolorbrewer
+  - r-devtools
+  - r-broom
+  - r-data.table
+  - r-enrichr
+  - r-factoextra
+  - r-ggnewscale
+  - r-ggrepel
+  - r-ggpubr
+  - r-ggvenn
+  - r-janitor
+  - r-multcomp
+  - r-matrix
+  - r-pheatmap
+  - r-reshape
+  - r-rstatix
+  - r-viridis
+  - r-hdf5r
+  - r-wgcna
+  - r-coloc
+  - r-susier
+  - r-mendelianrandomization
+  - r-ldlinkr
+  - r-arrow

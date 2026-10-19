@@ -859,8 +859,7 @@ class ServerClient(BaseModel):
                 model = config.get("model_server") or {}
                 if model.get("name") != model_server_name or model.get("type") != "responses_api_models":
                     continue
-                # Nested harnesses are keyed by directory path (e.g. `conversational_tool_use/simulation`).
-                package = import_module(f"responses_api_agents.{harness.replace('/', '.')}")
+                package = import_module(f"responses_api_agents.{harness}")
                 header = getattr(package, "_assistant_message_header", None)
                 if header is not None:
                     headers.add(header.lower())
