@@ -27,8 +27,9 @@ These metrics make that pressure visible without inspecting private asyncio inte
   ``gym.gc.count`` (gauge, by ``nemo.gym.gc.generation``) is the allocation count from ``gc.get_count()``.
 * ``process.cpu.time`` (counter, seconds, by ``cpu.mode``), ``process.memory.usage``, ``process.thread.count``, and ``process.open_file_descriptor.count``.
   These keep the OpenTelemetry process semantic-convention names, units, and attributes, so standard dashboards recognize them.
-* ``gym.server.requests.in_flight``, ``gym.server.requests.cancelled_total``, ``gym.server.requests.unhandled_exceptions_total``, and ``gym.server.responses_total`` by ``http.response.status_code``.
-  The outermost server middleware keeps them as plain integers, and the exporter thread reads them.
+* ``gym.server.requests.in_flight``, ``gym.server.requests.unhandled_exceptions_total``, and ``gym.server.responses_total`` by ``http.response.status_code``.
+  ``gym.server.requests.cancelled_total`` carries ``http.route`` and ``nemo.gym.request.phase``.
+  The outermost server middleware keeps these totals locally, and the exporter thread reads them.
 * ``gym.http.client.requests.in_flight``: outbound calls through ``server_utils.request`` still waiting for their response headers.
 * ``gym.driver.rollouts.offered_total``, ``gym.driver.rollouts.resident``, and ``gym.driver.rollouts.active``, plus the ``gym.driver.admission_duration_ms``, ``gym.driver.output_write_duration_ms``, ``gym.driver.output_write_bytes``, and ``gym.driver.materialize_duration_ms`` histograms, from the rollout driver.
 * ``gym.driver.rollout.input_items``, ``gym.driver.rollout.output_items``, ``gym.driver.rollout.turns``, and ``gym.driver.rollout.tool_calls``: the size of each completed rollout, recorded once per rollout by the driver.
@@ -92,6 +93,8 @@ EVENT_LOOP_ATTRIBUTE = "nemo.gym.event_loop"
 GC_GENERATION_ATTRIBUTE = "nemo.gym.gc.generation"
 CPU_MODE_ATTRIBUTE = "cpu.mode"
 HTTP_STATUS_CODE_ATTRIBUTE = "http.response.status_code"
+HTTP_ROUTE_ATTRIBUTE = "http.route"
+REQUEST_PHASE_ATTRIBUTE = "nemo.gym.request.phase"
 
 #: Milliseconds. Lag below half a millisecond is ordinary scheduling, and lag of seconds means the loop was blocked outright.
 EVENT_LOOP_LAG_BOUNDARIES_MS: tuple[float, ...] = (
@@ -179,10 +182,19 @@ class RequestCounts:
     def __init__(self) -> None:
         self.in_flight = 0
         self.cancelled = 0
+        self.cancelled_by_route_and_phase: dict[tuple[str, str], int] = {}
+        """Cumulative cancellations by registered route template and response-start phase."""
         self.unhandled_exceptions = 0
         self.outbound_in_flight = 0
         self.responses: dict[int, int] = {}
         """Responses by HTTP status code, updated only by the serving event loop. HTTP bounds the set of codes."""
+
+    def count_cancellation(self, route: str, *, response_started: bool) -> None:
+        """Count one disconnect; ``route`` must be a registered template or the unmatched sentinel."""
+        phase = "response_started" if response_started else "before_response_start"
+        key = (route, phase)
+        self.cancelled_by_route_and_phase[key] = self.cancelled_by_route_and_phase.get(key, 0) + 1
+        self.cancelled += 1
 
     def count_response(self, status: int) -> None:
         self.responses[status] = self.responses.get(status, 0) + 1
@@ -264,9 +276,18 @@ class _Instruments:
         )
         meter.create_observable_counter(
             REQUESTS_CANCELLED_INSTRUMENT,
-            callbacks=[_observe(lambda state: [_observation(state.requests.cancelled)])],
+            callbacks=[
+                _observe(
+                    lambda state: [
+                        # Snapshot before iterating: the serving loop can add a bucket during export.
+                        # Export only these buckets, not the aggregate, which would double-count cancels.
+                        _observation(count, {HTTP_ROUTE_ATTRIBUTE: route, REQUEST_PHASE_ATTRIBUTE: phase})
+                        for (route, phase), count in list(state.requests.cancelled_by_route_and_phase.items())
+                    ]
+                )
+            ],
             unit="{request}",
-            description="HTTP requests cancelled because the client disconnected before the response finished.",
+            description="HTTP requests cancelled on client disconnect, by route template and response-start phase.",
         )
         meter.create_observable_counter(
             REQUESTS_UNHANDLED_EXCEPTIONS_INSTRUMENT,

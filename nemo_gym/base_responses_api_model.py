@@ -84,7 +84,7 @@ from nemo_gym.responses_streaming import (
     synthesize_responses_sse,
     validate_streaming_responses_params,
 )
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body, rollout_context
+from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body, rollout_context, scope_with_routed_path
 from nemo_gym.rollout_observability import (
     NG_AGENT_OBSERVATIONS_KEY,
     AgentObservationBundle,
@@ -1742,7 +1742,7 @@ class _CaptureMiddleware:
             token_capture_requested = prefix_match.group("token_capture") is not None
             capture_prefix = path[: prefix_match.start("rest")]
             path = prefix_match.group("rest")
-            scope = {**scope, "path": path, "raw_path": path.encode("utf-8")}
+            scope = scope_with_routed_path(scope, path)
 
         method = str(scope.get("method") or "").upper()
         dialect = _OBSERVED_PATHS.get(path)

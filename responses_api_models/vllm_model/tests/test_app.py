@@ -1220,7 +1220,7 @@ class TestApp:
                 )
             return result
 
-        async def post(*, server_name, url_path, json, cookies):
+        async def post(*, server_name, url_path, json, cookies, headers=None):
             if server_name == "model":
                 result = model_client.post(url_path, json=json.model_dump(exclude_none=True))
                 return reply(result.json(), result.status_code)
@@ -4178,6 +4178,28 @@ class TestVLLMConverter:
             assert "".join(chunk["choices"][0]["delta"].get("content", "") for chunk in chunks) == "response"
         else:
             assert response.json()["choices"][0]["message"]["content"] == "response"
+
+    @mark.parametrize("stream", [False, True])
+    def test_tool_message_image_reaches_the_backend(self, stream: bool) -> None:
+        client, captured_kwargs = self._chat_client_capturing_upstream()
+        tool_call = {"id": "c1", "type": "function", "function": {"name": "load_image", "arguments": "{}"}}
+        messages = [
+            {"role": "user", "content": "What color is the image?"},
+            {"role": "assistant", "content": None, "tool_calls": [tool_call]},
+            {
+                "role": "tool",
+                "tool_call_id": "c1",
+                "content": [
+                    {"type": "text", "text": "Image loaded."},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,YWJj"}},
+                ],
+            },
+        ]
+
+        response = client.post("/v1/chat/completions", json={"messages": messages, "stream": stream})
+
+        assert response.status_code == 200, response.text
+        assert captured_kwargs["messages"] == messages
 
     def test_request_chat_template_kwargs_precedence(self, caplog):
         """Config baseline -> direct request field -> metadata override.

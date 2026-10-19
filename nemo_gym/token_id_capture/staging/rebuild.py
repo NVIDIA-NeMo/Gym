@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Sequence
 
 from nemo_gym.episode_types import EpisodeId
+from nemo_gym.token_id_capture.records import FINISH_REASON_DISAGREEMENT_REASON, incomplete_reason_for_finish_reason
 from nemo_gym.token_id_capture.staging.digest import (
     EXTRAS_DIGEST_VERSION,
     STAGING_DIGEST_VERSION,
@@ -85,15 +86,52 @@ class LinearizedRow:
     weight_version_spans: list[WeightVersionSpan]
     link_spans: list[tuple[str, int, int]] = field(default_factory=list)
     extras_commitments: list[ExtrasCommitment] = field(default_factory=list)
+    # The terminal call's finish reason as its ledger row recorded it; ``None`` when the served
+    # payload stated none or the row predates the column.
+    terminal_finish_reason: str | None = None
+    # Whether ``terminal_finish_reason`` is the kept serving's. ``False`` when the receipt's
+    # attribution trail carries ``finish_reason_disagreement``: the terminal was chosen among
+    # token-identical calls that recorded different finish reasons, so the reason reported here
+    # depends on which of them the receipt names.
+    finish_reason_resolved: bool = True
 
     @property
     def call_ids(self) -> list[str]:
         """Compatibility spelling for existing framework consumers."""
         return self.model_call_ids
 
+    @property
+    def incomplete_reason(self) -> str | None:
+        """The ``incomplete_details.reason`` the rebuilt response reports, or ``None`` for a complete ending.
+
+        Only the terminal call decides: an earlier ``length`` stop did not end the chain, because a
+        later call extended it. The mapping is the one the local capture path applies, and so is
+        the abstention: an unresolved finish reason (``finish_reason_resolved`` is ``False``) gives
+        no verdict rather than one that follows the call-id order of identical retries.
+
+        A framework consumer puts this verdict on the harness response with
+        ``nemo_gym.token_id_capture.apply_capture_incomplete_verdict``, the precedence rule the
+        local delivery applies as well: a harness that reported ``incomplete`` or ``failed``
+        itself keeps its own verdict, and only a response that reported ``completed`` or no
+        status takes this one.
+        """
+        if not self.finish_reason_resolved:
+            return None
+        return incomplete_reason_for_finish_reason(self.terminal_finish_reason)
+
 
 def _fail(code: str, detail: str) -> ReceiptVerificationError:
     return ReceiptVerificationError(code, detail)
+
+
+def _attribution_reasons(receipt: RolloutReceipt) -> set[str]:
+    """Return the reason tokens of the receipt's attribution trail.
+
+    ``resolve_terminal`` joins its abstention, corroboration, and disagreement tokens with commas,
+    and the framework copies the string onto ``terminal_attribution_reason``; a receipt from a
+    framework that records no trail has none.
+    """
+    return {token for token in (receipt.terminal_attribution_reason or "").split(",") if token}
 
 
 def _verify_versions(receipt: RolloutReceipt) -> None:
@@ -381,6 +419,8 @@ def verify_and_linearize(
         weight_version_spans=weight_version_spans,
         link_spans=link_spans,
         extras_commitments=extras_commitments,
+        terminal_finish_reason=chain[-1].finish_reason,
+        finish_reason_resolved=FINISH_REASON_DISAGREEMENT_REASON not in _attribution_reasons(receipt),
     )
 
 

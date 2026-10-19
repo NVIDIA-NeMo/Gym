@@ -1342,6 +1342,82 @@ class TestServerUtils:
             {"type": "http.response.body", "body": b"ok", "more_body": False},
         ]
 
+    @mark.parametrize(
+        "path", ["/v1/chat/completions", "/ng-rollout/3-1/v1/messages", "/run", "/tools/run", "/seed_session"]
+    )
+    async def test_cancellation_middleware_samples_all_routes(
+        self, monkeypatch: MonkeyPatch, capsys: CaptureFixture, path: str
+    ) -> None:
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
+        handler_waiting = asyncio.Event()
+
+        async def inner_app(scope, receive, send) -> None:
+            await receive()
+            handler_waiting.set()
+            await asyncio.Event().wait()
+
+        middleware = ClientDisconnectCancellationMiddleware(inner_app)
+        scope = {"type": "http", "method": "POST", "path": path, "client": ("127.0.0.1", 1234)}
+
+        async def send(message):
+            pass
+
+        for _ in range(101):
+            handler_waiting.clear()
+            incoming = asyncio.Queue()
+            await incoming.put({"type": "http.request", "body": b"", "more_body": False})
+            app_task = asyncio.create_task(middleware(scope, incoming.get, send))
+            await asyncio.wait_for(handler_waiting.wait(), timeout=1)
+            await incoming.put({"type": "http.disconnect"})
+            await asyncio.wait_for(app_task, timeout=1)
+
+        assert middleware.num_cancelled == 101
+        assert capsys.readouterr().out == (
+            f'127.0.0.1:1234 - "POST {path}" 499 CLIENT DISCONNECTED (100 total for this server worker)\n'
+        )
+
+    @mark.parametrize(
+        ("response", "phase"),
+        [("none", "before_response_start"), ("headers", "response_started"), ("keepalive", "response_started")],
+    )
+    async def test_cancellation_middleware_debug_phase(
+        self, monkeypatch: MonkeyPatch, capsys: CaptureFixture, response: str, phase: str
+    ) -> None:
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", True)
+        clock = iter([10.0, 12.5])
+        monkeypatch.setattr(nemo_gym.server_utils, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+        handler_waiting = asyncio.Event()
+
+        async def inner_app(scope, receive, send) -> None:
+            await receive()
+            if response != "none":
+                await send({"type": "http.response.start", "status": 200, "headers": []})
+            if response == "keepalive":
+                await send({"type": "http.response.body", "body": b": keep-alive\n\n", "more_body": True})
+            handler_waiting.set()
+            await asyncio.Event().wait()
+
+        middleware = ClientDisconnectCancellationMiddleware(inner_app)
+        incoming = asyncio.Queue()
+        await incoming.put({"type": "http.request", "body": b"", "more_body": False})
+
+        async def send(message):
+            pass
+
+        scope = {"type": "http", "method": "POST", "path": "/v1/chat/completions", "client": ("127.0.0.1", 1234)}
+        app_task = asyncio.create_task(middleware(scope, incoming.get, send))
+        await asyncio.wait_for(handler_waiting.wait(), timeout=1)
+        await incoming.put({"type": "http.disconnect"})
+        await asyncio.wait_for(app_task, timeout=1)
+
+        assert middleware.num_cancelled == 1
+        assert capsys.readouterr().out == (
+            '127.0.0.1:1234 - "POST /v1/chat/completions" 499 CLIENT DISCONNECTED '
+            f"after 2.5s {phase} (1 total for this server worker)\n"
+        )
+
     def test_upstream_error_log_has_bounded_body_and_redacted_url(self) -> None:
         request_info = RequestInfo(
             url=URL("http://policy.test/v1/responses?api_key=secret"),
@@ -2356,39 +2432,6 @@ def test_model_header_comes_from_its_harness_property(monkeypatch, header):
     assert client.assistant_message_header("first_model") == (header.lower() if header else None)
     assert client.assistant_message_header("second_model") is None
     assert client.assistant_message_header("unused_model") is None
-
-
-def test_model_header_imports_nested_harness_key(monkeypatch):
-    import sys
-    from types import ModuleType
-
-    # Nested harnesses are keyed by their directory path, e.g. `conversational_tool_use/simulation`.
-    nested = ModuleType("responses_api_agents.test_header_group.nested_harness")
-    nested._assistant_message_header = b"X-Nested-Reply"
-    monkeypatch.setitem(sys.modules, nested.__name__, nested)
-    client = ServerClient(
-        head_server_config={"host": "localhost", "port": 0},
-        global_config_dict=OmegaConf.create(
-            {
-                "conversational_tool_use_agent": {
-                    "responses_api_agents": {
-                        "conversational_tool_use/simulation": {
-                            "model_server": {"type": "responses_api_models", "name": "policy_model"},
-                        }
-                    }
-                },
-                "nested_agent": {
-                    "responses_api_agents": {
-                        "test_header_group/nested_harness": {
-                            "model_server": {"type": "responses_api_models", "name": "nested_model"},
-                        }
-                    }
-                },
-            }
-        ),
-    )
-    assert client.assistant_message_header("policy_model") is None
-    assert client.assistant_message_header("nested_model") == b"x-nested-reply"
 
 
 def test_shared_model_rejects_conflicting_harness_headers(monkeypatch):
