@@ -21,16 +21,32 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from nooa import Agent, strategy
+from nooa.errors import GenerationError
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseFunctionToolCall
 from nemo_gym.rollout_observability import AgentInvocation, ToolCallObservation
+from nemo_gym.tool_access import DirectHTTPToolAccess
+from responses_api_agents.nooa_agent import resource_tools
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig
 from responses_api_agents.nooa_agent.runner import (
-    EmbeddedNOOARunner,
+    InProcessNOOARunner,
     NOOARunFailure,
     NOOARunRequest,
 )
+from responses_api_agents.nooa_agent.termination import NOOATerminationReason
 from responses_api_agents.nooa_agent.tests.test_gym_llm import FakeHTTPResponse, model_response
+from responses_api_agents.nooa_agent.tests.test_resource_tools import FakeResponse as FakeResourceResponse
+
+
+@pytest.fixture(autouse=True)
+def outbound(monkeypatch):
+    mock = AsyncMock(return_value=FakeResponse())
+    monkeypatch.setattr(resource_tools, "request", mock)
+    return mock
+
+
+def grant() -> DirectHTTPToolAccess:
+    return DirectHTTPToolAccess(name="resources", required=True, base_url="http://resources/")
 
 
 class ValidAgent(Agent):
@@ -122,12 +138,13 @@ class FakeContent:
 
 
 class FakeResponse:
+    ok = True
     status = 200
     content = FakeContent()
     cookies = SimpleCookie()
 
 
-def make_runner(*, execution_mode: str = "embedded") -> tuple[EmbeddedNOOARunner, MagicMock]:
+def make_runner(*, execution_mode: str = "embedded") -> tuple[InProcessNOOARunner, MagicMock]:
     invocation = NOOAInvocationConfig.model_validate(
         {
             "agent_class": f"{__name__}:ValidAgent",
@@ -137,12 +154,11 @@ def make_runner(*, execution_mode: str = "embedded") -> tuple[EmbeddedNOOARunner
         }
     )
     client = MagicMock()
-    client.post = AsyncMock(return_value=FakeResponse())
-    runner = EmbeddedNOOARunner(
+    client.post = resource_tools.request
+    runner = InProcessNOOARunner(
         invocation=invocation,
         server_client=client,
         model_server_name="policy_model",
-        resources_server_name="weather_resources",
         max_policy_calls=3,
     )
     runner._agent_class = FakeAgent
@@ -179,6 +195,7 @@ async def test_embedded_runner_invokes_adapter_and_attaches_resource_methods() -
 
     result = await runner.run(
         NOOARunRequest(
+            tool_access=grant(),
             responses_create_params=request,
             model_url_path="/ng-rollout/rollout-1/v1/responses",
             resource_cookies={"session": "one"},
@@ -205,12 +222,14 @@ async def test_constructs_a_fresh_agent_for_every_rollout() -> None:
 
     first = await runner.run(
         NOOARunRequest(
+            tool_access=grant(),
             responses_create_params=responses_create_params("Paris"),
             model_url_path="/one/v1/responses",
         )
     )
     second = await runner.run(
         NOOARunRequest(
+            tool_access=grant(),
             responses_create_params=responses_create_params("Berlin"),
             model_url_path="/two/v1/responses",
         )
@@ -221,9 +240,8 @@ async def test_constructs_a_fresh_agent_for_every_rollout() -> None:
     assert first.resource_cookies is not second.resource_cookies
 
 
-def test_sandboxed_execution_mode_fails_during_runner_construction() -> None:
-    with pytest.raises(NotImplementedError, match="sandboxed execution is not implemented"):
-        make_runner(execution_mode="sandboxed")
+def test_runner_can_execute_inside_sandbox_process() -> None:
+    make_runner(execution_mode="sandboxed")
 
 
 def test_method_level_llm_override_fails_during_runner_construction() -> None:
@@ -241,7 +259,7 @@ async def invoke_policy(agent: Any, request: NeMoGymResponseCreateParamsNonStrea
     return await agent.analyze(text)
 
 
-def policy_runner(agent_class: type[Agent] = PolicyAgent) -> tuple[EmbeddedNOOARunner, list[dict[str, Any]]]:
+def policy_runner(agent_class: type[Agent] = PolicyAgent) -> tuple[InProcessNOOARunner, list[dict[str, Any]]]:
     calls: list[dict[str, Any]] = []
 
     async def post(*, json: dict[str, Any], **_: Any) -> FakeHTTPResponse:
@@ -260,11 +278,10 @@ def policy_runner(agent_class: type[Agent] = PolicyAgent) -> tuple[EmbeddedNOOAR
         agent_class=f"{__name__}:{agent_class.__name__}",
         invocation_adapter=f"{__name__}:invoke_policy",
     )
-    return EmbeddedNOOARunner(
+    return InProcessNOOARunner(
         invocation=invocation,
         server_client=client,
         model_server_name="primary_model",
-        resources_server_name="resources",
         max_policy_calls=3,
     ), calls
 
@@ -275,11 +292,12 @@ async def test_real_strategy_budget_failure_keeps_completed_calls() -> None:
     runner._max_policy_calls = 2
     result = await runner.run(
         NOOARunRequest(
+            tool_access=grant(),
             responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="question"),
             model_url_path="/v1/responses",
         )
     )
-    assert result.termination_reason == "policy_budget_exceeded"
+    assert result.termination_reason is NOOATerminationReason.POLICY_BUDGET_EXCEEDED
     assert len(calls) == len(result.trajectory.turns) == 2
     assert any(invocation.status == "failed" for invocation in result.trajectory.invocations)
 
@@ -290,6 +308,7 @@ async def test_unexpected_agent_failure_carries_the_partial_episode() -> None:
     with pytest.raises(NOOARunFailure, match="failed after a model call") as error:
         await runner.run(
             NOOARunRequest(
+                tool_access=grant(),
                 responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="question"),
                 model_url_path="/v1/responses",
             )
@@ -305,6 +324,7 @@ async def test_cancellation_preserves_evidence_without_swallowing_cancellation()
     task = asyncio.create_task(
         runner.run(
             NOOARunRequest(
+                tool_access=grant(),
                 responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="question"),
                 model_url_path="/v1/responses",
             )
@@ -324,7 +344,7 @@ async def test_cancellation_preserves_evidence_without_swallowing_cancellation()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", [200, 503])
+@pytest.mark.parametrize("status", [200])
 async def test_real_code_and_resource_outputs_join_to_their_own_invocations(status: int) -> None:
     runner, _ = policy_runner(ResourceUsingAgent)
     model_requests = []
@@ -346,8 +366,14 @@ async def test_real_code_and_resource_outputs_join_to_their_own_invocations(stat
         return FakeHTTPResponse(model_response(output, response_id=f"response-{len(model_requests)}"))
 
     runner._server_client.post = AsyncMock(side_effect=post)
+
+    async def resource_request(method: str, url: str, **kwargs: Any) -> FakeHTTPResponse:
+        return await post(server_name="resources", **kwargs)
+
+    resource_tools.request.side_effect = resource_request
     result = await runner.run(
         NOOARunRequest(
+            tool_access=grant(),
             responses_create_params=responses_create_params("Paris"),
             model_url_path="/v1/responses",
         )
@@ -378,3 +404,153 @@ async def test_real_code_and_resource_outputs_join_to_their_own_invocations(stat
             getattr(item, "call_id", None) == tool.tool_call_id and item.type == "function_call_output"
             for item in owner.conversation
         )
+
+
+@pytest.mark.asyncio
+async def test_real_codeact_recovers_from_resource_http_error(outbound: AsyncMock) -> None:
+    runner, _ = policy_runner(ResourceUsingAgent)
+    model_requests: list[NeMoGymResponseCreateParamsNonStreaming] = []
+    feedback = "Unknown city Pariss; use Paris."
+    outbound.side_effect = [
+        FakeResourceResponse({"error": feedback}, status=400, cookie=("tool_state", "rejected")),
+        FakeResourceResponse({"weather": "cold"}, cookie=("tool_state", "accepted")),
+    ]
+    replies = [
+        ("execute_python", json.dumps({"code": "print(await self.get_weather(city='Pariss'))"})),
+        ("execute_python", json.dumps({"code": "print(await self.get_weather(city='Paris'))"})),
+        ("return_result", '{"result":"cold"}'),
+    ]
+
+    async def post(*, json: NeMoGymResponseCreateParamsNonStreaming, **_: Any) -> FakeHTTPResponse:
+        name, arguments = replies[len(model_requests)]
+        model_requests.append(json)
+        output = NeMoGymResponseFunctionToolCall(
+            id=f"fc-{len(model_requests)}",
+            call_id=f"call-{len(model_requests)}",
+            name=name,
+            arguments=arguments,
+        )
+        return FakeHTTPResponse(model_response(output, response_id=f"response-{len(model_requests)}"))
+
+    runner._server_client.post = AsyncMock(side_effect=post)
+    result = await runner.run(
+        NOOARunRequest(
+            tool_access=grant(),
+            responses_create_params=responses_create_params("Paris"),
+            model_url_path="/v1/responses",
+            resource_cookies={"session": "one"},
+        )
+    )
+
+    assert result.return_value == "cold"
+    assert result.termination_reason is None
+    assert len(model_requests) == len(result.trajectory.turns) == 3
+    for request, expected in (
+        (model_requests[1], feedback),
+        (model_requests[2], "cold"),
+    ):
+        assert expected in request.model_dump_json(include={"input"})
+    assert [call.kwargs["json"] for call in outbound.await_args_list] == [{"city": "Pariss"}, {"city": "Paris"}]
+    assert [call.kwargs["cookies"] for call in outbound.await_args_list] == [
+        {"session": "one"},
+        {"session": "one", "tool_state": "rejected"},
+    ]
+    assert result.resource_cookies == {"session": "one", "tool_state": "accepted"}
+    resources = [tool for tool in result.trajectory.tool_calls if tool.tool_name == "get_weather"]
+    assert [tool.status for tool in resources] == ["failed", "completed"]
+    assert [tool.error_type for tool in resources] == ["http_400", None]
+    assert [json.loads(tool.output) for tool in resources] == [{"error": feedback}, {"weather": "cold"}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["model", "resource"])
+async def test_swallowed_infrastructure_failure_never_becomes_gradable(source: str) -> None:
+    runner, _ = make_runner()
+    failure = ConnectionError("dependency unavailable")
+
+    async def swallow(agent, request):
+        try:
+            if source == "resource":
+                await agent.get_weather(city="Paris")
+            else:
+                await agent.llm.acall([{"role": "user", "content": "question"}])
+        except ConnectionError:
+            pass
+        return "apparently successful"
+
+    runner._invocation_adapter = swallow
+    if source == "resource":
+        resource_tools.request.side_effect = failure
+    else:
+        runner._server_client.post = AsyncMock(side_effect=failure)
+    with pytest.raises(NOOARunFailure) as caught:
+        await runner.run(
+            NOOARunRequest(
+                responses_create_params=responses_create_params("Paris"),
+                model_url_path="/v1/responses",
+                tool_access=grant(),
+            )
+        )
+    assert caught.value.__cause__ is failure
+    assert caught.value.result.termination_reason is None
+
+
+@pytest.mark.asyncio
+async def test_real_codeact_output_limit_is_gradable_and_preserves_model_evidence() -> None:
+    runner, _ = policy_runner()
+    response = model_response(response_id="truncated")
+    response["incomplete_details"] = {"reason": "max_output_tokens"}
+    response["status"] = "incomplete"
+    runner._server_client.post = AsyncMock(return_value=FakeHTTPResponse(response))
+    result = await runner.run(
+        NOOARunRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="question"),
+            model_url_path="/v1/responses",
+        )
+    )
+    assert result.termination_reason is NOOATerminationReason.MAX_OUTPUT_TOKENS_EXCEEDED
+    assert runner._server_client.post.await_count == 3
+    assert len(result.trajectory.turns) == 3
+    assert all(turn.model_calls[0].response_id == "truncated" for turn in result.trajectory.turns)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("truncated,transport_failure", [(False, False), (True, False), (True, True)])
+async def test_generation_error_without_output_limit_or_with_transport_failure_is_not_gradable(
+    truncated: bool,
+    transport_failure: bool,
+) -> None:
+    runner, _ = make_runner()
+    response = model_response()
+    if truncated:
+        response["incomplete_details"] = {"reason": "max_output_tokens"}
+    responses = [FakeHTTPResponse(response)]
+    failure = ConnectionError("model unavailable")
+    if transport_failure:
+        responses.append(failure)
+    runner._server_client.post = AsyncMock(side_effect=responses)
+
+    async def invoke(agent, request):
+        from responses_api_agents.nooa_agent.gym_llm import OutputTokenLimitExceeded
+
+        try:
+            await agent.llm.acall([{"role": "user", "content": "question"}])
+        except OutputTokenLimitExceeded:
+            pass
+        if transport_failure:
+            try:
+                await agent.llm.acall([{"role": "user", "content": "again"}])
+            except ConnectionError:
+                pass
+        raise GenerationError("arbitrary generation failure")
+
+    runner._invocation_adapter = invoke
+    with pytest.raises(NOOARunFailure) as caught:
+        await runner.run(
+            NOOARunRequest(
+                responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="question"),
+                model_url_path="/v1/responses",
+            )
+        )
+    assert caught.value.result.termination_reason is None
+    assert isinstance(caught.value.__cause__, GenerationError)
