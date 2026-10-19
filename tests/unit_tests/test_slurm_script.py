@@ -2610,6 +2610,46 @@ def test_every_node_of_a_per_node_service_is_probed_where_it_runs(tmp_path):
     assert "policy-node0" not in script
 
 
+def test_a_per_node_service_exports_every_pool_node_to_the_driver(tmp_path):
+    script = _per_node_vllm_script(tmp_path)
+    for node in range(4):
+        assert f'export GYM_POOL_GPU_NODE_{node}="${{gym_nodes[{node}]}}"' in script
+
+
+def test_a_service_per_node_exports_no_node_variables_when_it_is_off(tmp_path):
+    with pytest.warns(UserWarning):
+        script = _per_node_vllm_script(tmp_path, server_per_node=False)
+    assert "GYM_POOL_GPU_NODE_" not in script
+
+
+def test_the_driver_gets_one_policy_url_per_node(tmp_path):
+    script = _per_node_vllm_script(tmp_path)
+    urls = ",".join(f"http://${{oc.env:GYM_POOL_GPU_NODE_{i}}}:8000/v1" for i in range(4))
+    assert f"'+policy_base_url=[{urls}]'" in script
+
+
+def test_the_policy_url_stays_one_address_without_server_per_node(tmp_path):
+    with pytest.warns(UserWarning):
+        script = _per_node_vllm_script(tmp_path, server_per_node=False)
+    assert "+policy_base_url=http://localhost:8000/v1" in script
+    assert "policy_base_url=[" not in script
+
+
+def test_the_per_node_policy_urls_resolve_to_the_pool_hosts(tmp_path, monkeypatch):
+    from hydra.core.override_parser.overrides_parser import OverridesParser
+    from omegaconf import OmegaConf
+
+    script = _per_node_vllm_script(tmp_path)
+    token = next(t for t in shlex.split(script.replace("\n", " ")) if t.startswith("+policy_base_url="))
+    for node in range(4):
+        monkeypatch.setenv(f"GYM_POOL_GPU_NODE_{node}", f"host{node}")
+    override = OverridesParser.create().parse_overrides([token])[0]
+    config = OmegaConf.create({"policy_base_url": override.value(), "model": {"base_url": "${policy_base_url}"}})
+    assert OmegaConf.to_container(config, resolve=True)["model"]["base_url"] == [
+        f"http://host{node}:8000/v1" for node in range(4)
+    ]
+
+
 def test_a_per_node_service_needs_a_node_pool(tmp_path):
     with pytest.raises(ValueError, match="has no node_pool"):
         _per_node_vllm_config(tmp_path, node_pool=None)
