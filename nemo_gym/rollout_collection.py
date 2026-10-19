@@ -3942,7 +3942,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         async def _fetch_agent_metrics(server_name: str, agent_name: str, agent_result_list: List[Dict]) -> Dict:
             nonlocal first_error
-            # Strip heavyweight fields before sending, but preserve response.usage and response.incomplete_details if present.
+            # Strip generated content, but keep provider metrics for request-level
+            # aggregation (e.g. SPEED-Bench), along with usage and truncation status.
             stripped = []
             for r in agent_result_list:
                 entry = {
@@ -3965,6 +3966,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 incomplete_details = response.get("incomplete_details")
                 if incomplete_details is not None:
                     response_metadata["incomplete_details"] = incomplete_details
+                metrics = response.get("metrics")
+                if metrics is not None:
+                    response_metadata["metrics"] = metrics
                 if response_metadata:
                     entry["response"] = response_metadata
                 stripped.append(entry)

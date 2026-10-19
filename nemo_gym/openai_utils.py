@@ -179,6 +179,7 @@ from pydantic import (
     ConfigDict,
     Discriminator,
     Field,
+    JsonValue,
     PrivateAttr,
     Tag,
     field_serializer,
@@ -1159,6 +1160,7 @@ def accumulate_response_usage(
 class NeMoGymResponse(Response):
     output: List[NeMoGymResponseOutputItem]
     usage: Optional[NeMoGymResponseUsage] = None
+    metrics: Optional[Dict[str, JsonValue]] = None
     # OpenAI-compatible providers may return provider-specific service-tier names.
     # The OpenAI SDK's Literal may not include those names.
     # Preserve the reported value.
@@ -1212,6 +1214,7 @@ class NeMoGymChoice(Choice):
 
 class NeMoGymChatCompletion(ChatCompletion):
     choices: List[NeMoGymChoice]
+    metrics: Optional[Dict[str, JsonValue]] = None
     # Providers can return deployment-specific tiers. Accept any string.
     service_tier: Optional[str] = None
 

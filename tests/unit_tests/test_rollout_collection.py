@@ -5929,6 +5929,20 @@ class TestRolloutCollection:
     async def test_call_aggregate_metrics(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """Test _call_aggregate_metrics with a mocked server client."""
 
+        provider_metrics = {
+            "requests": [
+                {
+                    "speculative_decoding": {
+                        "num_spec_steps": 2,
+                        "num_draft_tokens": 6,
+                        "num_accepted_draft_tokens": 3,
+                        "num_spec_tokens": 3,
+                        "acceptance_histogram": [1, 0, 0, 1],
+                    }
+                },
+                None,
+            ]
+        }
         agg = AggregateMetrics(
             agent_metrics={"mean/reward": 0.5},
             key_metrics={"mean/reward": 0.5},
@@ -5976,6 +5990,8 @@ class TestRolloutCollection:
                 "response": {
                     "usage": {"tokens": 10},
                     "incomplete_details": {"reason": "max_output_tokens"},
+                    "metrics": provider_metrics,
+                    "output": [{"content": "large generated text"}],
                 },
                 "ng_agent_observations": {"invocations": [{"conversation": ["large"]}]},
                 "ng_model_call_capture": {"calls": [{"request": "large"}]},
@@ -5999,7 +6015,7 @@ class TestRolloutCollection:
         assert written[0]["key_metrics"]["mean/reward"] == 0.5
         assert len(written[0]["group_level_metrics"]) == 2
 
-        # Verify server_client.post was called with stripped data (usage preserved)
+        # Provider metrics (including missing turns) must survive payload stripping.
         call_kwargs = mock_server_client.post.call_args
         sent_request = call_kwargs.kwargs["json"]
         sent_data = (
@@ -6013,7 +6029,10 @@ class TestRolloutCollection:
             assert "ng_model_call_capture" not in item
             assert "ng_trajectory" not in item
             assert "usage" in item["response"]
+            assert "output" not in item["response"]
         assert sent_data[0]["response"]["incomplete_details"] == {"reason": "max_output_tokens"}
+        assert sent_data[0]["response"]["metrics"] == provider_metrics
+        assert "metrics" not in sent_data[1]["response"]
 
     async def test_call_aggregate_metrics_includes_perf_summary_when_present(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

@@ -60,6 +60,42 @@ from nemo_gym.responses_converter import (
 FIXED_UUID = "123"
 
 
+@pytest.mark.parametrize(
+    "metrics",
+    [
+        None,
+        {"speculative_decoding": None},
+        {
+            "speculative_decoding": {
+                "num_spec_steps": 4,
+                "num_draft_tokens": 12,
+                "num_accepted_draft_tokens": 9,
+                "num_spec_tokens": 3,
+                "acceptance_histogram": [1, 0, 0, 3],
+                "per_step_accepted": [0, 3, 3, 3],
+                "per_step_drafted": [3, 3, 3, 3],
+            },
+            "time_to_first_token": 0.5,
+        },
+    ],
+)
+def test_provider_metrics_survive_response_conversion(converter, metrics):
+    completion = NeMoGymChatCompletion.model_validate(
+        {
+            "id": "chatcmpl-metrics",
+            "created": 123,
+            "model": "test",
+            "object": "chat.completion",
+            "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "ok"}}],
+            "metrics": metrics,
+        }
+    )
+    response = converter.chat_completion_to_response(
+        NeMoGymResponseCreateParamsNonStreaming(input="test", model="test"), completion
+    )
+    assert NeMoGymResponse.model_validate_json(response.model_dump_json()).metrics == metrics
+
+
 class FakeUUID:
     hex = FIXED_UUID
 
