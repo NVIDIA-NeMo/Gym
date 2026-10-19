@@ -192,7 +192,7 @@ The base class in [`nemo_gym/base_responses_api_agent.py`](https://github.com/NV
 - **Activation identity.** Reject an activation whose rollout path does not match the seeded `episode_id.capture_key`.
 - **Retained close.** A successful close response, including its observations, is replayed for `session_close_retry_window_seconds` (default 300). If harness termination cannot be confirmed yet, the session state is kept so that close can retry. A final termination failure is released instead; see [Harness termination](#harness-termination).
 - **Setup failure.** If seed fails and its cleanup cannot finish, raise `AgentSessionSetupError(state, error=...)`. The base class keeps the partial state for close and never activates it.
-- **Deterministic errors.** Return a 4xx status, usually 422, for errors that a retry cannot fix, such as an unsupported sandbox connection, an unusable required grant, or an invalid request. The Environment Server treats 5xx responses as retryable, so a deterministic 500 seeds the episode again, including a new sandbox, on every attempt. Hermes does not follow this rule yet: its seed raises `ValueError`, which surfaces as HTTP 500, for an unsupported connection, a missing sandbox provider, and an MCP grant that collides with a toolset. Follow Pi or Codex, which return 422.
+- **Deterministic errors.** Return a 4xx status, usually 422, for errors that a retry cannot fix, such as an unsupported sandbox connection, an unusable required grant, or an invalid request. The Environment Server treats 5xx responses as retryable, so a deterministic 500 seeds the episode again, including a new sandbox, on every attempt. Hermes does not follow this rule yet: its seed raises `ValueError`, which surfaces as HTTP 500, for a missing sandbox provider and for an MCP grant that collides with a toolset. Follow Pi or Codex, which return 422.
 
 Close must return `agent_observations` even when activation failed. When no observations were captured, return a bundle with an `ObservationGap` such as `observation_capture_failed`. Return `resources_cookies` only if the harness changed the Resources Server's cookie jar through tool calls. `None` or an empty jar keeps the cookies from the Resources Server's seed.
 
@@ -215,7 +215,11 @@ from nemo_gym.server_utils import get_global_config_dict
 
 connection = body.sandbox_access.connection
 provider = create_provider(resolve_provider_config(connection.provider_config_ref, get_global_config_dict()))
-sandbox = await AsyncSandbox.connect(connection.descriptor, provider=provider)
+try:
+    sandbox = await AsyncSandbox.connect(connection.descriptor, provider=provider)
+except BaseException:
+    await provider.aclose()  # no sandbox owns the provider yet
+    raise
 ```
 
 Follow these rules for a borrowed sandbox:
@@ -288,7 +292,7 @@ Adapter configurations extend `BaseResponsesAPIAgentConfig`. Native session adap
 | `model_server` | The Gym Model Server reference, for example `{type: responses_api_models, name: policy_model}`. The sandbox must be able to reach it. |
 | `model` | The model name that the harness sends. |
 | `num_workers` | Must be `1` for agent sessions. |
-| Version pin | The exact harness version, for example `pi_version: 0.80.2` or `codex_version: 0.144.4`. Pi, Codex, OpenCode, and OpenClaw reject a missing or inexact version. Hermes has no version field; it pins `hermes-agent` in its `requirements.txt`. |
+| Version pin | The exact harness version, for example `pi_version: 0.80.2` or `codex_version: 0.144.4`. Pi, Codex, and OpenClaw reject a missing or inexact version. OpenCode defaults `opencode_version` to its pinned release and rejects an inexact value. Hermes has no version field; it pins `hermes-agent` in its `requirements.txt`. |
 | `sandbox_provider`, `sandbox_config` | Used only for agent-owned sessions: a named provider block and the `SandboxSpec` fields. Leave `sandbox_provider` as `null` when the Resources Server supplies the sandbox. |
 | Timeouts | Installation, execution, and per-phase close budgets, such as `sandbox_install_timeout_seconds` and `session_close_timeout_seconds`. Names differ by adapter; check its configuration class. |
 | `session_close_retry_window_seconds` | How long a successful close response is replayed. Cover the caller's retry horizon. |
@@ -297,7 +301,7 @@ Adapter configurations extend `BaseResponsesAPIAgentConfig`. Native session adap
 
 The Environment Server (`single_agent_turn`) binds the pair with `resources_server`, `agent_server`, and `resources_tool_transports`. Its base configuration also sets `max_concurrent_episodes`, `queue_timeout_seconds`, and the episode and cleanup timeouts.
 
-The episode timeout, `default_episode_timeout_seconds`, covers the whole episode: Resources Server seed, runtime installation, the harness run, agent close, and verification. Set it above the harness's own run timeout plus those budgets, or the deadline fires before verification. Set `max_concurrent_episodes` and `queue_timeout_seconds` to admit episodes at the rate the agent can run them. Admission waits before the deadline starts; without it, every row starts its sandbox at once and waits inside its own deadline.
+The episode timeout, `default_episode_timeout_seconds`, covers the whole episode: Resources Server seed, runtime installation, the harness run, agent close, and verification. Set it above the harness's own run timeout plus those budgets, or the deadline fires before verification. The task sandbox has its own lifetime: SWE-bench Pro and Terminal Bench 2.1 set `sandbox_config.ttl_s: 18000`, and OpenSandbox does not renew a sandbox by default. A harness that is still running when the sandbox expires fails the episode, so raise `ttl_s` in the benchmark declaration for runs that can last longer. Set `max_concurrent_episodes` and `queue_timeout_seconds` to admit episodes at the rate the agent can run them. Admission waits before the deadline starts; without it, every row starts its sandbox at once and waits inside its own deadline.
 
 Since [#3902](https://github.com/NVIDIA-NeMo/Gym/pull/3902), `cleanup_timeout_seconds` bounds each cleanup callback, such as agent close or Resources Server close, rather than the whole final cleanup. Agent close bounds each of its sequential steps by `session_close_timeout_seconds`: cancelling staging, stopping the harness, collection, exec release, and session-file removal with disconnect (or the owned-sandbox stop). Keep about five times that value, plus any adapter-side wait, within `cleanup_timeout_seconds`. A close that the Environment Server cancels leaves the sandbox to its owner's teardown or the provider TTL.
 
@@ -390,8 +394,10 @@ experiment:
       resources_tool_transports: []
       max_concurrent_episodes: 1
       queue_timeout_seconds: 60
-      # Above Hermes installation (900) + runner (21600) + SWE-bench Pro seed and verification (2700).
+      # Above Hermes installation (900) + runner (21600) + SWE-bench Pro verification (2700), plus seed and agent close.
       default_episode_timeout_seconds: 28800
+      # Each cleanup callback, such as agent close: Pi needs up to 5 x 60 + 60 = 360 seconds, Hermes 5 x 30 + 30.
+      cleanup_timeout_seconds: 360
 ```
 
 With `taskset: onboarding`, collation wraps each prepared row in `task_id` and `task_input` and keeps the benchmark's task fields. `environment_server_routes` maps that taskset to the `experiment` instance, whose implementation is `single_agent_turn`. The collector assigns the episode identity and calls the instance's `/run` endpoint. `environment_routing_mode: taskset` rejects flat rows submitted by mistake. For the row contract, see [taskset data declarations](/main/environment-tutorials/resources-server-apis).
@@ -463,7 +469,7 @@ benchmark:
 <Warning>
 The Terminal Bench 2.1 pairing with Hermes is experimental. The benchmark's `allowed_agents` list includes `pi_agent`, but does not include `hermes_agent`.
 
-Before you try a pairing, review the benchmark's session and tool contract and the selected agent's task-image and runtime support. To run with Hermes, append `+allow_unsupported_pairing=true` to the prepare, resolve, and run commands; Pi does not require that override. Validate a representative rollout with a real model and verifier before you claim support. Do not remove the benchmark's guard, and do not mark the pairing as verified only because its configuration resolves.
+Before you try a pairing, review the benchmark's session and tool contract and the selected agent's task-image and runtime support. To run with Hermes, add `--allow-unsupported-pairing` to the `gym eval run` command; Pi does not need it. `gym eval prepare` and `gym env resolve` neither check the pairing nor accept the flag, and `gym eval run` checks it only when it dispatches rollouts, after the servers start. The flag waives every `allowed_agents` and `allowed_model_types` check in the run, not only this one. Validate a representative rollout with a real model and verifier before you claim support. Do not remove the benchmark's guard, and do not add the agent to the benchmark's `allowed_agents` only because its configuration resolves.
 </Warning>
 
 To swap a component, change the imported configuration and its matching implementation block together. Keep task data and preparation in the benchmark declaration, and keep harness selection in the Environment Server's `agent_server` reference. The `--agent-type` shortcut for legacy agent-to-Resources bindings does not replace these edits. To compare agents on the same endpoint, keep the model and provider file unchanged. To compare models or providers, change that file in a separate experiment.
@@ -499,6 +505,7 @@ Organize a new adapter under `responses_api_agents/<harness>/`. The adapter's `s
 | `sandbox.py` | A harness-specific session state class that composes `SandboxSession`. It installs the runtime at seed, stages input in `stage_activation()`, collects artifacts, and holds harness-specific state and diagnostics. |
 | `sandbox_runner.py` | Reads the staged input, invokes the harness SDK or CLI, writes native output and optional process diagnostics, and keeps partial output where the harness supports it. Handles `SIGTERM` by stopping the harness and writing that partial output before it exits, because the supervisor sends `SIGTERM` at the deadline and on close. |
 | `install_<harness>_runtime.sh` or an existing harness-specific installer | Installs the pinned harness and its private dependencies, then checks that they run. Keep installation out of the activation path. |
+| `requirements.txt` | The adapter's isolated environment: `-e nemo-gym[dev,sandbox] @ ../../` plus packages that run on the Agent Server, such as a framework or SDK. Without the `sandbox` extra, an SDK-backed provider such as OpenSandbox cannot import its SDK, and the first sandbox session fails. |
 | `tests/` | Host dispatch, session setup, request semantics, output parsing, installation, and lifecycle regressions. |
 
 The shared modules have separate responsibilities. All of them run on the Agent Server, except `process_supervisor.py`, which is uploaded into the sandbox. Provider APIs and general file transfer stay in `nemo_gym/sandbox/`.
@@ -509,6 +516,7 @@ The shared modules have separate responsibilities. All of them run on the Agent 
 | `agent_utils/supervisor_client.py` | Builds the launch and stop shell commands, defines control-file names and timeout budgets, validates termination receipts, and retires session directories safely. |
 | `agent_utils/process_supervisor.py` | Runs inside the Linux sandbox using only the standard library. It enforces the harness deadline, stops and reaps the harness process group, and writes the termination receipt. The sandbox does not need a Gym installation. |
 | `agent_utils/uv_bootstrap.py` | `uv_for_sandbox()` chooses the `uv` binary to upload for sandboxed Python runtime installation. It reuses a compatible host binary or downloads the static musl build for the detected platform. If the platform probe fails, it warns and falls back to the host binary without confirming compatibility. Hermes uses it. |
+| `agent_utils/task_timeout.py` | `resolve_agent_timeout(metadata, ceiling=...)` returns the harness time budget: a task's positive `metadata.agent_timeout_sec`, which Harbor task rows carry, capped by the configured timeout. A missing or invalid value keeps the configured timeout. Hermes, Pi, Codex, OpenCode, and OpenClaw use it. |
 | `sandbox/utils.py` | `upload_text()` and `read_text()` transfer UTF-8 text through `AsyncSandbox.upload()` and `download()`. Use those underlying APIs directly for binary files. |
 
 In the following diagram, dashed boxes are planned helpers that do not exist yet. Edges inside the Agent Server are Python calls unless labeled otherwise. Edges between processes are labeled with their protocol: HTTP/JSON, provider transport, subprocess and signals, or file I/O. A request without an agent session takes the host path.
@@ -622,15 +630,17 @@ except BaseException as error:
 return state
 ```
 
-**3. Run one activation.** In the session branch of `responses()`, bind the request to a single shared task as described in [the session rules](#agent-server-and-environment-server). The task calls `execute()`:
+**3. Run one activation.** In `responses()`, `self._agent_session_id_from_request(request)` returns the session ID from the cookie, or `None` for a sessionless host call. In the session branch, load the state with `self._require_agent_session(session_id)`, which returns HTTP 409 for an unknown, closing, or closed session. Check the rollout path against `state.request.episode_id.capture_key`, and bind the request to a single shared task as described in [the session rules](#agent-server-and-environment-server). That task resolves the time budget from the request metadata and calls `execute()` under the adapter's `concurrency` limit:
 
 ```python
-raw = await state.session.execute(
-    stage_activation=lambda: state.stage_activation(payload),
-    collect=state.collect,
-    timeout=self.config.timeout,
-    close_timeout=self.config.session_close_timeout_seconds,
-)
+timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
+async with self.sem:  # asyncio.Semaphore(self.config.concurrency)
+    raw = await state.session.execute(
+        stage_activation=lambda: state.stage_activation(payload),
+        collect=state.collect,
+        timeout=timeout,
+        close_timeout=self.config.session_close_timeout_seconds,
+    )
 ```
 
 `execute()` uploads `process_supervisor.py` into `session_dir` after `stage_activation` returns, so adapters do not upload it themselves. It then launches the harness under the supervisor, confirms harness termination, collects artifacts, and releases the provider exec. Captured artifacts remain in `session.artifacts` even when execution raises. If the supervisor writes a final negative receipt, `execute()` raises `HarnessTerminationError` and does not capture artifacts. A nonzero harness exit code does not raise by itself, because the output can still be useful. Convert artifacts into a response and observations in the adapter.
@@ -673,7 +683,7 @@ All control files live under `session_dir`, and their names are defined in `supe
 | `cleanup.json` | The supervisor records here whether the harness process group terminated. If a stop wins the launch claim, the stop shell writes the same receipt shape with `return_code: null` and `timed_out: false`. |
 | `output.log` | The launch shell redirects supervisor and harness diagnostics here. Task output is a separate, adapter-owned artifact. |
 
-When you migrate an adapter from an earlier `runner.py` or `sandbox/session.py` implementation, update the imports, hook arguments, control-file assumptions, test doubles, and tests together. These modules are imported at startup, even for host calls. Renamed helpers include `supervisor_command()`, now `supervised_launch_command()`, and `confirm_runner_cleanup()`, now `stop_and_confirm_cleanup()`.
+To migrate an adapter that launches the process supervisor itself, such as `hermes_sandboxed_agent`, move launch, termination, collection, and release into `SandboxSession`. Adapters written before [#3961](https://github.com/NVIDIA-NeMo/Gym/pull/3961) also import `process_supervisor` from `nemo_gym.sandbox`, which #3961 moved to `nemo_gym.agent_utils`. Update the imports, hook arguments, control-file assumptions, test doubles, and tests together. The adapter imports these modules at startup, so a stale import also breaks host calls.
 
 ## Prepare the runtime during session setup
 
@@ -731,7 +741,7 @@ For training, enable `token_id_capture` on an adapter whose responses carry no t
 
 ### Map configuration and request fields explicitly
 
-Handle each configuration and request field in one of three ways: apply it, reject it with a clear error, or document that the adapter ignores it by design. Never drop a field silently. For example, Pi rejects request fields that it does not support with HTTP 422, and Codex rejects `max_output_tokens`, `temperature`, `top_p`, and reasoning controls, because it cannot enforce them for a custom Gym provider.
+Handle each configuration and request field in one of three ways: apply it, reject it with a clear error, or document that the adapter ignores it by design. Never drop a field silently. For example, Pi rejects request fields that it does not support with HTTP 422, except `metadata.agent_timeout_sec`, which it applies with `resolve_agent_timeout()`. Codex rejects `max_output_tokens`, `temperature`, `top_p`, and reasoning controls, because it cannot enforce them for a custom Gym provider.
 
 Read only the settings that the harness actually supports. Do not forward a value from another part of the Gym configuration, such as a step limit, unless the harness has an equivalent setting with the same meaning.
 
@@ -756,7 +766,7 @@ Preserve the model's HTTP status and error bodies, so that context-limit handlin
 | Harness termination not confirmed | Fail the activation and skip verification. The sandbox owner tears the sandbox down. |
 | Verification completed | Report the score, including valid zeros. |
 | Verification missing or inconclusive | Report the missing measurement separately from scored attempts. |
-| Verification infrastructure failure | Raise, or mask the sample with `mask_sample: true`. Do not report it as a reward of 0, and do not cache it as the session's verification result. Terminal Bench 2.1 and SWE-bench Pro do not follow this yet: they return a reward of 0 with `evaluation_completed: false`, and Terminal Bench 2.1 caches that result. Do not copy that behavior into a new Resources Server. |
+| Verification infrastructure failure | Raise, or mask the sample with `mask_sample: true`. Do not report it as a reward of 0, and do not cache it as the session's verification result. Terminal Bench 2.1 and SWE-bench Pro do not follow this yet. When verification cannot run, both return a reward of 0 with `evaluation_completed: false`, and Terminal Bench 2.1 caches that result. When SWE-bench Pro cannot extract the patch from the task sandbox, it grades an empty patch and returns a reward of 0 with `evaluation_completed: true` and the extraction failure in `error`. Do not copy that behavior into a new Resources Server. |
 
 Local compatibility paths can have a different evidence contract. For example, [Hermes's local `/run`](https://github.com/NVIDIA-NeMo/Gym/blob/77509af61efe53e6bb01244209e2a6e9c9e8a403/responses_api_agents/hermes_agent/README.md#local-compatibility) keeps terminal provider failures through verification. It then returns `mask_sample: true` and `failure_kind: agent_request_failed`, even if the verifier awards a positive reward. These failed rollouts are excluded from scores. Hermes agent sessions keep their retryable failure path.
 
