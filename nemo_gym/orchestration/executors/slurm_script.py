@@ -274,9 +274,7 @@ def _build_vllm_single_instance_multi_node_command(service: VllmServiceConfig, t
 # mode") and exits before loading anything. The flag is legitimate on the head node and reaches us
 # through a service's own extra_args, so it is stripped from the worker command rather than
 # rejected: Gym decides which nodes run headless, so Gym keeps their command valid.
-# `--otlp-traces-endpoint` goes the same way: request spans come from the API server on the head
-# node, and a headless worker given the flag would only try to reach a collector that is not on
-# its node.
+# `--otlp-traces-endpoint` likewise: request spans come from the head's API server, not the workers.
 _HEADLESS_INCOMPATIBLE_FLAG = re.compile(r"\s--(?:api-server-count|otlp-traces-endpoint)(?:[= ]\S+)?")
 
 
