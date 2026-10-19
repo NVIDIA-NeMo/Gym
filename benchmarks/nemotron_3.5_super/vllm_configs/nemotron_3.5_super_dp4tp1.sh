@@ -90,7 +90,6 @@ VLLM_PREFILL_ARGS=(
         }
     }'
     --max-cudagraph-capture-size 1200
-    --kv-cache-memory-bytes 54G
     --max-num-batched-tokens 16960
     --max-num-seqs 1024
 )
