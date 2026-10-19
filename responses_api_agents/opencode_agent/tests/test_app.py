@@ -803,3 +803,23 @@ def test_gym_provider_preserves_interleaved_override(override: dict, expected: d
     with patch.object(agent, "_resolve_model_base_url", return_value="http://model/v1"):
         config = agent._build_opencode_config("1-2")
     assert config["provider"]["nemo"]["models"]["policy"]["interleaved"] == expected
+
+
+@pytest.mark.parametrize("budget,expected", [(None, 1800), ("12.5", 12.5), ("3600", 1800), ("invalid", 1800)])
+async def test_task_timeout_reaches_local_subprocess_wait(tmp_path: Path, budget: str | None, expected: float) -> None:
+    agent = _make_agent(timeout=1800, workspace_root=str(tmp_path))
+    body = NeMoGymResponseCreateParamsNonStreaming(
+        input="task", metadata=None if budget is None else {"agent_timeout_sec": budget}
+    )
+    process = MagicMock(returncode=0)
+    process.communicate = AsyncMock(return_value=(b"", b""))
+    module = "responses_api_agents.opencode_agent.app"
+    with (
+        patch(f"{module}.asyncio.create_subprocess_exec", AsyncMock(return_value=process)),
+        patch(f"{module}.asyncio.wait_for", wraps=asyncio.wait_for) as wait,
+    ):
+        episode = await agent._create_episode(body, collect_observations=False)
+    wait.assert_awaited_once()
+    assert wait.await_args.kwargs["timeout"] == expected
+    assert episode.response.metadata == {"agent_timeout_sec": str(float(expected))}
+    assert agent.config.timeout == 1800

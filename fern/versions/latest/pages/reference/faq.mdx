@@ -38,7 +38,7 @@ You will only need to manually input the `{dataset_name}` portion of the above w
 
 To upload to Hugging Face, use the below command:
 ```bash
-resource_config_path="resources_servers/multineedle/configs/multineedle.yaml"
+resource_config_path="resources_servers/example_multi_step/configs/example_multi_step.yaml"
 gym dataset upload \
     --name {your dataset name} \
     --input data/multineedle_benchmark.jsonl \
@@ -50,7 +50,7 @@ Because of the required dataset nomenclature, the resources server config path i
 By default, the `split` parameter for uploading is set to `train`, which will run a check on the required fields `{"responses_create_params"}`. Specifying `validation` or `test` bypasses this check:
 
 ```bash
-resource_config_path="resources_servers/multineedle/configs/multineedle.yaml"
+resource_config_path="resources_servers/example_multi_step/configs/example_multi_step.yaml"
 gym dataset migrate \
     --name {your dataset name} \
     --input data/multineedle_benchmark_validation.jsonl \
@@ -88,7 +88,7 @@ The commit_message and commit_description parameters work for both direct pushes
 ## Deleting Datasets from GitLab
 You can optionally pass a `+delete_from_gitlab=true` flag to the above command, which will delete the model and all of its artifacts from GitLab. By default, this is set to `False`.
 ```bash
-resource_config_path="resources_servers/multineedle/configs/multineedle.yaml"
+resource_config_path="resources_servers/example_multi_step/configs/example_multi_step.yaml"
 gym dataset upload \
     +dataset_name={your dataset name} \
     +input_jsonl_fpath=data/multineedle_benchmark.jsonl \
@@ -105,7 +105,7 @@ There will be a confirmation dialog to confirm the deletion:
 You can also run the below command which does the same thing without the need for a `+delete_from_gitlab` flag:
 
 ```bash
-resource_config_path="resources_servers/multineedle/configs/multineedle.yaml"
+resource_config_path="resources_servers/example_multi_step/configs/example_multi_step.yaml"
 gym dataset migrate \
     --name {your dataset name} \
     --input data/multineedle_benchmark.jsonl \
@@ -359,7 +359,7 @@ pip install "nemo-gym[ray]"
 
 A server that declares `ray_enabled = True` requests the extra in its own dependency file, for example `-e nemo-gym[dev,ray] @ ../../` in `requirements.txt`, so its environment gets Ray. Gym pins the server's Ray to the exact version installed where `gym` runs.
 
-If a configured server declares `ray_enabled = True` and Ray isn't installed where `gym` runs, `gym env start` stops before launching any server and names the servers that need it. Ray is still a core dependency today; the extra lets environments request it explicitly ahead of making it optional.
+If a configured server declares `ray_enabled = True` and Ray isn't installed where `gym` runs, `gym env start` stops before launching any server and names the servers that need it. A plain `pip install nemo-gym` doesn't include Ray.
 
 ### Ray Configuration
 You can also specify a custom Ray cluster address in your config:

@@ -161,6 +161,10 @@ class MalformedConfigPathsError(ConfigError, ValueError):
     """`config_paths` was not a list of paths (e.g. a scalar string was passed)."""
 
 
+class HeadServerConfigMalformedError(ConfigError, ValueError):
+    """`head_server` is not a mapping, or a field has the wrong type (e.g. a non-integer `port` from a `++head_server.port=` override)."""
+
+
 class NoServerInstancesError(ConfigError, ValueError):
     """A run was requested but the merged config defines no server instances to start."""
 
@@ -487,6 +491,7 @@ class DatasetConfig(BaseModel):
             Literal["MIT"],
             Literal["Creative Commons Attribution 4.0 International"],
             Literal["Creative Commons Attribution-ShareAlike 4.0 International"],
+            Literal["CC-BY-SA-4.0 AND LicenseRef-OpenMDW-1.1"],
             Literal["CC BY-SA 4.0"],
             Literal["CC BY-NC 3.0"],
             Literal["NVIDIA Internal Use Only, Do Not Distribute"],
@@ -907,6 +912,8 @@ class MLFlowConfig(ExporterConfig):
     mlflow_tracking_token: Optional[str] = None
     mlflow_experiment_name: Optional[str] = None
     mlflow_run_name: Optional[str] = None
+    mlflow_run_description: Optional[str] = None
+    mlflow_run_tags: Dict[str, str] = Field(default_factory=dict)
 
     @property
     def is_available(self) -> bool:

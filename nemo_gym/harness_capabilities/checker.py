@@ -10,6 +10,8 @@ from dataclasses import dataclass
 
 from jsonschema import Draft202012Validator
 
+from nemo_gym.rollout_observability import NG_AGENT_OBSERVATIONS_KEY
+
 from .checks import SchemaCheck, SemanticCheck
 from .results import Results, gate_passes
 
@@ -144,7 +146,7 @@ class Inspector:
         self.invocations = _objects(self.trajectory.get("invocations"))
         self.turns = _objects(self.trajectory.get("turns"))
         self.tools = _objects(self.trajectory.get("tool_calls"))
-        self.observations = _objects(_mapping(self.record.get("ng_agent_observations")).get("records"))
+        self.observations = _objects(_mapping(self.record.get(NG_AGENT_OBSERVATIONS_KEY)).get("records"))
 
     def model_calls(self) -> None:
         self.results.run(

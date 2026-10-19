@@ -1001,3 +1001,27 @@ class TestConfigYaml:
         assert inner["model"] == "${policy_model_name}"
         assert inner["sandbox_install_timeout_seconds"] == 600
         assert inner["session_close_timeout_seconds"] == 60
+
+
+@pytest.mark.parametrize("budget,expected", [(None, 1800), ("12.5", 12.5), ("3600", 1800), ("invalid", 1800)])
+async def test_task_timeout_reaches_local_subprocess_wait(tmp_path: Path, budget: str | None, expected: float) -> None:
+    agent = _make_agent(timeout=1800, workspace_root=str(tmp_path))
+    body = NeMoGymResponseCreateParamsNonStreaming(
+        input="task", metadata=None if budget is None else {"agent_timeout_sec": budget}
+    )
+    process = MagicMock(returncode=0)
+    process.communicate = AsyncMock(return_value=(b"", b""))
+    work_dir = tmp_path / "run"
+    config_path = work_dir / ".openclaw-home" / ".openclaw" / "openclaw.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text("{}")
+    module = "responses_api_agents.openclaw_agent.app"
+    with (
+        patch(f"{module}.asyncio.create_subprocess_exec", AsyncMock(return_value=process)),
+        patch(f"{module}.asyncio.wait_for", wraps=asyncio.wait_for) as wait,
+        patch.object(agent, "_workspace_root", return_value=work_dir),
+    ):
+        response = await agent._create_response(body)
+    assert [call.kwargs["timeout"] for call in wait.await_args_list] == [agent.config.setup_timeout, expected]
+    assert response.metadata == {"agent_timeout_sec": str(float(expected))}
+    assert agent.config.timeout == 1800

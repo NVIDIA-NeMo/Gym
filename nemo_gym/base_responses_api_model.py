@@ -35,6 +35,7 @@ import os
 import re
 import time
 from abc import abstractmethod
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator, ClassVar, Iterable, Literal, Mapping, NotRequired, Optional, TypedDict
@@ -46,10 +47,28 @@ from aiohttp import ClientResponseError
 from fastapi import Body, FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field, ValidationError, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, ValidationError, model_validator
 
+from nemo_gym._checkpoint.control import install_control_routes, install_participant
+from nemo_gym._checkpoint.model import (
+    CheckpointableLedger,
+    PolicyAdmissionMiddleware,
+    PolicyModelParticipant,
+    attach_capture_context,
+    generation_cut_requester,
+    ledger_removal_refusal,
+    reject_ungated_ledger_writers,
+    worker_control_root,
+)
+from nemo_gym._checkpoint.model_workers import (
+    COORDINATOR_SOCKET_ENV,
+    PolicyCoordinator,
+    PolicyWorkerLink,
+    coordinator_socket_path,
+)
+from nemo_gym._checkpoint.settings import checkpoint_settings
 from nemo_gym.anthropic_converter import AnthropicConverter
-from nemo_gym.chat_streaming import sanitize_streaming_chat_body, synthesize_chat_completion_sse
+from nemo_gym.chat_streaming import SSE_KEEPALIVE, sanitize_streaming_chat_body, synthesize_chat_completion_sse
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT, ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
@@ -65,8 +84,9 @@ from nemo_gym.responses_streaming import (
     synthesize_responses_sse,
     validate_streaming_responses_params,
 )
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body, rollout_context
+from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body, rollout_context, scope_with_routed_path
 from nemo_gym.rollout_observability import (
+    NG_AGENT_OBSERVATIONS_KEY,
     AgentObservationBundle,
     ObservationGap,
     TrajectoryRecord,
@@ -77,6 +97,7 @@ from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
     BaseServer,
     SimpleServer,
+    is_nemo_gym_fastapi_worker,
 )
 from nemo_gym.telemetry.endpoints import traced_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
@@ -105,7 +126,55 @@ from nemo_gym.token_id_capture.store import make_token_store
 logger = logging.getLogger(__name__)
 
 _CHAT_KEEPALIVE_SECONDS = 15.0
-_SSE_KEEPALIVE = b": keep-alive\n\n"
+_SSE_KEEPALIVE = SSE_KEEPALIVE
+
+# A model server sets this attribute on an engine refusal it propagates on purpose (a length
+# refusal under its propagation setting). Its value is the envelope's string code:
+# ``CONTEXT_LENGTH_EXCEEDED_ERROR_CODE`` when the engine's message names the context window,
+# ``None`` for a refusal of the request's own output-token parameter. The mark is the attribute's
+# presence (``is_propagated_refusal``), so a ``None`` code stays distinct from an unmarked error.
+# The shared error handler lets a marked error through to the server's own middleware, which
+# answers with OpenAI's error envelope, and the chat-SSE error event reports it with the same
+# message and code.
+PROPAGATED_REFUSAL_CODE_ATTRIBUTE = "nemo_gym_propagated_refusal_code"
+# OpenAI's error code for a request that exceeds the model's context window; OpenAI-compatible
+# harnesses (Codex, OpenCode) compact their history and retry when they see it.
+CONTEXT_LENGTH_EXCEEDED_ERROR_CODE = "context_length_exceeded"
+
+
+def is_propagated_refusal(error: BaseException) -> bool:
+    """Whether a model server marked ``error`` as a refusal it propagates on purpose."""
+    return hasattr(error, PROPAGATED_REFUSAL_CODE_ATTRIBUTE)
+
+
+def context_overflow_error_fields(error: BaseException) -> tuple[str, str | None, str | None]:
+    """Return ``(message, code, param)`` for a marked engine refusal.
+
+    The engine's error body travels on the exception as ``response_content`` (attached by
+    ``nemo_gym.server_utils.raise_for_status``). vLLM 0.10.1 and later format it as
+    ``{"error": {"message": ..., "type": ..., "param": ..., "code": 400}}``; older engines used a
+    flat object with a top-level ``message``. The message is the engine's own sentence from
+    either shape, verbatim; any other body is returned as raw text so no information is lost.
+    The param is the engine's ``param`` when its body names one. The code is whatever the server
+    stored under ``PROPAGATED_REFUSAL_CODE_ATTRIBUTE`` when it marked the error.
+    """
+    body = getattr(error, "response_content", b"") or b""
+    text = body.decode(errors="replace") if isinstance(body, (bytes, bytearray)) else str(body)
+    message, param = text, None
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        parsed = None
+    if isinstance(parsed, dict):
+        nested = parsed.get("error")
+        if isinstance(nested, dict) and isinstance(nested.get("message"), str):
+            message = nested["message"]
+            param = nested.get("param") if isinstance(nested.get("param"), str) else None
+        elif isinstance(parsed.get("message"), str):
+            message = parsed["message"]
+            param = parsed.get("param") if isinstance(parsed.get("param"), str) else None
+    code = getattr(error, PROPAGATED_REFUSAL_CODE_ATTRIBUTE, CONTEXT_LENGTH_EXCEEDED_ERROR_CODE)
+    return message, code, param
 
 
 # Stateless; shared by every model server's default /v1/messages handler.
@@ -230,6 +299,13 @@ class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
             "so a backend with free-form tool support keeps them."
         ),
     )
+    # Only the policy instance drains during a partial-rollout checkpoint.
+    # Judge and simulator instances keep serving so accepted tool and verifier calls can finish.
+    checkpoint_policy: bool = False
+    # Ask inference workers to stage the prefix of each in-flight call at a checkpoint,
+    # so a restored call continues it instead of regenerating.
+    # Requires external token staging on workers that implement the generation-cut endpoint.
+    checkpoint_generation_cuts: bool = False
 
 
 class BaseResponsesAPIModel(BaseServer):
@@ -240,6 +316,8 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
     # Subclasses can declare successful metadata or health routes here.
     # Unknown successful routes fail closed during training-token capture.
     non_generating_model_routes: ClassVar[frozenset[tuple[str, str]]] = frozenset()
+    # Main process of a multi-worker policy server under checkpointing: coordinates the workers.
+    _policy_coordinator: Optional[PolicyCoordinator] = PrivateAttr(default=None)
 
     async def _finalize_served_response(self, response: Any) -> None:
         """Finalize capture after conversion to the response returned to the client."""
@@ -278,7 +356,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
         self.setup_session_middleware(app)
         capture_config = ModelCallCaptureConfig.model_validate(self.server_client.global_config_dict)
-        install_model_call_capture(
+        capture_ledger = install_model_call_capture(
             app,
             capture_config,
             model_server_name=self.config.name,
@@ -310,7 +388,89 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             traced_endpoint(GymSpanGroup.MODEL_CALL, "gym.model.messages", self.messages, model_attributes)
         )
 
+        self.setup_policy_checkpoint(app, capture_ledger)
         return app
+
+    def setup_policy_checkpoint(self, app: FastAPI, capture_ledger: CaptureLedger | None) -> None:
+        global_config_dict = getattr(self.server_client, "global_config_dict", None)
+        settings = checkpoint_settings(global_config_dict)
+        if settings is not None and capture_ledger is not None:
+            # Every model server sharing the run's capture ledger checks, so one outside the gate refuses to start.
+            reject_ungated_ledger_writers(global_config_dict)
+        if settings is None or not self.config.checkpoint_policy:
+            return
+        capture_settings = token_id_capture_config(global_config_dict)
+        if capture_settings is not None and capture_settings.enabled and capture_ledger is None:
+            raise ValueError(
+                "checkpoint_policy with token_id_capture requires external_staging: only the token-free "
+                "capture ledger is checkpointed, and the training framework owns the staged tokens"
+            )
+        if capture_ledger is not None and not isinstance(capture_ledger, CheckpointableLedger):
+            raise ValueError(f"checkpoint_policy requires a checkpointable capture ledger, got {type(capture_ledger)}")
+        cut_requester = None
+        if self.config.checkpoint_generation_cuts:
+            if capture_ledger is None:
+                raise ValueError("checkpoint_generation_cuts requires token_id_capture with external_staging")
+            cut_requester = generation_cut_requester(
+                capture_settings.token_id_capture.resolve_control_auth_token(),
+                control_root=self.generation_cut_control_root,
+            )
+        num_workers = self.config.num_workers or 1
+        if num_workers == 1:
+            participant = PolicyModelParticipant(
+                capture_ledger, server_name=self.config.name, cut_requester=cut_requester
+            )
+            install_participant(
+                app,
+                participant,
+                auth_token=settings.control_auth_token,
+                lease_grace_seconds=settings.lease_grace_seconds,
+                instance_name=self.config.name,
+            )
+            gate = participant.gate
+        elif not is_nemo_gym_fastapi_worker():
+            # The main process of a multi-worker server serves no requests.
+            # It coordinates the workers uvicorn is about to spawn;
+            # they inherit the socket path through the environment.
+            socket_path = coordinator_socket_path()
+            self._policy_coordinator = PolicyCoordinator(
+                capture_ledger,
+                expected_workers=num_workers,
+                instance_name=self.config.name,
+                lease_grace_seconds=settings.lease_grace_seconds,
+                socket_path=socket_path,
+            )
+            self._policy_coordinator.start_in_background()
+            os.environ[COORDINATOR_SOCKET_ENV] = socket_path
+            return
+        else:
+            link = PolicyWorkerLink(
+                socket_path=os.environ[COORDINATOR_SOCKET_ENV],
+                server_name=self.config.name,
+                cut_requester=cut_requester,
+                ledger=capture_ledger,
+            )
+            install_control_routes(app, link.dispatch, auth_token=settings.control_auth_token)
+            original_lifespan = app.router.lifespan_context
+
+            @asynccontextmanager
+            async def lifespan_with_coordinator(application: FastAPI) -> AsyncIterator[Any]:
+                await link.connect()
+                try:
+                    async with original_lifespan(application) as state:
+                        yield state
+                finally:
+                    await link.disconnect()
+
+            app.router.lifespan_context = lifespan_with_coordinator
+            gate = link.gate
+        # Outermost of this app's middleware: a refused call must not register capture intent.
+        app.add_middleware(PolicyAdmissionMiddleware, gate=gate)
+        app.state.nemo_gym_policy_gate = gate
+
+    def generation_cut_control_root(self, base_url: str) -> str:
+        """The URL root where the inference worker serving ``base_url`` takes generation cuts."""
+        return worker_control_root(base_url)
 
     @abstractmethod
     async def chat_completions(
@@ -441,6 +601,20 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
                 try:
                     completion = await pending
                 except Exception as exc:
+                    if is_propagated_refusal(exc):
+                        # Headers are committed, so the refusal the server chose to propagate is
+                        # reported as an SSE error carrying the same OpenAI envelope the HTTP path
+                        # answers with; a traceback adds nothing to a refusal.
+                        message, code, param = context_overflow_error_fields(exc)
+                        logger.warning(
+                            "chat_completions() refused a streaming request after the keepalive with %s (%s): %s",
+                            getattr(exc, "status", 400),
+                            code,
+                            message,
+                        )
+                        error = {"message": message, "type": "invalid_request_error", "param": param, "code": code}
+                        yield f"event: error\ndata: {json.dumps({'error': error})}\n\n"
+                        return
                     logger.exception("chat_completions() failed after streaming headers were sent")
                     status = getattr(exc, "status_code", None) or getattr(exc, "status", None) or 500
                     detail = exc.detail if isinstance(exc, HTTPException) else "Model request failed"
@@ -592,6 +766,15 @@ class ModelCallCaptureConfig(BaseModel):
         return self
 
 
+_PENDING_SUFFIX = ".capture.pending"
+
+
+def _pending_token(model_call_id: str) -> str:
+    """A filename-safe, dot-free token; the dot is the separator `has_pending` globs on."""
+    token = "".join(char if (char.isascii() and (char.isalnum() or char in "_-")) else "_" for char in model_call_id)
+    return token or "unknown"
+
+
 def _validate_rollout_id(rollout_id: str) -> str:
     if not rollout_id or any(not (char.isascii() and (char.isalnum() or char in "._-")) for char in rollout_id):
         raise ValueError(f"Invalid rollout id: {rollout_id!r}")
@@ -620,6 +803,35 @@ class CaptureStore:
 
     def is_incomplete(self, rollout_id: str) -> bool:
         return self.incomplete_path_for(rollout_id).exists()
+
+    def pending_path_for(self, rollout_id: str, model_call_id: str) -> Path:
+        return self._root / f"{_validate_rollout_id(rollout_id)}.{_pending_token(model_call_id)}{_PENDING_SUFFIX}"
+
+    def mark_pending(self, rollout_id: str, model_call_id: str) -> None:
+        """Claim a write before it is queued, so a reader can tell 'not yet' from 'never'."""
+        try:
+            self.pending_path_for(rollout_id, model_call_id).touch(exist_ok=True)
+        except OSError:
+            logger.warning("Could not mark model-call capture pending for rollout %s.", rollout_id, exc_info=True)
+
+    def clear_pending(self, rollout_id: str, model_call_id: str) -> None:
+        try:
+            self.pending_path_for(rollout_id, model_call_id).unlink(missing_ok=True)
+        except OSError:
+            logger.warning("Could not clear model-call capture pending for rollout %s.", rollout_id, exc_info=True)
+
+    def has_pending(self, rollout_id: str) -> bool:
+        """True while any claimed write for this rollout has not finished.
+
+        The literal dot after the rollout id keeps `1-0` from matching `1-0-retry1`.
+        """
+        pattern = f"{_validate_rollout_id(rollout_id)}.*{_PENDING_SUFFIX}"
+        return any(self._root.glob(pattern))
+
+    def clear_all_pending(self, rollout_id: str) -> None:
+        pattern = f"{_validate_rollout_id(rollout_id)}.*{_PENDING_SUFFIX}"
+        for marker in self._root.glob(pattern):
+            marker.unlink(missing_ok=True)
 
     def record(self, rollout_id: str, exchange: dict[str, Any]) -> None:
         """Append one exchange and fsync (durable across a killed box).
@@ -1435,6 +1647,9 @@ async def _fail_uncommitted_external_call(context: CaptureContext | None) -> Non
         or not context.external_staging
         or context.capture_admission is None
         or context.committed
+        # A checkpoint gate owns a deferred row: it publishes it when the response starts,
+        # and a call whose response never starts made no answer to record, so it is not poisoned.
+        or context.deferred_commit is not None
         or context.lineage_store is None
     ):
         return
@@ -1527,7 +1742,7 @@ class _CaptureMiddleware:
             token_capture_requested = prefix_match.group("token_capture") is not None
             capture_prefix = path[: prefix_match.start("rest")]
             path = prefix_match.group("rest")
-            scope = {**scope, "path": path, "raw_path": path.encode("utf-8")}
+            scope = scope_with_routed_path(scope, path)
 
         method = str(scope.get("method") or "").upper()
         dialect = _OBSERVED_PATHS.get(path)
@@ -1632,6 +1847,7 @@ class _CaptureMiddleware:
                 admitted_at=time.time(),
             )
             sink_token = set_token_sink(capture_context)
+            attach_capture_context(capture_context)
 
         # Training-only capture has no evaluation record.
         # Persist capture failure before forwarding a terminal event or finishing a JSON response.
@@ -1709,6 +1925,10 @@ class _CaptureMiddleware:
             for message in deferred_response_messages:
                 await send(message)
 
+        # Claimed before the call is forwarded, for its whole lifetime. A claim taken only at
+        # write time does not exist while the call is in flight, so a reader can look, see nothing
+        # outstanding, and snapshot the rollout before the row lands.
+        self._store.mark_pending(rollout_id, model_call_id)
         try:
             with rollout_context(rollout_id):
                 await self._app(scope, _receive, _send)
@@ -1744,6 +1964,7 @@ class _CaptureMiddleware:
             except Exception:
                 logger.warning("Model-call capture finalization failed.", exc_info=True)
             finally:
+                self._store.clear_pending(rollout_id, model_call_id)
                 await _fail_uncommitted_external_call(capture_context)
                 await _flush_deferred_response()
             raise
@@ -1793,25 +2014,28 @@ class _CaptureMiddleware:
                 if body_bytes and (streaming or response_body is None)
                 else None
             )
-            _record(
-                store,
-                dialect,
-                model_server_name,
-                request_bytes,
-                client_session_id=client_session_id,
-                client_assistant_message_id=client_assistant_message_id,
-                rollout_id=rollout_id,
-                model_call_id=model_call_id,
-                started_at=started_at,
-                completed_at=completed_at,
-                response_body=response_body,
-                status_code=status,
-                error_category=error_category,
-                latency_ms=latency_ms,
-                ttft_ms=ttft_ms,
-                response_raw=response_raw,
-                execution=request_state.get("nemo_gym_model_execution"),
-            )
+            try:
+                _record(
+                    store,
+                    dialect,
+                    model_server_name,
+                    request_bytes,
+                    client_session_id=client_session_id,
+                    client_assistant_message_id=client_assistant_message_id,
+                    rollout_id=rollout_id,
+                    model_call_id=model_call_id,
+                    started_at=started_at,
+                    completed_at=completed_at,
+                    response_body=response_body,
+                    status_code=status,
+                    error_category=error_category,
+                    latency_ms=latency_ms,
+                    ttft_ms=ttft_ms,
+                    response_raw=response_raw,
+                    execution=request_state.get("nemo_gym_model_execution"),
+                )
+            finally:
+                store.clear_pending(rollout_id, model_call_id)
 
         try:
             # Shielded: cancellation here strands the queued write and the row is
@@ -1836,8 +2060,8 @@ def install_model_call_capture(
     global_config_dict: Any = None,
     num_workers: int | None = None,
     non_generating_requests: frozenset[tuple[str, str]] = frozenset(),
-) -> None:
-    """Install model-call capture middleware.
+) -> CaptureLedger | None:
+    """Install model-call capture middleware and return the capture ledger when staging is external.
 
     Always strip ``/ng-rollout/<id>/...`` before routing.
     Evaluation capture records requests and responses for that path.
@@ -1890,6 +2114,7 @@ def install_model_call_capture(
             app,
             capture_ledger,
             auth_token=capture_settings.token_id_capture.resolve_control_auth_token(),
+            refuse_removal=lambda: ledger_removal_refusal(app),
         )
 
     owned_endpoints = [
@@ -1927,6 +2152,7 @@ def install_model_call_capture(
         token_capture_enabled=capture_settings.enabled if capture_settings is not None else False,
         non_generating_requests=non_generating_requests,
     )
+    return capture_ledger if external_staging else None
 
 
 # --- Run-level capture helpers (rollout-collection side) ---
@@ -1946,12 +2172,53 @@ def observability_enabled_from_config(global_config_dict: Any) -> bool:
     return ModelCallCaptureConfig.model_validate(global_config_dict).observability_enabled
 
 
+# How long a reader waits for writes already claimed by the model server to land. A claimed
+# write is one append + fsync, so this only ever elapses when the writer died holding a claim.
+CAPTURE_DRAIN_TIMEOUT_S = 10.0
+_CAPTURE_DRAIN_POLL_S = 0.05
+
+
 def _store_for_rollout(rollout_id: str, capture_dirs: list[Path]) -> Optional[CaptureStore]:
     for directory in capture_dirs:
         store = CaptureStore(directory)
-        if store.path_for(rollout_id).exists() or store.is_incomplete(rollout_id):
+        if store.path_for(rollout_id).exists() or store.is_incomplete(rollout_id) or store.has_pending(rollout_id):
             return store
     return None
+
+
+async def await_model_call_capture_quiescence(
+    rollout_id: str,
+    capture_dirs: list[Path],
+    *,
+    timeout_s: float = CAPTURE_DRAIN_TIMEOUT_S,
+    poll_s: float = _CAPTURE_DRAIN_POLL_S,
+) -> bool:
+    """Wait until no claimed capture write for this rollout is outstanding.
+
+    A cancelled model call finishes its capture write detached (see the shield in
+    ``_CaptureMiddleware``), so the row can land after the rollout record is snapshotted and be
+    missing from ``ng_model_call_capture`` while present on disk. Returns False on timeout, which
+    the merge turns into a ``model_call_capture_pending`` gap rather than a silent omission.
+    """
+    if not capture_dirs:
+        return True
+    stores = [CaptureStore(directory) for directory in capture_dirs]
+    deadline = time.monotonic() + timeout_s
+    while True:
+        try:
+            if not any(store.has_pending(rollout_id) for store in stores):
+                return True
+        except OSError:
+            logger.warning("Could not poll model-call capture claims for rollout %s.", rollout_id, exc_info=True)
+            return True
+        if time.monotonic() >= deadline:
+            logger.warning(
+                "Model-call capture for rollout %s still has claimed writes after %.1fs; snapshotting anyway.",
+                rollout_id,
+                timeout_s,
+            )
+            return False
+        await asyncio.sleep(poll_s)
 
 
 def clear_model_call_captures_for_rollouts(records: list[Any], capture_dirs: list[Path]) -> None:
@@ -1970,6 +2237,7 @@ def clear_model_call_captures_for_rollouts(records: list[Any], capture_dirs: lis
             if rollout_id:
                 store.path_for(rollout_id).unlink(missing_ok=True)
                 store.incomplete_path_for(rollout_id).unlink(missing_ok=True)
+                store.clear_all_pending(rollout_id)
 
 
 def merge_model_call_capture_into_record(
@@ -2004,6 +2272,8 @@ def merge_model_call_capture_into_record(
                         detail=f"count={invalid_count}",
                     )
                 )
+            if store.has_pending(rollout_id):
+                gaps.append(ObservationGap(code="model_call_capture_pending"))
             if store.is_incomplete(rollout_id):
                 gaps.append(ObservationGap(code="model_call_capture_incomplete"))
             elif not calls and not invalid_count:
@@ -2012,7 +2282,7 @@ def merge_model_call_capture_into_record(
             logger.warning("Could not read model-call capture for rollout %s.", rollout_id, exc_info=True)
             calls = []
             gaps.append(ObservationGap(code="model_call_capture_unreadable"))
-    observations = record.get("ng_agent_observations")
+    observations = record.get(NG_AGENT_OBSERVATIONS_KEY)
     if observations is not None:
         try:
             bundle = AgentObservationBundle.model_validate(observations)
@@ -2048,7 +2318,7 @@ def merge_model_call_capture_into_record(
                         "Could not associate assistant message calls for rollout %s.", rollout_id, exc_info=True
                     )
                     bundle.gaps.append(ObservationGap(code="assistant_message_call_join_failed"))
-            record["ng_agent_observations"] = bundle.model_dump(mode="json")
+            record[NG_AGENT_OBSERVATIONS_KEY] = bundle.model_dump(mode="json")
         except Exception:
             logger.warning("Could not join agent observations for rollout %s.", rollout_id, exc_info=True)
             gaps.append(ObservationGap(code="agent_observation_join_failed"))

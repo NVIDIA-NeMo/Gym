@@ -53,7 +53,6 @@ class WorkbenchVerifyResponse(BaseVerifyResponse):
 
 
 class WorkbenchResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: WorkbenchResourcesServerConfig
     session_id_to_tool_env: Dict[str, Any] = Field(default_factory=dict)
 

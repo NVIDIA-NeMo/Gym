@@ -76,6 +76,8 @@ jobs:
           {
             source scripts/ci/setup_dev.sh
             python -m scripts.harness_conformance.ci install --harness "$HARNESS"
+            # Agent session setup needs the installer in later steps too.
+            dirname "$(command -v uv)" >> "$GITHUB_PATH"
           } 2>&1 | tee "$RESULTS/setup.log"
           echo "$NPM_CONFIG_PREFIX/bin" >> "$GITHUB_PATH"
       - name: Validate probes, checker, and adapter
@@ -145,3 +147,35 @@ jobs:
           SELECTED_HARNESSES: ${{ needs.select.outputs.harnesses }}
           PROBE_JOB_RESULT: ${{ needs.probe.result }}
         run: python3 -m scripts.harness_conformance.checks
+
+  docs_table:
+    name: Render documentation table
+    needs: [select, probe]
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - name: Install table renderer dependencies
+        timeout-minutes: 8
+        run: source scripts/ci/setup_dev.sh
+      - name: Download and render this attempt's measurements
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          .venv/bin/python -m scripts.harness_conformance.ci_table \
+            --repo "$GITHUB_REPOSITORY" --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" --commit "$GITHUB_SHA" \
+            --output "$RUNNER_TEMP/harness-conformance-docs/table.mdx"
+      - name: Upload rendered documentation table
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: harness-conformance-docs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/harness-conformance-docs/table.mdx
+          if-no-files-found: error
+          retention-days: 14

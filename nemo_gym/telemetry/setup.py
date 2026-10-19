@@ -66,6 +66,7 @@ logger = logging.getLogger(__name__)
 #: raises on for a second call in the same process.
 _TELEMETRY_HANDLE: Optional["TelemetryHandle"] = None
 _METRICS_EXPORTING = False
+_TRACES_EXPORTING = False
 _INITIALISED = False
 #: False when ``_TELEMETRY_HANDLE`` wraps providers another library set up in this
 #: process. Shutting those down would end that library's telemetry too.
@@ -89,8 +90,8 @@ TELEMETRY_KEY_NAME = "telemetry"
 #: function that actually connects a ``telemetry:`` YAML block (or any other
 #: ``TelemetryConfig``) to these env vars via ``setdefault`` — a user does not set them by
 #: hand. ``service_name`` is handled separately because it maps to the standard unprefixed
-#: ``OTEL_SERVICE_NAME``, and the Gym-owned flags (``service_name_per_server``,
-#: ``instrument_aiohttp``) are not lens config fields.
+#: ``OTEL_SERVICE_NAME``, and the Gym-owned ``service_name_per_server`` flag is not a lens
+#: config field.
 _ENV_FIELD_MAP = {
     "enabled": f"{_OTEL_PREFIX}_ENABLED",
     "span_groups": f"{_OTEL_PREFIX}_SPAN_GROUPS",
@@ -99,14 +100,18 @@ _ENV_FIELD_MAP = {
     "logs_enabled": f"{_OTEL_PREFIX}_LOGS_ENABLED",
     "exporter": f"{_OTEL_PREFIX}_EXPORTER",
     "run_id": f"{_OTEL_PREFIX}_RUN_ID",
-    # Gym-owned flags, read back by init_telemetry / server_utils rather than by lens.
+    # Gym-owned flag, read back by init_telemetry rather than by lens.
     "service_name_per_server": f"{_OTEL_PREFIX}_SERVICE_NAME_PER_SERVER",
-    "instrument_aiohttp": f"{_OTEL_PREFIX}_INSTRUMENT_AIOHTTP",
 }
 
 #: The ``_ENV_FIELD_MAP`` fields that nemo-lens itself reads, each with a ``NEMO_LENS_<KEY>`` fallback.
 #: Exporting one of them as ``NEMO_GYM_OTEL_<KEY>`` would shadow that fallback.
 _LENS_FIELDS = frozenset({"span_groups", "traces_enabled", "metrics_enabled", "logs_enabled", "exporter", "run_id"})
+
+_EVENT_LOOP_ENV_FIELD_MAP = {
+    "event_loop_sample_interval_seconds": f"{_OTEL_PREFIX}_EVENT_LOOP_SAMPLE_INTERVAL_SECONDS",
+    "event_loop_task_count": f"{_OTEL_PREFIX}_EVENT_LOOP_TASK_COUNT",
+}
 
 _MEMORY_PROFILING_ENV_FIELD_MAP = {
     "enabled": f"{_OTEL_PREFIX}_MEMORY_PROFILING_ENABLED",
@@ -177,6 +182,20 @@ def memory_profiling_config_from_env(defaults: MemoryProfilingConfig) -> MemoryP
             "interval_seconds": os.environ.get(interval_env, defaults.interval_seconds),
         }
     )
+
+
+def event_loop_settings_from_env() -> tuple[float, bool]:
+    """Return the event-loop sample interval and whether to count tasks, from the environment the supervisor exported."""
+    defaults = TelemetryConfig()
+    interval = float(
+        os.environ.get(
+            _EVENT_LOOP_ENV_FIELD_MAP["event_loop_sample_interval_seconds"], defaults.event_loop_sample_interval_seconds
+        )
+    )
+    if interval <= 0:
+        interval = defaults.event_loop_sample_interval_seconds
+    task_count = _env_flag(_EVENT_LOOP_ENV_FIELD_MAP["event_loop_task_count"], defaults.event_loop_task_count)
+    return interval, task_count
 
 
 def telemetry_config_from_global_config(global_config_dict: Any) -> TelemetryConfig:
@@ -254,6 +273,10 @@ def configure_telemetry_env(telemetry_config: Union[TelemetryConfig, None]) -> O
         value = getattr(telemetry_config.memory_profiling, field)
         os.environ.setdefault(env_name, "1" if value is True else "0" if value is False else str(value))
 
+    for field, env_name in _EVENT_LOOP_ENV_FIELD_MAP.items():
+        value = getattr(telemetry_config, field)
+        os.environ.setdefault(env_name, "1" if value is True else "0" if value is False else str(value))
+
     for field, env_name in _OTLP_ENV_FIELD_MAP.items():
         value = getattr(telemetry_config, field, None)
         if value is not None:
@@ -278,22 +301,58 @@ def configure_telemetry_env(telemetry_config: Union[TelemetryConfig, None]) -> O
 
 
 #: Packages a Gym server process needs in order to export telemetry. `nemo-lens[sdk]`
-#: brings the providers and exporters; the two instrumentation packages back
-#: `instrument_fastapi` / `instrument_aiohttp_client`, which nemo-lens imports lazily.
+#: brings the providers and exporters; the FastAPI instrumentation package backs
+#: `instrument_fastapi`, which nemo-lens imports lazily. Outbound aiohttp calls need no
+#: instrumentation package: `server_utils.request` makes its own CLIENT span and injects
+#: `traceparent`.
 _SERVER_TELEMETRY_PACKAGES = (
     ("nemo-lens", "nemo-lens[sdk]"),
     ("opentelemetry-instrumentation-fastapi", "opentelemetry-instrumentation-fastapi"),
-    ("opentelemetry-instrumentation-aiohttp-client", "opentelemetry-instrumentation-aiohttp-client"),
 )
 
 
-def _installed_requirement(dist_name: str, requirement_name: str) -> Optional[str]:
+def _direct_reference(requirement_name: str, direct_url: dict) -> Optional[str]:
+    """PEP 508 direct reference for a PEP 610 ``direct_url.json`` record.
+
+    Covers the three shapes the record can take: a VCS checkout pinned to its commit, a
+    local directory, and an archive such as a wheel installed from a file or a URL. Each
+    keeps its ``subdirectory``. Returns None when the record has nothing reinstallable,
+    so the caller can fall back to a version pin.
+    """
+    url = direct_url.get("url")
+    if not url:
+        return None
+    vcs_info = direct_url.get("vcs_info")
+    if vcs_info:
+        commit = vcs_info.get("commit_id") or vcs_info.get("requested_revision")
+        if not commit:
+            return None
+        url = f"{vcs_info.get('vcs', 'git')}+{url}@{commit}"
+    elif "dir_info" in direct_url:
+        # A local directory install (`pip install /path` or `-e /path`) has a version no
+        # index serves; the server venv installs the same directory.
+        if not url.startswith("file:"):
+            return None
+    elif "archive_info" not in direct_url:
+        return None
+    subdirectory = direct_url.get("subdirectory")
+    if subdirectory:
+        url = f"{url}#subdirectory={subdirectory}"
+    # No spaces around the '@'. PEP 508 allows either form, but `setup_env_command`
+    # interpolates this into a shell command line and joins head_server_deps unquoted, so
+    # the spaced form would be split into separate arguments. Quoting at that call site
+    # would be the better fix and is tracked separately.
+    return f"{requirement_name}@{url}"
+
+
+def installed_requirement(dist_name: str, requirement_name: str) -> Optional[str]:
     """Build a requirement string pinning *dist_name* to the copy installed right here.
 
     Prefers the recorded install source over the version number. A git-installed
     nemo-lens reports a local version such as ``0.2.0+b85578f`` that exists on no index,
     so ``==`` would be unsatisfiable; the recorded VCS URL and commit reinstall exactly
-    what this process is running.
+    what this process is running. The same holds for a wheel built locally and for a
+    plugin checked out from a repository subfolder.
     """
     from importlib.metadata import PackageNotFoundError, distribution
 
@@ -307,18 +366,9 @@ def _installed_requirement(dist_name: str, requirement_name: str) -> Optional[st
         if raw:
             import json
 
-            direct_url = json.loads(raw)
-            vcs_info = direct_url.get("vcs_info")
-            if vcs_info and direct_url.get("url"):
-                commit = vcs_info.get("commit_id") or vcs_info.get("requested_revision")
-                vcs = vcs_info.get("vcs", "git")
-                if commit:
-                    # No spaces around the '@'. PEP 508 allows either form, but
-                    # `setup_env_command` interpolates this into a shell command line and
-                    # joins head_server_deps unquoted, so the spaced form would be split
-                    # into separate arguments. Quoting at that call site would be the
-                    # better fix and is tracked separately.
-                    return f"{requirement_name}@{vcs}+{direct_url['url']}@{commit}"
+            requirement = _direct_reference(requirement_name, json.loads(raw))
+            if requirement is not None:
+                return requirement
     except Exception:  # pragma: no cover - metadata is best-effort
         logger.debug("nemo-lens: could not read direct_url.json for %s", dist_name, exc_info=True)
 
@@ -347,7 +397,7 @@ def server_venv_requirements() -> list:
         return []
     requirements = []
     for dist_name, requirement_name in _SERVER_TELEMETRY_PACKAGES:
-        requirement = _installed_requirement(dist_name, requirement_name)
+        requirement = installed_requirement(dist_name, requirement_name)
         if requirement is not None:
             requirements.append(requirement)
     if not any(req.startswith("nemo-lens") for req in requirements):
@@ -373,6 +423,8 @@ def _build_resource_attributes(server_name: Optional[str], server_type: Optional
         attrs["nemo.gym.server.name"] = server_name
     if server_type:
         attrs["nemo.gym.server.type"] = server_type
+    # The Uvicorn workers of one server share its name and type, so the process ID is what tells their metrics apart.
+    attrs["process.pid"] = os.getpid()
     return attrs
 
 
@@ -384,6 +436,16 @@ def _sdk_meter_provider_installed() -> bool:
     except ImportError:
         return False
     return isinstance(metrics.get_meter_provider(), MeterProvider)
+
+
+def _sdk_tracer_provider_installed() -> bool:
+    """Whether a real OpenTelemetry SDK tracer provider, not a no-op or proxy, is registered."""
+    try:
+        from opentelemetry import trace
+        from opentelemetry.sdk.trace import TracerProvider
+    except ImportError:
+        return False
+    return isinstance(trace.get_tracer_provider(), TracerProvider)
 
 
 def init_telemetry(
@@ -409,7 +471,7 @@ def init_telemetry(
         handle over its providers; Gym's service name and resource attributes do not apply
         then. Never raises: a telemetry failure must not take a server down.
     """
-    global _TELEMETRY_HANDLE, _METRICS_EXPORTING, _INITIALISED, _OWNS_PROVIDERS
+    global _TELEMETRY_HANDLE, _METRICS_EXPORTING, _TRACES_EXPORTING, _INITIALISED, _OWNS_PROVIDERS
     # The whole check-and-set plus the actual setup_telemetry() call is one critical
     # section: without the lock, two threads can both observe `_INITIALISED is False`
     # before either sets it and both call setup_telemetry, which nemo-lens raises on for
@@ -442,6 +504,7 @@ def init_telemetry(
             _TELEMETRY_HANDLE = TelemetryHandle(tracer=get_tracer(), meter=get_meter(), is_exporting=True)
             # Lens registers an SDK meter provider only when the owner enabled metrics.
             _METRICS_EXPORTING = _sdk_meter_provider_installed()
+            _TRACES_EXPORTING = _sdk_tracer_provider_installed()
             logger.info(
                 "nemo-lens was already initialised in this process; Gym reuses its providers "
                 "and span-group spec (server=%s)",
@@ -483,6 +546,7 @@ def init_telemetry(
         _TELEMETRY_HANDLE = handle
         _OWNS_PROVIDERS = True
         _METRICS_EXPORTING = bool(config.metrics_enabled and handle.is_exporting)
+        _TRACES_EXPORTING = bool(config.traces_enabled and handle.is_exporting)
 
         if config.logs_enabled and handle.is_exporting:
             try:
@@ -517,6 +581,15 @@ def is_metrics_exporter_active() -> bool:
     return _METRICS_EXPORTING
 
 
+def is_trace_exporter_active() -> bool:
+    """Whether this process exports spans.
+
+    With traces off, nemo-lens still enables the configured span groups, so a span site runs against a tracer that records nothing.
+    Sites whose only output is spans, or trace context for spans downstream, check this as well to skip that work.
+    """
+    return _TRACES_EXPORTING
+
+
 def shutdown_telemetry(timeout_ms: int = 5000) -> None:
     """Flush and shut down this process's telemetry providers.
 
@@ -539,8 +612,9 @@ def _reset_for_testing() -> None:
     Test-only. Production code has exactly one init per process, which is what
     ``_INITIALISED`` enforces.
     """
-    global _TELEMETRY_HANDLE, _METRICS_EXPORTING, _INITIALISED, _OWNS_PROVIDERS
+    global _TELEMETRY_HANDLE, _METRICS_EXPORTING, _TRACES_EXPORTING, _INITIALISED, _OWNS_PROVIDERS
     _TELEMETRY_HANDLE = None
     _METRICS_EXPORTING = False
+    _TRACES_EXPORTING = False
     _INITIALISED = False
     _OWNS_PROVIDERS = False
