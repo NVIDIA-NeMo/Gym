@@ -11,7 +11,7 @@ capture needs two things that endpoint cannot give it directly:
   request without ``stream`` and replays the complete completion as the SSE
   chunk stream OpenCode expects;
 * NeMo-RL matches the agent's returned output to captured calls by content,
-  so the proxy records every served completion verbatim. The recorded
+  so the proxy records every served assistant message verbatim. The recorded
   completions are converted with the same Chat conversion Gym's capture
   ledger applies, which makes the fingerprints identical by construction.
 
@@ -83,6 +83,27 @@ def redact_images(messages: Any) -> Any:
     return redacted
 
 
+def _recorded_completion(completion: dict[str, Any]) -> dict[str, Any]:
+    """Keep routed-expert digests in diagnostics; native capture owns the routes.
+
+    A single encoded route tensor can exceed 100 MB. Repeating it in every
+    diagnostic file also makes episode finalization load gigabytes of unused
+    data. Copy only the affected choices so forwarding and native token capture
+    still receive the original completion, including its complete route tensor.
+    """
+    choices = []
+    for choice in completion.get("choices") or []:
+        routes = choice.get("routed_experts")
+        if isinstance(routes, str):
+            choice = {key: value for key, value in choice.items() if key != "routed_experts"}
+            choice["routed_experts_summary"] = {
+                "encoded_chars": len(routes),
+                "sha256_utf8": hashlib.sha256(routes.encode()).hexdigest(),
+            }
+        choices.append(choice)
+    return {**completion, "choices": choices}
+
+
 def local_ip_toward(host: str, port: int = 80) -> str:
     """The local interface address that routes to ``host`` (no traffic is sent)."""
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
@@ -144,9 +165,7 @@ class CaptureProxy:
         if self._runner is not None:
             await self._runner.cleanup()
 
-    def register(
-        self, episode: str, upstream: str, record_dir: Path, *, local_step_cap_reply: bool = False
-    ) -> str:
+    def register(self, episode: str, upstream: str, record_dir: Path, *, local_step_cap_reply: bool = False) -> str:
         """Route ``/avb/<episode>/...`` to ``upstream`` (a root URL without ``/v1``).
 
         ``local_step_cap_reply`` answers OpenCode's step-cap turn here instead of
@@ -256,7 +275,7 @@ class CaptureProxy:
             }
             if status == 200:
                 completion = json.loads(payload)
-                record["response"] = completion
+                record["response"] = _recorded_completion(completion)
                 session.turns.append(turn)
                 if isinstance(completion.get("id"), str):
                     session.response_ids.append(completion["id"])
@@ -311,16 +330,23 @@ def _first_user_text(body: dict) -> str:
     return ""
 
 
+def _stable_session_environment(match: re.Match[str]) -> str:
+    """Exclude OpenCode's changing environment date from session identity."""
+    return re.sub(r"(?m)^([ \t]*Today's date:)[^\r\n]*", r"\1 <date>", match.group())
+
+
 def session_key(body: dict) -> str:
     """Identify an OpenCode session by its leading context.
 
-    OpenCode replays the full history on every call, so the system prompt plus
-    the opening user turn is stable within a session and differs between the
-    parent (the benchmark prompt) and each child (its ``task`` prompt).
+    OpenCode replays the full history on every call. Its environment date can
+    change at UTC midnight, so normalize that generated field for this hash.
+    The forwarded system prompt remains intact. The remaining system context
+    and opening user turn distinguish the parent and each child's task prompt.
     """
     system = "\n".join(
         _message_text(m) for m in body.get("messages") or [] if isinstance(m, dict) and m.get("role") == "system"
     )
+    system = re.sub(r"<env>.*?</env>", _stable_session_environment, system, flags=re.DOTALL)
     digest = hashlib.sha256()
     digest.update(system.encode())
     digest.update(b"\x00")

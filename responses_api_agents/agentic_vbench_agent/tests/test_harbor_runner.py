@@ -234,19 +234,20 @@ def test_assembly_judge_guard_leaves_other_families_unstaged(tmp_path: Path) -> 
     assert not (tmp_path / "staging").exists()
 
 
-def test_hub_judge_is_verifier_only(tmp_path: Path) -> None:
+@pytest.mark.parametrize("protocol", ["nvinference-hybrid", "nvinference-native"])
+def test_hub_judge_is_verifier_only(tmp_path: Path, protocol: str) -> None:
     task = make_task(tmp_path / "source", JUDGED_TASK)
     output = tmp_path / "output"
     output.mkdir()
 
-    staged = stage_judge(task, staging=tmp_path / "staging", output=output, protocol="nvinference-hybrid")
+    staged = stage_judge(task, staging=tmp_path / "staging", output=output, protocol=protocol)
 
     config = tomllib.loads((staged / "task.toml").read_text())
     assert "env" not in config["environment"]
     assert config["steps"][0]["verifier"]["timeout_sec"] == 1800.0
     assert config["steps"][0]["verifier"]["env"] == {
         "NVINFERENCE_API_KEY": "${NVINFERENCE_API_KEY}",
-        **JUDGE_PROTOCOLS["nvinference-hybrid"],
+        **JUDGE_PROTOCOLS[protocol],
     }
     tests = staged / "steps/solve/tests"
     assert (tests / "avb-original-judge.py").read_text() == "ORIGINAL JUDGE\n"

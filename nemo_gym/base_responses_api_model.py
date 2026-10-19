@@ -440,6 +440,13 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
+    async def _preflight_capture_request(
+        self,
+        request: Request,
+        params: NeMoGymChatCompletionCreateParamsNonStreaming | NeMoGymResponseCreateParamsNonStreaming,
+    ) -> None:
+        """Validate a backend request before creating a durable capture intent."""
+
     async def _invoke_chat_completions(
         self, request: Request, params: NeMoGymChatCompletionCreateParamsNonStreaming
     ) -> NeMoGymChatCompletion:
@@ -449,6 +456,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # Resolve the parent from the received request before dispatch.
         # Exact prefix supply and capture share this decision.
         if current_capture_context() is not None:
+            await self._preflight_capture_request(request, params)
             request_messages = _request_messages(params)
             await resolve_parent(request_messages)
             await register_call_intent()
@@ -503,6 +511,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         if parent_header is not None and request.url.path != "/v1/responses":
             raise HTTPException(status_code=422, detail="accepted parent selection requires the Responses API")
         if context is not None:
+            await self._preflight_capture_request(request, params)
             request_messages = _request_messages(params)
             if parent_header is None:
                 await resolve_parent(request_messages)

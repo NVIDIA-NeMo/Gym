@@ -184,6 +184,13 @@ def make_capture_harness(
     monkeypatch.setattr(
         NeMoGymAsyncOpenAI, "create_chat_completion", worker_through_transport if transport_failure else worker
     )
+
+    async def tokenize(client, **body):
+        # This harness replaces generation and its renderer. Expose the
+        # corresponding native measurement contract before capture admission.
+        return {"prompt_token_count": 2, "max_model_len": 4096, "ng_context_measured": True}
+
+    monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_tokenize", tokenize)
     return harness
 
 

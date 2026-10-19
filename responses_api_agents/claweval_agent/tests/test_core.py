@@ -82,6 +82,10 @@ def test_stage_keeps_private_grader_out_of_agent_workdir(tmp_path: Path) -> None
     assert "claw_ReadMedia" in (staged / "steps/solve/workdir/AGENTS.md").read_text()
     assert not (staged / "steps/solve/workdir/.grade_artifacts.py").exists()
     assert (staged / "steps/solve/tests/.grade_artifacts.py").is_file()
+    assert (staged / "steps/solve/tests/judge_transport.py").read_bytes() == Path(core.__file__).with_name(
+        "judge_transport.py"
+    ).read_bytes()
+    assert not (staged / "steps/solve/workdir/judge_transport.py").exists()
     private_task = yaml.safe_load((staged / "steps/solve/tests/task.yaml").read_text())
     assert private_task["prompt"]["text"] == "variant prompt"
     manifest = json.loads((staged / "staging_manifest.json").read_text())

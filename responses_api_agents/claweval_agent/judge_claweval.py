@@ -14,14 +14,15 @@ import subprocess
 import sys
 from pathlib import Path
 
+
 TESTS = Path("/tests")
 WORKSPACE = Path("/workspace")
 sys.path.insert(0, str(TESTS))
 
-from claw_eval.graders.llm_judge import LLMJudge  # noqa: E402
 from claw_eval.graders.registry import get_grader  # noqa: E402
 from claw_eval.models.scoring import compute_task_score, is_pass  # noqa: E402
 from claw_eval.models.task import TaskDefinition  # noqa: E402
+from judge_transport import create_judge  # noqa: E402
 
 
 def _read_file(path: Path) -> dict:
@@ -82,7 +83,7 @@ def main() -> None:
     model = os.environ.get("CLAW_EVAL_JUDGE_MODEL")
     if not base_url or not model:
         raise RuntimeError("ClawEval judge base URL and model must be configured")
-    judge = LLMJudge(
+    judge = create_judge(
         model_id=model,
         api_key=key,
         base_url=base_url,

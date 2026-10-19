@@ -233,12 +233,18 @@ def job_config(
 
 
 JUDGE_PROTOCOLS = {
+    "nvinference-native": {
+        "AVB_JUDGE_BASE_URL": "https://inference-api.nvidia.com",
+        "AVB_JUDGE_CLAUDE_MODEL": "azure/anthropic/claude-opus-4-7",
+        "AVB_JUDGE_GEMINI_MODEL": "gcp/google/gemini-3.1-pro-preview",
+        "AVB_JUDGE_GEMINI_THINKING": "low",
+    },
     "nvinference-hybrid": {
         "AVB_JUDGE_BASE_URL": "https://inference-api.nvidia.com",
         "AVB_JUDGE_CLAUDE_MODEL": "us/aws/anthropic/eccn-claude-opus-4-7",
         "AVB_JUDGE_GEMINI_MODEL": "us/gcp/google/eccn-gemini-3.5-flash",
         "AVB_JUDGE_GEMINI_THINKING": "low",
-    }
+    },
 }
 NATIVE_JUDGE_ENV = {"ANTHROPIC_API_KEY", "GEMINI_API_KEY"}
 # Informational scan in the repurpose verifier; inaccessible /proc entries in

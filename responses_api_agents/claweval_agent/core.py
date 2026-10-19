@@ -10,8 +10,8 @@ import math
 import os
 import shutil
 from collections import Counter
-from pathlib import Path
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 import yaml
@@ -152,17 +152,13 @@ def dataset_rows(sft_path: str | Path, tasks: dict[str, dict[str, Any]]) -> list
             if task is None:
                 raise ValueError(f"No task package for {source_id} ({task_variant}::{task_id})")
             user_messages = [
-                value
-                for message in record.get("conversations", [])
-                if (value := _message_value(message)) is not None
+                value for message in record.get("conversations", []) if (value := _message_value(message)) is not None
             ]
             if not user_messages:
                 raise ValueError(f"No initial user prompt in {source_id}")
             prompt = user_messages[0]
             if prompt != task["prompt"]:
-                raise ValueError(
-                    f"SFT prompt differs from the immutable ClawEval task package: {source_id}"
-                )
+                raise ValueError(f"SFT prompt differs from the immutable ClawEval task package: {source_id}")
             prompt_sha256 = hashlib.sha256(prompt.encode()).hexdigest()
             rows.append(
                 {
@@ -271,7 +267,7 @@ def stage_harbor_task(
                 f'name = "claweval/{task["task_id"]}"',
                 "",
                 "[metadata]",
-                f'category = {json.dumps(task["family"])}',
+                f"category = {json.dumps(task['family'])}",
                 'source = "ClawEval task package; prompt selected from successful OpenCode trace"',
                 "",
                 "[environment]",
@@ -314,6 +310,7 @@ def stage_harbor_task(
     (solution / "solve.sh").write_text("#!/bin/bash\n# No golden solution is exposed to training.\n")
     (tests / "test.sh").write_text(TEST_SCRIPT)
     shutil.copy2(Path(__file__).with_name("judge_claweval.py"), tests / "judge_claweval.py")
+    shutil.copy2(Path(__file__).with_name("judge_transport.py"), tests / "judge_transport.py")
     (tests / "task.yaml").write_text(yaml.safe_dump(definition, sort_keys=False, allow_unicode=True))
     shutil.copy2(source_dir / "grader.py", tests / "grader.py")
 

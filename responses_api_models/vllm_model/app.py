@@ -25,6 +25,7 @@ from typing import Any, ClassVar, Dict, List, Literal, Optional, Union, get_args
 
 from aiohttp.client_exceptions import ClientResponseError
 from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import Field, PrivateAttr, model_validator
 
 from nemo_gym.base_responses_api_model import (
@@ -70,6 +71,11 @@ from nemo_gym.token_id_capture.sink import CAPTURE_PARENT_HEADER
 
 LOG = logging.getLogger("nemo_gym.vllm_model")
 _PROPAGATE_CONTEXT_ERROR_ATTRIBUTE = "nemo_gym_vllm_propagate_context_error"
+
+
+class _FrameworkContextLengthError(HTTPException):
+    """A prompt rejected before worker custody, served as an OpenAI API error."""
+
 
 _TRANSPORT_LOG_CONTEXT_HEADERS = {
     "run_id": "x-nemo-gym-log-run-id",
@@ -382,6 +388,23 @@ class VLLMModel(SimpleResponsesAPIModel):
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
+
+        @app.exception_handler(_FrameworkContextLengthError)
+        async def framework_context_length_error(
+            request: Request, error: _FrameworkContextLengthError
+        ) -> JSONResponse:
+            return JSONResponse(
+                status_code=error.status_code,
+                content={
+                    "error": {
+                        "message": error.detail,
+                        "type": "invalid_request_error",
+                        "param": "input_tokens",
+                        "code": "context_length_exceeded",
+                    }
+                },
+            )
+
         config = token_id_capture_config(self.server_client.global_config_dict)
         if config.token_id_capture.framework_owned_context:
             app.post("/context/{rollout_id}/measure")(self.measure_context)
@@ -394,9 +417,45 @@ class VLLMModel(SimpleResponsesAPIModel):
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> dict[str, int]:
         """Render through the generation admission path without writing capture state."""
+        return await self._measure_framework_context(request, rollout_id, body, include_limit=False)
+
+    async def _preflight_capture_request(
+        self,
+        request: Request,
+        params: NeMoGymChatCompletionCreateParamsNonStreaming | NeMoGymResponseCreateParamsNonStreaming,
+    ) -> None:
+        context = current_capture_context()
+        if context is None or not context.external_staging or not context.framework_owned_context:
+            return
+        measured = await self._measure_framework_context(request, context.rollout_id, params, include_limit=True)
+        count, limit = measured["prompt_token_count"], measured["max_model_len"]
+        # The worker already clamps output length when the prompt fits. Reject
+        # only a prompt that leaves no generation slot, without fabricating an
+        # empty captured completion or poisoning an unadmitted rollout.
+        if count >= limit:
+            raise _FrameworkContextLengthError(
+                status_code=400,
+                detail=(
+                    f"This model's maximum context length is {limit} tokens. "
+                    f"The request contains {count} input tokens; at least one output token is required."
+                ),
+            )
+
+    async def _measure_framework_context(
+        self,
+        request: Request,
+        rollout_id: str,
+        body: NeMoGymChatCompletionCreateParamsNonStreaming | NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        include_limit: bool,
+    ) -> dict[str, int]:
+        """Use a separate admission context so measurement cannot create custody."""
         if self._external_capture_handler is None or self._capture_lineage is None:
             raise HTTPException(status_code=409, detail="measurement requires external capture")
-        if body.stream or body.previous_response_id or body.conversation:
+        if body.stream or (
+            isinstance(body, NeMoGymResponseCreateParamsNonStreaming)
+            and (body.previous_response_id or body.conversation)
+        ):
             raise HTTPException(status_code=422, detail="measurement requires explicit non-streaming history")
         context = CaptureContext(
             rollout_id=rollout_id,
@@ -408,22 +467,37 @@ class VLLMModel(SimpleResponsesAPIModel):
         )
         token = set_token_sink(context)
         try:
-            parent_header = request.headers.get(CAPTURE_PARENT_HEADER)
+            parent_header = (
+                request.headers.get(CAPTURE_PARENT_HEADER)
+                if isinstance(body, NeMoGymResponseCreateParamsNonStreaming)
+                else None
+            )
             if parent_header is None:
                 await resolve_parent(_request_messages(body))
             else:
                 await resolve_parent(_request_messages(body), parent_response_id=_decode_capture_parent(parent_header))
-            chat = self._converter.responses_to_chat_completion_create_params(body)
+            chat = (
+                self._converter.responses_to_chat_completion_create_params(body)
+                if isinstance(body, NeMoGymResponseCreateParamsNonStreaming)
+                else body
+            )
             processed = self._preprocess_chat_completion_create_params(request, chat.model_dump(exclude_unset=True))
             if processed.get("truncate_prompt_tokens") is not None:
                 raise HTTPException(status_code=422, detail="measurement does not support prompt truncation")
-            result = await self._resolve_client(request).create_tokenize(**self._get_tokenize_chat_body(processed))
+            client = self._resolve_client(request)
+            result = await client.create_tokenize(**self._get_tokenize_chat_body(processed))
+            count = result.get("prompt_token_count")
+            if type(count) is not int or count < 0 or result.get("ng_context_measured") is not True:
+                raise HTTPException(status_code=502, detail="worker did not acknowledge exact context measurement")
+            measured = {"prompt_token_count": count}
+            if include_limit:
+                limit = result.get("max_model_len")
+                if type(limit) is not int or limit <= 0:
+                    raise HTTPException(status_code=502, detail="worker did not report its native context limit")
+                measured["max_model_len"] = limit
+            return measured
         finally:
             reset_token_sink(token)
-        count = result.get("prompt_token_count")
-        if type(count) is not int or count < 0 or result.get("ng_context_measured") is not True:
-            raise HTTPException(status_code=502, detail="worker did not acknowledge exact context measurement")
-        return {"prompt_token_count": count}
 
     def get_converter(self) -> "VLLMConverter":
         """Return the converter used for Responses API <-> Chat Completions mapping.
