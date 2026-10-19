@@ -29,6 +29,7 @@ from nemo_gym.orchestration.executors.otel import (
     OTLP_GRPC_PORT,
     OTLP_HTTP_PORT,
     collector_config_path,
+    exporter_nodes,
     otel_active,
     render_collector_config,
     resolve_token,
@@ -771,3 +772,48 @@ def test_the_batch_script_exports_only_the_hostnames_the_collector_names():
 def test_the_batch_script_exports_no_hostnames_without_a_collector_or_pinned_services():
     assert "GYM_NODE_" not in _script(_pd_config(otel={"enabled": False}))
     assert "GYM_NODE_" not in _script(_config())
+
+
+# ---------------------------------------------------------------------------
+# node exporters on every node
+# ---------------------------------------------------------------------------
+
+
+def test_exporter_nodes_cover_every_node_of_a_multi_node_allocation():
+    assert exporter_nodes(_pd_config(prefill_nodes=2, decode_nodes=2)) == (0, 1, 2, 3)
+
+
+def test_exporter_nodes_are_empty_on_a_single_node_and_off_slurm():
+    assert exporter_nodes(_config()) == ()
+    assert exporter_nodes(_pd_config(prefill_nodes=1, decode_nodes=0)) == ()
+    assert exporter_nodes(_config(compute={"k8s": {"type": "kubernetes", "pvc_name": "gym-results"}})) == ()
+
+
+def test_collector_scrapes_the_node_exporters_on_every_node_of_a_multi_node_job():
+    jobs = _jobs(_pd_config())
+    for job_name, port in (("dcgm", 9400), ("node", 9100)):
+        assert [(s["targets"], s["labels"]) for s in jobs[job_name]] == [
+            ([f"${{env:GYM_NODE_{i}_HOST}}:{port}"], {"gym_node": str(i)}) for i in range(3)
+        ]
+
+
+def test_collector_scrapes_the_node_exporters_on_localhost_on_a_single_node():
+    jobs = _jobs(_config())
+    assert jobs["dcgm"] == [{"targets": ["localhost:9400"]}]
+    assert jobs["node"] == [{"targets": ["localhost:9100"]}]
+
+
+def test_the_batch_script_exports_a_hostname_for_every_node_the_exporters_run_on():
+    # Prefill is one four-node tier pinned at its head, so the services alone name nodes 0 and 4.
+    config = _pd_config(prefill_nodes=4, decode_nodes=1, server_per_node=False)
+    script = _script(config)
+    assert all(f'export GYM_NODE_{i}_HOST="${{gym_nodes[{i}]}}"' in script for i in range(5))
+
+    quiet = _pd_config(
+        prefill_nodes=4,
+        decode_nodes=1,
+        server_per_node=False,
+        otel={"gpu_metrics_port": None, "node_metrics_port": None},
+    )
+    script = _script(quiet)
+    assert [i for i in range(5) if f"export GYM_NODE_{i}_HOST=" in script] == [0, 4]

@@ -42,6 +42,7 @@ from nemo_gym.orchestration.executors.otel import (
     SHUTDOWN_WAIT_SECONDS,
     collector_config_path,
     driver_telemetry_env,
+    exporter_nodes,
     gym_telemetry_active,
     node_host_var,
     otel_active,
@@ -504,13 +505,16 @@ def _render_node_hosts(config: SubmitConfig) -> str:
     """Export the hostname of each node the collector scrapes by name, for its config to refer to.
 
     The collector's config is written at submit time, before Slurm has chosen the nodes, so it
-    names them as `${env:GYM_NODE_<i>_HOST}` and reads these exports at startup. Any pinned
-    service implies the host array was declared (see _places_services).
+    names them as `${env:GYM_NODE_<i>_HOST}` and reads these exports at startup. A pinned service
+    or a multi-node allocation implies the host array was declared (see _places_services).
     """
     if not otel_active(config):
         return ""
-    indexes = sorted({index for nodes in scrape_nodes(config).values() for index in nodes})
-    return "\n".join(f'export {node_host_var(index)}="${{gym_nodes[{index}]}}"' for index in indexes)
+    obs = config.otel
+    indexes = {index for nodes in scrape_nodes(config).values() for index in nodes}
+    if obs.gpu_metrics_port is not None or obs.node_metrics_port is not None:
+        indexes |= set(exporter_nodes(config))
+    return "\n".join(f'export {node_host_var(index)}="${{gym_nodes[{index}]}}"' for index in sorted(indexes))
 
 
 def ray_head_address_var(ray_service: str) -> str:
