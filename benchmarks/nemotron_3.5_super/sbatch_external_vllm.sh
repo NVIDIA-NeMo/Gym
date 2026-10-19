@@ -22,6 +22,7 @@ set -euo pipefail
 # retains its embedded 150GB worker pools and needs no SSD mount or owner process.
 # MOONCAKE_DEFAULT_KV_LEASE_TTL overrides either default: 180000 ms without disk
 # offload, 30000 ms with it. Owner/master logs go to slurm-logs/%j-%x.log.
+# MOONCAKE_CACHE_TRACE=1 enables hash-removal summaries and master INFO logs.
 
 # Input arguments and validation
 # PD (default): NUM_PREFILL_NODES=<P> NUM_DECODE_NODES=<D>
@@ -92,6 +93,14 @@ case "$ENABLE_MOONCAKE_DISK_OFFLOAD" in
         ;;
 esac
 ENABLE_MOONCAKE=${ENABLE_MOONCAKE:-$ENABLE_MOONCAKE_DISK_OFFLOAD}
+MOONCAKE_CACHE_TRACE=${MOONCAKE_CACHE_TRACE:-0}
+case "$MOONCAKE_CACHE_TRACE" in
+    0 | 1) ;;
+    *)
+        echo "ERROR: MOONCAKE_CACHE_TRACE must be 0 or 1." >&2
+        exit 1
+        ;;
+esac
 worker_mounts=$MOUNTS
 mooncake_mode=embedded
 mooncake_global_segment_size='"150GB"'
@@ -336,6 +345,7 @@ export NCCL_MNNVL_ENABLE=1
 export NCCL_NVLS_ENABLE=1
 
 export ENABLE_MOONCAKE=$ENABLE_MOONCAKE
+export MOONCAKE_CACHE_TRACE=$MOONCAKE_CACHE_TRACE
 export VLLM_ENGINES_PER_NODE=$VLLM_ENGINES_PER_NODE
 source "$VLLM_CONFIG"
 

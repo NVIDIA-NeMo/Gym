@@ -266,6 +266,7 @@ curl() { :; }
 findmnt() { touch "$TEST_STATE_DIR/disk-checked"; printf 'ext4\n'; }
 mktemp() { command mktemp -d "$TEST_STATE_DIR/ssd.XXXXXX"; }
 mooncake_master() {
+    printenv MOONCAKE_CACHE_TRACE > "$TEST_STATE_DIR/master-trace"
     printf '%s\n' "$@" > "$TEST_STATE_DIR/master-args"
     exec "$TEST_SLEEP" 30
 }
@@ -294,16 +295,22 @@ python3() {
                 self.assertEqual(status, 0, stderr)
                 start = 'mooncake_pid=""'
                 setup = start + worker.split(start, 1)[1].split("router_common_args=", 1)[0]
+                exports = (
+                    "\n".join(
+                        line
+                        for line in worker.splitlines()
+                        if line.startswith(("export ENABLE_MOONCAKE=", "export MOONCAKE_CACHE_TRACE="))
+                    )
+                    + "\n"
+                )
                 # Wait for the stub to record argv before the EXIT trap shuts it down.
                 inspect = "\nif (( ENABLE_MOONCAKE )); then\n"
                 inspect += 'until [[ -s "$TEST_STATE_DIR/master-args" ]]; do "$TEST_SLEEP" 0.01; done\nfi\n'
                 config = Path(directory) / "config.json"
                 status, _, stderr = self.run_shell(
-                    stubs + setup + inspect,
+                    stubs + exports + setup + inspect,
                     env={
-                        "ENABLE_MOONCAKE": str(int(enabled)),
                         "MOONCAKE_CONFIG_PATH": str(config),
-                        "MOONCAKE_CACHE_TRACE": env.get("MOONCAKE_CACHE_TRACE", "0"),
                         "TEST_STATE_DIR": directory,
                     },
                 )
@@ -322,6 +329,9 @@ python3() {
                 self.assertEqual(settings["global_segment_size"], 0 if disk else "150GB")
                 self.assertEqual(settings["enable_offload"], disk)
                 master = (Path(directory) / "master-args").read_text().splitlines()
+                self.assertEqual(
+                    (Path(directory) / "master-trace").read_text().strip(), env.get("MOONCAKE_CACHE_TRACE", "0")
+                )
                 self.assertIn(f"-default_kv_lease_ttl={ttl}", master)
                 self.assertIn(f"-eviction_high_watermark_ratio={'0.7' if disk else '0.9'}", master)
                 self.assertIn(f"-enable_offload={str(disk).lower()}", master)
@@ -1419,6 +1429,7 @@ sleep() { printf 'startup-delay=%s\n' "$1"; wait "$router_pid" || true; }
             "VLLM_PD_DEPLOYMENT_MODE": (("bad", "COUPLED"), 1),
             "VLLM_MODE": (("bad", "PD"), 1),
             "VLLM_ENGINES_PER_NODE": (("0", "3", "bad"), 1),
+            "MOONCAKE_CACHE_TRACE": (("true", "2", "bad"), 1),
         }
         for name, (values, expected_status) in cases.items():
             for value in values:
