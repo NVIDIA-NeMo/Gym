@@ -25,7 +25,6 @@ from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path
 from typing import Any, TypeVar
 
-from nemo_gym.rollout_correlation import current_rollout_id
 from nemo_gym.sandbox.providers import (
     ConnectableProvider,
     SandboxEndpoint,
@@ -383,7 +382,13 @@ class SandboxPty:
 
 
 def _rollout_attributes() -> dict[str, str]:
-    """The rollout id Gym's endpoint spans carry, so sandbox spans are filterable per rollout too."""
+    """The rollout id Gym's endpoint spans carry, so sandbox spans are filterable per rollout too.
+
+    Imported here, not at module level: `global_config` imports the sandbox registry while it is
+    still initialising, and `rollout_correlation` imports constants from `global_config`.
+    """
+    from nemo_gym.rollout_correlation import current_rollout_id
+
     rollout_id = current_rollout_id()
     return {"nemo.gym.rollout.id": rollout_id} if rollout_id else {}
 
@@ -449,13 +454,11 @@ class AsyncSandbox:
             with managed_span(
                 GymSpanGroup.SANDBOX,
                 "gym.sandbox.start",
-                **{"nemo.gym.sandbox.provider": provider_name},
+                **{"nemo.gym.sandbox.provider": provider_name, **_rollout_attributes()},
             ) as span:
                 handle = await self._provider.create(requested_spec)
                 if span is not None:
-                    safe_set_span_attributes(
-                        span, {"nemo.gym.sandbox.id": _sandbox_id(handle), **_rollout_attributes()}
-                    )
+                    safe_set_span_attributes(span, {"nemo.gym.sandbox.id": _sandbox_id(handle)})
             record_sandbox_startup((time.perf_counter() - started) * 1000.0, provider=provider_name)
             record_sandbox_active(1, provider=provider_name)
             self._counted_active = True
@@ -533,7 +536,7 @@ class AsyncSandbox:
         with managed_span(
             GymSpanGroup.SANDBOX,
             "gym.sandbox.exec",
-            **{"nemo.gym.sandbox.provider": provider_name},
+            **{"nemo.gym.sandbox.provider": provider_name, **_rollout_attributes()},
         ) as span:
             result = await self._exec_uninstrumented(
                 command,
@@ -550,7 +553,6 @@ class AsyncSandbox:
                         "nemo.gym.sandbox.id": _sandbox_id(self._handle),
                         "nemo.gym.sandbox.return_code": result.return_code,
                         "nemo.gym.sandbox.error_type": result.error_type,
-                        **_rollout_attributes(),
                     },
                 )
         record_sandbox_exec_duration((time.perf_counter() - started) * 1000.0, provider=provider_name)

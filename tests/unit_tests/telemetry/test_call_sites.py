@@ -139,9 +139,66 @@ async def test_sandbox_spans_carry_the_rollout_id_inside_a_rollout(recorded_span
 async def test_sandbox_spans_have_no_rollout_id_outside_a_rollout(recorded_spans, started_sandbox):
     sandbox = await started_sandbox().start()
     await sandbox.exec("echo hi")
+    await sandbox.stop()
+    names = set()
     for span in recorded_spans():
         if span.name.startswith("gym.sandbox."):
+            names.add(span.name)
             assert "nemo.gym.rollout.id" not in span.attributes
+    assert names == {"gym.sandbox.start", "gym.sandbox.exec", "gym.sandbox.stop"}
+
+
+class _FailingProvider(_StubProvider):
+    """A provider whose create or exec raises, so the span ends in error before any result exists."""
+
+    def __init__(self, fail: str):
+        super().__init__()
+        self._fail = fail
+
+    async def create(self, spec):
+        if self._fail == "create":
+            raise RuntimeError("boom")
+        return await super().create(spec)
+
+    async def exec(self, handle, command, **kwargs):
+        if self._fail == "exec":
+            raise RuntimeError("boom")
+        return await super().exec(handle, command, **kwargs)
+
+
+@pytest.mark.parametrize("fail", ["create", "exec"])
+async def test_sandbox_spans_keep_the_rollout_id_when_the_provider_fails(recorded_spans, fail):
+    """Correlation is attached before the awaited work, so a failed start or exec is still filterable."""
+    from opentelemetry.trace import StatusCode
+
+    from nemo_gym.rollout_correlation import rollout_context
+    from nemo_gym.sandbox.api import AsyncSandbox
+    from nemo_gym.sandbox.providers.base import SandboxSpec
+
+    sandbox = AsyncSandbox(_FailingProvider(fail), SandboxSpec(image="ubuntu"))
+    with rollout_context("7-0"), pytest.raises(RuntimeError, match="boom"):
+        if fail == "create":
+            await sandbox.start()
+        else:
+            await (await sandbox.start()).exec("echo hi")
+
+    name = "gym.sandbox.start" if fail == "create" else "gym.sandbox.exec"
+    span = next(s for s in recorded_spans() if s.name == name)
+    assert span.status.status_code == StatusCode.ERROR
+    assert span.attributes["nemo.gym.rollout.id"] == "7-0"
+
+
+@pytest.mark.parametrize(
+    "module",
+    ["nemo_gym.global_config", "nemo_gym.rollout_correlation", "nemo_gym.server_utils", "nemo_gym.sandbox.api"],
+)
+def test_sandbox_api_import_does_not_create_an_import_cycle(module):
+    """`global_config` imports the sandbox registry while initialising; the sandbox API must not
+    import `rollout_correlation` (which reads `global_config` constants) at module level."""
+    import subprocess
+    import sys
+
+    subprocess.run([sys.executable, "-c", f"import {module}"], check=True, timeout=120)
 
 
 async def test_sandbox_span_never_records_the_command(recorded_spans, started_sandbox):
