@@ -403,6 +403,8 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
             record["_ng_failure_partial_response"] = failure["partial_response"]
         if failure.get("agent_observations") is not None:
             record[NG_AGENT_OBSERVATIONS_KEY] = failure["agent_observations"]
+        if response.get("agent_trajectory") is not None:
+            record[NG_TRAJECTORY_KEY] = response["agent_trajectory"]
         return record
     result = response.get("result")
     if not isinstance(result, Mapping):
@@ -426,6 +428,8 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
     # add judge failure info to the record
     record = dict(result) | judge_failure
     record[NG_TASK_ID_KEY] = task_id
+    if response.get("agent_trajectory") is not None:
+        record[NG_TRAJECTORY_KEY] = response["agent_trajectory"]
     return record
 
 
@@ -488,9 +492,13 @@ def _has_observation_gap(result: dict[str, Any], code: str) -> bool:
 
 
 def _trajectory_identity(row: dict[str, Any]) -> tuple[str, str]:
-    task_id = next(
-        (str(row[key]) for key in TASK_ID_FIELDS if row.get(key) is not None),
-        str(row[TASK_INDEX_KEY_NAME]),
+    task_id = (
+        row["task_id"]["task_id"]
+        if is_materialized_task_row(row)
+        else next(
+            (str(row[key]) for key in TASK_ID_FIELDS if row.get(key) is not None),
+            str(row[TASK_INDEX_KEY_NAME]),
+        )
     )
     rollout_id = maybe_rollout_id_from_run_body(row) or f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
     return task_id, rollout_id

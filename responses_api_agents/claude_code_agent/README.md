@@ -209,3 +209,26 @@ The skills path is resolved like `input_jsonl_fpath` (relative paths check the w
   The served id is not a declared terminal id on `/run`; capture still corroborates it against the
   transcript. Without capture, thinking stays folded and unmatched tool calls remain omitted.
 - `turns_used` counts assistant messages, not tool calls.
+
+
+## Native sandbox sessions
+
+The existing `claude_code_agent` also supports Gym agent sessions with native shell
+and filesystem tools. Supply `sandbox_access` at seed to borrow the benchmark's
+sandbox, or configure `sandbox_provider` and `sandbox_spec` for an agent-owned one.
+Pin `claude_code_version`; seed installs and verifies that release inside the
+sandbox. For offline deployments, `local_executable_path` uploads an agent-host
+binary, while `executable_path` copies one already available inside the sandbox.
+`executable_sha256` optionally verifies either source. `python_executable` selects
+the sandbox Python used by the installer and shared process supervisor.
+
+Call `/v1/responses` with the seeded session cookie, then close the session before
+verification. A positive `timeout_seconds` on seed bounds setup, including connect;
+on Responses it bounds queueing, staging, and execution. Close reports the shared
+supervisor's termination result and native observations. A borrowed sandbox stays
+owned by the benchmark; an agent-owned sandbox is stopped by close. Native sessions
+currently accept one user turn, and reject requests for multi-activation continuation.
+
+Sandbox and local modes share the command builder, settings, tool restrictions,
+and stream parser. Unseeded local requests keep the existing execution path and
+install the CLI lazily on first use. Sandboxed sessions install no host runtime.

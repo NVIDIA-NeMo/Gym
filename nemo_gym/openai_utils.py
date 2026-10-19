@@ -988,6 +988,7 @@ class NeMoGymResponseCreateParamsNonStreaming(BaseModel):
             value["tools"] = [_normalize_tool_for_replay(tool) for tool in value["tools"]]
         return value
 
+    timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False, exclude_if=lambda v: v is None)
     background: Optional[bool] = None
     include: Optional[List[ResponseIncludable]] = None
     input: Union[str, NeMoGymResponseInput]

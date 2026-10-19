@@ -50,6 +50,20 @@ def test_episode_response_requires_exactly_one_outcome() -> None:
         )
 
 
+def test_native_trajectory_is_typed_envelope_evidence() -> None:
+    request = _request()
+    response = _Response(
+        episode_id=request.episode_id,
+        task_id=request.task.task_id,
+        result="result",
+        agent_trajectory={"task_id": "task", "rollout_id": "rollout-a1"},
+    )
+    assert response.agent_trajectory["rollout_id"] == "rollout-a1"
+    assert _Response.model_validate_json(response.model_dump_json()) == response
+    with pytest.raises(ValidationError):
+        _Response.model_validate(response.model_dump() | {"agent_trajectory": {"turns": "invalid"}})
+
+
 def test_capture_key_qualifies_retries() -> None:
     assert EpisodeId(rollout_id="r").capture_key == "r"
     assert EpisodeId(rollout_id="r", attempt=2).capture_key == "r-a2"
@@ -126,3 +140,34 @@ def test_unknown_execution_stage_is_optional_but_stage_aliases_are_rejected() ->
 )
 def test_materialized_task_row_identifies_routing_shape(row: dict[str, object], expected: bool) -> None:
     assert is_materialized_task_row(row) is expected
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_episode_envelope_projects_native_trajectory_without_reserved_result_keys(failed) -> None:
+    from nemo_gym.rollout_collection import _episode_record
+
+    trajectory = {"task_id": "a", "rollout_id": "rollout", "turns": [], "invocations": []}
+    outcome = {"failure": {"failure_reason": "interrupted", "terminal": True}} if failed else {"result": {"reward": 1}}
+    reply = {"task_id": {"taskset": "test", "task_id": "a"}, **outcome, "agent_trajectory": trajectory}
+    record = _episode_record(reply)
+    assert record["ng_trajectory"] == trajectory
+    assert "agent_trajectory" not in record
+    with pytest.raises(ValueError, match="reserved"):
+        _episode_record({"task_id": reply["task_id"], "result": {"reward": 1, "ng_trajectory": trajectory}})
+
+
+def test_materialized_trajectory_keeps_logical_task_identity() -> None:
+    from nemo_gym.rollout_collection import _build_trajectory_record
+
+    row = {
+        "task_id": {"taskset": "test", "task_id": "task"},
+        "task_input": {},
+        "_ng_task_index": 0,
+        "_ng_rollout_index": 0,
+        "_ng_rollout_id": "rollout",
+    }
+    trajectory = _build_trajectory_record(
+        row, {"ng_trajectory": {"task_id": "task", "rollout_id": "rollout", "turns": []}}
+    )
+    assert trajectory.task_id == "task"
+    assert all(gap.code != "producer_trajectory_identity_mismatch" for gap in trajectory.gaps)

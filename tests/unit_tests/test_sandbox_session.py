@@ -485,3 +485,18 @@ async def test_missing_failure_log_does_not_mask_capture_failure(session, monkey
     assert session.cleanup == RECEIPT
     await session.close(timeout=1)
     assert session.closed
+
+
+async def test_deadline_is_rechecked_after_staging_before_launch(session):
+    stage = AsyncMock(return_value=SandboxCommand(argv=["worker"], python="/runtime/python"))
+    with pytest.raises(TimeoutError):
+        await session.execute(
+            stage_activation=stage,
+            collect=AsyncMock(return_value=""),
+            timeout=10,
+            close_timeout=1,
+            deadline=0,
+        )
+    stage.assert_awaited_once()
+    assert not session.launch_started
+    session.sandbox.exec.assert_not_awaited()

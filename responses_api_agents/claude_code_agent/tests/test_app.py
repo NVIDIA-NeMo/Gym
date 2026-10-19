@@ -51,6 +51,11 @@ from responses_api_agents.claude_code_agent.app import (
 from responses_api_agents.claude_code_agent.observability import extract_claude_code_observations
 
 
+@pytest.fixture(autouse=True)
+def installed_local_runtime(monkeypatch):
+    monkeypatch.setattr(ClaudeCodeAgent, "_ensure_local_runtime", AsyncMock())
+
+
 def _write_skill_dir(root: Path, name: str = "cot_enhanced") -> Path:
     skills_dir = root / "variant_a"
     skill = skills_dir / name

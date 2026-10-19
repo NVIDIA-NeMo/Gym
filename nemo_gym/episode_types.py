@@ -11,6 +11,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    JsonValue,
     SerializerFunctionWrapHandler,
     field_validator,
     model_serializer,
@@ -139,6 +140,19 @@ class BaseEpisodeResponse(BaseModel, Generic[EpisodeResultT]):
     task_id: TaskId
     result: EpisodeResultT | None = None
     failure: EpisodeFailure | None = None
+    agent_trajectory: dict[str, JsonValue] | None = Field(
+        default=None,
+        description="Native agent evidence for collector projection, separate from benchmark result fields.",
+    )
+
+    @field_validator("agent_trajectory")
+    @classmethod
+    def validate_agent_trajectory(cls, value: dict[str, JsonValue] | None) -> dict[str, JsonValue] | None:
+        # Observation types depend on routing, which imports EpisodeId from this module.
+        # Validate lazily to keep the foundational episode identity importable on its own.
+        from nemo_gym.rollout_observability import TrajectoryRecord
+
+        return TrajectoryRecord.model_validate(value).model_dump(mode="json") if value is not None else None
 
     @model_validator(mode="after")
     def validate_result(self) -> Self:
