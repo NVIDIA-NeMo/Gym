@@ -230,23 +230,46 @@ sandbox_install_timeout_seconds: 600
 session_close_timeout_seconds: 60
 ```
 
-The image must include `python3`, `tar`, CA certificates, and libraries required by
-the native Claude binary. Seed downloads the exact Linux x64/arm64 release and
-checks its published SHA-256. For offline images, set `sandbox_executable_path` to
-an existing native binary **inside the sandbox**; seed copies it into the private
-session directory and checks its version. Configure `model_server` as above, or
-`anthropic_base_url` and `anthropic_api_key`; the endpoint must be reachable from
-the sandbox. `resources_server` is needed only for the legacy agent `/run` path.
+The image must include Linux Python **3.8+**, `tar`, CA certificates, and libraries
+required by the native Claude binary. Seed installs the exact x64/arm64 release in
+`/tmp/nemo-gym-claude-runtime-<version>`, separate from per-session state. A file
+lock serializes installers; later seeds reuse a binary after checksum and version
+health checks. Closing a borrowed session removes its private state and retains
+the shared runtime for subsequent sessions.
+
+Downloads are checked against the release manifest's SHA-256 to detect corruption.
+For an independently trusted checksum, set `sandbox_executable_sha256`. Offline
+images can set `sandbox_executable_path` to a native binary **inside the sandbox**;
+that option requires `sandbox_executable_sha256`. The installer verifies the hash
+and version before atomically updating the shared runtime.
+
+Configure `model_server` as above, or `anthropic_base_url` and `anthropic_api_key`;
+the endpoint must be reachable from the sandbox. `resources_server` is needed only
+for the legacy agent `/run` path. Sandbox-only servers install no host CLI. For
+local execution, installation happens on the first local invocation; concurrent
+calls share setup, failures propagate, and a later call can retry.
 
 For borrowed execution, the seed request supplies `sandbox_access` with a direct
 provider connection descriptor and an absolute task `workdir`. Resources prepares
 the task directory; Claude Code only stages its own runtime and settings outside
 it. Required remote tool accesses are rejected: this adapter runs Claude Code's
 native tools. Optional static `mcp_config` and `settings` JSON files are staged
-from the agent server, with the same command options as local execution.
+from the agent server, with the same command options as local execution. A
+`skills.path` in the merged server config is copied into the session's
+`CLAUDE_CONFIG_DIR/skills`, including supporting files; skills disable `--bare`
+through the same command builder used locally. The legacy `/run` skills reference
+still takes precedence over configured skills for that invocation. The collector's
+run-level skills option remains unsupported for materialized task rows.
+
+Prompt conversion preserves the existing local contract in both modes: the last
+user message is the prompt, and a leading system message is appended to
+`system_prompt`. Request `instructions` and developer messages retain the local
+behavior of being ignored. One session runs one activation; it does not resume a
+previous Claude conversation.
 
 The shared `SandboxSession` supervisor stops the harness before reading its
-stream and native transcripts. Close returns the observation bundle, disconnects
+dedicated stdout stream and native transcripts. The runner keeps `events.jsonl`,
+`stderr.log`, and `runtime.json` separate from supervisor diagnostics. Close returns the observation bundle, disconnects
 borrowed sandboxes, and stops agent-owned sandboxes. The task directory remains
 available to the borrowed sandbox's owner for verification. `timeout` bounds
 harness execution; setup and close use the limits above.

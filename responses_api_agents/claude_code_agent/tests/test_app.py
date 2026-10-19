@@ -70,11 +70,14 @@ def _config(**kwargs) -> ClaudeCodeAgentConfig:
     )
 
 
+@pytest.fixture(autouse=True)
+def no_host_install(monkeypatch):
+    # These tests exercise invocation behavior without installing the external CLI.
+    monkeypatch.setattr("responses_api_agents.claude_code_agent.app.ensure_claude_code", lambda version: None)
+
+
 def _make_agent(**kwargs) -> ClaudeCodeAgent:
-    # Patch only the Claude Code installation check.
-    # The real model initialization still configures private attributes and the semaphore.
-    with patch("responses_api_agents.claude_code_agent.app.ensure_claude_code"):
-        return ClaudeCodeAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
+    return ClaudeCodeAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
 
 
 def _event(type_: str, **kwargs) -> str:
