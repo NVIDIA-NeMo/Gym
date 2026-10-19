@@ -46,24 +46,37 @@ wall-clock time, and dropping those samples would bias the histogram toward the 
 ### What `gym.rollout.completed_total` Counts
 
 One increment per rollout **attempt**: one dispatch of one row in one `gym eval run` collection
-run, recorded after the driver wrote the attempt or decided to omit it. A retry on a later
+run, recorded after the recovery store accepts the saved outcome. A retry on a later
 resume run is another attempt; an HTTP-level re-send of `/run` inside one dispatch is not.
-Coverage comes from the output files, not this counter.
+Reused cached results do not increment it. Coverage comes from the output files, not this counter.
 
 `nemo.gym.rollout.outcome` is `scored` (written to the main output, masked and forced-zero
-results included), `failed` (written to the failures sidecar), or `omitted` (a no-persist
-result written to neither, such as a `kill_shaped` failure: a Slurm SIGTERM, a dead Ray actor, or
-an out-of-memory kill). Rows drained by the dispatch budget never ran and are not counted. Every
-point carries `nemo.gym.rollout.dispatch.name`, the environment server or, when rows name none, the
-agent. Attempts with a failure class also carry
-`nemo.gym.failure_class`, `nemo.gym.failure_kind` (a registered or `<server>:<kind>` namespaced
-kind, otherwise `unregistered`) and `nemo.gym.failure_type` (the exception class name). Free-text
-failure reasons never become attributes.
+results and supported unscored completions included), `failed` (a saved failure), or `omitted` (a saved
+intentional omission, including terminal skips and bare no-persist replies). A reported `kill_shaped` failure
+(a Slurm SIGTERM, a dead Ray actor, or an out-of-memory kill) is saved as a failure so it remains eligible
+for retry. The historical `scored` label does not guarantee a measured reward.
+Rows drained by the dispatch budget never ran and are not counted. Every point carries
+`nemo.gym.rollout.dispatch.name`, the environment server or, when rows name none, the agent.
+Attempts with a failure class also carry `nemo.gym.failure_class` and, when supplied,
+`nemo.gym.failure_kind` and `nemo.gym.failure_type` (the exception class name).
 
-A failed `/run` is counted as `failed` with class `agent_request_failed` only when
-`route_failures_to_sidecar` is on; otherwise it aborts the run. Only the serving collection path
-records the counter: `gym eval run --no-serve`, direct `run_examples` callers and rollout
-reverification do not.
+Older legacy producers retain their original routing class and exception type. Those two fields remain
+producer-controlled, as on main; producers should supply stable category names, not free-text error details.
+The kind label is included only when supplied: a registered or `<server>:<kind>` namespaced kind is retained,
+otherwise it is `unregistered`. A saved record's compatibility fallback does not add a kind label or replace
+a distinct routing class.
+
+Native episode failures and the legacy Environment Server adapter route by the shared kind. When that kind also
+supplies the class, both labels use the same bounded-name rule. This changes the adapter's dashboard labels:
+previously it reported `environment_server_failed` without a kind label; it now reports the shared kind like a
+native episode. Free-text kinds and reasons are never promoted to class labels. Existing legacy class/type fields
+are retained, so arbitrary producer text in those fields is not automatically bounded.
+
+Transport failures count as saved failures only when failure routing is enabled; otherwise the request error
+aborts collection. An HTTP 500 uses `agent_run_error`; an unavailable server uses `agent_request_failed`.
+Neither adds a kind label. The collector records the counter when telemetry is enabled; `gym eval run --no-serve`
+does not initialize telemetry by default. Direct `run_examples` callers, GDPVal multistage and rollout
+reverification do not record it.
 
 ### What the Reward Metrics Show
 

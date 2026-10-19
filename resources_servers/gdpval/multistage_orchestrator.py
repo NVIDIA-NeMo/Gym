@@ -108,6 +108,14 @@ from nemo_gym.rollout_collection import (
     is_terminal_failure,
     observed_elapsed,
 )
+from nemo_gym.rollout_records import (
+    coverage_path_for,
+    materialized_path_for,
+)
+from nemo_gym.rollout_records import (
+    journal_path_for as rollout_attempts_path_for,
+)
+from nemo_gym.rollout_recovery import manifest_path_for
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from resources_servers.gdpval.multistage_elo import (
     PartialStagePolicy,
@@ -1549,6 +1557,15 @@ async def run_multistage_stages(
             "stage_index": index,
             "num_tasks": len(task_ids),
             "num_rollouts": len(stage_rows),
+            # Only an accepted partial-stage policy can waive unresolved rows.
+            # Terminal/exhausted rows are already absent from unresolved_keys.
+            "num_retryable": 0
+            if partial_outcome is not None
+            else sum(
+                _stage_key(row) in unresolved_keys and (row.get(NG_NO_PERSIST_KEY) or _is_retryable_failure(row))
+                for row in new_tagged
+            )
+            + len(unresolved_keys - {_stage_key(row) for row in new_tagged}),
             "num_reused": num_reused,
             "reference_ids": list(reference_ids),
             "eval_elo": stage_elo,
@@ -1776,6 +1793,7 @@ def _resume_complete_stage(
         "num_tasks": len(task_ids),
         # Cached results can be incomplete even when the stage was marked complete.
         "num_rollouts": expected_stage_row_count,
+        "num_retryable": 0,
         "num_reused": 0,
         "reference_ids": reference_ids,
         "eval_elo": stage_elo,
@@ -2574,7 +2592,10 @@ async def run_e2e_multistage(
             results.append((completed.row, completed.result))
         return results
 
+    outcomes_recorded = 0
+
     async def run_rollouts(rows: List[Dict[str, Any]]) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
+        nonlocal outcomes_recorded
         semaphore = None
         if semaphore_size:
             from asyncio import Semaphore
@@ -2600,6 +2621,17 @@ async def run_e2e_multistage(
         results.extend((row, result) for row, result in judged if result is not None)
         # No deliverable was persisted for these rows, so the policy runs, as old Stirrup did.
         results.extend(await dispatch([row for row, result in judged if result is None], semaphore))
+        outcomes_recorded += sum(
+            not result.get(NG_NO_PERSIST_KEY)
+            and (
+                bool(result.get(NG_TERMINAL_KEY))
+                or (
+                    result.get(NG_FAILURE_CLASS_KEY) != "kill_shaped"
+                    and result.get("_ng_failure_stage") != "admission"
+                )
+            )
+            for _, result in results
+        )
         return results
 
     output_fpath = Path(rollout_collection_config.output_jsonl_fpath)
@@ -2671,7 +2703,11 @@ Aggregate metrics: {aggregate_metrics_fpath}
 Stages: {orjson.dumps(stage_summaries, option=orjson.OPT_INDENT_2).decode()}"""
     )
     rollout_collection_config.check_completion(
-        expected=sum(stage["num_rollouts"] for stage in stage_summaries), results=all_results
+        expected=sum(stage["num_rollouts"] for stage in stage_summaries),
+        results=all_results,
+        intentionally_omitted=sum(stage.get("num_omitted", 0) for stage in stage_summaries),
+        retryable=any(stage["num_retryable"] > 0 for stage in stage_summaries),
+        made_progress=outcomes_recorded > 0,
     )
     return aggregate_metrics_fpath
 
@@ -2685,7 +2721,7 @@ def _prepare_resume(
     and rows incrementally, giving a later resume state to read. Prior state is
     reused only when ``resume_from_cache`` is set and both the rollouts file and a
     fingerprint-matching journal exist; every other case renames the prior
-    rollouts, failure sidecar, journal and aggregate metrics to
+    rollouts, failure sidecar, journals, manifest, materialized inputs, coverage and aggregate metrics to
     ``<name>.stale.<ns>`` and starts fresh (with the reason logged).
     """
     import sys
@@ -2710,6 +2746,12 @@ def _prepare_resume(
             failures_path_for(output_fpath),
             journal_fpath,
             aggregate_metrics_path_for(output_fpath),
+            # A previous single-pass run owns these additional companions.
+            # Preserve them together so they cannot claim the new stage output.
+            manifest_path_for(output_fpath),
+            rollout_attempts_path_for(output_fpath),
+            materialized_path_for(output_fpath),
+            coverage_path_for(output_fpath),
         ):
             if stale.exists():
                 quarantined = stale.with_name(stale.name + stale_suffix)

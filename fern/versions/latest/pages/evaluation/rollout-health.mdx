@@ -21,6 +21,14 @@ metrics, model servers, or agent behavior. It writes two additional report files
 
 ## When Health Checks Run
 
+<Note>
+Fresh runs, including those with a recovery manifest, support the checks below when every saved row still represents
+its task's selected attempt. Histories with superseded rows require a merged selected-result projection from
+`gym eval aggregate`; automatic checks print a skip message for those histories, and standalone checks explain
+how to export them. Reading and reporting those histories directly remains a follow-up to
+[evaluation resume](/main/evaluation/resume). These protections also apply through file symlinks.
+</Note>
+
 `gym eval run` runs health checks after rollout collection and aggregate-metrics computation. `gym eval aggregate` runs health checks
 after aggregating the selected shards. Both commands print a short report:
 
