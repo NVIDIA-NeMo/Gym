@@ -71,6 +71,7 @@ if [[ -n "$SAVE_WARMED_CONTAINER" ]]; then
     SAVE_WARMED_CONTAINER="$(cd "$(dirname "$SAVE_WARMED_CONTAINER")" && pwd -P)/$(basename "$SAVE_WARMED_CONTAINER")"
 fi
 ENABLE_MOONCAKE=${ENABLE_MOONCAKE:-0}
+MOONCAKE_DEFAULT_KV_LEASE_TTL=${MOONCAKE_DEFAULT_KV_LEASE_TTL:-180000}
 if [[ "$VLLM_MODE" == aggregated && "$ENABLE_MOONCAKE" != 0 ]]; then
     echo "ENABLE_MOONCAKE requires VLLM_MODE=pd" >&2
     exit 1
@@ -530,7 +531,7 @@ MOONCAKE_CONFIG
             -eviction_ratio=0.1 \
             -minloglevel=1 \
             -enable_metric_reporting=false \
-            -default_kv_lease_ttl=180000 \
+            -default_kv_lease_ttl=$MOONCAKE_DEFAULT_KV_LEASE_TTL \
             -logtostderr &
         mooncake_pid=\$!
     fi
