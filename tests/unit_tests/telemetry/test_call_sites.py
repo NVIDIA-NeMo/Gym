@@ -121,6 +121,29 @@ async def test_sandbox_stop_emits_a_span_for_the_release(recorded_spans, started
     assert stop_span.attributes["nemo.gym.sandbox.id"] == "handle-1"
 
 
+async def test_sandbox_spans_carry_the_rollout_id_inside_a_rollout(recorded_spans, started_sandbox):
+    """The same correlation key the endpoint spans carry, so a rollout's sandbox time is filterable
+    by attribute and not only through the parent chain."""
+    from nemo_gym.rollout_correlation import rollout_context
+
+    with rollout_context("7-0"):
+        sandbox = await started_sandbox().start()
+        await sandbox.exec("echo hi")
+        await sandbox.stop()
+
+    by_name = {span.name: span for span in recorded_spans()}
+    for name in ("gym.sandbox.start", "gym.sandbox.exec", "gym.sandbox.stop"):
+        assert by_name[name].attributes["nemo.gym.rollout.id"] == "7-0", name
+
+
+async def test_sandbox_spans_have_no_rollout_id_outside_a_rollout(recorded_spans, started_sandbox):
+    sandbox = await started_sandbox().start()
+    await sandbox.exec("echo hi")
+    for span in recorded_spans():
+        if span.name.startswith("gym.sandbox."):
+            assert "nemo.gym.rollout.id" not in span.attributes
+
+
 async def test_sandbox_span_never_records_the_command(recorded_spans, started_sandbox):
     """In a code-execution environment the command is model output or task content.
 

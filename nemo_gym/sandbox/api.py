@@ -25,6 +25,7 @@ from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path
 from typing import Any, TypeVar
 
+from nemo_gym.rollout_correlation import current_rollout_id
 from nemo_gym.sandbox.providers import (
     ConnectableProvider,
     SandboxEndpoint,
@@ -381,6 +382,12 @@ class SandboxPty:
         )
 
 
+def _rollout_attributes() -> dict[str, str]:
+    """The rollout id Gym's endpoint spans carry, so sandbox spans are filterable per rollout too."""
+    rollout_id = current_rollout_id()
+    return {"nemo.gym.rollout.id": rollout_id} if rollout_id else {}
+
+
 def _sandbox_id(handle: Any) -> str | None:
     """The provider-neutral id of a handle, or None for a handle-less test double."""
     return getattr(handle, "sandbox_id", None)
@@ -446,7 +453,9 @@ class AsyncSandbox:
             ) as span:
                 handle = await self._provider.create(requested_spec)
                 if span is not None:
-                    safe_set_span_attributes(span, {"nemo.gym.sandbox.id": _sandbox_id(handle)})
+                    safe_set_span_attributes(
+                        span, {"nemo.gym.sandbox.id": _sandbox_id(handle), **_rollout_attributes()}
+                    )
             record_sandbox_startup((time.perf_counter() - started) * 1000.0, provider=provider_name)
             record_sandbox_active(1, provider=provider_name)
             self._counted_active = True
@@ -541,6 +550,7 @@ class AsyncSandbox:
                         "nemo.gym.sandbox.id": _sandbox_id(self._handle),
                         "nemo.gym.sandbox.return_code": result.return_code,
                         "nemo.gym.sandbox.error_type": result.error_type,
+                        **_rollout_attributes(),
                     },
                 )
         record_sandbox_exec_duration((time.perf_counter() - started) * 1000.0, provider=provider_name)
@@ -654,6 +664,7 @@ class AsyncSandbox:
                     **{
                         "nemo.gym.sandbox.provider": self._telemetry_provider_name(),
                         "nemo.gym.sandbox.id": _sandbox_id(self._handle),
+                        **_rollout_attributes(),
                     },
                 ):
                     await self._provider.close(self._handle)
