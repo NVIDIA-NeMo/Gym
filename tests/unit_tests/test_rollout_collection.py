@@ -7503,6 +7503,32 @@ class TestLongestFirstDispatch:
             assert 1 not in [r[TASK_INDEX_KEY_NAME] for r in input_rows]
 
 
+class TestResubmitAttemptBudget:
+    def test_a_resubmit_offset_gives_capped_rows_a_fresh_budget(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", raising=False)
+        key = lambda i: {TASK_INDEX_KEY_NAME: i, ROLLOUT_INDEX_KEY_NAME: 0}
+        (tmp_path / "output_materialized_inputs.jsonl").write_bytes(
+            b"".join(orjson.dumps(key(i)) + b"\n" for i in range(3))
+        )
+        output = tmp_path / "output.jsonl"
+        output.write_bytes(b"")
+        # Task 0 hit the cap, task 1 is terminal, then a resubmit; task 2 failed once after it.
+        rows = [key(0)] * _DEFAULT_MAX_ROLLOUT_ATTEMPTS + [{**key(1), "_ng_failure_terminal": True}]
+        (tmp_path / "output_resubmit_offset").write_text(f"{len(rows)}\n")
+        rows.append(key(2))
+        _failures_path_for(output).write_bytes(b"".join(orjson.dumps(r) + b"\n" for r in rows))
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(tmp_path / "input.jsonl"), output_jsonl_fpath=str(output), resume_from_cache=True
+        )
+
+        input_rows, *_ = RolloutCollectionHelper()._load_from_cache(config)
+
+        attempts = {r[TASK_INDEX_KEY_NAME]: r.get(ATTEMPT_INDEX_KEY_NAME) for r in input_rows}
+        assert attempts == {0: _DEFAULT_MAX_ROLLOUT_ATTEMPTS, 2: 1}
+
+
 class TestIsTerminalFailure:
     """The failure contract is opt-in; off, a row is terminal iff it is stamped terminal."""
 

@@ -88,7 +88,12 @@ from nemo_gym.observability.model_calls import (
     model_call_capture_dirs_from_config,
     observability_enabled_from_config,
 )
-from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for, materialized_path_for
+from nemo_gym.path_utils import (
+    aggregate_metrics_path_for,
+    failures_path_for,
+    materialized_path_for,
+    resubmit_offset_path_for,
+)
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import (
@@ -2902,11 +2907,16 @@ class RolloutCollectionHelper(BaseModel):
         # per key + flag terminal rows so chain-hop 2 retries the right ones.
         failures_fpath = failures_path_for(Path(config.output_jsonl_fpath))
         attempts_by_key: Counter = Counter()
+        # Attempts since the last `gym eval resubmit`: a resubmit gives every non-terminal failure a fresh budget.
+        # If the sidecar is later rewritten shorter (a GDPval stage restart), the offset only gives extra attempts.
+        offset_fpath = resubmit_offset_path_for(Path(config.output_jsonl_fpath))
+        resubmit_offset = int(offset_fpath.read_text()) if offset_fpath.exists() else 0
+        budget_used: Counter = Counter()
         terminal_keys: set = set()
         elapsed_by_key: Dict[Tuple, float] = {}
         if failures_fpath.exists():
             with failures_fpath.open("rb") as f:
-                for line in f:
+                for line_index, line in enumerate(f):
                     line = line.strip()
                     if not line:
                         continue
@@ -2915,6 +2925,8 @@ class RolloutCollectionHelper(BaseModel):
                         continue
                     k = (fr[TASK_INDEX_KEY_NAME], fr[ROLLOUT_INDEX_KEY_NAME])
                     attempts_by_key[k] += 1
+                    if line_index >= resubmit_offset:
+                        budget_used[k] += 1
                     if is_terminal_failure(fr, retry_terminal_timeouts=config.retry_terminal_timeouts):
                         terminal_keys.add(k)
                     # A failed attempt still tells us how long this task runs -
@@ -2925,7 +2937,7 @@ class RolloutCollectionHelper(BaseModel):
                         elapsed_by_key[k] = max(elapsed_by_key.get(k, 0.0), observed)
 
         max_attempts = _get_max_rollout_attempts()
-        maxed_out = {k for k, n in attempts_by_key.items() if n >= max_attempts}
+        maxed_out = {k for k, n in budget_used.items() if n >= max_attempts}
         gated = successes_seen | terminal_keys | maxed_out
 
         input_rows = [row for row in original_input_rows if get_key(row) not in gated]

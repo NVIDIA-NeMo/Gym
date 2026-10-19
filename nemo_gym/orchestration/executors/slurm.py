@@ -35,6 +35,7 @@ from nemo_gym.orchestration.executors.otel import (
     validate_destination,
     validate_gym_telemetry,
 )
+from nemo_gym.orchestration.executors.resume_script import JOB_CHAIN_NAME, PROLOGUE_MARKER, RETRY_FILE_NAME
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
 from nemo_gym.orchestration.jobs import (
     BenchmarkJob,
@@ -44,6 +45,7 @@ from nemo_gym.orchestration.jobs import (
     utc_now,
     utc_timestamp,
 )
+from nemo_gym.path_utils import failures_path_for, resubmit_offset_path_for
 
 
 # Each sbatch reports its own result on a line that names its benchmark, so a
@@ -200,6 +202,39 @@ class SlurmExecutor(BaseExecutor):
                 self.persist(record, config, conn.write_text)
 
         return record
+
+    def resubmit(self, record: SubmissionRecord, benchmark: BenchmarkJob) -> str:
+        """Queue `benchmark`'s job.sh again from its job dir and append the new id to its job chain.
+
+        Refuses while any of the caller's jobs runs in that job dir, so two jobs never write one run.
+        """
+        job_dir = Path(benchmark.job_dir)
+        with get_connection(record.hostname) as conn:
+            workdirs = conn.run(["squeue --me --noheader --format=%Z"]).split()
+            if str(job_dir) in workdirs:
+                raise RuntimeError(f"A job of this run is still pending or running in {job_dir}.")
+            rollouts = job_dir / "artifacts" / "rollouts.jsonl"
+            failures = shlex.quote(str(failures_path_for(rollouts)))
+            offset = shlex.quote(str(resubmit_offset_path_for(rollouts)))
+            results = _parse_sbatch_results(
+                conn.run(
+                    [
+                        f"cd {shlex.quote(str(job_dir))}",
+                        # A fresh attempt budget for failed rollouts, and fresh auto-resume retries.
+                        f"if [ -f {failures} ]; then wc -l < {failures}; else echo 0; fi > {offset}",
+                        f"rm -f {RETRY_FILE_NAME}",
+                        _sbatch_command(benchmark.benchmark, job_dir / "job.sh"),
+                    ]
+                )
+            )
+            job_id, error = results.get(benchmark.benchmark, (None, "sbatch produced no result"))
+            if job_id is None:
+                raise RuntimeError(f"Resubmit of {benchmark.benchmark} failed: {error}")
+            # A resumable job.sh appends its own id to the chain when it starts.
+            chain = shlex.quote(str(job_dir / JOB_CHAIN_NAME))
+            job_sh = shlex.quote(str(job_dir / "job.sh"))
+            conn.run([f"grep -qF -- {shlex.quote(PROLOGUE_MARKER)} {job_sh} || echo {job_id} >> {chain}"])
+        return job_id
 
     def _build_record(
         self,

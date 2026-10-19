@@ -13,11 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
+from pathlib import Path
+
 from nemo_gym.decorators import experimental
 from nemo_gym.orchestration.api import KubernetesComputeConfig, SlurmComputeConfig, SubmitConfig
 from nemo_gym.orchestration.executors.kubernetes import KubernetesExecutor
 from nemo_gym.orchestration.executors.slurm import SlurmExecutor
-from nemo_gym.orchestration.jobs import SubmissionRecord
+from nemo_gym.orchestration.jobs import MANIFEST_NAME, BenchmarkJob, SubmissionRecord, local_index_dir
 
 
 _EXECUTORS = {
@@ -40,3 +43,24 @@ def submit(config: SubmitConfig, *, dry_run: bool = False) -> SubmissionRecord |
             )
 
     return executor_cls().run(config, dry_run=dry_run)
+
+
+def _find_benchmark_job(job_dir: str) -> tuple[SubmissionRecord, BenchmarkJob]:
+    """The record naming `job_dir`: the run's manifest if it is on this machine, else this machine's job index."""
+    target = Path(job_dir)
+    manifest = target.parent / MANIFEST_NAME
+    for path in [manifest] if manifest.is_file() else sorted(local_index_dir().glob("*.json")):
+        record = SubmissionRecord.load(json.loads(path.read_text(encoding="utf-8")))
+        for benchmark in record.benchmarks:
+            if Path(benchmark.job_dir) == target:
+                return record, benchmark
+    raise ValueError(f"No submission record names job dir {job_dir}.")
+
+
+@experimental
+def resubmit(job_dir: str) -> str:
+    """Queue a submitted benchmark's job.sh again, in place, and return the new Slurm job id."""
+    record, benchmark = _find_benchmark_job(job_dir)
+    if record.executor != "slurm":
+        raise ValueError(f"Resubmit supports the Slurm executor only, not {record.executor!r}.")
+    return SlurmExecutor().resubmit(record, benchmark)
