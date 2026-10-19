@@ -1461,6 +1461,28 @@ def test_chat_structured_tool_text_to_responses_preserves_parts(converter: Respo
     ]
 
 
+def test_chat_tool_image_to_responses_becomes_input_image(converter: ResponsesConverter):
+    items = converter.chat_completions_messages_to_responses_items(
+        [
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": [
+                    {"type": "text", "text": "Image loaded."},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,YWJj", "detail": "high"}},
+                    {"type": "image_url", "image_url": {"url": "https://example.com/image.png"}},
+                ],
+            }
+        ]
+    )
+
+    assert items[0].model_dump()["output"] == [
+        {"type": "input_text", "text": "Image loaded."},
+        {"type": "input_image", "image_url": "data:image/png;base64,YWJj", "detail": "high"},
+        {"type": "input_image", "image_url": "https://example.com/image.png", "detail": "auto"},
+    ]
+
+
 def test_chat_messages_to_responses_items_unrecognized_role_raises(converter: ResponsesConverter):
     with pytest.raises(NotImplementedError):
         converter.chat_completions_messages_to_responses_items([{"role": "alien", "content": "x"}])

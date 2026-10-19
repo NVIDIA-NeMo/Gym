@@ -2405,6 +2405,183 @@ def _coverage_report(
     return report
 
 
+class _EagerCompletionQueue:
+    """Own undelivered outcomes independently of the iterator and its handed-out awaitables."""
+
+    def __init__(self, progress):
+        self.ready: asyncio.Queue[Future] = asyncio.Queue()
+        self.drained = False
+        self.progress = progress
+
+    def put(self, task: Future) -> None:
+        if not self.drained:
+            self.ready.put_nowait(task)  # Wake one consumer for each available outcome.
+
+    async def get(self):
+        try:
+            task = await self.ready.get()
+        except asyncio.QueueShutDown:
+            raise asyncio.CancelledError from None
+        self.progress.update(1)
+        if self.progress.n == self.progress.total:
+            self.progress.close()
+        return await task
+
+    def drain(self) -> list[Future]:
+        self.drained = True
+        tasks = []
+        while not self.ready.empty():
+            tasks.append(self.ready.get_nowait())
+        # Only drain wakes every consumer, including issued awaitables started later.
+        self.ready.shutdown()
+        return tasks
+
+
+class _EagerCompletionIterator:
+    """Start every rollout in input order on first use, yielding completion-order awaitables."""
+
+    def __init__(self, awaitables: Iterator, *, total: int):
+        self._awaitables = awaitables
+        self._total = total
+        self._remaining = total
+        self._tasks: set[Future] = set()
+        self._queue: Optional[_EagerCompletionQueue] = None
+        self._closed = False
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self._closed or self._remaining <= 0:
+            raise StopIteration
+        if self._queue is None:
+            progress = tqdm(desc="Collecting rollouts", miniters=10, total=self._total, maxinterval=60)
+            self._queue = _EagerCompletionQueue(progress)
+            # Creating tasks explicitly preserves input order (as_completed uses a set).
+            for awaitable in self._awaitables:
+                task = asyncio.ensure_future(awaitable)
+                self._tasks.add(task)
+                task.add_done_callback(functools.partial(self._on_done, self._queue))
+        self._remaining -= 1
+        return self._queue.get()
+
+    def _on_done(self, queue: _EagerCompletionQueue, task: Future) -> None:
+        self._tasks.discard(task)
+        if not task.cancelled():
+            # Retrieve failures even if no caller consumes this completion. Awaiting it still raises.
+            task.exception()
+        queue.put(task)
+
+    async def aclose(self) -> None:
+        await self._close(drain=False)
+
+    async def aclose_and_drain(self) -> list[Future]:
+        return await self._close(drain=True)
+
+    async def _close(self, *, drain: bool) -> list[Future]:
+        if self._closed:
+            return []
+        self._closed = True
+        queue, self._queue = self._queue, None
+        tasks = list(self._tasks)
+        self._tasks.clear()
+        completed = []
+        if queue is not None:
+            if drain:
+                completed = queue.drain()
+                # Some tasks may have finished before their done callbacks ran.
+                completed.extend(task for task in tasks if task.done())
+            queue.progress.close()
+        # Plain aclose leaves the detached queue available to existing awaitables.
+        # With no such awaitables, the queue and its payloads are released after callbacks run.
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        return completed
+
+
+class _RowResultIterator:
+    """What ``run_examples`` returns: ``(row, result)`` awaitables in completion order.
+
+    A thin map over the internal completion iterator that keeps its ``aclose()`` reachable, so a
+    direct caller can stop collecting and cancel the rollouts still in flight.
+    """
+
+    def __init__(self, completions: Iterator[Future]):
+        self._completions = completions
+        self._closed = False
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self._closed:
+            raise StopIteration
+        return self._without_metadata(next(self._completions))
+
+    @staticmethod
+    async def _without_metadata(future: Future) -> Tuple[Dict, Dict]:
+        completed = await future
+        return completed.row, completed.result
+
+    async def aclose(self) -> None:
+        """Cancel unfinished rollouts and await the end of their client tasks in this process.
+
+        Cancelling an in-flight `/run` request closes its connection. A server using
+        ``ClientDisconnectCancellationMiddleware`` subsequently cancels its handler. This method
+        does not wait for or acknowledge server/agent cleanup, which depends on the agent and may
+        continue after return; it does not guarantee sandbox release or retire an attempt.
+
+        A handed-out awaitable may return an already completed result or raise its exception,
+        including ``CancelledError`` for cancelled work. In bounded mode, an awaitable first
+        awaited after closure raises ``CancelledError`` even if a result was ready. This error
+        propagates in the awaiting caller's task without a call to that task's ``cancel()``;
+        ``asyncio.gather`` and ``TaskGroup`` treat it as cancellation. Iteration stops after closure.
+        Safe to call again after closure completes, or before first use (no rollouts start).
+        """
+        self._closed = True
+        await self._completions.aclose()
+
+    async def aclose_and_drain(self) -> list[Future[Tuple[Dict, Dict]]]:
+        """Stop admission, cancel unfinished client tasks, and preserve completed outcomes.
+
+        Before its first suspension, this operation stops admitting rollouts and snapshots
+        completed outcomes not yet claimed by a completion awaitable. It then cancels and
+        awaits unfinished client tasks, and returns settled futures yielding ``(row, result)``
+        or raising the original exception. No new rollouts start while draining, including
+        in bounded mode. Outcomes are transferred once; repeated calls return an empty list.
+
+        A handed-out awaitable that already claimed an outcome retains it. Other issued
+        awaitables raise ``CancelledError``. Callers with an outstanding waiter must also
+        await that waiter and consume its outcome if it was not cancelled. The returned
+        futures have their exceptions retrieved even if abandoned; awaiting them still raises.
+        An outcome already cancelled at the snapshot is returned as a cancelled future and
+        raises ``CancelledError`` when awaited. Tasks cancelled by this operation are excluded.
+
+        Calling this before first use starts nothing. Calling it after ``aclose()`` returns
+        nothing. Like ``aclose()``, it waits only for local client tasks, not server/agent
+        cleanup, and does not guarantee sandbox release.
+        """
+        self._closed = True
+        completed = await self._completions.aclose_and_drain()
+        outcomes = []
+        loop = asyncio.get_running_loop()
+        for task in completed:
+            outcome = loop.create_future()
+            if task.cancelled():
+                outcome.cancel()
+            elif (error := task.exception()) is not None:
+                outcome.set_exception(error)
+                outcome.exception()
+            else:
+                result = task.result()
+                outcome.set_result((result.row, result.result))
+            outcomes.append(outcome)
+        return outcomes
+
+
 class _BoundedCompletionIterator:
     """Completion-order iterator with a bounded set of resident asyncio tasks."""
 
@@ -2468,10 +2645,17 @@ class _BoundedCompletionIterator:
                 if not self._pending:
                     raise RuntimeError("rollout completion iterator exhausted unexpectedly")
 
-                done, self._pending = await asyncio.wait(
+                done, pending = await asyncio.wait(
                     self._pending,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
+                if self._closed:
+                    # Close owns the snapshot; do not put drained outcomes back or refill.
+                    # A cancelled waiter's traceback must not retain the transferred payloads.
+                    done.clear()
+                    pending.clear()
+                    raise asyncio.CancelledError
+                self._pending = pending
                 self._ready.extend(done)
 
             task = self._ready.pop()
@@ -2484,23 +2668,28 @@ class _BoundedCompletionIterator:
         return await task
 
     async def aclose(self) -> None:
-        # A concurrent consumer may hold the lock while waiting for a task.
-        # Cancel resident tasks without taking the lock so it can wake up.
-        if self._closed:
-            return
+        await self._close(drain=False)
 
+    async def aclose_and_drain(self) -> list[Future]:
+        return await self._close(drain=True)
+
+    async def _close(self, *, drain: bool) -> list[Future]:
+        # A concurrent consumer may hold the lock while waiting for a task.
+        # Freeze admission and snapshot outcomes before yielding, without taking that lock.
+        if self._closed:
+            return []
         self._closed = True
-        resident = [*self._pending, *self._ready]
+        resident = [*self._ready, *self._pending]
+        completed = [task for task in resident if task.done()] if drain else []
         self._pending.clear()
         self._ready.clear()
-
         for task in resident:
-            task.cancel()
-
+            if not task.done():
+                task.cancel()
         if resident:
             await asyncio.gather(*resident, return_exceptions=True)
-
         self._progress.close()
+        return completed
 
 
 class RolloutCollectionHelper(BaseModel):
@@ -3559,7 +3748,7 @@ class RolloutCollectionHelper(BaseModel):
                 _restore_sigterm(sigterm_previous)
                 if run_timing is not None:
                     print(run_timing.table(), flush=True)
-                if isinstance(completion_iterator, _BoundedCompletionIterator):
+                if hasattr(completion_iterator, "aclose"):
                     await completion_iterator.aclose()
             finally:
                 try:
@@ -4126,7 +4315,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         When ``max_resident_tasks`` is set, at most that many rollout tasks are admitted
         at once. When unset, all examples are scheduled as before. The collection
-        owner closes the bounded iterator on cancellation or error.
+        owner closes either iterator on completion, cancellation or error.
 
         ``dispatch_budget_s`` stops starting rows that many seconds after this call, and
         ``drain_margin_s`` stops sooner for rows that would not have time to finish. A row
@@ -4261,21 +4450,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 total=len(examples),
             )
 
-        def _start_in_input_order() -> Iterator[Future]:
-            # asyncio.as_completed creates its tasks from a set, so create them here to start rollouts in input order.
-            # It drains this generator in order before it builds that set, so tasks are still created in input order.
-            # A finished task keeps its result, so a list of tasks would keep every /run result until the run ends.
-            # A generator leaves the consumer holding the only reference to a result once it takes one.
-            tasks = (asyncio.ensure_future(awaitable) for awaitable in awaitables)
-            yield from tqdm.as_completed(
-                tasks,
-                desc="Collecting rollouts",
-                miniters=10,
-                total=len(examples),
-                maxinterval=60,
-            )
-
-        return _start_in_input_order()
+        return _EagerCompletionIterator(awaitables, total=len(examples))
 
     def run_examples(
         self,
@@ -4289,7 +4464,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         dispatch_budget_s: Optional[float] = None,
         drain_margin_s: Optional[float] = None,
         latency_tracker: Optional["DispatchLatencyTracker"] = None,
-    ) -> Iterator[Future]:  # pragma: no cover
+    ) -> _RowResultIterator:  # pragma: no cover
         """
         We provide this function as a lower level interface for running rollout collection.
 
@@ -4304,8 +4479,37 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         ``max_resident_tasks`` limits admitted tasks and therefore concurrent requests,
         even when ``semaphore`` allows more. Admission starts when the first returned
         awaitable is awaited. None schedules all examples up front, as with
-        ``asyncio.as_completed``. Stopping iteration early leaves up to
-        ``max_resident_tasks`` tasks running because this mapped iterator has no ``aclose()``.
+        ``asyncio.as_completed``.
+
+        To stop early, ``await`` the returned iterator's ``aclose()``: it cancels unfinished
+        rollouts and waits for their client tasks in this process to end. Cancelling an in-flight
+        `/run` closes its connection; a server with ``ClientDisconnectCancellationMiddleware``
+        subsequently cancels its handler. Server/agent cleanup is not awaited or acknowledged,
+        depends on the agent, and may continue after return. Sandbox release is not guaranteed.
+        Handed-out awaitables may return completed results or raise their exceptions, including
+        ``CancelledError``; bounded awaitables first awaited after closure raise ``CancelledError``.
+        The error propagates in the awaiting caller's task even without cancelling that task,
+        and ``asyncio.gather`` and ``TaskGroup`` treat it as cancellation.
+        Without it, abandoned rollouts keep running to completion in the background.
+
+        To preserve completed but unconsumed work when stopping, use
+        ``await completions.aclose_and_drain()`` instead. It stops admission before suspending,
+        cancels and awaits unfinished client tasks, and returns settled ``(row, result)``
+        futures, including failures. Consume those futures and any outcome already claimed
+        by an outstanding completion waiter; an unclaimed waiter raises ``CancelledError``.
+        Repeated drains return an empty list. This also works with bounded admission without
+        starting more rows, and has the same server/agent cleanup limits as ``aclose()``.
+
+        Use ``finally`` to close the iterator if collection stops early::
+
+            completions = helper.run_examples(examples)
+            try:
+                for future in completions:
+                    row, result = await future
+                    if should_stop(row, result):
+                        break
+            finally:
+                await completions.aclose()
 
         ``dispatch_budget_s`` stops starting rows that many seconds after this call, and
         ``drain_margin_s`` stops sooner for rows that would not have time to finish.
@@ -4320,12 +4524,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         failure row with ``_ng_failure_*`` fields.
         """
 
-        async def _without_metadata(future: Future) -> Tuple[Dict, Dict]:
-            completed = await future
-            return completed.row, completed.result
-
-        return map(
-            _without_metadata,
+        return _RowResultIterator(
             self._run_examples_with_metadata(
                 examples,
                 head_server_config=head_server_config,
@@ -4336,7 +4535,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 dispatch_budget_s=dispatch_budget_s,
                 drain_margin_s=drain_margin_s,
                 latency_tracker=latency_tracker,
-            ),
+            )
         )
 
     def setup_server_client(
