@@ -45,6 +45,14 @@ def select_harnesses(paths: list[str]) -> list[str]:
             )
         ):
             return list(HARNESSES)
+        elif path in (
+            "tests/__init__.py",
+            "tests/conftest.py",
+            "tests/unit_tests/__init__.py",
+            "tests/unit_tests/conftest.py",
+        ):
+            # Checker tests inherit these fixtures and import through these packages.
+            return list(HARNESSES)
         elif (
             path.startswith(
                 (

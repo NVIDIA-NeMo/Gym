@@ -37,6 +37,10 @@ def test_adapter_changes_select_only_that_harness(harness):
         "scripts/run_harness_conformance.py",
         "scripts/inspect_harness_conformance.py",
         "scripts/ci/setup_dev.sh",
+        "tests/__init__.py",
+        "tests/conftest.py",
+        "tests/unit_tests/__init__.py",
+        "tests/unit_tests/conftest.py",
         "tests/unit_tests/harness_capabilities/test_checker.py",
         "tests/unit_tests/test_harness_conformance_checks.py",
         "pyproject.toml",
@@ -47,7 +51,9 @@ def test_adapter_changes_select_only_that_harness(harness):
     ],
 )
 def test_shared_or_unknown_dependencies_run_all(path):
+    assert select_harnesses([path]) == list(HARNESSES)
     assert select_harnesses(["responses_api_agents/pi_agent/app.py", path]) == list(HARNESSES)
+    assert select_harnesses([path, "responses_api_agents/pi_agent/app.py"]) == list(HARNESSES)
 
 
 @pytest.mark.parametrize(
