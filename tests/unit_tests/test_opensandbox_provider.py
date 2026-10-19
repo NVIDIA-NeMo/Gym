@@ -2712,7 +2712,7 @@ async def test_direct_create_runs_setup_commands_as_root_and_a_failure_fails_the
             id="bullseye",
         ),
         pytest.param(
-            "ID=debian\nVERSION_CODENAME=bookworm\n",
+            "ID=debian\nVERSION_CODENAME=bookworm\n",  # pragma: allowlist secret
             "deb http://deb.debian.org/debian-security bookworm-security main\n",
             "deb http://deb.debian.org/debian-security bookworm-security main\n",
             id="bookworm",
