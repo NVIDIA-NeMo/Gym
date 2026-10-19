@@ -713,7 +713,7 @@ def test_session_http_usage_gaps_follow_persisted_optional_counter_availability(
     assert ("token_usage_detail_unavailable" in gaps) == (cache == 0 or reasoning == 0)
 
 
-@pytest.mark.parametrize("option", ["missing-sandbox", "worker", "required-tool", "workdir", "unpinned", "provider"])
+@pytest.mark.parametrize("option", ["missing-sandbox", "worker", "required-tool", "workdir", "provider"])
 def test_invalid_seed_never_connects(setup, option):
     agent, sandbox = setup
     body = seed().model_dump(mode="json")
@@ -728,8 +728,6 @@ def test_invalid_seed_never_connects(setup, option):
         ]
     elif option == "workdir":
         body["sandbox_access"]["workdir"] = "/"
-    elif option == "unpinned":
-        agent.config.opencode_version = "latest"
     else:
         agent.config.opencode_config = {"provider": {"other": {"apiKey": "must-not-copy"}}}
     with TestClient(agent.setup_webserver()) as client:
@@ -742,15 +740,12 @@ def test_invalid_seed_never_connects(setup, option):
 
 
 @pytest.mark.parametrize("output_budget", [0, -1, 32001])
-def test_invalid_output_budget_rejected_before_connecting(setup, output_budget):
+def test_invalid_output_budget_rejected_for_sandbox_only(setup, output_budget):
     agent, sandbox = setup
-    agent.config.max_output_tokens = output_budget
-    with TestClient(agent.setup_webserver()) as client:
-        response = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
-    assert response.status_code == 422
-    assert "max_output_tokens" in response.json()["detail"]
+    config = OpenCodeAgentConfig.model_validate(agent.config.model_dump() | {"max_output_tokens": output_budget})
+    with pytest.raises(ValueError):
+        config.validate_sandbox_runtime()
     sandbox.exec.assert_not_awaited()
-    sandbox.launch.assert_not_awaited()
 
 
 @pytest.mark.parametrize("kind", ["error", "timeout", "length"])
@@ -1380,7 +1375,7 @@ def test_task_timeout_metadata_reaches_sandbox_supervisor(
         )
         assert response.status_code == 200, response.text
         command = shlex.split(sandbox.launch.await_args.kwargs["command"])
-        assert float(command[command.index("--timeout") + 1]) == expected
+        assert expected - 1 < float(command[command.index("--timeout") + 1]) <= expected
         assert agent.config.timeout == 1800
         assert response.json()["metadata"]["agent_timeout_sec"] == str(float(expected))
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))

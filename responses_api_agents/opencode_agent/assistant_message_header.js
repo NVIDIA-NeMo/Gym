@@ -32,6 +32,9 @@ export const AssistantMessageHeader = () => {
       });
     },
     "chat.headers"(input, output) {
+      // Older runners omit the session header; use the native identity supplied
+      // by this hook so capture can join replies across supported versions.
+      output.headers["X-Session-Id"] = input.sessionID;
       const candidates = [...(active.get(input.sessionID)?.values() ?? [])].filter(m =>
         m.parentID === input.message.id && m.agent === input.agent &&
         m.modelID === input.model.id && m.providerID === input.model.providerID);

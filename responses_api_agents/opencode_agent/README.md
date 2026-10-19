@@ -72,15 +72,21 @@ create an agent-owned sandbox; it is destroyed on close. Verifiers that inspect
 task files must use a Resources-owned sandbox. Missing access and provider is an
 error, never a fallback to local execution.
 
-Session setup installs the pinned OpenCode runtime inside the sandbox. The image
-needs Linux, Python 3.8+ with SQLite and `fcntl`, and Bash. Missing Python/Bash can
-be installed with apt-get or apk when running as root; otherwise preinstall them.
-Online installation needs GitHub access, curl, tar, gzip and a Debian or RHEL CA
-bundle. Missing required packages are installed with apt-get or apk as root;
-non-root images must preinstall them. System `rg` is a best-effort optimization:
-setup tries apt-get or apk as root, but only warns if it is unavailable. OpenCode
-can then download ripgrep on demand; offline images should preinstall it.
-Cached matching OpenCode runtimes need no runtime download. Task dependencies are preserved.
+Session setup installs the pinned OpenCode runtime inside the sandbox. For offline
+execution, configure `remote_opencode_binary_path` and `remote_ripgrep_binary_path`
+with files already provisioned in that sandbox, or `local_opencode_binary_path` and
+`local_ripgrep_binary_path` with trusted files on the agent server to upload. A
+local and remote source for the same binary are mutually exclusive. Setup verifies
+the OpenCode version and populates a private ripgrep cache; it performs no downloads
+when using an offline runtime. The sandbox owner must provide Python 3.8+ with
+SQLite and `fcntl` before agent seed; set `python_executable` for a mounted complete
+Python installation. Keep runtime provisioning outside the task workdir.
+
+Ordinary single-turn sessions without an offline runtime retain the existing online
+installer. These need Linux, Python 3.8+ and Bash, GitHub access, curl, tar, gzip and
+CA certificates. Missing packages are installed with apt-get or apk as root;
+non-root images must preinstall them. System `rg` is a best-effort optimization for
+online execution. Task dependencies are preserved.
 
 Local and sandbox execution share `runtime.OPENCODE_VERSION` and the model-call
 correlation plugin. The plugin is uploaded into each sandbox when model-call
@@ -152,3 +158,38 @@ stricter, single-activation contract described above. The intentional difference
 Both paths honor configured `thinking` and declare interleaved `reasoning_content`.
 Different prompt placement can affect results; this integration does not establish
 local/session score parity or migrate existing benchmark defaults.
+
+
+## Native continuation
+
+Seed with `continuation: {mode: native_conversation}` and a borrowed sandbox,
+then call `/v1/responses` using zero-based increasing activation IDs.
+An activation carries one new user message. The adapter records the native session
+ID after activation 0 and resumes that exact session for each later input. Retries
+replay the original result; output items, usage, and activation observations contain
+only the new work. Close returns cumulative observations and the native trajectory.
+Runtime installation happens at seed; uploaded or mounted binaries are optional offline sources.
+
+Each activation uses the Responses endpoint with `agent_session_id`, `episode_id`,
+`activation_id`, `responses_create_params`, and a positive `timeout_seconds`.
+Ordinary single-turn Responses requests still use the existing request shape.
+The adapter converts seconds to a local monotonic deadline, covering the concurrency
+queue and file staging as well as execution. Expiration stops the harness while
+leaving the native conversation resumable. The environment owns its total episode
+budget; no clock synchronization or shared interaction-budget object is required.
+A native permission rejection preserves the conversation for feedback without
+granting the denied tool. Unsupported continuation requirements fail at seed.
+
+`model_options` supplies model metadata and variants; `reasoning_effort` selects
+an OpenCode variant. Required per-task `tools.deny.v1` policies support
+`deny_tools` as a list of tool names. They map to OpenCode's
+flat permission keys (for example `permission.webfetch: deny`). Unsupported policy
+formats and settings fail before sandbox setup. The sandbox owner controls actual
+network and filesystem isolation.
+
+Activation response metadata separates `launch_attempted` from
+`native_input_accepted`: the latter is `true` only when a new root user message in
+the native checkpoint contains this activation's prompt. It is `unknown` after a
+launch without that evidence and `false` when no launch was attempted.
+`policy_input_observed` remains `unknown`; confirming model consumption requires
+the captured model request, not a process PID or staged input file.
