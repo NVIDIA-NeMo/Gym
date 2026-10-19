@@ -411,6 +411,33 @@ def test_an_agent_seed_refusal_is_final_but_a_server_error_is_retried(status: in
     assert _is_retryable_dependency_error(refusal) is retryable
 
 
+async def test_an_agent_seed_refusal_fails_the_episode_once_with_the_agents_reason() -> None:
+    environment, client = _environment_server()
+    # What raise_for_status raises for an agent's AgentSeedRejectedError.
+    refusal = ClientResponseError(
+        request_info=SimpleNamespace(real_url="http://agent:8001/v1/agent_sessions"),
+        history=(),
+        status=422,
+        message="Unprocessable Content",
+    )
+    refusal.response_content = b'{"detail":"Simple Agent does not support required MCP tool access: resources"}'
+    responses = client.responses
+    client.responses = [responses[0], refusal, responses[3], responses[5]]
+
+    result = await environment.run_request(_request())
+
+    assert result.result is None
+    assert result.failure.stage == "agent"
+    assert result.failure.terminal is True
+    assert "Simple Agent does not support required MCP tool access: resources" in result.failure.failure_reason
+    assert [path for _, path, _ in client.calls] == [
+        "/seed_session",
+        "/v1/agent_sessions",
+        "/v1/agent_sessions/close",
+        "/close_session",
+    ]
+
+
 async def test_verifier_only_episode_does_not_expose_resource_tools() -> None:
     environment, client = _environment_server()
     seed = orjson.loads(client.responses[0].body)

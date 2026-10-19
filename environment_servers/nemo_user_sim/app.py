@@ -59,7 +59,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseReasoningItem,
 )
 from nemo_gym.rollout_observability import AgentObservationBundle, ToolCallObservation, TrajectoryRecord
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.server_utils import describe_dependency_error, get_response_json, raise_for_status
 from nemo_gym.server_utils import request as http_request
 from resources_servers.nemo_user_sim.episode_contracts import (
     UserSimInvocation,
@@ -610,7 +610,7 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
         return HandledEpisodeError(
             UserSimEpisodeFailure(
                 stage=stage,
-                failure_reason=f"{type(error).__name__}: {error}"[:2000],
+                failure_reason=f"{type(error).__name__}: {describe_dependency_error(error)}"[:2000],
                 terminal=not _is_retryable_dependency_error(error) if terminal is None else terminal,
             )
         )

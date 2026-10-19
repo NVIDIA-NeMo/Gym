@@ -1013,6 +1013,16 @@ def test_non_participant_http_contract_failures_are_not_retryable(status: int) -
     assert _is_retryable_dependency_error(ClientResponseError(MagicMock(), (), status=status)) is False
 
 
+def test_an_agent_seed_refusal_fails_with_the_agents_reason() -> None:
+    refusal = ClientResponseError(MagicMock(), (), status=422, message="Unprocessable Content")
+    refusal.response_content = b'{"detail":"Simple Agent does not support sandbox access"}'
+
+    failure = UserSimEnvironmentServer._failure("agent", refusal).failure
+
+    assert failure.terminal is True
+    assert "Simple Agent does not support sandbox access" in failure.failure_reason
+
+
 def test_wrapped_assistant_invalid_response_is_not_retryable() -> None:
     invalid = _ParticipantActivationError("assistant_model", ValueError("invalid response"))
     bad_request = _ParticipantActivationError(

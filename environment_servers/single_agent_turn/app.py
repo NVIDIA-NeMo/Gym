@@ -43,6 +43,7 @@ from nemo_gym.global_config import (
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.rollout_observability import NG_AGENT_OBSERVATIONS_KEY, AgentObservationBundle
 from nemo_gym.server_utils import (
+    describe_dependency_error,
     get_response_json,
     is_nemo_gym_fastapi_entrypoint,
     raise_for_status,
@@ -354,7 +355,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         except Exception as error:
             raise self._failure(
                 stage="agent",
-                failure_reason=str(error),
+                failure_reason=describe_dependency_error(error),
                 terminal=not _is_retryable_dependency_error(error),
             ) from error
 

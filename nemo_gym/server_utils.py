@@ -671,6 +671,19 @@ def _format_upstream_error_body(content: Any) -> str:
     return prefix[:_UPSTREAM_ERROR_LOG_BODY_CHARS] + ("…" if truncated else "")
 
 
+def describe_dependency_error(error: BaseException) -> str:
+    """Describe ``error`` for an episode failure, with the bounded response body of an HTTP error.
+
+    ``str(ClientResponseError)`` names only the status, reason phrase, and URL. The upstream server's own reason,
+    such as an agent's ``AgentSeedRejectedError`` detail, is in the body that ``raise_for_status`` keeps on
+    ``response_content``.
+    """
+    content = getattr(error, "response_content", None) if isinstance(error, ClientResponseError) else None
+    if not content:
+        return str(error)
+    return f"{error}: {_format_upstream_error_body(content)}"
+
+
 def _format_upstream_error_log(server_name: str, error: ClientResponseError) -> str:
     request_info = error.request_info
     upstream_url = getattr(request_info, "real_url", None)
