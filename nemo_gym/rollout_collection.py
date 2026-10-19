@@ -22,7 +22,6 @@ import math
 import os
 import re
 import signal
-import tempfile
 import time
 import warnings
 from asyncio import Future, Semaphore
@@ -61,9 +60,9 @@ from nemo_gym.config_types import (
     BaseServerConfig,
     ConfigError,
     ConfigPathNotFoundError,
+    RemovedRolloutOptionsMixin,
     UploadRolloutsConfigMixin,
 )
-from nemo_gym.deliverables import is_deliverable
 from nemo_gym.episode_types import EpisodeId, is_materialized_task_row
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
 from nemo_gym.failure_kinds import CANCELLED, JUDGE_FAILED, is_namespaced, is_registered
@@ -1019,7 +1018,7 @@ def _normalize_health_check_ignored_checks(value) -> List[str]:
     return list(normalize_ignored_checks(value))
 
 
-class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLIConfig):
+class SharedRolloutCollectionConfig(RemovedRolloutOptionsMixin, UploadRolloutsConfigMixin, BaseNeMoGymCLIConfig):
     output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
     batch_manifest_fpath: Optional[str] = Field(
         default=None,
@@ -1603,147 +1602,21 @@ def is_terminal_failure(record: Mapping[str, Any], *, retry_terminal_timeouts: b
     ``retry_terminal_timeouts`` is for agents whose older builds incorrectly
     stamped per-attempt timeouts terminal. A timeout reflects the
     load/remaining walltime of that attempt, so it remains retryable (up to the
-    normal max-attempt cap). A skipped sample is unusable regardless of which
-    agent version wrote the sidecar and stays terminal.
+    normal max-attempt cap).
 
-    The class names below are ``_ng_failure_class`` labels that agents and
-    resources servers already write to the failures sidecar. They predate
-    ``nemo_gym.failure_kinds`` and are not registered there:
-
-    - ``timeout_exceeded`` (Stirrup, pinchbench): the per-task timeout; ``agent_timeout``
-      in the shared vocabulary.
-    - ``reference_missing``, ``eval_missing``, ``transport_ineligible`` (GDPVal): environment
-      faults with no shared name (namespaced, they would be ``gdpval:<kind>``).
-    - ``skipped`` (Stirrup): the sample cannot be run; no shared name.
+    ``timeout_exceeded`` is an ``_ng_failure_class`` label that agents already
+    write to the failures sidecar (pinchbench, nooa). It predates
+    ``nemo_gym.failure_kinds`` and is not registered there; ``agent_timeout`` is
+    the shared name.
 
     As ``failure_kinds`` requires, this function decides retryability for the
-    occurrence, under an explicit caller opt-in; the names carry no retry meaning.
+    occurrence, under an explicit caller opt-in; the name carries no retry meaning.
     """
     if not retry_terminal_timeouts:
         return bool(record.get(NG_TERMINAL_KEY))
-    failure_class = record.get(NG_FAILURE_CLASS_KEY)
-    if failure_class == "timeout_exceeded":
+    if record.get(NG_FAILURE_CLASS_KEY) == "timeout_exceeded":
         return False
-    if failure_class in ("reference_missing", "eval_missing", "transport_ineligible"):
-        # Environment faults: the deliverable tree can be repaired after the
-        # run (remounted reference view, restored eval dir). Terminal within a
-        # run, but re-validated on resume; the /verify recheck is cheap and the
-        # normal max-attempt cap still bounds re-dispatch.
-        return False
-    if failure_class == "skipped":
-        return True
     return bool(record.get(NG_TERMINAL_KEY))
-
-
-_MIGRATED_INVALID_JUDGE_KEY = "_ng_migrated_invalid_judge_response"
-
-
-def migrate_invalid_judge_main_rows(output_fpath: Path) -> int:
-    """Move legacy invalid-judge rows from the main JSONL into the sidecar.
-
-    Old builds persisted ``invalid_judge_response=True`` as a zero-reward main
-    success, which both contaminated aggregation and gated resume. Sidecar-first
-    migration is idempotent via a marker keyed by
-    stage/task/rollout/attempt; the main file is then atomically rewritten so
-    a crash cannot lose retry state.
-
-    Run it only for environments that opt in (``retry_invalid_judge_responses``):
-    other verifiers score an invalid judge response as a zero-reward row on purpose.
-
-    Migrated rows are classed ``judge_invalid``, the sidecar label reverification uses for
-    the same condition (``judge_unparseable`` in ``nemo_gym.failure_kinds``).
-    """
-    if not output_fpath.exists():
-        return 0
-
-    invalid_count = 0
-    with output_fpath.open("rb") as handle:
-        for line in handle:
-            stripped = line.strip()
-            if not stripped:
-                continue
-            if orjson.loads(stripped).get("invalid_judge_response"):
-                invalid_count += 1
-    if not invalid_count:
-        return 0
-
-    def migration_key(row: Mapping[str, Any]) -> Tuple[Any, Any, Any, Any]:
-        return (
-            int(row.get("stage_index", 0) or 0),
-            row.get(TASK_INDEX_KEY_NAME),
-            row.get(ROLLOUT_INDEX_KEY_NAME),
-            int(row.get(ATTEMPT_INDEX_KEY_NAME, 0) or 0),
-        )
-
-    failures_fpath = failures_path_for(output_fpath)
-    failures_fpath.parent.mkdir(parents=True, exist_ok=True)
-    already_migrated: set[Tuple[Any, Any, Any, Any]] = set()
-    if failures_fpath.exists():
-        with failures_fpath.open("rb") as handle:
-            for line in handle:
-                stripped = line.strip()
-                if not stripped:
-                    continue
-                row = orjson.loads(stripped)
-                if row.get(_MIGRATED_INVALID_JUDGE_KEY):
-                    already_migrated.add(migration_key(row))
-
-    mode = output_fpath.stat().st_mode & 0o7777
-    temp_path: Optional[Path] = None
-    try:
-        with (
-            tempfile.NamedTemporaryFile(
-                mode="wb", dir=output_fpath.parent, prefix=f".{output_fpath.name}.migrate-", delete=False
-            ) as output_handle,
-            output_fpath.open("rb") as source,
-            failures_fpath.open("ab") as failures_handle,
-        ):
-            temp_path = Path(output_handle.name)
-            for line in source:
-                stripped = line.strip()
-                if not stripped:
-                    continue
-                legacy = orjson.loads(stripped)
-                if not legacy.get("invalid_judge_response"):
-                    output_handle.write(stripped + b"\n")
-                    continue
-
-                key = migration_key(legacy)
-                if key in already_migrated:
-                    continue
-                migrated = dict(legacy)
-                migrated[NG_FAILURE_CLASS_KEY] = migrated.get(NG_FAILURE_CLASS_KEY) or "judge_invalid"
-                migrated.pop(NG_TERMINAL_KEY, None)
-                deliverables_dir = migrated.get("deliverables_dir")
-                try:
-                    has_cached_deliverable = bool(
-                        deliverables_dir
-                        and Path(deliverables_dir).is_dir()
-                        and any(is_deliverable(path) for path in Path(deliverables_dir).iterdir())
-                    )
-                except (OSError, TypeError):
-                    has_cached_deliverable = False
-                if has_cached_deliverable:
-                    migrated["reuse_cached_deliverable"] = True
-                else:
-                    migrated.pop("reuse_cached_deliverable", None)
-                migrated[_MIGRATED_INVALID_JUDGE_KEY] = True
-                failures_handle.write(orjson.dumps(migrated) + b"\n")
-                already_migrated.add(key)
-
-            # Make every retry record durable before removing the corresponding
-            # legacy success from the main file.
-            failures_handle.flush()
-            os.fsync(failures_handle.fileno())
-            output_handle.flush()
-            os.fsync(output_handle.fileno())
-        os.chmod(temp_path, mode)
-        os.replace(temp_path, output_fpath)
-        temp_path = None
-    finally:
-        if temp_path is not None:
-            temp_path.unlink(missing_ok=True)
-    return invalid_count
 
 
 class RolloutCollectionConfig(SharedRolloutCollectionConfig):
@@ -2005,23 +1878,10 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         default=False,
         description=(
             "On resume, retry failures-sidecar rows of class `timeout_exceeded` even when they are stamped "
-            "`_ng_failure_terminal`, up to NEMO_GYM_MAX_ROLLOUT_ATTEMPTS. The environment faults "
-            "`reference_missing`, `eval_missing` and `transport_ineligible`, which can be repaired between "
-            "runs, are retried the same way, and `skipped` rows are never retried, stamped or not. For sidecars "
+            "`_ng_failure_terminal`, up to NEMO_GYM_MAX_ROLLOUT_ATTEMPTS. For sidecars "
             "whose per-attempt timeouts were stamped terminal but should be retried. Off (default): a sidecar row "
             "is terminal iff it is stamped `_ng_failure_terminal`, so an agent that marks its timeouts terminal "
             "on purpose keeps them gated."
-        ),
-    )
-
-    retry_invalid_judge_responses: bool = Field(
-        default=False,
-        description=(
-            "On resume, move rows flagged `invalid_judge_response` out of the rollouts jsonl and into the "
-            "failures sidecar as retryable `judge_invalid` attempts, so they leave the score and are judged "
-            "again (reusing the persisted deliverable when there is one). For environments whose invalid judge "
-            "responses were written as zero-reward successes but should be judged again. Off (default): the "
-            "rollouts jsonl is left as is, so a verifier that scores invalid judge responses as zero keeps those rows."
         ),
     )
 
@@ -3015,8 +2875,6 @@ class RolloutCollectionHelper(BaseModel):
         retain_results_in_memory: bool = True,
         success_keys: Optional[set] = None,
     ) -> Tuple[List[Dict], List[Dict], List[Dict], List[List[bytes]]]:
-        if config.retry_invalid_judge_responses:
-            migrate_invalid_judge_main_rows(Path(config.output_jsonl_fpath))
         with config.materialized_jsonl_fpath.open() as f:
             original_input_rows = list(map(orjson.loads, tqdm(f, desc="Reading materialized input rows")))
         _reject_attempt_qualified_rollout_ids(original_input_rows, config.materialized_jsonl_fpath)
@@ -3046,7 +2904,6 @@ class RolloutCollectionHelper(BaseModel):
         attempts_by_key: Counter = Counter()
         terminal_keys: set = set()
         elapsed_by_key: Dict[Tuple, float] = {}
-        reuse_cached_keys: set[Tuple[Any, Any]] = set()
         if failures_fpath.exists():
             with failures_fpath.open("rb") as f:
                 for line in f:
@@ -3060,8 +2917,6 @@ class RolloutCollectionHelper(BaseModel):
                     attempts_by_key[k] += 1
                     if is_terminal_failure(fr, retry_terminal_timeouts=config.retry_terminal_timeouts):
                         terminal_keys.add(k)
-                    if fr.get("reuse_cached_deliverable"):
-                        reuse_cached_keys.add(k)
                     # A failed attempt still tells us how long this task runs -
                     # the only duration signal available for a task that has not
                     # succeeded yet. Keep the longest attempt seen.
@@ -3083,11 +2938,6 @@ class RolloutCollectionHelper(BaseModel):
             attempt = attempts_by_key.get(key, 0)
             if attempt > 0:
                 row[ATTEMPT_INDEX_KEY_NAME] = attempt
-            if key in reuse_cached_keys:
-                # A failed judging attempt can still have a valid persisted
-                # policy deliverable. Preserve the sidecar's signal so resume
-                # rejudges that artifact instead of rerunning the policy.
-                row["reuse_cached_deliverable"] = True
 
         # Longest-first: known-long tasks go to the front so they get a whole
         # allocation to finish in rather than being cut off at its boundary.
@@ -3116,7 +2966,7 @@ class RolloutCollectionHelper(BaseModel):
 - {len(original_input_rows)} original input rows
 - {len(successes_seen)} rows already done (in main jsonl)
 - {sum(attempts_by_key.values())} prior failure attempts ({len(attempts_by_key)} unique tasks) in sidecar
-- {len(terminal_keys)} sidecar-terminal (for example skipped) → not retried
+- {len(terminal_keys)} sidecar-terminal → not retried
 - {len(maxed_out)} hit max_attempts={max_attempts} → not retried
 - {len(input_rows)} rows that still need to be run"""
         )
