@@ -88,7 +88,9 @@ async def test_verify_collects_regular_outputs_without_runtime_links(
     )
     server = app.JobBenchResourcesServer.model_construct(
         config=app.JobBenchConfig.model_construct(
-            judge_model="judge", artifact_root=tmp_path / "saved" if mode != "temporary" else None
+            judge_model="judge",
+            judge_max_completion_tokens=32768,
+            artifact_root=tmp_path / "saved" if mode != "temporary" else None,
         )
     )
     server._sandboxes = {"session": sandbox}
@@ -176,6 +178,7 @@ async def test_verify_collects_regular_outputs_without_runtime_links(
         restarted = app.JobBenchResourcesServer.model_construct(config=server.config)
         recovered = await restarted.verify(request, body)
         assert recovered.reward == 1
+        assert recovered.judge_max_completion_tokens == 32768
         assert (saved / "output.tar.gz").read_bytes() == snapshot
         assert await restarted.verify(request, body) == recovered
         assert len(list(saved.glob("judge-receipt-*.json"))) == 2
@@ -189,6 +192,7 @@ async def test_verify_collects_regular_outputs_without_runtime_links(
     else:
         result = await server.verify(request, body)
         assert result.reward == 1
+        assert result.judge_max_completion_tokens == 32768
         if mode == "persisted":
             saved = server.config.artifact_root / body.artifact_id
             snapshot = (saved / "output.tar.gz").read_bytes()

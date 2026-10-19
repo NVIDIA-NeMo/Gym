@@ -78,6 +78,7 @@ class JobBenchVerifyResponse(BaseVerifyResponse):
     passed_count: int
     total_count: int
     judge_model: str
+    judge_max_completion_tokens: int | None = None
     rubrics: list[dict[str, Any]]
 
 
@@ -286,6 +287,7 @@ class JobBenchResourcesServer(SimpleResourcesServer):
             passed_count=int(scorecard["passed_count"]),
             total_count=int(scorecard["total_count"]),
             judge_model=self.config.judge_model,
+            judge_max_completion_tokens=self.config.judge_max_completion_tokens,
             grading_protocol=judge.INPUT_PROTOCOL,
             rubrics=rubrics,
         )
