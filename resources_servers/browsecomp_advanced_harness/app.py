@@ -59,6 +59,13 @@ from resources_servers.browsecomp_advanced_harness.bash_guard import (
     format_bash_output,
 )
 from resources_servers.browsecomp_advanced_harness.judge_prompt import JUDGE_PROMPT_TEMPLATE
+from resources_servers.browsecomp_advanced_harness.rollout_context import (
+    format_phase_totals,
+    pop_phase_totals,
+    rollout_id_from_request,
+    set_rollout_id,
+)
+from resources_servers.browsecomp_advanced_harness.search_cache import SearchCache
 
 
 # Exa /search "type" values. The deep variants run Exa's multi-step research path:
@@ -87,6 +94,9 @@ class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
     judge_responses_create_params: Optional[NeMoGymResponseCreateParamsNonStreaming] = None
     debug: bool = False
     dump_session_id_to_metrics_on_exit: bool = False
+    # Per-CALL phase lines for every cache get and put. Off by default: cache gets
+    # run several per turn, so this is the one knob that can multiply driver-log size.
+    verbose_phase_log: bool = False
     # Terminal/disk mode: "none" = inline content (original behavior);
     # "per_session" = search/browse write pages to a per-session disk workspace
     # and a read-only bash_command tool is exposed for the model to grep/read them.
@@ -126,6 +136,19 @@ class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
     # changes in the request/response. Validated at config load so a typo dies at
     # startup rather than 400-ing every live query mid-run.
     exa_search_type: str = "auto"
+    # Shared flat-file search/browse cache (network layer only: raw provider
+    # responses in, format-on-read out — a hit is byte-identical to a miss).
+    # None/"" disables. A relative path resolves against this server's dir.
+    search_cache_dir: Optional[str] = None
+    # SEARCH-only fuzzy matching over the cache's norms index: on an exact miss,
+    # the best token_sort_ratio match >= this 0-1 threshold is served (serve-only;
+    # never re-written under the new key). None = exact only. Browse stays exact.
+    search_cache_fuzzy_threshold: Optional[float] = None
+    # Serve from search_cache_dir but never write to it. Set this when the root
+    # belongs to another user: it is world-readable but not world-writable, and
+    # the write path would otherwise report a SUCCESSFUL search to the model as
+    # "Search failed: [Errno 13] Permission denied". See SearchCache.read_only.
+    search_cache_read_only: bool = False
 
     @model_validator(mode="after")
     def _check_provider_key(self) -> "TavilySearchResourcesServerConfig":
@@ -710,6 +733,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
     _session_workspaces: Dict[str, "_PageWriter"] = PrivateAttr(default_factory=dict)
     _bash_semaphore: Optional[asyncio.Semaphore] = PrivateAttr(default=None)
     _workspace_root: Optional[str] = PrivateAttr(default=None)
+    _search_cache: Optional[SearchCache] = PrivateAttr(default=None)
 
     JUDGE_PROMPT_TEMPLATE: ClassVar[str] = JUDGE_PROMPT_TEMPLATE
     JUDGE_MAX_ATTEMPTS: ClassVar[int] = 15
@@ -751,7 +775,27 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         self._session_id_to_metrics = defaultdict(TavilySearchMetrics)
 
         self._exclude_domains = self._parse_exclude_domains()
-        self._page_cache: dict[str, str] = {}
+
+        # Shared flat-file provider cache (replaces the never-used in-memory
+        # _page_cache). Only raw provider responses are stored — never
+        # model-authored text — so a rollout cannot plant results for siblings.
+        cache_dir = self.config.search_cache_dir
+        if cache_dir and not Path(cache_dir).is_absolute():
+            cache_dir = str(Path(__file__).parent / cache_dir)
+        self._search_cache = SearchCache(
+            cache_dir,
+            fuzzy_threshold=self.config.search_cache_fuzzy_threshold,
+            verbose_phase_log=self.config.verbose_phase_log,
+            read_only=self.config.search_cache_read_only,
+        )
+        if self._search_cache.enabled:
+            print(
+                f"Search cache enabled at {cache_dir} "
+                f"(fuzzy={self.config.search_cache_fuzzy_threshold or 'off'}, "
+                f"read_only={self._search_cache.read_only}, "
+                f"index norms={self._search_cache.index_size})"
+            )
+
         print(f"Excluded domains: {self._exclude_domains}")
 
         # Terminal/disk mode setup
@@ -933,6 +977,42 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             )
         )
 
+    # ---- shared flat-file cache plumbing ----------------------------------
+    # Lustre metadata ops can stall for tens of ms; keep them off the event loop.
+
+    async def _cache_get_search(self, query: str) -> Optional[tuple]:
+        if not self._search_cache.enabled:
+            return None
+        return await asyncio.to_thread(self._search_cache.get_search, query)
+
+    async def _cache_put_search(self, query: str, results: List[dict], provider: str) -> None:
+        # Empties are never cached so a transient provider failure can't poison the cache.
+        if self._search_cache.enabled and results:
+            await asyncio.to_thread(self._search_cache.put_search, query, results, provider)
+
+    async def _cache_get_extract(self, url: str) -> Optional[tuple]:
+        if not self._search_cache.enabled:
+            return None
+        return await asyncio.to_thread(self._search_cache.get_extract, url)
+
+    async def _cache_put_extract(self, url: str, content: str, provider: str) -> None:
+        if self._search_cache.enabled and content:
+            await asyncio.to_thread(self._search_cache.put_extract, url, content, provider)
+
+    def _format_search_hit(
+        self, provider: str, query: str, result_list: List[dict], max_length: int, page_writer: Optional["_PageWriter"]
+    ) -> str:
+        """Format a cached search entry per its STORED provider — a hit must be
+        byte-identical to the miss that produced it, whatever today's config is.
+        Exa entries are formatted inline (highlights; pages only if the entry holds full
+        text); tavily entries follow the workspace mode (disk pages in terminal mode,
+        inline otherwise)."""
+        if provider == "exa":
+            return self._format_exa_search(query, {"results": result_list}, max_length, page_writer)[0]
+        if page_writer is not None:
+            return self._format_tavily_search_disk(query, result_list, page_writer, max_length)
+        return self._postprocess_search_results(query, {"results": result_list}, max_length)
+
     async def _exa_search_one(
         self, query: str, max_length: int, metrics: "TavilySearchMetrics", page_writer: Optional["_PageWriter"] = None
     ) -> str:
@@ -945,6 +1025,12 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         either way; the page is additional, never a substitute."""
         if len(query) > 400:
             return "Query is too long"
+
+        cached = await self._cache_get_search(query)
+        if cached is not None:
+            provider, result_list = cached
+            self._record_call(metrics, "search", provider, "cache_hit", time())
+            return self._format_search_hit(provider, query, result_list, max_length, page_writer)
 
         write_pages = self.config.exa_search_writes_pages and page_writer is not None
         client = self._select_exa_client()
@@ -961,6 +1047,36 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             self._record_call(metrics, "search", "exa", "error", call_start)
             print(f"[browsecomp][tool_fail][exa_search] query={query[:200]!r} error={e}", flush=True)
             return f"Search failed: {e}"
+        await self._cache_put_search(query, results.get("results", []) or [], "exa")
+        results_string, n_offered, returned = self._format_exa_search(query, results, max_length, page_writer)
+        # Recorded AFTER the block is built so the yield counters are real. Nothing awaits
+        # in between, so the retry contextvar _record_call reads is still this call's.
+        self._record_call(
+            metrics,
+            "search",
+            "exa",
+            "success",
+            call_start,
+            num_results_offered=n_offered,
+            num_results_returned=returned,
+            chars_returned=len(results_string),
+        )
+        if returned < n_offered:
+            print(
+                f"[browsecomp][search_truncated][exa] query={query[:120]!r} "
+                f"returned={returned}/{n_offered} budget={max_length}",
+                flush=True,
+            )
+        elif not n_offered:
+            print(f"[browsecomp][search_empty][exa] query={query[:120]!r} provider returned 0 results", flush=True)
+        return results_string
+
+    def _format_exa_search(
+        self, query: str, results: dict, max_length: int, page_writer: Optional["_PageWriter"]
+    ) -> tuple[str, int, int]:
+        """Format one exa result set. Returns (results_string, num offered, num returned).
+        Shared by the live path and a cache hit, so a hit is byte-identical to its miss."""
+        write_pages = self.config.exa_search_writes_pages and page_writer is not None
         # Contamination guard. Filtering at each formatting site rather than at the
         # provider call is deliberate: a result reaches the model by exactly four
         # routes, and every one of them formats here or in one of the three sites
@@ -1012,32 +1128,17 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             blocks.append(entry)
             running_len += len(entry)
             returned += 1
-        results_string = "\n".join(blocks)
-        # Recorded AFTER the block is built so the yield counters are real. Nothing awaits
-        # in between, so the retry contextvar _record_call reads is still this call's.
-        self._record_call(
-            metrics,
-            "search",
-            "exa",
-            "success",
-            call_start,
-            num_results_offered=len(offered),
-            num_results_returned=returned,
-            chars_returned=len(results_string),
-        )
-        if returned < len(offered):
-            print(
-                f"[browsecomp][search_truncated][exa] query={query[:120]!r} "
-                f"returned={returned}/{len(offered)} budget={max_length}",
-                flush=True,
-            )
-        elif not offered:
-            print(f"[browsecomp][search_empty][exa] query={query[:120]!r} provider returned 0 results", flush=True)
-        return results_string
+        return "\n".join(blocks), len(offered), returned
 
     async def _search_one(self, query: str, max_length: int, metrics: "TavilySearchMetrics") -> str:
         if len(query) > 400:
             return "Query is too long"
+
+        cached = await self._cache_get_search(query)
+        if cached is not None:
+            provider, result_list = cached
+            self._record_call(metrics, "search", provider, "cache_hit", time())
+            return self._format_search_hit(provider, query, result_list, max_length, None)
 
         client = self._select_tavily_client()
         print(f"[tavily_call_begin function=search query={query[:80]!r}]", flush=True)
@@ -1067,6 +1168,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             f"[tavily_call function=search status=success duration_s={time() - call_start:.2f} query={query[:80]!r} n_results={len(results.get('results', []))}]",
             flush=True,
         )
+        await self._cache_put_search(query, results.get("results", []), "tavily")
         postprocessed_results = self._postprocess_search_results(query, results, max_length)
         return postprocessed_results
 
@@ -1076,6 +1178,12 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         """Terminal mode: run one search, write each result's raw content to disk, return
         title/url/snippet/[Saved to] metadata. Mirrors the reference harness tavily_search
         (disk mode) formatting exactly."""
+        cached = await self._cache_get_search(query)
+        if cached is not None:
+            provider, result_list = cached
+            self._record_call(metrics, "search", provider, "cache_hit", time())
+            return self._format_search_hit(provider, query, result_list, max_per_query, page_writer)
+
         client = self._select_tavily_client()
         call_start = time()
         try:
@@ -1092,12 +1200,19 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             return f"Search failed: {e}"
         self._record_call(metrics, "search", "tavily", "success", call_start)
 
+        result_list = results.get("results", [])
+        await self._cache_put_search(query, result_list, "tavily")
+        return self._format_tavily_search_disk(query, result_list, page_writer, max_per_query)
+
+    def _format_tavily_search_disk(
+        self, query: str, result_list: List[dict], page_writer: "_PageWriter", max_per_query: int
+    ) -> str:
         # THE important one. In terminal mode the raw page is written to pages/*.txt
         # and the model reads it later with grep/cat through the bash tool, so
         # filtering only the returned string would leave the contamination on disk
         # and fully readable. Filtering here, ABOVE the write loop, means the page is
         # never written at all.
-        result_list, _ = _filter_results(results.get("results", []), "search", "tavily")
+        result_list, _ = _filter_results(result_list, "search", "tavily")
 
         blocks = [f"[Search Query]: {query}"]
         running_len = len(blocks[0])
@@ -1121,6 +1236,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         return "\n".join(blocks)
 
     async def search(self, request: Request, body: TavilySearchRequest) -> TavilySearchResponse:
+        set_rollout_id(rollout_id_from_request(request))
         sid = request.session[SESSION_ID_KEY]
         metrics = self._session_id_to_metrics[sid]
 
@@ -1160,6 +1276,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         return TavilySearchResponse(results_string="\n\n".join(results))
 
     async def browse(self, request: Request, body: BrowseRequest) -> BrowseResponse:
+        set_rollout_id(rollout_id_from_request(request))
         metrics = self._session_id_to_metrics[request.session[SESSION_ID_KEY]]
 
         if self.config.debug:
@@ -1174,26 +1291,45 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         # set max length per url
         max_per_url_length = body.max_total_length // len(urls)
 
+        # cache: serve hits from the shared flat-file cache, send ONLY the
+        # missed URLs to the provider. Hits keep input order and come first.
+        cached_entries: List[dict] = []
+        fetch_urls = urls
+        if self._search_cache.enabled:
+            fetch_urls = []
+            for u in urls:
+                hit = await self._cache_get_extract(u)
+                if hit is not None:
+                    hit_provider, content = hit
+                    self._record_call(metrics, "browse", hit_provider, "cache_hit", time())
+                    cached_entries.append({"url": u, "raw_content": content})
+                else:
+                    fetch_urls.append(u)
+
         # fetch full page content (provider-specific); normalize to a list of
         # {url, raw_content} so the shared disk/inline formatting below is provider-agnostic.
         start_time = time()
-        if self.config.search_provider == "exa":
+        result_list: List[dict] = []
+        if fetch_urls and self.config.search_provider == "exa":
             exa_client = self._select_exa_client()
-            print(f"[exa_call_begin function=browse n_urls={len(urls)} goal={(body.goal or '')[:80]!r}]", flush=True)
+            print(
+                f"[exa_call_begin function=browse n_urls={len(fetch_urls)} goal={(body.goal or '')[:80]!r}]",
+                flush=True,
+            )
             try:
-                raw = await exa_client.get_contents(urls=urls, max_characters=max_per_url_length)
+                raw = await exa_client.get_contents(urls=fetch_urls, max_characters=max_per_url_length)
             except Exception as e:
                 self._record_call(metrics, "browse", "exa", "error", start_time)
-                print(f"[browsecomp][tool_fail][exa_extract] urls={urls} error={e}", flush=True)
+                print(f"[browsecomp][tool_fail][exa_extract] urls={fetch_urls} error={e}", flush=True)
                 return BrowseResponse(results_string=f"Failed to extract content: {e}")
             self._record_call(metrics, "browse", "exa", "success", start_time)
             result_list = [
                 {"url": r.get("url", "") or "", "raw_content": r.get("text", "") or ""} for r in raw.get("results", [])
             ]
-        else:
+        elif fetch_urls:
             async_tavily_client = self._select_tavily_client()
             print(
-                f"[tavily_call_begin function=extract n_urls={len(urls)} goal={(body.goal or '')[:80]!r}]",
+                f"[tavily_call_begin function=extract n_urls={len(fetch_urls)} goal={(body.goal or '')[:80]!r}]",
                 flush=True,
             )
             try:
@@ -1201,17 +1337,23 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 # Passing a query triggers relevance-focused extraction that returns far less
                 # (e.g. ~2k vs ~15k bytes for the same URL). `goal` stays a tool-schema field
                 # for the model to state intent, but is not sent to Tavily (matches the harness).
-                results = await async_tavily_client.extract(urls=urls)
+                results = await async_tavily_client.extract(urls=fetch_urls)
             except Exception as e:
                 self._record_call(metrics, "browse", "tavily", "error", start_time)
-                print(f"[browsecomp][tool_fail][tavily_extract] urls={urls} error={e}", flush=True)
+                print(f"[browsecomp][tool_fail][tavily_extract] urls={fetch_urls} error={e}", flush=True)
                 return BrowseResponse(results_string=f"Failed to extract content: {e}")
             self._record_call(metrics, "browse", "tavily", "success", start_time)
             print(
-                f"[tavily_call function=extract status=success duration_s={time() - start_time:.2f} n_urls={len(urls)} n_results={len(results.get('results', []))}]",
+                f"[tavily_call function=extract status=success duration_s={time() - start_time:.2f} n_urls={len(fetch_urls)} n_results={len(results.get('results', []))}]",
                 flush=True,
             )
             result_list = results.get("results", [])
+
+        for fetched in result_list:
+            await self._cache_put_extract(
+                fetched.get("url", "") or "", fetched.get("raw_content", "") or "", self.config.search_provider
+            )
+        result_list = cached_entries + result_list
 
         # return if no results
         if not result_list:
@@ -1255,6 +1397,8 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         return BrowseResponse(results_string=results_string)
 
     async def verify(self, request: Request, body: TavilySearchVerifyRequest) -> TavilySearchVerifyResponse:
+        rid = rollout_id_from_request(request)
+        set_rollout_id(rid)
         question = body.question
         ground_truth = body.ground_truth
         last_assistant_response = _last_assistant_text(body.response)
@@ -1284,6 +1428,15 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             num_provider_429s=num_provider_429s,
             num_provider_other_retries=num_provider_other_retries,
         )
+
+        # /verify is the end of a rollout: release its cache phase totals (else they
+        # leak for the process life) and log the server-lifetime cache hit rates.
+        if self._search_cache.enabled:
+            print(
+                f"[browsecomp][phases] rid={rid} t={time():.3f} {format_phase_totals(pop_phase_totals(rid))}",
+                flush=True,
+            )
+            print(f"[cache] {self._search_cache.summary_str()}", flush=True)
 
         # terminal mode: clean up this session's disk workspace
         if self.config.workspace == "per_session":
