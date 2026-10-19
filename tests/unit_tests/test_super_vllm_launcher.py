@@ -230,6 +230,129 @@ getent() { printf '10.0.0.1 node0\n'; }
                     else:
                         self.assertNotIn("mooncake_endpoint", metrics)
 
+    def test_mooncake_storage_modes_and_cleanup(self) -> None:
+        """Execute generated setup with stub services; SSD work requires explicit opt-in."""
+        cases = (
+            ({}, False, False, 180000),
+            ({"ENABLE_MOONCAKE": "1"}, True, False, 180000),
+            (
+                {"ENABLE_MOONCAKE": "1", "ENABLE_MOONCAKE_DISK_OFFLOAD": "0", "MOONCAKE_SSD_PATH": "invalid path"},
+                True,
+                False,
+                180000,
+            ),
+            ({"ENABLE_MOONCAKE_DISK_OFFLOAD": "1", "MOONCAKE_SSD_PATH": "/ssd"}, True, True, 30000),
+            (
+                {
+                    "ENABLE_MOONCAKE_DISK_OFFLOAD": "1",
+                    "MOONCAKE_SSD_PATH": "/ssd",
+                    "MOONCAKE_DEFAULT_KV_LEASE_TTL": "180000",
+                    "MOONCAKE_CPU_CACHE_GIB": "100",
+                    "MOONCAKE_DISK_QUOTA_GIB": "200",
+                },
+                True,
+                True,
+                180000,
+            ),
+        )
+        stubs = r"""
+set -euo pipefail
+nodes=(node0)
+this_node_hostname=node0
+cleanup_prefill_profile() { :; }
+uv() { :; }
+curl() { :; }
+findmnt() { touch "$TEST_STATE_DIR/disk-checked"; printf 'ext4\n'; }
+mktemp() { command mktemp -d "$TEST_STATE_DIR/ssd.XXXXXX"; }
+mooncake_master() {
+    printf '%s\n' "$@" > "$TEST_STATE_DIR/master-args"
+    exec "$TEST_SLEEP" 30
+}
+mooncake_client() {
+    printf '%s\n' "$@" > "$TEST_STATE_DIR/owner-args"
+    printf '%s\n' "$MOONCAKE_OFFLOAD_FILE_STORAGE_PATH" > "$TEST_STATE_DIR/disk-dir"
+    printf '%s\n' "$MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE" > "$TEST_STATE_DIR/disk-quota"
+    exec "$TEST_SLEEP" 30
+}
+python3() {
+    if [[ "$1" == -c ]]; then
+        if [[ "$2" == *get_ip* ]]; then printf '127.0.0.1\n'; fi
+    else
+        cat >/dev/null
+        if [[ $# == 3 ]]; then
+            until [[ -s "$TEST_STATE_DIR/disk-quota" ]]; do "$TEST_SLEEP" 0.01; done
+        fi
+    fi
+}
+"""
+        for env, enabled, disk, ttl in cases:
+            with self.subTest(env=env), TemporaryDirectory(dir=self.workdir) as directory:
+                _, worker, batch, calls = self.capture_submission(env=env)
+                self.assertIn(f"export ENABLE_MOONCAKE={int(enabled)}\n", worker)
+                status, _, stderr = self.run_shell('bash -n -c "$1"', worker)
+                self.assertEqual(status, 0, stderr)
+                start = 'mooncake_pid=""'
+                setup = start + worker.split(start, 1)[1].split("router_common_args=", 1)[0]
+                # Wait for the stub to record argv before the EXIT trap shuts it down.
+                inspect = "\nif (( ENABLE_MOONCAKE )); then\n"
+                inspect += 'until [[ -s "$TEST_STATE_DIR/master-args" ]]; do "$TEST_SLEEP" 0.01; done\nfi\n'
+                config = Path(directory) / "config.json"
+                status, _, stderr = self.run_shell(
+                    stubs + setup + inspect,
+                    env={
+                        "ENABLE_MOONCAKE": str(int(enabled)),
+                        "MOONCAKE_CONFIG_PATH": str(config),
+                        "TEST_STATE_DIR": directory,
+                    },
+                )
+                self.assertEqual(status, 0, stderr)
+                self.assertEqual(config.exists(), enabled)
+                self.assertEqual("--mem=0" in calls[0], enabled)
+                self.assertEqual((Path(directory) / "disk-checked").exists(), disk)
+                self.assertEqual((Path(directory) / "owner-args").exists(), disk)
+                mounts = "/test:/test" + (",/ssd:/mooncake-ssd" if disk else "")
+                self.assertIn(f"--container-mounts={mounts} ", batch)
+                if not enabled:
+                    self.assertFalse((Path(directory) / "master-args").exists())
+                    continue
+                settings = json.loads(config.read_text())
+                self.assertEqual(settings["mode"], "standalone-store" if disk else "embedded")
+                self.assertEqual(settings["global_segment_size"], 0 if disk else "150GB")
+                self.assertEqual(settings["enable_offload"], disk)
+                master = (Path(directory) / "master-args").read_text().splitlines()
+                self.assertIn(f"-default_kv_lease_ttl={ttl}", master)
+                self.assertIn(f"-eviction_high_watermark_ratio={'0.7' if disk else '0.9'}", master)
+                self.assertIn(f"-enable_offload={str(disk).lower()}", master)
+                if disk:
+                    owner = (Path(directory) / "owner-args").read_text().splitlines()
+                    cpu_bytes = int(env.get("MOONCAKE_CPU_CACHE_GIB", "600")) * 1024**3
+                    self.assertIn(f"--global_segment_size={cpu_bytes}", owner)
+                    self.assertIn("--host=127.0.0.1:50053", owner)
+                    quota = int((Path(directory) / "disk-quota").read_text())
+                    self.assertEqual(quota, int(env.get("MOONCAKE_DISK_QUOTA_GIB", "512")) * 1024**3)
+                    self.assertFalse(Path((Path(directory) / "disk-dir").read_text().strip()).exists())
+
+    def test_mooncake_disk_offload_rejects_invalid_settings_before_submission(self) -> None:
+        cases = (
+            {"ENABLE_MOONCAKE_DISK_OFFLOAD": "yes"},
+            {"ENABLE_MOONCAKE": "0"},
+            {"MOONCAKE_SSD_PATH": ""},
+            {"MOONCAKE_SSD_PATH": "/ssd/../other"},
+            {"MOONCAKE_SSD_PATH": "/ssd,other:/mount"},
+            {"MOONCAKE_CPU_CACHE_GIB": "0"},
+            {"MOONCAKE_DISK_QUOTA_GIB": "1.5"},
+            {"VLLM_MODE": "aggregated"},
+        )
+        for overrides in cases:
+            with self.subTest(overrides=overrides):
+                status, stdout, _ = self.run_shell(
+                    'sbatch() { echo UNEXPECTED_SUBMISSION; }; source "$1"',
+                    str(SCRIPT),
+                    env={"ENABLE_MOONCAKE_DISK_OFFLOAD": "1", "MOONCAKE_SSD_PATH": "/ssd"} | overrides,
+                )
+                self.assertNotEqual(status, 0)
+                self.assertNotIn("UNEXPECTED_SUBMISSION", stdout)
+
     def model_arguments(
         self, *, config_path: Path, enable_mooncake: bool, rank: int = 0, engines_per_node: int = 1
     ) -> list[list[str]]:

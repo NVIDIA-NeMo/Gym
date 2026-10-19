@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 set -euo pipefail
 
@@ -9,6 +11,17 @@ set -euo pipefail
 # Detailed tracing adds overhead; use separate runs for throughput measurements.
 # API-triggered captures exclude startup/graph construction. For those call sites,
 # enable cuBLAS logging before launch or collect a separate startup trace.
+
+# Mooncake disk offload is opt-in: ENABLE_MOONCAKE_DISK_OFFLOAD=1 also enables
+# Mooncake unless ENABLE_MOONCAKE=0 was explicitly set (an error).
+# Required only with disk offload: MOONCAKE_SSD_PATH=/absolute/node-local/ssd/dir.
+# Per-node defaults: MOONCAKE_CPU_CACHE_GIB=600, MOONCAKE_DISK_QUOTA_GIB=512.
+# One standalone owner per node replaces the embedded worker pools. SSD data is
+# job-local and removed on orderly shutdown, and excluded from warmed images.
+# SIGKILL/node failure may leave job directories. Without disk offload, Mooncake
+# retains its embedded 150GB worker pools and needs no SSD mount or owner process.
+# MOONCAKE_DEFAULT_KV_LEASE_TTL overrides either default: 180000 ms without disk
+# offload, 30000 ms with it. Owner/master logs go to slurm-logs/%j-%x.log.
 
 # Input arguments and validation
 # PD (default): NUM_PREFILL_NODES=<P> NUM_DECODE_NODES=<D>
@@ -70,8 +83,57 @@ if [[ -n "$SAVE_WARMED_CONTAINER" ]]; then
     mkdir -p "$(dirname "$SAVE_WARMED_CONTAINER")" slurm-logs
     SAVE_WARMED_CONTAINER="$(cd "$(dirname "$SAVE_WARMED_CONTAINER")" && pwd -P)/$(basename "$SAVE_WARMED_CONTAINER")"
 fi
-ENABLE_MOONCAKE=${ENABLE_MOONCAKE:-0}
-MOONCAKE_DEFAULT_KV_LEASE_TTL=${MOONCAKE_DEFAULT_KV_LEASE_TTL:-180000}
+ENABLE_MOONCAKE_DISK_OFFLOAD=${ENABLE_MOONCAKE_DISK_OFFLOAD:-0}
+case "$ENABLE_MOONCAKE_DISK_OFFLOAD" in
+    0 | 1) ;;
+    *)
+        echo "ERROR: ENABLE_MOONCAKE_DISK_OFFLOAD must be 0 or 1." >&2
+        exit 1
+        ;;
+esac
+ENABLE_MOONCAKE=${ENABLE_MOONCAKE:-$ENABLE_MOONCAKE_DISK_OFFLOAD}
+worker_mounts=$MOUNTS
+mooncake_mode=embedded
+mooncake_global_segment_size='"150GB"'
+mooncake_enable_offload=false
+mooncake_eviction_high_watermark=0.9
+mooncake_minloglevel=1
+mooncake_metric_reporting=false
+mooncake_default_lease_ttl=180000
+if (( ENABLE_MOONCAKE_DISK_OFFLOAD )); then
+    if [[ "$ENABLE_MOONCAKE" != 1 ]]; then
+        echo "ERROR: Disk offload requires ENABLE_MOONCAKE=1." >&2
+        exit 1
+    fi
+    MOONCAKE_SSD_PATH=${MOONCAKE_SSD_PATH:?Set to an existing node-local SSD directory on every worker}
+    # Pyxis mount specifications use commas/colons; constrain the path before it
+    # is embedded in the generated batch script. Check its filesystem on the node.
+    if [[ ! "$MOONCAKE_SSD_PATH" =~ ^/[a-zA-Z0-9_./-]+$ || "/$MOONCAKE_SSD_PATH/" == *"/../"* ]]; then
+        echo "ERROR: MOONCAKE_SSD_PATH must be an absolute path without spaces, mount separators, or '..'." >&2
+        exit 1
+    fi
+    MOONCAKE_CPU_CACHE_GIB=${MOONCAKE_CPU_CACHE_GIB:-600}
+    MOONCAKE_DISK_QUOTA_GIB=${MOONCAKE_DISK_QUOTA_GIB:-512}
+    for budget in "$MOONCAKE_CPU_CACHE_GIB" "$MOONCAKE_DISK_QUOTA_GIB"; do
+        if [[ ! "$budget" =~ ^[1-9][0-9]{0,5}$ ]]; then
+            echo "ERROR: Mooncake CPU/disk budgets must be positive integer GiB values (at most 999999)." >&2
+            exit 1
+        fi
+    done
+    worker_mounts="$MOUNTS,$MOONCAKE_SSD_PATH:/mooncake-ssd"
+    mooncake_mode=standalone-store
+    mooncake_global_segment_size=0
+    mooncake_enable_offload=true
+    mooncake_eviction_high_watermark=0.7
+    mooncake_minloglevel=0
+    mooncake_metric_reporting=true
+    mooncake_default_lease_ttl=30000
+else
+    # Values are expanded into the generated worker command even when disabled.
+    MOONCAKE_CPU_CACHE_GIB=0
+    MOONCAKE_DISK_QUOTA_GIB=0
+fi
+MOONCAKE_DEFAULT_KV_LEASE_TTL=${MOONCAKE_DEFAULT_KV_LEASE_TTL:-$mooncake_default_lease_ttl}
 if [[ "$VLLM_MODE" == aggregated && "$ENABLE_MOONCAKE" != 0 ]]; then
     echo "ENABLE_MOONCAKE requires VLLM_MODE=pd" >&2
     exit 1
@@ -474,8 +536,19 @@ serve_prefill() {
 }
 
 mooncake_pid=""
+mooncake_owner_pid=""
+mooncake_disk_dir=""
 cleanup_worker_services() {
     cleanup_prefill_profile
+    if [[ -n "\$mooncake_owner_pid" ]]; then
+        kill "\$mooncake_owner_pid" 2>/dev/null || true
+        wait "\$mooncake_owner_pid" 2>/dev/null || true
+        mooncake_owner_pid=""
+    fi
+    if [[ -n "\$mooncake_disk_dir" ]]; then
+        rm -rf -- "\$mooncake_disk_dir"
+        mooncake_disk_dir=""
+    fi
     if [[ -n "\$mooncake_pid" ]]; then
         kill "\$mooncake_pid" 2>/dev/null || true
         wait "\$mooncake_pid" 2>/dev/null || true
@@ -492,14 +565,14 @@ if (( ENABLE_MOONCAKE )); then
     mkdir -p "\$(dirname "\$MOONCAKE_CONFIG_PATH")"
     cat > "\$MOONCAKE_CONFIG_PATH" <<MOONCAKE_CONFIG
 {
-  "mode": "embedded",
+  "mode": "$mooncake_mode",
   "metadata_server": "P2PHANDSHAKE",
   "master_server_address": "\${nodes[0]}:50051",
-  "global_segment_size": "150GB",
+  "global_segment_size": $mooncake_global_segment_size,
   "local_buffer_size": "4GB",
   "protocol": "rdma",
   "device_name": "mlx5_0,mlx5_1,mlx5_3,mlx5_4",
-  "enable_offload": false
+  "enable_offload": $mooncake_enable_offload
 }
 MOONCAKE_CONFIG
 
@@ -525,12 +598,13 @@ MOONCAKE_CONFIG
         echo "Starting mooncake_master on \${nodes[0]}"
         mooncake_master \
             -rpc_port=50051 \
+            -enable_offload=$mooncake_enable_offload \
             -rpc_thread_num=4 \
             -metrics_port=9003 \
-            -eviction_high_watermark_ratio=0.9 \
+            -eviction_high_watermark_ratio=$mooncake_eviction_high_watermark \
             -eviction_ratio=0.1 \
-            -minloglevel=1 \
-            -enable_metric_reporting=false \
+            -minloglevel=$mooncake_minloglevel \
+            -enable_metric_reporting=$mooncake_metric_reporting \
             -default_kv_lease_ttl=$MOONCAKE_DEFAULT_KV_LEASE_TTL \
             -logtostderr &
         mooncake_pid=\$!
@@ -552,6 +626,74 @@ MOONCAKE_CONFIG
         sleep 1
     done
     echo "Mooncake master is ready"
+
+    if (( $ENABLE_MOONCAKE_DISK_OFFLOAD )); then
+        # Fail before allocating the owner pool if the bind mount is not disk-backed.
+        disk_fs=\$(findmnt -n -T /mooncake-ssd -o FSTYPE)
+        if [[ "\$disk_fs" =~ ^(tmpfs|ramfs|overlay|nfs|nfs4|lustre)\$ ]]; then
+            echo "ERROR: /mooncake-ssd must be node-local disk storage; found \$disk_fs." >&2
+            exit 1
+        fi
+        disk_quota_bytes=\$(($MOONCAKE_DISK_QUOTA_GIB * 1024 * 1024 * 1024))
+        python3 - "\$disk_quota_bytes" <<'DISK_CHECK'
+import shutil
+import sys
+free = shutil.disk_usage('/mooncake-ssd').free
+quota = int(sys.argv[1])
+if quota > free:
+    raise SystemExit(f'Mooncake SSD quota {quota} bytes exceeds free space {free}; lower MOONCAKE_DISK_QUOTA_GIB')
+DISK_CHECK
+        mooncake_disk_dir=\$(mktemp -d "/mooncake-ssd/mooncake-\$SLURM_JOB_ID-\${SLURM_RESTART_COUNT:-0}.XXXXXX")
+        export MOONCAKE_OFFLOAD_FILE_STORAGE_PATH="\$mooncake_disk_dir"
+        export MOONCAKE_OFFLOAD_STORAGE_BACKEND_DESCRIPTOR=bucket_storage_backend
+        # Drain pending SSD persistence promptly so RAM replicas become evictable.
+        export MOONCAKE_OFFLOAD_HEARTBEAT_INTERVAL_SECONDS=1
+        export MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY=lru
+        export MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE="\$disk_quota_bytes"
+        export MOONCAKE_OFFLOAD_BUCKET_MAX_PHYSICAL_BYTES="\$disk_quota_bytes"
+        export MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES="\$disk_quota_bytes"
+        # Match the connector's 1280 MiB DirectIO staging budget.
+        export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES=1342177280
+        owner_ip=\$(python3 -c 'from vllm.utils.network_utils import get_ip; print(get_ip())')
+        # The preferred segment is the TransferEngine address, NOT the client RPC port.
+        export MOONCAKE_PREFERRED_SEGMENT="\$owner_ip:50053"
+        echo "Starting Mooncake SSD owner on \$this_node_hostname: segment=\$MOONCAKE_PREFERRED_SEGMENT, CPU=$MOONCAKE_CPU_CACHE_GIB GiB, disk=\$mooncake_disk_dir, quota=\$disk_quota_bytes bytes"
+        mooncake_client \\
+            --host="\$MOONCAKE_PREFERRED_SEGMENT" \\
+            --port=50052 \\
+            --master_server_address="\${nodes[0]}:50051" \\
+            --metadata_server=P2PHANDSHAKE \\
+            --protocol=rdma \\
+            --device_names=mlx5_0,mlx5_1,mlx5_3,mlx5_4 \\
+            --global_segment_size=$((MOONCAKE_CPU_CACHE_GIB * 1024 * 1024 * 1024)) \\
+            --enable_offload=true \\
+            --threads=4 \\
+            --logtostderr &
+        mooncake_owner_pid=\$!
+        # The client RPC server starts only after pool/SSD initialization succeeds.
+        python3 - "\$owner_ip" "\$mooncake_owner_pid" <<'OWNER_READY'
+import os
+import socket
+import sys
+import time
+host, pid = sys.argv[1], int(sys.argv[2])
+deadline = time.monotonic() + 180
+while time.monotonic() < deadline:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        raise SystemExit('Mooncake SSD owner exited during startup; inspect its logs above')
+    try:
+        with socket.create_connection((host, 50052), timeout=1):
+            break
+    except OSError:
+        time.sleep(1)
+else:
+    raise SystemExit('Mooncake SSD owner did not become ready within 180 seconds')
+OWNER_READY
+        kill -0 "\$mooncake_owner_pid"
+        echo "Mooncake SSD owner is ready on \$this_node_hostname"
+    fi
 fi
 
 router_common_args=(--log-level error --prometheus-host 0.0.0.0 --prometheus-port $ROUTER_METRICS_PORT)
@@ -900,7 +1042,7 @@ srun --nodes=$NUM_NODES --ntasks=$NUM_NODES --ntasks-per-node=1 --kill-on-bad-ex
     --container-image=$CONTAINER \
     --container-name="\$worker_container" \
     --container-writable \
-    --container-mounts=$MOUNTS \
+    --container-mounts=$worker_mounts \
     --container-workdir=\$SLURM_SUBMIT_DIR \
     --no-container-mount-home \
     bash -c '
