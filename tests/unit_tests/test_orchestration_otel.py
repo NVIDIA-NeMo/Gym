@@ -32,6 +32,7 @@ from nemo_gym.orchestration.executors.otel import (
     otel_active,
     render_collector_config,
     resolve_token,
+    scrape_nodes,
     scrape_targets,
 )
 from nemo_gym.orchestration.executors.slurm import SlurmExecutor
@@ -661,3 +662,112 @@ def test_submit_without_otel_neither_stages_nor_exports(tmp_path, monkeypatch):
 
     assert not (Path(record.run_dir) / "scicode" / "otel").exists()
     assert not conn.commands[0][0].startswith("export ")
+
+
+# ---------------------------------------------------------------------------
+# per-node scraping of pinned services
+# ---------------------------------------------------------------------------
+
+
+def _pd_config(prefill_nodes=2, decode_nodes=1, server_per_node=True, **overrides):
+    pd = {
+        "type": "vllm_pd",
+        "container": "vllm:latest",
+        "model": "m",
+        "server_per_node": server_per_node,
+        "prefill": {"node_pool": "prefill", "port": 8001},
+        "decode": {"node_pool": "decode", "port": 8001},
+    }
+    pools = {
+        "prefill": {"partition": "batch", "nodes": prefill_nodes},
+        "decode": {"partition": "batch", "nodes": decode_nodes},
+    }
+    return _config(
+        services={"policy": pd},
+        compute={"cluster-a": {"type": "slurm", "account": "acct", "node_pools": pools}},
+        **overrides,
+    )
+
+
+def _jobs(config):
+    scrape_configs = _rendered(config)["receivers"]["prometheus"]["config"]["scrape_configs"]
+    return {s["job_name"]: s["static_configs"] for s in scrape_configs}
+
+
+def test_scrape_nodes_cover_every_node_of_a_per_node_tier():
+    # The pools are laid out in declaration order: prefill owns nodes 0 and 1, decode owns node 2.
+    assert scrape_nodes(_pd_config()) == {"policy-prefill": (0, 1), "policy-decode": (2,)}
+
+
+def test_scrape_nodes_of_a_tier_without_per_node_servers_is_the_pool_head():
+    config = _pd_config(prefill_nodes=2, decode_nodes=2, server_per_node=False)
+    assert scrape_nodes(config) == {"policy-prefill": (0,), "policy-decode": (2,)}
+
+
+def test_scrape_nodes_are_empty_for_services_that_are_not_pinned():
+    assert scrape_nodes(_config()) == {}
+
+
+def _pooled(nodes):
+    return {
+        "cluster-a": {
+            "type": "slurm",
+            "account": "acct",
+            "node_pools": {"gpu": {"partition": "batch", "nodes": nodes}},
+        }
+    }
+
+
+def test_scrape_nodes_of_an_unpinned_multi_node_vllm_service_is_the_first_node():
+    # It spans the allocation and serves its API from node 0, while the collector follows the driver.
+    assert scrape_nodes(_config(compute=_pooled(2))) == {"policy": (0,)}
+
+
+def test_scrape_nodes_of_an_unpinned_service_on_a_single_node_is_empty():
+    assert scrape_nodes(_config(compute=_pooled(1))) == {}
+
+
+def test_an_unpinned_multi_node_service_is_scraped_by_hostname_on_the_first_node():
+    config = _config(compute=_pooled(2))
+    assert _jobs(config)["gym-vllm/policy"] == [
+        {"targets": ["${env:GYM_NODE_0_HOST}:8000"], "labels": {"gym_service": "policy", "gym_node": "0"}}
+    ]
+    assert 'export GYM_NODE_0_HOST="${gym_nodes[0]}"' in _script(config)
+
+
+def test_scrape_nodes_are_empty_off_slurm():
+    config = _config(compute={"k8s": {"type": "kubernetes", "pvc_name": "gym-results"}})
+    assert scrape_nodes(config) == {}
+
+
+def test_collector_scrapes_each_node_of_a_per_node_tier_by_hostname():
+    jobs = _jobs(_pd_config())
+    assert [(s["targets"], s["labels"]) for s in jobs["gym-vllm/policy-prefill"]] == [
+        (["${env:GYM_NODE_0_HOST}:8001"], {"gym_service": "policy-prefill", "gym_node": "0"}),
+        (["${env:GYM_NODE_1_HOST}:8001"], {"gym_service": "policy-prefill", "gym_node": "1"}),
+    ]
+    # Both tiers listen on 8001, but each is scraped only on its own pool's nodes.
+    assert [(s["targets"], s["labels"]) for s in jobs["gym-vllm/policy-decode"]] == [
+        (["${env:GYM_NODE_2_HOST}:8001"], {"gym_service": "policy-decode", "gym_node": "2"}),
+    ]
+    # The router is not pinned: it runs beside the collector.
+    assert jobs["gym-vllm/policy"] == [{"targets": ["localhost:8000"], "labels": {"gym_service": "policy"}}]
+
+
+def test_the_batch_script_exports_the_hostnames_before_the_collector_starts():
+    script = _script(_pd_config())
+    exports = [f'export GYM_NODE_{i}_HOST="${{gym_nodes[{i}]}}"' for i in range(3)]
+    for line in exports:
+        assert script.index("gym_nodes=(") < script.index(line) < script.index("# service: otel_collector")
+
+
+def test_the_batch_script_exports_only_the_hostnames_the_collector_names():
+    script = _script(_pd_config(prefill_nodes=1, decode_nodes=1, server_per_node=False))
+    assert 'export GYM_NODE_0_HOST="${gym_nodes[0]}"' in script
+    assert 'export GYM_NODE_1_HOST="${gym_nodes[1]}"' in script
+    assert "GYM_NODE_2_HOST" not in script
+
+
+def test_the_batch_script_exports_no_hostnames_without_a_collector_or_pinned_services():
+    assert "GYM_NODE_" not in _script(_pd_config(otel={"enabled": False}))
+    assert "GYM_NODE_" not in _script(_config())

@@ -20,6 +20,8 @@ echo "Head node IP address: $HEAD_NODE_IP"
 gym_nodes=($(scontrol show hostnames "$SLURM_JOB_NODELIST"))
 export GYM_POOL_PREFILL_NODES="$(IFS=,; echo "${gym_nodes[*]:0:4}")"
 export GYM_POOL_DECODE_NODES="$(IFS=,; echo "${gym_nodes[*]:4:6}")"
+export GYM_NODE_0_HOST="${gym_nodes[0]}"
+export GYM_NODE_4_HOST="${gym_nodes[4]}"
 
 # service: otel_collector
 env OTEL_TOKEN=${OTEL_TOKEN} SLURM_JOB_ID=${SLURM_JOB_ID} srun --overlap --nodelist="${gym_nodes[0]}" --nodes=1 --ntasks=1 --output=logs/otel_collector-$SLURM_JOB_ID.log otelcol-contrib --config /jobs/swebench_pro/otel/collector.yaml &

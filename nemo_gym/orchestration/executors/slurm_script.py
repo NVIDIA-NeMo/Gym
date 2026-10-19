@@ -43,7 +43,9 @@ from nemo_gym.orchestration.executors.otel import (
     collector_config_path,
     driver_telemetry_env,
     gym_telemetry_active,
+    node_host_var,
     otel_active,
+    scrape_nodes,
 )
 from nemo_gym.orchestration.executors.resume_script import render_resume_prologue
 from nemo_gym.orchestration.executors.script_templates import (
@@ -498,6 +500,19 @@ def _render_pool_nodes(config: SubmitConfig, compute: SlurmComputeConfig, is_mul
     return "\n".join(lines)
 
 
+def _render_node_hosts(config: SubmitConfig) -> str:
+    """Export the hostname of each node the collector scrapes by name, for its config to refer to.
+
+    The collector's config is written at submit time, before Slurm has chosen the nodes, so it
+    names them as `${env:GYM_NODE_<i>_HOST}` and reads these exports at startup. Any pinned
+    service implies the host array was declared (see _places_services).
+    """
+    if not otel_active(config):
+        return ""
+    indexes = sorted({index for nodes in scrape_nodes(config).values() for index in nodes})
+    return "\n".join(f'export {node_host_var(index)}="${{gym_nodes[{index}]}}"' for index in indexes)
+
+
 def ray_head_address_var(ray_service: str) -> str:
     """The env var build_sbatch_script exports with a ray service's head host:port."""
     return f"GYM_RAY_ADDRESS_{bash_var(ray_service)}"
@@ -714,12 +729,7 @@ def _pool_offsets(compute: SlurmComputeConfig) -> dict[str, tuple[int, int]]:
     single #SBATCH --nodes total is built from, so pool i owns the nodes after
     every pool before it.
     """
-    offsets: dict[str, tuple[int, int]] = {}
-    start = 0
-    for name, pool in compute.node_pools.items():
-        offsets[name] = (start, pool.nodes)
-        start += pool.nodes
-    return offsets
+    return compute.pool_offsets()
 
 
 def _service_nodes(service: ServiceConfig, compute: SlurmComputeConfig, total_nodes: int) -> int:
@@ -900,6 +910,7 @@ def build_sbatch_script(
             if any(_vllm_spans_multiple_nodes(s, total_nodes) for s in config.deployed_services.values())
             else "",
             _render_pool_nodes(config, compute, is_multi_node),
+            _render_node_hosts(config),
             _render_ray_head_addresses(config, compute),
         )
         if block
