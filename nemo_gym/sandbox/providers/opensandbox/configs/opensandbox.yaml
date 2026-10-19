@@ -71,8 +71,17 @@ sandbox:
       auth: {}
     # Commands run as root in every new sandbox before it is handed out, for repairs the
     # deployment owns rather than the task. A failing command fails the create, unretried.
+    # POSIX sh (images may lack bash); an override of `commands` replaces this whole list.
     setup:
-      commands: []
+      commands:
+        # Debian bullseye's security packages left the live mirror when its LTS ended, while the
+        # index still lists them, so every apt-get install 404s. Point bullseye-security at the
+        # signed final-LTS snapshot; any other image is left untouched.
+        - >-
+          if [ -r /etc/os-release ] && [ -f /etc/apt/sources.list ] && . /etc/os-release
+          && [ "$ID:$VERSION_CODENAME" = debian:bullseye ]; then
+          sed -i -E 's|^deb http://deb[.]debian[.]org/debian-security bullseye-security main$|deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/20260831T235959Z/ bullseye-security main|' /etc/apt/sources.list;
+          fi
       timeout_s: 600
       # Environment set in every sandbox, under the spec's own variables (platform knobs only).
       env: {}
