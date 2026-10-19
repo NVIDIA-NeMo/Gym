@@ -48,7 +48,10 @@ places by different agent classes, so up to five witnesses testify:
                  writer recorded one (a full-transcript response), the
                  fingerprint of the entry's own output (a final-turn-only
                  response), and the transcript's trailing model-authored
-                 block (a merged multi-turn transcript).
+                 block (a merged multi-turn transcript). When none of them
+                 matches, the trailing block must match one entry's complete
+                 output apart from tool arguments: IDs, names, order, and
+                 non-tool content still agree when a harness rewrites arguments.
 
 External staging rows omit token arrays because those tokens remain in framework storage.
 They carry a ``staging_key`` and precomputed content fingerprints instead.
@@ -80,8 +83,10 @@ from nemo_gym.token_id_capture.fingerprint import (
     FINGERPRINT_VERSION,
     _content_of,
     _is_assistant_authored,
+    _tools_of,
     assistant_fingerprint,
     canonicalize_tool_arguments,
+    tool_call_turn_fingerprint,
 )
 from nemo_gym.token_id_capture.records import FINISH_REASON_DISAGREEMENT_REASON, NAMESPACE_TOOL_DELIMITER, TokenEntry
 
@@ -397,7 +402,7 @@ def _content_witness(
 ) -> tuple[str, TokenEntry] | None:
     """The content witness: fingerprint the response's model-authored items.
 
-    Three readings of one response are possible and must compete, not race. A
+    The first three readings of one response must compete, not race. A
     full transcript matches an entry's cumulative fingerprint (the
     model-authored spine of request context + that call's output); a
     final-turn-only response matches the fingerprint of one entry's own
@@ -407,6 +412,13 @@ def _content_witness(
     non-model turns never contribute — so candidates from all keys pool before
     the ambiguity decision. A call matched as the single entry is added to
     ``identified``, as in ``_item_id_witness``.
+
+    If those readings find no candidates, the fourth compares the complete
+    trailing turn with each entry's output, ignoring only tool arguments.
+    A unique sequence reports ``content_tool_ids``; distinct matching sequences
+    abstain as ``tool_ids_ambiguous``. IDs reused in earlier transcript turns
+    abstain as ``tool_ids_reused`` because those IDs cannot identify a call.
+    Custody rows have no output items and cannot supply this fourth reading.
     """
     output = response.get("output")
     if not isinstance(output, list) or not output:
@@ -431,7 +443,7 @@ def _content_witness(
     # skips this reading rather than matching the wrong call.
     trailing: list[dict] = []
     for item in reversed(items):
-        if not _is_assistant_authored(item):
+        if not _is_assistant_authored(item) and item.get("type") != "reasoning":
             break
         trailing.append(item)
     trailing.reverse()
@@ -479,5 +491,39 @@ def _content_witness(
             # Custody manifests label all three readings as one witness.
             return ("content", winner)
         return ("content_cumulative" if cumulative_hit else "content_output", winner)
+    if not matches:
+        # Fourth reading: the complete trailing model turn, ignoring only tool
+        # arguments. Tool IDs alone cannot corroborate changed/missing output
+        # or an uncaptured final assistant message (the #3972 witness contract).
+        target_turn = tool_call_turn_fingerprint(trailing)
+        if target_turn:
+            trailing_ids = {call_id for item in trailing for call_id, _, _ in _tools_of(item)}
+            earlier_ids = {
+                call_id
+                for item in items[: len(items) - len(trailing)]
+                if _is_assistant_authored(item)
+                for call_id, _, _ in _tools_of(item)
+            }
+            if trailing_ids & earlier_ids:
+                reasons.append("tool_ids_reused")
+                return None
+            id_matches: dict[str, TokenEntry] = {}
+            for entry in entries:
+                if _is_custody_row(entry) or not entry.output_items:
+                    continue
+                try:
+                    own_turn = tool_call_turn_fingerprint(list(entry.output_items))
+                except (TypeError, ValueError):
+                    continue
+                if own_turn == target_turn:
+                    id_matches[entry.model_call_id] = entry
+            winner = _collapse_identical(list(id_matches.values()))
+            if winner is not None:
+                if len(id_matches) == 1:
+                    identified.add(winner.model_call_id)
+                return ("content_tool_ids", winner)
+            if id_matches:
+                reasons.append("tool_ids_ambiguous")
+                return None
     reasons.append("content_ambiguous" if matches else "no_content_match")
     return None
