@@ -1,0 +1,71 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Held-out test split of the vahid_1016 nl2repo SFT data (75/89 raw instances - 14 skipped at
+# prep time for missing metadata/no start.md/no tests-or-test dir at repo root, see
+# sft_runs/lightning_vahid1016/testset/prepare_testset.py's log), run through the SAME
+# resources server as upstream NL2RepoBench (resources_servers/nl2repobench), reusing its
+# task-store/sandbox/verify machinery entirely unmodified except for two knobs this corpus
+# needs that upstream doesn't:
+#   - tasks_dir/expected_task_count: ours (75), not upstream's pinned 104.
+#   - verify_image_override: we have no pinned, deps-preinstalled per-task grading image for
+#     this corpus (upstream ships one per task; derived here from raw GitHub repos instead) -
+#     point the verifier at a generic image and let test_commands install deps itself
+#     (`pip install -e .`) over the verify sandbox's already-open network. Explicitly accepted:
+#     this is NOT network-hardened (no block_target/no_internet_preinstalled guard here), same
+#     as upstream's own "official" mode - fine for a quick held-out eval, not for a leak-proof one.
+
+# Uses the SAME top-level block names as benchmarks/nl2repobench/opencode.yaml
+# (nl2repobench_opencode_resources_server / nl2repobench_opencode_sandboxed_agent /
+# nl2repobench_environment_server), not a renamed variant - so it's a drop-in
+# BENCHMARK_CONFIG override for the existing model launcher scripts
+# (scripts/launchers/run_*.sh), whose "++nl2repobench_opencode_resources_server...
+# .agent_network_mode=$AGENT_NETWORK_MODE" overrides are hardcoded to these names.
+# Only one of these two opencode.yaml files is ever loaded per launch (config_paths
+# replaces, not merges), so reusing the names is intentional, not a collision risk.
+config_paths:
+  - responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml
+  - resources_servers/nl2repobench/configs/nl2repobench.yaml
+
+nl2repobench_opencode_resources_server:
+  _inherit_from: nl2repobench_resources_server
+  resources_servers:
+    nl2repobench:
+      tasks_dir: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemotron_nano/users/fjia/long_code/nl2repo/sft_runs/lightning_vahid1016/testset/tasks
+      expected_task_count: 75
+      verify_image_override: ghcr.io/all-hands-ai/runtime:0.56-nikolaik
+      enforce_agent_no_network: false
+      sandbox_model_server:
+        type: responses_api_models
+        name: policy_model
+      # Overridable at the CLI exactly like the real nl2repobench benchmark, e.g.:
+      #   ++nl2repobench_opencode_resources_server.resources_servers.nl2repobench.agent_network_mode=block_target
+
+nl2repobench_opencode_sandboxed_agent:
+  _inherit_from: opencode_sandboxed_agent
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      sandbox_timeout: 21600
+      opencode_model_call_timeout: 14400000
+      opencode_max_context_window: 524288
+
+      remote_opencode_install_script_path: /mnt/s3-data/data/bxyu/opencode/install.sh
+      remote_opencode_binary_path: /mnt/s3-data/data/bxyu/opencode/opencode-linux-x64
+
+      resources_server:
+        type: resources_servers
+        name: nl2repobench_opencode_resources_server
+      datasets:
+        - name: nl2repobench_vahid1016_testset
+          type: benchmark
+          jsonl_fpath: /lustre/fsw/portfolios/llmservice/projects/llmservice_nemotron_nano/users/fjia/long_code/nl2repo/sft_runs/lightning_vahid1016/testset/benchmark.jsonl
+          prepare_script: benchmarks/nl2repobench_vahid1016_testset/prepare.py
+          num_repeats: 1
+
+nl2repobench_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: nl2repobench_opencode_sandboxed_agent
