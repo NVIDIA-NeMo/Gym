@@ -97,7 +97,7 @@ mooncake_mode=embedded
 mooncake_global_segment_size='"150GB"'
 mooncake_enable_offload=false
 mooncake_eviction_high_watermark=0.9
-mooncake_minloglevel=1
+mooncake_minloglevel=${MOONCAKE_MINLOGLEVEL:-1}
 mooncake_metric_reporting=false
 mooncake_default_lease_ttl=180000
 if (( ENABLE_MOONCAKE_DISK_OFFLOAD )); then
