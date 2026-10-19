@@ -188,17 +188,14 @@ async def test_sandbox_spans_keep_the_rollout_id_when_the_provider_fails(recorde
     assert span.attributes["nemo.gym.rollout.id"] == "7-0"
 
 
-@pytest.mark.parametrize(
-    "module",
-    ["nemo_gym.global_config", "nemo_gym.rollout_correlation", "nemo_gym.server_utils", "nemo_gym.sandbox.api"],
-)
-def test_sandbox_api_import_does_not_create_an_import_cycle(module):
-    """`global_config` imports the sandbox registry while initialising; the sandbox API must not
-    import `rollout_correlation` (which reads `global_config` constants) at module level."""
+def test_global_config_imports_in_a_fresh_interpreter():
+    """`global_config` imports the sandbox registry while initialising, so a module-level import of
+    `rollout_correlation` from the sandbox API is a cycle. Only a fresh interpreter sees it: in the
+    test process another module has usually imported `global_config` first."""
     import subprocess
     import sys
 
-    subprocess.run([sys.executable, "-c", f"import {module}"], check=True, timeout=120)
+    subprocess.run([sys.executable, "-c", "import nemo_gym.global_config"], check=True, timeout=120)
 
 
 async def test_sandbox_span_never_records_the_command(recorded_spans, started_sandbox):
