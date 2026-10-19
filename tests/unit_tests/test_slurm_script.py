@@ -14,15 +14,19 @@
 # limitations under the License.
 
 import base64
+import os
 import re
 import shlex
+import socket
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
 
 from nemo_gym.orchestration.api import NodePool, RayServiceConfig, SubmitConfig, VllmPDTierConfig
 from nemo_gym.orchestration.executors.script_templates import (
+    RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT_S,
     render_driver_entrypoint,
     render_gym_cmd,
 )
@@ -318,15 +322,94 @@ def test_build_vllm_ray_command_raises_symmetric_run_node_wait_timeout(vllm_serv
 
 
 def test_build_vllm_ray_command_worker_waits_for_head_port(vllm_service):
-    # Ray 2.59 bug: check_head_node_ready() constructs GcsClient outside the retry loop,
-    # so RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT has no effect and workers give up after ~40 s.
-    # The fix: worker nodes poll HEAD_NODE_IP:6379 before handing off to ray symmetric-run.
+    # Worker nodes poll RAY_HEAD_NODE_IP before calling ray symmetric-run or ray start.
     cmd = _build_vllm_ray_command(vllm_service, total_nodes=2)
-    assert '/dev/tcp/"$HEAD_NODE_IP"/6379' in cmd
-    # The wait must be inside the symmetric-run branch and gated on SLURM_NODEID != 0.
-    assert '[ "${SLURM_NODEID:-0}" != "0" ]' in cmd
-    # The wait must appear before the actual ray symmetric-run call (not the --help probe).
-    assert cmd.index('/dev/tcp/"$HEAD_NODE_IP"/6379') < cmd.index('--address "$RAY_HEAD_NODE_IP"')
+    assert "/dev/tcp/${RAY_HEAD_NODE_IP%:*}/${RAY_HEAD_NODE_IP##*:}" in cmd
+    assert "${SLURM_NODEID:-0}" in cmd
+    # Wait must precede the symmetric-run --help probe, covering both Ray branches.
+    assert cmd.index("/dev/tcp/${RAY_HEAD_NODE_IP%:*}/${RAY_HEAD_NODE_IP##*:}") < cmd.index(
+        "if ray symmetric-run --help"
+    )
+
+
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _ray_bootstrap(cmd: str, tmp_path: Path, *, node_id: int, port: int, wait_s: int, help_rc: int = 0):
+    """Rendered bootstrap with a short head wait and a fake `ray` that records its calls."""
+    default = f"RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT={RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT_S}\n"
+    assert cmd.count(default) == 1
+    script = (
+        'ray() { echo "$*" >> "$RAY_CALLS"; [ "$2" != --help ] || return "$RAY_HELP_RC"; }\nexport -f ray\n'
+        + cmd.replace(default, f"RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT={wait_s}\n")
+    )
+    env = {
+        **os.environ,
+        "SLURM_NODEID": str(node_id),
+        "RAY_HEAD_NODE_IP": f"127.0.0.1:{port}",
+        "RAY_CALLS": str(tmp_path / "ray_calls"),
+        "RAY_HELP_RC": str(help_rc),
+    }
+    return ["bash", "-c", script], env
+
+
+@pytest.mark.parametrize(
+    "help_rc, join_call",
+    [(0, "symmetric-run --address 127.0.0.1:{port} --min-nodes 2"), (1, "start --address=127.0.0.1:{port}")],
+    ids=["symmetric-run", "older-ray-fallback"],
+)
+def test_build_vllm_ray_command_worker_waits_for_late_head(vllm_service, tmp_path, help_rc, join_call):
+    # A Ray 2.59 symmetric-run worker gives up on a head that is ~40s late; the worker
+    # must not start Ray until the head's GCS port accepts connections.
+    port = _free_port()
+    argv, env = _ray_bootstrap(
+        _build_vllm_ray_command(vllm_service, total_nodes=2),
+        tmp_path,
+        node_id=1,
+        port=port,
+        wait_s=30,
+        help_rc=help_rc,
+    )
+    proc = subprocess.Popen(argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        time.sleep(2)
+        assert proc.poll() is None, proc.communicate()
+        assert not (tmp_path / "ray_calls").exists()
+        with socket.create_server(("127.0.0.1", port)):
+            _, stderr = proc.communicate(timeout=10)
+    finally:
+        proc.kill()
+
+    assert proc.returncode == 0, stderr
+    assert (tmp_path / "ray_calls").read_text().splitlines()[-1].startswith(join_call.format(port=port))
+
+
+def test_build_vllm_ray_command_worker_fails_when_head_never_comes_up(vllm_service, tmp_path):
+    argv, env = _ray_bootstrap(
+        _build_vllm_ray_command(vllm_service, total_nodes=2), tmp_path, node_id=1, port=_free_port(), wait_s=2
+    )
+    result = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=15)
+
+    assert result.returncode == 1
+    assert "Waiting up to 2s for the Ray head" in result.stdout
+    assert "timed out waiting for the Ray head" in result.stderr
+    assert not (tmp_path / "ray_calls").exists()
+
+
+def test_build_vllm_ray_command_head_does_not_wait_for_itself(vllm_service, tmp_path):
+    # Head's port is closed until Ray starts; a head that waited would time out here.
+    port = _free_port()
+    argv, env = _ray_bootstrap(
+        _build_vllm_ray_command(vllm_service, total_nodes=2), tmp_path, node_id=0, port=port, wait_s=30
+    )
+    result = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=10)
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "ray_calls").read_text().splitlines()
+    assert calls[-1].startswith(f"symmetric-run --address 127.0.0.1:{port} --min-nodes 2")
 
 
 # ---------------------------------------------------------------------------

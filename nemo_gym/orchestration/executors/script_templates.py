@@ -31,7 +31,7 @@ echo "Head node IP address: $HEAD_NODE_IP\""""
 
 ENSURE_RAY_INSTALLED = 'command -v ray >/dev/null 2>&1 || pip install -q "ray[default]"'
 
-# Default node-join wait (30s) is too short for slow image pulls.
+# Default node-join wait (30s) is too short for slow image pulls. Also bounds a worker's wait for the head.
 RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT_S = 600
 
 # Default replica queue-length RPC deadline (0.1s) is too tight for cross-node hops.
@@ -49,18 +49,22 @@ bash -lc '
     + """
     """
     + ENSURE_RAY_INSTALLED
+    # Ray applies the wait above only to the head waiting for workers: a worker gives up on a late
+    # head after ~40s (GcsClient connect timeout), so workers first wait for the head's GCS port.
+    # Node 0 is the head here as in the fallback below: the prelude takes RAY_HEAD_NODE_IP from it.
     + """
+    if [ "${{SLURM_NODEID:-0}}" != "0" ]; then
+        echo "Waiting up to ${{RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT}}s for the Ray head at $RAY_HEAD_NODE_IP..."
+        deadline=$((SECONDS + RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT))
+        until (: >"/dev/tcp/${{RAY_HEAD_NODE_IP%:*}}/${{RAY_HEAD_NODE_IP##*:}}") 2>/dev/null; do
+            if [ "$SECONDS" -ge "$deadline" ]; then
+                echo "ERROR: timed out waiting for the Ray head at $RAY_HEAD_NODE_IP." >&2
+                exit 1
+            fi
+            sleep 1
+        done
+    fi
     if ray symmetric-run --help >/dev/null 2>&1; then
-        if [ "${{SLURM_NODEID:-0}}" != "0" ]; then
-            _deadline=$(($(date +%s) + RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT))
-            until (</dev/tcp/"$HEAD_NODE_IP"/6379) 2>/dev/null; do
-                if [ "$(date +%s)" -ge "$_deadline" ]; then
-                    echo "Timed out waiting for Ray head $HEAD_NODE_IP:6379"
-                    exit 1
-                fi
-                sleep 2
-            done
-        fi
         ray symmetric-run \\
             --address "$RAY_HEAD_NODE_IP" \\
             --min-nodes {total_nodes} \\
