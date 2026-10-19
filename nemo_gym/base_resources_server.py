@@ -20,7 +20,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 from time import monotonic
-from typing import TYPE_CHECKING, Any, ClassVar, Generic, Optional, TypeVar, get_args
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, Optional, TypedDict, TypeVar, get_args
 
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, PrivateAttr, field_validator
@@ -45,7 +45,7 @@ from nemo_gym._checkpoint.settings import checkpoint_settings
 from nemo_gym._checkpoint.steps import StepMode
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.failure_kinds import validate_failure_kind
+from nemo_gym.failure_kinds import SESSION_LOST, validate_failure_kind
 from nemo_gym.judge import judge_failsafe
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
@@ -280,6 +280,60 @@ class ResourcesCloseSessionResponse(BaseModel):
     resources_session_id: str
 
 
+class ResourcesSeedRejectedError(HTTPException, ValueError):
+    """Refuse a seed whose input no retry can fix, such as ``task_data`` that fails validation.
+
+    FastAPI answers it with HTTP 422, which an Environment Server treats as terminal, so the episode fails once
+    with this message instead of being dispatched again with the same input. It is also a ``ValueError``, so code
+    that seeds outside a request (a direct call in a test) keeps catching it as before.
+    """
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(422, detail)
+
+
+class ResourcesSessionConflictError(HTTPException, ValueError):
+    """Refuse a seed or close that conflicts with what this server recorded for the session.
+
+    Examples: a ``resources_session_id`` already bound to another episode or task, a close that names another
+    episode, or a seed for a session that already closed. FastAPI answers it with HTTP 409, which an Environment
+    Server treats as terminal. It is also a ``ValueError`` for direct callers.
+    """
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(409, detail)
+
+
+class ResourcesSessionLostError(HTTPException):
+    """Answer a tool call for a session this server no longer holds with HTTP 404.
+
+    Return this instead of a tool observation that tells the model the session is gone: the model would keep
+    going and produce a trajectory that measures nothing. The detail names the ``failure_kind`` so a harness or a
+    log can group it.
+    """
+
+    def __init__(self, message: str, *, failure_kind: str = SESSION_LOST) -> None:
+        super().__init__(404, {"failure_kind": failure_kind, "message": message})
+
+
+class LostSessionVerification(TypedDict):
+    reward: float
+    mask_sample: bool
+    failure_kind: str
+    failure_reason: str
+
+
+def lost_session_verification(reason: str, *, failure_kind: str = SESSION_LOST) -> LostSessionVerification:
+    """Return the verify response fields for an episode whose session this server no longer holds.
+
+    The sample is masked: the environment lost the state it would measure, so a reward of 0 would read as a
+    policy that solved nothing. Spread the result into the server's own response model, for example
+    ``BaseVerifyResponse(**body.model_dump(), **lost_session_verification("sandbox gone"))``. Use
+    ``failure_kind=SESSION_EXPIRED`` when the server closed the session itself because its lifetime ran out.
+    """
+    return {"reward": 0.0, "mask_sample": True, "failure_kind": failure_kind, "failure_reason": reason}
+
+
 # How long a closed resources session is remembered, so a late seed for it is refused.
 CLOSED_SESSION_RETENTION_S = 3600.0
 
@@ -291,6 +345,10 @@ class ResourcesSessionFence:
     session again, so a server remembers each closed ``resources_session_id``. Each record expires
     ``retention_seconds`` after its close, which keeps memory bounded over a long training run. A per-session lock
     exists only while a request holds or waits for it.
+
+    TODO: also expire sessions that are never closed, as when the Environment Server dies before its close. Planned
+    rule: a fixed lifetime from the seed (the sandbox ``ttl_s`` when set, else 24 hours), checked on the next request
+    and at shutdown; an expired session is released, fenced, and verifies as ``SESSION_EXPIRED``.
     """
 
     def __init__(
@@ -327,7 +385,7 @@ class ResourcesSessionFence:
     def raise_if_closed(self, resources_session_id: str) -> None:
         """Refuse a seed for a closed session with 409, which the Environment Server does not retry."""
         if self.closed_episode(resources_session_id) is not None:
-            raise HTTPException(409, f"Resources session is already closed: {resources_session_id}")
+            raise ResourcesSessionConflictError(f"Resources session is already closed: {resources_session_id}")
 
     def mark_closed(self, resources_session_id: str, episode_id: EpisodeId) -> None:
         """Record ``resources_session_id`` as closed; call it only after its state was released."""
@@ -538,6 +596,15 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         An Environment Server seeds with a ``ResourcesSeedSessionRequest`` and gets its caller-assigned
         ``resources_session_id`` back. An Agent's ``/run`` seeds with its legacy body and gets an empty
         response. Servers that keep per-rollout state override this method.
+
+        An override refuses a seed that no retry can make succeed with a final 4xx, never a plain exception
+        (HTTP 500), which the Environment Server retries by dispatching the whole episode again:
+
+        - ``ResourcesSeedRejectedError`` (422) for input that fails validation, such as ``task_data`` or a
+          ``TaskId`` that does not match the task row;
+        - ``ResourcesSessionConflictError`` (409) for an ID bound to another episode or task, or a closed session.
+
+        A failure that a retry may fix, such as an unavailable sandbox provider, stays a 5xx.
         """
         if isinstance(body, ResourcesSeedSessionRequest):
             return ResourcesSeedSessionResponse(resources_session_id=body.resources_session_id)
@@ -569,7 +636,13 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
 
     @abstractmethod
     async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
-        pass
+        """Score the episode.
+
+        A server whose score depends on per-rollout state answers a verify for a session it no longer holds
+        (never seeded, closed, or lost) with a masked sample built by ``lost_session_verification``, never a
+        plain reward of 0 and never an exception that dispatches the episode again. A tool call for such a
+        session raises ``ResourcesSessionLostError`` (404).
+        """
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
         """Compute aggregate metrics from verify responses.

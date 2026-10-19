@@ -23,17 +23,22 @@ from pydantic import PrivateAttr
 from nemo_gym.base_resources_server import (
     BaseMultiRewardVerifyResponse,
     BaseResourcesServerConfig,
+    BaseVerifyRequest,
     BaseVerifyResponse,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
+    ResourcesSeedRejectedError,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
+    ResourcesSessionConflictError,
     ResourcesSessionFence,
+    ResourcesSessionLostError,
     ReverifyMode,
     SimpleResourcesServer,
+    lost_session_verification,
 )
 from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.failure_kinds import JUDGE_FAILED, SESSION_LOST
+from nemo_gym.failure_kinds import JUDGE_FAILED, SESSION_EXPIRED, SESSION_LOST
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from nemo_gym.testing.session_conformance import check_resources_session_contract
@@ -290,22 +295,34 @@ class TestResourcesSessionFence:
         assert fence._locks == {}
 
 
-def _cookie_keyed_server(*, releases_by_resources_session_id: bool) -> SimpleResourcesServer:
+def _cookie_keyed_server(
+    *, releases_by_resources_session_id: bool = True, conflict_is_final: bool = True, masks_lost_session: bool = True
+) -> SimpleResourcesServer:
     """A server that keys per-rollout state by the session cookie, as several servers do."""
     config = BaseResourcesServerConfig(host="", port=0, entrypoint="", name="")
 
     class CookieKeyedResourcesServer(SimpleResourcesServer):
         _fence: ResourcesSessionFence = PrivateAttr(default_factory=ResourcesSessionFence)
         _held: dict[str, str] = PrivateAttr(default_factory=dict)
+        _episodes: dict[str, EpisodeId] = PrivateAttr(default_factory=dict)
 
-        async def verify(self, body):
-            pass
+        async def verify(self, request: Request, body: BaseVerifyRequest) -> BaseVerifyResponse:
+            if request.session[SESSION_ID_KEY] in self._held:
+                return BaseVerifyResponse(**body.model_dump(), reward=1.0)
+            if masks_lost_session:
+                return BaseVerifyResponse(**body.model_dump(), **lost_session_verification("no session at verify"))
+            return BaseVerifyResponse(**body.model_dump(), reward=0.0)
 
         async def seed_session(
             self, request: Request, body: ResourcesSeedSessionRequest
         ) -> ResourcesSeedSessionResponse:
             async with self._fence.locked(body.resources_session_id):
                 self._fence.raise_if_closed(body.resources_session_id)
+                bound = self._episodes.setdefault(body.resources_session_id, body.episode_id)
+                if bound != body.episode_id:
+                    if conflict_is_final:
+                        raise ResourcesSessionConflictError("resources_session_id is bound to another episode")
+                    raise ValueError("resources_session_id is bound to another episode")
                 self._held[request.session[SESSION_ID_KEY]] = body.resources_session_id
             return ResourcesSeedSessionResponse(resources_session_id=body.resources_session_id)
 
@@ -318,10 +335,26 @@ def _cookie_keyed_server(*, releases_by_resources_session_id: bool) -> SimpleRes
                         del self._held[key]
                 else:
                     self._held.pop(request.session[SESSION_ID_KEY], None)
+                self._episodes.pop(body.resources_session_id, None)
                 self._fence.mark_closed(body.resources_session_id, body.episode_id)
             return ResourcesCloseSessionResponse(resources_session_id=body.resources_session_id)
 
     return CookieKeyedResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+
+VERIFY_BODY = BaseVerifyRequest(
+    responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="hi"),
+    response=NeMoGymResponse(
+        id="response",
+        created_at=0,
+        model="model",
+        object="response",
+        output=[],
+        parallel_tool_calls=True,
+        tool_choice="auto",
+        tools=[],
+    ),
+).model_dump(mode="json")
 
 
 class TestLostSeedReplyConformance:
@@ -352,3 +385,69 @@ class TestLostSeedReplyConformance:
             keeps_state=True,
             holds_state=lambda resources_session_id: resources_session_id in server._held.values(),
         )
+
+    def test_a_conflicting_seed_must_be_refused_as_final(self) -> None:
+        server = _cookie_keyed_server(conflict_is_final=False)
+
+        with pytest.raises(AssertionError, match="to another episode must get 409, got 500"):
+            check_resources_session_contract(server.setup_webserver(), self.SEED, keeps_state=True)
+
+    def test_a_lost_session_must_verify_as_a_masked_sample(self) -> None:
+        server = _cookie_keyed_server(masks_lost_session=False)
+
+        with pytest.raises(AssertionError, match="must be masked as session_lost or session_expired"):
+            check_resources_session_contract(
+                server.setup_webserver(), self.SEED, keeps_state=True, verify_body=VERIFY_BODY
+            )
+
+    def test_a_server_that_follows_every_rule_passes_with_verify(self) -> None:
+        server = _cookie_keyed_server()
+
+        check_resources_session_contract(
+            server.setup_webserver(),
+            self.SEED,
+            keeps_state=True,
+            holds_state=lambda resources_session_id: resources_session_id in server._held.values(),
+            verify_body=VERIFY_BODY,
+        )
+
+    def test_the_verify_check_needs_a_stateful_server(self) -> None:
+        with pytest.raises(ValueError, match="requires keeps_state"):
+            check_resources_session_contract(
+                _resources_server().setup_webserver(), self.SEED, keeps_state=False, verify_body=VERIFY_BODY
+            )
+
+
+class TestRefusalsAndLostSessions:
+    @pytest.mark.parametrize(
+        ("error", "status"),
+        [(ResourcesSeedRejectedError("bad task_data"), 422), (ResourcesSessionConflictError("bound"), 409)],
+    )
+    def test_refusals_are_final_4xx_and_still_value_errors(self, error: HTTPException, status: int) -> None:
+        assert error.status_code == status
+        assert isinstance(error, ValueError)
+
+    def test_a_closed_session_is_refused_as_a_conflict(self) -> None:
+        fence = ResourcesSessionFence()
+        fence.mark_closed("closed", EPISODE)
+
+        with pytest.raises(ResourcesSessionConflictError, match="already closed: closed"):
+            fence.raise_if_closed("closed")
+
+    def test_a_lost_session_tool_call_names_its_failure_kind(self) -> None:
+        lost = ResourcesSessionLostError("browser is gone")
+        expired = ResourcesSessionLostError("lifetime ran out", failure_kind=SESSION_EXPIRED)
+
+        assert lost.status_code == 404
+        assert lost.detail == {"failure_kind": SESSION_LOST, "message": "browser is gone"}
+        assert expired.detail["failure_kind"] == SESSION_EXPIRED
+
+    def test_a_lost_session_verifies_as_a_masked_sample(self) -> None:
+        verified = BaseVerifyResponse(
+            **BaseVerifyRequest.model_validate(VERIFY_BODY).model_dump(), **lost_session_verification("sandbox gone")
+        )
+
+        assert verified.reward == 0.0
+        assert verified.mask_sample is True
+        assert verified.failure_kind == SESSION_LOST
+        assert verified.failure_reason == "sandbox gone"

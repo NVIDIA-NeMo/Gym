@@ -24,6 +24,7 @@ from nemo_gym.base_resources_server import (
     ResourcesCloseSessionResponse,
     ResourcesSeedSessionRequest,
     SimpleResourcesServer,
+    lost_session_verification,
 )
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.episode_types import EpisodeId, TaskId
@@ -183,6 +184,9 @@ class UserSimResourcesServer(SimpleResourcesServer):
 
     config: UserSimResourcesServerConfig
     session_id_to_seed: dict[str, SeededUserSimEpisode] = {}
+    # The cookie session each resources session was seeded under, so a close that carries no cookie, as after a
+    # lost seed reply, still finds and releases the seed.
+    resources_session_id_to_session_id: dict[str, str] = {}
     closed_resources_session_ids: dict[str, float] = {}
 
     async def seed_session(
@@ -205,7 +209,12 @@ class UserSimResourcesServer(SimpleResourcesServer):
         resolved_row = task.resolved_row
         if body.resources_session_id in self.closed_resources_session_ids:
             raise HTTPException(status_code=409, detail="Resources session is already closed")
-        existing = self.session_id_to_seed.get(session_id)
+        existing_session_id = (
+            session_id
+            if session_id in self.session_id_to_seed
+            else self.resources_session_id_to_session_id.get(body.resources_session_id, session_id)
+        )
+        existing = self.session_id_to_seed.get(existing_session_id)
         if existing is not None:
             if (
                 existing.resources_session_id != body.resources_session_id
@@ -214,6 +223,10 @@ class UserSimResourcesServer(SimpleResourcesServer):
                 or existing.resolved_row_sha256 != _row_digest(resolved_row)
             ):
                 raise HTTPException(status_code=409, detail="Resources session is already seeded for another task")
+            if existing_session_id != session_id:
+                # A seed retried after its reply was lost carries a new cookie; move the record to it.
+                self.session_id_to_seed[session_id] = self.session_id_to_seed.pop(existing_session_id)
+                self.resources_session_id_to_session_id[body.resources_session_id] = session_id
             return UserSimSeedResponse(
                 resources_session_id=existing.resources_session_id,
                 sandbox_access=None,
@@ -226,6 +239,7 @@ class UserSimResourcesServer(SimpleResourcesServer):
             resolved_row_sha256=_row_digest(resolved_row),
             expires_at=monotonic() + self.config.session_ttl_seconds,
         )
+        self.resources_session_id_to_session_id[body.resources_session_id] = session_id
         return UserSimSeedResponse(
             resources_session_id=body.resources_session_id,
             sandbox_access=None,
@@ -237,6 +251,13 @@ class UserSimResourcesServer(SimpleResourcesServer):
         body: UserSimVerifyRequest,
     ) -> UserSimVerification:
         seeded = self._seeded_episode(request)
+        if seeded is None:
+            # The seed expired, was closed, or this process restarted, so there is no task to score against.
+            return UserSimVerification(
+                **lost_session_verification("No active NeMo UserSim task for this request"),
+                reward_components={},
+                scenario_completed=False,
+            )
         verification_input = body.verification_input
         if body.episode_id != seeded.episode_id or body.task_id != seeded.task_id:
             raise HTTPException(status_code=409, detail="Verification identity does not match the seeded episode")
@@ -429,26 +450,26 @@ class UserSimResourcesServer(SimpleResourcesServer):
         request: Request,
         body: ResourcesCloseSessionRequest,
     ) -> ResourcesCloseSessionResponse:
-        session_id = request.session[SESSION_ID_KEY]
         self._expire_sessions()
+        # The Environment Server closes by resources_session_id and may not hold the seed's cookie.
+        session_id = self.resources_session_id_to_session_id.get(
+            body.resources_session_id, request.session[SESSION_ID_KEY]
+        )
         seeded = self.session_id_to_seed.get(session_id)
         if seeded is not None:
             if body.resources_session_id != seeded.resources_session_id or body.episode_id != seeded.episode_id:
                 raise HTTPException(status_code=409, detail="Resources session does not match the active episode")
             del self.session_id_to_seed[session_id]
+            self.resources_session_id_to_session_id.pop(seeded.resources_session_id, None)
         self.closed_resources_session_ids.setdefault(
             body.resources_session_id,
             monotonic() + self.config.session_ttl_seconds,
         )
         return ResourcesCloseSessionResponse(resources_session_id=body.resources_session_id)
 
-    def _seeded_episode(self, request: Request) -> SeededUserSimEpisode:
+    def _seeded_episode(self, request: Request) -> SeededUserSimEpisode | None:
         self._expire_sessions()
-        session_id = request.session[SESSION_ID_KEY]
-        seeded = self.session_id_to_seed.get(session_id)
-        if seeded is None:
-            raise HTTPException(status_code=404, detail="No active NeMo UserSim task. Call /seed_session first.")
-        return seeded
+        return self.session_id_to_seed.get(request.session[SESSION_ID_KEY])
 
     def _expire_sessions(self) -> None:
         """Discard sessions older than the configured episode and cleanup window."""
@@ -456,6 +477,7 @@ class UserSimResourcesServer(SimpleResourcesServer):
         for session_id, seeded in tuple(self.session_id_to_seed.items()):
             if seeded.expires_at <= now:
                 del self.session_id_to_seed[session_id]
+                self.resources_session_id_to_session_id.pop(seeded.resources_session_id, None)
         for resources_session_id, expires_at in tuple(self.closed_resources_session_ids.items()):
             if expires_at <= now:
                 del self.closed_resources_session_ids[resources_session_id]

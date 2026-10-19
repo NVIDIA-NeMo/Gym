@@ -27,6 +27,7 @@ from nemo_gym.base_resources_server import (
     ResourcesCloseSessionResponse,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
+    ResourcesSessionConflictError,
     ResourcesSessionFence,
     SimpleResourcesServer,
 )
@@ -82,7 +83,7 @@ class SimpleWeatherResourcesServer(SimpleWeatherVerifier, SimpleResourcesServer)
             self._fence.raise_if_closed(resources_session_id)
             identity = self._session_episodes.setdefault(resources_session_id, (body.episode_id, body.task_id))
             if identity != (body.episode_id, body.task_id):
-                raise ValueError("resources_session_id is already bound to another episode or task")
+                raise ResourcesSessionConflictError("resources_session_id is already bound to another episode or task")
         return ResourcesSeedSessionResponse(resources_session_id=resources_session_id)
 
     async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
@@ -91,7 +92,7 @@ class SimpleWeatherResourcesServer(SimpleWeatherVerifier, SimpleResourcesServer)
         async with self._fence.locked(resources_session_id):
             identity = self._session_episodes.get(resources_session_id)
             if identity is not None and body.episode_id != identity[0]:
-                raise ValueError("episode_id does not match the seeded resources session")
+                raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")
             self._session_episodes.pop(resources_session_id, None)
             self._fence.mark_closed(resources_session_id, body.episode_id)
         return ResourcesCloseSessionResponse(resources_session_id=resources_session_id)
