@@ -17,6 +17,7 @@ import base64
 import re
 import shlex
 import subprocess
+import warnings
 from pathlib import Path
 
 import pytest
@@ -2243,9 +2244,8 @@ def test_kv_settings_are_not_accepted_on_a_tier(tmp_path, field):
         _pd_config(tmp_path, services=services)
 
 
-@pytest.mark.parametrize("field", ["nixl_side_channel_port", "server_per_node"])
-def test_tier_only_settings_are_not_accepted_on_a_plain_vllm_service(tmp_path, field):
-    services = {"policy": {"type": "vllm", "container": "img", "model": "/ckpt", field: 1}}
+def test_tier_only_settings_are_not_accepted_on_a_plain_vllm_service(tmp_path):
+    services = {"policy": {"type": "vllm", "container": "img", "model": "/ckpt", "nixl_side_channel_port": 1}}
     with pytest.raises(ValueError, match="Extra inputs are not permitted"):
         _pd_config(tmp_path, services=services)
 
@@ -2544,3 +2544,89 @@ def test_a_ray_head_on_node_0_is_probed_locally(tmp_path):
     }
     script = _render(tmp_path, {"policy": _vllm(8000, "gpu", tensor_parallel_size=4), "ray": ray})
     assert "Waiting for ray at http://localhost:8011" in script
+
+
+_PER_NODE_POOLS = {"gpu": {"partition": "batch", "nodes": 4, "ntasks_per_node": 1, "gpus_per_node": 4}}
+
+
+def _per_node_vllm_config(tmp_path, **overrides):
+    service = {
+        "type": "vllm",
+        "container": "img",
+        "model": "/ckpt",
+        "served_model_name": "hy4",
+        "node_pool": "gpu",
+        "tensor_parallel_size": 4,
+        "server_per_node": True,
+        **overrides,
+    }
+    return SubmitConfig.model_validate(
+        {
+            "services": {"policy": service},
+            "compute": {"hsg": {"type": "slurm", "account": "acct", "node_pools": _PER_NODE_POOLS}},
+            "driver": {"container": "img", "policy_model": "policy", "benchmarks": {"b": {"run": {}}}},
+            "job": {"output_path": str(tmp_path / "jobs")},
+        }
+    )
+
+
+def _per_node_vllm_script(tmp_path, **overrides):
+    config = _per_node_vllm_config(tmp_path, **overrides)
+    return build_sbatch_script(
+        config, "b", config.driver.benchmarks["b"], config.compute["hsg"], tmp_path / "jobs" / "b"
+    )
+
+
+def test_a_per_node_vllm_service_starts_one_single_node_server_on_every_pool_node(tmp_path):
+    step = _step(_per_node_vllm_script(tmp_path), "policy")
+    assert '--nodelist="${GYM_POOL_GPU_NODES}" --nodes=4 --ntasks=4' in step
+    assert "vllm serve /ckpt --port 8000 --tensor-parallel-size 4" in step
+    assert "ray" not in step and "--headless" not in step
+
+
+def test_without_server_per_node_the_same_pool_is_one_multi_node_engine(tmp_path):
+    with pytest.warns(UserWarning, match="leaving 12 GPU"):
+        step = _step(_per_node_vllm_script(tmp_path, server_per_node=False), "policy")
+    assert "ray symmetric-run" in step
+
+
+def test_a_per_node_service_can_tell_each_node_its_rank_in_a_data_parallel_group(tmp_path):
+    extra = "--data-parallel-size 4 --data-parallel-start-rank $SLURM_NODEID"
+    step = _step(_per_node_vllm_script(tmp_path, extra_args=extra), "policy")
+    assert extra in step
+
+
+def test_a_per_node_service_is_not_reported_as_leaving_gpus_idle(tmp_path):
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _per_node_vllm_config(tmp_path)
+
+
+def test_every_node_of_a_per_node_service_is_probed_where_it_runs(tmp_path):
+    script = _per_node_vllm_script(tmp_path)
+    assert "Waiting for policy-node0 at http://localhost:8000" in script
+    for node in (1, 2, 3):
+        assert f"Waiting for policy-node{node} at http://${{gym_nodes[{node}]}}:8000" in script
+    assert "Waiting for policy at " not in script
+
+
+def test_a_per_node_service_needs_a_node_pool(tmp_path):
+    with pytest.raises(ValueError, match="has no node_pool"):
+        _per_node_vllm_config(tmp_path, node_pool=None)
+
+
+def test_a_per_node_service_runs_one_instance_per_node(tmp_path):
+    with pytest.raises(ValueError, match="number_of_instances must be 1"):
+        _per_node_vllm_config(tmp_path, number_of_instances=4)
+
+
+def test_a_per_node_service_cannot_use_the_ray_serve_gateway(tmp_path):
+    with pytest.raises(ValueError, match="drop use_ray_serve"):
+        _per_node_vllm_config(tmp_path, use_ray_serve=True)
+
+
+def test_a_prefill_decode_tier_still_cannot_set_server_per_node(tmp_path):
+    services = _pd_services()
+    services["policy"]["prefill"]["server_per_node"] = True
+    with pytest.raises(ValueError, match="Set it on the vllm_pd service itself"):
+        _pd_config(tmp_path, services=services)

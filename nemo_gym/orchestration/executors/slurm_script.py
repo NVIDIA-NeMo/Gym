@@ -762,7 +762,7 @@ def _service_nodelist(service: ServiceConfig, driver_node: int | None, total_nod
 
 def _build_nodes(service: ServiceConfig, compute: SlurmComputeConfig, total_nodes: int) -> int:
     """Nodes the service command is written for; a per-node server is a single-node command."""
-    if isinstance(service, VllmPDTierConfig) and service.server_per_node:
+    if isinstance(service, VllmServiceConfig) and service.server_per_node:
         return 1
     return _service_nodes(service, compute, total_nodes)
 
@@ -852,6 +852,25 @@ def _health_check_host(
     if driver_node is not None and not _vllm_spans_multiple_nodes(service, total_nodes):
         return _probe_host(driver_node)
     return "localhost"
+
+
+def _health_check_probes(
+    name: str,
+    service: ServiceConfig,
+    config: SubmitConfig,
+    compute: SlurmComputeConfig,
+    driver_node: int | None,
+    total_nodes: int,
+) -> list[tuple[str, str]]:
+    """(label, host) pairs a service's readiness waits on: every node of a per-node pool, else one."""
+    if (
+        isinstance(service, VllmServiceConfig)
+        and service.server_per_node
+        and not isinstance(service, VllmPDTierConfig)
+    ):
+        start, count = _pool_offsets(compute)[service.node_pool]
+        return [(f"{name}-node{i}", _probe_host(start + i)) for i in range(count)]
+    return [(name, _health_check_host(service, config, compute, driver_node, total_nodes))]
 
 
 def _service_pre_command(service: ServiceConfig) -> str:
@@ -951,14 +970,15 @@ def build_sbatch_script(
         ([_render_collector_health_check(config, driver_node)] if observed else [])
         + [
             render_health_check(
-                name,
+                label,
                 service.health_check.port,
                 service.health_check.path,
                 service.health_check.timeout_seconds,
-                _health_check_host(service, config, compute, driver_node, total_nodes),
+                host,
             )
             for name, service in config.deployed_services.items()
             if service.health_check
+            for label, host in _health_check_probes(name, service, config, compute, driver_node, total_nodes)
         ]
     )
 
