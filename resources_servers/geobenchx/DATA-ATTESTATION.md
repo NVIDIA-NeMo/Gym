@@ -2,10 +2,11 @@
 
 ## Approval
 
-- Scope: approved for evaluation, training, and redistribution of the JSONL files
-  in the NeMo Gym repo.
-- Reviewer: Katherine Cheung.
-- Conditions:
+- Evaluation and training: approved by legal dataset review.
+- Redistribution of the task records and JSONL files in this repo: under legal
+  review. Until it is approved, nothing from the task set is committed (see
+  "Benchmark records").
+- Conditions for redistribution:
   - Go through the Release Process before publishing.
   - Flag to the legal release PIC that this data includes output of OpenAI and
     Anthropic models, which may be subject to their respective terms of use (see
