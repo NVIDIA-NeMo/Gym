@@ -600,9 +600,15 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
     # strict validation so it fails loudly instead of being silently dropped.
     resolved = OmegaConf.to_container(composed, resolve=True)
     scratch_keys = {key for key in resolved if key.startswith("_")}
-    # A missing or empty driver.benchmarks is left for SubmitConfig validation to report.
-    available = (resolved.get("driver") or {}).get("benchmarks")
-    if args.select is not None and available:
+    # Malformed driver/benchmarks shapes are left for SubmitConfig validation to report.
+    driver = resolved.get("driver")
+    available = driver.get("benchmarks") if isinstance(driver, dict) else None
+    if (
+        args.select is not None
+        and isinstance(available, dict)
+        and available
+        and all(isinstance(name, str) for name in available)
+    ):
         selected = [name.strip() for name in args.select.split(",") if name.strip()]
         if not selected:
             raise ConfigError(

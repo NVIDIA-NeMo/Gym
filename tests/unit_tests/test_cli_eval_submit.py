@@ -192,6 +192,33 @@ class TestEvalSubmitSelect:
 
         assert "driver.benchmarks" in capsys.readouterr().out
 
+    @pytest.mark.parametrize(
+        ("driver", "select", "expected"),
+        [
+            ("oops", None, "driver"),
+            ("oops", "aime", "driver"),
+            ({"container": "gym:latest", "benchmarks": ["aime"]}, "aime", "driver.benchmarks"),
+            ({"container": "gym:latest", "benchmarks": {1: {}}}, "nope", "driver.benchmarks"),
+        ],
+    )
+    def test_malformed_driver_shapes_reach_schema_validation(
+        self, tmp_path, monkeypatch: MonkeyPatch, capsys, driver, select, expected: str
+    ) -> None:
+        captured = _capture_submit(monkeypatch)
+        config_path = tmp_path / "submit.yaml"
+        config_path.write_text(
+            yaml.dump({"services": {"svc": SERVICE}, "compute": COMPUTE, "driver": driver, "job": JOB})
+        )
+
+        with pytest.raises(SystemExit):
+            _eval_submit(_args(config_path, select=select), overrides=[])
+
+        output = capsys.readouterr().out
+        assert "is invalid" in output
+        assert expected in output
+        assert "Traceback" not in output
+        assert "config" not in captured
+
 
 class TestEvalSubmitScratchNamespace:
     """Root-level keys prefixed with `_` are scratch namespaces: not part of SubmitConfig's schema, only
