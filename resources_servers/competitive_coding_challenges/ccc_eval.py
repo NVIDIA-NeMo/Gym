@@ -3,6 +3,7 @@
 import asyncio
 import glob
 import json
+import logging
 import os
 import re
 import shlex
@@ -15,6 +16,9 @@ from dataclasses import dataclass, is_dataclass
 from uuid import uuid4
 
 import httpx
+
+
+LOG = logging.getLogger(__name__)
 
 
 def nested_dataclass(*args, **kwargs):
@@ -103,6 +107,10 @@ class LocalSandbox:
             limits=httpx.Limits(max_keepalive_connections=2048, max_connections=2048),
         )
 
+    @property
+    def url(self) -> str:
+        return f"http://{self.host}:{self.port}/execute"
+
     async def close(self):
         await self.http_session.aclose()
 
@@ -129,7 +137,7 @@ class LocalSandbox:
         }
         try:
             response = await self.http_session.post(
-                url=f"http://{self.host}:{self.port}/execute",
+                url=self.url,
                 content=json.dumps(request),
                 timeout=timeout + 5.0,
                 headers={"Content-Type": "application/json"},
@@ -140,8 +148,10 @@ class LocalSandbox:
                 output = response.json()
             except json.JSONDecodeError:
                 output = {"process_status": "error", "stdout": "", "stderr": "Unknown error"}
-        except (httpx.TimeoutException, httpx.TransportError):
+        except httpx.TimeoutException:
             output = {"process_status": "timeout", "stdout": "", "stderr": "Client timed out\n"}
+        except httpx.TransportError as e:
+            output = {"process_status": "timeout", "stdout": "", "stderr": f"{type(e).__name__}: {e}\n"}
         return output, None
 
 
@@ -225,17 +235,35 @@ exit "$compile_status"
     return _exec_sync(tls, sandbox, command, language="shell", timeout=timeout)
 
 
-def wait_for_sandbox(sandbox, timeout: int = 240, poll: float = 1.0):
+def wait_for_sandbox(sandbox: LocalSandbox, timeout: float = 240, poll: float = 1.0) -> None:
+    """Wait until the external NeMo Skills sandbox runs a shell command.
+
+    Connection errors are retried until ``timeout``: NeMo Skills' ``with_sandbox=True`` starts the sandbox next to
+    this server, so it may still be booting.
+    """
     deadline = time.monotonic() + timeout
+    last_problem = "no probe completed"
+    warned = False
     while time.monotonic() < deadline:
         try:
             resp = _exec_sync(_precompile_loop_tls, sandbox, "echo hello world", language="shell", timeout=10)
             if resp.get("stdout", "").strip() == "hello world":
                 return
-        except Exception:
-            pass
+            last_problem = f"process_status={resp.get('process_status')!r}, stderr={resp.get('stderr', '').strip()!r}"
+        except Exception as e:
+            last_problem = f"{type(e).__name__}: {e}"
+        if not warned:
+            warned = True
+            LOG.warning(
+                "NeMo Skills sandbox at %s is not ready (%s); waiting up to %ss.", sandbox.url, last_problem, timeout
+            )
         time.sleep(poll)
-    raise RuntimeError(f"Sandbox not ready after waiting {timeout}s")
+    raise RuntimeError(
+        f"NeMo Skills sandbox at {sandbox.url} did not run `echo hello world` within {timeout}s "
+        f"(last probe: {last_problem}). Start the sandbox first, see 'Sandbox prerequisite' in "
+        "resources_servers/competitive_coding_challenges/README.md, or set NEMO_SKILLS_SANDBOX_HOST and "
+        "NEMO_SKILLS_SANDBOX_PORT to a running one."
+    )
 
 
 def _safe_fs_name(text: str) -> str:

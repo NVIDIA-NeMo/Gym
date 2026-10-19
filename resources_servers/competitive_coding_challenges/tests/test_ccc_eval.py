@@ -13,9 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import shutil
+import socket
 import subprocess
 from pathlib import Path
+
+import pytest
 
 from resources_servers.competitive_coding_challenges import ccc_eval
 
@@ -186,3 +190,64 @@ def test_compile_failure_skips_test_staging_and_sandbox_execution(monkeypatch, t
     assert result["compile_success"] is False
     assert result["compile_stderr"] == "compile failed"
     assert list(shared_dir.glob("ccc_run_*")) == []
+
+
+def _closed_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def test_execute_code_names_a_connection_failure_instead_of_a_timeout():
+    sandbox = ccc_eval.LocalSandbox(host="127.0.0.1", port=str(_closed_port()))
+
+    output = ccc_eval._exec_sync(ccc_eval._precompile_loop_tls, sandbox, "echo hello world", language="shell")
+
+    assert output["process_status"] == "timeout"
+    assert "ConnectError" in output["stderr"]
+    assert "timed out" not in output["stderr"]
+
+
+def test_wait_for_sandbox_error_names_url_cause_and_how_to_start_it():
+    port = _closed_port()
+    sandbox = ccc_eval.LocalSandbox(host="127.0.0.1", port=str(port))
+
+    with pytest.raises(RuntimeError) as exc_info:
+        ccc_eval.wait_for_sandbox(sandbox, timeout=0.3, poll=0.05)
+
+    message = str(exc_info.value)
+    assert f"http://127.0.0.1:{port}/execute" in message
+    assert "ConnectError" in message
+    assert "README" in message
+    assert "NEMO_SKILLS_SANDBOX_HOST" in message and "NEMO_SKILLS_SANDBOX_PORT" in message
+
+
+def test_wait_for_sandbox_reports_an_unexpected_probe_answer(monkeypatch):
+    def wrong_answer(_tls, _sandbox, _command, *, language, timeout):
+        return {"process_status": "error", "stdout": "", "stderr": "unsupported language: shell"}
+
+    monkeypatch.setattr(ccc_eval, "_exec_sync", wrong_answer)
+
+    with pytest.raises(RuntimeError, match="unsupported language: shell"):
+        ccc_eval.wait_for_sandbox(ccc_eval.LocalSandbox(), timeout=0.2, poll=0.05)
+
+
+def test_wait_for_sandbox_waits_for_a_sandbox_that_is_still_booting(monkeypatch, caplog):
+    # NeMo Skills `with_sandbox=True` starts the sandbox next to this server, so early probes are refused.
+    answers = iter(
+        [
+            {"process_status": "timeout", "stdout": "", "stderr": "ConnectError: connection refused\n"},
+            {"process_status": "timeout", "stdout": "", "stderr": "ConnectError: connection refused\n"},
+            {"process_status": "completed", "stdout": "hello world\n", "stderr": ""},
+        ]
+    )
+    monkeypatch.setattr(ccc_eval, "_exec_sync", lambda *_args, **_kwargs: next(answers))
+    sandbox = ccc_eval.LocalSandbox(host="sandbox-node", port="6123")
+
+    with caplog.at_level(logging.WARNING, logger=ccc_eval.__name__):
+        ccc_eval.wait_for_sandbox(sandbox, timeout=5, poll=0.01)
+
+    assert next(answers, None) is None
+    warnings = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "http://sandbox-node:6123/execute" in warnings[0]
