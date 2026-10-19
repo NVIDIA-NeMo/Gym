@@ -37,6 +37,7 @@ from pydantic import ValidationError
 
 import nemo_gym.batch_status
 import nemo_gym.rollout_collection
+import nemo_gym.server_utils
 import nemo_gym.token_id_capture.delivery
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.batch_status import observe_materialized_rows
@@ -95,6 +96,7 @@ from nemo_gym.rollout_collection import (
     migrate_invalid_judge_main_rows,
 )
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
+from nemo_gym.server_utils import BaseServerConfig, ServerClient
 from nemo_gym.telemetry.gym_metrics import ROLLOUT_COMPLETED_INSTRUMENT
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.token_id_capture import (
@@ -1541,13 +1543,26 @@ class TestRolloutCollection:
     async def test_run_examples_controls_transport_replay(
         self, monkeypatch: pytest.MonkeyPatch, retry_requests: bool
     ) -> None:
-        """CC callers can prevent retrying a /run whose first attempt may have mutated state."""
-        post = AsyncMock(side_effect=ServerDisconnectedError())
-        install_fake_server_client(monkeypatch, post)
-        with pytest.raises(ServerDisconnectedError):
-            await next(RolloutCollectionHelper().run_examples([failing_row()], retry_requests=retry_requests))
-        assert post.await_count == 1
-        assert post.call_args.kwargs["_retry"] is retry_requests
+        """Framework callers can prevent replaying a /run after uncertain delivery."""
+        config = install_fake_server_client(monkeypatch, AsyncMock()).global_config_dict
+        config.my_environment_server.environment_servers.legacy_agent.update({"host": "agent", "port": 1234})
+        client = ServerClient(head_server_config=BaseServerConfig(host="head", port=11000), global_config_dict=config)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "setup_server_client_utils", lambda *_args, **_kwargs: client)
+        transport = MagicMock()
+        transport.request = AsyncMock(side_effect=[ServerDisconnectedError(), FakeResponse(200, {"reward": 1})])
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: transport)
+        monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", AsyncMock())
+        run = RolloutCollectionHelper().run_examples([failing_row()], retry_requests=retry_requests)
+        if retry_requests:
+            _, result = await next(run)
+            assert result["reward"] == 1
+        else:
+            with pytest.raises(ServerDisconnectedError):
+                await next(run)
+        assert transport.request.await_count == (2 if retry_requests else 1)
+        for call in transport.request.call_args_list:
+            assert call.kwargs["url"] == "http://agent:1234/run"
+            assert "_retry" not in call.kwargs
 
     @pytest.mark.parametrize("error", [RuntimeError("dispatcher bug"), asyncio.CancelledError()])
     async def test_run_examples_propagates_non_request_failures(

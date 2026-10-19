@@ -71,8 +71,9 @@ from nemo_gym.token_id_capture.config import token_id_capture_config
 from nemo_gym.token_id_capture.external_capture import (
     ExternalCaptureHandler,
     make_external_capture_handler,
+    validate_framework_context_options,
 )
-from nemo_gym.token_id_capture.protocols import CaptureAdmissionError
+from nemo_gym.token_id_capture.protocols import CAPTURE_REFUSAL_HEADER, CaptureAdmissionError, CaptureInputError
 from responses_api_models.vllm_model.tar_audio import TarAudioReader, resolve_archive_path, validate_relative_path
 
 
@@ -491,6 +492,7 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
 
 class VLLMModel(SimpleResponsesAPIModel):
     config: VLLMModelConfig
+    non_generating_model_routes: ClassVar[frozenset[tuple[str, str]]] = frozenset({("POST", "/context/measure")})
 
     _TOKENIZE_CHAT_FIELDS: ClassVar[tuple[str, ...]] = (
         "model",
@@ -513,12 +515,45 @@ class VLLMModel(SimpleResponsesAPIModel):
     _tar_audio_reader: TarAudioReader = PrivateAttr(default_factory=TarAudioReader)
     _generation_cut_control_urls: Dict[str, str] = PrivateAttr(default_factory=dict)
 
+    def _validate_capture_request(
+        self, body: NeMoGymResponseCreateParamsNonStreaming | NeMoGymChatCompletionCreateParamsNonStreaming
+    ) -> None:
+        context = current_capture_context()
+        if context is None or not context.framework_owned_context:
+            return
+        try:
+            options = json.loads((body.metadata or {}).get("extra_body") or "{}")
+            if not isinstance(options, dict):
+                raise ValueError("metadata.extra_body must encode a JSON object")
+            validate_framework_context_options(options | (self.config.sampling_overrides or {}))
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
     def _should_propagate_upstream_http_error(self, error: ClientResponseError) -> bool:
         # The shared handler answers every other engine error with the provider's raw body. A
         # marked length refusal is let through to the middleware below, which answers with
         # OpenAI's envelope instead: vLLM's body carries the integer code 400, which
         # OpenAI-compatible harnesses cannot match against "context_length_exceeded".
         return not is_propagated_refusal(error)
+
+    async def _propagate_context_refusal(self, error: ClientResponseError) -> bool:
+        """Preserve length errors in framework mode; settle only worker-acknowledged refusals."""
+        context = current_capture_context()
+        framework_owned = context is not None and context.framework_owned_context
+        if (
+            framework_owned
+            and context.intent_registered
+            and not context.external_worker_response_seen
+            and (error.headers or {}).get(CAPTURE_REFUSAL_HEADER) == context.model_call_id
+        ):
+            refuse = getattr(context.lineage_store, "refuse_call", None)
+            if refuse is not None:
+                await refuse(context.rollout_id, context.model_call_id)
+                context.refused = True
+        if framework_owned or self.config.propagate_context_overflow_errors:
+            _mark_propagated_overflow(error)
+            return True
+        return False
 
     def setup_exception_middleware(self, app) -> None:
         @app.middleware("http")
@@ -549,19 +584,21 @@ class VLLMModel(SimpleResponsesAPIModel):
         app = super().setup_webserver()
         config = token_id_capture_config(self.server_client.global_config_dict)
         if config.token_id_capture.framework_owned_context:
-            app.post("/context/{rollout_id}/measure")(self.measure_context)
+            app.post("/context/measure")(self.measure_context)
         return app
 
     async def measure_context(
         self,
         request: Request,
-        rollout_id: str,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> dict[str, int]:
         """Render through the generation admission path without writing capture state."""
         if self._external_capture_handler is None or self._capture_lineage is None:
             raise HTTPException(status_code=409, detail="measurement requires external capture")
-        if body.stream or body.previous_response_id or body.conversation:
+        rollout_id = current_rollout_id()
+        if rollout_id is None:
+            raise HTTPException(status_code=422, detail="measurement requires a /ng-rollout/{rollout_id} prefix")
+        if body.previous_response_id or body.conversation:
             raise HTTPException(status_code=422, detail="measurement requires explicit non-streaming history")
         client = self._resolve_client(request)
         context = CaptureContext(
@@ -574,14 +611,18 @@ class VLLMModel(SimpleResponsesAPIModel):
         )
         token = set_token_sink(context)
         try:
+            self._validate_capture_request(body)
             try:
                 await resolve_parent(_request_messages(body))
             except CaptureAdmissionError as error:
                 raise HTTPException(status_code=409, detail=str(error)) from error
-            chat = self._converter.responses_to_chat_completion_create_params(body)
-            processed = self._preprocess_chat_completion_create_params(request, chat.model_dump(exclude_unset=True))
-            if processed.get("truncate_prompt_tokens") is not None:
-                raise HTTPException(status_code=422, detail="measurement does not support prompt truncation")
+            except CaptureInputError as error:
+                raise HTTPException(status_code=422, detail=str(error)) from error
+            try:
+                chat = self._responses_to_chat_request(body)
+                processed = await self._prepare_chat_request(request, chat)
+            except (ValueError, NotImplementedError) as error:
+                raise HTTPException(status_code=422, detail=str(error)) from error
             result = await client.create_tokenize(**self._get_tokenize_chat_body(processed))
         finally:
             reset_token_sink(token)
@@ -644,6 +685,10 @@ class VLLMModel(SimpleResponsesAPIModel):
         self._external_capture_handler = None
         if capture_config is not None and capture_config.token_id_capture.external_staging:
             overrides = (self.config.extra_body or {}) | (self.config.sampling_overrides or {})
+            if capture_config.token_id_capture.framework_owned_context:
+                if self.config.continue_final_assistant_message:
+                    raise ValueError("Framework context requires continue_final_assistant_message=false")
+                validate_framework_context_options(overrides)
             if overrides.get("stream"):
                 raise ValueError("external staging requires non-streaming backend requests")
             if self.config.use_completions_api:
@@ -703,6 +748,13 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         return tokenizer
 
+    def _responses_to_chat_request(
+        self, body: NeMoGymResponseCreateParamsNonStreaming
+    ) -> NeMoGymChatCompletionCreateParamsNonStreaming:
+        return self._converter.responses_to_chat_completion_create_params(
+            body, drop_unrepresentable_request_fields=self.config.drop_unrepresentable_request_fields
+        )
+
     async def responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
     ) -> NeMoGymResponse:
@@ -710,9 +762,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             return await self._responses_native(request, body)
 
         # Response Create Params -> Chat Completion Create Params
-        chat_completion_create_params = self._converter.responses_to_chat_completion_create_params(
-            body, drop_unrepresentable_request_fields=self.config.drop_unrepresentable_request_fields
-        )
+        chat_completion_create_params = self._responses_to_chat_request(body)
         body.model = self.config.model
 
         # Chat Completion Create Params -> Chat Completion
@@ -1195,21 +1245,26 @@ class VLLMModel(SimpleResponsesAPIModel):
                 total,
             )
 
-    async def chat_completions(
-        self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
-    ) -> NeMoGymChatCompletion:
-        if self.config.use_completions_api:
-            return await self._chat_completions_via_completions_api(request, body)
-
+    async def _prepare_chat_request(
+        self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming
+    ) -> Dict[str, Any]:
+        """Share engine prompt preparation, including media I/O, with measurement."""
         body_dict = body.model_dump(exclude_unset=True)
         metadata = body_dict.get("metadata") or {}
         if any(metadata.get(key) for key in ("audio_path", "audio_paths", "audio_ref")):
             # Archive indexing, disk reads, and base64 encoding must not block
             # concurrent requests on the event loop. to_thread also preserves
             # the request's token-capture context for preprocessing hooks.
-            body_dict = await asyncio.to_thread(self._preprocess_chat_completion_create_params, request, body_dict)
-        else:
-            body_dict = self._preprocess_chat_completion_create_params(request, body_dict)
+            return await asyncio.to_thread(self._preprocess_chat_completion_create_params, request, body_dict)
+        return self._preprocess_chat_completion_create_params(request, body_dict)
+
+    async def chat_completions(
+        self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
+    ) -> NeMoGymChatCompletion:
+        if self.config.use_completions_api:
+            return await self._chat_completions_via_completions_api(request, body)
+
+        body_dict = await self._prepare_chat_request(request, body)
 
         note_generation_request(body_dict)
         client = self._resolve_client(request)
@@ -1255,8 +1310,14 @@ class VLLMModel(SimpleResponsesAPIModel):
             )
 
         execution["upstream_attempted"] = True
+        context = current_capture_context()
+        transport_options = (
+            {"_resend_after_disconnect": False} if context is not None and context.framework_owned_context else {}
+        )
         try:
-            chat_completion_dict = await self._call_endpoint(client, client.create_chat_completion(**body_dict))
+            chat_completion_dict = await self._call_endpoint(
+                client, client.create_chat_completion(**transport_options, **body_dict)
+            )
         except ClientResponseError as e:
             execution.update(response_source="upstream", upstream_status_code=e.status)
             if transport_io_enabled:
@@ -1289,8 +1350,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             result_content_str = e.response_content.decode(errors="replace")
             if _is_context_length_error(e):
                 execution["error_category"] = "context_length_exceeded"
-                if self.config.propagate_context_overflow_errors:
-                    _mark_propagated_overflow(e)
+                if await self._propagate_context_refusal(e):
                     raise
                 res = self._create_empty_chat_completion()
                 res.choices[0].finish_reason = "length"
@@ -1447,7 +1507,13 @@ class VLLMModel(SimpleResponsesAPIModel):
         if self._external_capture_handler is not None:
             await self._external_capture_handler.finalize_response(_jsonable(response))
             context = current_capture_context()
-            if context is not None and context.framework_owned_context and not context.committed:
+            if (
+                context is not None
+                and context.framework_owned_context
+                and not context.committed
+                # A checkpoint gate publishes this validated row before forwarding the answer.
+                and not (context.publish_on_delivery and context.deferred_commit is not None)
+            ):
                 raise RuntimeError("Framework-owned context requires a committed capture before serving a response")
 
     @staticmethod
@@ -1640,8 +1706,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             result_content_str = e.response_content.decode(errors="replace")
             if _is_context_length_error(e):
                 execution["error_category"] = "context_length_exceeded"
-                if self.config.propagate_context_overflow_errors:
-                    _mark_propagated_overflow(e)
+                if await self._propagate_context_refusal(e):
                     raise
                 res = self._create_empty_chat_completion()
                 res.choices[0].finish_reason = "length"
@@ -2030,10 +2095,6 @@ class VLLMModel(SimpleResponsesAPIModel):
         self._session_id_to_client[session_id] = client
         note_generation_backend(getattr(client, "base_url", None))
 
-        context = current_capture_context()
-        if context is not None and context.framework_owned_context:
-            # The cached client is shared with ordinary traffic; scope this to one call.
-            return client.model_copy(update={"retry_requests": False})
         return client
 
     def _hashed_client(self, session_id: str) -> NeMoGymAsyncOpenAI:

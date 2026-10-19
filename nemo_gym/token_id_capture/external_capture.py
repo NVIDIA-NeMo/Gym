@@ -46,6 +46,13 @@ from nemo_gym.token_id_capture.staging.records import (
 
 LOGGER = logging.getLogger(__name__)
 
+
+def validate_framework_context_options(request_payload: dict[str, Any]) -> None:
+    """Reject prompt transformations unsupported by framework-owned context capture."""
+    if request_payload.get("truncate_prompt_tokens") is not None or request_payload.get("continue_final_message"):
+        raise ValueError("Framework context requires explicit history without truncation or assistant prefill")
+
+
 # Megatron may echo the exact prompt token form it uses for lossless
 # multi-turn prefix stitching. Gym does not request or read it, but strips it
 # defensively alongside ``TOKEN_FIELDS`` so it never reaches the agent hop.
@@ -118,10 +125,7 @@ class _BaseExternalCaptureHandler(ABC):
         if admission is None:
             return request_payload
         if context.framework_owned_context:
-            if request_payload.get("truncate_prompt_tokens") is not None or request_payload.get(
-                "continue_final_message"
-            ):
-                raise ValueError("Framework context requires explicit history without truncation or assistant prefill")
+            validate_framework_context_options(request_payload)
             if admission.request_replay is None:
                 raise ValueError("Framework admission is missing source request evidence")
             admission = admission.model_copy(
@@ -143,6 +147,7 @@ class _BaseExternalCaptureHandler(ABC):
                         model_call_id=admission.model_call_id,
                         mode="text",
                         request_replay=admission.request_replay,
+                        root_reason="render_options_changed",
                     )
                     context.parent_staging_chain = []
             context.capture_admission = admission
@@ -289,8 +294,7 @@ class _BaseExternalCaptureHandler(ABC):
             str(coords.staging_key)
         ]
         response_items, _ = strip_token_fields(response_to_output_items(served_payload))
-        response_status, _ = completion_metadata(served_payload)
-        evidence_items = completion_items(served_payload)
+        evidence_items = completion_items(served_payload) if context.framework_owned_context else []
         # Content-witness keys, hashed while the response is still
         # server-side: this call's own output, and request + output (the
         # cumulative reading). Unfingerprintable content abstains (None)
@@ -316,15 +320,20 @@ class _BaseExternalCaptureHandler(ABC):
             extras_digest=coords.extras_digest,
             staging_key=coords.staging_key,
             mode="text" if coords.parent_call_id is None else "token_in",
+            root_reason="worker_rooted" if worker_root else admission.root_reason,
             admitted_at=context.admitted_at,
             chain_hash=coords.chain_hash,
             cumulative_hash=coords.cumulative_hash,
             response_id=response_id,
-            output_items=[
-                OutputItemEvidence(id=item.get("id"), fingerprint=output_item_fingerprint(item))
-                for item in evidence_items
-            ],
-            response_status=response_status,
+            output_items=(
+                [
+                    OutputItemEvidence(id=item.get("id"), fingerprint=output_item_fingerprint(item))
+                    for item in evidence_items
+                ]
+                if context.framework_owned_context
+                else None
+            ),
+            response_status=completion_metadata(served_payload)[0] if context.framework_owned_context else None,
             finish_reason=response_finish_reason(served_payload),
             last_output_item=output_validation_item(evidence_items[-1]) if evidence_items else None,
             output_fingerprint=output_fingerprint,

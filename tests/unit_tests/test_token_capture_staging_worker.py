@@ -704,6 +704,11 @@ def test_vllm_text_call_has_no_extras() -> None:
     assert VLLMCaptureAdapter().extract_extras({"choices": [{"message": {}}]}) is None
 
 
+def test_vllm_extras_do_not_adopt_unimplemented_predecessor_routes() -> None:
+    payload = {"choices": [{"message": {"routed_experts": [[[1]]], "predecessor_tail_route": [2]}}]}
+    assert VLLMCaptureAdapter().extract_extras(payload) == {"routed_experts": [[[1]]]}
+
+
 def test_vllm_rejects_malformed_media_spans() -> None:
     with pytest.raises(ValueError):
         VLLMCaptureAdapter().extract_extras({"choices": [{"message": {}}], "media_spans": "bad"})

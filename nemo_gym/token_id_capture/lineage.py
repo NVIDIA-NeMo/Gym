@@ -128,6 +128,7 @@ def _custody_columns(record: CallRecord, staging_chain: tuple[str, ...] | list[s
         "response_status": record.response_status,
         "finish_reason": record.finish_reason,
         "last_output_item": record.last_output_item,
+        "root_reason": record.root_reason,
         "capture_key": record.capture_key,
     }
 
@@ -152,8 +153,11 @@ def _manifest_from_rows(rollout_id: str, rows: list[dict]) -> dict:
 
     records = []
     failures = []
-    completed = {row["model_call_id"] for row in rows if row.get("staging_key")}
+    refused = {row["model_call_id"] for row in rows if row.get("refused_before_generation")}
+    completed = {row["model_call_id"] for row in rows if row.get("staging_key")} | refused
     attempted = list(dict.fromkeys(row["model_call_id"] for row in rows if row.get("intent")))
+    # Keep refusals in the audit log, but require training custody only for calls that could generate.
+    attempted = [call_id for call_id in attempted if call_id not in refused]
     pending = [row["model_call_id"] for row in rows if row.get("intent") and row["model_call_id"] not in completed]
     for row in rows:
         if row.get("intent"):
@@ -210,6 +214,7 @@ def _manifest_from_rows(rollout_id: str, rows: list[dict]) -> dict:
                     output_items=row.get("output_items"),
                     response_status=row.get("response_status"),
                     last_output_item=row.get("last_output_item"),
+                    root_reason=row.get("root_reason"),
                     # Set on rows a checkpoint restore carried over from an earlier attempt.
                     capture_key=row.get("capture_key"),
                     # A row written before the column existed reads as an unstated reason.
@@ -231,8 +236,16 @@ def _validate_call_intent(rows: list[dict], model_call_id: str) -> None:
         raise CaptureAdmissionError("Capture admissions are closed for this rollout")
     if any(row.get("model_call_id") == model_call_id for row in rows):
         raise CaptureAdmissionError(f"Capture call ID already registered: {model_call_id}")
-    if any(row.get("failure_reason") is not None for row in rows):
-        raise CaptureAdmissionError("Cannot admit a call after failed capture in this attempt")
+
+
+def _refusal_row(rows: list[dict], model_call_id: str) -> dict | None:
+    row = {"model_call_id": model_call_id, "refused_before_generation": True}
+    existing = [r for r in rows if r.get("model_call_id") == model_call_id and not r.get("intent")]
+    if existing == [row]:
+        return None
+    if existing or not any(r.get("model_call_id") == model_call_id and r.get("intent") for r in rows):
+        raise ValueError(f"Cannot settle non-pending call as refused: {model_call_id}")
+    return row
 
 
 @dataclass
@@ -541,6 +554,15 @@ class InMemoryLineageStore:
         rows = self._ledgers.setdefault(rollout_id, [])
         _validate_call_intent(rows, model_call_id)
         rows.append({"model_call_id": model_call_id, "intent": True})
+
+    async def refuse_call(self, rollout_id: str, model_call_id: str) -> None:
+        """Settle an acknowledged refusal without erasing its audit record."""
+        if rollout_id in self._retired:
+            raise RolloutRetiredError(f"rollout {rollout_id} is retired")
+        rows = self._ledgers.setdefault(rollout_id, [])
+        row = _refusal_row(rows, model_call_id)
+        if row is not None:
+            rows.append(row)
 
     async def close_admissions(self, rollout_id: str) -> dict:
         """Stop new calls idempotently; admitted calls may still commit."""
@@ -1096,6 +1118,19 @@ class FileLineageStore(IncrementalLineageStore):
             _validate_call_intent(rows, model_call_id)
             self._append(rollout_id, {"model_call_id": model_call_id, "intent": True}, rows)
 
+    async def refuse_call(self, rollout_id: str, model_call_id: str) -> None:
+        """Settle a worker-acknowledged refusal under the admission lock."""
+        await asyncio.to_thread(self._refuse_call, rollout_id, model_call_id)
+
+    def _refuse_call(self, rollout_id: str, model_call_id: str) -> None:
+        with self._locked(rollout_id):
+            if self._is_retired(rollout_id):
+                raise RolloutRetiredError(f"rollout {rollout_id} is retired")
+            rows = self._read(rollout_id)
+            row = _refusal_row(rows, model_call_id)
+            if row is not None:
+                self._append(rollout_id, row, rows)
+
     async def close_admissions(self, rollout_id: str) -> dict:
         """Close new admissions atomically with begin_call and return a snapshot."""
         return await asyncio.to_thread(self._close_admissions, rollout_id)
@@ -1171,6 +1206,12 @@ class FileLineageStore(IncrementalLineageStore):
         return await asyncio.to_thread(self._manifest, rollout_id)
 
     def _manifest(self, rollout_id: str) -> dict:
+        # Do not mint a lock just to measure an unused rollout. An existing lock
+        # may belong to a writer before its first row, so still wait for it below.
+        if not self._ledger_path(rollout_id).exists() and not self._store.lock_path_for(rollout_id).exists():
+            if self._is_retired(rollout_id):
+                raise RolloutRetiredError(f"rollout {rollout_id} is retired")
+            return _manifest_from_rows(rollout_id, [])
         with self._locked(rollout_id):
             rows = list(self._read(rollout_id))
             if not rows and self._is_retired(rollout_id):

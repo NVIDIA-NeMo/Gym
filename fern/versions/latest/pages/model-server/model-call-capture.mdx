@@ -96,6 +96,25 @@ Framework candidates carry an explicit source-match proof. Deploy compatible Gym
 revisions together: a missing proof is an error, not permission to assume an exact match.
 Direct roots retain replay evidence and framework safety checks so later calls can continue them.
 
+The staging wire schema is version 3. Gym and every external-staging worker must upgrade together,
+including deployments using ordinary capture without framework-owned context. Version 2 admissions,
+staged rows, receipts and checkpoints are incompatible and require a separate migration; this change
+does not provide one. Finish or retire existing attempts before upgrading, and do not resume their
+persisted data with the new schema.
+
+Framework-owned rows include output fingerprints, a bounded completion status and minimal original
+text for output validation. Ordinary capture keeps its existing fingerprints and finish reason without
+these additional selection/validation fields. The status is `completed`, `incomplete`, `failed` or
+`unknown`; cancellation and abort mean `failed`, while missing or unrecognized completion information
+means `unknown`. NeMo RL masks a rollout containing a selected failed or unknown completion.
+
+Framework roots record `root_reason`: `first_call` (no committed history), `no_prefix_match`,
+`non_user_suffix` (an otherwise matching prefix followed by a non-observation item),
+`render_options_changed`, or `worker_rooted` (the worker declined a source-compatible candidate).
+These are diagnostic observations, not proof that the harness performed compaction. Ordinary roots
+and continuations leave the field unset. An ambiguous source match remains a refusal rather than
+silently becoming a new root.
+
 The framework must configure the worker, shared capture ledger and control bearer token as well as
 these run-wide settings:
 
@@ -115,26 +134,52 @@ ordinary rollout output for framework reconstruction instead of Gym's single-cha
 | Request | Framework-owned behavior |
 |---|---|
 | Responses with explicit history | Supported, including buffered SSE. |
-| Chat Completions with explicit history | Non-streaming, one choice; omitted or null `n` means one. |
+| Responses history item kinds | `message`, `reasoning`, `function_call`, and `function_call_output`. |
+| Other Responses history items, including `web_search_call`, `custom_tool_call`, `custom_tool_call_output`, and opaque `compaction` | Refused with HTTP 422 before capture intent. |
+| Chat Completions with explicit history | Supported, including buffered SSE; one choice. Omitted or null `n` means one. |
 | `/v1/messages` | Refused with HTTP 422. |
 | Responses `previous_response_id` or `conversation` | Refused with HTTP 422; full input must be visible. |
-| Chat `stream: true` or `n` other than null or 1 | Refused with HTTP 422. |
+| Chat `n` other than null or 1 | Refused with HTTP 422. |
 
-Independent calls may overlap. Each registers an intent before inference. Failed capture prevents
-further admission in that attempt; a pending call alone does not. After the harness returns, the
+Prompt truncation and assistant prefill are unsupported in this mode. Incompatible server settings
+are rejected at startup; unsupported options in request `metadata.extra_body` return HTTP 422 before
+capture intent is recorded, so a corrected request can reuse the attempt.
+
+The policy checkpoint gate supports framework-owned capture. It publishes the staged call's ledger
+record immediately before forwarding the first answer chunk. Restore carries captured history into
+the new attempt without inheriting the previous attempt's closed-admission state.
+
+Independent calls may overlap. Each registers an intent before inference. Failed or pending capture
+does not block later calls; the manifest retains those outcomes for the trainer. After the harness returns, the
 framework calls the bearer-protected `POST /training-token-capture/control/rollouts/{rollout_id}/close`
 then drains already-admitted calls through the manifest endpoint. Closure refuses new generation but
 allows admitted calls to finish. Missing acknowledgements remain pending; failure is not permission
 to delete data that a worker may still be writing. NeMo RL masks an incomplete attempt.
-Closed, failed, or ambiguous admission returns HTTP 409 with a reason instead of a retryable 500.
+Closed or ambiguous admission returns HTTP 409 with a reason before generation.
+The same refusal applies to a ledger missing source replay evidence, or a selected storage chain
+with a cycle or missing ancestor. The existing ledger is preserved for diagnosis.
 Use a fresh attempt ID when restarting a rollout.
+Some SDKs automatically retry HTTP 409. External harness clients should disable those automatic
+retries for generation requests; a retry cannot resolve ambiguous identity or an unusable ledger.
 
-The model server also exposes `POST /context/{rollout_id}/measure`. Call it **without** the
-`/ng-rollout/.../training-token-capture` prefix, with a non-streaming Responses request containing
+Framework-owned capture forwards recognized context-length refusals as HTTP 400, even when
+`propagate_context_overflow_errors` is false. The harness decides whether to compact and retry.
+To keep that retry usable, the worker must acknowledge the refused call before generation or
+staging using the internal `x-nemo-gym-capture-refused` response header. A ledger implementing
+`refuse_call` settles that intent and retains its audit row, excluding it from the training
+manifest. This header is between the worker and Gym; harnesses neither send nor receive it.
+An error without a matching acknowledgement still leaves capture incomplete.
+
+The model server also exposes `POST /ng-rollout/{rollout_id}/training-token-capture/context/measure`.
+This is a rollout-scoped model route, not a bearer-protected control endpoint.
+Call it with a non-streaming Responses request containing
 explicit history. It returns `{"prompt_token_count": N}` using the same candidate and rendering
-path as generation, without registering an intent or writing capture records. This is a count of
+path and rollout-based backend routing as generation, without registering an intent, writing capture
+records, or creating ledger files for an unused rollout. This is a count of
 that request, not a reservation against concurrent changes. Idempotent worker tokenization retains
-ordinary retries; captured generation disables them to avoid replaying an uncertain call.
+ordinary retries. Captured generation retries only failed connection setup, within the configured
+connection limit (three attempts by default); it never resends after uncertain delivery or an HTTP
+error response. Permanent authentication and quota errors still stop further calls to that endpoint.
 
 Framework callers should use `run_examples(retry_requests=False)` to avoid automatically replaying
 an entire `/run` after transport failure. This does not prevent a harness from explicitly making a

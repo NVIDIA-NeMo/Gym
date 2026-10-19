@@ -26,7 +26,7 @@ def ledger(request, tmp_path):
     return InMemoryLineageStore() if request.param == "memory" else FileLineageStore(tmp_path)
 
 
-async def _serve(ledger, call_id, items, *, ordinary=False, splice=False, started=None, finish=None):
+async def _serve(ledger, call_id, items, *, ordinary=False, splice=False, started=None, finish=None, model="model"):
     context = CaptureContext(
         rollout_id="rollout-1",
         model_call_id=call_id,
@@ -51,7 +51,7 @@ async def _serve(ledger, call_id, items, *, ordinary=False, splice=False, starte
                     "mode": "token_in",
                 }
             )
-        handler.prepare_request({"model": "model", "messages": items})
+        handler.prepare_request({"model": model, "messages": items})
         if started is not None:
             started.set()
         if finish is not None:
@@ -79,12 +79,15 @@ async def test_source_rewrite_roots_without_candidate_and_keeps_source_evidence(
     await _serve(ledger, "c1", [{"role": "user", "content": "old question"}])
     context, admission = await _serve(ledger, "c2", [{"role": "user", "content": "compacted summary"}])
     assert admission.mode == "text"
+    assert admission.root_reason == "no_prefix_match"
     assert admission.parent_call_id is None
     assert admission.staging_chain == []
     assert context.committed
     manifest = await ledger.manifest("rollout-1")
     assert not manifest["failures"]
     first, second = manifest["records"]
+    assert first["root_reason"] == "first_call"
+    assert second["root_reason"] == "no_prefix_match"
     assert second["parent_call_id"] is None
     assert second["mode"] == "text"
     assert second["prev_len"] == 0
@@ -103,6 +106,42 @@ async def test_source_rewrite_roots_without_candidate_and_keeps_source_evidence(
     assert next_admission.staging_chain == ["rollout-1/c2"]
 
 
+@pytest.mark.parametrize("role", ["system", "developer", "assistant", "user"])
+async def test_root_reason_distinguishes_source_boundary_and_worker_decision(ledger, role):
+    history = [{"role": "user", "content": "question"}]
+    await _serve(ledger, "a", history)
+    history += [
+        {"role": "assistant", "content": [{"type": "output_text", "text": "answer"}]},
+        {"role": role, "content": "reminder"},
+    ]
+    _, admission = await _serve(ledger, "b", history)
+    if role == "user":
+        # A source candidate is only a proposal; the worker can start a root.
+        assert admission.mode == "candidate" and admission.root_reason is None
+    else:
+        assert admission.mode == "text" and admission.root_reason == "non_user_suffix"
+    manifest = await ledger.manifest("rollout-1")
+    assert manifest["records"][-1]["root_reason"] == ("worker_rooted" if role == "user" else "non_user_suffix")
+    assert manifest["records"][-1]["parent_call_id"] is None
+    if isinstance(ledger, FileLineageStore):
+        reopened = FileLineageStore(ledger._ledger_root)
+        assert await reopened.manifest("rollout-1") == manifest
+        await reopened.close()
+
+
+async def test_render_change_root_reason_is_persisted(ledger):
+    history = [{"role": "user", "content": "question"}]
+    await _serve(ledger, "a", history)
+    history += [
+        {"role": "assistant", "content": [{"type": "output_text", "text": "answer"}]},
+        {"role": "user", "content": "continue"},
+    ]
+    context, proposed = await _serve(ledger, "b", history, model="different")
+    assert proposed.mode == "candidate"
+    assert context.capture_admission.mode == "text"
+    assert (await ledger.manifest("rollout-1"))["records"][-1]["root_reason"] == "render_options_changed"
+
+
 async def test_ordinary_admission_still_rejects_different_worker_parent(ledger):
     await _serve(ledger, "c1", [{"role": "user", "content": "question"}])
     context, _ = await _serve(
@@ -119,10 +158,30 @@ async def test_ordinary_admission_still_rejects_different_worker_parent(ledger):
     assert (await ledger.manifest("rollout-1"))["failures"]
 
 
-async def test_candidate_lookup_failure_is_not_a_fresh_root(ledger):
+async def test_failed_capture_does_not_block_other_roots_or_healthy_continuations(ledger):
+    await _serve(ledger, "accepted", [{"role": "user", "content": "question"}])
+    await ledger.begin_call("rollout-1", "missing")
     await ledger.record_failure("rollout-1", "missing", "uncommitted_call")
-    with pytest.raises(ValueError, match="incomplete capture"):
-        await _serve(ledger, "c2", [{"role": "user", "content": "summary"}])
+    context, root = await _serve(ledger, "independent", [{"role": "user", "content": "other task"}])
+    assert context.committed and root.mode == "text" and root.parent_call_id is None
+    context, candidate = await _serve(
+        ledger,
+        "continuation",
+        [
+            {"role": "user", "content": "question"},
+            {"role": "assistant", "content": [{"type": "output_text", "text": "answer"}]},
+            {"role": "user", "content": "continue"},
+        ],
+        splice=True,
+    )
+    assert context.committed and candidate.parent_call_id == "accepted"
+    assert candidate.staging_chain == ["rollout-1/accepted"]
+    manifest = await ledger.manifest("rollout-1")
+    assert manifest["pending_call_ids"] == ["missing"]
+    assert [(failure["model_call_id"], failure["reason"]) for failure in manifest["failures"]] == [
+        ("missing", "uncommitted_call")
+    ]
+    assert [record["model_call_id"] for record in manifest["records"]] == ["accepted", "independent", "continuation"]
 
 
 def test_exposed_reasoning_survives_source_comparison():
@@ -156,6 +215,24 @@ def test_chat_tool_argument_reserialization_preserves_content_and_identity():
     assert a["tool_calls"][0]["function"]["arguments"] == '{"x":1,"y":2}'
 
 
+@pytest.mark.parametrize("tool_calls", [None, []])
+def test_empty_chat_tool_calls_match_omission_without_mutating_source(tool_calls):
+    message = {"role": "assistant", "content": "answer"}
+    echoed = {**message, "tool_calls": tool_calls}
+    assert replay_context([message]) == replay_context([echoed])
+    assert summarize_replay(replay_context([message])) == summarize_replay(replay_context([echoed]))
+    assert "tool_calls" in echoed and echoed["tool_calls"] == tool_calls
+
+
+def test_nonempty_chat_tool_calls_and_nested_empty_arguments_remain_distinct():
+    message = {"role": "assistant", "content": "answer"}
+    call = {"id": "call", "type": "function", "function": {"name": "tool", "arguments": '{"tool_calls":[]}'}}
+    with_call = {**message, "tool_calls": [call]}
+    changed_arguments = {**call, "function": {**call["function"], "arguments": "{}"}}
+    assert replay_context([message]) != replay_context([with_call])
+    assert replay_context([with_call]) != replay_context([{**message, "tool_calls": [changed_arguments]}])
+
+
 def test_summary_authenticates_order_roles_and_prefix_length():
     items = [{"role": "user", "content": "question"}, {"role": "assistant", "content": "answer"}]
     context = replay_context(items)
@@ -180,7 +257,10 @@ async def test_intent_is_atomic_and_unknown_ack_is_retained(ledger):
     with pytest.raises(ValueError, match="already registered"):
         await ledger.begin_call("rollout-1", "c2")
     await ledger.record_failure("rollout-1", "c1", "request_finished_without_staged_coordinates")
-    assert (await ledger.manifest("rollout-1"))["pending_call_ids"] == ["c1", "c2"]
+    await ledger.begin_call("rollout-1", "c3")
+    manifest = await ledger.manifest("rollout-1")
+    assert manifest["pending_call_ids"] == ["c1", "c2", "c3"]
+    assert manifest["failures"][0]["model_call_id"] == "c1"
 
 
 async def test_commit_resolves_its_intent(ledger):
@@ -466,6 +546,15 @@ async def test_source_and_effective_options_choose_root_or_proven_candidate(ledg
         admission = context.capture_admission
         matched = edit in ("exact", "null_empty", "empty_null")
         assert admission.mode == ("candidate" if matched else "text")
+        assert admission.root_reason == (
+            None
+            if matched
+            else "render_options_changed"
+            if edit == "render"
+            else "non_user_suffix"
+            if edit == "assistant_suffix"
+            else "no_prefix_match"
+        )
         assert admission.parent_call_id == ("a" if matched else None)
         assert admission.requires_empty_tool_content_equivalence == (
             (edit in ("null_empty", "empty_null")) if matched else None
@@ -496,19 +585,6 @@ async def test_framework_direct_root_keeps_unsupported_option_guard(ledger, opti
             VLLMWorkerCaptureHandler().prepare_request({"model": "model", option: 1})
     finally:
         reset_token_sink(token)
-
-
-@pytest.mark.parametrize("mode", ["text", "token_in"])
-def test_legacy_admission_wire_omits_new_candidate_proof(mode):
-    fields = (
-        {}
-        if mode == "text"
-        else dict(parent_call_id="a", prev_len=1, required_prefix_token_ids=[1], parent_chain_hash="a" * 64)
-    )
-    admission = CaptureAdmission(rollout_id="r", model_call_id="b", mode=mode, **fields)
-    wire = VLLMWorkerCaptureHandler()._prepare_admitted_request({}, admission)["ng_capture"]
-    assert "requires_empty_tool_content_equivalence" not in wire
-    assert CaptureAdmission.model_validate(wire) == admission
 
 
 @pytest.mark.parametrize("continuation", [False, True])

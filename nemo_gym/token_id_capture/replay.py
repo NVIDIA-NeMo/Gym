@@ -67,6 +67,10 @@ def replay_context(items: list[dict], *, render_digest: str | None = None) -> Re
         if kind == "function_call":
             _normalize_arguments(value)
         elif kind == "message" and role == "assistant":
+            # An omitted empty Chat field must not break source continuity.
+            # Normalize only this message field, never nested tool arguments.
+            if value.get("tool_calls") == []:
+                value.pop("tool_calls")
             for call in value.get("tool_calls") or []:
                 if isinstance(call, dict) and isinstance(call.get("function"), dict):
                     _normalize_arguments(call["function"])

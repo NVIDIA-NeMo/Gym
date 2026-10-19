@@ -38,6 +38,7 @@ from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint
 from nemo_gym.token_id_capture.lineage import stamp_continuation
 from nemo_gym.token_id_capture.protocols import (
     CaptureAdmissionError,
+    CaptureInputError,
     CaptureLedger,
     LineageResolution,
     LineageResolver,
@@ -91,6 +92,8 @@ class CaptureContext:
     model: str = ""
     # ``commit_entry`` sets this after another capture path records the call.
     committed: bool = False
+    # A worker acknowledged refusal before generation/staging and the ledger settled its intent.
+    refused: bool = False
     # Store resolved continuations as parent-relative suffixes.
     delta_records: bool = False
     # This records the model server's intent to request prefix supply.
@@ -344,7 +347,7 @@ async def _admit_candidate(context: CaptureContext, request_items: list[dict]) -
     """
     # Deferred to avoid the staging records/sink import cycle.
     from nemo_gym.token_id_capture.replay import replay_context, same_replay_source, summarize_replay
-    from nemo_gym.token_id_capture.staging.records import CaptureAdmission, RolloutManifest
+    from nemo_gym.token_id_capture.staging.records import CaptureAdmission, RolloutManifest, RootReason
 
     if not context.external_staging or not isinstance(context.lineage_store, CaptureLedger):
         raise ValueError("Framework context ownership requires an external capture ledger")
@@ -352,16 +355,18 @@ async def _admit_candidate(context: CaptureContext, request_items: list[dict]) -
         manifest = RolloutManifest.model_validate(await context.lineage_store.manifest(context.rollout_id))
     except RolloutRetiredError as error:
         raise CaptureAdmissionError(str(error)) from error
-    if manifest.failures:
-        raise CaptureAdmissionError("Cannot admit a call after incomplete capture in this attempt")
     predecessor = None
-    request_replay = replay_context(request_items)
+    root_reason: RootReason = "first_call" if not manifest.records else "no_prefix_match"
+    try:
+        request_replay = replay_context(request_items)
+    except ValueError as error:
+        raise CaptureInputError(str(error)) from error
     prefixes = {}
     matches = []
     for record in manifest.records:
         replay = record.replay
         if replay is None:
-            raise ValueError("Captured call is missing source replay evidence")
+            raise CaptureAdmissionError("Captured call is missing source replay evidence")
         if replay.item_count > len(request_replay.items):
             continue
         if replay.item_count not in prefixes:
@@ -370,11 +375,12 @@ async def _admit_candidate(context: CaptureContext, request_items: list[dict]) -
         if (
             # This only proposes a predecessor. RL still requires renderer
             # proof before using an empty-content-equivalent prefix.
-            same_replay_source(prefixes[replay.item_count], replay, allow_empty_tool_content=True)
-            and suffix
-            and all(item.role in ("user", "tool") for item in suffix)
+            same_replay_source(prefixes[replay.item_count], replay, allow_empty_tool_content=True) and suffix
         ):
-            matches.append(record)
+            if all(item.role in ("user", "tool") for item in suffix):
+                matches.append(record)
+            else:
+                root_reason = "non_user_suffix"
     if matches:
         # Prefer the longest complete prefix. Two equally long occurrences
         # still need explicit identity; equal text is not acceptance evidence.
@@ -401,14 +407,14 @@ async def _admit_candidate(context: CaptureContext, request_items: list[dict]) -
         visited = set()
         while current is not None:
             if current.model_call_id in visited:
-                raise ValueError("Cyclic candidate storage chain")
+                raise CaptureAdmissionError("Cyclic candidate storage chain")
             visited.add(current.model_call_id)
             chain.append(current.staging_key)
             if current.parent_call_id is None:
                 break
             current = by_id.get(current.parent_call_id)
             if current is None:
-                raise ValueError("Candidate storage ancestor is missing")
+                raise CaptureAdmissionError("Candidate storage ancestor is missing")
         chain.reverse()
     context.parent_staging_chain = chain
     context.capture_admission = CaptureAdmission(
@@ -426,6 +432,7 @@ async def _admit_candidate(context: CaptureContext, request_items: list[dict]) -
             if predecessor is not None
             else None
         ),
+        root_reason=root_reason if predecessor is None else None,
     )
 
 

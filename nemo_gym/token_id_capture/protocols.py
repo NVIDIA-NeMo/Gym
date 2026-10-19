@@ -49,6 +49,10 @@ from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry
 from nemo_gym.token_id_capture.staging.records import CaptureLedgerCommit
 
 
+# Internal worker acknowledgement: this call was refused before generation or staging.
+CAPTURE_REFUSAL_HEADER = "x-nemo-gym-capture-refused"
+
+
 class RolloutRemovalPayload(TypedDict):
     """The result of retiring or deleting rollouts, as plain wire data.
 
@@ -85,6 +89,10 @@ class TokenCaptureFrozenError(RuntimeError):
 
 class CaptureAdmissionError(ValueError):
     """Refuse a request whose capture state cannot safely admit generation."""
+
+
+class CaptureInputError(ValueError):
+    """Reject request history that capture cannot represent."""
 
 
 class TokenCaptureRetiredError(TokenCaptureFrozenError):
@@ -189,6 +197,11 @@ class CaptureLedger(LineageResolver, Protocol):
     model_call_id)`` and ``close_admissions(rollout_id)``. They share one atomic
     admission boundary: close returns a manifest and rejects new calls, while
     existing intents may still commit. These extensions do not freeze writes.
+
+    ``refuse_call(rollout_id, model_call_id)`` optionally settles an intent after
+    the worker acknowledges a refusal before generation or staging. Such calls
+    remain in the audit ledger but are excluded from the training manifest.
+    An error status or message alone is not this acknowledgement.
     """
 
     async def record(self, commit: CaptureLedgerCommit) -> None:

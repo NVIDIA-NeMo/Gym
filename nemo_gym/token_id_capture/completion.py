@@ -9,6 +9,7 @@ from nemo_gym.responses_converter import ResponsesConverter
 from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint
 from nemo_gym.token_id_capture.records import response_to_output_items, strip_token_fields
 from nemo_gym.token_id_capture.replay import replay_context
+from nemo_gym.token_id_capture.staging.records import CompletionStatus, OutputValidationItem
 
 
 def completion_items(response: dict[str, Any]) -> list[dict]:
@@ -29,7 +30,7 @@ def completion_items(response: dict[str, Any]) -> list[dict]:
     return strip_token_fields(response_to_output_items(response))[0]
 
 
-def completion_metadata(response: dict[str, Any]) -> tuple[str | None, str | None]:
+def completion_metadata(response: dict[str, Any]) -> tuple[CompletionStatus, str | None]:
     """Read existing dialect completion fields; never infer success from absence."""
     choices = response.get("choices")
     first = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
@@ -44,20 +45,22 @@ def completion_metadata(response: dict[str, Any]) -> tuple[str | None, str | Non
         None,
     )
     status = response.get("status")
-    if response.get("error") is not None:
+    if response.get("error") is not None or status == "cancelled" or reason == "abort":
         status = "failed"
     if not isinstance(status, str):
-        status = None
+        status = "unknown"
         if reason in ("stop", "tool_calls", "function_call", "end_turn", "tool_use", "stop_sequence"):
             status = "completed"
         elif reason in ("length", "max_tokens", "max_output_tokens", "content_filter"):
             status = "incomplete"
+    if status not in ("completed", "incomplete", "failed"):
+        return "unknown", reason
     return status, reason
 
 
-def output_validation_item(item: dict[str, Any]) -> dict[str, Any]:
+def output_validation_item(item: dict[str, Any]) -> OutputValidationItem:
     """Keep original text used by output detectors, excluding transport arrays."""
-    result: dict[str, Any] = {"type": item.get("type")}
+    result: OutputValidationItem = {"type": item.get("type")}
     for key in ("content", "summary"):
         parts = item.get(key)
         if isinstance(parts, list):

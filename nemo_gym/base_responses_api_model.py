@@ -119,7 +119,12 @@ from nemo_gym.token_id_capture.completion import completion_metadata
 from nemo_gym.token_id_capture.config import NonGeneratingRequest, token_id_capture_config
 from nemo_gym.token_id_capture.control_routes import install_rollout_control_routes
 from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore
-from nemo_gym.token_id_capture.protocols import CaptureAdmissionError, CaptureLedger, LineageResolver
+from nemo_gym.token_id_capture.protocols import (
+    CaptureAdmissionError,
+    CaptureInputError,
+    CaptureLedger,
+    LineageResolver,
+)
 from nemo_gym.token_id_capture.records import UNCOMMITTED_CALL_REASON
 from nemo_gym.token_id_capture.store import make_token_store
 
@@ -324,6 +329,11 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
     async def _finalize_served_response(self, response: Any) -> None:
         """Finalize capture after conversion to the response returned to the client."""
+
+    def _validate_capture_request(
+        self, body: NeMoGymResponseCreateParamsNonStreaming | NeMoGymChatCompletionCreateParamsNonStreaming
+    ) -> None:
+        """Validate server-specific request options before recording capture intent."""
 
     async def _stream_served_response(self, response: Any, events: Iterable[str | bytes]) -> StreamingResponse:
         """Serialize buffered SSE before committing externally staged capture."""
@@ -572,12 +582,8 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         malformed ``stream`` with the same 422 as before.
         """
         context = current_capture_context()
-        if (
-            context is not None
-            and context.framework_owned_context
-            and (body.get("stream") or body.get("n") not in (None, 1))
-        ):
-            raise HTTPException(status_code=422, detail="Framework context requires one non-streaming Chat completion")
+        if context is not None and context.framework_owned_context and body.get("n") not in (None, 1):
+            raise HTTPException(status_code=422, detail="Framework context requires one Chat completion")
         if body.get("stream") is not True:
             params = _validate_chat_params(body)
             response = await self._invoke_chat_completions(request, params)
@@ -679,12 +685,15 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # Resolve the parent from the received request before dispatch.
         # Exact prefix supply and capture share this decision.
         if current_capture_context() is not None:
+            self._validate_capture_request(params)
             request_messages = _request_messages(params)
             try:
                 await resolve_parent(request_messages)
                 await register_call_intent()
             except CaptureAdmissionError as error:
                 raise HTTPException(status_code=409, detail=str(error)) from error
+            except CaptureInputError as error:
+                raise HTTPException(status_code=422, detail=str(error)) from error
         else:
             request_messages = None
         if "request" in inspect.signature(self.chat_completions).parameters:
@@ -729,12 +738,15 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # Exact prefix supply and capture share this decision.
         context = current_capture_context()
         if context is not None:
+            self._validate_capture_request(params)
             request_messages = _request_messages(params)
             try:
                 await resolve_parent(request_messages)
                 await register_call_intent()
             except CaptureAdmissionError as error:
                 raise HTTPException(status_code=409, detail=str(error)) from error
+            except CaptureInputError as error:
+                raise HTTPException(status_code=422, detail=str(error)) from error
         else:
             request_messages = None
         if "request" in inspect.signature(self.responses).parameters:
@@ -1659,6 +1671,7 @@ async def _fail_uncommitted_external_call(context: CaptureContext | None) -> Non
         or not context.external_staging
         or context.capture_admission is None
         or context.committed
+        or context.refused
         or (context.framework_owned_context and not context.intent_registered)
         # A checkpoint gate owns a deferred row: it publishes it when the response starts,
         # and a call whose response never starts made no answer to record, so it is not poisoned.
@@ -1827,7 +1840,8 @@ class _CaptureMiddleware:
                 await send(message)
 
             try:
-                await self._app(scope, receive, _send_unobserved)
+                with rollout_context(rollout_from_path):
+                    await self._app(scope, receive, _send_unobserved)
             except asyncio.CancelledError:
                 if not known_non_generating and not response_started:
                     await _mark_unobserved_incomplete("was cancelled before starting a response")
