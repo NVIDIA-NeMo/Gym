@@ -1602,7 +1602,25 @@ repr(e): {repr(e)}"""
         app.add_middleware(ClientDisconnectCancellationMiddleware)
 
     def setup_request_context_isolation(self, app: FastAPI) -> None:
-        app.add_middleware(RequestContextIsolationMiddleware)
+        """Wrap the complete middleware stack, instrumentation included, in context isolation.
+
+        `add_middleware` is not enough: the FastAPI instrumentor installs its middleware by
+        overriding `build_middleware_stack`, so it always ends up outside anything added that
+        way. Wrapping the build the same way, after instrumentation, puts isolation outside
+        the instrumentor, which is the only place it works: the instrumentor must see an empty
+        context so it extracts `traceparent`, and the handlers must still see the server span
+        the instrumentor then makes current.
+        """
+        if getattr(app.state, "nemo_gym_request_context_isolation_installed", False):
+            return
+        app.state.nemo_gym_request_context_isolation_installed = True
+        build_inner = app.build_middleware_stack
+
+        def build_middleware_stack() -> ASGIApp:
+            return RequestContextIsolationMiddleware(build_inner())
+
+        app.build_middleware_stack = build_middleware_stack  # type: ignore[method-assign]
+        app.middleware_stack = None
 
     def setup_profiling(self, app: FastAPI, profiling_config: ProfilingMiddlewareConfig) -> None:  # pragma: no cover
         base_profile_dir = WORKING_DIR / profiling_config.profiling_results_dirpath / self.get_session_middleware_key()

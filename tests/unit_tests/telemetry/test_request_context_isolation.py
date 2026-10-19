@@ -38,7 +38,7 @@ from aiohttp import ClientSession, ClientTimeout, TCPConnector
 from fastapi import FastAPI
 
 from nemo_gym.rollout_correlation import _ROLLOUT_ID, current_rollout_id
-from nemo_gym.server_utils import RequestContextIsolationMiddleware
+from nemo_gym.server_utils import SimpleServer
 from tests.unit_tests.telemetry.conftest import requires_lens
 from tests.unit_tests.telemetry.test_propagation import (
     traces,  # noqa: F401  (fixture: real Lens providers, in-memory exporter)
@@ -50,6 +50,11 @@ pytestmark = requires_lens
 WINDOW_SECONDS = 0.02
 COROUTINES = 8
 CALLS_PER_COROUTINE = 12
+
+
+def install_isolation(app: FastAPI) -> None:
+    """Exactly what `run_webserver` does after instrumenting the app."""
+    SimpleServer.setup_request_context_isolation(None, app)  # the method does not touch `self`
 
 
 def _free_port() -> int:
@@ -87,15 +92,21 @@ def _app(isolate: bool) -> FastAPI:
 
     @app.post("/v1/responses")
     async def responses():
+        from opentelemetry import trace
+
         inherited = current_rollout_id()
         _ROLLOUT_ID.set("leaked-by-handler")  # a handler that forgets to reset; must not reach the next request
-        await asyncio.sleep(0.005)
+        # What Gym's own instrumentation does inside a handler: open a span that must sit under
+        # the request's server span, which is only true if isolation runs *outside* the
+        # instrumentor and the instrumentor's server span is current in here.
+        with trace.get_tracer("test").start_as_current_span("handler.work"):
+            await asyncio.sleep(0.005)
         return {"inherited_rollout_id": inherited}
 
     app.add_middleware(_LateTerminatingBody)
     instrument_fastapi(app)
     if isolate:
-        app.add_middleware(RequestContextIsolationMiddleware)
+        install_isolation(app)
     return app
 
 
@@ -157,16 +168,23 @@ async def test_requests_on_a_reused_connection_keep_their_own_parent(served, tra
     deadline = time.monotonic() + 5
     while len(_server_spans(traces())) < COROUTINES * CALLS_PER_COROUTINE and time.monotonic() < deadline:
         await asyncio.sleep(0.05)
-    spans = _server_spans(traces())
+    all_spans = traces()
+    spans = _server_spans(all_spans)
     assert len(spans) == COROUTINES * CALLS_PER_COROUTINE
     expected = {0x100 * (i + 1) + k + 1 for i in range(COROUTINES) for k in range(CALLS_PER_COROUTINE)}
     own_parent = [s for s in spans if s.parent is not None and s.parent.span_id in expected]
     wrong_kind = [s for s in spans if s.kind.name != "SERVER"]
+    server_ids = {s.context.span_id for s in spans}
+    handler_spans = [s for s in all_spans if s.name == "handler.work"]
+    handler_under_server = [s for s in handler_spans if s.parent is not None and s.parent.span_id in server_ids]
 
     if isolated:
         assert len(own_parent) == len(spans), "every server span must be parented to its request's traceparent"
         assert not wrong_kind
         assert all(value is None for value in inherited), "the rollout id must not leak into the next request"
+        assert len(handler_spans) == len(spans) and len(handler_under_server) == len(spans), (
+            "handlers must still run under the server span: isolation has to wrap the instrumentor, not sit inside it"
+        )
     else:
         # The control: the same server without the isolation middleware mis-parents some requests, which is
         # the failure this test exists to catch. If this ever stops holding, the window closed upstream and the
