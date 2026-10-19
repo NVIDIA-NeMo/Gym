@@ -49,7 +49,10 @@ alone does not mean the component has been deprecated.
    commands, including `--no-serve` runs. Direct HTTP callers use the Environment Server's
    `/run`; changing the agent name in an existing agent `/run` call does not create a session.
    Use the task format expected by the environment; `single_agent_turn_legacy` accepts
-   compatible prepared flat rows through the session lifecycle.
+   compatible prepared flat rows through the session lifecycle. Rows posted directly to `/run`
+   must already carry the rollout identity that collection stamps on them, either
+   `_ng_rollout_id` or `_ng_task_index` with `_ng_rollout_index`; a row taken straight from a
+   preparation script has neither and is rejected without a useful message.
 3. **Preserve sandbox ownership.** For tasks where Resources prepares the workspace and
    verifies its state, the agent must connect to that same sandbox. Configure agent-owned
    sandbox creation only when both the harness and the environment support it. Check model
@@ -80,12 +83,18 @@ and the [Hermes-specific runtime, request, and reporting changes](../../response
 For this benchmark:
 
 - Replace the old agent configuration with `benchmarks/swebench/pro/hermes.yaml`, and
-  select `swebench_pro_hermes_agent` when using `--no-serve`.
+  select `swebench_pro_hermes_agent` when using `--no-serve`. The defaults this recipe
+  inherits differ from the removed adapter's: `max_turns` drops from 90 to 30,
+  `terminal_timeout` from 180 to 60, and `concurrency` rises from 4 to 32. Override them if
+  you were relying on the old budgets.
 - Move agent settings under `swebench_pro_hermes_agent.responses_api_agents.hermes_agent`.
   Move SWE-Pro `image_template` and image-cache provenance settings under
   `swebench_pro_hermes_resources_server.resources_servers.swebench_pro`.
-- Reuse prepared SWE-Pro JSONL rows through `single_agent_turn_legacy`; no data conversion
-  is needed. The SWE-Pro verifier is unchanged by the removal.
+- Reuse prepared SWE-Pro JSONL rows from `benchmarks/swebench/pro/prepare.py` through
+  `single_agent_turn_legacy`; no data conversion is needed. Previously materialized inputs
+  must be re-collated, because they carry the removed agent's `agent_ref` and are rejected.
+  The SWE-Pro verifier is unchanged by the removal, but scores are not comparable across
+  adapters, so re-baseline before publishing results.
 
 ## Golden-patch smoke test
 
