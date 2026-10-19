@@ -856,21 +856,6 @@ def _health_check_host(
     return "localhost"
 
 
-def _health_check_probes(
-    name: str,
-    service: ServiceConfig,
-    config: SubmitConfig,
-    compute: SlurmComputeConfig,
-    driver_node: int | None,
-    total_nodes: int,
-) -> list[tuple[str, str]]:
-    """(label, host) pairs a service's readiness waits on: every node of a per-node pool, else one."""
-    if isinstance(service, VllmNodeServiceConfig) and service.server_per_node:
-        start, count = _pool_offsets(compute)[service.node_pool]
-        return [(f"{name}-node{i}", _probe_host(start + i)) for i in range(count)]
-    return [(name, _health_check_host(service, config, compute, driver_node, total_nodes))]
-
-
 def _service_pre_command(service: ServiceConfig) -> str:
     """The service's own pre_command, with any exports its role requires in front."""
     if not isinstance(service, VllmServiceConfig):
@@ -968,15 +953,27 @@ def build_sbatch_script(
         ([_render_collector_health_check(config, driver_node)] if observed else [])
         + [
             render_health_check(
-                label,
+                name,
                 service.health_check.port,
                 service.health_check.path,
                 service.health_check.timeout_seconds,
-                host,
+                _health_check_host(service, config, compute, driver_node, total_nodes),
             )
             for name, service in config.deployed_services.items()
             if service.health_check
-            for label, host in _health_check_probes(name, service, config, compute, driver_node, total_nodes)
+        ]
+        + [
+            render_health_check(
+                f"{name}-node{i}",
+                service.health_check.port,
+                service.health_check.path,
+                service.health_check.timeout_seconds,
+                _probe_host(start + i),
+            )
+            for name, service in config.deployed_services.items()
+            if isinstance(service, VllmNodeServiceConfig) and service.server_per_node and service.health_check
+            for start, count in [_pool_offsets(compute)[service.node_pool]]
+            for i in range(1, count)
         ]
     )
 

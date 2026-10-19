@@ -2604,10 +2604,10 @@ def test_a_per_node_service_is_not_reported_as_leaving_gpus_idle(tmp_path):
 
 def test_every_node_of_a_per_node_service_is_probed_where_it_runs(tmp_path):
     script = _per_node_vllm_script(tmp_path)
-    assert "Waiting for policy-node0 at http://localhost:8000" in script
+    assert "Waiting for policy at http://localhost:8000" in script
     for node in (1, 2, 3):
         assert f"Waiting for policy-node{node} at http://${{gym_nodes[{node}]}}:8000" in script
-    assert "Waiting for policy at " not in script
+    assert "policy-node0" not in script
 
 
 def test_a_per_node_service_needs_a_node_pool(tmp_path):
