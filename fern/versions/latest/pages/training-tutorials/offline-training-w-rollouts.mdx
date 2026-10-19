@@ -52,7 +52,7 @@ This tutorial is **experimental** and may contain bugs. Proceed with caution.
 {
   "messages": [
     {"role": "user", "content": "What's the weather in Paris?"},
-    {"role": "assistant", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\": \"Paris\"}"}}]},
+    {"role": "assistant", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": {"city": "Paris"}}}]},
     {"role": "tool", "tool_call_id": "call_1", "content": "Temperature: 22°C, sunny"},
     {"role": "assistant", "content": "The weather in Paris is 22°C and sunny."}
   ],
@@ -88,7 +88,7 @@ The offline training pipeline follows this logical flow:
 2. Filter for quality - Remove masked and low-reward rollouts before building SFT data. DPO pairs need the low-reward rollouts as the rejected side, so build them from all unmasked rollouts.
 3. Format for training - Convert to SFT or DPO format based on your goals
 
-Each line of a rollouts file from `gym eval run` holds the task (`responses_create_params`), the model's turns as Responses API items (`response.output`), the verifier's `reward`, and the task and repeat indices `_ng_task_index` and `_ng_rollout_index`. A verifier sets `mask_sample: true` when the environment, not the model, failed a sample; its reward is not a valid training signal.
+Each line of a rollouts file from `gym eval run` holds the task (`responses_create_params`), the model's turns as Responses API items (`response.output`), the verifier's `reward`, and the task and repeat indices `_ng_task_index` and `_ng_rollout_index`. A verifier sets `mask_sample: true` when the environment, not the model, failed a sample; its reward is not a valid training signal. The filtering and DPO snippets skip rows with no model turns in `response.output`, such as the results of an environment server that records its own result type (`nemo_user_sim`, for example). Harness agents that run their own tools, such as OpenCode, Pi, or Harbor, record the tool calls but not the tool definitions, so their rows have no `tools`.
 
 ## Step 1: Quality Filtering and Curation
 
@@ -111,8 +111,9 @@ def filter_rollouts(input_file: str, output_file: str, min_reward: float = 0.5, 
                 continue  # the environment failed this sample, so its reward is not meaningful
             if rollout.get("reward", 0.0) < min_reward:
                 continue
-            if len(rollout["response"]["output"]) > max_output_items:
-                continue  # drop runaway trajectories
+            output = rollout.get("response", {}).get("output")
+            if not output or len(output) > max_output_items:
+                continue  # no model turns to train on, or a runaway trajectory
             out.write(line)
             kept += 1
     print(f"Kept {kept}/{total} rollouts")
@@ -160,9 +161,9 @@ After you have filtered, high-quality rollouts, format them for your chosen trai
 
 ### SFT Data Processing
 
-Rollouts store the conversation as Responses API items: the prompt in `responses_create_params.input` and the model's turns in `response.output`. Training libraries expect Chat Completions messages, so convert both with NeMo Gym's `ResponsesConverter`, the same converter its model servers use. It turns `function_call` items into assistant `tool_calls`, `function_call_output` items into `tool` messages, and `reasoning` items into `<think>` blocks in the assistant content. Filter out items whose `type` is `reasoning` first if you don't want to train on them. The task's `instructions`, when set, become the leading system message.
+Rollouts store the conversation as Responses API items: the prompt in `responses_create_params.input` and the model's turns in `response.output`. Training libraries expect Chat Completions messages, so convert both with NeMo Gym's `ResponsesConverter`, the same converter its model servers use. It turns `function_call` items into assistant `tool_calls`, `function_call_output` items into `tool` messages, and `reasoning` items into `<think>` blocks in the assistant content. Filter out items whose `type` is `reasoning` first if you don't want to train on them. The task's `instructions`, when set, become the leading system message. `to_chat` then parses each tool call's `arguments` from a JSON string into a dict, because the Hugging Face chat templates that TRL and NeMo RL apply expect one.
 
-Some Responses fields have no Chat Completions equivalent, and the converter raises `NotImplementedError` on them. `to_chat` drops them first: a message's `phase` and a reasoning item's `encrypted_content`. Readable reasoning `content` becomes the `<think>` text when present; otherwise the snippet uses the reasoning `summary`.
+Some Responses fields have no Chat Completions equivalent, and the converter raises `NotImplementedError` on them. `to_chat` drops the two that rollouts commonly carry, a message's `phase` and a reasoning item's `encrypted_content`; any other, such as an image in a tool output, still raises, as do tool-call `arguments` that aren't valid JSON. Readable reasoning `content` becomes the `<think>` text when present; otherwise the snippet uses the reasoning `summary`.
 
 Run these snippets in the NeMo Gym environment, in one Python session:
 
@@ -188,12 +189,15 @@ def chat_representable(item: dict) -> dict:
 
 def to_chat(items: list, tools: list | None = None, instructions: str | None = None) -> dict:
     """Convert Responses API items (and tools and instructions) to Chat Completions messages (and tools)."""
-    params = converter.responses_to_chat_completion_create_params(
+    chat = converter.responses_to_chat_completion_create_params(
         NeMoGymResponseCreateParamsNonStreaming(
             input=[chat_representable(item) for item in items], tools=tools or [], instructions=instructions
         )
-    )
-    return params.model_dump(exclude_none=True)
+    ).model_dump(exclude_none=True)
+    for message in chat["messages"]:
+        for call in message.get("tool_calls", []):
+            call["function"]["arguments"] = json.loads(call["function"]["arguments"])
+    return chat
 
 
 def prompt_items(rollout: dict) -> list:
@@ -212,7 +216,10 @@ def process_sft_data(filtered_rollout_file: str, output_file: str) -> None:
                 task.get("tools"),
                 task.get("instructions"),
             )
-            example = {"messages": chat["messages"], "reward": rollout["reward"]}
+            messages = chat["messages"]
+            while messages and messages[-1]["role"] != "assistant":
+                messages.pop()  # end on the model's last turn, as NeMo RL's SFT loader requires
+            example = {"messages": messages, "reward": rollout["reward"]}
             if chat.get("tools"):
                 example["tools"] = chat["tools"]
             out.write(json.dumps(example) + "\n")
@@ -223,27 +230,30 @@ process_sft_data("filtered_rollouts.jsonl", "sft_data.jsonl")
 
 ### DPO Data Processing
 
-Pair each task's highest- and lowest-reward rollouts. Rollouts of the same task share `_ng_task_index`, so collect with `--num-repeats 2` or more, and build pairs from the unfiltered rollouts file so low-reward rollouts are available as the rejected side. This snippet reuses `to_chat` and `prompt_items` from the SFT snippet:
+Pair each task's highest- and lowest-reward rollouts. Rollouts of the same task share `_ng_task_index`, so collect with `--num-repeats 2` or more. Build pairs from one run's unfiltered rollouts file: low-reward rollouts are needed as the rejected side, and every run numbers its tasks from 0. Some environments also add a random starting state to each rollout's prompt (blackjack deals a new hand), so the snippet pairs only rollouts that saw the same prompt. This snippet reuses `to_chat` and `prompt_items` from the SFT snippet:
 
 ```python
 from collections import defaultdict
 
 
 def create_dpo_pairs(rollout_file: str, output_file: str, min_margin: float = 0.1) -> None:
-    """Pair each task's best and worst unmasked rollouts when their rewards differ enough."""
-    by_task = defaultdict(list)
+    """Pair the best and worst unmasked rollouts of each task prompt when their rewards differ enough."""
+    by_prompt = defaultdict(list)
     with open(rollout_file) as f:
         for line in f:
             rollout = json.loads(line)
-            if not rollout.get("mask_sample"):
-                by_task[rollout["_ng_task_index"]].append(rollout)
+            if rollout.get("mask_sample") or not rollout.get("response", {}).get("output"):
+                continue
+            task = rollout["responses_create_params"]
+            prompt_key = json.dumps([task["input"], task.get("instructions"), task.get("tools")], sort_keys=True)
+            by_prompt[(rollout["_ng_task_index"], prompt_key)].append(rollout)
 
     pairs = 0
     with open(output_file, "w") as out:
-        for rollouts in by_task.values():
+        for rollouts in by_prompt.values():
             chosen = max(rollouts, key=lambda r: r["reward"])
             rejected = min(rollouts, key=lambda r: r["reward"])
-            margin = chosen["reward"] - rejected["reward"]
+            margin = round(chosen["reward"] - rejected["reward"], 6)  # so 0.3 - 0.2 counts as 0.1
             if len(rollouts) < 2 or margin < min_margin:
                 continue
             task = chosen["responses_create_params"]
@@ -258,7 +268,7 @@ def create_dpo_pairs(rollout_file: str, output_file: str, min_margin: float = 0.
                 pair["tools"] = prompt["tools"]
             out.write(json.dumps(pair) + "\n")
             pairs += 1
-    print(f"Created {pairs} preference pairs from {len(by_task)} tasks")
+    print(f"Created {pairs} preference pairs from {len(by_prompt)} task prompts")
 
 
 create_dpo_pairs("results/rollouts.jsonl", "dpo_pairs.jsonl")
@@ -275,7 +285,7 @@ SFT data follows the conversation format used by most training libraries:
 {"messages": [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]}
 ```
 
-DPO data follows the preference pair format:
+DPO data follows TRL's conversational preference format (NeMo RL's DPO expects `context` and ranked `completions` instead):
 ```json
 {"prompt": ["..."], "chosen": ["..."], "rejected": ["..."]}
 ```
