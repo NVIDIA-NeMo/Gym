@@ -14,7 +14,7 @@ https://huggingface.co/datasets/nvidia/Nemotron-RL-knowledge-openqa
 - `judge_equal_label` / `judge_not_equal_label`: labels the judge must output. Defaults to `[[A=B]]` and `[[A!=B]]`.
 - `check_twice_swap` (bool, default false): if true, after an initial equal verdict, performs a second judge call swapping expected and generated answers to reduce bias.
 - `reward_if_swap_fails` (float, default 0.0): reward to assign if the second (swap) pass disagrees (i.e., fails). You may set this to -1.0 or other value to catch it on the training side..
-- `use_per_record_regex` (bool, default true): if true, use per-record regex from `template_metadata.output_regex` to extract answers. Enables mixed datasets with different answer formats. Safe to enable - falls back to global regex when no per-record regex present.
+- `use_per_record_regex` (bool, default true): enable independent per-problem overrides from `template_metadata.question_regex` for questions and `template_metadata.output_regex` for answers. Missing overrides fall back to the corresponding global regex.
 - `check_full_generation_on_fail` (bool, default true): if true, when regex extraction fails, retry with full generation (no regex) for partial credit. Only activates when per-record regex exists.
 - `reward_if_full_generation_succeeds` (float, default 0.5): reward when full generation check succeeds after extraction failure. Set to 1.0 for full credit.
 - `extraction_length_threshold` (int, default 120): skip regex extraction when expected answer exceeds this length. Use full generation instead. Only applies when per-record regex is present. Set to null to disable.
@@ -57,6 +57,42 @@ Accepts the same outer request structure as other resources servers:
 - `responses_create_params`: the original model query (used here to extract a question/context string from user messages for the judge prompt).
 - `response`: the model output in OpenAI Responses schema. The last assistant message text is used as the generated answer.
 - `expected_answer`: gold answer to compare against.
+
+### Per-problem question extraction
+
+With `use_per_record_regex: true`, set `template_metadata.question_regex` on each
+problem to override the server-wide `question_extract_regex`. For example, this
+dataset row keeps the full prompt for generation while passing only `What is
+2+2?` as the question in the judge prompt:
+
+```json
+{
+  "responses_create_params": {
+    "input": [{"role": "user", "content": "Solve the following problem.\n<question>What is 2+2?</question>\nGive your final answer as Answer: ..."}]
+  },
+  "expected_answer": "4",
+  "template_metadata": {
+    "question_regex": "<question>(.*?)</question>",
+    "output_regex": "Answer: ([^\\n]+)"
+  }
+}
+```
+
+The question override does not require `output_regex`. Missing, empty, null, or
+non-string question overrides use the global `question_extract_regex`; setting
+`use_per_record_regex: false` disables both per-problem overrides. A null global
+pattern uses the full text of the last user message.
+
+Question extraction uses the last regex match with multiline and dot-all flags,
+then the first non-empty capture group, or the whole match if no group is
+non-empty. Invalid or unmatched patterns retain the full last user text, rather
+than retrying the global pattern. Text blocks in a multimodal user message are
+joined before extraction; image content is excluded.
+
+`extraction_length_threshold` and full-generation rescue apply only to answer
+extraction via `output_regex`. They do not disable question extraction. Rescue
+and swap judge calls reuse the extracted question. Adding a question override
+can change judge inputs and rewards; record the metadata with evaluation results.
 
 ### Example config
 ```yaml
@@ -101,10 +137,9 @@ You should always check the license of your chosen judge model to make sure your
 - By default (`check_twice_swap=false`), the server performs a single judge pass. If the verdict is equal, reward is 1 and one evaluation is returned; if not equal, reward is 0 and one evaluation is returned.
 - If `check_twice_swap=true` and the first pass is equal, a second pass is performed with expected and generated answers swapped. Reward is 1 only if the second pass is also equal; otherwise `reward_if_swap_fails` is used (default 0.0). In the double-check case, two evaluations are returned.
 - If the judge output doesn't include either label, it defaults to not-equal.
-- **OpenQA support (enabled by default)**: The server now enables per-record regex extraction (`use_per_record_regex=true`), full generation rescue (`check_full_generation_on_fail=true`), and length-based thresholds (`extraction_length_threshold=120`) by default. These features only activate when `template_metadata.output_regex` is present, making them safe for all datasets. They reduce false negatives from regex extraction failures while maintaining backward compatibility.
+- **OpenQA support (enabled by default)**: The server enables per-record regex extraction (`use_per_record_regex=true`), full generation rescue (`check_full_generation_on_fail=true`), and length-based thresholds (`extraction_length_threshold=120`) by default. Answer rescue and length thresholds only activate when `template_metadata.output_regex` is present. The independent question override is described above.
 
 ## Licensing
 Code: Apache 2.0   
 Data: CC-BY-NC-3.0 (Examples from https://huggingface.co/datasets/allenai/sciq)
-
 

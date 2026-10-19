@@ -154,15 +154,13 @@ class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     # ========================================================================
     # Per-Record Regex Features (OpenQA support)
     # ========================================================================
-    # These features enable mixed datasets with different answer formats.
-    # They only activate when template_metadata.output_regex is present.
-    # Safe to enable by default - falls back to response_extract_regex when
-    # no per-record regex is present.
+    # Mixed datasets can override question and answer extraction independently.
+    # Missing overrides fall back to question_extract_regex / response_extract_regex.
 
-    # [NEW] Enable per-record regex override from template_metadata.output_regex
+    # Enable template_metadata.question_regex and template_metadata.output_regex overrides.
     use_per_record_regex: bool = True
 
-    # --- The following features ONLY work when use_per_record_regex=True ---
+    # The following answer-only features require use_per_record_regex=True and output_regex.
 
     # [NEW] If set, skip regex extraction when expected_answer length exceeds this threshold.
     # When skipped, the full generation is used instead of extracting with regex.
@@ -394,6 +392,15 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
 
         return False  # No per-record regex, length threshold doesn't apply
 
+    def _get_question_extraction_regex(self, body: LLMJudgeVerifyRequest) -> Optional[str]:
+        """Select a per-record question pattern independently of answer extraction settings."""
+        metadata = getattr(body, "template_metadata", None)
+        if self.config.use_per_record_regex and isinstance(metadata, dict):
+            regex_override = metadata.get("question_regex")
+            if isinstance(regex_override, str) and regex_override:
+                return regex_override
+        return self.config.question_extract_regex
+
     def _get_extraction_regex(self, body: LLMJudgeVerifyRequest, expected: str) -> Optional[str]:
         """Determine which regex to use for extraction, considering per-record overrides and length threshold.
 
@@ -521,7 +528,7 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
                 f"final_answer_too_long: {len(answer)} characters exceeds {self.config.max_answer_chars}"
             )
             return result
-        question = _extract_question_text(body.responses_create_params, self.config.question_extract_regex)
+        question = _extract_question_text(body.responses_create_params, self._get_question_extraction_regex(body))
 
         # Step 2: Determine extraction regex (None if long answer triggers threshold)
         extract_regex = self._get_extraction_regex(body, expected)

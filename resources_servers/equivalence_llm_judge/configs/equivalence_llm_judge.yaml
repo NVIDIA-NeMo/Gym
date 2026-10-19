@@ -35,15 +35,13 @@ equivalence_llm_judge:
       # ========================================================================
       # Per-Record Regex Features (OpenQA support)
       # ========================================================================
-      # These features enable mixed datasets with different answer formats.
-      # They only activate when template_metadata.output_regex is present.
-      # Safe to enable by default - falls back to response_extract_regex when
-      # no per-record regex is present.
+      # Mixed datasets can override question and answer extraction independently.
+      # Missing overrides fall back to question_extract_regex / response_extract_regex.
       
-      # [NEW] Enable per-record regex override from template_metadata.output_regex
+      # Enable template_metadata.question_regex and template_metadata.output_regex overrides.
       use_per_record_regex: true
       
-      # --- The following features ONLY work when use_per_record_regex=true ---
+      # The following answer-only features require use_per_record_regex=true and output_regex.
       
       # [NEW] Skip regex extraction when expected_answer length exceeds this threshold.
       # When skipped, the full generation is shown to judge instead of extracting.

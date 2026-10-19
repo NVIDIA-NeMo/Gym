@@ -15,6 +15,7 @@
 import json
 from copy import deepcopy
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 from fastapi.encoders import jsonable_encoder
@@ -388,6 +389,81 @@ class TestApp:
         assert res.reward == approx(-1.0)
         assert len(res.judge_evaluations) == 2
 
+    @mark.parametrize(
+        "metadata,enabled,expected_question",
+        [
+            ({"question_regex": r"<question>(.*?)</question>"}, True, "What is 2+2?"),
+            ({"question_regex": r"<question>(.*?)</question>"}, False, "global question"),
+            ({}, True, "global question"),
+            (None, True, "global question"),
+            ("not a dictionary", True, "global question"),
+            ({"question_regex": ""}, True, "global question"),
+            ({"question_regex": None}, True, "global question"),
+            ({"question_regex": 42}, True, "global question"),
+            ({"question_regex": "["}, True, None),
+            ({"question_regex": "no match"}, True, None),
+        ],
+    )
+    async def test_per_record_question_extraction(
+        self, config: LLMJudgeResourcesServerConfig, metadata: Any, enabled: bool, expected_question: str | None
+    ) -> None:
+        config.question_extract_regex = r"<global>(.*?)</global>"
+        config.use_per_record_regex = enabled
+        client = MagicMock(spec=ServerClient)
+        reply = MagicMock(ok=True)
+        reply.read = AsyncMock(return_value=self._create_response("judge", self._msg("[[A=B]]")))
+        client.post = AsyncMock(return_value=reply)
+        server = LLMJudgeResourcesServer(config=config, server_client=client)
+        prompt = "<global>global question</global><question>example</question><question>What is 2+2?</question>"
+        request = LLMJudgeVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                input=[{"role": "user", "content": prompt}]
+            ),
+            response=NeMoGymResponse.model_validate_json(self._create_response("policy", self._msg("4"))),
+            expected_answer="4",
+            template_metadata=metadata,
+        )
+        before = request.model_dump()
+        result = await server.verify(request)
+        expected_prompt = server._judge_prompt_template.format(
+            question=prompt if expected_question is None else expected_question,
+            expected_answer="4",
+            generated_answer="4",
+        )
+        assert result.judge_evaluations[0].responses_create_params.input[-1].content == expected_prompt
+        assert request.model_dump() == before
+        assert result.reward == 1
+        client.post.assert_awaited_once()
+
+    @mark.parametrize("threshold,expected_generated", [(None, "4"), (0, "Answer: 4")])
+    async def test_question_regex_independent_of_answer_threshold(
+        self, config: LLMJudgeResourcesServerConfig, threshold: int | None, expected_generated: str
+    ) -> None:
+        config.extraction_length_threshold = threshold
+        config.check_twice_swap = True
+        config.response_extract_regex = "must be overridden"
+        client = MagicMock(spec=ServerClient)
+        reply = MagicMock(ok=True)
+        reply.read = AsyncMock(return_value=self._create_response("judge", self._msg("[[A=B]]")))
+        client.post = AsyncMock(return_value=reply)
+        server = LLMJudgeResourcesServer(config=config, server_client=client)
+        request = LLMJudgeVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                input=[{"role": "user", "content": "<question>What is 2+2?</question>"}]
+            ),
+            response=NeMoGymResponse.model_validate_json(self._create_response("policy", self._msg("Answer: 4"))),
+            expected_answer="4",
+            template_metadata={"question_regex": r"<question>(.*?)</question>", "output_regex": r"Answer: (.*)"},
+        )
+        result = await server.verify(request)
+        expected_prompt = server._judge_prompt_template.format(
+            question="What is 2+2?", expected_answer="4", generated_answer=expected_generated
+        )
+        assert len(result.judge_evaluations) == (2 if threshold is None else 1)
+        for evaluation in result.judge_evaluations:
+            assert evaluation.responses_create_params.input[-1].content == expected_prompt
+        assert result.reward == 1
+
     async def test_per_record_regex_extraction(self, config: LLMJudgeResourcesServerConfig) -> None:
         """Test that template_metadata.output_regex extracts answer correctly."""
         server_mock = MagicMock(spec=ServerClient)
@@ -450,7 +526,7 @@ class TestApp:
         ]
 
         model_create_params = NeMoGymResponseCreateParamsNonStreaming(
-            input=[{"role": "user", "content": "What is 2+2?"}]
+            input=[{"role": "user", "content": "<question>What is 2+2?</question>"}]
         )
         # Model output contains an answer even if extraction misses or matches empty text.
         model_response = NeMoGymResponse(
@@ -469,13 +545,17 @@ class TestApp:
             responses_create_params=deepcopy(model_create_params),
             response=model_response.model_copy(deep=True),
             expected_answer="4",
-            template_metadata={"output_regex": pattern},
+            template_metadata={"output_regex": pattern, "question_regex": r"<question>(.*?)</question>"},
         )
 
         res = await rs.verify(req)
         assert res.reward == approx(0.5)  # Partial credit
         assert len(res.judge_evaluations) == 2  # Both passes recorded
         assert server_mock.post.call_count == 2
+        for evaluation in res.judge_evaluations:
+            prompt = evaluation.responses_create_params.input[-1].content
+            assert "QUESTION:\nWhat is 2+2?\n" in prompt
+            assert "<question>" not in prompt
 
     async def test_extraction_length_threshold_skips_regex(self, config: LLMJudgeResourcesServerConfig) -> None:
         """Long expected answers skip regex extraction and use full generation."""
