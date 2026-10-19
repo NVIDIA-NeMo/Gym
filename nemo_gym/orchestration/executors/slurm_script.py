@@ -44,6 +44,8 @@ from nemo_gym.orchestration.executors.otel import (
     driver_telemetry_env,
     gym_telemetry_active,
     otel_active,
+    vllm_traces_env,
+    vllm_traces_flag,
 )
 from nemo_gym.orchestration.executors.resume_script import render_resume_prologue
 from nemo_gym.orchestration.executors.script_templates import (
@@ -272,7 +274,10 @@ def _build_vllm_single_instance_multi_node_command(service: VllmServiceConfig, t
 # mode") and exits before loading anything. The flag is legitimate on the head node and reaches us
 # through a service's own extra_args, so it is stripped from the worker command rather than
 # rejected: Gym decides which nodes run headless, so Gym keeps their command valid.
-_HEADLESS_INCOMPATIBLE_FLAG = re.compile(r"\s--api-server-count(?:[= ]\S+)?")
+# `--otlp-traces-endpoint` goes the same way: request spans come from the API server on the head
+# node, and a headless worker given the flag would only try to reach a collector that is not on
+# its node.
+_HEADLESS_INCOMPATIBLE_FLAG = re.compile(r"\s--(?:api-server-count|otlp-traces-endpoint)(?:[= ]\S+)?")
 
 
 def _strip_headless_incompatible_flags(cmd: str) -> str:
@@ -637,6 +642,29 @@ def _build_service_command(
     return _BUILDERS[type(service)](service)
 
 
+def _with_vllm_traces(
+    name: str, service: ServiceConfig, config: SubmitConfig, compute: SlurmComputeConfig, driver_node: int | None
+) -> ServiceConfig:
+    """The service with vLLM request tracing switched on, when `otel.vllm_traces` asks for it.
+
+    The flag and env go through the service's own `extra_args` and `env`, so every command builder
+    (plain, multi-node Ray, data-parallel head, Ray Serve replicas, prefill/decode tiers) carries
+    them without knowing about tracing. A service's explicit env wins over the defaults here.
+
+    vLLM exports to `localhost`, so only a service whose API server runs on the collector's node is
+    traced: a tier pinned to a pool whose head is another node is left alone rather than pointed at a
+    collector it cannot reach.
+    """
+    if not (otel_active(config) and config.otel.vllm_traces and isinstance(service, VllmServiceConfig)):
+        return service
+    collector_node = driver_node if driver_node is not None else 0
+    if service.node_pool is not None and _pool_offsets(compute)[service.node_pool][0] != collector_node:
+        return service
+    extra_args = f"{service.extra_args} {vllm_traces_flag()}".strip()
+    env = {**vllm_traces_env(config.otel.component, name), **service.env}
+    return service.model_copy(update={"extra_args": extra_args, "env": env})
+
+
 def _render_collector_service(
     config: SubmitConfig, remote_bench_dir: Path, *, is_multi_node: bool, driver_node: int | None = None
 ) -> str:
@@ -937,7 +965,10 @@ def build_sbatch_script(
                 pre_command=_service_pre_command(service),
                 nodelist=_service_nodelist(service, driver_node, total_nodes),
             )
-            for name, service in config.deployed_services.items()
+            for name, service in (
+                (name, _with_vllm_traces(name, service, config, compute, driver_node))
+                for name, service in config.deployed_services.items()
+            )
             if not isinstance(service, RayServiceConfig)
         ]
         + [

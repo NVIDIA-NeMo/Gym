@@ -219,6 +219,22 @@ def test_build_vllm_command_multi_instance():
     assert "--data-parallel-size 4" in cmd
 
 
+def test_multi_node_dp_worker_drops_the_traces_endpoint_the_head_keeps():
+    """Request spans come from the head's API server; a headless worker has no collector on its node."""
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="org/model",
+        number_of_instances=4,
+        extra_args="--otlp-traces-endpoint http://localhost:4318/v1/traces --max-model-len 8192",
+    )
+    cmd = _build_vllm_multi_instance_multi_node_command(service, total_nodes=2)
+    head, worker = cmd.split("else", 1)
+    assert "--otlp-traces-endpoint http://localhost:4318/v1/traces" in head
+    assert "--otlp-traces-endpoint" not in worker
+    assert "--max-model-len 8192" in worker
+
+
 def test_build_vllm_command_single_instance_omits_dp_flag(vllm_service):
     cmd = _build_vllm_command(vllm_service)
     assert "--data-parallel-size" not in cmd

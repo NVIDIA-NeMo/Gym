@@ -531,6 +531,74 @@ def test_script_honours_configured_gym_span_groups():
     assert "NEMO_GYM_OTEL_SPAN_GROUPS=per_rollout,sandbox" in _driver_line(_script(config))
 
 
+def _policy_line(script):
+    return next(line for line in script.splitlines() if "--output=logs/policy-$SLURM_JOB_ID.log" in line)
+
+
+def test_vllm_traces_are_off_by_default():
+    assert "--otlp-traces-endpoint" not in _script(_config())
+
+
+def test_vllm_traces_point_the_engine_at_the_collector_over_http():
+    line = _policy_line(_script(_config(otel={"vllm_traces": True})))
+    assert f"--otlp-traces-endpoint http://localhost:{OTLP_HTTP_PORT}/v1/traces" in line
+    assert "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf" in line
+    assert "OTEL_SERVICE_NAME=gym-vllm/policy" in line
+
+
+def test_vllm_traces_keep_the_services_own_flags_and_let_its_env_win():
+    config = _config(
+        services={
+            "policy": {
+                "type": "vllm",
+                "container": "vllm:latest",
+                "model": "/checkpoint",
+                "port": 8000,
+                "extra_args": "--max-model-len 8192",
+                "env": {"OTEL_SERVICE_NAME": "lit:mine"},
+            }
+        },
+        otel={"vllm_traces": True, "component": "engine"},
+    )
+    line = _policy_line(_script(config))
+    assert "--max-model-len 8192 --otlp-traces-endpoint" in line
+    assert "OTEL_SERVICE_NAME=mine" in line
+    assert "OTEL_SERVICE_NAME=engine/policy" not in line
+    assert "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf" in line
+
+
+def test_vllm_traces_need_the_collector():
+    assert "--otlp-traces-endpoint" not in _script(_config(otel={"enabled": False, "vllm_traces": True}))
+
+
+def test_vllm_traces_skip_a_tier_whose_api_server_is_on_another_node():
+    config = _config(
+        services={
+            "policy": {
+                "type": "vllm_pd",
+                "container": "vllm:latest",
+                "model": "/checkpoint",
+                "port": 8000,
+                "prefill": {"node_pool": "prefill"},
+                "decode": {"node_pool": "decode"},
+            }
+        },
+        compute={
+            "cluster-a": {
+                "type": "slurm",
+                "account": "acct",
+                "hostname": None,
+                "node_pools": {"prefill": {"partition": "batch"}, "decode": {"partition": "batch"}},
+            }
+        },
+        otel={"vllm_traces": True},
+    )
+    script = _script(config)
+    traced = [line for line in script.splitlines() if "--otlp-traces-endpoint" in line]
+    assert len(traced) == 1
+    assert "--port 8001" in traced[0]  # the prefill tier, on the collector's node
+
+
 def test_script_leaves_the_driver_alone_when_disabled():
     script = _script(_config(otel={"enabled": False}, driver=_DRIVER_WITH_INSTALL))
     assert "NEMO_GYM_OTEL" not in script

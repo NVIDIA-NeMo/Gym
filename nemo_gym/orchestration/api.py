@@ -506,6 +506,11 @@ class OtelConfig(_StrictModel):
     gym_span_groups: str = "default,verify"
     # Ship Gym's Python logging as OTel logs too (trace-correlated), through the same collector.
     gym_logs: bool = True
+    # Have each vLLM service export one span per request (queue, prefill, decode, token counts) to the
+    # same collector. The spans join Gym's rollout traces through the `traceparent` Gym's model server
+    # already sends. Off by default: it roughly doubles the span volume of a run, and the vLLM image
+    # must ship the OpenTelemetry SDK (the `vllm/vllm-openai` images do) or `vllm serve` refuses to start.
+    vllm_traces: bool = False
     # Node-level exporters that clusters commonly run as system services on every compute node;
     # scraped on localhost when set, skipped when null. DCGM gives per-GPU activity/memory/power,
     # node_exporter gives CPU/memory/network/disk. A closed port only logs scrape errors.
