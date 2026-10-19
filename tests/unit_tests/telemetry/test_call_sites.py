@@ -405,3 +405,39 @@ def test_lens_imports_are_function_local_outside_the_fallback_resolver():
             if targets and path.name not in allowed_at_module_scope:
                 offenders.append((path.name, targets))
     assert not offenders, f"module-scope nemo.lens imports outside the resolvers: {offenders}"
+
+
+# --------------------------------------------------------------------------- #
+# Driver dispatch
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("row", "expected"),
+    [
+        ({"_ng_task_index": 3, "_ng_rollout_index": 0}, "3-0"),
+        ({"_ng_task_index": 3, "_ng_rollout_index": 0, "_ng_attempt_index": 2}, "3-0-a2"),
+        ({"_ng_rollout_id": "custom", "_ng_attempt_index": 2}, "custom-a2"),
+        ({"task_id": {"taskset": "t"}, "_ng_task_index": 5, "_ng_rollout_index": 1}, "5-1"),
+    ],
+)
+def test_dispatch_span_takes_its_identity_from_the_collector_row(recorded_spans, row, expected):
+    """A materialized episode body carries the identity only as `episode_id`; the span reads the row."""
+    from nemo_gym.rollout_collection import _dispatch_span
+
+    with _dispatch_span(row, "env"):
+        pass
+
+    (span,) = [s for s in recorded_spans() if s.name == "gym.rollout.dispatch"]
+    assert span.attributes["nemo.gym.rollout.id"] == expected
+    assert span.attributes["nemo.gym.rollout.dispatch.name"] == "env"
+
+
+def test_dispatch_span_omits_the_id_for_a_row_without_identity(recorded_spans):
+    from nemo_gym.rollout_collection import _dispatch_span
+
+    with _dispatch_span({"input": "x"}, "agent"):
+        pass
+
+    (span,) = [s for s in recorded_spans() if s.name == "gym.rollout.dispatch"]
+    assert "nemo.gym.rollout.id" not in span.attributes

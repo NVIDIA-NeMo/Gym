@@ -26,6 +26,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from opentelemetry.trace import SpanKind, StatusCode
 
 from nemo_gym.telemetry.spans import client_span, rollout_root_span
+from tests.unit_tests.telemetry.conftest import LENS_INSTALLED
 
 
 @pytest.fixture
@@ -106,12 +107,15 @@ def test_client_span_accepts_attributes(recorder):
     assert finished.name == "gym.test"
 
 
-def test_rollout_root_span_starts_a_new_trace_linked_to_a_root_current_span(recorder):
-    """Under the driver's own root (``gym.job``) a dispatch must not nest: new trace id, one link back."""
+def test_rollout_root_span_starts_a_new_trace_linked_to_the_owned_job_span(recorder):
+    """Under the job span the driver owns, a dispatch must not nest: new trace id, one link back."""
     tracer, exporter = recorder
 
     with tracer.start_as_current_span("gym.job") as job:
-        with rollout_root_span("gym.rollout.dispatch", tracer=tracer, **{"nemo.gym.rollout.id": "3-0"}) as span:
+        owner = job.get_span_context()
+        with rollout_root_span(
+            "gym.rollout.dispatch", tracer=tracer, owner=owner, **{"nemo.gym.rollout.id": "3-0"}
+        ) as span:
             assert trace_current_span() is span
             assert span.get_span_context().trace_id != job.get_span_context().trace_id
             assert span.parent is None
@@ -119,16 +123,19 @@ def test_rollout_root_span_starts_a_new_trace_linked_to_a_root_current_span(reco
     dispatch = next(s for s in exporter.get_finished_spans() if s.name == "gym.rollout.dispatch")
     (link,) = dispatch.links
     assert link.context.span_id == job.get_span_context().span_id
-    assert dispatch.attributes["nemo.gym.rollout.id"] == "3-0"
+    if LENS_INSTALLED:
+        assert dispatch.attributes["nemo.gym.rollout.id"] == "3-0"
+    else:
+        assert not dispatch.attributes
 
 
 def test_rollout_root_span_nests_under_an_embedders_trace(recorder):
-    """When a caller owns the trace (the current span has a parent), keep its shape."""
+    """A job opened under a caller's span is not owned: keep the caller's shape, no link."""
     tracer, exporter = recorder
 
     with tracer.start_as_current_span("embedder.step"):
         with tracer.start_as_current_span("gym.job") as job:
-            with rollout_root_span("gym.rollout.dispatch", tracer=tracer) as span:
+            with rollout_root_span("gym.rollout.dispatch", tracer=tracer, owner=None) as span:
                 assert span.get_span_context().trace_id == job.get_span_context().trace_id
                 assert span.parent.span_id == job.get_span_context().span_id
 
@@ -136,10 +143,57 @@ def test_rollout_root_span_nests_under_an_embedders_trace(recorder):
     assert dispatch.links == ()
 
 
+def test_rollout_root_span_nests_under_an_external_root_when_no_job_is_owned(recorder):
+    """The `job` group off inside an embedder: the current span is the embedder's own root, and a
+    root is not ownership. Without an owner the dispatch nests."""
+    tracer, exporter = recorder
+
+    with tracer.start_as_current_span("embedder.step") as step:
+        with rollout_root_span("gym.rollout.dispatch", tracer=tracer, owner=None) as span:
+            assert span.get_span_context().trace_id == step.get_span_context().trace_id
+            assert span.parent.span_id == step.get_span_context().span_id
+
+    dispatch = next(s for s in exporter.get_finished_spans() if s.name == "gym.rollout.dispatch")
+    assert dispatch.links == ()
+
+
+def test_rollout_root_span_nests_under_a_remote_non_recording_context(recorder):
+    """An inbound `traceparent` attaches a NonRecordingSpan, which has no `.parent`; it is a
+    parent, not an owner."""
+    from opentelemetry import context as otel_ctx
+    from opentelemetry import trace as otel_trace
+    from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags
+
+    tracer, exporter = recorder
+    remote = SpanContext(trace_id=0xABC, span_id=0x123, is_remote=True, trace_flags=TraceFlags(0x01))
+    token = otel_ctx.attach(otel_trace.set_span_in_context(NonRecordingSpan(remote)))
+    try:
+        with rollout_root_span("gym.rollout.dispatch", tracer=tracer, owner=None) as span:
+            assert span.get_span_context().trace_id == remote.trace_id
+            assert span.parent.span_id == remote.span_id
+    finally:
+        otel_ctx.detach(token)
+
+    dispatch = next(s for s in exporter.get_finished_spans() if s.name == "gym.rollout.dispatch")
+    assert dispatch.links == ()
+
+
+def test_rollout_root_span_only_splits_when_the_current_span_is_the_owner(recorder):
+    """Owner set, but a child of the job is current: nest under that child."""
+    tracer, exporter = recorder
+
+    with tracer.start_as_current_span("gym.job") as job:
+        owner = job.get_span_context()
+        with tracer.start_as_current_span("gym.job.child") as child:
+            with rollout_root_span("gym.rollout.dispatch", tracer=tracer, owner=owner) as span:
+                assert span.get_span_context().trace_id == job.get_span_context().trace_id
+                assert span.parent.span_id == child.get_span_context().span_id
+
+
 def test_rollout_root_span_without_a_current_span_is_a_plain_root(recorder):
     tracer, exporter = recorder
 
-    with rollout_root_span("gym.rollout.dispatch", tracer=tracer) as span:
+    with rollout_root_span("gym.rollout.dispatch", tracer=tracer, owner=None) as span:
         assert span.parent is None
 
     (dispatch,) = exporter.get_finished_spans()
