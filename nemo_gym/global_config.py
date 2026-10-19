@@ -1626,7 +1626,7 @@ Set the keys individually, in a config or as overrides, e.g.:
             if _openai_version_matches_nemo_gym_constraint(openai_version):
                 head_server_deps.append(f"openai=={openai_version}")
             elif allow_openai_skew:
-                logging.warning(
+                logger.warning(
                     f"Not pinning the parent process's openai=={openai_version} into server venvs: "
                     f"it does not satisfy nemo-gym's own constraint ({_nemo_gym_openai_requirement()}). "
                     "Server venvs resolve openai from nemo-gym's constraint instead, so the parent and "
