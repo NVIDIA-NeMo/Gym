@@ -31,12 +31,11 @@ from nemo_gym.base_responses_api_model import (
     ModelCallCaptureConfig,
     SimpleResponsesAPIModel,
     _orjson_dispatch_response,
-    build_model_call_record,
     install_model_call_capture,
     make_capture_store,
-    read_model_call_records,
 )
 from nemo_gym.global_config import NEMO_GYM_RESERVED_TOP_LEVEL_KEYS, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.observability.model_calls import build_model_call_record, read_model_call_records
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymResponse,
@@ -799,8 +798,8 @@ def test_maybe_rollout_id_from_run_body_reads_canonical_indices():
     """The shared accessor agents use to derive the rollout id from a /run request body."""
     from pydantic import BaseModel, ConfigDict
 
-    from nemo_gym.base_responses_api_model import maybe_rollout_id_from_run_body
     from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+    from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 
     mapping = MappingProxyType({TASK_INDEX_KEY_NAME: 3, ROLLOUT_INDEX_KEY_NAME: 1})
     assert maybe_rollout_id_from_run_body(mapping) == "3-1"
@@ -925,7 +924,7 @@ def test_model_call_capture_keys_are_reserved_global_config():
 
 
 def test_model_call_capture_config_requires_absolute_dir_when_enabled(tmp_path, monkeypatch):
-    from nemo_gym.base_responses_api_model import model_call_capture_dirs_from_config
+    from nemo_gym.observability.model_calls import model_call_capture_dirs_from_config
 
     assert make_capture_store(ModelCallCaptureConfig()) is None
     with pytest.raises(ValueError, match="required"):
@@ -946,7 +945,7 @@ def test_model_call_capture_config_requires_absolute_dir_when_enabled(tmp_path, 
 
 
 def test_observability_enabled_from_config(tmp_path):
-    from nemo_gym.base_responses_api_model import observability_enabled_from_config
+    from nemo_gym.observability.model_calls import observability_enabled_from_config
 
     assert observability_enabled_from_config({}) is False
 
@@ -1041,7 +1040,7 @@ def test_capture_records_non_json_response_as_none(tmp_path):
 
 
 def test_as_arguments():
-    from nemo_gym.base_responses_api_model import _as_arguments
+    from nemo_gym.observability.model_calls import _as_arguments
 
     assert _as_arguments({"x": 1}) == {"x": 1}
     assert _as_arguments('{"y": 2}') == {"y": 2}
@@ -1050,7 +1049,7 @@ def test_as_arguments():
 
 
 def test_cache_signal():
-    from nemo_gym.base_responses_api_model import _cache_signal
+    from nemo_gym.observability.model_calls import _cache_signal
 
     assert _cache_signal(None) == (None, None)
     assert _cache_signal({"prompt_tokens_details": {"cached_tokens": 4}}) == (True, 4)
@@ -1066,7 +1065,7 @@ def test_cache_signal():
 
 
 def test_extract_token_stats_chat_fallback():
-    from nemo_gym.base_responses_api_model import extract_token_stats
+    from nemo_gym.observability.model_calls import extract_token_stats
 
     assert extract_token_stats(None)["tokens_total"] is None
     stats = extract_token_stats(
@@ -1076,7 +1075,7 @@ def test_extract_token_stats_chat_fallback():
 
 
 def test_tool_calls_and_reasoning_chat_and_anthropic():
-    from nemo_gym.base_responses_api_model import _tool_calls_and_reasoning
+    from nemo_gym.observability.model_calls import _tool_calls_and_reasoning
 
     chat = {
         "choices": [
@@ -1101,7 +1100,7 @@ def test_tool_calls_and_reasoning_chat_and_anthropic():
 
 
 def test_tool_calls_and_reasoning_accepts_reasoning_alias():
-    from nemo_gym.base_responses_api_model import _tool_calls_and_reasoning
+    from nemo_gym.observability.model_calls import _tool_calls_and_reasoning
 
     # vLLM / newer servers emit `reasoning` (no `reasoning_content`).
     assert _tool_calls_and_reasoning({"choices": [{"message": {"content": "hi", "reasoning": "because"}}]}) == (
@@ -1114,7 +1113,7 @@ def test_tool_calls_and_reasoning_accepts_reasoning_alias():
 
 
 def test_tool_calls_and_reasoning_skips_non_dict_output_items():
-    from nemo_gym.base_responses_api_model import _tool_calls_and_reasoning
+    from nemo_gym.observability.model_calls import _tool_calls_and_reasoning
 
     # A Responses `output` list may contain non-dict junk; it must be skipped, not crash.
     resp = {"output": [None, "junk", {"type": "function_call", "call_id": "c", "name": "f", "arguments": "{}"}]}
@@ -1471,7 +1470,7 @@ def test_reconstruct_streamed_response_best_effort_none():
 
 
 def test_maybe_rollout_id_from_run_body_attempt_suffix():
-    from nemo_gym.base_responses_api_model import maybe_rollout_id_from_run_body
+    from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 
     base = {"_ng_task_index": 3, "_ng_rollout_index": 2}
     assert maybe_rollout_id_from_run_body(base) == "3-2"  # no attempt -> bare key
@@ -1484,7 +1483,7 @@ def test_maybe_rollout_id_from_run_body_attempt_suffix():
 
 
 def test_maybe_rollout_id_from_run_body_prefers_an_explicit_id():
-    from nemo_gym.base_responses_api_model import maybe_rollout_id_from_run_body
+    from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 
     base = {"_ng_task_index": 3, "_ng_rollout_index": 2}
     # Restarted index numbering derives the same id twice.
@@ -1499,7 +1498,7 @@ def test_maybe_rollout_id_from_run_body_prefers_an_explicit_id():
 
 @pytest.mark.parametrize("bad", [".hidden", "has/slash", "has space", "", 7, None])
 def test_maybe_rollout_id_from_run_body_refuses_an_unusable_explicit_id(bad):
-    from nemo_gym.base_responses_api_model import maybe_rollout_id_from_run_body
+    from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 
     body = {"_ng_task_index": 3, "_ng_rollout_index": 2, "_ng_rollout_id": bad}
     if bad is None:
@@ -1513,8 +1512,7 @@ def test_maybe_rollout_id_from_run_body_refuses_an_unusable_explicit_id(bad):
 
 
 def test_explicit_rollout_ids_round_trip_through_the_path_prefix():
-    from nemo_gym.base_responses_api_model import maybe_rollout_id_from_run_body
-    from nemo_gym.rollout_correlation import RolloutContextMiddleware
+    from nemo_gym.rollout_correlation import RolloutContextMiddleware, maybe_rollout_id_from_run_body
 
     # The id becomes a path segment.
     # Middleware must return every accepted id unchanged.
@@ -1541,7 +1539,8 @@ def _capture_exchange(dialect, model_server, usage, response):
 
 
 def test_merge_capture_attaches_metrics_without_raw_payloads(tmp_path):
-    from nemo_gym.base_responses_api_model import CaptureStore, merge_model_call_capture_into_record
+    from nemo_gym.base_responses_api_model import CaptureStore
+    from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
 
     store = CaptureStore(tmp_path)
     exchange = _capture_exchange(
@@ -1610,7 +1609,8 @@ def test_merge_capture_attaches_metrics_without_raw_payloads(tmp_path):
 
 
 def test_merge_capture_owns_opencode_calls_by_client_session(tmp_path):
-    from nemo_gym.base_responses_api_model import CaptureStore, merge_model_call_capture_into_record
+    from nemo_gym.base_responses_api_model import CaptureStore
+    from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
 
     store = CaptureStore(tmp_path)
     exchange = _capture_exchange(
@@ -1638,7 +1638,8 @@ def test_merge_capture_owns_opencode_calls_by_client_session(tmp_path):
 
 
 def test_merge_capture_reports_observation_join_failure(tmp_path, monkeypatch):
-    from nemo_gym.base_responses_api_model import CaptureStore, merge_model_call_capture_into_record
+    from nemo_gym.base_responses_api_model import CaptureStore
+    from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
 
     store = CaptureStore(tmp_path)
     exchange = _capture_exchange("chat", "A", {}, {"id": "resp-A"})
@@ -1656,14 +1657,15 @@ def test_merge_capture_reports_observation_join_failure(tmp_path, monkeypatch):
     def fail_association(*_args, **_kwargs):
         raise RuntimeError("association failed")
 
-    monkeypatch.setattr("nemo_gym.base_responses_api_model.join_model_call_observations", fail_association)
+    monkeypatch.setattr("nemo_gym.observability.model_calls.join_model_call_observations", fail_association)
     merge_model_call_capture_into_record(record, [tmp_path])
 
     assert [gap["code"] for gap in record["ng_model_call_capture"]["gaps"]] == ["agent_observation_join_failed"]
 
 
 def test_merge_capture_reports_missing_capture(tmp_path):
-    from nemo_gym.base_responses_api_model import CaptureStore, merge_model_call_capture_into_record
+    from nemo_gym.base_responses_api_model import CaptureStore
+    from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
 
     rec = {
         "_ng_task_index": 9,
@@ -1696,7 +1698,7 @@ def test_merge_capture_reports_missing_capture(tmp_path):
 
 
 def test_merge_capture_preserves_valid_records_around_malformed_data(tmp_path):
-    from nemo_gym.base_responses_api_model import merge_model_call_capture_into_record
+    from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
 
     store = CaptureStore(tmp_path)
     first = _capture_exchange("responses", "A", {}, {"id": "resp-A"})
@@ -1717,7 +1719,8 @@ def test_merge_capture_preserves_valid_records_around_malformed_data(tmp_path):
 
 
 def test_merge_capture_reports_partial_write_loss(tmp_path):
-    from nemo_gym.base_responses_api_model import CaptureStore, merge_model_call_capture_into_record
+    from nemo_gym.base_responses_api_model import CaptureStore
+    from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
 
     store = CaptureStore(tmp_path)
     store.record("4-2", _capture_exchange("responses", "A", {}, {"id": "resp-A"}))
@@ -1731,8 +1734,8 @@ def test_merge_capture_reports_partial_write_loss(tmp_path):
 
 
 def test_clear_model_call_captures_for_rollouts_run_scoping(tmp_path, monkeypatch):
-    import nemo_gym.base_responses_api_model as obs
-    from nemo_gym.base_responses_api_model import clear_model_call_captures_for_rollouts
+    import nemo_gym.observability.model_calls as obs
+    from nemo_gym.observability.model_calls import clear_model_call_captures_for_rollouts
 
     store = CaptureStore(tmp_path)
     store.record("0-0", {"dialect": "chat", "request": {}, "response": {}})
@@ -1756,7 +1759,7 @@ def test_clear_model_call_captures_for_rollouts_run_scoping(tmp_path, monkeypatc
 
 
 def test_aggregate_model_call_records_sums_and_counts():
-    from nemo_gym.base_responses_api_model import ModelCallRecord, aggregate_model_call_records
+    from nemo_gym.observability.model_calls import ModelCallRecord, aggregate_model_call_records
 
     calls = [
         ModelCallRecord(
@@ -1798,7 +1801,7 @@ def test_rollout_prefix_stripped_when_capture_disabled():
 
 
 def test_extract_token_stats_anthropic_cache_fold():
-    from nemo_gym.base_responses_api_model import extract_token_stats
+    from nemo_gym.observability.model_calls import extract_token_stats
 
     # Anthropic native: input_tokens is the uncached remainder; cache-read + cache-creation fold in.
     stats = extract_token_stats(
@@ -1816,7 +1819,7 @@ def test_extract_token_stats_anthropic_cache_fold():
 
 
 def test_extract_token_stats_anthropic_fully_cached_zero_base():
-    from nemo_gym.base_responses_api_model import extract_token_stats
+    from nemo_gym.observability.model_calls import extract_token_stats
 
     # A fully-cached Anthropic response omits input_tokens; a 0 base preserves the folded prompt
     # size instead of leaving tokens_in null.
@@ -1835,7 +1838,7 @@ def test_extract_token_stats_anthropic_fully_cached_zero_base():
 
 
 def test_extract_token_stats_openai_cached_not_double_counted():
-    from nemo_gym.base_responses_api_model import extract_token_stats
+    from nemo_gym.observability.model_calls import extract_token_stats
 
     # OpenAI: input_tokens already includes cached tokens (cached_tokens is a subset) -> no fold.
     stats = extract_token_stats(
@@ -2094,7 +2097,7 @@ def test_capture_store_pending_token_survives_an_unsafe_model_call_id(tmp_path):
 async def test_await_quiescence_waits_for_a_detached_write_to_land(tmp_path):
     import asyncio
 
-    from nemo_gym.base_responses_api_model import await_model_call_capture_quiescence
+    from nemo_gym.observability.model_calls import await_model_call_capture_quiescence
 
     store = CaptureStore(tmp_path)
     store.mark_pending("2-0", "call-1")
@@ -2117,7 +2120,7 @@ async def test_await_quiescence_waits_for_a_detached_write_to_land(tmp_path):
 
 @pytest.mark.asyncio
 async def test_await_quiescence_gives_up_on_a_stranded_claim(tmp_path):
-    from nemo_gym.base_responses_api_model import await_model_call_capture_quiescence
+    from nemo_gym.observability.model_calls import await_model_call_capture_quiescence
 
     CaptureStore(tmp_path).mark_pending("3-0", "call-1")
 
@@ -2125,7 +2128,7 @@ async def test_await_quiescence_gives_up_on_a_stranded_claim(tmp_path):
 
 
 def test_merge_capture_flags_a_claim_that_never_landed(tmp_path):
-    from nemo_gym.base_responses_api_model import merge_model_call_capture_into_record
+    from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
 
     store = CaptureStore(tmp_path)
     store.record("4-0", _capture_exchange("responses", "A", {}, {"id": "resp-A"}))
@@ -2138,7 +2141,7 @@ def test_merge_capture_flags_a_claim_that_never_landed(tmp_path):
 
 
 def test_clear_captures_for_rollouts_drops_stale_pending_claims(tmp_path):
-    from nemo_gym.base_responses_api_model import clear_model_call_captures_for_rollouts
+    from nemo_gym.observability.model_calls import clear_model_call_captures_for_rollouts
 
     store = CaptureStore(tmp_path)
     store.mark_pending("5-0", "call-1")
@@ -2156,7 +2159,8 @@ def test_capture_claim_is_visible_while_the_call_is_still_in_flight(tmp_path):
     """
     import asyncio
 
-    from nemo_gym.base_responses_api_model import _CaptureMiddleware, await_model_call_capture_quiescence
+    from nemo_gym.base_responses_api_model import _CaptureMiddleware
+    from nemo_gym.observability.model_calls import await_model_call_capture_quiescence
 
     store = CaptureStore(tmp_path)
 
