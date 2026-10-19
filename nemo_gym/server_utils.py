@@ -87,8 +87,19 @@ from nemo_gym.global_config import (
     get_global_config_dict,
 )
 from nemo_gym.profiling import Profiler
-from nemo_gym.rollout_correlation import ROUTED_PATH_STATE_KEY, current_rollout_id, maybe_rollout_id_from_run_body
+from nemo_gym.rollout_correlation import (
+    ROUTED_PATH_STATE_KEY,
+    current_rollout_id,
+    maybe_rollout_id_from_run_body,
+    rollout_context,
+)
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, safe_set_span_attributes
+
+
+try:
+    from opentelemetry import context as _otel_context
+except ImportError:  # the telemetry extra is optional; without the SDK there is no span context to isolate
+    _otel_context = None
 from nemo_gym.telemetry.connection_pool import (
     QueueTimedTCPConnector,
     build_connection_pool_connector,
@@ -1280,6 +1291,37 @@ def _cancelled_request_route(scope: Scope) -> str:
     return "<unmatched>"
 
 
+class RequestContextIsolationMiddleware:
+    """Start every request from a clean context, whatever task uvicorn started it from.
+
+    uvicorn starts a *pipelined* request's task from inside the previous request's task
+    (``on_response_complete`` → ``loop.create_task``), so that task inherits the previous
+    request's contextvars: the OpenTelemetry current span and Gym's rollout id. The OTel ASGI
+    instrumentation then sees a current span, skips ``traceparent`` extraction, and files the
+    new request as an INTERNAL child of the previous one, under the previous rollout's trace.
+    Pipelining happens whenever a client reuses a kept-alive connection before this server has
+    sent the terminating body message, which Starlette's ``BaseHTTPMiddleware`` sends late.
+
+    Registered outermost, this resets both for the request's duration, so the instrumentor
+    extracts the inbound ``traceparent`` and the rollout middleware sets the id from the path.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        otel_token = _otel_context.attach(_otel_context.Context()) if _otel_context is not None else None
+        try:
+            with rollout_context(None):
+                await self.app(scope, receive, send)
+        finally:
+            if otel_token is not None:
+                _otel_context.detach(otel_token)
+
+
 class ClientDisconnectCancellationMiddleware:
     """Cancel an in-flight HTTP request when its client disconnects."""
 
@@ -1559,6 +1601,9 @@ repr(e): {repr(e)}"""
     def setup_cancellation_middleware(self, app: FastAPI) -> None:
         app.add_middleware(ClientDisconnectCancellationMiddleware)
 
+    def setup_request_context_isolation(self, app: FastAPI) -> None:
+        app.add_middleware(RequestContextIsolationMiddleware)
+
     def setup_profiling(self, app: FastAPI, profiling_config: ProfilingMiddlewareConfig) -> None:  # pragma: no cover
         base_profile_dir = WORKING_DIR / profiling_config.profiling_results_dirpath / self.get_session_middleware_key()
         profiler = Profiler(name=self.config.name, base_profile_dir=base_profile_dir)
@@ -1699,6 +1744,9 @@ repr(e): {repr(e)}"""
         # extracts an inbound `traceparent` and parents this server's SERVER span to the
         # caller's CLIENT span.
         server.instrument_app_for_telemetry(app)
+        # Outermost of all, so the instrumentor and the rollout middleware run inside a clean
+        # context even when uvicorn started this request's task from the previous request's.
+        server.setup_request_context_isolation(app)
 
         app.exception_handler(RequestValidationError)(_validation_exception_handler)
 

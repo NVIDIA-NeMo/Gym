@@ -125,6 +125,16 @@ The `traceparent` header is not arriving. Check, in order:
    telemetry does not extract the header. Confirm that the environment reached it —
    `NEMO_GYM_OTEL_ENABLED` must be set in the server process, not only in your shell.
 
+### A Request Nests Under the Previous One on the Same Connection
+
+Seen as a server span whose parent is the previous request's server span, in another rollout's
+trace, with the caller's client span left without a child. uvicorn starts a pipelined request's
+task from inside the previous request's task, so it inherits that request's context, and the
+instrumentor then skips `traceparent` extraction. Gym's servers wrap every request in
+`RequestContextIsolationMiddleware`, registered outermost in `run_webserver`, which resets the
+OpenTelemetry context and the rollout id before the instrumentor runs. An app served without
+`run_webserver` needs the same middleware outermost to be safe from this.
+
 ### Traces Are Missing Their Last Spans
 
 Spans export in batches. A process that exits before its batch flushes drops whatever was
