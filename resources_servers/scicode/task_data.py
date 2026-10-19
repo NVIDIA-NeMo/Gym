@@ -59,6 +59,15 @@ class TaskData(BaseModel):
         ),
         json_schema_extra={"consumed_by": ["prompt"]},
     )
+    prefilled_steps_code: Dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Optional benchmark-specific reference code for official unscored steps, keyed by "
+            "canonical step number (for example, '13.6'). The agent adds it to cumulative context "
+            "without generating or scoring that step."
+        ),
+        json_schema_extra={"consumed_by": ["prompt"]},
+    )
     uuid: Optional[str] = Field(
         default=None,
         description="Row identifier (mirrors problem_id in committed data); never read by verify().",
