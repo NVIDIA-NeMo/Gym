@@ -11,8 +11,10 @@ from uuid import uuid4
 from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap
 from nemo_gym.sandbox import AsyncSandbox
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig
+from responses_api_agents.nooa_agent.result import set_response_lifecycle
 from responses_api_agents.nooa_agent.runner import NOOARunFailure, NOOARunRequest, NOOARunResult
-from responses_api_agents.nooa_agent.sandbox_entrypoint import SandboxInput, SandboxResult
+from responses_api_agents.nooa_agent.sandbox_entrypoint import SandboxCheckpoint, SandboxInput, SandboxResult
+from responses_api_agents.nooa_agent.termination import NOOATerminationReason
 
 
 class SandboxNOOARunner:
@@ -40,6 +42,7 @@ class SandboxNOOARunner:
         self.launched = False
         self.stopped = False
         self.artifact: SandboxResult | None = None
+        self.checkpoint: SandboxCheckpoint | None = None
         self.observations: AgentObservationBundle | None = None
         self.diagnostics = ""
 
@@ -80,7 +83,10 @@ class SandboxNOOARunner:
         await self.stop()
         await self.collect()
         if self.artifact is None:
-            raise RuntimeError(f"NOOA sandbox result is missing or malformed: {self.diagnostics}")
+            error = RuntimeError(f"NOOA sandbox result is missing or malformed: {self.diagnostics}")
+            if self.checkpoint is not None and self.checkpoint.response is not None:
+                raise NOOARunFailure(error, self.checkpoint.run_result()) from error
+            raise error
         request.model_cookies.update(self.artifact.model_cookies)
         request.resource_cookies.update(self.artifact.resource_cookies)
         if self.artifact.error is not None:
@@ -118,26 +124,62 @@ class SandboxNOOARunner:
         self.stopped = True
 
     async def collect(self) -> None:
-        """Retain a graceful checkpoint, or explicitly mark evidence lost to a hard stop."""
+        """Prefer terminal evidence; recover a checkpoint without claiming task completion."""
         if not self.launched or self.artifact is not None:
             return
         try:
-            self.artifact = SandboxResult.model_validate_json(await self._read("result.json"))
-            self.observations = self.artifact.observations
+            artifact = SandboxResult.model_validate_json(await self._read("result.json"))
+            if artifact.response is None and artifact.error is None:
+                raise ValueError("NOOA terminal result has neither a response nor an error")
         except Exception:
-            try:
-                self.diagnostics = (await self._read("stderr.log"))[-2000:]
-            except Exception:
-                self.diagnostics = "Runner diagnostics unavailable"
-            self.observations = AgentObservationBundle(
-                source="nooa",
-                gaps=[
-                    ObservationGap(
-                        code="sandbox_result_unavailable",
-                        detail="NOOA result missing or malformed; in-memory hooks may be lost. External model capture remains.",
-                    )
-                ],
-            )
+            pass
+        else:
+            self.artifact = artifact
+            self.checkpoint = None
+            self.observations = self.artifact.observations
+            return
+
+        try:
+            self.diagnostics = (await self._read("stderr.log"))[-2000:]
+        except Exception:
+            self.diagnostics = "Runner diagnostics unavailable"
+        gap = ObservationGap(
+            code="sandbox_result_unavailable",
+            detail="NOOA terminal result is missing or malformed; recovered evidence cannot establish completion.",
+        )
+        try:
+            checkpoint = SandboxCheckpoint.model_validate_json(await self._read("checkpoint.json"))
+        except Exception:
+            # A failed retry must not discard an earlier valid snapshot. Temporary
+            # files from interrupted writes are never candidates for recovery.
+            checkpoint = self.checkpoint
+        if checkpoint is None:
+            self.observations = AgentObservationBundle(source="nooa", gaps=[gap])
+            return
+
+        detail = "NOOA worker exited without a valid final result; checkpoint evidence is partial and not gradable."
+        observations = checkpoint.observations.model_copy(deep=True)
+        observations.gaps = list(
+            {
+                item.model_dump_json(): item
+                for item in [*observations.gaps, gap, ObservationGap(code="partial_checkpoint", detail=detail)]
+            }.values()
+        )
+        # The controller determines failure from the absent terminal result, never
+        # from a checkpoint's claimed response status or termination reason.
+        self.checkpoint = checkpoint.model_copy(
+            update={
+                "response": set_response_lifecycle(
+                    checkpoint.response, NOOATerminationReason.INFRASTRUCTURE_ERROR, detail
+                )
+                if checkpoint.response is not None
+                else None,
+                "observations": observations,
+                "termination_reason": NOOATerminationReason.INFRASTRUCTURE_ERROR,
+                "termination_error": detail,
+            }
+        )
+        self.observations = observations
 
     async def close(self) -> None:
         """Stop before disconnecting; a failed cleanup leaves this handle available for retry."""
