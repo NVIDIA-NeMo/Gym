@@ -22,7 +22,6 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Discriminator,
-    Field,
     PrivateAttr,
     SerializationInfo,
     Tag,
@@ -161,7 +160,6 @@ class VllmServiceConfig(BaseModelServiceConfig):
     trust_remote_code: bool = False
     number_of_instances: int = 1
     use_ray_serve: bool = False
-    server_per_node: bool = False
     # Raw extra flags appended verbatim to `vllm serve` (e.g. "--max-model-len 8192").
     extra_args: str = ""
     # Port the data-parallel ranks of a multi-node service coordinate on.
@@ -185,6 +183,10 @@ class VllmServiceConfig(BaseModelServiceConfig):
         return self
 
 
+class VllmNodeServiceConfig(VllmServiceConfig):
+    server_per_node: bool = False
+
+
 def effective_ray_serve(service: "VllmServiceConfig", total_nodes: int, gpus_per_node_values: list[int]) -> bool:
     """Whether the Ray Serve gateway manages this service's instances/routing instead of vLLM's own DP."""
     if service.use_ray_serve:
@@ -196,14 +198,11 @@ def effective_ray_serve(service: "VllmServiceConfig", total_nodes: int, gpus_per
     return total_nodes > 1 and service.number_of_instances > 1 and tp_pp > max_gpus_per_node
 
 
-class VllmTierSettings(VllmServiceConfig):
-    server_per_node: bool = Field(default=False, exclude=True)
-
-
 class VllmPDTierConfig(VllmServiceConfig):
     """One tier of a `vllm_pd` service as deployed. Built by the service, never written by a user."""
 
     nixl_side_channel_port: int
+    server_per_node: bool
     kv_transfer_config: dict[str, str]
 
 
@@ -220,8 +219,8 @@ class VllmPDServiceConfig(BaseModelServiceConfig):
     """
 
     type: Literal["vllm_pd"]
-    prefill: VllmTierSettings
-    decode: VllmTierSettings
+    prefill: VllmServiceConfig
+    decode: VllmServiceConfig
     # Run an independent server on every node of each tier's pool instead of one data-parallel
     # engine across them. The router then lists each node as its own endpoint.
     server_per_node: bool = False
@@ -272,8 +271,9 @@ class VllmPDServiceConfig(BaseModelServiceConfig):
             # model_construct: the tier is already validated, and env prefixes must not resolve twice.
             self._tiers[name] = VllmPDTierConfig.model_construct(
                 _fields_set=tier.model_fields_set,
-                **{**dict(tier), "server_per_node": self.server_per_node},
+                **dict(tier),
                 nixl_side_channel_port=nixl_port,
+                server_per_node=self.server_per_node,
                 kv_transfer_config={
                     "kv_connector": self.kv_connector,
                     "kv_role": role,
@@ -324,7 +324,7 @@ class RayServiceConfig(BaseServiceConfig):
 
 # Discriminated union keyed on `type`; Pydantic rejects unknown type values at parse time.
 ServiceConfig = Annotated[
-    Annotated[VllmServiceConfig, Tag("vllm")]
+    Annotated[VllmNodeServiceConfig, Tag("vllm")]
     | Annotated[RayServiceConfig, Tag("ray")]
     | Annotated[VllmPDServiceConfig, Tag("vllm_pd")],
     Discriminator("type"),
@@ -617,7 +617,15 @@ class SubmitConfig(_StrictModel):
                 else (compute.node_pools if isinstance(compute, SlurmComputeConfig) else {})
             )
             service_nodes = sum(p.nodes for p in service_pools.values()) or total_nodes
-            if service.server_per_node:
+            if isinstance(service, VllmPDTierConfig) and service.server_per_node:
+                if service.number_of_instances != 1:
+                    raise ValueError(
+                        f"Service '{service_name}' runs one server per node (server_per_node), so each node is one "
+                        f"instance; number_of_instances must be 1, got {service.number_of_instances}."
+                    )
+                # Each node serves on its own, so size it as a single-node deployment.
+                service_nodes = 1
+            if isinstance(service, VllmNodeServiceConfig) and service.server_per_node:
                 if service.number_of_instances != 1:
                     raise ValueError(
                         f"Service '{service_name}' runs one server per node (server_per_node), so each node is one "
@@ -633,7 +641,6 @@ class SubmitConfig(_StrictModel):
                         f"Service '{service_name}' runs one server per node (server_per_node), which leaves no "
                         "instances for the Ray Serve gateway to route; drop use_ray_serve."
                     )
-                # Each node serves on its own, so size it as a single-node deployment.
                 service_nodes = 1
             if isinstance(compute, SlurmComputeConfig):
                 service_gpus = [p.gpus_per_node for p in service_pools.values() if p.gpus_per_node is not None]

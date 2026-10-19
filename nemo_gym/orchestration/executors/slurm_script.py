@@ -29,6 +29,7 @@ from nemo_gym.orchestration.api import (
     ServiceConfig,
     SlurmComputeConfig,
     SubmitConfig,
+    VllmNodeServiceConfig,
     VllmPDServiceConfig,
     VllmPDTierConfig,
     VllmServiceConfig,  # used in _BUILDERS dispatch table
@@ -603,6 +604,7 @@ def _render_ray_service(
 
 _BUILDERS = {
     VllmServiceConfig: _build_vllm_command,
+    VllmNodeServiceConfig: _build_vllm_command,
     VllmPDTierConfig: _build_vllm_command,
     RayServiceConfig: _build_ray_command,
 }
@@ -762,7 +764,7 @@ def _service_nodelist(service: ServiceConfig, driver_node: int | None, total_nod
 
 def _build_nodes(service: ServiceConfig, compute: SlurmComputeConfig, total_nodes: int) -> int:
     """Nodes the service command is written for; a per-node server is a single-node command."""
-    if isinstance(service, VllmServiceConfig) and service.server_per_node:
+    if isinstance(service, (VllmPDTierConfig, VllmNodeServiceConfig)) and service.server_per_node:
         return 1
     return _service_nodes(service, compute, total_nodes)
 
@@ -863,11 +865,7 @@ def _health_check_probes(
     total_nodes: int,
 ) -> list[tuple[str, str]]:
     """(label, host) pairs a service's readiness waits on: every node of a per-node pool, else one."""
-    if (
-        isinstance(service, VllmServiceConfig)
-        and service.server_per_node
-        and not isinstance(service, VllmPDTierConfig)
-    ):
+    if isinstance(service, VllmNodeServiceConfig) and service.server_per_node:
         start, count = _pool_offsets(compute)[service.node_pool]
         return [(f"{name}-node{i}", _probe_host(start + i)) for i in range(count)]
     return [(name, _health_check_host(service, config, compute, driver_node, total_nodes))]
