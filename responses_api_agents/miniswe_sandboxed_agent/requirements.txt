@@ -1,6 +1,5 @@
 -e nemo-gym[dev,sandbox] @ ../../
 mini-swe-agent==2.4.6
-litellm==1.81.14
 mcp==1.29.0
 httpx-aiohttp==0.2.0
 opensandbox==0.1.16
