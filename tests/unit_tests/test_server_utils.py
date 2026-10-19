@@ -2434,39 +2434,6 @@ def test_model_header_comes_from_its_harness_property(monkeypatch, header):
     assert client.assistant_message_header("unused_model") is None
 
 
-def test_model_header_imports_nested_harness_key(monkeypatch):
-    import sys
-    from types import ModuleType
-
-    # Nested harnesses are keyed by their directory path, e.g. `conversational_tool_use/simulation`.
-    nested = ModuleType("responses_api_agents.test_header_group.nested_harness")
-    nested._assistant_message_header = b"X-Nested-Reply"
-    monkeypatch.setitem(sys.modules, nested.__name__, nested)
-    client = ServerClient(
-        head_server_config={"host": "localhost", "port": 0},
-        global_config_dict=OmegaConf.create(
-            {
-                "conversational_tool_use_agent": {
-                    "responses_api_agents": {
-                        "conversational_tool_use/simulation": {
-                            "model_server": {"type": "responses_api_models", "name": "policy_model"},
-                        }
-                    }
-                },
-                "nested_agent": {
-                    "responses_api_agents": {
-                        "test_header_group/nested_harness": {
-                            "model_server": {"type": "responses_api_models", "name": "nested_model"},
-                        }
-                    }
-                },
-            }
-        ),
-    )
-    assert client.assistant_message_header("policy_model") is None
-    assert client.assistant_message_header("nested_model") == b"x-nested-reply"
-
-
 def test_shared_model_rejects_conflicting_harness_headers(monkeypatch):
     import sys
     from types import ModuleType

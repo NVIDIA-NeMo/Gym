@@ -30,6 +30,7 @@ from nemo_gym.token_id_capture import (
     ParentResolutionStatus,
     TokenCaptureStore,
     TokenEntry,
+    apply_capture_incomplete_verdict,
     stamp_lineage,
 )
 from nemo_gym.token_id_capture.builder import run_builder
@@ -42,7 +43,9 @@ from nemo_gym.token_id_capture.delivery import (
     capture_build_can_retire,
     finalize_rollout_token_capture,
 )
-from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint
+from nemo_gym.token_id_capture.fingerprint import FINGERPRINT_VERSION, assistant_fingerprint
+from nemo_gym.token_id_capture.staging.digest import EMPTY_EXTRAS_DIGEST
+from nemo_gym.token_id_capture.staging.records import CallRecord
 from nemo_gym.token_id_capture.terminal import resolve_terminal
 
 
@@ -271,6 +274,99 @@ def test_identical_retries_collapse_to_one_call():
     ]
     att = resolve_terminal(entries, _response([_assistant_item("same")]))
     assert att.attributed and att.model_call_id == "call_a" and att.method == "content_output"
+    # Neither serving recorded a finish reason, so the twins agree and the verdict stands.
+    assert att.finish_reason_resolved
+
+
+@pytest.mark.parametrize("cut_call", ["call_a", "call_b"])
+def test_identical_retries_with_different_finish_reasons_leave_the_verdict_unresolved(cut_call):
+    # The same tokens were served twice, once cut at the output budget and once complete (a
+    # retry under a larger budget). Content names the smaller call id, which says nothing about
+    # which serving the harness kept, so the chain is attributed but the finish reason is not,
+    # whichever twin was the cut one.
+    entries = [
+        _entry("call_a", [1, 2], [3, 4], text="same", finish_reason="length" if cut_call == "call_a" else "stop"),
+        _entry("call_b", [1, 2], [3, 4], text="same", finish_reason="length" if cut_call == "call_b" else "stop"),
+    ]
+    att = resolve_terminal(entries, _response([_assistant_item("same")]))
+    assert att.attributed and att.model_call_id == "call_a" and att.method == "content_output"
+    assert not att.finish_reason_resolved
+    assert "finish_reason_disagreement" in att.reason
+
+
+@pytest.mark.parametrize("witness", ["explicit", "response_id"])
+def test_a_witness_that_singles_out_one_twin_settles_its_finish_reason(witness):
+    # A gate seal, or possession of the served response id, names the serving the harness kept,
+    # so its finish reason stands even though a token-identical twin recorded a different one.
+    entries = [
+        _entry("call_a", [1, 2], [3, 4], text="same", response_id="resp_a", finish_reason="length"),
+        _entry("call_b", [1, 2], [3, 4], text="same", response_id="resp_b", finish_reason="stop"),
+    ]
+    if witness == "explicit":
+        att = resolve_terminal(entries, _response([_assistant_item("same")]), explicit_call_id="call_b")
+    else:
+        att = resolve_terminal(entries, _response([_assistant_item("same")], response_id="resp_b"))
+    assert att.model_call_id == "call_b" and att.method == witness
+    assert att.finish_reason_resolved and "finish_reason_disagreement" not in att.reason
+
+
+@pytest.mark.parametrize("witness", ["explicit", "declared", "response_id"])
+@pytest.mark.parametrize("other_reason", ["stop", "content_filter", None])
+def test_token_identical_witnesses_must_agree_on_the_servings_finish_reason(witness, other_reason):
+    entries = [
+        _entry("call_a", [1, 2], [3, 4], text="same", response_id="resp_a", finish_reason="length"),
+        _entry("call_b", [1, 2], [3, 4], text="same", response_id="resp_b", finish_reason=other_reason),
+    ]
+    entries[1].output_items[0]["id"] = "msg_b"
+    response = _response([_assistant_item("same", item_id="msg_b")], response_id="resp_b")
+    explicit = "call_a" if witness == "explicit" else None
+    declared = "resp_a" if witness == "declared" else None
+    if witness == "response_id":
+        response["id"] = "resp_a"
+
+    att = resolve_terminal(entries, response, explicit, declared_response_id=declared)
+    # The witnesses agree on tokens, but each identifies a different serving. Neither serving's
+    # finish reason is corroborated, even though the token chain is safe to deliver.
+    assert att.attributed and not att.finish_reason_resolved
+    assert "finish_reason_disagreement" in att.reason
+    built = _assemble(
+        "r",
+        entries,
+        "prefix_merging",
+        "m",
+        verified_response=response,
+        explicit_terminal_call_id=explicit,
+        declared_response_id=declared,
+    )
+    assert built[MASK_SAMPLE_KEY] is False
+    assert "status" not in built["rebuilt_response"]
+    assert "incomplete_details" not in built["rebuilt_response"]
+
+
+@pytest.mark.parametrize("witness", ["response_id", "declared"])
+@pytest.mark.parametrize("kept_call", ["call_a", "call_b"])
+def test_unique_item_id_settles_the_serving_when_an_envelope_id_matches_both_twins(witness, kept_call):
+    entries = [
+        _entry(
+            call_id,
+            [1, 2],
+            [3, 4],
+            text="same",
+            response_id="shared",
+            finish_reason="length" if call_id == kept_call else "stop",
+        )
+        for call_id in ("call_a", "call_b")
+    ]
+    for entry in entries:
+        entry.output_items[0]["id"] = "msg_" + entry.model_call_id
+    response = _response([_assistant_item("same", item_id="msg_" + kept_call)])
+    if witness == "response_id":
+        response["id"] = "shared"
+    declared = "shared" if witness == "declared" else None
+    built = _assemble("r", entries, "prefix_merging", "m", verified_response=response, declared_response_id=declared)
+    assert built[MASK_SAMPLE_KEY] is False
+    assert built["rebuilt_response"].get("incomplete_details") == {"reason": "max_output_tokens"}
+    assert built["metrics"]["terminal_attribution"]["call_id"] == kept_call
 
 
 def test_divergent_final_retries_resolve_by_id_and_abstain_on_content():
@@ -543,6 +639,33 @@ def test_terminal_resolves_a_final_retry_group():
     assert set(legacy.notes.unresolved_retries) == {"call_a", "call_b"}
 
 
+def test_a_call_delivered_before_a_checkpoint_and_issued_again_after_a_restore_keeps_only_the_reissued_call():
+    # The model server delivered a reply before its own checkpoint, so that checkpoint keeps the call's row,
+    # but the agent held the reply at the boundary before the call.
+    # After a crash the restored agent calls again from that boundary: same parent and prompt, another generation.
+    entries = [
+        _entry("call1", [1, 2], [3, 4], text="step one", response_id="resp_1"),
+        _entry("delivered", [1, 2, 3, 4, 5], [6, 7], text="held", response_id="resp_held", parent_call_id="call1"),
+        _entry("reissued", [1, 2, 3, 4, 5], [8, 9], text="again", response_id="resp_again", parent_call_id="call1"),
+        _entry(
+            "terminal",
+            [1, 2, 3, 4, 5, 8, 9, 10],
+            [11],
+            text="final answer",
+            response_id="resp_final",
+            parent_call_id="reissued",
+        ),
+    ]
+    out = run_builder(entries, terminal_call_id="terminal")
+
+    # The two calls are a retry group; the sibling on the terminal path is kept, as for a client retry.
+    assert out.notes.terminal_chain == "delivered"
+    assert out.quarantined == ["delivered"]
+    assert out.notes.unresolved_retries == []
+    main = [c for c in out.chains if c.chain_id == "main"][0]
+    assert [link.entry.model_call_id for link in main.links] == ["call1", "reissued", "terminal"]
+
+
 def test_terminal_not_captured_is_reported():
     out = run_builder(_chain_entries(), terminal_call_id="ghost")
     assert out.notes.terminal_chain == "not_captured"
@@ -612,6 +735,36 @@ def test_assemble_broken_terminal_chain_masks():
     assert built[MASK_SAMPLE_KEY] is True
 
 
+@pytest.mark.parametrize("cut_call", ["call_a", "call_b"])
+def test_assemble_withholds_the_truncation_verdict_when_identical_retries_disagree(cut_call):
+    # Two token-identical servings, one cut at the output budget. Content attribution picks the
+    # smaller call id, so without the finish-reason rule the delivered response would read
+    # incomplete or complete depending on which twin drew that id. The chain is delivered either
+    # way; the status stays unset either way.
+    entries = [
+        _entry("call_a", [1, 2], [3, 4], text="same", finish_reason="length" if cut_call == "call_a" else "stop"),
+        _entry("call_b", [1, 2], [3, 4], text="same", finish_reason="length" if cut_call == "call_b" else "stop"),
+    ]
+    built = _assemble("r", entries, "prefix_merging", "m", verified_response=_response([_assistant_item("same")]))
+    assert built[MASK_SAMPLE_KEY] is False
+    assert built["metrics"]["terminal_attribution"]["chain"] == "delivered"
+    assert "finish_reason_disagreement" in built["metrics"]["terminal_attribution"]["reason"]
+    rebuilt = built["rebuilt_response"]
+    assert "status" not in rebuilt and "incomplete_details" not in rebuilt
+
+
+def test_assemble_keeps_the_truncation_verdict_when_identical_retries_agree():
+    # Both servings stopped at the output budget, so the verdict does not depend on the call id.
+    entries = [
+        _entry("call_a", [1, 2], [3, 4], text="same", finish_reason="length"),
+        _entry("call_b", [1, 2], [3, 4], text="same", finish_reason="length"),
+    ]
+    built = _assemble("r", entries, "prefix_merging", "m", verified_response=_response([_assistant_item("same")]))
+    assert built[MASK_SAMPLE_KEY] is False
+    assert built["rebuilt_response"]["status"] == "incomplete"
+    assert built["rebuilt_response"]["incomplete_details"] == {"reason": "max_output_tokens"}
+
+
 # --- delivery end to end -------------------------------------------------------
 
 
@@ -642,6 +795,142 @@ def test_finalize_attributes_from_the_result_response(tmp_path):
     assert attribution["method"] == "response_id" and attribution["chain"] == "delivered"
     delivered = [i for i in result["response"]["output"] if i.get("generation_token_ids")]
     assert [i["generation_token_ids"] for i in delivered] == [[3, 4], [7, 8]]
+
+
+def _length_cut_chain_entries() -> list[TokenEntry]:
+    """Two chained calls whose terminal call stopped at the output-token budget."""
+    return [
+        _entry("call1", [1, 2], [3, 4], text="step one", response_id="resp_1", created_at=2.0),
+        _entry(
+            "call2",
+            [1, 2, 3, 4, 5, 6],
+            [7, 8],
+            text="final answer",
+            response_id="resp_2",
+            created_at=3.0,
+            parent_call_id="call1",
+            finish_reason="length",
+        ),
+    ]
+
+
+def _finalize_length_cut_rollout(
+    tmp_path, harness_status: str | None, incomplete_details: dict | None = None
+) -> tuple[dict, dict]:
+    """Deliver a length-cut rollout whose harness response reports ``harness_status`` (or none).
+
+    ``incomplete_details`` is the harness's own cause for an ``incomplete`` status.
+    """
+    store = TokenCaptureStore(tmp_path)
+    response = _response([_assistant_item("step one"), _assistant_item("final answer")], response_id="resp_2")
+    if harness_status is not None:
+        response["status"] = harness_status
+    if incomplete_details is not None:
+        response["incomplete_details"] = incomplete_details
+    result = {"_ng_rollout_id": "t0-r0", "response": response, "reward": 1.0}
+
+    async def go() -> dict:
+        for entry in _length_cut_chain_entries():
+            await store.put(entry.model_copy(update={"rollout_id": "t0-r0"}))
+        return await finalize_rollout_token_capture(result, store)
+
+    return asyncio.run(go()), result
+
+
+@pytest.mark.parametrize("harness_status", ["completed", None])
+def test_finalize_marks_the_delivered_response_incomplete_when_the_terminal_call_was_cut(tmp_path, harness_status):
+    # The agent server's response says "completed" (or says nothing) because the harness ended the
+    # rollout on its own terms, but the capture shows the terminal call stopped at the output
+    # budget. Delivery carries the builder's verdict onto the result's response, so a consumer
+    # reading ``incomplete_details`` sees the truncation that the rebuilt output reflects.
+    built, result = _finalize_length_cut_rollout(tmp_path, harness_status)
+    assert built[MASK_SAMPLE_KEY] is False
+    assert built["rebuilt_response"]["status"] == "incomplete"
+    assert result["response"]["status"] == "incomplete"
+    assert result["response"]["incomplete_details"] == {"reason": "max_output_tokens"}
+    assert [i["generation_token_ids"] for i in result["response"]["output"] if i.get("generation_token_ids")] == [
+        [3, 4],
+        [7, 8],
+    ]
+
+
+def test_finalize_keeps_a_harness_verdict_that_is_already_a_failure(tmp_path):
+    # A harness that reported ``failed`` gave a more specific verdict than the capture's truncation;
+    # delivery replaces the output but leaves that status and its absent ``incomplete_details``.
+    built, result = _finalize_length_cut_rollout(tmp_path, "failed")
+    assert built["rebuilt_response"]["status"] == "incomplete"
+    assert result["response"]["status"] == "failed"
+    assert "incomplete_details" not in result["response"]
+    assert [i["generation_token_ids"] for i in result["response"]["output"] if i.get("generation_token_ids")] == [
+        [3, 4],
+        [7, 8],
+    ]
+
+
+def test_finalize_keeps_a_harness_verdict_that_is_already_incomplete(tmp_path):
+    # A harness that reported ``incomplete`` for a reason of its own gave the more specific
+    # verdict; delivery replaces the output but leaves that status and its ``incomplete_details``
+    # alone instead of overwriting them with the capture's ``max_output_tokens``.
+    built, result = _finalize_length_cut_rollout(tmp_path, "incomplete", {"reason": "result_missing"})
+    assert built["rebuilt_response"]["status"] == "incomplete"
+    assert result["response"]["status"] == "incomplete"
+    assert result["response"]["incomplete_details"] == {"reason": "result_missing"}
+    assert [i["generation_token_ids"] for i in result["response"]["output"] if i.get("generation_token_ids")] == [
+        [3, 4],
+        [7, 8],
+    ]
+
+
+@pytest.mark.parametrize(
+    ("status", "details", "changed", "expected"),
+    [
+        (None, None, True, ("incomplete", {"reason": "max_output_tokens"})),
+        ("completed", None, True, ("incomplete", {"reason": "max_output_tokens"})),
+        ("incomplete", {"reason": "result_missing"}, False, ("incomplete", {"reason": "result_missing"})),
+        ("failed", None, False, ("failed", None)),
+    ],
+    ids=["no-status", "completed", "incomplete-for-its-own-reason", "failed"],
+)
+def test_apply_capture_incomplete_verdict_keeps_a_harness_verdict_of_its_own(status, details, changed, expected):
+    # One precedence rule for both capture placements: a response that reported ``completed`` or
+    # no status takes the capture's verdict; one that reported ``incomplete`` or ``failed``
+    # itself keeps its status and its ``incomplete_details``.
+    response = {"id": "resp", "output": []}
+    if status is not None:
+        response["status"] = status
+    if details is not None:
+        response["incomplete_details"] = details
+    assert apply_capture_incomplete_verdict(response, "max_output_tokens") is changed
+    assert (response.get("status"), response.get("incomplete_details")) == expected
+
+
+def test_apply_capture_incomplete_verdict_leaves_a_complete_ending_alone():
+    response = {"id": "resp", "output": [], "status": "completed"}
+    assert apply_capture_incomplete_verdict(response, None) is False
+    assert response == {"id": "resp", "output": [], "status": "completed"}
+
+
+def test_finalize_withholds_a_cutoff_when_identified_servings_disagree(tmp_path):
+    store = TokenCaptureStore(tmp_path)
+    entries = [
+        _entry("call_a", [1, 2], [3, 4], text="same", response_id="resp_a", finish_reason="length"),
+        _entry("call_b", [1, 2], [3, 4], text="same", response_id="resp_b", finish_reason="stop"),
+    ]
+    response = _response([_assistant_item("same")], response_id="resp_b")
+    response["status"] = "completed"
+    result = {"_ng_rollout_id": "r", TERMINAL_CALL_KEY: "call_a", "response": response, "reward": 1.0}
+
+    async def go():
+        for entry in entries:
+            await store.put(entry)
+        return await finalize_rollout_token_capture(result, store)
+
+    built = asyncio.run(go())
+    assert built[MASK_SAMPLE_KEY] is False
+    assert result["response"]["status"] == "completed"
+    assert "incomplete_details" not in result["response"]
+    assert result["response"]["output"][0]["generation_token_ids"] == [3, 4]
+    assert result["reward"] == 1.0
 
 
 def test_finalize_honors_an_explicit_terminal_key(tmp_path):
@@ -713,3 +1002,72 @@ def test_finalize_without_witnesses_keeps_the_strict_policy(tmp_path):
     # Two roots (main chain + aux) and no attribution: masked, as before.
     assert built[MASK_SAMPLE_KEY] is True
     assert result[MASK_SAMPLE_KEY] is True
+
+
+def _rewritten_tool_call_item(call_id: str, arguments: str) -> dict:
+    return {
+        "type": "function_call",
+        "call_id": call_id,
+        "id": call_id,
+        "name": "Bash",
+        "arguments": arguments,
+        "status": "completed",
+    }
+
+
+def test_content_attribution_falls_back_to_tool_call_ids_when_arguments_were_rewritten():
+    """Claude Code echoes tool-call ids verbatim but rewrites arguments (drops `cd /testbed && `)."""
+    served = _entry("c-1", [1, 2], [3], response_id="resp_1")
+    served.output_items = [_rewritten_tool_call_item("t1", '{"command": "cd /testbed && pytest"}')]
+    other = _entry("c-0", [1], [2], response_id="resp_0")
+    other.output_items = [_rewritten_tool_call_item("t0", '{"command": "ls"}')]
+    transcript = {
+        "id": "uuid-from-the-harness",
+        "output": [
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "fix"}]},
+            _rewritten_tool_call_item("t1", '{"command": "pytest", "description": "run tests"}'),
+        ],
+    }
+    attribution = resolve_terminal([other, served], transcript)
+    assert attribution.model_call_id == "c-1"
+    assert attribution.method == "content_tool_ids"
+
+
+def test_content_attribution_refuses_ambiguous_tool_call_ids():
+    a = _entry("c-a", [1], [2], response_id="resp_a")
+    a.output_items = [_rewritten_tool_call_item("dup", "{}")]
+    b = _entry("c-b", [3], [4], response_id="resp_b")
+    b.output_items = [_rewritten_tool_call_item("dup", "{}")]
+    transcript = {
+        "id": "x",
+        "output": [{"type": "message", "role": "user", "content": "q"}, _rewritten_tool_call_item("dup", '{"k": 1}')],
+    }
+    attribution = resolve_terminal([a, b], transcript)
+    assert attribution.model_call_id is None
+    assert "tool_ids_ambiguous" in attribution.reason
+
+
+@pytest.mark.parametrize("matching_id", [False, True])
+def test_staged_terminal_rewritten_tools_abstains_without_crashing(matching_id):
+    row = CallRecord(
+        model_call_id="c1",
+        prev_len=0,
+        delta_len=3,
+        cum_len=3,
+        weight_version=1,
+        digest="b" * 64,
+        extras_digest=EMPTY_EXTRAS_DIGEST,
+        staging_key="r/c1",
+        mode="text",
+        chain_hash="b" * 64,
+        cumulative_hash="b" * 64,
+        response_id="resp_c1",
+        output_fingerprint=assistant_fingerprint([_rewritten_tool_call_item("t1", '{"command":"cd /testbed && ls"}')]),
+        fingerprint_version=FINGERPRINT_VERSION,
+    )
+    response = {
+        "id": "resp_c1" if matching_id else "harness",
+        "output": [_rewritten_tool_call_item("t1", '{"command":"ls"}')],
+    }
+    result = resolve_terminal([row], response)
+    assert result.model_call_id == ("c1" if matching_id else None)

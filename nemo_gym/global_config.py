@@ -66,10 +66,12 @@ from nemo_gym.config_types import (
 )
 from nemo_gym.exporters import setup_exporters
 from nemo_gym.h2_ping_sidecar.config import H2_PING_SIDECAR_KEY_NAME
+from nemo_gym.sandbox.providers.registry import plugin_distributions
 from nemo_gym.secret_utils import recursively_hide_secrets
 from nemo_gym.telemetry.setup import (
     TELEMETRY_KEY_NAME,
     configure_telemetry_env,
+    installed_requirement,
     server_venv_requirements,
     telemetry_config_from_global_config,
 )
@@ -1649,6 +1651,12 @@ Set the keys individually, in a config or as overrides, e.g.:
             # lets server_venv_requirements() see that telemetry is on.
             configure_telemetry_env(telemetry_config_from_global_config(global_config_dict))
             head_server_deps.extend(server_venv_requirements())
+            # A server venv is built from that server's own requirements, so a provider
+            # installed only in this process would be unknown there.
+            for dist_name in plugin_distributions():
+                requirement = installed_requirement(dist_name, dist_name)
+                if requirement is not None:
+                    head_server_deps.append(requirement)
 
             global_config_dict[HEAD_SERVER_DEPS_KEY_NAME] = head_server_deps
 

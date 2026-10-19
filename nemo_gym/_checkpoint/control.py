@@ -110,6 +110,15 @@ class CheckpointRequest(BaseModel):
         return remaining
 
 
+class PrepareRequest(CheckpointRequest):
+    restarts: list[str] = Field(
+        default_factory=list,
+        description="Capture keys of episodes that earlier prepare stages reported as restarts. "
+        "The commit leaves them out, so this participant leaves them out of its blockers and its export "
+        "until the checkpoint resumes. Coordination sends the field only when an earlier stage reported a restart.",
+    )
+
+
 class CommitRequest(CheckpointRequest):
     checkpoint_dir: str = Field(min_length=1, description="Controller-owned directory visible to this server.")
     episode_ids: Optional[list[EpisodeId]] = Field(
@@ -298,6 +307,10 @@ class CheckpointParticipant(ABC):
 
     def __init__(self) -> None:
         self.retired = RetiredAttempts()
+        # Episodes that earlier prepare stages of the open checkpoint reported as restarts, by capture key.
+        # A participant that waits on episodes leaves these out of its blockers and its export.
+        # The control plane clears them when the checkpoint resumes.
+        self.carried_restarts: set[str] = set()
         self._changed = asyncio.Condition()
 
     async def notify(self) -> None:
@@ -311,6 +324,17 @@ class CheckpointParticipant(ABC):
                 await asyncio.wait_for(self._changed.wait(), timeout=timeout)
             except TimeoutError:
                 pass
+
+    async def carry_restarts(self, capture_keys: Iterable[str]) -> None:
+        """Add episodes an earlier prepare stage reported as restarts, for the rest of the open checkpoint.
+
+        Such an episode is never in the commit, so waiting for it could only stall the checkpoint.
+        Override to tell other processes as well.
+        """
+        added = set(capture_keys) - self.carried_restarts
+        if added:
+            self.carried_restarts |= added
+            await self.notify()
 
     @abstractmethod
     async def close_admission(self, request: CheckpointRequest) -> None:
@@ -356,6 +380,12 @@ class CheckpointParticipant(ABC):
     async def mark_retired(self, episode_ids: list[EpisodeId]) -> None:
         """Refuse these attempts from now on, before a retire stops them. Override to tell other processes as well."""
         self.retired.mark(episode_ids)
+
+    def check_forget(self, rollout_ids: list[str]) -> None:
+        """Raise if forgetting ``rollout_ids`` now would make retired state live again; ``forget`` checks first.
+
+        A server with several workers asks every worker before any of them forgets.
+        """
 
     async def forget(self, rollout_ids: list[str]) -> None:
         """Stop refusing these rollouts' retired attempts. Override to tell other processes as well."""
@@ -533,6 +563,9 @@ class ParticipantControlPlane:
     # -- phases ---------------------------------------------------------------------------------
 
     async def prepare(self, request: CheckpointRequest) -> dict[str, Any]:
+        if not isinstance(request, PrepareRequest):
+            # A caller in this process may build the base request, which names no restarts.
+            request = PrepareRequest(checkpoint_id=request.checkpoint_id, deadline_ts=request.deadline_ts)
         async with self._lock:
             recorded = self._recorded(request.checkpoint_id, "prepare")
             if recorded is not None:
@@ -544,11 +577,14 @@ class ParticipantControlPlane:
                 self._renew(request)
                 try:
                     await self.participant.close_admission(request)
+                    await self.participant.carry_restarts(request.restarts)
                 except BaseException:
                     await self._reopen()
                     raise
             else:
                 self._renew(request)
+                # A prepare asked again may name more restarts; they add up until resume.
+                await self.participant.carry_restarts(request.restarts)
 
         try:
             await self._wait_ready(request)
@@ -559,8 +595,13 @@ class ParticipantControlPlane:
             raise
 
         async with self._lock:
-            if self.checkpoint_id != request.checkpoint_id or self.phase != CheckpointPhase.PREPARING:
-                # A resume, lease expiry, or concurrent prepare finished this checkpoint while we waited.
+            if self.checkpoint_id != request.checkpoint_id:
+                # A resume or lease expiry ended this checkpoint while the prepare waited.
+                # Another checkpoint may be open by now, so its phase says nothing about this one.
+                # The reply is idle, as for a prepare that a resume interrupts.
+                return {"phase": CheckpointPhase.IDLE.value, "report": self.participant.readiness().model_dump()}
+            if self.phase != CheckpointPhase.PREPARING:
+                # A concurrent prepare of this checkpoint finished it while this one waited.
                 return {"phase": self.phase.value, "report": self.participant.readiness().model_dump()}
             report = self.participant.readiness()
             if report.ready:
@@ -886,6 +927,7 @@ class ParticipantControlPlane:
                 if not cleanup.done():
                     raise DeadlineExceededError("restored state is still being deleted; resume again")
             self._write = None
+        self.participant.carried_restarts.clear()
         await self.participant.open_admission()
         self._reopen_pending = False
         if resume_id is not None:
@@ -981,7 +1023,7 @@ def _require_bearer(authorization: Optional[str], token: str) -> None:
 
 # Validated request body of each mutating control operation.
 _OPERATION_REQUESTS: dict[str, type[CheckpointRequest]] = {
-    "prepare": CheckpointRequest,
+    "prepare": PrepareRequest,
     "renew": CheckpointRequest,
     "retire": RetireRequest,
     "forget": ForgetRequest,

@@ -859,8 +859,7 @@ class ServerClient(BaseModel):
                 model = config.get("model_server") or {}
                 if model.get("name") != model_server_name or model.get("type") != "responses_api_models":
                     continue
-                # Nested harnesses are keyed by directory path (e.g. `conversational_tool_use/simulation`).
-                package = import_module(f"responses_api_agents.{harness.replace('/', '.')}")
+                package = import_module(f"responses_api_agents.{harness}")
                 header = getattr(package, "_assistant_message_header", None)
                 if header is not None:
                     headers.add(header.lower())
@@ -1453,6 +1452,12 @@ class SimpleServer(BaseServer):
     def setup_webserver(self) -> FastAPI:
         pass
 
+    def setup_checkpoint_participant(self, app: FastAPI) -> None:
+        """Take part in partial-rollout checkpoints on the app ``setup_webserver`` built, if it does not yet.
+
+        Called for every server, so a server whose ``setup_webserver`` builds its own app takes part too.
+        """
+
     def setup_telemetry(self) -> None:
         """Initialise this process's nemo-lens telemetry. Idempotent, once per process.
 
@@ -1668,6 +1673,7 @@ repr(e): {repr(e)}"""
         app = server.setup_webserver()
         startup.mark("setup_webserver")
         observe_app_event_loop(app, "server")
+        server.setup_checkpoint_participant(app)
         # After the app is fully built so subclass routes are present. Only resources servers expose tools over MCP,
         # so gating the lazy import on their config keeps the MCP SDK out of agent/model processes that never need it.
         if getattr(getattr(server, "config", None), "expose_tools_over_mcp", False):

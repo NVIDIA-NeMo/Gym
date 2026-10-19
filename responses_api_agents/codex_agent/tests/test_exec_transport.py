@@ -16,7 +16,7 @@ from nemo_gym.agent_utils.sandbox_session import SandboxSession
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from responses_api_agents.codex_agent import sandbox_runner
 from responses_api_agents.codex_agent.sandbox import CodexSandboxSession
-from responses_api_agents.codex_agent.tests.test_native_sessions import seed
+from responses_api_agents.codex_agent.tests.test_sandbox_sessions import seed
 
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux process supervision required")
