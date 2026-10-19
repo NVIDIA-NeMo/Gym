@@ -12,27 +12,41 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import base64
 import json
+import subprocess
+import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi import HTTPException
+from omegaconf import OmegaConf
+from pydantic import ValidationError
 
+from nemo_gym.base_resources_server import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
+from nemo_gym.episode_types import EpisodeId, TaskId
+from nemo_gym.global_config import GlobalConfigDictParser
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+from resources_servers.gdpval import app as gdp_app
 from resources_servers.gdpval.app import (
     GDPValResourcesServer,
     GDPValResourcesServerConfig,
     GDPValVerifyRequest,
+    GDPValVerifyResponse,
     _iter_ref_repeat_dirs,
     _strict_comparison_trial_failure,
 )
+from resources_servers.gdpval.comparison import task_attempted
+from resources_servers.gdpval.task_data import GDPFileTask, prepare_row
 
 
 def _server(reward_mode: str = "rubric", **extra) -> GDPValResourcesServer:
@@ -2125,3 +2139,434 @@ class TestComparisonPayloadHardening:
         )
         # ``timeout`` substring no longer triggers a blind retry.
         assert _is_retryable(RuntimeError("Request timed out")) is False
+
+
+def row(**extra):
+    return {
+        "task_id": "task-1",
+        "prompt": "Write a financial summary.",
+        "responses_create_params": {"input": []},
+        "reference_files": [],
+        "reference_file_urls": [],
+        "rubric_pretty": "PRIVATE RUBRIC",
+        **extra,
+    }
+
+
+def seed(**extra):
+    return ResourcesSeedSessionRequest(
+        resources_session_id="resources-1",
+        episode_id=EpisodeId(rollout_id="rollout-1"),
+        task_id=TaskId(taskset="gdp", task_id="task-1"),
+        task_data=row(),
+        **extra,
+    )
+
+
+def response():
+    return NeMoGymResponse(
+        id="response-1",
+        created_at=0,
+        model="model",
+        object="response",
+        output=[],
+        tools=[],
+        tool_choice="auto",
+        parallel_tool_calls=False,
+    )
+
+
+class Sandbox:
+    def __init__(self):
+        self.files = {"/workspace/output/report.csv": b"name,value\na,3\n"}
+        self.start = AsyncMock()
+        self.stop = AsyncMock()
+        self.serialize = AsyncMock(return_value={"sandbox_id": "task-box"})
+        self.exec = AsyncMock(side_effect=self.execute)
+        self.upload = AsyncMock(side_effect=self.upload_file)
+        self.download = AsyncMock(side_effect=self.download_file)
+
+    async def execute(self, command, **kwargs):
+        files = [
+            {"name": key.removeprefix("/workspace/output/"), "size": len(value)}
+            for key, value in self.files.items()
+            if key.startswith("/workspace/output/")
+        ]
+        return SimpleNamespace(return_code=0, stdout=json.dumps(files), stderr="")
+
+    async def upload_file(self, local, remote):
+        self.files[remote] = Path(local).read_bytes()
+
+    async def download_file(self, remote, local):
+        Path(local).write_bytes(self.files[remote])
+
+
+@pytest.fixture
+def sandbox_server(tmp_path, monkeypatch):
+    box = Sandbox()
+    monkeypatch.setattr(gdp_app, "AsyncSandbox", lambda provider: box)
+    monkeypatch.setattr(gdp_app, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(gdp_app, "resolve_provider_config", lambda *args: {"docker": {}})
+    config = GDPValResourcesServerConfig(
+        host="127.0.0.1",
+        port=8000,
+        name="resources",
+        entrypoint="app.py",
+        sandbox_provider="sandbox",
+        num_workers=1,
+        image="test-only",
+        deliverables_root=tmp_path,
+        preconvert_office_to_pdf=False,
+        judge_model_server={"type": "responses_api_models", "name": "judge"},
+    )
+    instance = GDPValResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    return instance, box, SimpleNamespace(session={})
+
+
+def test_prepare_only_exposes_prompt_and_reference_paths():
+    source = row(reference_files='["a.xlsx"]', reference_file_urls='["https://example.com/a.xlsx"]')
+    prepared = prepare_row(source)
+    text = prepared["responses_create_params"]["input"][0]["content"]
+    assert "PRIVATE RUBRIC" not in text
+    assert "https://example.com" not in text
+    assert "/workspace/input/a.xlsx" in text
+    assert "/workspace/output" in text
+    assert "finish tool" not in text
+    assert prepared["rubric_pretty"] == "PRIVATE RUBRIC"
+    assert source["responses_create_params"]["input"] == []
+    assert source["reference_file_urls"] == '["https://example.com/a.xlsx"]'
+    assert prepared["reference_files"] == ["a.xlsx"]
+    assert prepared["reference_file_urls"] == ["https://example.com/a.xlsx"]
+
+
+@pytest.mark.parametrize("name", ["../secret", "/etc/passwd", "a/../../x", "a\\b", "a//b", ".", "a/./b", "a\x00b"])
+def test_unsafe_reference_paths_rejected(name):
+    with pytest.raises(ValueError):
+        GDPFileTask.model_validate(row(reference_files=[name], reference_file_urls=["https://example.com/file"]))
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"reference_files": ["x"], "reference_file_urls": []},
+        {"reference_files": ["x", "x"], "reference_file_urls": ["https://example.com/x"] * 2},
+        {"reference_files": ["x"], "reference_file_urls": ["file:///secret"]},
+    ],
+)
+def test_bad_reference_metadata_rejected(fields):
+    with pytest.raises(ValueError):
+        GDPFileTask.model_validate(row(**fields))
+
+
+async def test_seed_is_idempotent_and_lends_resources_owned_sandbox(sandbox_server):
+    instance, box, request = sandbox_server
+    first, second = await asyncio.gather(
+        instance.seed_session(request, seed()), instance.seed_session(request, seed())
+    )
+    assert first == second
+    assert first.sandbox_access.workdir == "/workspace"
+    assert first.sandbox_access.connection.descriptor == {"sandbox_id": "task-box"}
+    assert request.session[SESSION_ID_KEY] == "resources-1"
+    box.start.assert_awaited_once()
+    box.stop.assert_not_awaited()
+    spec = box.start.call_args.args[0]
+    assert "PRIVATE RUBRIC" not in str(spec)
+
+
+async def test_seed_conflict_rejected(sandbox_server):
+    instance, _, request = sandbox_server
+    body = seed()
+    await instance.seed_session(request, body)
+    body.task_data["prompt"] = "Different task"
+    with pytest.raises(HTTPException, match="bound"):
+        await instance.seed_session(request, body)
+
+
+async def test_reference_bytes_staged_before_sandbox_is_exposed(sandbox_server, monkeypatch):
+    instance, box, request = sandbox_server
+    content = b"PK\x00\xffbinary spreadsheet\n"
+
+    async def chunks(*args):
+        yield content
+
+    download = SimpleNamespace(
+        raise_for_status=MagicMock(),
+        release=MagicMock(),
+        content=SimpleNamespace(iter_chunked=chunks),
+    )
+    monkeypatch.setattr(gdp_app, "http_request", AsyncMock(return_value=download))
+    body = seed()
+    body.task_data.update(reference_files=["nested/a.xlsx"], reference_file_urls=["https://example.com/a"])
+    await instance.seed_session(request, body)
+    assert box.files["/workspace/input/nested/a.xlsx"] == content
+    download.release.assert_called_once()
+
+
+async def test_reference_failure_stops_sandbox_and_never_exposes_access(sandbox_server, monkeypatch):
+    instance, box, request = sandbox_server
+    monkeypatch.setattr(instance, "_stage_references", AsyncMock(side_effect=RuntimeError("download failed")))
+    with pytest.raises(RuntimeError, match="download failed"):
+        await instance.seed_session(request, seed())
+    box.stop.assert_awaited_once()
+    box.serialize.assert_not_awaited()
+    assert SESSION_ID_KEY not in request.session
+
+
+async def test_verify_exports_bytes_and_reuses_existing_gdp_judge(sandbox_server, monkeypatch):
+    instance, box, request = sandbox_server
+    await instance.seed_session(request, seed())
+    captured = []
+
+    async def grade(self, body):
+        captured.append(body)
+        assert Path(body.deliverables_dir, "report.csv").read_bytes() == b"name,value\na,3\n"
+        assert body.rubric_pretty == "PRIVATE RUBRIC"
+        # Comparison mode skips a task dir without the completion marker as never attempted.
+        assert task_attempted(body.deliverables_dir)
+        return GDPValVerifyResponse(**body.model_dump(), reward=0.75)
+
+    monkeypatch.setattr(GDPValResourcesServer, "_grade_deliverables", grade)
+    body = GDPValVerifyRequest(
+        **row(rubric_pretty="TAMPERED"), response=response(), deliverables_dir="/untrusted/path"
+    )
+    first = await instance.verify(body, request=request)
+    second = await instance.verify(body, request=request)
+    assert first.reward == second.reward == 0.75
+    assert len(captured) == 1
+    box.stop.assert_not_awaited()
+    close = ResourcesCloseSessionRequest(resources_session_id="resources-1", episode_id=seed().episode_id)
+    assert await instance.close_resources_session(request, close) == await instance.close_resources_session(
+        request, close
+    )
+    box.stop.assert_awaited_once()
+    assert Path(first.deliverables_dir, "report.csv").exists()
+    with pytest.raises(HTTPException, match="closed"):
+        await instance.seed_session(request, seed())
+
+
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+async def test_failed_seed_retries_with_fresh_sandbox(sandbox_server, monkeypatch, cleanup_fails):
+    instance, first, request = sandbox_server
+    second = Sandbox()
+    factory = MagicMock(side_effect=[first, second])
+    monkeypatch.setattr(gdp_app, "AsyncSandbox", factory)
+    staging = AsyncMock(side_effect=[RuntimeError("download failed"), None])
+    monkeypatch.setattr(instance, "_stage_references", staging)
+    if cleanup_fails:
+        first.stop.side_effect = [RuntimeError("cleanup failed"), RuntimeError("still unavailable"), None]
+    body = seed()
+    with pytest.raises(RuntimeError, match="download failed"):
+        await instance.seed_session(request, body)
+    original = instance._sessions[body.resources_session_id]
+    assert not original.ready
+    if cleanup_fails:
+        with pytest.raises(RuntimeError, match="still unavailable"):
+            await instance.seed_session(request, body)
+        assert original.sandbox is first
+        assert factory.call_count == 1
+    result = await instance.seed_session(request, body)
+    assert instance._sessions[body.resources_session_id] is original
+    assert original.ready and original.sandbox is second
+    assert result.sandbox_access is not None
+    first.start.assert_awaited_once()
+    second.start.assert_awaited_once()
+    assert staging.await_count == 2
+    assert factory.call_count == 2
+
+
+async def test_verify_normalizes_seeded_json_reference_lists(sandbox_server, monkeypatch):
+    instance, _, request = sandbox_server
+    source = row(reference_files='["a.csv"]', reference_file_urls='["https://example.com/a.csv"]')
+    body = seed()
+    body.task_data = source
+    monkeypatch.setattr(instance, "_stage_references", AsyncMock())
+    await instance.seed_session(request, body)
+
+    async def grade(self, payload):
+        assert payload.reference_file_urls == ["https://example.com/a.csv"]
+        assert payload.rubric_pretty == "PRIVATE RUBRIC"
+        return GDPValVerifyResponse(**payload.model_dump(), reward=0.5)
+
+    monkeypatch.setattr(GDPValResourcesServer, "_grade_deliverables", grade)
+    prepared = prepare_row(source)
+    result = await instance.verify(GDPValVerifyRequest(**prepared, response=response()), request=request)
+    assert result.reward == 0.5
+
+
+async def test_invalid_judge_is_retryable_not_zero_reward(sandbox_server, monkeypatch):
+    instance, _, request = sandbox_server
+    await instance.seed_session(request, seed())
+
+    async def invalid(self, body):
+        return GDPValVerifyResponse(**body.model_dump(), reward=0.0, invalid_judge_response=True)
+
+    monkeypatch.setattr(GDPValResourcesServer, "_grade_deliverables", invalid)
+    with pytest.raises(HTTPException) as error:
+        await instance.verify(GDPValVerifyRequest(**row(), response=response()), request=request)
+    assert error.value.status_code == 503
+    assert instance._sessions["resources-1"].verdict is None
+
+
+async def test_failed_close_retains_handle_for_retry(sandbox_server):
+    instance, box, request = sandbox_server
+    await instance.seed_session(request, seed())
+    box.stop.side_effect = [RuntimeError("provider unavailable"), None]
+    close = ResourcesCloseSessionRequest(resources_session_id="resources-1", episode_id=seed().episode_id)
+    with pytest.raises(RuntimeError):
+        await instance.close_resources_session(request, close)
+    assert "resources-1" in instance._sessions
+    await instance.close_resources_session(request, close)
+    assert "resources-1" not in instance._sessions
+    assert box.stop.await_count == 2
+
+
+async def test_close_before_seed_fences_delayed_seed(sandbox_server):
+    instance, box, request = sandbox_server
+    close = ResourcesCloseSessionRequest(resources_session_id="resources-1", episode_id=seed().episode_id)
+    await instance.close_resources_session(request, close)
+    with pytest.raises(HTTPException):
+        await instance.seed_session(request, seed())
+    box.start.assert_not_awaited()
+
+
+async def test_export_failure_prevents_grading(sandbox_server, monkeypatch):
+    instance, box, request = sandbox_server
+    await instance.seed_session(request, seed())
+    box.exec.side_effect = None
+    box.exec.return_value = SimpleNamespace(return_code=1, stderr="symlink rejected")
+    grader = AsyncMock()
+    monkeypatch.setattr(GDPValResourcesServer, "_grade_deliverables", grader)
+    with pytest.raises(HTTPException) as error:
+        await instance.verify(GDPValVerifyRequest(**row(), response=response()), request=request)
+    assert error.value.status_code == 503
+    grader.assert_not_awaited()
+
+
+async def test_other_session_cannot_verify_or_close(sandbox_server):
+    instance, _, request = sandbox_server
+    await instance.seed_session(request, seed())
+    with pytest.raises(HTTPException):
+        await instance.verify(GDPValVerifyRequest(**row(), response=response()), request=SimpleNamespace(session={}))
+    with pytest.raises(HTTPException):
+        await instance.close_resources_session(
+            request,
+            ResourcesCloseSessionRequest(
+                resources_session_id="resources-1",
+                episode_id=EpisodeId(rollout_id="other"),
+            ),
+        )
+
+
+def test_config_rejects_relative_output_and_multiple_workers(sandbox_server):
+    instance, _, _ = sandbox_server
+    for change in ({"deliverables_root": "relative"}, {"num_workers": 2}):
+        with pytest.raises(ValidationError):
+            GDPValResourcesServerConfig.model_validate(instance.config.model_dump() | change)
+
+
+@pytest.mark.parametrize("kind", ["file", "symlink", "directory", "hardlink"])
+def test_actual_export_listing_rejects_nonregular_deliverables(tmp_path, kind):
+    output = tmp_path / "output"
+    output.mkdir()
+    candidate = output / "report.csv"
+    outside = tmp_path / "not-a-deliverable"
+    outside.write_bytes(b"private data")
+    if kind == "file":
+        candidate.write_bytes(b"a,b\n1,2\n")
+    elif kind == "symlink":
+        candidate.symlink_to(outside)
+    elif kind == "directory":
+        candidate.mkdir()
+    else:
+        candidate.hardlink_to(outside)
+    script = gdp_app._LIST_OUTPUTS.replace(repr("/workspace/output"), repr(str(output)))
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
+    if kind == "file":
+        assert result.returncode == 0
+        assert json.loads(result.stdout) == [{"name": "report.csv", "size": 8}]
+    else:
+        assert result.returncode != 0
+        assert "Only regular" in result.stderr
+
+
+def test_app_http_sandbox_lifecycle_uses_seeded_metadata(sandbox_server, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    instance, box, _ = sandbox_server
+    graded = []
+
+    async def grade(self, body):
+        graded.append(body)
+        assert body.rubric_pretty == "PRIVATE RUBRIC"
+        assert Path(body.deliverables_dir, "report.csv").read_bytes() == box.files["/workspace/output/report.csv"]
+        return GDPValVerifyResponse(**body.model_dump(), reward=0.75)
+
+    monkeypatch.setattr(GDPValResourcesServer, "_grade_deliverables", grade)
+    with TestClient(instance.setup_webserver()) as client:
+        seeded = client.post("/seed_session", json=seed().model_dump(mode="json"))
+        assert seeded.status_code == 200, seeded.text
+        assert seeded.json()["sandbox_access"]["connection"]["descriptor"] == {"sandbox_id": "task-box"}
+        body = GDPValVerifyRequest(**row(rubric_pretty="TAMPERED"), response=response())
+        result = client.post("/verify", json=body.model_dump(mode="json"))
+        assert result.status_code == 200, result.text
+        assert result.json()["reward"] == 0.75
+        close = ResourcesCloseSessionRequest(resources_session_id="resources-1", episode_id=seed().episode_id)
+        closed = client.post("/close_session", json=close.model_dump(mode="json"))
+        assert closed.status_code == 200, closed.text
+        assert not instance._sessions
+    assert len(graded) == 1
+    box.stop.assert_awaited_once()
+
+
+def test_app_http_stateless_lifecycle_preserves_existing_judging(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    instance = _server(num_workers=2)
+    box = MagicMock(side_effect=AssertionError("Stateless judging must not create a sandbox"))
+    monkeypatch.setattr(gdp_app, "AsyncSandbox", box)
+    with TestClient(instance.setup_webserver()) as client:
+        assert client.post("/seed_session", json={}).json() == {}
+        seeded = client.post("/seed_session", json=seed().model_dump(mode="json"))
+        assert seeded.status_code == 200, seeded.text
+        assert seeded.json()["resources_session_id"] == "resources-1"
+        assert seeded.json()["sandbox_access"] is None
+        result = client.post("/verify", json=_verify_request().model_dump(mode="json"))
+        assert result.status_code == 200, result.text
+        assert result.json()["judge_response"] == {"scoring_error": "missing_rubric"}
+        close = ResourcesCloseSessionRequest(resources_session_id="resources-1", episode_id=seed().episode_id)
+        assert client.post("/close_session", json=close.model_dump(mode="json")).status_code == 200
+    box.assert_not_called()
+
+
+@pytest.mark.parametrize("missing", ["image", "deliverables_root"])
+def test_sandbox_config_requires_complete_runtime_settings(sandbox_server, missing):
+    instance, _, _ = sandbox_server
+    with pytest.raises(ValidationError, match="Sandbox sessions require"):
+        GDPValResourcesServerConfig.model_validate(instance.config.model_dump() | {missing: None})
+
+
+@pytest.mark.parametrize("harness", ["hermes", "pi"])
+def test_pairing_config_uses_shared_gdp_lifecycle(harness: str) -> None:
+    _, layers = GlobalConfigDictParser().load_extra_config_paths(
+        [f"resources_servers/gdpval/configs/gdpval_{harness}.yaml"]
+    )
+    config = OmegaConf.merge(*layers, {"policy_model_name": "test-policy"})
+    resources = config.gdpval_resources_server.resources_servers.gdpval
+    agent_name = f"{harness}_agent"
+    environment = config.single_agent_turn.environment_servers.single_agent_turn
+    assert resources.entrypoint == "app.py"
+    assert list(resources.allowed_agents) == [agent_name]
+    assert resources.judge_model_server.name == "gdpval_judge_model"
+    assert resources.verified is False
+    assert environment.agent_server.name == agent_name
+    assert environment.resources_server.name == "gdpval_resources_server"
+    assert environment.max_concurrent_episodes == 1
+    assert config.sandbox.apptainer.create.mount_point == "/workspace"
+    assert ("pi_agent" in config) == (harness == "pi")
+    assert ("hermes_agent" in config) == (harness == "hermes")
+    if harness == "hermes":
+        agent = config.hermes_agent.responses_api_agents.hermes_agent
+        assert agent.model == "test-policy"
+        assert agent.resources_server.name == "gdpval_resources_server"
+        assert list(agent.enabled_toolsets) == ["terminal", "file"]
+        assert agent.sandbox_provider is None  # Borrow the task sandbox; do not create another.

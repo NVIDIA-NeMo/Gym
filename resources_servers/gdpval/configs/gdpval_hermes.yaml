@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Experimental file-task pairing, not the AA-v2/Stirrup protocol.
+config_paths:
+- resources_servers/gdpval/configs/gdpval.yaml
+- responses_api_agents/hermes_agent/configs/hermes_agent.yaml
+- environment_servers/single_agent_turn/configs/single_agent_turn.yaml
+# Prepare taskset rows with task_data.py --taskset gdpval; flat source rows stay unchanged.
+environment_routing_mode: taskset
+environment_server_routes:
+  gdpval: single_agent_turn
+num_repeats_add_seed: false
+gdpval_resources_server:
+  resources_servers:
+    gdpval:
+      entrypoint: app.py
+      sandbox_provider: sandbox
+      num_workers: 1
+      allowed_agents:
+      - hermes_agent
+      image: ???
+      deliverables_root: ???
+      verified: false
+hermes_agent:
+  responses_api_agents:
+    hermes_agent:
+      resources_server:
+        name: gdpval_resources_server
+      model: ${policy_model_name}
+      enabled_toolsets: [terminal, file]
+single_agent_turn:
+  environment_servers:
+    single_agent_turn:
+      resources_server:
+        name: gdpval_resources_server
+      agent_server:
+        name: hermes_agent
+      max_concurrent_episodes: 1
+      queue_timeout_seconds: 60
+# Requires an existing, audited GDP SIF and Apptainer installation.
+sandbox:
+  apptainer:
+    create:
+      mount_point: /workspace
+      extra_start_args: [--containall, --writable-tmpfs]
+    exec:
+      extra_exec_args: [--writable-tmpfs]
+gdpval_judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ???
+      openai_api_key: ???
+      openai_model: ???
