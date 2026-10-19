@@ -107,6 +107,35 @@ The trajectory-level checks of the rollout health report, evaluated as each roll
 ``gym.rollout.health_flagged_total`` (counter): one per rollout *and* check with at least one finding,
 by ``nemo.gym.health.check`` (a check id from the health-check registry) and ``nemo.gym.rollout.outcome``, so a
 check's count is the number of rollouts it flagged, not the number of findings. Checks in ``health_check_ignored_checks`` are not evaluated.
+
+Partial-rollout checkpoints
+---------------------------
+``gym.checkpoint.operation_duration_ms`` (histogram): wall-clock of one checkpoint operation.
+``nemo.gym.checkpoint.operation`` is a participant's control operation (``prepare``, ``commit``, ``restore``,
+``resume``, ``retire``, or ``forget``), ``lease_reopen`` for one attempt to reopen a participant whose lease expired,
+or ``coordinate.<operation>`` for one call the controller makes to every participant.
+It also carries ``nemo.gym.checkpoint.participant_kind`` (``controller`` for coordination) and ``outcome``
+(``ok`` or ``error``).
+
+``gym.checkpoint.records_total`` / ``gym.checkpoint.bytes_total`` (counters): the records a participant wrote at
+commit or restored, and the bytes of the records file it wrote or read, by ``nemo.gym.checkpoint.operation`` and
+``nemo.gym.checkpoint.participant_kind``.
+A commit counts once its write finishes, and a restore counts once it succeeds, so a retried call counts nothing again.
+
+``gym.checkpoint.control_errors_total`` (counter): control calls that failed, by ``nemo.gym.checkpoint.error_code``,
+the ``code`` of the error in the reply, such as ``deadline_exceeded``.
+Each failed call to a participant's control routes counts once.
+Data-plane requests refused because of a checkpoint are not counted.
+
+``gym.checkpoint.events_total`` (counter): things that change a checkpoint's outcome without failing a call,
+by ``nemo.gym.checkpoint.event``:
+
+- ``lease_expired``: a participant's lease ran out before its controller resumed it,
+  so the participant reopens on its own.
+  Counted once per checkpoint, with the participant kind and phase.
+  Each attempt to reopen is a ``lease_reopen`` operation.
+- ``prepare_not_ready``: a prepare reached its deadline with blockers.
+- ``generation_cut``: one in-flight model call's cut, with its disposition.
 """
 
 import logging
@@ -144,6 +173,16 @@ ROLLOUT_REWARDED_INSTRUMENT = "gym.rollout.rewarded_total"
 REWARD_RANGE_ATTRIBUTE = "nemo.gym.rollout.reward.range"
 ROLLOUT_MASKED_ATTRIBUTE = "nemo.gym.rollout.masked"
 UNREGISTERED_FAILURE_KIND = "unregistered"
+CHECKPOINT_OPERATION_INSTRUMENT = "gym.checkpoint.operation_duration_ms"
+CHECKPOINT_RECORDS_INSTRUMENT = "gym.checkpoint.records_total"
+CHECKPOINT_BYTES_INSTRUMENT = "gym.checkpoint.bytes_total"
+CHECKPOINT_EVENTS_INSTRUMENT = "gym.checkpoint.events_total"
+CHECKPOINT_CONTROL_ERRORS_INSTRUMENT = "gym.checkpoint.control_errors_total"
+#: Every checkpoint span and metric attribute is named under this prefix.
+CHECKPOINT_ATTRIBUTE_PREFIX = "nemo.gym.checkpoint."
+CHECKPOINT_OPERATION_ATTRIBUTE = f"{CHECKPOINT_ATTRIBUTE_PREFIX}operation"
+CHECKPOINT_KIND_ATTRIBUTE = f"{CHECKPOINT_ATTRIBUTE_PREFIX}participant_kind"
+CHECKPOINT_ERROR_CODE_ATTRIBUTE = f"{CHECKPOINT_ATTRIBUTE_PREFIX}error_code"
 
 #: Milliseconds. Provisioning a remote sandbox takes tens of seconds and a long command can run
 #: for minutes; the SDK's default boundaries end at 10 s and would put most of both in +Inf.
@@ -413,6 +452,59 @@ def register_http_connection_pool_connect_counter(snapshot: Callable[[], dict[st
         )
     except Exception:
         logger.debug("nemo-lens: failed to register %s", HTTP_CONNECTION_POOL_CONNECT_INSTRUMENT, exc_info=True)
+
+
+#: Milliseconds. Most operations take milliseconds; commit and restore at tens of thousands of rollouts take seconds.
+CHECKPOINT_DURATION_BOUNDARIES_MS: tuple[float, ...] = (1, 5, 10, 50, 100, 500, 1_000, 5_000, 10_000, 30_000, 120_000)
+
+
+def record_checkpoint_operation(duration_ms: float, *, operation: str, kind: str, outcome: str) -> None:
+    """Record one checkpoint operation's wall-clock, by operation, participant kind, and outcome."""
+    _record_histogram(
+        CHECKPOINT_OPERATION_INSTRUMENT,
+        "ms",
+        "Wall-clock time of one partial-rollout checkpoint operation.",
+        duration_ms,
+        {CHECKPOINT_OPERATION_ATTRIBUTE: operation, CHECKPOINT_KIND_ATTRIBUTE: kind, "outcome": outcome},
+        boundaries=CHECKPOINT_DURATION_BOUNDARIES_MS,
+    )
+
+
+def record_checkpoint_volume(*, operation: str, kind: str, records: int, size_bytes: int) -> None:
+    """Count the records a participant wrote at commit or restored, and the bytes of the records file."""
+    attributes = {CHECKPOINT_OPERATION_ATTRIBUTE: operation, CHECKPOINT_KIND_ATTRIBUTE: kind}
+    _record_counter(
+        CHECKPOINT_RECORDS_INSTRUMENT, "Checkpoint records written at commit or restored.", attributes, records
+    )
+    _record_counter(
+        CHECKPOINT_BYTES_INSTRUMENT,
+        "Bytes of checkpoint records files written at commit or read at restore.",
+        attributes,
+        size_bytes,
+        unit="By",
+    )
+
+
+def record_checkpoint_control_error(code: str) -> None:
+    """Count one control call that failed, by the error code of its reply."""
+    _record_counter(
+        CHECKPOINT_CONTROL_ERRORS_INSTRUMENT,
+        "Partial-rollout checkpoint control calls that failed, by error code.",
+        {CHECKPOINT_ERROR_CODE_ATTRIBUTE: code},
+    )
+
+
+def record_checkpoint_event(event: str, amount: int = 1, **attributes: str) -> None:
+    """Count a checkpoint event (``lease_expired``, ``prepare_not_ready``, ``generation_cut``)."""
+    _record_counter(
+        CHECKPOINT_EVENTS_INSTRUMENT,
+        "Events that change a partial-rollout checkpoint's outcome without failing a call.",
+        {
+            f"{CHECKPOINT_ATTRIBUTE_PREFIX}event": event,
+            **{f"{CHECKPOINT_ATTRIBUTE_PREFIX}{name}": value for name, value in attributes.items()},
+        },
+        amount,
+    )
 
 
 def record_rollout_completed(
