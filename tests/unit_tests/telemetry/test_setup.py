@@ -549,8 +549,8 @@ def test_the_fastapi_instrumentor_is_installed_only_while_traces_export(monkeypa
 
 
 def test_init_registers_the_rollout_id_provider_for_sandbox_spans(enabled_console_env):
-    import nemo_gym.sandbox.api as sandbox_api
+    import nemo_gym.sandbox.observability as sandbox_observability
     from nemo_gym.telemetry.setup import init_telemetry, rollout_span_attributes
 
     init_telemetry()
-    assert sandbox_api._span_attribute_provider is rollout_span_attributes
+    assert sandbox_observability._span_attribute_provider is rollout_span_attributes

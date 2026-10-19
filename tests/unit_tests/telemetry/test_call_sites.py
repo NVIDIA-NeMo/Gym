@@ -50,7 +50,7 @@ def recorded_spans(monkeypatch):
 @pytest.fixture
 def rollout_attributes_registered():
     """What Gym's telemetry setup does: hand the sandbox API the rollout-id provider."""
-    from nemo_gym.sandbox.api import set_span_attribute_provider
+    from nemo_gym.sandbox.observability import set_span_attribute_provider
     from nemo_gym.telemetry.setup import rollout_span_attributes
 
     set_span_attribute_provider(rollout_span_attributes)

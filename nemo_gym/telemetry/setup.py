@@ -461,7 +461,7 @@ def rollout_span_attributes() -> dict[str, str]:
 def _register_sandbox_span_attributes() -> None:
     """Hand the sandbox API its extra span attributes. The sandbox package must not import rollout
     correlation itself: `global_config` imports the sandbox registry while initialising."""
-    from nemo_gym.sandbox.api import set_span_attribute_provider
+    from nemo_gym.sandbox.observability import set_span_attribute_provider
 
     set_span_attribute_provider(rollout_span_attributes)
 

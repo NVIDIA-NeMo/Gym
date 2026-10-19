@@ -25,6 +25,7 @@ from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path
 from typing import Any, TypeVar
 
+from nemo_gym.sandbox.observability import span_attributes as _span_attributes
 from nemo_gym.sandbox.providers import (
     ConnectableProvider,
     SandboxEndpoint,
@@ -379,31 +380,6 @@ class SandboxPty:
             return_code=exit_code if exit_code is not None else SANDBOX_PTY_RUNTIME_RETURN_CODE,
             error_type=None if exit_code is not None else "pty",
         )
-
-
-#: Extra attributes for every sandbox span, supplied by whoever runs the sandbox. The sandbox
-#: package knows nothing about rollouts; Gym's telemetry setup registers the rollout id here.
-SpanAttributeProvider = Callable[[], Mapping[str, Any]]
-_span_attribute_provider: SpanAttributeProvider | None = None
-
-
-def set_span_attribute_provider(provider: SpanAttributeProvider | None) -> None:
-    """Register a callable whose attributes are added to every `gym.sandbox.*` span.
-
-    Called once by the telemetry setup of the embedding application; None removes it. The
-    provider runs when a span opens, so it may read request-scoped state such as a ContextVar.
-    An explicit ``span_attributes`` argument to :meth:`AsyncSandbox.start` or
-    :meth:`AsyncSandbox.exec` wins over it key by key.
-    """
-    global _span_attribute_provider
-    _span_attribute_provider = provider
-
-
-def _span_attributes(explicit: Mapping[str, Any] | None = None) -> dict[str, Any]:
-    attributes: dict[str, Any] = dict(_span_attribute_provider()) if _span_attribute_provider is not None else {}
-    if explicit:
-        attributes.update(explicit)
-    return attributes
 
 
 def _sandbox_id(handle: Any) -> str | None:
