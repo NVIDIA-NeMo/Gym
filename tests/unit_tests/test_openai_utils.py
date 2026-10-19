@@ -1228,6 +1228,45 @@ class TestNeMoGymChatCompletionSchemas:
 
         assert params.model_dump(exclude_unset=True)["messages"][2] == messages[2]
 
+    def test_tool_message_accepts_image_parts(self) -> None:
+        # A vision tool may return the image it loaded inside its result for a vision-capable model to see.
+        tool_message = {
+            "role": "tool",
+            "tool_call_id": "c1",
+            "content": [
+                {"type": "text", "text": "Image loaded."},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,YWJj", "detail": "auto"}},
+            ],
+        }
+        messages = [
+            {"role": "user", "content": "What color is the image?"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {"id": "c1", "type": "function", "function": {"name": "load_image", "arguments": "{}"}}
+                ],
+            },
+            tool_message,
+        ]
+        params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate({"messages": messages})
+
+        assert params.model_dump(exclude_unset=True)["messages"][2] == tool_message
+
+    @pytest.mark.parametrize(
+        "part",
+        [
+            {"type": "input_audio", "input_audio": {"data": "YWJj", "format": "wav"}},
+            {"type": "video_url", "video_url": {"url": "data:video/mp4;base64,YWJj"}},
+        ],
+        ids=["audio", "video"],
+    )
+    def test_tool_message_refuses_other_media_parts(self, part: dict) -> None:
+        tool_message = {"role": "tool", "tool_call_id": "c1", "content": [{"type": "text", "text": "x"}, part]}
+
+        with pytest.raises(ValidationError):
+            NeMoGymChatCompletionCreateParamsNonStreaming.model_validate({"messages": [tool_message]})
+
     def test_custom_tool_and_training_tool_call_round_trip(self) -> None:
         payload = {
             "messages": [
