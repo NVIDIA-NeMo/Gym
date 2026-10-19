@@ -367,6 +367,9 @@ gym eval run \
     +mlflow_run_name=gpqa
 ```
 
+The exporter writes the MLflow run id to `<output stem>_mlflow_run_id` next to `output_jsonl_fpath`.
+A resumed or resubmitted run with the same output logs to that MLflow run. Delete the file to start a new one.
+
 <Note>
 `mlflow_tracking_uri` and `mlflow_tracking_token` are shared with the GitLab model registry used by
 `gym dataset upload|download`. Setting only those two does not enable the exporter — it also needs
