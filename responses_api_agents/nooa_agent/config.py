@@ -81,11 +81,32 @@ class NOOAAgentConfig(BaseResponsesAPIAgentConfig):
 
     model_config = ConfigDict(extra="forbid")
 
-    resources_server: ResourcesServerRef
+    resources_server: ResourcesServerRef | None = Field(
+        default=None,
+        description="Dataset/schema discovery metadata; runtime access comes from environment session grants.",
+    )
     model_server: ModelServerRef
     nooa: NOOAInvocationConfig
-    max_policy_calls: int = Field(default=10, gt=0)
-    run_timeout_secs: float = Field(default=2100, gt=0)
+    max_policy_calls: int | None = Field(
+        default=None, gt=0, description="Optional shared model-call limit per rollout; null disables the limit."
+    )
+
+    @field_validator("nooa")
+    @classmethod
+    def require_embedded_execution(cls, value: NOOAInvocationConfig) -> NOOAInvocationConfig:
+        if value.execution_mode != "embedded":
+            raise ValueError(
+                "nooa.execution_mode='sandboxed' is unavailable in this agent server; "
+                "use 'embedded' until sandbox sessions are supported"
+            )
+        return value
+
+    @field_validator("num_workers")
+    @classmethod
+    def require_single_worker(cls, value: int | None) -> int | None:
+        if value not in (None, 1):
+            raise ValueError("NOOA sessions require num_workers=1")
+        return value
 
 
 def load_agent_class(path: str) -> type[Agent]:

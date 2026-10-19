@@ -14,6 +14,7 @@
 # limitations under the License.
 import warnings
 from argparse import ArgumentParser
+from collections.abc import Mapping
 from enum import Enum
 from pathlib import Path
 from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional, Set, Tuple, Union
@@ -159,6 +160,10 @@ class ConfigPathNotFoundError(ConfigError, FileNotFoundError):
 
 class MalformedConfigPathsError(ConfigError, ValueError):
     """`config_paths` was not a list of paths (e.g. a scalar string was passed)."""
+
+
+class HeadServerConfigMalformedError(ConfigError, ValueError):
+    """`head_server` is not a mapping, or a field has the wrong type (e.g. a non-integer `port` from a `++head_server.port=` override)."""
 
 
 class NoServerInstancesError(ConfigError, ValueError):
@@ -487,6 +492,7 @@ class DatasetConfig(BaseModel):
             Literal["MIT"],
             Literal["Creative Commons Attribution 4.0 International"],
             Literal["Creative Commons Attribution-ShareAlike 4.0 International"],
+            Literal["CC-BY-SA-4.0 AND LicenseRef-OpenMDW-1.1"],
             Literal["CC BY-SA 4.0"],
             Literal["CC BY-NC 3.0"],
             Literal["NVIDIA Internal Use Only, Do Not Distribute"],
@@ -850,6 +856,28 @@ class ExporterConfig(BaseModel):
     def is_available(self) -> bool:
         """Whether every field the backend needs to connect is set."""
         raise NotImplementedError
+
+
+REMOVED_ROLLOUT_OPTIONS = {
+    "retry_invalid_judge_responses": (
+        "A verifier that cannot produce a usable judgement now returns a `judge_failed` row; recover those "
+        "with `gym eval reverify --judge-failed-only`."
+    ),
+}
+
+
+class RemovedRolloutOptionsMixin(BaseModel):
+    """Reject rollout options that no longer exist, which pydantic would otherwise drop without a word."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_removed_rollout_options(cls, data):
+        # The CLI passes an OmegaConf DictConfig, which is a Mapping but not a dict.
+        if isinstance(data, Mapping):
+            for name, hint in REMOVED_ROLLOUT_OPTIONS.items():
+                if name in data:
+                    raise ConfigError(f"`{name}` was removed. {hint}")
+        return data
 
 
 DEPRECATED_UPLOAD_ROLLOUTS_KEY = "upload_rollouts_to_wandb"

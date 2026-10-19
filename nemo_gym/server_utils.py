@@ -60,6 +60,7 @@ from omegaconf import DictConfig, OmegaConf, open_dict
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 from requests.exceptions import ConnectionError
 from starlette.middleware.sessions import SessionMiddleware
+from starlette.routing import Match
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from uvicorn.protocols.http.httptools_impl import HttpToolsProtocol
 
@@ -86,7 +87,7 @@ from nemo_gym.global_config import (
     get_global_config_dict,
 )
 from nemo_gym.profiling import Profiler
-from nemo_gym.rollout_correlation import current_rollout_id, maybe_rollout_id_from_run_body
+from nemo_gym.rollout_correlation import ROUTED_PATH_STATE_KEY, current_rollout_id, maybe_rollout_id_from_run_body
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, safe_set_span_attributes
 from nemo_gym.telemetry.connection_pool import (
     QueueTimedTCPConnector,
@@ -115,6 +116,8 @@ _VALIDATION_ERROR_LOG_BODY_CHARS = 4096
 _VALIDATION_ERROR_LOG_MAX_ERRORS = 20
 _VALIDATION_ERROR_LOG_FIELD_CHARS = 256
 _VALIDATION_ERROR_LOG_LOC_ITEMS = 8
+# Bound the rendered error summaries in the log message to 4 KiB.
+_VALIDATION_ERROR_LOG_ERRORS_CHARS = 4096
 
 
 def _escaped_log_text(value: str, max_chars: int) -> tuple[str, bool]:
@@ -177,10 +180,29 @@ def _validation_error_summaries(errors: list[dict[str, Any]]) -> tuple[list[dict
     return summaries, truncated
 
 
+def _validation_errors_log_text(error_summaries: list[dict[str, Any]]) -> tuple[str, bool]:
+    """Render the error summaries for the log message, bounded by ``_VALIDATION_ERROR_LOG_ERRORS_CHARS``."""
+    # Custom validator messages can echo credentials from headers, queries, paths, or cookies.
+    # Keep their type and location visible without copying their messages into the default log.
+    message_summaries = [
+        summary if summary["loc"] and summary["loc"][0] == "body" else {key: summary[key] for key in ("type", "loc")}
+        for summary in error_summaries
+    ]
+    rendered = json.dumps(message_summaries, ensure_ascii=True, separators=(",", ":"))
+    if len(rendered) <= _VALIDATION_ERROR_LOG_ERRORS_CHARS:
+        return rendered, False
+    suffix = "...[truncated]"
+    return rendered[: _VALIDATION_ERROR_LOG_ERRORS_CHARS - len(suffix)] + suffix, True
+
+
 async def _log_validation_exception(request: Request, exc: RequestValidationError) -> None:
     errors = exc.errors()
     error_summaries, errors_truncated = _validation_error_summaries(errors)
-    errors_suffix = " ...[truncated]" if errors_truncated else ""
+    # The summaries are also attached as ``extra``, but the default formatter drops extras,
+    # so render them into the message too: a 422 log line should say which field failed.
+    errors_text, errors_text_truncated = _validation_errors_log_text(error_summaries)
+    errors_log_truncated = errors_truncated or errors_text_truncated
+    errors_suffix = " ...[truncated]" if errors_log_truncated else ""
     extra = {
         "validation_error_count": len(errors),
         "validation_errors": error_summaries,
@@ -192,9 +214,11 @@ async def _log_validation_exception(request: Request, exc: RequestValidationErro
     )
     if not has_body_error:
         logger.warning(
-            "Request validation failed; validation_error_count=%d validation_errors_truncated=%s%s",
+            "Request validation failed; validation_error_count=%d validation_errors=%s "
+            "validation_errors_truncated=%s%s",
             len(errors),
-            errors_truncated,
+            errors_text,
+            errors_log_truncated,
             errors_suffix,
             extra=extra,
         )
@@ -205,9 +229,10 @@ async def _log_validation_exception(request: Request, exc: RequestValidationErro
     except Exception:
         logger.warning(
             "Request validation failed; request body unavailable; "
-            "validation_error_count=%d validation_errors_truncated=%s%s",
+            "validation_error_count=%d validation_errors=%s validation_errors_truncated=%s%s",
             len(errors),
-            errors_truncated,
+            errors_text,
+            errors_log_truncated,
             errors_suffix,
             extra=extra,
         )
@@ -227,12 +252,13 @@ async def _log_validation_exception(request: Request, exc: RequestValidationErro
     )
     logger.warning(
         "Request validation failed; request_body_size_bytes=%d request_body_truncated=%s request_body_prefix=%s "
-        "validation_error_count=%d validation_errors_truncated=%s%s",
+        "validation_error_count=%d validation_errors=%s validation_errors_truncated=%s%s",
         len(body),
         body_truncated,
         escaped_prefix,
         len(errors),
-        errors_truncated,
+        errors_text,
+        errors_log_truncated,
         errors_suffix,
         extra=extra,
     )
@@ -833,8 +859,7 @@ class ServerClient(BaseModel):
                 model = config.get("model_server") or {}
                 if model.get("name") != model_server_name or model.get("type") != "responses_api_models":
                     continue
-                # Nested harnesses are keyed by directory path (e.g. `conversational_tool_use/simulation`).
-                package = import_module(f"responses_api_agents.{harness.replace('/', '.')}")
+                package = import_module(f"responses_api_agents.{harness}")
                 header = getattr(package, "_assistant_message_header", None)
                 if header is not None:
                     headers.add(header.lower())
@@ -1238,6 +1263,23 @@ def _telemetry_server_type(server_cls: Type) -> Optional[str]:
     return None
 
 
+def _cancelled_request_route(scope: Scope) -> str:
+    """Return a registered route template, never a path containing request or rollout IDs."""
+    route = scope.get("route")
+    if route is not None:
+        return getattr(route, "path_format", "<unmatched>")
+
+    # Prefix middleware copies the scope, but shares its actual routed path in state.
+    # Respect each server's prefix rules and resolve only registered templates.
+    path = scope.get("state", {}).get(ROUTED_PATH_STATE_KEY, scope["path"])
+    routed_scope = {**scope, "path": path}
+    for candidate in getattr(scope.get("app"), "routes", ()):
+        match, _ = candidate.matches(routed_scope)
+        if match == Match.FULL:
+            return getattr(candidate, "path_format", "<unmatched>")
+    return "<unmatched>"
+
+
 class ClientDisconnectCancellationMiddleware:
     """Cancel an in-flight HTTP request when its client disconnects."""
 
@@ -1267,17 +1309,23 @@ class ClientDisconnectCancellationMiddleware:
         received_messages: asyncio.Queue[Message] = asyncio.Queue()
         client_disconnected = asyncio.Event()
         response_complete = asyncio.Event()
+        debug = is_global_aiohttp_client_request_debug_enabled()
+        started_at = time.monotonic() if debug else None
+        response_started = False
 
         async def receive_message() -> Message:
             return await received_messages.get()
 
         async def send_message(message: Message) -> None:
+            nonlocal response_started
             if client_disconnected.is_set():
                 return
 
             if counts is not None and message["type"] == "http.response.start":
                 counts.count_response(message["status"])
             await send(message)
+            if message["type"] == "http.response.start":
+                response_started = True
             if message["type"] == "http.response.body" and not message.get("more_body", False):
                 response_complete.set()
 
@@ -1309,13 +1357,18 @@ class ClientDisconnectCancellationMiddleware:
                     client_disconnected.set()
                     self.num_cancelled += 1
                     if counts is not None:
-                        counts.cancelled += 1
-                    if is_global_aiohttp_client_request_debug_enabled() or self.num_cancelled % 100 == 0:
+                        counts.count_cancellation(_cancelled_request_route(scope), response_started=response_started)
+                    if debug or self.num_cancelled % 100 == 0:
                         client = scope.get("client")
                         client_address = f"{client[0]}:{client[1]}" if client else "-:-"
+                        detail = ""
+                        if started_at is not None:
+                            elapsed_s = time.monotonic() - started_at
+                            phase = "response_started" if response_started else "before_response_start"
+                            detail = f" after {elapsed_s:.1f}s {phase}"
                         print(
                             f'{client_address} - "{scope["method"]} {scope["path"]}" '
-                            f"499 CLIENT DISCONNECTED ({self.num_cancelled} total for this server worker)"
+                            f"499 CLIENT DISCONNECTED{detail} ({self.num_cancelled} total for this server worker)"
                         )
                     task_group.cancel_scope.cancel()
                     return
@@ -1398,6 +1451,12 @@ class SimpleServer(BaseServer):
     @abstractmethod
     def setup_webserver(self) -> FastAPI:
         pass
+
+    def setup_checkpoint_participant(self, app: FastAPI) -> None:
+        """Take part in partial-rollout checkpoints on the app ``setup_webserver`` built, if it does not yet.
+
+        Called for every server, so a server whose ``setup_webserver`` builds its own app takes part too.
+        """
 
     def setup_telemetry(self) -> None:
         """Initialise this process's nemo-lens telemetry. Idempotent, once per process.
@@ -1614,6 +1673,7 @@ repr(e): {repr(e)}"""
         app = server.setup_webserver()
         startup.mark("setup_webserver")
         observe_app_event_loop(app, "server")
+        server.setup_checkpoint_participant(app)
         # After the app is fully built so subclass routes are present. Only resources servers expose tools over MCP,
         # so gating the lazy import on their config keeps the MCP SDK out of agent/model processes that never need it.
         if getattr(getattr(server, "config", None), "expose_tools_over_mcp", False):

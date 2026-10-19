@@ -38,6 +38,7 @@ class Recorder(CheckpointParticipant):
         self.name = name
         self.events = events
         self.blockers: list[str] = []
+        self.restarts: list[str] = []
         self.fail_restore = False
         self.live: set[str] = set()
 
@@ -48,7 +49,7 @@ class Recorder(CheckpointParticipant):
         self.events.append(f"open {self.name}")
 
     def readiness(self) -> PrepareReport:
-        return PrepareReport(ready=not self.blockers, blockers=self.blockers)
+        return PrepareReport(ready=not self.blockers, blockers=self.blockers, restarts=self.restarts)
 
     async def retire(self, episode_id: EpisodeId) -> None:
         self.events.append(f"retire {self.name}")
@@ -187,6 +188,43 @@ async def test_prepare_stops_at_an_unready_stage_until_the_controller_retires_it
     assert missed.blockers() == {"agent": ["r-a1"]}
     assert later_stage_untouched
     assert prepared.prepared
+
+
+async def test_each_prepare_stage_carries_the_restarts_every_earlier_stage_reported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A later stage leaves an episode an earlier stage reported as a restart out of its blockers.
+
+    The commit leaves that episode out anyway, so waiting for it could only stall the checkpoint.
+    A stage that follows no restart gets the same request as before.
+    """
+    client, recorders, _ = deployment(*FULL)
+    participants = await coordination.discover(client, auth_token=TOKEN)
+    recorders["env"].restarts = ["r"]
+    recorders["agent"].restarts = ["q"]
+    prepares: dict[str, dict[str, Any]] = {}
+    real_request = InProcessClient.request
+
+    async def recording(self, server_name: str, url_path: str, method: str, **kwargs: Any) -> _Response:
+        if url_path.endswith("/prepare"):
+            prepares[server_name] = orjson.loads(kwargs["data"])
+        return await real_request(self, server_name, url_path, method, **kwargs)
+
+    monkeypatch.setattr(InProcessClient, "request", recording)
+    result = await coordination.prepare(participants, "c1", deadline_ts=deadline())
+    carried = {name: set(recorder.carried_restarts) for name, recorder in recorders.items()}
+    await coordination.resume(participants, "c1", deadline_ts=deadline())
+
+    assert result.prepared
+    assert {name: body.get("restarts") for name, body in prepares.items()} == {
+        "env": None,
+        "policy": ["r"],
+        "agent": ["r"],
+        "res": ["q", "r"],
+    }
+    assert carried == {"env": set(), "policy": {"r"}, "agent": {"r"}, "res": {"q", "r"}}
+    # Resume ends the checkpoint, and the restarts it carried with it.
+    assert all(not recorder.carried_restarts for recorder in recorders.values())
 
 
 async def test_resume_after_a_partial_prepare_fences_the_participants_it_never_reached() -> None:

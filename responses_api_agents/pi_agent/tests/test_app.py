@@ -115,7 +115,9 @@ async def test_legacy_runner_request_preserves_configured_pi_controls(with_scope
     with patch.object(agent, "_run_pi", AsyncMock(return_value=(items, usage, "configured-model", []))) as run:
         result = await agent.responses(request, body)
 
-    run.assert_awaited_once_with("fix the code", "config", rollout_id=None, collect_observations=False)
+    run.assert_awaited_once_with(
+        "fix the code", "config", rollout_id=None, collect_observations=False, timeout=agent.config.timeout
+    )
     assert result.output[0].content[0].text == "fixed"
     assert result.model == "configured-model"
     assert result.usage.total_tokens == 3
@@ -848,3 +850,23 @@ def test_uncorrelated_pi_provider_has_no_invocation_header() -> None:
     agent = _make_agent(model_server=ModelServerRef(type="responses_api_models", name="policy"))
     with patch.object(PiAgent, "resolve_model_base_url", return_value="http://model/v1"):
         assert "headers" not in agent._build_models_config()["providers"]["nemo"]
+
+
+@pytest.mark.parametrize("budget,expected", [(None, 1800), ("12.5", 12.5), ("3600", 1800), ("invalid", 1800)])
+async def test_task_timeout_reaches_local_subprocess_wait(tmp_path: Path, budget: str | None, expected: float) -> None:
+    agent = _make_agent(timeout=1800, workspace_root=str(tmp_path))
+    body = NeMoGymResponseCreateParamsNonStreaming(
+        input="task", metadata=None if budget is None else {"agent_timeout_sec": budget}
+    )
+    process = MagicMock(returncode=0)
+    process.communicate = AsyncMock(return_value=(b"", b""))
+    module = "responses_api_agents.pi_agent.app"
+    with (
+        patch(f"{module}.asyncio.create_subprocess_exec", AsyncMock(return_value=process)),
+        patch(f"{module}.asyncio.wait_for", wraps=asyncio.wait_for) as wait,
+    ):
+        episode = await agent._create_episode(body, collect_observations=False)
+    wait.assert_awaited_once()
+    assert wait.await_args.kwargs["timeout"] == expected
+    assert episode.response.metadata == {"agent_timeout_sec": str(float(expected))}
+    assert agent.config.timeout == 1800

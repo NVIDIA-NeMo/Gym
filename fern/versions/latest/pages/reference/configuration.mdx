@@ -50,6 +50,8 @@ Gym resolves every relative path — `config_paths`, `env.yaml`, prompt configs,
 
 Earlier roots win, so a component you provide shadows a same-named built-in. Absolute paths are used unchanged.
 
+In non-editable installs (including wheels), Python keeps its existing import-path order, so a cwd copy of a built-in can override its files while the installed module still wins. To override both files and modules, explicitly add your project with `--search-dir .` (for example, `gym eval prepare --benchmark aime24 --search-dir .`) or `NEMO_GYM_EXTRA_ROOTS`.
+
 ### External roots (`NEMO_GYM_EXTRA_ROOTS`)
 
 Point Gym at one or more extra roots so your own benchmarks, environments, resources servers, agents, models, configs, prompts, and data resolve by name — without forking Gym or copying files into the install tree. Each root uses the same layout as the Gym repo:

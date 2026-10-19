@@ -1220,7 +1220,7 @@ class TestApp:
                 )
             return result
 
-        async def post(*, server_name, url_path, json, cookies):
+        async def post(*, server_name, url_path, json, cookies, headers=None):
             if server_name == "model":
                 result = model_client.post(url_path, json=json.model_dump(exclude_none=True))
                 return reply(result.json(), result.status_code)
@@ -4137,6 +4137,70 @@ class TestVLLMConverter:
         server._clients = [mock_client]
         return TestClient(app), captured_kwargs
 
+    @mark.parametrize("stream", [False, True])
+    @mark.parametrize("aws_region_name", [None, "us-east-1", 123, {"ignored": ["value"]}])
+    def test_openhands_request_fields_are_accepted_and_not_forwarded(
+        self, stream: bool, aws_region_name: object
+    ) -> None:
+        """Exercise ingress and forwarding with OpenHands fields and #4483 replay metadata."""
+        client, captured_kwargs = self._chat_client_capturing_upstream()
+        tool_call = {"id": "c1", "type": "function", "function": {"name": "ls", "arguments": "{}"}}
+        body = {
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [tool_call],
+                    "provider_specific_fields": {"refusal": None},
+                },
+                {"role": "tool", "tool_call_id": "c1", "name": "ls", "content": "ok"},
+            ],
+            "aws_region_name": aws_region_name,
+            "stream": stream,
+        }
+
+        response = client.post("/v1/chat/completions", json=body)
+
+        assert response.status_code == 200, response.text
+        assert "aws_region_name" not in captured_kwargs
+        assert captured_kwargs["messages"] == [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": None, "tool_calls": [tool_call]},
+            {"role": "tool", "tool_call_id": "c1", "name": "ls", "content": "ok"},
+        ]
+        if stream:
+            assert response.headers["content-type"].startswith("text/event-stream")
+            frames = [line.removeprefix("data: ") for line in response.text.splitlines() if line.startswith("data: ")]
+            assert frames[-1] == "[DONE]"
+            chunks = [json.loads(frame) for frame in frames[:-1]]
+            assert all(chunk["object"] == "chat.completion.chunk" for chunk in chunks)
+            assert "".join(chunk["choices"][0]["delta"].get("content", "") for chunk in chunks) == "response"
+        else:
+            assert response.json()["choices"][0]["message"]["content"] == "response"
+
+    @mark.parametrize("stream", [False, True])
+    def test_tool_message_image_reaches_the_backend(self, stream: bool) -> None:
+        client, captured_kwargs = self._chat_client_capturing_upstream()
+        tool_call = {"id": "c1", "type": "function", "function": {"name": "load_image", "arguments": "{}"}}
+        messages = [
+            {"role": "user", "content": "What color is the image?"},
+            {"role": "assistant", "content": None, "tool_calls": [tool_call]},
+            {
+                "role": "tool",
+                "tool_call_id": "c1",
+                "content": [
+                    {"type": "text", "text": "Image loaded."},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,YWJj"}},
+                ],
+            },
+        ]
+
+        response = client.post("/v1/chat/completions", json={"messages": messages, "stream": stream})
+
+        assert response.status_code == 200, response.text
+        assert captured_kwargs["messages"] == messages
+
     def test_request_chat_template_kwargs_precedence(self, caplog):
         """Config baseline -> direct request field -> metadata override.
 
@@ -4609,6 +4673,29 @@ def test_responses_metadata_sampling_reaches_vllm() -> None:
     assert outbound["top_k"] == 64
     assert outbound["seed"] == 3
     assert outbound["chat_template_kwargs"] == {"enable_thinking": True}
+
+
+def test_indic_ifeval_prepared_sampling_reaches_vllm() -> None:
+    from benchmarks.indic.ifeval.prepare import build_rows
+
+    row = build_rows(
+        [
+            {
+                "key": 1,
+                "prompt": "नमस्ते लिखिए।",
+                "instruction_id_list": ["keywords:existence"],
+                "kwargs": [{"keywords": ["नमस्ते"]}],
+                "tags": ["correct"],
+            }
+        ],
+        language="hi",
+    )[0]
+    request = NeMoGymResponseCreateParamsNonStreaming.model_validate(row["responses_create_params"])
+    outbound = _translate_responses_request(_make_minimal_audio_model(), request)
+    assert (outbound["temperature"], outbound["max_tokens"]) == (0.0, 1280)
+    assert outbound["messages"] == [{"role": "user", "content": "नमस्ते लिखिए।"}]
+    assert "top_k" not in outbound
+    assert "chat_template_kwargs" not in outbound
 
 
 class TestAudioDataSplice:
