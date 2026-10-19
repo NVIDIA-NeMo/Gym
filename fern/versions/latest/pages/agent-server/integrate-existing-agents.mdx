@@ -18,13 +18,15 @@ These adapters run a coding harness inside a task sandbox that a Resources serve
 
 | Harness | Model API | Resources tool grants | Token IDs and logprobs | SWE-bench Pro | Terminal Bench 2.1 |
 | --- | --- | --- | --- | --- | --- |
-| Hermes (`hermes_agent`) | Chat Completions | MCP only | Returned in the result | Declared | Not declared |
+| Hermes (`hermes_agent`) | Chat Completions | MCP only | Returned in a result file that the model can also write; evaluation only | Declared | Not declared |
 | Pi (`pi_agent`) | Chat Completions | None | Not wired up; evaluation only | Declared | Declared |
 | Codex (`codex_agent`) | Responses (streaming) | None | Not wired up; evaluation only | Declared | Declared |
 | OpenCode (`opencode_agent`) | Chat Completions | None | Off by default; the session path is evaluation only | Not declared | Declared |
 | OpenClaw (`openclaw_agent`) | Chat Completions | None | Not wired up; evaluation only | Not declared | Declared |
 
-*Declared* means the benchmark's Resources server lists the agent in `allowed_agents`. When rollout collection starts, any other pairing is rejected unless you pass `allow_unsupported_pairing`. Declared support is not a validation: it says nothing about accuracy or training readiness. Check that a pairing works with a real model and the benchmark's verifier before you rely on it.
+*Declared* means the benchmark's Resources server lists the agent in `allowed_agents`. Gym rejects any other pairing unless you pass `--allow-unsupported-pairing`. Declared support is not a validation: it says nothing about accuracy or training readiness. Check that a pairing works with a real model and the benchmark's verifier before you rely on it.
+
+The `allowed_agents` lists also name older adapters, such as `opencode_sandboxed_agent` and `terminus_2_sandboxed_agent`. They run the whole episode themselves behind a `legacy_agent` Environment Server, and shipped recipes such as `terminal_bench_2_1/opencode` use them. To run them or swap one for another, see [Compare Harnesses](/main/evaluation/harness).
 
 ## Run an integrated agent on a benchmark
 
@@ -119,8 +121,10 @@ experiment:
       resources_tool_transports: []
       max_concurrent_episodes: 1
       queue_timeout_seconds: 60
-      # Above Hermes installation (900) + runner (21600) + SWE-bench Pro seed and verification (2700).
+      # Above Hermes installation (900) + runner (21600) + SWE-bench Pro verification (2700), plus seed and agent close.
       default_episode_timeout_seconds: 28800
+      # Each cleanup callback, such as agent close: Pi needs up to 5 x 60 + 60 = 360 seconds, Hermes 5 x 30 + 30.
+      cleanup_timeout_seconds: 360
 ```
 
 With `taskset: onboarding`, collation wraps each prepared row in `task_id` and `task_input` and keeps the benchmark's task fields. `environment_server_routes` maps that taskset to the `experiment` instance, whose implementation is `single_agent_turn`. The collector assigns the episode identity and calls the instance's `/run` endpoint. `environment_routing_mode: taskset` rejects flat rows submitted by mistake. For the row contract, see [taskset data declarations](/main/environment-tutorials/resources-server-apis).
@@ -192,7 +196,7 @@ benchmark:
 <Warning>
 The Terminal Bench 2.1 pairing with Hermes is experimental. The benchmark's `allowed_agents` list includes `pi_agent`, but does not include `hermes_agent`.
 
-Before you try a pairing, review the benchmark's session and tool contract and the selected agent's task-image and runtime support. To run with Hermes, append `+allow_unsupported_pairing=true` to the prepare, resolve, and run commands; Pi does not require that override. Validate a representative rollout with a real model and verifier before you claim support. Do not remove the benchmark's guard, and do not mark the pairing as verified only because its configuration resolves.
+Before you try a pairing, review the benchmark's session and tool contract and the selected agent's task-image and runtime support. To run with Hermes, add `--allow-unsupported-pairing` to the `gym eval run` command; Pi does not need it. `gym eval prepare` and `gym env resolve` neither check the pairing nor accept the flag, and `gym eval run` checks it only when it dispatches rollouts, after the servers start. The flag waives every `allowed_agents` and `allowed_model_types` check in the run, not only this one. Validate a representative rollout with a real model and verifier before you claim support. Do not remove the benchmark's guard, and do not add the agent to the benchmark's `allowed_agents` only because its configuration resolves.
 </Warning>
 
 To swap a component, change the imported configuration and its matching implementation block together. Keep task data and preparation in the benchmark declaration, and keep harness selection in the Environment Server's `agent_server` reference. The `--agent-type` shortcut for legacy agent-to-Resources bindings does not replace these edits. To compare agents on the same endpoint, keep the model and provider file unchanged. To compare models or providers, change that file in a separate experiment.
