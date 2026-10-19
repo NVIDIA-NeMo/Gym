@@ -345,6 +345,18 @@ class SlurmComputeConfig(BaseComputeConfig):
     type: Literal["slurm"]
     account: str
     hostname: str | None = None  # None means we're already on the login node; skip SSH.
+    # Submit-side variables explicitly exported before sbatch, without writing values
+    # into job.sh or the resolved config. Runtime-only Slurm variables stay untouched.
+    forward_env: list[str] = []
+
+    @field_validator("forward_env")
+    @classmethod
+    def _validate_forward_env(cls, names: list[str]) -> list[str]:
+        for name in names:
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+                raise ValueError(f"Invalid forward_env variable name: {name!r}")
+        return names
+
     walltime: str | None = None
     node_pools: dict[str, NodePool] = {}
     extra_args: dict[str, str] = {}  # Job-level #SBATCH directives (e.g. --comment, --mail-user).
