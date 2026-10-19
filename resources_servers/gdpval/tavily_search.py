@@ -41,6 +41,8 @@ def _should_rotate_on_status(status: int) -> bool:
     return status in KEY_ROTATION_RETRY_STATUSES or 500 <= status < 600
 
 
+# NOTE(marta-sd): httpx is used on purpose, despite AGENTS.md. This way the model sees the error text as in
+# the pre-refactor code (PR 4178) and a client per call has no shared pool so this is not an issue here.
 def web_client() -> httpx.AsyncClient:
     """Return a client for one tool call."""
     return httpx.AsyncClient(timeout=TIMEOUT, follow_redirects=True)
