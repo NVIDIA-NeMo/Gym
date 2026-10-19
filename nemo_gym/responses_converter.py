@@ -134,11 +134,21 @@ class ResponsesConverterState(BaseModel):
         if self.refusal_buffer:
             shared_params["refusal"] = self.refusal_buffer
 
-        if self.return_token_id_information and self.token_information is not None:
-            message = NeMoGymChatCompletionAssistantMessageForTrainingParam(
-                **shared_params,
-                **self.token_information.model_dump(exclude_none=True),
-            )
+        if self.return_token_id_information:
+            if self.token_information is not None:
+                message = NeMoGymChatCompletionAssistantMessageForTrainingParam(
+                    **shared_params,
+                    **self.token_information.model_dump(exclude_none=True),
+                )
+            else:
+                # Training mode without token ids: emit empty lists so NeMo-RL
+                # can distinguish trainable turns from non-trainable ones.
+                message = NeMoGymChatCompletionAssistantMessageForTrainingParam(
+                    **shared_params,
+                    prompt_token_ids=[],
+                    generation_token_ids=[],
+                    generation_log_probs=[],
+                )
         else:
             message = NeMoGymChatCompletionAssistantMessageParam(**shared_params)
 

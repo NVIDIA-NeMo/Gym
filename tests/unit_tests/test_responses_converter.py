@@ -160,6 +160,32 @@ def test_flush_assistant_emits_training_message_when_token_info_present():
     assert state.token_information is None
 
 
+def test_flush_assistant_emits_training_message_with_empty_ids_when_no_token_info():
+    """When return_token_id_information=True but token_information is None,
+    flush_assistant must still emit a training message (with empty token ids)
+    so that NeMo-RL can distinguish trainable turns from non-trainable ones.
+
+    Regression test for NVBug 5973371 / GitHub issue #4534.
+    """
+    state = ResponsesConverterState(return_token_id_information=True)
+    state.content_buffer = "hello"
+    # token_information is None by default
+    assert state.token_information is None
+
+    state.flush_assistant()
+
+    msg = state.messages[0]
+    # Must be a training message, not a plain assistant message.
+    assert "prompt_token_ids" in msg
+    assert "generation_token_ids" in msg
+    assert "generation_log_probs" in msg
+    assert msg["prompt_token_ids"] == []
+    assert msg["generation_token_ids"] == []
+    assert msg["generation_log_probs"] == []
+    assert msg["content"] == "hello"
+    assert state.token_information is None
+
+
 def test_flush_assistant_clears_token_info_when_no_assistant_is_buffered():
     state = ResponsesConverterState(
         return_token_id_information=True,
@@ -1164,9 +1190,15 @@ def test_responses_to_chat_completion_does_not_leak_token_info_between_turns():
 
     first_assistant, _, second_assistant = params.messages
     assert first_assistant["prompt_token_ids"] == [1]
-    assert "prompt_token_ids" not in second_assistant
-    assert "generation_token_ids" not in second_assistant
-    assert "generation_log_probs" not in second_assistant
+    # When return_token_id_information=True, all assistant messages carry
+    # token-id fields (empty when no capture was available). This prevents
+    # NeMo-RL from crashing on missing keys.
+    assert "prompt_token_ids" in second_assistant
+    assert "generation_token_ids" in second_assistant
+    assert "generation_log_probs" in second_assistant
+    assert second_assistant["prompt_token_ids"] == []
+    assert second_assistant["generation_token_ids"] == []
+    assert second_assistant["generation_log_probs"] == []
 
 
 def test_responses_to_chat_completion_preserves_empty_training_assistant():
