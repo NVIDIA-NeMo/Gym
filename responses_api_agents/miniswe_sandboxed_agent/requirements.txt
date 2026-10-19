@@ -1,5 +1,6 @@
 -e nemo-gym[dev,sandbox] @ ../../
 mini-swe-agent==2.4.6
+litellm==1.105.1  # 1.106.0+ imports mcp.types.CacheableResult (needs mcp>=2.2); mcp is pinned to 1.29.0
 mcp==1.29.0
 httpx-aiohttp==0.2.0
 opensandbox==0.1.16
