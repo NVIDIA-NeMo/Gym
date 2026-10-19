@@ -17,7 +17,7 @@
 
 Kept free of Ray and other server dependencies so the identical code runs on a Ray worker
 (``compute_code_generation_metrics.check_correctness_remote``) and inside a verification
-sandbox (``sandbox_runner.py``), which is what keeps the two execution paths at parity.
+sandbox (``sandbox/sandbox_runner.py``), which is what keeps the two execution paths at parity.
 """
 
 import json

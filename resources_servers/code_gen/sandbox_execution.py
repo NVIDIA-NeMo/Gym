@@ -15,7 +15,9 @@
 
 """Grade a candidate in a fresh provider sandbox instead of on a Ray worker.
 
-The runner and the unchanged grading harness are uploaded with the request and run by
+This module runs in the Gym server. Each verification uploads ``sandbox/sandbox_runner.py``, which
+runs only in the sandbox, and the unchanged grading harness from ``lcb_integration/``, the same
+code the Ray path runs; nothing else from this server is uploaded. The upload and run go through
 ``nemo_gym.verifier_utils.sandbox_verification.run_verification_sandbox``, which raises
 ``SandboxVerificationError`` on a sandbox or runner failure so the caller can mask the sample.
 Candidate failures (wrong answer, timeout, crash) come back as normal harness results.
@@ -28,13 +30,17 @@ from typing import Any
 from pydantic import BaseModel, StrictBool, StrictInt
 
 from nemo_gym.sandbox import SandboxProvider
-from nemo_gym.verifier_utils.sandbox_verification import SandboxVerificationConfig, run_verification_sandbox
+from nemo_gym.verifier_utils.sandbox_verification import (
+    RUNNER_FILE,
+    SandboxVerificationConfig,
+    run_verification_sandbox,
+)
 
 
 _CODE_GEN_DIR = Path(__file__).parent
-# The runner plus the exact grading code the Ray path runs.
+_RUNNER = _CODE_GEN_DIR / "sandbox" / RUNNER_FILE
+# The exact grading code the Ray path runs, uploaded under the same relative paths so the runner can import it.
 _HARNESS_FILES = (
-    "sandbox_runner.py",
     "lcb_integration/__init__.py",
     "lcb_integration/correctness.py",
     "lcb_integration/testing_util.py",
@@ -71,7 +77,10 @@ async def check_correctness_in_sandbox(
     parsed = await run_verification_sandbox(
         provider=provider,
         config=config,
-        files={name: (_CODE_GEN_DIR / name).read_text(encoding="utf-8") for name in _HARNESS_FILES},
+        files={
+            RUNNER_FILE: _RUNNER.read_text(encoding="utf-8"),
+            **{name: (_CODE_GEN_DIR / name).read_text(encoding="utf-8") for name in _HARNESS_FILES},
+        },
         request={"sample": sample, "generation": generation, "timeout": timeout, "debug": debug},
         exec_timeout_s=exec_timeout_s(timeout, num_tests),
         parse_result=_RunnerResult.model_validate_json,

@@ -26,17 +26,26 @@ deadline of `(unit_test_timeout_secs + 1) * num_tests + 5` seconds, 4 GiB `RLIMI
 ### Running unit tests in a sandbox
 Set `sandbox_provider` to run each verification in a fresh sandbox from any
 [sandbox provider](https://docs.nvidia.com/nemo/gym/main/infrastructure/sandbox) instead. The
-server uploads `sandbox_runner.py` together with the unchanged harness above, so the same limits
-apply inside the sandbox; the sandbox only has to be large enough not to undercut them. The
+server uploads `sandbox/sandbox_runner.py` together with the unchanged harness above, so the same
+limits apply inside the sandbox; the sandbox only has to be large enough not to undercut them. The
 exception is the stack: the harness can raise it only up to the sandbox's hard limit, which some
 providers set far below 4 GiB.
+
+Where each part runs:
+
+| Files | Where they run |
+|---|---|
+| `sandbox/sandbox_runner.py` | Only in the sandbox; uploaded with every verification. |
+| `lcb_integration/__init__.py`, `correctness.py`, `testing_util.py` | The grading harness: on a Ray worker by default, or uploaded next to the runner when `sandbox_provider` is set. |
+| `sandbox/Dockerfile` | Builds the sandbox image; not uploaded. |
+| Everything else, including `app.py` and `sandbox_execution.py` (which does the upload) | Only in the Gym server. |
 
 1. Build and push the runtime image. It uses the same uv-managed CPython build as this server's
    environment, and the same numpy, scipy and pandas versions, which candidates can import. With
    per-test time limits, a slower interpreter build turns borderline passes into failures:
 
    ```bash
-   docker build --platform linux/amd64 -t <registry>/code-gen-verifier:<tag> resources_servers/code_gen/sandbox_image
+   docker build --platform linux/amd64 -t <registry>/code-gen-verifier:<tag> resources_servers/code_gen/sandbox
    docker push <registry>/code-gen-verifier:<tag>
    ```
 

@@ -191,7 +191,7 @@ _DOCKER_IMAGE = os.environ.get("CODE_GEN_SANDBOX_IMAGE")
 
 @pytest.mark.skipif(
     shutil.which("docker") is None or not _DOCKER_IMAGE,
-    reason="needs docker and CODE_GEN_SANDBOX_IMAGE built from sandbox_image/",
+    reason="needs docker and CODE_GEN_SANDBOX_IMAGE built from sandbox/",
 )
 class TestDockerProvider:
     async def test_memory_limit_fails_the_test_not_the_sandbox(self) -> None:

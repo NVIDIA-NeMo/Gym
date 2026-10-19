@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Runtime for code_gen's sandboxed unit tests. The grading code is uploaded with every
-# verification, so the image pins what that code imports plus the libraries candidates can
-# import on the Ray path (scipy, pandas). Keep Python, numpy, scipy and pandas in step with
-# the code_gen server environment (requirements.txt) so both paths grade alike.
+# Runtime for code_gen's sandboxed unit tests. The runner next to this file and the grading
+# code are uploaded with every verification, not built in (see ../sandbox_execution.py), so
+# the image pins what that code imports plus the libraries candidates can import on the Ray
+# path (scipy, pandas). Keep Python, numpy, scipy and pandas in step with the code_gen server
+# environment (requirements.txt) so both paths grade alike.
 #
 # The interpreter is uv's managed CPython, the same build the server venv uses. Time limits
 # make interpreter speed part of the grade: the official python:3.13-slim build ran a
