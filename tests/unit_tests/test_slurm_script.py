@@ -2512,6 +2512,62 @@ _RAY_WITH_PROBE = {
 }
 
 
+_TRACED_OTEL = {"endpoint": "https://otlp.example.com", "service_name": "svc", "vllm_traces": True}
+
+
+def _traced_script(tmp_path, services, pools, policy="policy"):
+    config = SubmitConfig.model_validate(
+        {
+            "services": services,
+            "compute": {"hsg": {"type": "slurm", "account": "acct", "node_pools": pools}},
+            "driver": {"container": "gym:latest", "policy_model": policy, "benchmarks": {"b": {"run": {}}}},
+            "job": {"output_path": str(tmp_path / "jobs")},
+            "otel": _TRACED_OTEL,
+        }
+    )
+    return build_sbatch_script(config, "b", config.driver.benchmarks["b"], config.compute["hsg"], tmp_path / "b")
+
+
+_TRACES_FLAG = "--otlp-traces-endpoint http://localhost:4318/v1/traces"
+_UNPINNED_JUDGE = {"type": "vllm", "container": "img", "model": "/j", "port": 9000}
+
+
+def test_vllm_traces_follow_the_collector_to_a_later_pool_and_skip_the_unpinned_api_on_node_0(tmp_path):
+    # Policy pinned to the second pool: driver and collector sit on node 1. The unpinned judge spans
+    # the allocation and answers on node 0, where this job has no collector.
+    script = _traced_script(
+        tmp_path, {"policy": _vllm(8000, "aux", tensor_parallel_size=4), "judge": _UNPINNED_JUDGE}, _TWO_POOLS
+    )
+    assert _TRACES_FLAG in _step(script, "policy")
+    assert _TRACES_FLAG not in _step(script, "judge")
+    assert "Waiting for judge at http://localhost:9000" in script
+
+
+def test_vllm_traces_reach_the_unpinned_api_when_the_collector_is_on_node_0(tmp_path):
+    script = _traced_script(
+        tmp_path, {"policy": _vllm(8000, "gpu", tensor_parallel_size=4), "judge": _UNPINNED_JUDGE}, _TWO_POOLS
+    )
+    assert _TRACES_FLAG in _step(script, "policy")
+    assert _TRACES_FLAG in _step(script, "judge")
+
+
+def test_vllm_traces_skip_a_tier_with_one_server_per_node(tmp_path):
+    # One API per pool node: a localhost endpoint would reach the collector from one node only.
+    script = _traced_script(tmp_path, _per_node_services(), _PD_POOLS)
+    assert _TRACES_FLAG not in _step(script, "policy-prefill")
+    assert _TRACES_FLAG not in _step(script, "policy-decode")
+
+
+def test_vllm_traces_skip_multi_node_ray_serve_but_trace_single_node_ray_serve(tmp_path):
+    two_nodes = {"gpu": {"partition": "batch", "nodes": 2, "ntasks_per_node": 1, "gpus_per_node": 1}}
+    one_node = {"gpu": {"partition": "batch", "nodes": 1, "ntasks_per_node": 1, "gpus_per_node": 2}}
+    serve = {"type": "vllm", "container": "img", "model": "/ckpt", "port": 8000, "use_ray_serve": True}
+    assert _TRACES_FLAG not in _step(
+        _traced_script(tmp_path, {"policy": {**serve, "number_of_instances": 2}}, two_nodes), "policy"
+    )
+    assert _TRACES_FLAG in _step(_traced_script(tmp_path, {"policy": serve}, one_node), "policy")
+
+
 def test_a_pinned_service_on_a_later_pool_is_probed_where_it_runs(tmp_path):
     # The probe runs on node 0; the aux pool's service answers on node 1.
     script = _render(tmp_path, {"policy": _vllm(8000, "gpu"), "scorer": _vllm(8001, "aux")})

@@ -640,6 +640,29 @@ def _build_service_command(
     return _BUILDERS[type(service)](service)
 
 
+def _vllm_api_node(
+    service: VllmServiceConfig, compute: SlurmComputeConfig, driver_node: int | None, total_nodes: int
+) -> int | None:
+    """The allocation node whose vLLM API server a `localhost` endpoint would reach, or None when the
+    service runs an API on more than one node (one server per pool node, Ray Serve replicas across nodes).
+
+    Mirrors the placement the command builders and `_service_nodelist` produce: a pinned service
+    answers on its pool's first node, an unpinned multi-node service on node 0, and an unpinned
+    single-node service beside the driver.
+    """
+    nodes = _service_nodes(service, compute, total_nodes)
+    if isinstance(service, VllmPDTierConfig) and service.server_per_node and nodes > 1:
+        return None
+    gpus_per_node_values = [p.gpus_per_node for p in compute.node_pools.values() if p.gpus_per_node is not None]
+    if nodes > 1 and effective_ray_serve(service, nodes, gpus_per_node_values):
+        return None
+    if service.node_pool is not None:
+        return _pool_offsets(compute)[service.node_pool][0]
+    if _vllm_spans_multiple_nodes(service, total_nodes):
+        return 0
+    return driver_node if driver_node is not None else 0
+
+
 def _with_vllm_traces(
     name: str, service: ServiceConfig, config: SubmitConfig, compute: SlurmComputeConfig, driver_node: int | None
 ) -> ServiceConfig:
@@ -649,14 +672,15 @@ def _with_vllm_traces(
     (plain, multi-node Ray, data-parallel head, Ray Serve replicas, prefill/decode tiers) carries
     them without knowing about tracing. A service's explicit env wins over the defaults here.
 
-    vLLM exports to `localhost`, so only a service whose API server runs on the collector's node is
-    traced: a tier pinned to a pool whose head is another node is left alone rather than pointed at a
-    collector it cannot reach.
+    vLLM exports to `localhost`, so only a service whose single API server runs on the collector's
+    node is traced. A service answering on another node, or on several nodes, is left alone rather
+    than pointed at a collector it cannot reach.
     """
     if not (otel_active(config) and config.otel.vllm_traces and isinstance(service, VllmServiceConfig)):
         return service
+    total_nodes, _ = _node_totals(compute)
     collector_node = driver_node if driver_node is not None else 0
-    if service.node_pool is not None and _pool_offsets(compute)[service.node_pool][0] != collector_node:
+    if _vllm_api_node(service, compute, driver_node, total_nodes) != collector_node:
         return service
     extra_args = f"{service.extra_args} {vllm_traces_flag()}".strip()
     env = {**vllm_traces_env(config.otel.component, name), **service.env}

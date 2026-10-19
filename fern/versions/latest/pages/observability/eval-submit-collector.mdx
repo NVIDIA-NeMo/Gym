@@ -64,8 +64,10 @@ With `vllm_traces: true`, each vLLM service whose API server runs on the collect
 with `--otlp-traces-endpoint http://localhost:4318/v1/traces`, `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf`
 (vLLM defaults to gRPC) and `OTEL_SERVICE_NAME=<component>/<service>`, so its spans carry the same
 display identity as its scraped metrics. A service's own `extra_args` and `env` are kept, and an
-explicit `OTEL_SERVICE_NAME` in the service's `env` wins. Headless data-parallel workers do not get
-the flag; a prefill/decode tier pinned to a pool whose head is another node is left untraced.
+explicit `OTEL_SERVICE_NAME` in the service's `env` wins. Only a service with a single API server on the
+collector's node is traced: headless data-parallel workers do not get the flag, and a service answering on
+another node or on several nodes (a tier pinned to a later pool, one server per pool node, Ray Serve
+replicas across nodes) is left untraced rather than pointed at a collector it cannot reach.
 
 ## What is exported
 
