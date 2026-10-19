@@ -1,0 +1,29 @@
+swe_together:
+  environment_servers:
+    swe_together:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: swe_together_candidate
+      judge_agent:
+        type: responses_api_agents
+        name: swe_together_judge
+      simulator_model:
+        type: responses_api_models
+        name: swe_together_simulator_model
+      interaction_model:
+        type: responses_api_models
+        name: swe_together_interaction_model
+      asset_root: ${swe_together_asset_root}
+      artifact_root: ${swe_together_artifact_root}
+      runtime_manifest_path: ${swe_together_runtime_manifest}
+      sandbox_provider: sandbox
+      setup_timeout_seconds: 1800
+      interaction_timeout_seconds: 4800
+      activation_timeout_seconds: 1800
+      grading_timeout_seconds: 1800
+      cleanup_timeout_seconds: 300
+      protocol_profile: reference
+      scoring_profile: reference
+      simulator_temperature: 0.5
+      max_resumes: 15
