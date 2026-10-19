@@ -595,6 +595,11 @@ MOONCAKE_CONFIG
     export WITH_NVIDIA_PEERMEM=0
 
     if (( SLURM_PROCID == 0 )); then
+        # Removal summaries use LOG(INFO), including without disk offload.
+        mooncake_log_level=$mooncake_minloglevel
+        if [[ "\${MOONCAKE_CACHE_TRACE:-0}" == 1 ]]; then
+            mooncake_log_level=0
+        fi
         echo "Starting mooncake_master on \${nodes[0]}"
         mooncake_master \
             -rpc_port=50051 \
@@ -603,7 +608,7 @@ MOONCAKE_CONFIG
             -metrics_port=9003 \
             -eviction_high_watermark_ratio=$mooncake_eviction_high_watermark \
             -eviction_ratio=0.1 \
-            -minloglevel=$mooncake_minloglevel \
+            -minloglevel=\$mooncake_log_level \
             -enable_metric_reporting=$mooncake_metric_reporting \
             -default_kv_lease_ttl=$MOONCAKE_DEFAULT_KV_LEASE_TTL \
             -logtostderr &

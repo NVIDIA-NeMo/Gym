@@ -235,6 +235,7 @@ getent() { printf '10.0.0.1 node0\n'; }
         cases = (
             ({}, False, False, 180000),
             ({"ENABLE_MOONCAKE": "1"}, True, False, 180000),
+            ({"ENABLE_MOONCAKE": "1", "MOONCAKE_CACHE_TRACE": "1"}, True, False, 180000),
             (
                 {"ENABLE_MOONCAKE": "1", "ENABLE_MOONCAKE_DISK_OFFLOAD": "0", "MOONCAKE_SSD_PATH": "invalid path"},
                 True,
@@ -302,6 +303,7 @@ python3() {
                     env={
                         "ENABLE_MOONCAKE": str(int(enabled)),
                         "MOONCAKE_CONFIG_PATH": str(config),
+                        "MOONCAKE_CACHE_TRACE": env.get("MOONCAKE_CACHE_TRACE", "0"),
                         "TEST_STATE_DIR": directory,
                     },
                 )
@@ -323,6 +325,8 @@ python3() {
                 self.assertIn(f"-default_kv_lease_ttl={ttl}", master)
                 self.assertIn(f"-eviction_high_watermark_ratio={'0.7' if disk else '0.9'}", master)
                 self.assertIn(f"-enable_offload={str(disk).lower()}", master)
+                log_level = 0 if disk or env.get("MOONCAKE_CACHE_TRACE") == "1" else 1
+                self.assertIn(f"-minloglevel={log_level}", master)
                 if disk:
                     owner = (Path(directory) / "owner-args").read_text().splitlines()
                     cpu_bytes = int(env.get("MOONCAKE_CPU_CACHE_GIB", "600")) * 1024**3
