@@ -38,16 +38,7 @@ from abc import abstractmethod
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import (
-    Any,
-    AsyncIterator,
-    ClassVar,
-    Iterable,
-    Literal,
-    NotRequired,
-    Optional,
-    TypedDict,
-)
+from typing import Any, ClassVar, Iterable, Literal, NotRequired, Optional, TypedDict
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -1815,3 +1806,40 @@ def install_model_call_capture(
         non_generating_requests=non_generating_requests,
     )
     return capture_ledger if external_staging else None
+
+
+# Preserve old reader imports during deprecation without eagerly importing the reader back here.
+from nemo_gym.cli._compat import moved_attr_getter  # noqa: E402
+
+
+__getattr__ = moved_attr_getter(
+    __name__,
+    {
+        **dict.fromkeys(
+            (
+                "_token_count",
+                "_usage_detail_token",
+                "extract_token_stats",
+                "_cache_signal",
+                "_as_arguments",
+                "_tool_calls_and_reasoning",
+                "ModelCallRecord",
+                "build_model_call_record",
+                "read_model_call_records",
+                "read_available_model_call_records",
+                "aggregate_model_call_records",
+                "aggregate_model_call_metrics",
+                "model_call_capture_dirs_from_config",
+                "observability_enabled_from_config",
+                "CAPTURE_DRAIN_TIMEOUT_S",
+                "_CAPTURE_DRAIN_POLL_S",
+                "_store_for_rollout",
+                "await_model_call_capture_quiescence",
+                "clear_model_call_captures_for_rollouts",
+                "merge_model_call_capture_into_record",
+            ),
+            "nemo_gym.observability.model_calls",
+        ),
+        "maybe_rollout_id_from_run_body": "nemo_gym.rollout_correlation",
+    },
+)
