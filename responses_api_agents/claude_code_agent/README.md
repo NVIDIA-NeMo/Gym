@@ -230,18 +230,26 @@ sandbox_install_timeout_seconds: 600
 session_close_timeout_seconds: 60
 ```
 
-The image must include Linux Python **3.8+**, `tar`, CA certificates, and libraries
-required by the native Claude binary. Seed installs the exact x64/arm64 release in
-`/tmp/nemo-gym-claude-runtime-<version>`, separate from per-session state. A file
-lock serializes installers; later seeds reuse a binary after checksum and version
-health checks. Closing a borrowed session removes its private state and retains
-the shared runtime for subsequent sessions.
+The image must include Linux Python **3.8+**, `tar`, and libraries required by the
+native Claude binary. Seed probes the sandbox's architecture and libc, downloads
+and caches the matching Linux x64/arm64 release on the **Gym host**, then compresses
+and uploads it in bounded pieces through the sandbox provider's file transfer API.
+The sandbox needs no internet access for runtime setup. The Gym host needs HTTPS
+access to the release service, or a supplied local binary as described below.
 
-Downloads are checked against the release manifest's SHA-256 to detect corruption.
-For an independently trusted checksum, set `sandbox_executable_sha256`. Offline
-images can set `sandbox_executable_path` to a native binary **inside the sandbox**;
-that option requires `sandbox_executable_sha256`. The installer verifies the hash
-and version before atomically updating the shared runtime.
+The sandbox installer decompresses the transfer, verifies the native bytes, and
+atomically installs them in `/tmp/nemo-gym-claude-runtime-<version>`, separate from
+session state. A file lock serializes installation. Later seeds verify the cached
+checksum and version before skipping the binary upload. Closing a borrowed session
+removes its private state and retains the shared runtime for subsequent sessions.
+
+Host downloads are checked against the release manifest's SHA-256 to detect
+corruption. For an independently trusted checksum, set
+`sandbox_executable_sha256`. An offline Gym host can supply
+`sandbox_local_executable_path` pointing to a matching Linux binary on the host;
+alternatively, `sandbox_executable_path` names a binary already **inside the
+sandbox**. These two options are mutually exclusive and require
+`sandbox_executable_sha256`.
 
 Configure `model_server` as above, or `anthropic_base_url` and `anthropic_api_key`;
 the endpoint must be reachable from the sandbox. `resources_server` is needed only
@@ -257,15 +265,17 @@ native tools. Optional static `mcp_config` and `settings` JSON files are staged
 from the agent server, with the same command options as local execution. A
 `skills.path` in the merged server config is copied into the session's
 `CLAUDE_CONFIG_DIR/skills`, including supporting files; skills disable `--bare`
-through the same command builder used locally. The legacy `/run` skills reference
-still takes precedence over configured skills for that invocation. The collector's
+through the same command builder used locally. This fallback is sandbox-only:
+local `/run` uses only its explicit `skills_ref`, and unseeded `/v1/responses` does
+not pick up configured skills. The collector's
 run-level skills option remains unsupported for materialized task rows.
 
-Prompt conversion preserves the existing local contract in both modes: the last
-user message is the prompt, and a leading system message is appended to
-`system_prompt`. Request `instructions` and developer messages retain the local
-behavior of being ignored. One session runs one activation; it does not resume a
-previous Claude conversation.
+Sandbox requests accept one user text prompt (a string or a single user message),
+optionally preceded by one system message. Assistant/developer messages, multiple
+user turns, and request `instructions` are rejected with HTTP 422 so history or
+instructions cannot be silently dropped. Use the leading system message or
+`system_prompt` for instructions. One session runs one activation and does not
+resume a previous Claude conversation. Local prompt conversion is unchanged.
 
 The shared `SandboxSession` supervisor stops the harness before reading its
 dedicated stdout stream and native transcripts. The runner keeps `events.jsonl`,

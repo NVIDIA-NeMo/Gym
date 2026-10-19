@@ -316,6 +316,7 @@ class TestRunForwardsSkillsPath:
 
     def test_no_skills_ref_forwards_none(self) -> None:
         agent = _make_agent()
+        agent.server_client.global_config_dict = {"skills": {"path": "must-not-be-staged"}}
         run_claude_code = AsyncMock(
             return_value=([], "claude-sonnet-4-6", {"status": "incomplete", "error_type": "result_missing"})
         )
@@ -1269,3 +1270,17 @@ class TestCaptureFriendlyTranscript:
         assert attribution.model_call_id == "parent", attribution.reason
         assert attribution.method == "response_id"
         assert "corroborated_by=item_id+content_cumulative" in attribution.reason
+
+
+@pytest.mark.asyncio
+async def test_unseeded_responses_do_not_pick_up_configured_skills(monkeypatch):
+    agent = _make_agent()
+    agent.server_client.global_config_dict = {"skills": {"path": "must-not-be-staged"}}
+    run = AsyncMock(return_value=([], "model", {}))
+    monkeypatch.setattr(ClaudeCodeAgent, "_run_claude_code", run)
+    request = Request({"type": "http", "path_params": {}})
+    await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="Question"))
+    assert run.await_args.kwargs["skills_path"] is None
+    assert "--bare" in agent._build_command(
+        "model", "Question", skills_active=bool(run.await_args.kwargs["skills_path"])
+    )

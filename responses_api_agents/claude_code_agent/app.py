@@ -68,6 +68,7 @@ from nemo_gym.server_utils import apply_rollout_prefix, get_response_json, raise
 from nemo_gym.skills import stage_skills
 from responses_api_agents.claude_code_agent.observability import extract_claude_code_observations
 from responses_api_agents.claude_code_agent.parsing import _extract_instruction, _invocation_outcome, parse_stream_json
+from responses_api_agents.claude_code_agent.runtime import install_sandbox_runtime
 from responses_api_agents.claude_code_agent.sandbox import (
     ClaudeCodeSandboxSession,
     parse_artifact_observations,
@@ -107,6 +108,7 @@ class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_provider: str | None = None
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
     sandbox_executable_path: str | None = None
+    sandbox_local_executable_path: str | None = None
     sandbox_executable_sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
     session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
@@ -461,7 +463,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             user_message,
             system_prompt=system_prompt,
             mcp_config=mcp_config,
-            skills_path=skills_path or self._configured_skills_path(),
+            skills_path=skills_path,
             rollout_id=rollout_id,
             observation_collector=observation_collector,
         )
@@ -543,8 +545,12 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         version = self.config.claude_code_version
         if not version or not re.fullmatch(r"\d+\.\d+\.\d+", version):
             raise HTTPException(422, "Claude sandbox execution requires an exact claude_code_version")
-        if self.config.sandbox_executable_path and not self.config.sandbox_executable_sha256:
-            raise HTTPException(422, "sandbox_executable_path requires sandbox_executable_sha256")
+        if self.config.sandbox_executable_path and self.config.sandbox_local_executable_path:
+            raise HTTPException(422, "Choose either sandbox_executable_path or sandbox_local_executable_path")
+        if (
+            self.config.sandbox_executable_path or self.config.sandbox_local_executable_path
+        ) and not self.config.sandbox_executable_sha256:
+            raise HTTPException(422, "A supplied Claude binary requires sandbox_executable_sha256")
         access = body.sandbox_access
         owns_sandbox = access is None
         if owns_sandbox and not self.config.sandbox_provider:
@@ -601,23 +607,16 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 self._check_sandbox_setup(result)
                 for name in ("sandbox_runner.py", "install_claude_runtime.py"):
                     await sandbox.upload(Path(__file__).with_name(name), f"{directory}/{name}")
-                command = [
-                    "python3",
-                    "-I",
-                    f"{directory}/install_claude_runtime.py",
-                    "--version",
-                    version,
-                    "--runtime",
-                    runtime,
-                ]
-                if self.config.sandbox_executable_path:
-                    command += ["--source", self.config.sandbox_executable_path]
-                if self.config.sandbox_executable_sha256:
-                    command += ["--sha256", self.config.sandbox_executable_sha256]
-                installed = await sandbox.exec(
-                    " ".join(map(quote, command)), cwd=workdir, timeout_s=self.config.sandbox_install_timeout_seconds
+                await install_sandbox_runtime(
+                    sandbox,
+                    version=version,
+                    directory=directory,
+                    runtime=runtime,
+                    timeout=self.config.sandbox_install_timeout_seconds,
+                    source=self.config.sandbox_executable_path,
+                    local_source=self.config.sandbox_local_executable_path,
+                    expected=self.config.sandbox_executable_sha256,
                 )
-                self._check_sandbox_setup(installed)
             return state
         except BaseException as error:
             try:
@@ -648,7 +647,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         )
 
     def _validate_sandbox_request(self, body: NeMoGymResponseCreateParamsNonStreaming) -> None:
-        supported = {"input", "instructions", "model", "metadata"}
+        supported = {"input", "model", "metadata"}
         for name, field in type(body).model_fields.items():
             value = getattr(body, name)
             if name in supported or (name in {"stream", "background"} and value is False):
@@ -661,9 +660,12 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         if body.model not in models or body.model_extra:
             raise HTTPException(422, "Claude sandbox model is selected by agent/model-server configuration")
         if not isinstance(body.input, str):
+            roles = [getattr(item, "role", None) for item in body.input]
+            if roles not in (["user"], ["system", "user"]):
+                raise HTTPException(
+                    422, "Claude sandbox execution accepts one user message with an optional leading system message"
+                )
             for item in body.input:
-                if getattr(item, "role", None) not in {"user", "system", "developer", "assistant"}:
-                    raise HTTPException(422, "Claude sandbox input requires text messages")
                 if not isinstance(item.content, str) and any(
                     (part.get("type") if isinstance(part, dict) else part.type) != "input_text"
                     for part in item.content

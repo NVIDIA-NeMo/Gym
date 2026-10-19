@@ -53,11 +53,14 @@ async def test_seed_installs_inside_sandbox_and_preserves_ownership(monkeypatch,
     monkeypatch.setattr(app, "AsyncSandbox", constructor)
     provider = SimpleNamespace(aclose=AsyncMock())
     monkeypatch.setattr(app, "create_provider", lambda config: provider)
+    install = AsyncMock()
+    monkeypatch.setattr(app, "install_sandbox_runtime", install)
     instance = agent(sandbox_provider="sandbox", sandbox_config={"workdir": "/app"})
     state = await instance._seed_agent_session_state(seed(borrowed=borrowed))
     commands = [call.args[0] for call in remote.exec.await_args_list]
-    assert "install_claude_runtime.py" in commands[-1] and "--version 2.1.108" in commands[-1]
-    assert f"--runtime {state.runtime}" in commands[-1]
+    assert install.await_args.args == (remote,)
+    assert install.await_args.kwargs["version"] == "2.1.108"
+    assert install.await_args.kwargs["runtime"] == state.runtime
     assert state.runtime == "/tmp/nemo-gym-claude-runtime-2.1.108"
     assert state.runtime not in state.session.session_dir
     assert len(remote.upload.await_args_list) == 2
@@ -284,10 +287,9 @@ async def test_invalid_session_cannot_fall_back_to_local(monkeypatch):
         ),
     ],
 )
-def test_prompt_conversion_preserves_local_contract_for_both_modes(input, expected):
+def test_local_prompt_conversion_preserves_existing_contract(input, expected):
     instance = agent(system_prompt="Configured")
     body = NeMoGymResponseCreateParamsNonStreaming(input=input, instructions="Legacy ignores request instructions")
-    instance._validate_sandbox_request(body)
     assert instance._conversation_input(body) == expected
 
 
@@ -380,3 +382,42 @@ async def test_host_install_is_lazy_shared_and_retryable(monkeypatch):
     installer.side_effect = None
     await instance._ensure_local_runtime()
     assert installer.call_count == 3
+
+
+@pytest.mark.parametrize(
+    "input",
+    [
+        [],
+        [{"role": "assistant", "content": "Earlier answer"}],
+        [{"role": "user", "content": "Earlier"}, {"role": "user", "content": "Latest"}],
+        [{"role": "developer", "content": "Instructions"}, {"role": "user", "content": "Question"}],
+        [
+            {"role": "user", "content": "Question"},
+            {"role": "assistant", "content": "Answer"},
+            {"role": "user", "content": "Follow-up"},
+        ],
+    ],
+)
+def test_sandbox_rejects_history_instead_of_dropping_it(input):
+    with pytest.raises(HTTPException) as error:
+        agent()._validate_sandbox_request(NeMoGymResponseCreateParamsNonStreaming(input=input))
+    assert error.value.status_code == 422
+
+
+def test_sandbox_rejects_request_instructions_that_local_mode_ignores():
+    with pytest.raises(HTTPException, match="instructions"):
+        agent()._validate_sandbox_request(
+            NeMoGymResponseCreateParamsNonStreaming(input="Question", instructions="Use me")
+        )
+
+
+@pytest.mark.parametrize(
+    "input",
+    [
+        "Question",
+        [{"role": "user", "content": "Question"}],
+        [{"role": "system", "content": "Instructions"}, {"role": "user", "content": "Question"}],
+    ],
+)
+def test_sandbox_accepts_one_text_turn_with_optional_system_message(input):
+    agent()._validate_sandbox_request(NeMoGymResponseCreateParamsNonStreaming(input=input))

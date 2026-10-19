@@ -3,8 +3,6 @@
 
 import ast
 import hashlib
-import io
-import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -70,30 +68,21 @@ def test_preinstalled_binary_needs_trusted_checksum_and_matching_version(tmp_pat
     assert not (tmp_path / "runtime" / "claude").exists()
 
 
-def test_download_uses_manifest_checksum_and_cached_receipt(tmp_path, binary, monkeypatch):
-    source, checksum = binary
-    content = source.read_bytes()
-    monkeypatch.setattr(installer.platform, "system", lambda: "Linux")
-    monkeypatch.setattr(installer.platform, "machine", lambda: "x86_64")
-    monkeypatch.setattr(installer.platform, "libc_ver", lambda: ("glibc", "2.35"))
-
-    def fetch(url, timeout):
-        assert url.startswith("https://downloads.claude.ai/claude-code-releases/2.1.108/")
-        if url.endswith("manifest.json"):
-            return io.BytesIO(json.dumps({"platforms": {"linux-x64": {"checksum": checksum}}}).encode())
-        assert url.endswith("linux-x64/claude")
-        return io.BytesIO(content)
-
-    download = MagicMock(side_effect=fetch)
-    monkeypatch.setattr(installer.urllib.request, "urlopen", download)
-    installer.install("2.1.108", tmp_path / "runtime")
-    assert download.call_count == 2
-    installer.install("2.1.108", tmp_path / "runtime")
-    assert download.call_count == 2
-
-
 def test_installer_and_runner_accept_python38_syntax():
     for filename in ("install_claude_runtime.py", "sandbox_runner.py"):
         path = Path(installer.__file__).with_name(filename)
         ast.parse(path.read_text(), feature_version=(3, 8))
-    assert "file_digest" not in Path(installer.__file__).read_text()
+    tree = ast.parse(Path(installer.__file__).read_text())
+    assert not any(isinstance(n, ast.Attribute) and n.attr == "file_digest" for n in ast.walk(tree))
+
+
+def test_installer_verifies_decompressed_native_bytes(tmp_path, binary):
+    import gzip
+
+    source, checksum = binary
+    compressed = tmp_path / "claude.gz"
+    compressed.write_bytes(gzip.compress(source.read_bytes()))
+    runtime = tmp_path / "runtime"
+    installer.install("2.1.108", runtime, source=str(compressed), expected=checksum, compressed=True)
+    assert (runtime / "claude").read_bytes() == source.read_bytes()
+    assert installer.check_runtime("2.1.108", runtime, expected=checksum) == "2.1.108 (Claude Code)"
