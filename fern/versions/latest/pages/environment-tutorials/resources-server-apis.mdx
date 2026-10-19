@@ -382,6 +382,28 @@ async def close_session(self, session_id):
 
 Ensure a Gymnasium environment returns a terminal or truncated result before the Agent Server's `max_steps` is exhausted. Also use timeouts or stale-session reclamation so client failures cannot leak external resources indefinitely.
 
+### State With Several Workers
+
+With `num_workers` above 1, each Uvicorn worker is a separate process with its own memory, so a session's state lives only in the worker that created it. Gym routes each request that carries the session cookie, or the MCP session token minted at `/seed_session`, to that worker, so the in-memory patterns above keep working:
+
+- If that worker is no longer running, for example because it crashed and Uvicorn replaced it, the request gets HTTP 410 instead of running against empty state.
+- An Environment Server's `/seed_session` and `/close_session`, which name the session by `resources_session_id` and may arrive without the cookie, go to the worker that first saw that ID. That worker keeps the ID for `session_close_retry_window_seconds` (default 300) after the close, so a retried close or a delayed seed reaches it within that window; set it at least as long as your server remembers its closed sessions.
+- Other requests follow the cookie or the token only. State keyed only by an ID in the request body, or reached by a request without the cookie or token, is not routed and may land on another worker. Key state by the session ID as shown above.
+- Agent Server sessions are routed the same way, and a seed or close without the cookie goes to the worker that first saw its `agent_session_id`.
+
+Uvicorn starts several workers by importing the server's module in each of them, so the module must define a module-level `app`:
+
+```python
+from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
+
+if __name__ == "__main__":
+    StatefulServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = StatefulServer.run_webserver()
+```
+
+A server that keeps no per-session state, or shares it outside the process, can opt out of routing with `routes_sessions_to_owner = False` on its class.
+
 ## YAML Configuration
 
 The Resources Server definition has the same YAML shape for both episode protocols. The paired Agent Server determines which protocol is used.

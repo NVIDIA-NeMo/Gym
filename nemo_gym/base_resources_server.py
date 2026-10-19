@@ -116,6 +116,15 @@ class ReverifyMode(str, Enum):
 class BaseResourcesServerConfig(BaseRunServerInstanceConfig):
     # Opt in to serve this server's tool routes over MCP; default off.
     expose_tools_over_mcp: bool = False
+    session_close_retry_window_seconds: float = Field(
+        default=300,
+        gt=0,
+        allow_inf_nan=False,
+        description=(
+            "With several workers, how long a resources_session_id stays with the worker that served it "
+            "after its close or failed seed; cover the caller's retry horizon and the server's own close fences."
+        ),
+    )
     # The mode of reverification (for gym eval reverify) of this server.
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.UNKNOWN
 
@@ -290,6 +299,12 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
     checkpoint_session_starts: ClassVar[tuple[str, ...]] = ("/seed_session",)
     _checkpoint: Optional[ResourcesParticipant] = PrivateAttr(default=None)
     _mcp_token_serializer: Any = PrivateAttr(default=None)
+    routes_sessions_to_owner = True
+
+    def claimed_session_routing(self) -> dict[str, Any]:
+        # An environment server's typed seed and close name the session by resources_session_id,
+        # and can arrive without the cookie.
+        return {"resources_session_close_window_seconds": self.config.session_close_retry_window_seconds}
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()

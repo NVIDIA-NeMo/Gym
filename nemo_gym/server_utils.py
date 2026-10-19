@@ -88,6 +88,12 @@ from nemo_gym.global_config import (
 )
 from nemo_gym.profiling import Profiler
 from nemo_gym.rollout_correlation import ROUTED_PATH_STATE_KEY, current_rollout_id, maybe_rollout_id_from_run_body
+from nemo_gym.session_routing import (
+    SESSION_OWNER_KEY,
+    SESSION_SOCKET_DIR_ENV,
+    create_session_socket_dir,
+    install_session_routing,
+)
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, safe_set_span_attributes
 from nemo_gym.telemetry.connection_pool import (
     QueueTimedTCPConnector,
@@ -1447,6 +1453,17 @@ class SimpleServer(BaseServer):
     # Servers that use Ray must declare `ray_enabled = True` on the class their entrypoint runs. Gym reads it
     # before launch to decide whether to start Ray, and connects only those servers to it.
     ray_enabled: ClassVar[bool] = False
+    # Whether this server keeps state per session cookie,
+    # so that with several uvicorn workers a session's requests must reach the worker that created it.
+    # See nemo_gym.session_routing.
+    routes_sessions_to_owner: ClassVar[bool] = False
+
+    def claimed_session_routing(self) -> dict[str, Any]:
+        """Arguments to ``install_session_routing`` for seeds and closes that name their session by an ID.
+
+        With several workers, such a request is routed to the worker that first saw the ID.
+        """
+        return {}
 
     @abstractmethod
     def setup_webserver(self) -> FastAPI:
@@ -1519,6 +1536,10 @@ class SimpleServer(BaseServer):
         async def add_session_id(request: Request, call_next):  # pragma: no cover
             # Always assign so Starlette 1.0+ marks session.modified=True and re-sends Set-Cookie.
             request.session[SESSION_ID_KEY] = request.session.get(SESSION_ID_KEY, str(uuid4()))
+            # With several workers, a session belongs to the worker that created it (see nemo_gym.session_routing).
+            owner = getattr(request.app.state, "nemo_gym_routing_id", None)
+            if owner is not None:
+                request.session.setdefault(SESSION_OWNER_KEY, owner)
 
             response: Response = await call_next(request)
             return response
@@ -1676,11 +1697,15 @@ repr(e): {repr(e)}"""
         server.setup_checkpoint_participant(app)
         # After the app is fully built so subclass routes are present. Only resources servers expose tools over MCP,
         # so gating the lazy import on their config keeps the MCP SDK out of agent/model processes that never need it.
+        mcp_token_routing = {}
         if getattr(getattr(server, "config", None), "expose_tools_over_mcp", False):
-            from nemo_gym.mcp_auto_exposure import maybe_auto_expose
+            from nemo_gym.mcp_auto_exposure import TOKEN_HEADER, maybe_auto_expose, session_token_serializer
 
             maybe_auto_expose(server, app)
             startup.mark("expose_tools_over_mcp")
+            mcp_token_routing = dict(
+                mcp_token_header=TOKEN_HEADER, mcp_token_serializer=session_token_serializer(server)
+            )
         server.setup_liveness(app)
         server.set_ulimit()
         server.prefix_server_logs()
@@ -1692,6 +1717,19 @@ repr(e): {repr(e)}"""
         if is_main_fastapi_proc:
             report_connection_pool_capacity(connection_pool_config, pool_capacity, visible=True)
         server.setup_exception_middleware(app)
+        session_socket_dir = getenv(SESSION_SOCKET_DIR_ENV)
+        if session_socket_dir and not is_main_fastapi_proc and server.routes_sessions_to_owner:
+            # Outside SessionMiddleware and the exception middleware:
+            # a forwarded request is handled only by the worker that owns its session.
+            session_cookie = server.get_session_middleware_key()
+            install_session_routing(
+                app,
+                socket_dir=session_socket_dir,
+                session_cookie=session_cookie,
+                secret_key=session_cookie,
+                **mcp_token_routing,
+                **server.claimed_session_routing(),
+            )
         # Register last so cancellation wraps the complete request stack.
         server.setup_cancellation_middleware(app)
         # Must precede uvicorn.run: Starlette refuses add_middleware once the app has
@@ -1753,6 +1791,9 @@ repr(e): {repr(e)}"""
             set_is_nemo_gym_fastapi_worker()
             set_is_nemo_gym_fastapi_entrypoint(str(relative_fpath))
             set_nemo_gym_fastapi_num_workers(server.config.num_workers)
+            if is_main_fastapi_proc and server.routes_sessions_to_owner:
+                # The workers uvicorn spawns inherit this, and each serves a private socket in it.
+                environ[SESSION_SOCKET_DIR_ENV] = create_session_socket_dir()
 
             uvicorn_kwargs["app"] = f"{module_import_str}:app"
             uvicorn_kwargs["workers"] = server.config.num_workers

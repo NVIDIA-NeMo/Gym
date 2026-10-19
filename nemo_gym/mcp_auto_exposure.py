@@ -105,6 +105,7 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.rollout_correlation import current_episode_id
 from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.session_routing import SESSION_OWNER_KEY
 
 
 LOG = logging.getLogger(__name__)
@@ -726,6 +727,12 @@ def _mint_session_metadata(server: Any, serializer: URLSafeSerializer, request: 
                 "with checkpointing on, a seed that mints an MCP token needs a rollout prefix"
             )
         payload[MCP_TOKEN_EPISODE_CLAIM] = episode_id.capture_key
+    # With several workers, the token names the worker that holds the session,
+    # so a tool call that lands on another worker is routed back here (see nemo_gym.session_routing).
+    # Single-worker tokens are unchanged.
+    owner = getattr(request.app.state, "nemo_gym_routing_id", None)
+    if owner is not None:
+        payload[SESSION_OWNER_KEY] = owner
     return MCPServerMetadata(
         server_name=server.config.name or type(server).__name__,
         url_path=MCP_URL_PATH,
@@ -765,6 +772,11 @@ def _to_result(payload: Any):
     return (content, payload) if isinstance(payload, dict) else content
 
 
+def session_token_serializer(server: Any) -> URLSafeSerializer:
+    """The serializer that signs and verifies this server's MCP session tokens."""
+    return mcp_session_token_serializer(server.get_session_middleware_key())
+
+
 def maybe_auto_expose(server: Any, app: FastAPI) -> Optional[dict[str, MCPTool]]:
     """Install MCP auto-exposure iff the server opts in (``expose_tools_over_mcp: true`` in the config).
 
@@ -793,8 +805,7 @@ def install_auto_exposure(server: Any, app: FastAPI) -> dict[str, MCPTool]:
             "on the same server. Remove the hand-rolled /mcp mount and rely on expose_tools_over_mcp."
         )
 
-    secret = server.get_session_middleware_key()
-    serializer = mcp_session_token_serializer(secret)
+    serializer = session_token_serializer(server)
     tools = harvest_tools(app, server)
 
     mint_metadata = functools.partial(_mint_session_metadata, server, serializer)
