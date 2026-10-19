@@ -170,8 +170,10 @@ def apply_subagent_mode(opencode_config: dict, mode: str) -> None:
 JUDGE_PROTOCOLS = {
     "nvinference-hybrid": {
         "AVB_JUDGE_BASE_URL": "https://inference-api.nvidia.com",
-        "AVB_JUDGE_CLAUDE_MODEL": "us/aws/anthropic/eccn-claude-opus-4-7",
-        "AVB_JUDGE_GEMINI_MODEL": "us/gcp/google/eccn-gemini-3.5-flash",
+        # Same judge models (Claude Opus 4.7, Gemini 3.5 Flash) on the routes the current Hub key
+        # can reach; the earlier key used the us/.../eccn-* aliases of the same models (2026-10-18).
+        "AVB_JUDGE_CLAUDE_MODEL": "aws/anthropic/bedrock-claude-opus-4-7",
+        "AVB_JUDGE_GEMINI_MODEL": "gcp/google/gemini-3.5-flash",
         "AVB_JUDGE_GEMINI_THINKING": "low",
     }
 }
