@@ -285,3 +285,52 @@ def _update_field(hasher: Any, tag: bytes, value: str) -> None:
     hasher.update(tag)
     hasher.update(len(encoded).to_bytes(8, "big"))
     hasher.update(encoded)
+
+
+def tool_call_turn_fingerprint(items: list[dict]) -> str:
+    """Fingerprint a complete model turn while tolerating rewritten tool arguments.
+
+    Every tool ID and name, their order, and all non-tool assistant content must
+    agree. Missing/duplicate IDs abstain; they cannot identify a served call.
+    Chat/Anthropic bundled turns and Responses items use the same canonical
+    fields as the strict fingerprint. Empty assistant items remain accounted for.
+    This fallback key supplements the versioned content fingerprint and the
+    request-context digest in both in-memory and durable lineage indexes.
+    """
+    hasher = hashlib.sha256(b"nemo-gym-tool-call-turn")
+    seen_ids: set[str] = set()
+    for item in items or []:
+        if not isinstance(item, dict):
+            raise ValueError(f"request item is not an object: {type(item).__name__}")
+        if not _is_assistant_authored(item):
+            continue
+        content = _content_of(item.get("content"))
+        tools = _tools_of(item)
+        if not content and not tools:
+            _update_field(hasher, b"\x05", "empty-assistant")
+        for content_type, payload in content:
+            _update_field(hasher, b"\x00", content_type)
+            _update_field(hasher, b"\x01", payload)
+        for call_id, name, _arguments in tools:
+            if not call_id or not name or call_id in seen_ids:
+                return ""
+            seen_ids.add(call_id)
+            _update_field(hasher, b"\x02", call_id)
+            _update_field(hasher, b"\x03", name)
+    return hasher.hexdigest() if seen_ids else ""
+
+
+def trailing_assistant_turn(messages: list[dict]) -> list[dict]:
+    """Return the last model turn, skipping trailing user/tool results.
+
+    Standalone reasoning belongs to the turn even though fingerprints omit it.
+    It must not split interleaved text and tool calls into different turns.
+    """
+    items = [m for m in messages or [] if isinstance(m, dict)]
+    end = len(items)
+    while end > 0 and not (_is_assistant_authored(items[end - 1]) or items[end - 1].get("type") == "reasoning"):
+        end -= 1
+    start = end
+    while start > 0 and (_is_assistant_authored(items[start - 1]) or items[start - 1].get("type") == "reasoning"):
+        start -= 1
+    return items[start:end]

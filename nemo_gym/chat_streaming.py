@@ -49,6 +49,9 @@ from nemo_gym.openai_utils import (
 
 LOG = logging.getLogger(__name__)
 
+# The dispatch and checkpoint gate share this exact liveness-only SSE frame.
+SSE_KEEPALIVE = b": keep-alive\n\n"
+
 # Provider extension fields are accepted on the non-streaming path only. Streaming harnesses
 # (e.g. OpenClaw's ``chat_template_kwargs``) have always had them dropped here, so they stay
 # dropped rather than reaching the backend.

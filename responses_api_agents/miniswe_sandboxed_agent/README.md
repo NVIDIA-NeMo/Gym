@@ -24,7 +24,11 @@ task user. Both archives are downloaded by Gym and cached under
 initial setup requests share the downloads, and Python archives are checksum
 verified. Downloads are pinned separately for x86-64/ARM64 and glibc/musl.
 The sandbox never downloads these assets from GitHub; PyPI access is still needed
-for the isolated mini-SWE environment. LiteLLM uses its bundled model-cost map.
+for the isolated mini-SWE environment. `runtime/requirements.txt` pins mini-SWE
+2.4.6, LiteLLM 1.106.0 with its MCP extra, and MCP 2.2.0. This environment must
+not inherit Gym's MCP v1 SDK: LiteLLM's Responses adapter imports MCP v2 types
+even for ordinary function tools. Task MCP clients remain in their separate
+MCP v1 environment. LiteLLM uses its bundled model-cost map.
 
 The native agent calls Gym's rollout-prefixed `/v1/responses` endpoint directly.
 Gym's model wrapper retains model-call and training-token capture; every request

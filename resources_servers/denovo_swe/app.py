@@ -127,7 +127,6 @@ class DeNovoSWEVerifyResponse(BaseVerifyResponse):
 
 
 class DeNovoSWEResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: DeNovoSWEResourcesServerConfig
 
     def model_post_init(self, context: Any, /) -> None:
