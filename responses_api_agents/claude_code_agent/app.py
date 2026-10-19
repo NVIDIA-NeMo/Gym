@@ -28,7 +28,7 @@ from time import monotonic, time
 from typing import Any, Callable, Optional
 from uuid import uuid4
 
-from fastapi import Request
+from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field, PrivateAttr
 
 from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
@@ -53,6 +53,7 @@ from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle,
 from nemo_gym.server_utils import apply_rollout_prefix, get_response_json, raise_for_status
 from nemo_gym.skills import stage_skills
 from responses_api_agents.claude_code_agent.observability import extract_claude_code_observations
+from responses_api_agents.claude_code_agent.sandbox import ClaudeCodeSandboxMixin
 from responses_api_agents.claude_code_agent.setup_claude_code import ensure_claude_code
 
 
@@ -293,7 +294,7 @@ def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
 
 
 class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
-    resources_server: ResourcesServerRef
+    resources_server: Optional[ResourcesServerRef] = None
     # When model_server is set, ANTHROPIC_BASE_URL is resolved from the Gym model
     # server's URL (requires the server to expose POST /v1/messages).
     # When None, anthropic_base_url is used directly.
@@ -317,6 +318,13 @@ class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     mcp_config: Optional[str] = None
     settings: Optional[str] = None
 
+    # Used only when an episode does not supply a borrowed SandboxAccess.
+    sandbox_provider: str | None = None
+    sandbox_config: dict[str, Any] = Field(default_factory=dict)
+    sandbox_executable_path: str | None = None
+    sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
+    session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
+
 
 class ClaudeCodeAgentRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
@@ -331,7 +339,7 @@ class ClaudeCodeAgentVerifyResponse(BaseVerifyResponse):
     )
 
 
-class ClaudeCodeAgent(SimpleResponsesAPIAgent):
+class ClaudeCodeAgent(ClaudeCodeSandboxMixin, SimpleResponsesAPIAgent):
     config: ClaudeCodeAgentConfig
     sem: Semaphore = None
     _static_mcp_config: Optional[dict[str, Any]] = PrivateAttr(default=None)
@@ -706,6 +714,8 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
+        if self._agent_session_id_from_request(request) is not None:
+            return await self._sandbox_responses(request, body)
         return await self._create_response(body, rollout_id=request.path_params.get("rollout_id"))
 
     async def _create_episode(
@@ -754,6 +764,10 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         return AgentEpisode(response=response, observations=observations)
 
     async def run(self, request: Request, body: ClaudeCodeAgentRunRequest) -> ClaudeCodeAgentVerifyResponse:
+        if self._agent_session_id_from_request(request) is not None:
+            raise HTTPException(409, "Claude Code sandbox sessions must use EnvironmentServer /run")
+        if self.config.resources_server is None:
+            raise HTTPException(422, "Local Claude Code /run requires resources_server")
         async with self.sem:
             cookies = request.cookies
 

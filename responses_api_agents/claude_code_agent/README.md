@@ -209,3 +209,44 @@ The skills path is resolved like `input_jsonl_fpath` (relative paths check the w
   The served id is not a declared terminal id on `/run`; capture still corroborates it against the
   transcript. Without capture, thinking stays folded and unmatched tool calls remain omitted.
 - `turns_used` counts assistant messages, not tool calls.
+
+## Sandbox execution
+
+The same `claude_code_agent` supports standard agent sessions. An EnvironmentServer
+seeds `/v1/agent_sessions`, sends one text activation to the rollout-scoped
+`/v1/responses`, and closes `/v1/agent_sessions/close` to collect observations.
+Retries of the same activation reuse its result; a different activation requires a
+new session. Unseeded requests retain the existing local behavior.
+
+For an agent-owned sandbox, add these fields to the agent config:
+
+```yaml
+claude_code_version: "2.1.108"
+sandbox_provider: sandbox  # top-level provider config, shared with other harnesses
+sandbox_config:
+  image: ubuntu:24.04
+  workdir: /app
+sandbox_install_timeout_seconds: 600
+session_close_timeout_seconds: 60
+```
+
+The image must include `python3`, `tar`, CA certificates, and libraries required by
+the native Claude binary. Seed downloads the exact Linux x64/arm64 release and
+checks its published SHA-256. For offline images, set `sandbox_executable_path` to
+an existing native binary **inside the sandbox**; seed copies it into the private
+session directory and checks its version. Configure `model_server` as above, or
+`anthropic_base_url` and `anthropic_api_key`; the endpoint must be reachable from
+the sandbox. `resources_server` is needed only for the legacy agent `/run` path.
+
+For borrowed execution, the seed request supplies `sandbox_access` with a direct
+provider connection descriptor and an absolute task `workdir`. Resources prepares
+the task directory; Claude Code only stages its own runtime and settings outside
+it. Required remote tool accesses are rejected: this adapter runs Claude Code's
+native tools. Optional static `mcp_config` and `settings` JSON files are staged
+from the agent server, with the same command options as local execution.
+
+The shared `SandboxSession` supervisor stops the harness before reading its
+stream and native transcripts. Close returns the observation bundle, disconnects
+borrowed sandboxes, and stops agent-owned sandboxes. The task directory remains
+available to the borrowed sandbox's owner for verification. `timeout` bounds
+harness execution; setup and close use the limits above.
