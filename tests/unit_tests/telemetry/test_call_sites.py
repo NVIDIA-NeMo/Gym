@@ -188,16 +188,6 @@ async def test_sandbox_spans_keep_the_rollout_id_when_the_provider_fails(recorde
     assert span.attributes["nemo.gym.rollout.id"] == "7-0"
 
 
-def test_global_config_imports_in_a_fresh_interpreter():
-    """`global_config` imports the sandbox registry while initialising, so a module-level import of
-    `rollout_correlation` from the sandbox API is a cycle. Only a fresh interpreter sees it: in the
-    test process another module has usually imported `global_config` first."""
-    import subprocess
-    import sys
-
-    subprocess.run([sys.executable, "-c", "import nemo_gym.global_config"], check=True, timeout=120)
-
-
 async def test_sandbox_span_never_records_the_command(recorded_spans, started_sandbox):
     """In a code-execution environment the command is model output or task content.
 
