@@ -45,6 +45,7 @@ EXPORT = {
         {
             "info": {
                 "role": "assistant",
+                "time": {"created": 1, "completed": 2},
                 "tokens": {"input": 10, "output": 5, "reasoning": 0, "total": 15, "cache": {"read": 0, "write": 0}},
             },
             "parts": [{"type": "text", "text": "done"}],
@@ -152,6 +153,8 @@ class FakeSandbox:
         self, resources: FakeResourcesServer, *, finish_runs_after: int = 1, saves_session_from: int = 1
     ) -> None:
         self.resources = resources
+        # What ``opencode export`` returns for a saved session.
+        self.export = EXPORT
         self.commands: list[str] = []
         self.started = asyncio.Event()
         self.killed = asyncio.Event()
@@ -205,7 +208,7 @@ class FakeSandbox:
                 return done(return_code=1, stderr="Session not found")
             # OpenCode reports progress on stderr, which OpenSandbox's background executions return inside stdout.
             progress = "" if "2>/dev/null" in command else "Exporting session: ses_1\n"
-            return done(progress + json.dumps(EXPORT))
+            return done(progress + json.dumps(self.export))
         if "opencode db path" in command:
             return done("/tmp/db")
         return done()
@@ -415,7 +418,30 @@ async def test_a_checkpoint_interrupts_opencode_and_the_resume_continues_the_ses
         (False, "interrupted"),
         (True, "finished"),
     ]
-    assert launches[1]["reason"] == "OpenCode's session ses_1 starts with the task"
+    assert launches[1]["reason"] == "OpenCode's session ses_1 has completed model responses"
+
+
+async def test_a_session_stopped_before_its_first_model_response_starts_over_with_the_task(tmp_path: Path) -> None:
+    """OpenCode saved the task, then a checkpoint stopped it before the model answered. Re-entering that turn can
+    end the rollout with no model call at all; starting over loses nothing, so the relaunch does that."""
+    resources = FakeResourcesServer()
+    agent = make_agent(tmp_path, resources)
+    sandbox = FakeSandbox(resources)
+    sandbox.export = {"messages": [EXPORT["messages"][0], {"info": {"role": "assistant", "time": {"created": 1}}}]}
+    agent._start_sandbox = AsyncMock(return_value=sandbox)
+
+    run = asyncio.create_task(agent.run(make_request("agent-session", {}), body_for("r")))
+    await asyncio.wait_for(sandbox.started.wait(), timeout=5)
+    await park_and_resume(agent, sandbox)
+    result = await asyncio.wait_for(run, timeout=10)
+
+    first, second = launch_commands(sandbox)
+    assert not resumes(second) and "fix the bug" in second, "a fresh launch with the task"
+    assert data_home_of(second) != data_home_of(first), "in a fresh data folder"
+    launches = result.model_dump(mode="json")["ng_harness_launches"]
+    assert launches[1]["resumed"] is False
+    assert launches[1]["reason"] == "OpenCode's session ses_1 has no completed model response yet"
+    assert result.reward == 1.0 and result.opencode_finished is True
 
 
 async def test_opencode_that_ignores_the_interrupt_is_killed_after_the_grace(

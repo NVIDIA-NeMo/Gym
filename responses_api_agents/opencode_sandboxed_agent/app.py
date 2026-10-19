@@ -1183,10 +1183,12 @@ class OpenCodeSandboxedAgent(SandboxedHarnessAgent):
         )
 
     async def _resume_decision(self, sandbox: AsyncSandbox, data_home: str) -> ResumeDecision:
-        """Whether the relaunch continues OpenCode's session in ``data_home``: only one that starts with the task.
+        """Whether the relaunch continues OpenCode's session in ``data_home``: only one that starts with the task and
+        already holds a completed model response.
 
-        The resume re-enters the newest session's last user turn, so a relaunch continues only a session that already
-        carries the task. Any failure means starting over.
+        The resume re-enters the newest session's last user turn. A session stopped before its first model response
+        holds only the task, so starting over loses nothing, and re-entering it can end the rollout without a single
+        model call. Any failure means starting over.
         """
         env = {"XDG_DATA_HOME": data_home}
         opencode = 'export PATH="$HOME/.opencode/bin:$PATH" && opencode'
@@ -1206,7 +1208,16 @@ class OpenCodeSandboxedAgent(SandboxedHarnessAgent):
         first = messages[0] if isinstance(messages, list) and messages and isinstance(messages[0], dict) else {}
         if (first.get("info") or {}).get("role") != "user":
             return ResumeDecision(resume=False, reason=f"OpenCode's session {session_id} does not start with the task")
-        return ResumeDecision(resume=True, reason=f"OpenCode's session {session_id} starts with the task")
+        if not any(
+            isinstance(message, dict)
+            and (message.get("info") or {}).get("role") == "assistant"
+            and ((message.get("info") or {}).get("time") or {}).get("completed")
+            for message in messages
+        ):
+            return ResumeDecision(
+                resume=False, reason=f"OpenCode's session {session_id} has no completed model response yet"
+            )
+        return ResumeDecision(resume=True, reason=f"OpenCode's session {session_id} has completed model responses")
 
     async def run(
         self, request: Request, body: OpenCodeSandboxedAgentRunRequest

@@ -463,7 +463,12 @@ def test_checkpointing_without_a_state_dir_fails_at_startup(provider: SnapshotPr
 # the fake backend's sandboxes: ``opencode run`` runs until it is signalled or the test lets it finish, and a launch
 # leaves its session in the sandbox's history, so a snapshot carries it into a fork.
 
-OPENCODE_EXPORT = {"messages": [{"info": {"role": "user"}, "parts": [{"type": "text", "text": "fix the bug"}]}]}
+OPENCODE_EXPORT = {
+    "messages": [
+        {"info": {"role": "user"}, "parts": [{"type": "text", "text": "fix the bug"}]},
+        {"info": {"role": "assistant", "time": {"created": 1, "completed": 2}}, "parts": []},
+    ]
+}
 AGENT_CLOSE = CheckpointRequest(checkpoint_id="c1", deadline_ts=time.time() + 3600)
 
 
