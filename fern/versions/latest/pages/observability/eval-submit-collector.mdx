@@ -63,7 +63,7 @@ driver's return code.
 
 | Source | How | Notes |
 | --- | --- | --- |
-| Model services (`type: vllm`, ...) | Prometheus scrape of `localhost:<port>/metrics` | `vllm:<name>` is renamed to `vllm_<name>` after parsing so histogram and counter types survive |
+| Model services (`type: vllm`, ...) | Prometheus scrape of `localhost:<port>/metrics`; a service pinned to a node pool is scraped by hostname on every node it runs on | `vllm:<name>` is renamed to `vllm_<name>` after parsing so histogram and counter types survive. A prefill/decode tier with `server_per_node` is scraped on every node of its pool, any other pinned service on its pool's first node, and an unpinned vLLM service in a multi-node job on the allocation's first node; those series carry a `gym_node` label (the node's index in the allocation) and a hostname `instance` |
 | `dcgm-exporter`, `node_exporter` | Prometheus scrape on the node when the ports are set | per-GPU activity, memory and power; CPU, memory, network |
 | Gym's servers (nemo-lens) | OTLP on `localhost:4317` (gRPC) and `:4318` (HTTP) | `gym.rollout.duration_ms`, `gym.verify.*`, FastAPI request metrics, one trace per rollout, log records with trace ids; see [Metrics](/main/observability/metrics) and [Span Groups](/main/observability/span-groups) |
 | Spans, as metrics | `span_metrics` connector | every span becomes a duration histogram and a call counter (`traces_span_metrics_*`) keyed by span name, producer and, for sandboxes, provider, so sandbox start/exec latency and error rates need no metric of their own |

@@ -349,6 +349,20 @@ class SlurmComputeConfig(BaseComputeConfig):
     node_pools: dict[str, NodePool] = {}
     extra_args: dict[str, str] = {}  # Job-level #SBATCH directives (e.g. --comment, --mail-user).
 
+    def pool_offsets(self) -> dict[str, tuple[int, int]]:
+        """Each pool's (first node index, node count) within the allocation.
+
+        Pools are laid out contiguously in declaration order, which is the order the
+        single #SBATCH --nodes total is built from, so pool i owns the nodes after
+        every pool before it.
+        """
+        offsets: dict[str, tuple[int, int]] = {}
+        start = 0
+        for name, pool in self.node_pools.items():
+            offsets[name] = (start, pool.nodes)
+            start += pool.nodes
+        return offsets
+
 
 class KubernetesComputeConfig(BaseComputeConfig):
     type: Literal["kubernetes"]

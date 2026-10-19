@@ -16,7 +16,8 @@
 """The OpenTelemetry collector that runs beside every benchmark job.
 
 One collector per benchmark job, in its own `srun --overlap` step like any other service. It
-scrapes each model service's Prometheus `/metrics` on localhost, accepts OTLP from the job's own
+scrapes each model service's Prometheus `/metrics` (on localhost, or by hostname on every node a
+service pinned to a node pool runs on), accepts OTLP from the job's own
 processes, stamps the resource attributes the shared dashboards filter on (`user`, `run_id`,
 `slurm_job_id`, plus `benchmark`, `cluster`, `model`), and exports to the configured OTLP/HTTP
 endpoint and to `<job dir>/otel/*.jsonl` at the same time.
@@ -32,7 +33,13 @@ from pathlib import Path
 
 import yaml
 
-from nemo_gym.orchestration.api import BaseModelServiceConfig, SubmitConfig
+from nemo_gym.orchestration.api import (
+    BaseModelServiceConfig,
+    SlurmComputeConfig,
+    SubmitConfig,
+    VllmPDTierConfig,
+    VllmServiceConfig,
+)
 
 
 COLLECTOR_SERVICE_NAME = "otel_collector"
@@ -73,6 +80,38 @@ def scrape_targets(config: SubmitConfig) -> dict[str, int]:
         for name, service in config.deployed_services.items()
         if isinstance(service, BaseModelServiceConfig)
     }
+
+
+def node_host_var(index: int) -> str:
+    """The env var the batch script exports with the hostname of allocation node `index`."""
+    return f"GYM_NODE_{index}_HOST"
+
+
+def scrape_nodes(config: SubmitConfig) -> dict[str, tuple[int, ...]]:
+    """Allocation node indexes each model service answers `/metrics` on, where not beside the collector.
+
+    A service pinned to a node pool answers from the pool's first node, or from every node of the
+    pool when it is a prefill/decode tier running one server per node. A vLLM service that is not
+    pinned spans every node of a multi-node allocation and serves its API from the first one. The
+    collector follows the driver, which may be on a later pool, so these are scraped by hostname.
+    A service that is not listed runs beside the collector, so its target is `localhost`.
+    """
+    compute = next(iter(config.compute.values()))
+    if not isinstance(compute, SlurmComputeConfig):
+        return {}
+    offsets = compute.pool_offsets()
+    multi_node = sum(pool.nodes for pool in compute.node_pools.values()) > 1
+    nodes = {}
+    for name, service in config.deployed_services.items():
+        if not isinstance(service, BaseModelServiceConfig):
+            continue
+        if service.node_pool is not None:
+            start, count = offsets[service.node_pool]
+            per_node = isinstance(service, VllmPDTierConfig) and service.server_per_node
+            nodes[name] = tuple(range(start, start + count)) if per_node else (start,)
+        elif isinstance(service, VllmServiceConfig) and multi_node:
+            nodes[name] = (0,)
+    return nodes
 
 
 def otel_active(config: SubmitConfig) -> bool:
@@ -144,11 +183,24 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
     interval = f"{obs.scrape_interval_seconds}s"
 
     # The job name is what scraped data carries as `service.name`, and so becomes its display identity.
+    # A pinned service is scraped by hostname on every node it runs on; the batch script exports each
+    # hostname (see node_host_var) before the collector starts. Anything else runs beside the collector.
+    pinned = scrape_nodes(config)
     scrape_configs = [
         {
             "job_name": f"{obs.component}/{name}",
             "scrape_interval": interval,
-            "static_configs": [{"targets": [f"localhost:{port}"], "labels": {"gym_service": name}}],
+            "static_configs": (
+                [
+                    {
+                        "targets": [f"${{env:{node_host_var(index)}}}:{port}"],
+                        "labels": {"gym_service": name, "gym_node": str(index)},
+                    }
+                    for index in pinned[name]
+                ]
+                if name in pinned
+                else [{"targets": [f"localhost:{port}"], "labels": {"gym_service": name}}]
+            ),
         }
         for name, port in scrape_targets(config).items()
     ]
