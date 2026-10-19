@@ -15,11 +15,13 @@ import pytest
 from nemo_gym.token_id_capture import (
     FileLineageStore,
     InMemoryLineageStore,
+    TokenCaptureFrozenError,
+    TokenCaptureRetiredError,
     TokenCaptureSnapshot,
     TokenCaptureStore,
     TokenEntry,
 )
-from nemo_gym.token_id_capture.conformance import run_conformance
+from nemo_gym.token_id_capture.conformance import ConformanceError, run_conformance
 
 
 def test_file_store_passes_all_checks(tmp_path):
@@ -32,6 +34,7 @@ def test_file_store_passes_all_checks(tmp_path):
     )
     assert "begin_call_custody" in passed
     assert "lineage_visibility" in passed
+    assert {"unconditional_retirement", "delete_clears_retirement"} <= set(passed)
     assert len(passed) >= 10
 
 
@@ -43,7 +46,18 @@ class _MemoryBackend:
         self.incomplete: set[str] = set()
         self.frozen: dict[str, tuple[str, int]] = {}
         self.versions: dict[str, int] = {}
+        self.retired: set[str] = set()
         self.lineage = InMemoryLineageStore()
+
+    def remove(self, rollout_ids) -> dict:
+        removed, absent = [], []
+        for rollout_id in rollout_ids:
+            had_records = rollout_id in self.entries or rollout_id in self.incomplete
+            for records in (self.entries, self.frozen, self.versions):
+                records.pop(rollout_id, None)
+            self.incomplete.discard(rollout_id)
+            (removed if had_records else absent).append(rollout_id)
+        return {"removed": removed, "absent": absent}
 
 
 class _MemorySink:
@@ -52,6 +66,8 @@ class _MemorySink:
 
     async def put(self, entry: TokenEntry) -> None:
         backend = self.backend
+        if entry.rollout_id in backend.retired:
+            raise TokenCaptureRetiredError("retired")
         if entry.rollout_id in backend.frozen:
             backend.versions[entry.rollout_id] = backend.versions.get(entry.rollout_id, 0) + 1
             raise RuntimeError("frozen")
@@ -68,6 +84,8 @@ class _MemorySink:
         await backend.lineage.put(entry)
 
     async def mark_incomplete(self, rollout_id: str, model_call_id: str = "") -> None:
+        if rollout_id in self.backend.retired:
+            raise TokenCaptureRetiredError("retired")
         self.backend.incomplete.add(rollout_id)
         self.backend.versions[rollout_id] = self.backend.versions.get(rollout_id, 0) + 1
 
@@ -100,6 +118,14 @@ class _MemorySource:
             return False
         backend.entries.pop(rollout_id, None)
         return True
+
+    async def retire(self, rollout_ids) -> dict:
+        self.backend.retired.update(rollout_ids)
+        return self.backend.remove(rollout_ids)
+
+    async def delete(self, rollout_ids) -> dict:
+        self.backend.retired.difference_update(rollout_ids)
+        return self.backend.remove(rollout_ids)
 
     async def close(self) -> None:
         pass
@@ -185,3 +211,70 @@ def test_kit_rejects_a_broken_backend(tmp_path):
                 lambda: TokenCaptureStore(tmp_path),
             )
         )
+
+
+class _LateMarkSink(_MemorySink):
+    """Lets a late ``mark_incomplete`` through after retire, which resurrects the rollout's capture state."""
+
+    async def mark_incomplete(self, rollout_id: str, model_call_id: str = "") -> None:
+        self.backend.incomplete.add(rollout_id)
+        self.backend.versions[rollout_id] = self.backend.versions.get(rollout_id, 0) + 1
+
+
+class _UntypedLateWriteSink(_MemorySink):
+    """Rejects a late write with a plain error, which the capture sink would report as a capture failure."""
+
+    async def put(self, entry: TokenEntry) -> None:
+        if entry.rollout_id in self.backend.retired:
+            raise RuntimeError("retired")
+        await super().put(entry)
+
+
+@pytest.mark.parametrize(
+    ("sink_type", "detail"),
+    [
+        (_LateMarkSink, "a late mark_incomplete after retirement was accepted"),
+        (_UntypedLateWriteSink, "a late put after retirement raised RuntimeError, not TokenCaptureRetiredError"),
+    ],
+)
+def test_conformance_rejects_a_backend_that_does_not_fence_late_writes(sink_type, detail):
+    backend = _MemoryBackend()
+    with pytest.raises(ConformanceError) as raised:
+        asyncio.run(run_conformance(lambda: sink_type(backend), lambda: _MemorySource(backend)))
+    assert raised.value.check_name == "unconditional_retirement"
+    assert raised.value.detail == detail
+
+
+class _FrozenNotRetiredSink(_MemorySink):
+    """Rejects a late write as frozen, not retired, contrary to ``TokenSource.retire``."""
+
+    async def put(self, entry: TokenEntry) -> None:
+        if entry.rollout_id in self.backend.retired:
+            raise TokenCaptureFrozenError("frozen")
+        await super().put(entry)
+
+
+class _BrokenFreezeAfterRetireSource(_MemorySource):
+    """A source whose freeze fails for an unrelated reason once a rollout is retired."""
+
+    async def freeze(self, rollout_id: str) -> TokenCaptureSnapshot:
+        if rollout_id in self.backend.retired:
+            raise ConnectionError("backend unreachable")
+        return await super().freeze(rollout_id)
+
+
+def test_conformance_requires_the_retired_error_for_late_writes():
+    backend = _MemoryBackend()
+    with pytest.raises(ConformanceError) as raised:
+        asyncio.run(run_conformance(lambda: _FrozenNotRetiredSink(backend), lambda: _MemorySource(backend)))
+    assert raised.value.check_name == "unconditional_retirement"
+    assert (
+        raised.value.detail
+        == "a late put after retirement raised TokenCaptureFrozenError, not TokenCaptureRetiredError"
+    )
+
+
+def test_conformance_does_not_treat_a_broken_freeze_as_an_empty_rollout():
+    backend = _MemoryBackend()
+    with pytest.raises(ConformanceError, match="unconditional_retirement"):
+        asyncio.run(run_conformance(lambda: _MemorySink(backend), lambda: _BrokenFreezeAfterRetireSource(backend)))

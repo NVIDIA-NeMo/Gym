@@ -131,7 +131,6 @@ SUBSCRIPT_TRANSLATION = str.maketrans(
 
 
 class BunsenChemResourcesServer(MCQAResourcesServer):
-    ray_enabled = False
     config: BunsenChemResourcesServerConfig
 
     def compute_metrics(self, tasks):

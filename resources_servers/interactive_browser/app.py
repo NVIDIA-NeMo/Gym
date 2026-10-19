@@ -143,7 +143,6 @@ class _SessionState:
 
 
 class InteractiveBrowserResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: InteractiveBrowserConfig
     # Per-rollout session state. A private attr (leading underscore) so pydantic
     # does not try to build a schema for the non-pydantic _SessionState.

@@ -93,7 +93,25 @@ class GymSpanGroup:
     SANDBOX = "sandbox"
     """Sandbox provider create/exec/delete spans."""
 
-    ALL_GROUPS: Final[frozenset] = frozenset([JOB, SERVER, HTTP_CLIENT, ROLLOUT, VERIFY, AGENT, MODEL_CALL, SANDBOX])
+    STARTUP = "startup"
+    """Server startup spans, once per run.
+
+    The supervisor emits ``gym.startup`` and one ``gym.startup.server`` span per server.
+    Each server process emits ``gym.server.startup`` or ``gym.server.startup.worker`` with one child span per stage.
+    """
+
+    CHECKPOINT = "checkpoint"
+    """Partial-rollout checkpoint spans, in no preset but ``all``.
+
+    Each participant's control operations (prepare, commit, restore, resume, retire, and forget) get a span,
+    with child spans for their export, write, read, and install steps.
+    The controller's coordination calls get spans too.
+    Enable the group with ``default,checkpoint``; the checkpoint metrics are recorded either way.
+    """
+
+    ALL_GROUPS: Final[frozenset] = frozenset(
+        [JOB, SERVER, HTTP_CLIENT, ROLLOUT, VERIFY, AGENT, MODEL_CALL, SANDBOX, STARTUP, CHECKPOINT]
+    )
 
     #: The groups that make one rollout appear as one trace across Gym's server
     #: processes. Every preset is a superset of this.
@@ -101,10 +119,10 @@ class GymSpanGroup:
 
     #: ``all`` is not here: nemo-lens reserves it as a wildcard over every registered group.
     _PRESETS: ClassVar[dict] = {
-        "default": frozenset([JOB]) | CROSS_PROCESS_SPINE,
-        # NOTE: ``per_rollout`` deliberately omits ``job`` so each rollout is its own root
-        # trace with a bounded span count. ``job`` wraps a whole eval run and lives in
-        # ``default`` and ``all``.
+        "default": frozenset([JOB, STARTUP]) | CROSS_PROCESS_SPINE,
+        # NOTE: ``per_rollout`` deliberately omits ``job`` so each rollout is its own root trace with a bounded span count.
+        # ``job`` wraps a whole eval run and lives in ``default`` and ``all``.
+        # It also omits ``startup``, which happens once per run rather than once per rollout.
         "per_rollout": frozenset([VERIFY, AGENT, MODEL_CALL]) | CROSS_PROCESS_SPINE,
     }
 

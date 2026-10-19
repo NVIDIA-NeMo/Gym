@@ -57,7 +57,6 @@ class TerminalMultiHarnessVerifyResponse(BaseVerifyResponse):
 
 
 class TerminalMultiHarnessResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: TerminalMultiHarnessResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:

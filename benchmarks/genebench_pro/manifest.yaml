@@ -1,0 +1,28 @@
+name: genebench_pro
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: agent
+description: GeneBench-Pro public case studies adapted to Harbor and evaluated with the deterministic reference grader.
+modality: text
+licensing: MIT
+authors:
+- Sanyam Kapoor
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+config_path: config.yaml
+agent_server: harbor_agent_general
+datasets:
+- name: genebench_pro
+  type: benchmark
+  jsonl_fpath: benchmarks/genebench_pro/data/gym.jsonl
+  prepare_script: benchmarks/genebench_pro/harbor/adapter.py
+  num_repeats: 4
+model_server: policy_model
+canonical_split: benchmark
+lifecycle: experimental
