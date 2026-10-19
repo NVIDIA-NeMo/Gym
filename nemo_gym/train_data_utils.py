@@ -512,6 +512,11 @@ def _prepare_command(global_config: DictConfig, dataset: DatasetConfig) -> str:
 
 
 class TrainDataProcessor(BaseModel):
+    # Stores the full list of server instance configs (including resources servers) so that
+    # `_task_data_validator_for` and `_dataset_metrics_hook_for` can resolve the owning
+    # resources server even when the caller only passes the filtered agent list (Defect 1).
+    full_server_instance_configs: List[ServerInstanceConfig] = Field(default_factory=list, exclude=True)
+
     def run(self, global_config_dict: DictConfig):  # pragma: no cover
         """
         See the README section "How To: Prepare and validate data for PR submission or RL training"
@@ -551,6 +556,10 @@ class TrainDataProcessor(BaseModel):
     ) -> List[ServerInstanceConfig]:
         parser = GlobalConfigDictParser()
         server_instance_configs = parser.filter_for_server_instance_configs(global_config_dict)
+        # Store the full list so that `_task_data_validator_for` and
+        # `_dataset_metrics_hook_for` can resolve the owning resources server even when
+        # only the filtered agent list is passed to them (Defect 1).
+        self.full_server_instance_configs = server_instance_configs
 
         # Datasets may be declared by resources servers (the normal, decoupled home: the RS owns
         # the task schema and verifier) or by agents (self-contained environments that verify
@@ -1000,14 +1009,15 @@ This could be due to a change in how metrics are calculated, leading to outdated
                 return next(iter(other.resources_servers))
         return None
 
-    @classmethod
     def _task_data_validator_for(
-        cls,
+        self,
         c: ServerInstanceConfig,
         d: Union[DatasetConfig, BenchmarkDatasetConfig],
         server_instance_configs: List[ServerInstanceConfig],
     ) -> Optional[TaskDataValidator]:
-        impl_key = cls._owning_resources_server_impl(c, server_instance_configs)
+        # Use the full list (which includes resources servers) for resolving the owning
+        # resources server, not the filtered agent list (Defect 1).
+        impl_key = self._owning_resources_server_impl(c, self.full_server_instance_configs)
         base_folder = "resources_servers"
         if impl_key is None:
             # No resources server owns this data. A self-contained agent (one that declares no
@@ -1032,13 +1042,14 @@ This could be due to a change in how metrics are calculated, leading to outdated
             return None
         return TaskDataValidator(server_name=impl_key, adapter=adapter, dataset_fpath=str(d.jsonl_fpath))
 
-    @classmethod
     def _dataset_metrics_hook_for(
-        cls,
+        self,
         c: ServerInstanceConfig,
         server_instance_configs: List[ServerInstanceConfig],
     ) -> DatasetMetricHook | None:
-        impl_key = cls._owning_resources_server_impl(c, server_instance_configs)
+        # Use the full list (which includes resources servers) for resolving the owning
+        # resources server, not the filtered agent list (Defect 1).
+        impl_key = self._owning_resources_server_impl(c, self.full_server_instance_configs)
         base_folder = "resources_servers"
         if impl_key is None:
             if c.SERVER_TYPE != "responses_api_agents":

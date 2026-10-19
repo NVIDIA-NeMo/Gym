@@ -414,7 +414,8 @@ class TestSelfContainedAgentSchemaFallback:
         )
         monkeypatch.chdir(tmp_path)
         agent = self._agent("tau2", None)
-        validator = TrainDataProcessor._task_data_validator_for(agent, self._dataset(), [agent])
+        processor = TrainDataProcessor()
+        validator = processor._task_data_validator_for(agent, self._dataset(), [agent])
         assert validator is not None
         assert validator.report.server_name == "tau2"
 
@@ -422,7 +423,7 @@ class TestSelfContainedAgentSchemaFallback:
         (tmp_path / "responses_api_agents" / "tau2").mkdir(parents=True)
         monkeypatch.chdir(tmp_path)
         agent = self._agent("tau2", None)
-        assert TrainDataProcessor._task_data_validator_for(agent, self._dataset(), [agent]) is None
+        assert TrainDataProcessor()._task_data_validator_for(agent, self._dataset(), [agent]) is None
 
     def test_agent_with_dangling_rs_reference_is_skipped(self, tmp_path, monkeypatch):
         agent_dir = tmp_path / "responses_api_agents" / "tau2"
@@ -432,7 +433,7 @@ class TestSelfContainedAgentSchemaFallback:
         )
         monkeypatch.chdir(tmp_path)
         agent = self._agent("tau2", {"type": "resources_servers", "name": "missing_rs"})
-        assert TrainDataProcessor._task_data_validator_for(agent, self._dataset(), [agent]) is None
+        assert TrainDataProcessor()._task_data_validator_for(agent, self._dataset(), [agent]) is None
 
     def test_agent_with_valid_rs_reference_uses_that_servers_schema(self, tmp_path, monkeypatch):
         # The benchmark shape: the dataset is declared on the agent, the agent references a
@@ -452,7 +453,9 @@ class TestSelfContainedAgentSchemaFallback:
             resources_servers={"math_with_judge": {"entrypoint": "app.py", "domain": "math"}},
         )
         agent = self._agent("simple_agent", {"type": "resources_servers", "name": "bench_rs"})
-        validator = TrainDataProcessor._task_data_validator_for(agent, self._dataset(), [agent, rs])
+        processor = TrainDataProcessor()
+        processor.full_server_instance_configs = [agent, rs]
+        validator = processor._task_data_validator_for(agent, self._dataset(), [agent, rs])
         assert validator is not None
         assert validator.report.server_name == "math_with_judge"
 

@@ -81,10 +81,30 @@ def find_server_dir(server_name: str, base_folder: str = "resources_servers") ->
     the Gym install root), without the CLI's venv-marker requirement (a schema can exist for a
     server whose venv was never set up). Self-contained agents (which verify in-process) keep
     their schemas under ``responses_api_agents/<name>/``.
+
+    For resources servers, uses a marker validator (``requirements.txt``, ``pyproject.toml``, or
+    ``task_data.py``) so that bare directories created by ``mkdir`` (shadow directories) are not
+    mistaken for real servers. Self-contained agents in ``responses_api_agents/`` skip the marker
+    check since they may not ship those files.
     """
     from nemo_gym import _resolve_under_cwd_or_install
 
-    candidate = _resolve_under_cwd_or_install(Path(base_folder) / server_name, validator=Path.is_dir)
+    def _is_real_server_dir(d: Path) -> bool:
+        # A real server directory has either an install marker or a task_data.py schema file.
+        # This excludes bare directories created by mkdir (shadow directories).
+        return (
+            (d / "requirements.txt").exists()
+            or (d / "pyproject.toml").exists()
+            or (d / f"{TASK_DATA_MODULE_NAME}.py").exists()
+        )
+
+    validator = _is_real_server_dir if base_folder == "resources_servers" else None
+    candidate = _resolve_under_cwd_or_install(Path(base_folder) / server_name, validator=validator)
+    # For resources servers, also verify the marker files are present (not just the directory)
+    # because _resolve_under_cwd_or_install returns the path under the first root even if the
+    # validator rejects it. Self-contained agents skip this check.
+    if base_folder == "resources_servers":
+        return candidate if candidate.is_dir() and _is_real_server_dir(candidate) else None
     return candidate if candidate.is_dir() else None
 
 
