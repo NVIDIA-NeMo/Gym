@@ -21,6 +21,7 @@ from nemo_gym.token_id_capture.records import (
 from nemo_gym.token_id_capture.sink import (
     NG_CAPTURE_FIELD,
     NG_COMMIT_COORDS_FIELD,
+    NG_DEBUG_TOKENS_FIELD,
     CaptureContext,
     current_capture_context,
     mark_external_staging_committed,
@@ -74,6 +75,7 @@ class ExternalCaptureHandler(Protocol):
 def _strip_capture_transport_fields(payload: dict[str, Any]) -> None:
     """Keep token IDs, logprobs, routes, and coordinates off the agent hop."""
     payload.pop(NG_COMMIT_COORDS_FIELD, None)
+    payload.pop(NG_DEBUG_TOKENS_FIELD, None)
     payload.pop("prompt_token_ids", None)
     for choice in payload.get("choices") or []:
         if not isinstance(choice, dict):

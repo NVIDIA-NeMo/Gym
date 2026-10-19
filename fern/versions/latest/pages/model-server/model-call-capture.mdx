@@ -353,6 +353,40 @@ Because repeating either operation changes nothing, a failed batch can simply be
 Neither operation touches staged token data.
 The framework that staged the data removes it, and it must keep any staged data that a checkpoint it may restore still refers to.
 
+## Debug trace
+
+For debugging, a model server can also write one JSON line for each model call it serves, with the
+call's text and token data side by side. The trace is independent of model-call capture and of
+training-token capture, and works with either enabled or disabled, including external token staging.
+
+```yaml
+model_call_debug_trace:
+  enabled: true
+  dir: /absolute/path/to/model-call-debug
+```
+
+Each serving process appends to `<dir>/<model_server>.<pid>.jsonl`. A line carries `rollout_id` and
+`model_call_id` (when the call has them), `path`, timing, the `request` the client sent, the `response`
+it received, any `error`, and a `tokens` object with `prompt_token_ids`, `generation_token_ids`, and
+`generation_log_probs`. `tokens_source` names where the tokens came from:
+
+| `tokens_source` | Source |
+|---|---|
+| `engine_staged` | The arrays an external-staging inference worker staged. The NeMo RL vLLM worker and Megatron Inference stager echo them under `ng_debug_tokens` when the request asks for it. |
+| `served_response` | The token fields on the response the client received (`return_token_id_information: true`). |
+| `engine_response` | The token fields on the raw engine response, read before the model server removes them. |
+
+`request_token_data` (default `true`) adds the request fields that make the engine return token data,
+and the model server removes that extra data before responding, so agents receive the same response
+whether tracing is on or off. With external staging, the worker must include the matching echo
+support; an older worker ignores the request and the line has `tokens: null`. The `vllm_model` Chat
+Completions path supports engine token data; other model servers record what their served response
+carries. `token_errors` reports token data that could not be read.
+
+Writes run on one background thread per process and never fail or delay a model call. Lines are flushed
+but not fsynced. Every line stores the full request, so traces of long multi-turn rollouts grow quickly;
+enable tracing only for debugging runs.
+
 ## Limitations
 
 The model-server boundary observes model HTTP requests and responses. It can record tool calls,
