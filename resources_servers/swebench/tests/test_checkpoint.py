@@ -472,7 +472,8 @@ def exec_result(stdout: str = "", return_code: int = 0) -> SimpleNamespace:
 
 
 def launches_in(provider: SnapshotProvider, sandbox_id: str) -> list[str]:
-    return [c for c in provider.boxes[sandbox_id]["commands"] if "opencode run" in c]
+    commands = provider.boxes[sandbox_id]["commands"]
+    return [c for c in commands if "opencode run" in c or "nemo-gym-opencode-resume.py" in c]
 
 
 class AgentSandbox:
@@ -492,7 +493,7 @@ class AgentSandbox:
             if self.running is not None:
                 self.running.set()
             return exec_result()
-        if "opencode run" in command:
+        if "opencode run" in command or "nemo-gym-opencode-resume.py" in command:
             self.running = stop = asyncio.Event()
             stopped = asyncio.ensure_future(stop.wait())
             finished = asyncio.ensure_future(self.finish.wait())
@@ -698,7 +699,9 @@ async def test_opencode_continues_in_the_fork_of_its_sandbox_after_a_crash(
     assert replacement.calls == ["/ng-rollout/r-a1/sandbox_access", "/ng-rollout/r-a1/verify"], "no re-seed"
     fork = next(box for box, state in provider.boxes.items() if state["from_snapshot"] == "snap-2")
     relaunch = launches_in(provider, fork)[-1]
-    assert "--continue" in relaunch and f"XDG_DATA_HOME={record.episode['state']['data_home']}" in relaunch
+    # The saved user turn is re-entered: no new prompt, so no message the task never had.
+    assert "nemo-gym-opencode-resume.py" in relaunch and "opencode run" not in relaunch
+    assert f"XDG_DATA_HOME={record.episode['state']['data_home']}" in relaunch
     assert "echo drift > file" not in provider.boxes[fork]["commands"], "the fork holds the checkpoint"
     assert provider.boxes["sb-1"]["state"] == "stopped", "the superseded sandbox is stopped"
     assert result.reward == 1.0 and result.opencode_finished is True
@@ -751,6 +754,6 @@ async def test_opencode_asks_for_the_fork_when_the_checkpoint_came_before_its_fi
     assert replacement.calls == ["/ng-rollout/r-a1/sandbox_access", "/ng-rollout/r-a1/verify"]
     fork = next(box for box, state in provider.boxes.items() if state["from_snapshot"] == "snap-2")
     [launch] = launches_in(provider, fork)
-    assert "--continue" not in launch
+    assert "nemo-gym-opencode-resume.py" not in launch
     assert provider.boxes["sb-1"]["state"] == "stopped"
     assert result.reward == 1.0
