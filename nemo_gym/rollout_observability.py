@@ -80,6 +80,7 @@ class TrajectoryModelCall(ObservationModel):
 
 class TrajectoryTurn(ObservationModel):
     invocation_id: str
+    activation_id: Optional[int] = Field(default=None, ge=1, exclude_if=lambda value: value is None)
     source_message_id: Optional[str] = Field(
         default=None, description="Persisted assistant-message ID in the harness."
     )
@@ -99,7 +100,10 @@ class TrajectoryTurn(ObservationModel):
 
 
 class AgentInvocation(ObservationModel):
-    """One root Agent or subagent conversation observed by a harness.
+    """One agent activation or subagent invocation observed by a harness.
+
+    A native conversation may span several invocations; ``native_session_id``
+    retains that context while ``invocation_id`` owns each activation's evidence.
 
     Harness adapters should report an iteration-limit event through an
     ``on_iteration_limit_reached(*, invocation_id: str) -> None`` observer hook.
@@ -111,6 +115,8 @@ class AgentInvocation(ObservationModel):
 
     kind: Literal["agent_invocation"] = "agent_invocation"
     invocation_id: str
+    activation_id: Optional[int] = Field(default=None, ge=1, exclude_if=lambda value: value is None)
+    native_session_id: Optional[str] = Field(default=None, exclude_if=lambda value: value is None)
     parent_invocation_id: Optional[str] = None
     spawned_by_tool_call_id: Optional[str] = None
     status: Literal["completed", "failed", "incomplete", "unknown"] = Field(

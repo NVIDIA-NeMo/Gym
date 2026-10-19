@@ -156,27 +156,45 @@ local/session score parity or migrate existing benchmark defaults.
 
 ## Native continuation
 
-Seed with `continuation: {mode: native_conversation}` and a borrowed sandbox,
-then call `/v1/responses` using zero-based increasing activation IDs.
-An activation carries one new user message. The adapter records the native session
-ID after activation 0 and resumes that exact session for each later input. Retries
-replay the original result; output items, usage, and activation observations contain
-only the new work. Close returns cumulative observations and the native trajectory.
-Runtime installation happens at seed using the existing pinned online installer.
+Seed an owned or borrowed sandbox session with `continuation: {mode: native_conversation}`.
+Call the existing `/v1/responses` endpoint with an ordinary Responses request and
+`x-ng-agent-activation: 1`, then increment the header for each new user message.
+Use the session cookie returned by seed; a rollout-prefixed URL, when supplied,
+must match the seeded episode. For example, after saving the seed cookie:
 
-Each activation uses the Responses endpoint with `agent_session_id`, `episode_id`,
-`activation_id`, `responses_create_params`, and a positive `timeout_seconds`.
-Ordinary single-turn Responses requests still use the existing request shape.
-The adapter converts seconds to a local monotonic deadline, covering the concurrency
-queue and file staging as well as execution. Expiration stops the harness while
-leaving the native conversation resumable. The environment owns its total episode
-budget; no clock synchronization or shared interaction-budget object is required.
-A native permission rejection preserves the conversation for feedback without
-granting the denied tool. Unsupported continuation requirements fail at seed.
+```bash
+curl -b cookies.txt -H 'Content-Type: application/json' \
+  -H 'x-ng-agent-activation: 1' \
+  -d '{"input":"Implement a first version","metadata":{"agent_timeout_sec":"60"}}' \
+  http://localhost:8000/v1/responses
 
-Activation response metadata separates `launch_attempted` from
-`native_input_accepted`: the latter is `true` only when a new root user message in
-the native checkpoint contains this activation's prompt. It is `unknown` after a
-launch without that evidence and `false` when no launch was attempted.
-`policy_input_observed` remains `unknown`; confirming model consumption requires
-the captured model request, not a process PID or staged input file.
+curl -b cookies.txt -H 'Content-Type: application/json' \
+  -H 'x-ng-agent-activation: 2' \
+  -d '{"input":"Correction: handle empty input","metadata":{"agent_timeout_sec":"60"}}' \
+  http://localhost:8000/v1/responses
+```
+
+Only the new user input is sent on each call. The adapter resumes the exact native
+session, retaining HOME, native history and compaction state. Runtime installation
+happens once at seed using the existing installer. Identical retries join or replay
+the original response; conflicting inputs, skipped indices and concurrent new
+activations fail. Input validation runs before an index is consumed. A timeout
+before the first process launch leaves the next activation able to start the conversation.
+Retry state is process-local and retained for the session lifetime, without crash recovery.
+
+The existing `metadata.agent_timeout_sec` budget is capped by the configured timeout.
+For continuation it includes directory preparation, queueing, input staging and the
+native model/tool loop. Cleanup has its own configured bound. The response uses
+ordinary `status` and `incomplete_details`; timeout and native permission-denial
+evidence are recorded on the activation's invocation. Session instructions cannot
+be replaced by later inputs.
+
+Each response carries the activation's `_ng_agent_observations` and `_ng_trajectory`.
+Output and usage include only new work. Each invocation records its `activation_id`
+and `native_session_id`; every trajectory turn carries its activation. The native
+header plugin namespaces `X-Session-Id` by the staged activation identity, including
+child invocations, so captured model calls join to the activation that made them.
+Close fences new work, confirms cleanup and returns cumulative observations and
+trajectory. The task sandbox remains available to its owner for verification.
+
+Ordinary single-turn sessions keep their existing protocol and evidence shape.

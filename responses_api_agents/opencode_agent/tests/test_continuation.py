@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Exercise native continuation through agent HTTP routes and persisted checkpoints."""
+"""Native continuation uses ordinary Responses requests and per-activation evidence."""
 
+import asyncio
 import json
 import sqlite3
 from pathlib import Path
@@ -11,12 +12,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from nemo_gym.agent_activation_types import AgentContinuationRequirements
+from nemo_gym.base_responses_api_agent import AGENT_ACTIVATION_HEADER
 from responses_api_agents.opencode_agent.continuation import classify_native_outcome
 from responses_api_agents.opencode_agent.sandbox_runner import snapshot
-from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import (
-    seed,
-    setup,  # noqa: F401
-)
+from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import seed, setup  # noqa: F401
 
 
 def install_artifact_runner(sandbox, tmp_path):
@@ -122,175 +121,347 @@ def install_artifact_runner(sandbox, tmp_path):
     return payloads
 
 
-def test_interactive_http_resumes_same_store_replays_and_closes_cumulative(setup, tmp_path):
+def start(client):
+    request = seed().model_copy(update={"continuation": AgentContinuationRequirements()})
+    created = client.post("/v1/agent_sessions", json=request.model_dump(mode="json"))
+    assert created.status_code == 200, created.text
+    return request
+
+
+def activate(client, index, prompt="Inspect", *, timeout=30, instructions=None):
+    body = {"input": prompt, "metadata": {"agent_timeout_sec": str(timeout)}}
+    if instructions is not None:
+        body["instructions"] = instructions
+    return client.post("/v1/responses", headers={AGENT_ACTIVATION_HEADER: str(index)}, json=body)
+
+
+def close(client, request):
+    response = client.post(
+        "/v1/agent_sessions/close",
+        json={
+            "agent_session_id": request.agent_session_id,
+            "episode_id": request.episode_id.model_dump(),
+        },
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def roots(observations):
+    return [
+        r for r in observations["records"] if r["kind"] == "agent_invocation" and r["parent_invocation_id"] is None
+    ]
+
+
+def test_plain_http_delta_replay_and_cumulative_close(setup, tmp_path):
     agent, sandbox = setup
     payloads = install_artifact_runner(sandbox, tmp_path)
-    request = seed().model_copy(update={"continuation": AgentContinuationRequirements()})
     with TestClient(agent.setup_webserver()) as client:
-        created = client.post("/v1/agent_sessions", json=request.model_dump(mode="json"))
-        assert created.status_code == 200, created.text
-        assert created.json()["capabilities"]["mode"] == "native_conversation"
-        for activation_id, prompt in enumerate(("Implement a first version", "Now handle empty inputs")):
-            body = {
-                "agent_session_id": request.agent_session_id,
-                "episode_id": request.episode_id.model_dump(),
-                "activation_id": activation_id,
-                "timeout_seconds": 30,
-                "responses_create_params": {"input": prompt},
-            }
-            response = client.post("/v1/responses", json=body)
+        request = start(client)
+        results = []
+        for index, prompt in enumerate(("First version", "Correction: handle empty inputs"), 1):
+            response = activate(client, index, prompt)
             assert response.status_code == 200, response.text
             result = response.json()
-            assert result["response"]["output"][-1]["content"][0]["text"] == f"Answer {activation_id}"
-            assert result["response"]["usage"]["total_tokens"] == 16
-            assert result["response"]["metadata"]["native_conversation_id"] == "native-session"
-            assert result["response"]["metadata"]["launch_attempted"] == "true"
-            assert result["response"]["metadata"]["native_input_accepted"] == "true"
-            assert result["response"]["metadata"]["policy_input_observed"] == "unknown"
-            assert result["observation"]["harness_steps"] == 1
-            assert result["observation"]["events"][1]["kind"] == "reasoning"
-            assert "Private reasoning" not in result["observation"]["raw_log"]
-            assert client.post("/v1/responses", json=body).json() == result
-            assert sandbox.launch.call_count == activation_id + 1
-        config = json.loads(payloads[0]["env"]["OPENCODE_CONFIG_CONTENT"])
-        assert config["model"] == "nemo_gym/dummy_model"
-        assert config["provider"]["nemo_gym"]["npm"] == "@ai-sdk/openai-compatible"
+            results.append(result)
+            assert result["object"] == "response" and "response" not in result
+            assert result["output"][-1]["content"][0]["text"] == f"Answer {index - 1}"
+            assert result["usage"]["total_tokens"] == 16
+            assert result["metadata"]["native_conversation_id"] == "native-session"
+            assert result["metadata"]["activation_id"] == str(index)
+            invocation = roots(result["_ng_agent_observations"])[0]
+            assert invocation["activation_id"] == index
+            assert invocation["native_session_id"] == "native-session"
+            assert invocation["status"] == "completed"
+            assert len(invocation["conversation"]) == 2
+            assert (
+                invocation["invocation_id"]
+                == payloads[-1]["env"]["NEMO_GYM_OPENCODE_ACTIVATION_ID"] + ":native-session"
+            )
+            turns = result["_ng_trajectory"]["turns"]
+            assert len(turns) == 1 and turns[0]["activation_id"] == index
+            assert turns[0]["invocation_id"] == invocation["invocation_id"]
+            assert activate(client, index, prompt).json() == result
+            assert sandbox.launch.call_count == index
         assert "--session" not in payloads[0]["command"]
         assert payloads[1]["command"][-2:] == ["--session", "native-session"]
         assert payloads[0]["env"]["HOME"] == payloads[1]["env"]["HOME"]
         assert payloads[0]["env"]["XDG_DATA_HOME"] == payloads[1]["env"]["XDG_DATA_HOME"]
-        assert payloads[0]["directory"] != payloads[1]["directory"]
-        assert payloads[1]["prompt"] == "Now handle empty inputs"
         assert set(payloads[1]["previous_message_ids"]) == {"u0", "a0"}
-        invocations = result["observation"]["agent_observations"]["records"]
-        current = [record for record in invocations if record["kind"] == "agent_invocation"][0]
-        assert len(current["conversation"]) == 2
-        closed = client.post(
-            "/v1/agent_sessions/close",
-            json={
-                "agent_session_id": request.agent_session_id,
-                "episode_id": request.episode_id.model_dump(),
-            },
-        )
-        assert closed.status_code == 200, closed.text
-        receipt = closed.json()
-        assert receipt["cleanup_confirmed"] is True
-        assert len(receipt["activations"]) == 2
-        root = [record for record in receipt["agent_observations"]["records"] if record["kind"] == "agent_invocation"][
-            0
-        ]
-        assert len(root["conversation"]) == 4
-        trajectory = receipt["trajectory"]
-        assert (trajectory["task_id"], trajectory["rollout_id"]) == ("task", request.episode_id.capture_key)
-        turns = trajectory["turns"]
-        assert [(turn["source_message_id"], turn["turn_no"], turn["step_count"]) for turn in turns] == [
-            ("a0", 1, 1),
-            ("a1", 2, 2),
-        ]
-        assert {turn["invocation_id"] for turn in turns} == {"native-session"}
-        assert all(turn["source_model_ref"] == agent.config.model_server.model_dump() for turn in turns)
-        # Session affinity is insufficient to assert per-assistant HTTP call ownership.
-        assert all(turn["model_calls"] == [] and turn["question"] is None for turn in turns)
-        assert sandbox.disconnect.await_count == 1
-        assert sandbox.stop.await_count == 0
-        assert client.post("/v1/responses", json={**body, "activation_id": 2}).status_code == 409
+        receipt = close(client, request)
+        invocations = roots(receipt["agent_observations"])
+        assert [r["activation_id"] for r in invocations] == [1, 2]
+        assert len({r["invocation_id"] for r in invocations}) == 2
+        assert [r["status"] for r in invocations] == ["completed", "completed"]
+        assert len(receipt["trajectory"]["turns"]) == 2
+        assert receipt["cleanup_confirmed"] and "activations" not in receipt
+        assert close(client, request) == receipt
+        assert activate(client, 3).status_code == 409
+    assert sandbox.disconnect.await_count == 1 and sandbox.stop.await_count == 0
 
 
-@pytest.mark.parametrize("provider_error", [False, True])
-def test_permission_rejection_preserves_checkpoint_and_resumes_after_feedback(setup, tmp_path, provider_error):
+def test_invalid_delta_and_instructions_leave_activation_available(setup, tmp_path):
     agent, sandbox = setup
-    payloads = install_artifact_runner(sandbox, tmp_path)
-    launch = sandbox.launch.side_effect
-    denial = "The user rejected permission to use this specific tool call."
-
-    async def reject_first_tool(**kwargs):
-        result = await launch(**kwargs)
-        if len(payloads) != 1:
-            return result
-        path = f"{sandbox.directory}/export.json"
-        export = json.loads(sandbox.files[path])
-        message = export["messages"][-1]
-        message["info"]["finish"] = "tool-calls"
-        if provider_error:
-            message["info"]["error"] = {"name": "APIError", "message": "Provider unavailable"}
-        denied = {
-            "type": "tool",
-            "callID": "denied-call",
-            "tool": "read",
-            "state": {
-                "status": "error",
-                "input": {"filePath": "/"},
-                "error": denial,
-                "time": {"start": 10, "end": 20},
-            },
-        }
-        message["parts"].append(denied)
-        sandbox.files[path] = json.dumps(export)
-        with sqlite3.connect(tmp_path / "session.db") as con:
-            con.execute("update message set data=? where id='a0'", (json.dumps(message["info"]),))
-            con.execute("insert into part values('denied', 'a0', 'native-session', ?, 20)", (json.dumps(denied),))
-        sandbox.files[f"{sandbox.directory}/stdout.jsonl"] = "\n".join(
-            json.dumps(event)
-            for event in (
-                {"type": "step_start", "part": {}},
-                {"type": "tool_use", "part": denied},
-                {"type": "step_finish", "part": {"reason": "tool-calls"}},
-            )
-        )
-        return result
-
-    sandbox.launch.side_effect = reject_first_tool
-    request = seed().model_copy(update={"continuation": AgentContinuationRequirements()})
+    install_artifact_runner(sandbox, tmp_path)
     with TestClient(agent.setup_webserver()) as client:
-        assert client.post("/v1/agent_sessions", json=request.model_dump(mode="json")).status_code == 200
-        body = {
-            "agent_session_id": request.agent_session_id,
-            "episode_id": request.episode_id.model_dump(),
-            "activation_id": 0,
-            "timeout_seconds": 30,
-            "responses_create_params": {"input": "Inspect root"},
-        }
-        first = client.post("/v1/responses", json=body)
-        if provider_error:
-            assert first.status_code == 502
-            assert "Provider unavailable" in first.json()["detail"]
-        else:
-            assert first.status_code == 200, first.text
-            interrupted = first.json()
-            assert interrupted["response"]["status"] == "incomplete"
-            assert interrupted["turn_complete"] is False
-            assert interrupted["stop_reason"] == "permission_denied"
-            assert interrupted["observation"]["events"][1]["result"] == denial
-            records = interrupted["observation"]["agent_observations"]["records"]
-            assert (
-                next(record for record in records if record["kind"] == "agent_invocation")["error_type"]
-                == "permission_denied"
-            )
-            assert next(record for record in records if record["kind"] == "tool_call")["status"] == "failed"
-            assert client.post("/v1/responses", json=body).json() == interrupted
-            assert sandbox.launch.call_count == 1
-            resumed = client.post(
-                "/v1/responses",
-                json={
-                    **body,
-                    "activation_id": 1,
-                    "timeout_seconds": 30,
-                    "responses_create_params": {"input": "Continue inside the repository"},
+        request = start(client)
+        assert activate(client, 1, "").status_code == 422
+        assert activate(client, 1, instructions="Keep changes small").status_code == 200
+        assert activate(client, 2, instructions="Replace instructions").status_code == 422
+        assert activate(client, 2, "A valid correction").status_code == 200
+        assert sandbox.launch.call_count == 2
+        close(client, request)
+
+
+@pytest.mark.parametrize("stage", ["prepare", "queue", "upload"])
+def test_first_expiry_before_launch_can_start_next_activation(setup, tmp_path, stage):
+    agent, sandbox = setup
+    install_artifact_runner(sandbox, tmp_path)
+    execute, upload = sandbox.exec, sandbox.upload
+
+    async def slow_exec(command, **kwargs):
+        if stage == "prepare" and command.startswith("mkdir") and "/activation-1" in command:
+            await asyncio.sleep(0.2)
+        await execute(command, **kwargs)
+        return execute.return_value
+
+    async def slow_upload(source, destination):
+        if stage == "upload" and destination.endswith("process_supervisor.py"):
+            await asyncio.sleep(0.2)
+        await upload(source, destination)
+
+    with TestClient(agent.setup_webserver()) as client:
+        request = start(client)
+        slow_exec.return_value = execute.return_value
+        sandbox.exec = slow_exec
+        sandbox.upload = slow_upload
+        if stage == "queue":
+            agent.sem = asyncio.Semaphore(0)
+        first = activate(client, 1, timeout=0.01)
+        assert first.status_code == 200, first.text
+        result = first.json()
+        assert result["status"] == "incomplete" and result["output"] == []
+        assert result["usage"] is None and roots(result["_ng_agent_observations"])[0]["error_type"] == "timeout"
+        sandbox.launch.assert_not_awaited()
+        assert activate(client, 1, timeout=0.01).json() == result
+        sandbox.exec, sandbox.upload = execute, upload
+        agent.sem = asyncio.Semaphore(1)
+        second = activate(client, 2, "Start now")
+        assert second.status_code == 200 and second.json()["status"] == "completed", second.text
+        receipt = close(client, request)
+        assert [r["status"] for r in roots(receipt["agent_observations"])] == ["incomplete", "completed"]
+        assert receipt["cleanup_confirmed"]
+
+
+def test_expired_later_activation_keeps_prior_status_and_no_duplicate_turns(setup, tmp_path):
+    agent, sandbox = setup
+    install_artifact_runner(sandbox, tmp_path)
+    with TestClient(agent.setup_webserver()) as client:
+        request = start(client)
+        assert activate(client, 1).status_code == 200
+        agent.sem = asyncio.Semaphore(0)
+        result = activate(client, 2, "Correction", timeout=0.01)
+        assert result.status_code == 200, result.text
+        assert result.json()["_ng_trajectory"]["turns"] == []
+        receipt = close(client, request)
+        assert [r["status"] for r in roots(receipt["agent_observations"])] == ["completed", "incomplete"]
+        assert [t["activation_id"] for t in receipt["trajectory"]["turns"]] == [1]
+        sandbox.launch.assert_awaited_once()
+
+
+def test_continuation_requires_standard_header_and_keeps_plain_schema(setup):
+    agent, sandbox = setup
+    with TestClient(agent.setup_webserver()) as client:
+        request = start(client)
+        assert client.post("/v1/responses", json={"input": "Task"}).status_code == 422
+        assert activate(client, 0).status_code == 409
+        assert activate(client, 2).status_code == 409
+        assert (
+            client.post("/v1/responses", headers={AGENT_ACTIVATION_HEADER: "bad"}, json={"input": "Task"}).status_code
+            == 409
+        )
+        schema = agent.setup_webserver().openapi()
+        body = schema["paths"]["/v1/responses"]["post"]["requestBody"]["content"]["application/json"]["schema"]
+        assert body["$ref"].split("/")[-1].removesuffix("-Input") == "NeMoGymResponseCreateParamsNonStreaming"
+        close(client, request)
+    sandbox.launch.assert_not_awaited()
+
+
+@pytest.mark.parametrize("finish,reason", [("length", "max_output_tokens"), ("content-filter", "content_filter")])
+def test_native_budget_uses_response_incomplete_details(finish, reason):
+    result = classify_native_outcome(
+        {"messages": [{"info": {"role": "assistant", "finish": finish, "time": {"completed": 1}}}]},
+        cleanup={"return_code": 0, "error": None, "timed_out": False, "cleanup_confirmed": True},
+        previous_session_id=None,
+        session_id="native",
+        stdout="",
+        continuation=True,
+    )
+    assert result.status == "incomplete" and result.incomplete_reason == reason
+
+
+@pytest.mark.parametrize(
+    "session_id,previous,error_event,expected",
+    [
+        ("native", "native", False, "incomplete"),
+        ("other", "native", False, "failed"),
+        ("native", None, False, "failed"),
+        ("native", "native", True, "failed"),
+    ],
+)
+def test_interrupted_checkpoint_does_not_hide_native_error(session_id, previous, error_event, expected):
+    outcome = classify_native_outcome(
+        {},
+        cleanup={"return_code": -9, "error": None, "timed_out": True, "cleanup_confirmed": True},
+        previous_session_id=previous,
+        session_id=session_id,
+        stdout=json.dumps({"type": "error"}) if error_event else "",
+        continuation=True,
+    )
+    assert outcome.status == expected
+
+
+def test_collector_and_existing_conformance_keep_two_activation_owners(setup, tmp_path):
+    from nemo_gym.base_responses_api_model import ModelCallRecord
+    from nemo_gym.harness_capabilities.checker import EvidenceScope, inspect_record
+    from nemo_gym.rollout_collection import _build_trajectory_record
+    from nemo_gym.rollout_observability import (
+        AgentObservationBundle,
+        TrajectoryRecord,
+        join_assistant_message_calls,
+        join_model_call_observations,
+    )
+
+    agent, sandbox = setup
+    install_artifact_runner(sandbox, tmp_path)
+    with TestClient(agent.setup_webserver()) as client:
+        request = start(client)
+        outputs = [activate(client, index, f"delta-{index}").json() for index in (1, 2)]
+        receipt = close(client, request)
+    calls = []
+    for index, output in enumerate(outputs):
+        invocation = roots(output["_ng_agent_observations"])[0]
+        calls.append(
+            ModelCallRecord(
+                call_index=index,
+                model_call_id=f"capture-{index}",
+                response_id=f"reply-{index}",
+                model_ref=agent.config.model_server,
+                model="fixture",
+                dialect="responses",
+                status_code=200,
+                response_status="completed",
+                client_session_id=invocation["invocation_id"],
+                client_assistant_message_id=f"a{index}",
+                started_at=float(index),
+                completed_at=index + 0.5,
+                tokens_in=13,
+                tokens_out=3,
+                tokens_total=16,
+                tokens_reasoning=1,
+                cached_tokens=3,
+                request={"input": [{"role": "user", "content": f"delta-{index + 1}"}]},
+                response={
+                    "id": f"reply-{index}",
+                    "status": "completed",
+                    "output": output["output"],
+                    "usage": output["usage"],
                 },
             )
-            assert resumed.status_code == 200, resumed.text
-            assert resumed.json()["turn_complete"] is True
-            assert resumed.json()["stop_reason"] is None
-            assert payloads[1]["native_session_id"] == "native-session"
-            assert payloads[1]["previous_message_ids"] == ["u0", "a0"]
-        closed = client.post(
-            "/v1/agent_sessions/close",
-            json={"agent_session_id": request.agent_session_id, "episode_id": request.episode_id.model_dump()},
         )
-        assert closed.status_code == 200
-        assert closed.json()["cleanup_confirmed"] is True
-        assert denial in json.dumps(closed.json()["agent_observations"])
-        assert len(closed.json()["activations"]) == (0 if provider_error else 2)
+    bundle = join_model_call_observations(AgentObservationBundle.model_validate(receipt["agent_observations"]), calls)
+    bundle, trajectory = join_assistant_message_calls(
+        bundle, TrajectoryRecord.model_validate(receipt["trajectory"]), calls
+    )
+    row = {
+        "_ng_task_index": 0,
+        "_ng_rollout_index": 0,
+        "task_id": "task",
+        "_ng_rollout_id": request.episode_id.capture_key,
+    }
+    result = {
+        "ng_agent_observations": bundle.model_dump(mode="json"),
+        "ng_trajectory": trajectory.model_dump(mode="json"),
+        "ng_model_call_capture": {"calls": [c.model_dump(mode="json") for c in calls]},
+        "response": outputs[-1],
+    }
+    canonical = _build_trajectory_record(row, result)
+    result["ng_trajectory"] = canonical.model_dump(mode="json")
+    assert [inv.activation_id for inv in canonical.invocations] == [1, 2]
+    assert [[ref.model_call_id for ref in inv.model_calls] for inv in canonical.invocations] == [
+        ["capture-0"],
+        ["capture-1"],
+    ]
+    assert [turn.activation_id for turn in canonical.turns] == [1, 2]
+    assert [[ref.model_call_id for ref in turn.model_calls] for turn in canonical.turns] == [
+        ["capture-0"],
+        ["capture-1"],
+    ]
+    report = inspect_record(row | result, scope=EvidenceScope(tools=False, verifier=False))
+    failed = [check for check in report["checks"] if check["status"] == "fail"]
+    assert not failed, failed
+
+
+def test_permission_yield_is_native_continuation_outcome_not_a_task_policy():
+    info = {"role": "assistant", "finish": "tool-calls", "time": {"completed": 1}}
+    cleanup = {"return_code": 0, "error": None, "timed_out": False, "cleanup_confirmed": True}
+    export = {
+        "messages": [
+            {
+                "info": info,
+                "parts": [
+                    {
+                        "type": "tool",
+                        "state": {
+                            "status": "error",
+                            "error": "The user rejected permission to use this specific tool call.",
+                        },
+                    }
+                ],
+            }
+        ]
+    }
+    result = classify_native_outcome(
+        export, cleanup=cleanup, previous_session_id=None, session_id="native", stdout="", continuation=True
+    )
+    assert result.status == "incomplete" and result.error_type == "permission_denied"
+    export["messages"][0]["parts"][0]["state"]["error"] = "A different tool failure"
+    result = classify_native_outcome(
+        export, cleanup=cleanup, previous_session_id=None, session_id="native", stdout="", continuation=True
+    )
+    assert result.status == "failed"
+
+
+def test_ordinary_seed_does_not_add_continuation_capabilities(setup):
+    agent, sandbox = setup
+    request = seed()
+    with TestClient(agent.setup_webserver()) as client:
+        response = client.post("/v1/agent_sessions", json=request.model_dump(mode="json"))
+        assert response.status_code == 200, response.text
+        assert response.json() == {"agent_session_id": request.agent_session_id}
+        receipt = close(client, request)
+        assert "cleanup_confirmed" not in receipt and "trajectory" not in receipt
+
+
+def test_provider_preparation_timeout_does_not_brick_unstarted_session(setup, tmp_path):
+    agent, sandbox = setup
+    install_artifact_runner(sandbox, tmp_path)
+    execute = sandbox.exec.side_effect
+
+    async def timeout_once(command, **kwargs):
+        if command.startswith("mkdir") and "/activation-1" in command:
+            return SimpleNamespace(return_code=None, stdout="", stderr="", error_type="timeout")
+        return await execute(command, **kwargs)
+
+    with TestClient(agent.setup_webserver()) as client:
+        request = start(client)
+        sandbox.exec.side_effect = timeout_once
+        first = activate(client, 1)
+        assert first.status_code == 200 and first.json()["status"] == "incomplete", first.text
+        sandbox.launch.assert_not_awaited()
+        assert activate(client, 2).status_code == 200
+        receipt = close(client, request)
+        assert [r["status"] for r in roots(receipt["agent_observations"])] == ["incomplete", "completed"]
 
 
 def test_snapshot_scopes_delta_and_keeps_cumulative_store(tmp_path):
@@ -331,190 +502,3 @@ def test_snapshot_scopes_delta_and_keeps_cumulative_store(tmp_path):
     (activation / "input.json").write_text(json.dumps({"native_session_id": "wrong"}))
     with pytest.raises(RuntimeError, match="unexpected session"):
         snapshot(activation, session_directory=persistent)
-
-
-@pytest.mark.parametrize("after_staging", [115.0, 121.0])
-def test_turn_deadline_is_rechecked_after_staging(setup, tmp_path, monkeypatch, after_staging):
-    agent, sandbox = setup
-    install_artifact_runner(sandbox, tmp_path)
-    import time
-
-    origin = time.monotonic()
-    now = [origin]
-    monkeypatch.setattr("responses_api_agents.opencode_agent.app.monotonic", lambda: now[0])
-    monkeypatch.setattr("nemo_gym.agent_utils.sandbox_session.monotonic", lambda: now[0])
-    upload = sandbox.upload
-
-    async def stage(source, destination):
-        await upload(source, destination)
-        if destination.endswith("/process_supervisor.py"):
-            now[0] = origin + after_staging - 100
-
-    sandbox.upload = stage
-    request = seed().model_copy(update={"continuation": AgentContinuationRequirements()})
-    with TestClient(agent.setup_webserver()) as client:
-        created = client.post("/v1/agent_sessions", json=request.model_dump(mode="json"))
-        assert created.status_code == 200, created.text
-        response = client.post(
-            "/v1/responses",
-            json={
-                "agent_session_id": request.agent_session_id,
-                "episode_id": request.episode_id.model_dump(),
-                "activation_id": 0,
-                "responses_create_params": {"input": "Inspect"},
-                "timeout_seconds": 20.0,
-            },
-        )
-        assert response.status_code == 200, response.text
-        if after_staging > 120:
-            assert response.json()["stop_reason"] == "activation_timeout"
-            assert response.json()["response"]["output"] == []
-            assert response.json()["observation"]["events"] == []
-            sandbox.launch.assert_not_awaited()
-        else:
-            assert response.json()["turn_complete"] is True
-            command = sandbox.launch.await_args.kwargs["command"]
-            assert "--timeout 5.0" in command
-        closed = client.post(
-            "/v1/agent_sessions/close",
-            json={
-                "agent_session_id": request.agent_session_id,
-                "episode_id": request.episode_id.model_dump(),
-            },
-        )
-        assert closed.status_code == 200, closed.text
-        assert closed.json()["cleanup_confirmed"] is True
-
-
-def test_expired_resume_does_not_replay_previous_events(setup, tmp_path):
-    agent, sandbox = setup
-    install_artifact_runner(sandbox, tmp_path)
-    request = seed().model_copy(update={"continuation": AgentContinuationRequirements()})
-    with TestClient(agent.setup_webserver()) as client:
-        assert client.post("/v1/agent_sessions", json=request.model_dump(mode="json")).status_code == 200
-        body = {
-            "agent_session_id": request.agent_session_id,
-            "episode_id": request.episode_id.model_dump(),
-            "activation_id": 0,
-            "timeout_seconds": 30,
-            "responses_create_params": {"input": "Inspect"},
-        }
-        first = client.post("/v1/responses", json=body)
-        assert first.status_code == 200, first.text
-        second = client.post(
-            "/v1/responses",
-            json={**body, "activation_id": 1, "timeout_seconds": 0.0000001},
-        )
-        assert second.status_code == 200, second.text
-        assert second.json()["observation"]["events"] == []
-        assert second.json()["observation"]["raw_log"] == ""
-        assert second.json()["response"]["output"] == []
-        assert second.json()["response"]["usage"] is None
-        assert second.json()["response"]["metadata"]["launch_attempted"] == "false"
-        assert second.json()["response"]["metadata"]["native_input_accepted"] == "false"
-        assert second.json()["response"]["metadata"]["native_conversation_id"] == "native-session"
-        sandbox.launch.assert_awaited_once()
-
-
-@pytest.mark.parametrize(
-    "session_id,previous,error_event,expected",
-    [
-        ("native", "native", False, "incomplete"),
-        ("other", "native", False, "failed"),
-        ("native", None, False, "failed"),
-        ("native", "native", True, "failed"),
-    ],
-)
-def test_timeout_before_new_assistant_requires_confirmed_same_session_checkpoint(
-    session_id, previous, error_event, expected
-):
-    stdout = json.dumps({"type": "error", "part": {}}) if error_event else ""
-    outcome = classify_native_outcome(
-        {},
-        cleanup={"return_code": -9, "error": None, "timed_out": True, "cleanup_confirmed": True},
-        previous_session_id=previous,
-        session_id=session_id,
-        stdout=stdout,
-        continuation=True,
-    )
-    assert outcome.status == expected
-
-
-@pytest.mark.parametrize(
-    "messages",
-    [
-        [],
-        [{"info": {"role": "assistant"}, "parts": [{"type": "text", "text": "feedback"}]}],
-        [{"info": {"role": "user"}, "parts": [{"type": "text", "text": "other"}]}],
-    ],
-)
-def test_launched_input_without_matching_native_user_remains_unknown(messages):
-    from responses_api_agents.opencode_agent.continuation import native_input_acceptance
-
-    assert native_input_acceptance({"messages": messages}, prompt="feedback") == "unknown"
-
-
-@pytest.mark.parametrize("plugin_ready", [True, False])
-def test_timeout_after_launch_without_new_user_does_not_claim_feedback_acceptance(setup, tmp_path, plugin_ready):
-    agent, sandbox = setup
-    install_artifact_runner(sandbox, tmp_path)
-    request = seed().model_copy(update={"continuation": AgentContinuationRequirements()})
-    with TestClient(agent.setup_webserver()) as client:
-        assert client.post("/v1/agent_sessions", json=request.model_dump(mode="json")).status_code == 200
-        body = {
-            "agent_session_id": request.agent_session_id,
-            "episode_id": request.episode_id.model_dump(),
-            "activation_id": 0,
-            "timeout_seconds": 30,
-            "responses_create_params": {"input": "Inspect"},
-        }
-        assert client.post("/v1/responses", json=body).status_code == 200
-
-        async def interrupted_launch(**kwargs):
-            path = [path for path in sandbox.files if path.endswith("/input.json")][-1]
-            payload = json.loads(sandbox.files[path])
-            directory = payload["directory"]
-            sandbox.directory = directory
-            if plugin_ready:
-                sandbox.files[f"{directory}/task-environment.ready"] = "ready\n"
-            sandbox.files[f"{directory}/stderr.log"] = ""
-            sandbox.files[f"{directory}/cleanup.json"] = json.dumps({**sandbox.result, "timed_out": True})
-            sandbox.files[f"{directory}/runtime.json"] = json.dumps(sandbox.runtime_info)
-            sandbox.files[f"{directory}/stdout.jsonl"] = ""
-            sandbox.files[f"{directory}/export.json"] = json.dumps(
-                {
-                    "session_id": "native-session",
-                    "message_ids": ["u0", "a0"],
-                    "activation_message_ids": [],
-                    "messages": [],
-                    "usage_messages": [],
-                }
-            )
-            return SimpleNamespace(error_type=None, return_code=0, stdout="", stderr="")
-
-        sandbox.launch.side_effect = interrupted_launch
-        second = client.post(
-            "/v1/responses",
-            json={
-                **body,
-                "activation_id": 1,
-                "timeout_seconds": 30,
-                "responses_create_params": {"input": "Handle empty inputs"},
-            },
-        )
-        assert second.status_code == 200, second.text
-        result = second.json()
-        assert result["stop_reason"] == "activation_timeout"
-        assert result["response"]["status"] == "incomplete"
-        assert result["response"]["metadata"]["launch_attempted"] == "true"
-        assert result["response"]["metadata"]["native_input_accepted"] == "unknown"
-        assert result["response"]["metadata"]["policy_input_observed"] == "unknown"
-        assert result["observation"]["events"] == []
-        closed = client.post(
-            "/v1/agent_sessions/close",
-            json={
-                "agent_session_id": request.agent_session_id,
-                "episode_id": request.episode_id.model_dump(),
-            },
-        )
-        assert closed.status_code == 200 and closed.json()["cleanup_confirmed"]

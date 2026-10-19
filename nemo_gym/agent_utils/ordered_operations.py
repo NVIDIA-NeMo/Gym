@@ -4,24 +4,19 @@
 """In-process exactly-once ordered operations for agent activations."""
 
 import asyncio
-import hashlib
-import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
-from fastapi import HTTPException
 from pydantic import BaseModel
 
 
-def request_fingerprint(request: BaseModel) -> str:
-    """Hash the complete canonical wire request, including explicitly supplied controls."""
-    encoded = json.dumps(request.model_dump(mode="json", exclude_unset=True), sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(encoded.encode()).hexdigest()
+class ActivationConflictError(ValueError):
+    """An activation conflicts with its session's ordering or immutable input."""
 
 
 @dataclass
 class _Operation[Result: BaseModel]:
-    fingerprint: str
+    request: BaseModel
     task: asyncio.Task[Result]
 
 
@@ -39,39 +34,29 @@ class OrderedOperationLedger[Result: BaseModel]:
         self._operations: list[_Operation[Result]] = []
         self._closing = False
 
-    @property
-    def completed(self) -> list[Result]:
-        """Return isolated copies of successful results in operation order."""
-        return [
-            operation.task.result().model_copy(deep=True)
-            for operation in self._operations
-            if operation.task.done() and not operation.task.cancelled() and operation.task.exception() is None
-        ]
-
     async def execute(self, *, index: int, request: BaseModel, operation: Callable[[], Awaitable[Result]]) -> Result:
         """Run the next operation once or join an exact retry, without holding the lock while running."""
-        fingerprint = request_fingerprint(request)
         async with self._lock:
             if self._closing:
-                raise HTTPException(409, "Session is closing")
-            if index < 0 or index > len(self._operations):
-                raise HTTPException(409, "Operation is out of order")
-            if index < len(self._operations):
-                entry = self._operations[index]
-                if fingerprint != entry.fingerprint:
-                    raise HTTPException(409, "Operation ID is already bound to different input")
+                raise ActivationConflictError("Session is closing")
+            if index < 1 or index > len(self._operations) + 1:
+                raise ActivationConflictError("Operation is out of order")
+            if index <= len(self._operations):
+                entry = self._operations[index - 1]
+                if request != entry.request:
+                    raise ActivationConflictError("Operation ID is already bound to different input")
             else:
                 if self._operations:
                     previous = self._operations[-1].task
                     if not previous.done():
-                        raise HTTPException(409, "Another operation is in flight")
+                        raise ActivationConflictError("Another operation is in flight")
                     if previous.cancelled() or previous.exception() is not None:
-                        raise HTTPException(409, "Previous operation failed; close this session")
+                        raise ActivationConflictError("Previous operation failed; close this session")
                 # Consume failures even if every HTTP waiter disconnects; the task still retains
                 # its exception for an identical retry and for the next-operation guard.
                 task = asyncio.create_task(operation())
                 task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
-                entry = _Operation(fingerprint=fingerprint, task=task)
+                entry = _Operation(request=request.model_copy(deep=True), task=task)
                 self._operations.append(entry)
         return (await asyncio.shield(entry.task)).model_copy(deep=True)
 

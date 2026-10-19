@@ -30,12 +30,10 @@ from typing import Any, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
+from openai.types.responses.response import IncompleteDetails
 from pydantic import ConfigDict, Field, PrivateAttr
 
 from nemo_gym.agent_activation_types import (
-    AgentActivationObservation,
-    AgentActivationRequest,
-    AgentActivationResponse,
     AgentContinuationCapabilities,
 )
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
@@ -85,12 +83,7 @@ from responses_api_agents.opencode_agent.artifacts import (
     parse_opencode_export,
     parse_opencode_session,
 )
-from responses_api_agents.opencode_agent.continuation import (
-    classify_native_outcome,
-    native_input_acceptance,
-    parse_activation_events,
-    visible_activation_log,
-)
+from responses_api_agents.opencode_agent.continuation import NativeOutcome, classify_native_outcome
 from responses_api_agents.opencode_agent.observability import scope_opencode_trajectory
 from responses_api_agents.opencode_agent.runtime import (
     OBSERVABILITY_PATCH,
@@ -515,8 +508,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         if session_id is not None:
             state = self._require_agent_session(session_id)
             assert isinstance(state, OpenCodeSandboxSession)
-            if state.request.continuation is not None or state.conversation_directory is not None:
-                raise HTTPException(409, "OpenCode continuation requests require activation_id")
+            if state.request.continuation is not None:
+                return await self.activate_agent_session(request, body)
             if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
                 raise HTTPException(409, "OpenCode activation does not match the seeded session and rollout")
             prompt, system = self._session_input(body)
@@ -735,11 +728,15 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         observations = state.observations or AgentObservationBundle(
             source="opencode", gaps=[ObservationGap(code="agent_activation_interrupted")]
         )
+        if state.request.continuation is not None:
+            return AgentCloseSessionResponse(
+                agent_session_id=state.request.agent_session_id,
+                agent_observations=observations,
+                trajectory=state.trajectory,
+                cleanup_confirmed=state.session.cleanup_confirmed,
+            )
         return AgentCloseSessionResponse(
-            agent_session_id=state.request.agent_session_id,
-            agent_observations=observations,
-            trajectory=state.trajectory,
-            cleanup_confirmed=state.session.cleanup_confirmed,
+            agent_session_id=state.request.agent_session_id, agent_observations=observations
         )
 
     def _session_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
@@ -860,111 +857,123 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
 
     def _agent_continuation_capabilities(self) -> AgentContinuationCapabilities:
         return AgentContinuationCapabilities(
-            observations=["ordered_events", "timing", "native_tools", "reasoning", "compaction"],
+            observations=["trajectory", "timing", "native_tools", "reasoning", "compaction"],
         )
 
-    async def _activate_agent_session_state(
-        self,
-        state: AgentSessionState,
-        body: AgentActivationRequest,
-        request: Request,
-    ) -> AgentActivationResponse:
-        """Append one user delta and explicitly resume the persisted conversation."""
+    def _continuation_close_timeout(self) -> float:
+        return self.config.session_close_timeout_seconds
+
+    def _validate_agent_activation(
+        self, state: AgentSessionState, body: NeMoGymResponseCreateParamsNonStreaming
+    ) -> None:
         assert isinstance(state, OpenCodeSandboxSession)
-        if state.task is not None:
-            raise HTTPException(409, "Cannot mix single-turn and continuation activation APIs")
-        prompt, system = self._session_input(body.responses_create_params)
+        _, system = self._session_input(body)
+        supplied_instructions = body.instructions is not None or (
+            not isinstance(body.input, str)
+            and any(getattr(item, "role", None) in {"system", "developer"} for item in body.input)
+        )
+        if state.system_instructions is not None and supplied_instructions and system != state.system_instructions:
+            raise HTTPException(422, "OpenCode continuation cannot replace session instructions")
+
+    async def _activate_agent_session_state(
+        self, state: AgentSessionState, body: NeMoGymResponseCreateParamsNonStreaming, *, activation_id: int
+    ) -> NeMoGymResponse:
+        """Run a delta under one budget, including preparation and the concurrency queue."""
+        assert isinstance(state, OpenCodeSandboxSession)
+        prompt, system = self._session_input(body)
         if state.system_instructions is None:
             state.system_instructions = system
-        else:
-            params = body.responses_create_params
-            explicit_system = bool(
-                params.instructions or (not isinstance(params.input, str) and len(params.input) > 1)
-            )
-            if explicit_system and system != state.system_instructions:
-                raise HTTPException(422, "OpenCode continuation cannot replace session instructions")
-        if body.activation_id > 0 and state.native_session_id is None:
-            raise HTTPException(409, "OpenCode has no persisted conversation to resume")
+        timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
         started = monotonic()
+        deadline = started + timeout
         try:
-            timeout = min(self.config.timeout, body.timeout_seconds)
-            deadline = started + timeout
-            await state.prepare_activation(
-                body.activation_id, timeout=min(timeout, self.config.session_close_timeout_seconds)
-            )
-            response = await self._session_response(
+            async with asyncio.timeout_at(deadline):
+                await state.prepare_activation(
+                    activation_id, timeout=min(timeout, self.config.session_close_timeout_seconds)
+                )
+            return await self._session_response(
                 state,
-                body.responses_create_params,
+                body,
                 prompt=prompt,
                 system=state.system_instructions,
-                activation=body,
+                timeout=timeout,
                 deadline=deadline,
             )
-        except _ActivationDeadlineExpired:
-            response = NeMoGymResponse(
-                id=f"resp_{uuid4().hex}",
-                created_at=int(time()),
-                model=self.config.model_server.name,
-                object="response",
-                output=[],
+        except (TimeoutError, _ActivationDeadlineExpired):
+            if state.session.launch_started:
+                raise
+            # No native conversation is required until a launch persists one. A
+            # pre-launch timeout therefore does not prevent the next activation.
+            invocation_id = state.invocation_prefix
+            if state.native_session_id is not None:
+                invocation_id += f":{state.native_session_id}"
+            invocation = AgentInvocation(
+                invocation_id=invocation_id,
+                activation_id=activation_id,
+                native_session_id=state.native_session_id,
                 status="incomplete",
-                usage=None,
-                parallel_tool_calls=body.responses_create_params.parallel_tool_calls,
-                tool_choice=body.responses_create_params.tool_choice,
-                tools=body.responses_create_params.tools,
-                metadata={
-                    "launch_attempted": "false",
-                    "native_input_accepted": "false",
-                    "policy_input_observed": "unknown",
-                    "opencode_session_id": state.native_session_id or "",
-                    "native_conversation_id": state.native_session_id or "",
-                },
+                error_type="timeout",
+                stop_reason="timeout",
+                duration_ms=(monotonic() - started) * 1000,
             )
-        launched = (response.metadata or {}).get("launch_attempted") == "true"
-        events = parse_activation_events(state.activation_log) if launched else []
-        if response.status == "completed" and not any(
-            event.kind == "step_finish" and event.metadata.get("part", {}).get("reason") == "stop" for event in events
-        ):
-            gap = ObservationGap(
-                code="native_event_stream_terminal_missing", detail=f"Activation {body.activation_id}"
+            state.activation_observations = AgentObservationBundle(source="opencode", records=[invocation])
+            state.activation_trajectory = TrajectoryRecord(
+                task_id=state.request.task_id.task_id,
+                rollout_id=state.request.episode_id.capture_key,
             )
-            if state.observations is not None:
-                state.observations.gaps.append(gap)
-            if state.activation_observations is not None:
-                state.activation_observations.gaps.append(gap.model_copy(deep=True))
-        stop_reason = None
-        if response.status == "incomplete":
-            if state.session.cleanup is not None and state.session.cleanup["timed_out"]:
-                stop_reason = "activation_timeout"
-            elif (response.metadata or {}).get("native_interruption") == "permission_denied":
-                stop_reason = "permission_denied"
-            elif (response.metadata or {}).get("launch_attempted") == "false":
-                stop_reason = "activation_timeout"
-            elif any(
-                event.kind == "step_finish" and event.metadata.get("part", {}).get("reason") == "length"
-                for event in events
-            ):
-                stop_reason = "model_budget_exhausted"
-            elif any(
-                event.kind == "step_finish" and event.metadata.get("part", {}).get("reason") == "content_filter"
-                for event in events
-            ):
-                stop_reason = "content_filter"
-            else:
-                stop_reason = "interrupted"
-        return AgentActivationResponse(
-            activation_id=body.activation_id,
-            response=response,
-            turn_complete=response.status == "completed",
-            stop_reason=stop_reason,
-            observation=AgentActivationObservation(
-                events=events,
-                raw_log=visible_activation_log(state.activation_log) if launched else "",
-                duration_seconds=monotonic() - started,
-                harness_steps=sum(event.kind == "step_finish" for event in events),
-                agent_observations=state.activation_observations if launched else None,
-            ),
+            state.retain_activation()
+            return self._make_session_response(
+                state,
+                body,
+                timeout=timeout,
+                outcome=NativeOutcome(status="incomplete", error_type="timeout"),
+            )
+
+    def _make_session_response(
+        self,
+        state: OpenCodeSandboxSession,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        timeout: float,
+        outcome: NativeOutcome,
+        output: list[NeMoGymResponseOutputItem] | None = None,
+        usage: NeMoGymResponseUsage | None = None,
+    ) -> NeMoGymResponse:
+        runtime = state.runtime_info
+        response = NeMoGymResponse(
+            id=f"resp_{uuid4().hex}",
+            created_at=int(time()),
+            model=self.config.model_server.name,
+            object="response",
+            output=output or [],
+            usage=usage,
+            status=outcome.status,
+            incomplete_details=IncompleteDetails(reason=outcome.incomplete_reason)
+            if state.activation_id is not None and outcome.incomplete_reason
+            else None,
+            tool_choice=body.tool_choice,
+            tools=body.tools,
+            parallel_tool_calls=body.parallel_tool_calls,
+            metadata={
+                "harness_execution": "sandbox",
+                "opencode_version": self.config.opencode_version,
+                **({"harness_hostname": runtime.hostname, "harness_pid": str(runtime.pid)} if runtime else {}),
+                AGENT_TIMEOUT_METADATA_KEY: str(timeout),
+            },
         )
+        if state.activation_id is not None:
+            response.metadata.update({"activation_id": str(state.activation_id)})
+            if state.native_session_id is not None:
+                response.metadata["native_conversation_id"] = state.native_session_id
+            response = response.model_copy(
+                update={
+                    _INTERNAL_OBSERVATIONS_KEY: state.activation_observations.model_dump(mode="json"),
+                    _INTERNAL_TRAJECTORY_KEY: state.activation_trajectory.model_dump(mode="json")
+                    if state.activation_trajectory is not None
+                    else None,
+                }
+            )
+        return response
 
     async def _session_response(
         self,
@@ -973,12 +982,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         *,
         prompt: str,
         system: str,
-        activation: AgentActivationRequest | None = None,
+        timeout: float | None = None,
         deadline: float | None = None,
     ) -> NeMoGymResponse:
-        timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
-        if activation is not None:
-            timeout = min(timeout, activation.timeout_seconds)
+        timeout = timeout if timeout is not None else resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
+        started = monotonic()
         previous_session_id = state.native_session_id
         base_url = self.resolve_model_base_url(self.config.model_server.name, state.request.episode_id.capture_key)
         config = {
@@ -1028,12 +1036,18 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             "prompt": prompt,
             "native_session_id": state.native_session_id,
             "previous_message_ids": state.message_ids,
+            "activation_id": state.activation_id,
             "env": {
                 "HOME": f"{state.persistent_directory}/home",
                 "XDG_DATA_HOME": f"{state.persistent_directory}/data",
                 "XDG_CONFIG_HOME": f"{state.persistent_directory}/config",
                 "XDG_CACHE_HOME": f"{state.persistent_directory}/cache",
                 "XDG_STATE_HOME": f"{state.persistent_directory}/state",
+                **(
+                    {"NEMO_GYM_OPENCODE_ACTIVATION_ID": state.invocation_prefix}
+                    if state.activation_id is not None
+                    else {}
+                ),
                 "OPENCODE_CONFIG_CONTENT": json.dumps(config),
                 "OPENCODE_DISABLE_PROJECT_CONFIG": "true",
                 "OPENCODE_DISABLE_AUTOUPDATE": "true",
@@ -1057,15 +1071,20 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             finally:
                 self.sem.release()
         except TimeoutError as exc:
-            if activation is not None and not state.session.launch_started:
+            if state.activation_id is not None and not state.session.launch_started:
                 raise _ActivationDeadlineExpired from None
             failure = exc
         except BaseException as exc:
             failure = exc
-        if state.observations is None:
-            state.observations = AgentObservationBundle(
+        observations = state.activation_observations if state.activation_id is not None else state.observations
+        if observations is None:
+            observations = AgentObservationBundle(
                 source="opencode", gaps=[ObservationGap(code="observation_capture_failed")]
             )
+        if state.activation_id is not None:
+            state.activation_observations = observations
+        else:
+            state.observations = observations
         if state.session.artifacts is not None:
             try:
                 parsed = json.loads(state.session.artifacts)
@@ -1083,14 +1102,14 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         usage = None
         if export.get("messages"):
             try:
-                output = self._session_output(export, state.observations)
+                output = self._session_output(export, observations)
                 usage = self._session_usage(export)
                 if (
                     usage is None
                     or usage.input_tokens_details.cached_tokens is None
                     or usage.output_tokens_details.reasoning_tokens is None
                 ):
-                    state.observations.gaps.append(
+                    observations.gaps.append(
                         ObservationGap(
                             code="token_usage_detail_unavailable",
                             detail="Persisted optional counters are absent, invalid, or runtime-defaulted zeros",
@@ -1101,39 +1120,35 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         result = state.session.cleanup
         runtime = state.runtime_info
         if runtime is None:
-            state.observations.gaps.append(ObservationGap(code="runtime_info_unavailable"))
+            observations.gaps.append(ObservationGap(code="runtime_info_unavailable"))
         if result is not None and result["return_code"] is None:
-            state.observations.gaps.append(ObservationGap(code="worker_exit_code_unavailable"))
+            observations.gaps.append(ObservationGap(code="worker_exit_code_unavailable"))
         outcome = classify_native_outcome(
             export,
             cleanup=result,
             previous_session_id=previous_session_id,
             session_id=state.native_session_id,
             stdout=state.activation_log,
-            continuation=activation is not None,
+            continuation=state.activation_id is not None,
         )
         error = error or outcome.error
         status = outcome.status
         if error or failure:
             status = "failed"
         # Artifact message completion records a model turn, not the entire invocation.
-        for record in state.observations.records:
+        for record in observations.records:
             if isinstance(record, AgentInvocation) and record.parent_invocation_id is None:
                 record.status = "incomplete" if isinstance(failure, asyncio.CancelledError) else status
+                if state.activation_id is not None:
+                    record.duration_ms = (monotonic() - started) * 1000
+                    record.stop_reason = outcome.error_type
                 record.error_type = outcome.error_type
                 if isinstance(failure, asyncio.CancelledError):
                     record.error_type = "cancelled"
                 elif error or failure:
                     record.error_type = "server_error"
-        if state.activation_observations is not None:
-            for record in state.activation_observations.records:
-                if isinstance(record, AgentInvocation) and record.parent_invocation_id is None:
-                    record.status = "incomplete" if isinstance(failure, asyncio.CancelledError) else status
-                    record.error_type = (
-                        "cancelled" if isinstance(failure, asyncio.CancelledError) else outcome.error_type
-                    )
         if result is not None:
-            state.observations.records.append(
+            observations.records.append(
                 SandboxObservation(
                     role="agent",
                     provider=(
@@ -1150,40 +1165,19 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     exit_code=result["return_code"],
                 )
             )
-        state.observations.gaps.append(
+        observations.gaps.append(
             ObservationGap(
                 code="model_usage_reconciliation_unavailable",
                 detail="Usage comes from OpenCode persisted assistant messages; compare against captured Gym model calls.",
             )
         )
+        if state.activation_id is not None:
+            state.retain_activation()
         if failure is not None:
             raise failure
         if error:
             raise HTTPException(502, format_sandbox_error(error, stderr=state.stderr))
-        return NeMoGymResponse(
-            id=f"resp_{uuid4().hex}",
-            created_at=int(time()),
-            model=self.config.model_server.name,
-            object="response",
-            output=output,
-            usage=usage,
-            status=status,
-            tool_choice=body.tool_choice,
-            tools=body.tools,
-            parallel_tool_calls=body.parallel_tool_calls,
-            metadata={
-                "harness_execution": "sandbox",
-                "opencode_version": self.config.opencode_version,
-                "opencode_session_id": state.native_session_id or "",
-                "native_conversation_id": state.native_session_id or "",
-                "launch_attempted": str(state.session.launch_started).lower(),
-                "native_input_accepted": native_input_acceptance(export, prompt=prompt),
-                "policy_input_observed": "unknown",
-                **({"native_interruption": "permission_denied"} if outcome.error_type == "permission_denied" else {}),
-                **({"harness_hostname": runtime.hostname, "harness_pid": str(runtime.pid)} if runtime else {}),
-                AGENT_TIMEOUT_METADATA_KEY: str(float(timeout)),
-            },
-        )
+        return self._make_session_response(state, body, timeout=timeout, outcome=outcome, output=output, usage=usage)
 
 
 if __name__ == "__main__":

@@ -94,9 +94,12 @@ def _parse_opencode_session(
     finally:
         con.close()
 
+    all_part_rows = part_rows
     if message_ids is not None:
         message_rows = [row for row in message_rows if row["id"] in message_ids]
         part_rows = [row for row in part_rows if row["message_id"] in message_ids]
+        active_sessions = {row["session_id"] for row in message_rows}
+        session_rows = [row for row in session_rows if row["id"] in active_sessions or row["parent_id"] is None]
     messages = {row["id"]: _load_json(row["data"]) for row in message_rows}
     message_sessions = {row["id"]: row["session_id"] for row in message_rows}
     conversations: dict[str, list[Any]] = {row["id"]: [] for row in session_rows}
@@ -109,6 +112,15 @@ def _parse_opencode_session(
     summary_text: dict[str, list[str]] = {}
     summaries_by_parent: dict[tuple[str, str], list[str]] = {}
     first_item_id_by_message: dict[tuple[str, str], str] = {}
+    if message_ids is not None:
+        # A compaction can retain an item from an earlier activation. Its identity
+        # remains valid context even though that old conversation is not emitted again.
+        for row in all_part_rows:
+            part = _load_json(row["data"])
+            if part.get("type") in {"text", "reasoning", "tool"}:
+                item_id = part.get("callID") if part["type"] == "tool" else row["id"]
+                if isinstance(item_id, str):
+                    first_item_id_by_message.setdefault((row["session_id"], row["message_id"]), item_id)
 
     for row in message_rows:
         message = messages[row["id"]]

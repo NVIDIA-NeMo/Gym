@@ -1,68 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Project the native event stream without applying benchmark visibility policy."""
+"""Classify stopped OpenCode activations from their native checkpoints."""
 
 import json
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from nemo_gym.agent_activation_types import AgentActivationEvent
 from nemo_gym.agent_utils.process_supervisor import CleanupReceipt
-
-
-def parse_activation_events(stdout: str) -> list[AgentActivationEvent]:
-    """Keep native event ordering, tool evidence, and separate private reasoning."""
-    events = []
-    kinds = {"step_start", "step_finish", "text", "tool_use", "reasoning", "compaction", "error"}
-    for line in stdout.splitlines():
-        try:
-            native = json.loads(line)
-        except (ValueError, TypeError):
-            continue
-        if not isinstance(native, dict) or native.get("type") not in kinds:
-            continue
-        part = native.get("part") or {}
-        if not isinstance(part, dict):
-            continue
-        state = part.get("state") or {}
-        if not isinstance(state, dict):
-            state = {}
-        metadata = {key: value for key, value in native.items() if key not in {"type", "part"}}
-        metadata["part"] = part
-        if native.get("type") == "error":
-            metadata["error"] = native.get("error")
-        events.append(
-            AgentActivationEvent(
-                sequence=len(events),
-                kind=native["type"],
-                text=part.get("text") if isinstance(part.get("text"), str) else None,
-                name=part.get("tool") if isinstance(part.get("tool"), str) else None,
-                tool_call_id=part.get("callID") if isinstance(part.get("callID"), str) else None,
-                arguments=state.get("input"),
-                result=state.get("output", state.get("error")),
-                metadata=metadata,
-            )
-        )
-    return events
-
-
-def visible_activation_log(stdout: str) -> str:
-    """Keep unparsed fallback diagnostics without leaking dedicated reasoning events.
-
-    Private reasoning remains available in typed activation events and native
-    observation artifacts; the simulator-visible fallback must not reinterpret it
-    as narration just because no text/tool event was emitted.
-    """
-    lines = []
-    for line in stdout.splitlines():
-        try:
-            native = json.loads(line)
-        except (ValueError, TypeError):
-            native = None
-        if isinstance(native, dict) and native.get("type") == "reasoning":
-            continue
-        lines.append(line)
-    return "\n".join(lines)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -72,6 +16,7 @@ class NativeOutcome:
     status: Literal["completed", "incomplete", "failed"]
     error_type: Literal["server_error", "timeout", "permission_denied"] | None = None
     error: str | None = None
+    incomplete_reason: Literal["max_output_tokens", "content_filter"] | None = None
 
 
 def classify_native_outcome(
@@ -98,7 +43,7 @@ def classify_native_outcome(
         and timed_out
         and cleanup is not None
         and cleanup["cleanup_confirmed"]
-        and not any(event.kind == "error" for event in parse_activation_events(stdout))
+        and not has_native_error(stdout)
     )
     if not assistants and not resumed_checkpoint:
         error = error or "OpenCode produced no assistant result"
@@ -140,25 +85,24 @@ def classify_native_outcome(
     if permission_denied:
         return NativeOutcome(status="incomplete", error_type="permission_denied")
     if incomplete:
-        return NativeOutcome(status="incomplete")
+        return NativeOutcome(
+            status="incomplete",
+            incomplete_reason="max_output_tokens"
+            if finish == "length"
+            else "content_filter"
+            if finish == "content-filter"
+            else None,
+        )
     return NativeOutcome(status="completed")
 
 
-def native_input_acceptance(export: dict[str, Any], *, prompt: str) -> Literal["true", "unknown"]:
-    """Confirm acceptance only from this activation's new root user message.
-
-    Snapshot export excludes earlier messages and child conversations. Absence
-    remains unknown: a launched process or staged prompt does not prove delivery.
-    Model-request observation belongs to captured provider calls, not this export.
-    """
-    for message in export.get("messages", []):
-        if message["info"].get("role") != "user":
+def has_native_error(stdout: str) -> bool:
+    """An interrupted checkpoint must not hide an explicit native error event."""
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
             continue
-        text = "".join(
-            part.get("text", "")
-            for part in message.get("parts", [])
-            if part.get("type") == "text" and isinstance(part.get("text"), str)
-        )
-        if text == prompt:
-            return "true"
-    return "unknown"
+        if isinstance(event, dict) and event.get("type") == "error":
+            return True
+    return False

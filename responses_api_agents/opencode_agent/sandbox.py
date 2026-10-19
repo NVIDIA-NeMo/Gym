@@ -13,13 +13,13 @@ from shlex import quote
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
 from nemo_gym.agent_utils.sandbox_session import SandboxCommand, SandboxSession
-from nemo_gym.agent_utils.supervisor_client import remove_session_directory
 from nemo_gym.base_responses_api_agent import AgentSessionState
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap, TrajectoryRecord
 from nemo_gym.sandbox.utils import read_text, upload_text
 from responses_api_agents.opencode_agent.artifacts import parse_opencode_observations
+from responses_api_agents.opencode_agent.observability import scope_opencode_activation
 
 
 LOG = logging.getLogger(__name__)
@@ -59,7 +59,13 @@ def parse_runtime_info(payload: object) -> HarnessProcessInfo | None:
 
 @dataclass
 class OpenCodeSandboxSession(AgentSessionState):
-    """OpenCode request/output state; SandboxSession owns execution and teardown."""
+    """Keep native HOME/history under ``conversation_directory`` across launches.
+
+    ``session.session_dir`` holds only the current supervisor and input/output
+    files. ``persistent_directory`` selects that original session root for legacy
+    one-shot calls and the retained conversation root for continuation calls.
+    SandboxSession owns finalization and removal of the entire directory tree.
+    """
 
     session: SandboxSession[str]
     runtime: str
@@ -76,6 +82,13 @@ class OpenCodeSandboxSession(AgentSessionState):
     activation_log: str = ""
     activation_observations: AgentObservationBundle | None = None
     trajectory: TrajectoryRecord | None = None
+    activation_trajectory: TrajectoryRecord | None = None
+    activation_id: int | None = None
+
+    @property
+    def invocation_prefix(self) -> str:
+        """Unique process-activation identity, also passed to the native header plugin."""
+        return f"{self.request.agent_session_id}:activation-{self.activation_id}"
 
     @property
     def persistent_directory(self) -> str:
@@ -84,15 +97,36 @@ class OpenCodeSandboxSession(AgentSessionState):
 
     async def prepare_activation(self, activation_id: int, *, timeout: float) -> None:
         """Keep one conversation while rearming the supervised execution lifecycle."""
+        self.activation_id = activation_id
+        self.activation_log = ""
+        self.activation_observations = None
+        self.activation_trajectory = None
+        self.runtime_info = None
+        self.stderr = ""
         self.conversation_directory = self.persistent_directory
         directory = f"{self.conversation_directory}/activation-{activation_id}"
         await self.session.begin_activation(session_dir=directory, timeout=timeout)
         result = await self.session.sandbox.exec(f"mkdir -p -- {quote(directory)}", cwd="/", timeout_s=timeout)
+        if result.error_type == "timeout":
+            raise TimeoutError("OpenCode activation directory preparation timed out")
         if result.return_code != 0 or result.error_type:
             raise RuntimeError(f"Cannot prepare OpenCode activation directory: {result.stderr}")
-        self.activation_log = ""
-        self.activation_observations = None
-        self.stderr = ""
+
+    def retain_activation(self) -> None:
+        """Accumulate completed launch evidence once; retries replay above the adapter."""
+        if self.activation_observations is None:
+            return
+        if self.observations is None:
+            self.observations = AgentObservationBundle(source="opencode")
+        self.observations.records.extend(self.activation_observations.records)
+        self.observations.gaps.extend(self.activation_observations.gaps)
+        if self.activation_trajectory is not None:
+            if self.trajectory is None:
+                self.trajectory = TrajectoryRecord(
+                    task_id=self.request.task_id.task_id, rollout_id=self.request.episode_id.capture_key
+                )
+            for field in ("invocations", "turns", "tool_calls", "gaps"):
+                getattr(self.trajectory, field).extend(getattr(self.activation_trajectory, field))
 
     async def upload_json(self, name: str, payload: JsonValue) -> None:
         """Stage adapter input using the shared text-transfer utility."""
@@ -104,15 +138,6 @@ class OpenCodeSandboxSession(AgentSessionState):
 
     async def close(self, timeout: float) -> None:
         """Capture and release before cancelling the HTTP activation."""
-        if self.conversation_directory and not self.session.closed and not self.session.owns_sandbox:
-            await self.session.finish(timeout=timeout)
-            await remove_session_directory(
-                self.session.sandbox,
-                session_dir=self.conversation_directory,
-                workdir=self.session.workdir,
-                timeout=timeout,
-                harness="OpenCode",
-            )
         await self.session.close(timeout=timeout)
         if self.task is not None and not self.task.done() and not self.task.cancelling():
             self.task.cancel()
@@ -153,9 +178,10 @@ class OpenCodeSandboxSession(AgentSessionState):
             await upload_text(
                 self.session.sandbox, path=f"{self.session.session_dir}/instructions.md", text=payload["instructions"]
             )
-        await self.session.sandbox.upload(
-            Path(__file__).with_name("task_environment.mjs"), f"{self.session.session_dir}/task_environment.mjs"
-        )
+        if self.conversation_directory is not None:
+            await self.session.sandbox.upload(
+                Path(__file__).with_name("task_environment.mjs"), f"{self.session.session_dir}/task_environment.mjs"
+            )
         await self.upload_json("input.json", payload)
         return SandboxCommand(
             python="python3",
@@ -180,6 +206,8 @@ class OpenCodeSandboxSession(AgentSessionState):
             if self.stderr:
                 raise RuntimeError(format_sandbox_error(str(error), stderr=self.stderr)) from error
             raise
+        if self.conversation_directory is None:
+            await self._check_task_environment()
         try:
             export_text = await self.read_text("export.json")
             export = json.loads(export_text)
@@ -206,39 +234,44 @@ class OpenCodeSandboxSession(AgentSessionState):
             with tempfile.TemporaryDirectory(prefix="opencode-observations-") as directory:
                 path = Path(directory) / "observations.db"
                 await self.session.sandbox.download(f"{self.session.session_dir}/observations.db", path)
-                self.trajectory = TrajectoryRecord(
+                trajectory = TrajectoryRecord(
                     task_id=self.request.task_id.task_id, rollout_id=self.request.episode_id.capture_key
                 )
-                self.observations = await asyncio.to_thread(
+                observations = await asyncio.to_thread(
                     parse_opencode_observations,
                     path,
                     self.request.episode_id.capture_key,
-                    self.trajectory,
+                    trajectory,
                     require_terminal_finish=True,
                     model_ref=self.model_ref,
+                    message_ids=set(export.get("activation_message_ids", []))
+                    if self.conversation_directory is not None
+                    else None,
                 )
-                if self.conversation_directory:
-                    self.activation_observations = await asyncio.to_thread(
-                        parse_opencode_observations,
-                        path,
-                        self.request.episode_id.capture_key,
-                        require_terminal_finish=True,
-                        model_ref=self.model_ref,
-                        message_ids=set(export.get("activation_message_ids", []))
-                        if self.conversation_directory
-                        else None,
+                if self.activation_id is not None:
+                    scope_opencode_activation(
+                        observations,
+                        trajectory,
+                        invocation_prefix=self.invocation_prefix,
+                        activation_id=self.activation_id,
                     )
+                    self.activation_observations = observations
+                    self.activation_trajectory = trajectory
                 else:
-                    self.activation_observations = self.observations
+                    self.observations = observations
         except Exception:
             LOG.exception("Failed to parse OpenCode observations")
-            self.observations = AgentObservationBundle(
+            observations = AgentObservationBundle(
                 source="opencode",
                 gaps=[
                     ObservationGap(code="agent_artifact_unavailable"),
                     ObservationGap(code="observation_capture_failed"),
                 ],
             )
+            if self.activation_id is not None:
+                self.activation_observations = observations
+            else:
+                self.observations = observations
         try:
             runtime = json.loads(await self.read_text("runtime.json"))
         except Exception:
@@ -246,8 +279,8 @@ class OpenCodeSandboxSession(AgentSessionState):
             runtime = None
         self.runtime_info = parse_runtime_info(runtime)
         try:
-            if await self.read_text("task-environment.ready") != "ready\n":
-                raise ValueError("Invalid task environment initialization receipt")
+            if self.conversation_directory is not None:
+                await self._check_task_environment()
         except Exception as error:
             # A resumed process can exhaust its relative budget before plugins load.
             # Accept only an unchanged native checkpoint and confirmed timeout;
@@ -266,6 +299,15 @@ class OpenCodeSandboxSession(AgentSessionState):
                 format_sandbox_error("OpenCode task environment initialization was not confirmed", stderr=self.stderr)
             ) from error
         return export_text
+
+    async def _check_task_environment(self) -> None:
+        try:
+            if await self.read_text("task-environment.ready") != "ready\n":
+                raise ValueError("Invalid task environment initialization receipt")
+        except Exception as error:
+            raise RuntimeError(
+                format_sandbox_error("OpenCode task environment initialization was not confirmed", stderr=self.stderr)
+            ) from error
 
     async def snapshot(self, timeout: float) -> None:
         """Capture SQLite after CLI completion; borrowed task services may remain alive."""

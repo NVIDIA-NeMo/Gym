@@ -228,3 +228,58 @@ def test_invalid_json_and_tool_state_are_partial_evidence(tmp_path, parse):
     assert len(trajectory.turns) == 1
     assert trajectory.turns[0].answer == []
     assert trajectory.gaps[0].code == "turns_unavailable"
+
+
+def test_activation_scoping_keeps_child_ownership_and_cross_activation_compaction(tmp_path):
+    from nemo_gym.rollout_observability import ContextCompactionObservation
+    from responses_api_agents.opencode_agent.observability import scope_opencode_activation
+
+    db = _session_db(
+        tmp_path,
+        [
+            ("user", [{"type": "text", "text": "initial"}]),
+            _policy(
+                {
+                    "type": "tool",
+                    "tool": "task",
+                    "callID": "spawn-child",
+                    "state": {
+                        "status": "completed",
+                        "input": {"prompt": "inspect"},
+                        "output": "done",
+                        "metadata": {"sessionId": "child"},
+                        "time": {"start": 1000, "end": 1500},
+                    },
+                },
+                finish="stop",
+            ),
+            ("child", *_policy({"type": "text", "text": "child answer"}, finish="stop")),
+            ("user", [{"type": "compaction", "auto": True, "tail_start_id": "m1"}]),
+            _policy({"type": "text", "text": "summary"}, summary=True, parentID="m3", finish="stop"),
+            _policy({"type": "text", "text": "correction"}, finish="stop"),
+        ],
+        sessions=[("root", None), ("child", "root")],
+    )
+    projected = []
+    for index, ids in enumerate(({"m0", "m1", "m2"}, {"m3", "m4", "m5"}), 1):
+        trajectory = TrajectoryRecord(task_id="task", rollout_id="episode")
+        bundle = _parse_opencode_session(db, "fallback", trajectory, require_terminal_finish=True, message_ids=ids)
+        scope_opencode_activation(
+            bundle, trajectory, invocation_prefix=f"session:activation-{index}", activation_id=index
+        )
+        projected.append((bundle, trajectory))
+    first, first_trajectory = projected[0]
+    invocations = [r for r in first.records if isinstance(r, AgentInvocation)]
+    child = next(r for r in invocations if r.native_session_id == "child")
+    assert child.parent_invocation_id == "session:activation-1:root"
+    assert child.invocation_id == "session:activation-1:child" and child.activation_id == 1
+    assert child.spawned_by_tool_call_id == "spawn-child"
+    assert {turn.activation_id for turn in first_trajectory.turns} == {1}
+    second, second_trajectory = projected[1]
+    assert [r.native_session_id for r in second.records if isinstance(r, AgentInvocation)] == ["root"]
+    [compaction] = [r for r in second.records if isinstance(r, ContextCompactionObservation)]
+    assert compaction.invocation_id == "session:activation-2:root"
+    assert compaction.first_kept_item_id == "spawn-child"
+    assert compaction.summary == "summary" and compaction.source_message_ids == ["m4"]
+    assert all(gap.code != "compaction_first_kept_item_unavailable" for gap in second.gaps)
+    assert [(turn.activation_id, turn.turn_no, turn.step_count) for turn in second_trajectory.turns] == [(2, 1, 1)]

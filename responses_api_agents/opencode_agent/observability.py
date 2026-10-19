@@ -11,6 +11,8 @@ from typing import Any
 
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.rollout_observability import (
+    AgentInvocation,
+    AgentObservationBundle,
     ObservationGap,
     TrajectoryRecord,
     TrajectoryTurn,
@@ -171,3 +173,31 @@ def scope_opencode_trajectory(trajectory: TrajectoryRecord, body: Any, rollout_i
             ],
         }
     )
+
+
+def scope_opencode_activation(
+    observations: AgentObservationBundle,
+    trajectory: TrajectoryRecord,
+    *,
+    invocation_prefix: str,
+    activation_id: int,
+) -> None:
+    """Match the launch plugin's activation/native-session IDs at every evidence boundary."""
+
+    def scoped(native_id: str) -> str:
+        return f"{invocation_prefix}:{native_id}"
+
+    for record in observations.records:
+        if isinstance(record, AgentInvocation):
+            record.native_session_id = record.invocation_id
+            record.activation_id = activation_id
+            if record.parent_invocation_id is not None:
+                record.parent_invocation_id = scoped(record.parent_invocation_id)
+        if hasattr(record, "invocation_id"):
+            record.invocation_id = scoped(record.invocation_id)
+    for gap in [*observations.gaps, *trajectory.gaps]:
+        if gap.invocation_id is not None:
+            gap.invocation_id = scoped(gap.invocation_id)
+    for turn in trajectory.turns:
+        turn.invocation_id = scoped(turn.invocation_id)
+        turn.activation_id = activation_id

@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Agent-server lifecycle for one supervised harness activation."""
+"""Supervised harness activations over one retained sandbox connection."""
 
 import asyncio
 import logging
@@ -55,8 +55,10 @@ class SandboxSession[Artifacts]:
     to the agent server after cleanup is confirmed. It may run a bounded snapshot
     command, but must not restart the harness. Parsing responses stays in the adapter.
 
-    A new session stages input and its supervisor, runs the harness process, then
-    stops and collects artifacts. Execution retains the sandbox until close
+    Each activation stages input and a fresh supervisor, runs the harness process, then
+    stops and collects artifacts. Adapters may explicitly rearm it with ``begin_activation``
+    after confirmed cleanup, retaining native state outside the per-activation directory.
+    The default still permits only one launch. Execution retains the sandbox until close
     releases it. Missing termination evidence remains retryable. A final negative
     receipt skips capture, releases a borrowed connection and leaves teardown to
     Resources; an owned sandbox falls back to provider stop. Closed means release succeeded.
@@ -86,6 +88,7 @@ class SandboxSession[Artifacts]:
     capture_error: Exception | None = field(default=None, init=False)
     termination_error: HarnessTerminationError | None = field(default=None, init=False)
     sandbox_stopped: bool = field(default=False, init=False)
+    _session_root: str | None = field(default=None, init=False)
     _stage_task: asyncio.Future[SandboxCommand] | None = field(default=None, init=False)
     _exec_task: asyncio.Task[SandboxExecResult] | None = field(default=None, init=False)
     _finalize_task: asyncio.Task[None] | None = field(default=None, init=False)
@@ -183,11 +186,11 @@ class SandboxSession[Artifacts]:
             # A harness process's nonzero exit can still carry useful, adapter-specific output.
         except BaseException:
             try:
-                await self.finish(timeout=close_timeout)
+                await self._finish(timeout=close_timeout)
             except Exception:
                 LOG.exception("%s harness termination was not confirmed; close must release the session", self.harness)
             raise
-        await self.finish(timeout=close_timeout)
+        await self._finish(timeout=close_timeout)
         if result.return_code != 0 and self.capture_error is not None:
             raise RuntimeError(
                 f"{self.harness} sandbox execution failed (exit {result.return_code}): {result.stderr or ''}"
@@ -209,11 +212,13 @@ class SandboxSession[Artifacts]:
         if self._stage_task is not None:
             if session_dir == self.session_dir:
                 raise ValueError("Repeated activations require a fresh supervisor directory")
-            await self.finish(timeout=timeout)
+            await self._finish(timeout=timeout)
             if self.closing:
                 raise RuntimeError(f"{self.harness} sandbox session is closing")
-            if self.launch_started and (self.cleanup is None or not self.cleanup["cleanup_confirmed"]):
+            if not self.cleanup_confirmed:
                 raise RuntimeError(f"{self.harness} previous activation cleanup is unconfirmed")
+        if self._session_root is None:
+            self._session_root = self.session_dir
         self.session_dir = session_dir
         self.launch_started = False
         self.cleanup = None
@@ -246,8 +251,8 @@ class SandboxSession[Artifacts]:
         except TimeoutError as error:
             raise RuntimeError(f"{self.harness} launch outcome is unknown; termination deadline exceeded") from error
 
-    async def finish(self, *, timeout: float) -> None:
-        """Confirm cleanup and capture without releasing the conversation sandbox."""
+    async def _finish(self, *, timeout: float) -> None:
+        """Join process finalization without releasing the sandbox connection."""
         self._finalize_task = _reuse_or_start(self._finalize_task, lambda: self._finalize(timeout=timeout))
         await asyncio.shield(self._finalize_task)
 
@@ -295,7 +300,7 @@ class SandboxSession[Artifacts]:
 
     async def _close(self, *, timeout: float) -> None:
         try:
-            await self.finish(timeout=timeout)
+            await self._finish(timeout=timeout)
         except Exception as error:
             if not self.owns_sandbox and not isinstance(error, HarnessTerminationError):
                 raise
@@ -321,7 +326,7 @@ class SandboxSession[Artifacts]:
             async with asyncio.timeout(timeout):
                 await remove_session_directory(
                     self.sandbox,
-                    session_dir=self.session_dir,
+                    session_dir=self._session_root or self.session_dir,
                     workdir=self.workdir,
                     timeout=timeout,
                     harness=self.harness,
