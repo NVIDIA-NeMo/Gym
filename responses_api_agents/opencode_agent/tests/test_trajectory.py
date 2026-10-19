@@ -10,7 +10,7 @@ import pytest
 from nemo_gym.observability.model_calls import ModelCallRecord
 from nemo_gym.rollout_collection import _build_trajectory_record
 from nemo_gym.rollout_health import run_health_checks
-from nemo_gym.rollout_observability import AgentInvocation, TrajectoryRecord, join_model_call_observations
+from nemo_gym.rollout_observability import AgentInvocation, TrajectoryRecord, join_agent_model_calls
 from responses_api_agents.opencode_agent.app import _parse_opencode_session
 from responses_api_agents.opencode_agent.tests.test_app import _session_db
 
@@ -49,7 +49,7 @@ def _health(tmp_path, trajectory, observations, **call_updates):
         )
         | call_updates
     )
-    observations = join_model_call_observations(observations, [call])
+    observations = join_agent_model_calls(observations, [call])
     row = {"_ng_task_index": 0, "_ng_rollout_index": 0}
     result = {
         "ng_agent_observations": observations.model_dump(mode="json"),

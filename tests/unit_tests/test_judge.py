@@ -150,3 +150,25 @@ class TestJudgeFailsafe:
         assert len(data["failure_reason"]) == 2000
         assert data["_ng_failure_judge_error"] == data["failure_reason"]
         assert request.model_dump() == original
+
+
+@pytest.mark.asyncio
+async def test_judge_calls_use_enclosing_verifier_identity_even_on_failure():
+    from nemo_gym.rollout_correlation import verifier_invocation_context
+
+    client = _client(status=200, body=b'{"verdict":"CORRECT"}')
+    await _call(client)
+    assert client.post.call_args.kwargs["headers"] == {}
+    with verifier_invocation_context("verify-one"):
+        await _call(client)
+        await _call(client)
+        assert all(
+            call.kwargs["headers"] == {"x-ng-verifier-invocation-id": "verify-one"}
+            for call in client.post.call_args_list[1:]
+        )
+        failed = _client(status=400, body=b'{"error":"rejected"}')
+        with pytest.raises(JudgeError):
+            await _call(failed)
+        assert failed.post.call_args.kwargs["headers"] == {"x-ng-verifier-invocation-id": "verify-one"}
+    await _call(client)
+    assert client.post.call_args.kwargs["headers"] == {}

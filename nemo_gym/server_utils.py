@@ -87,7 +87,12 @@ from nemo_gym.global_config import (
     get_global_config_dict,
 )
 from nemo_gym.profiling import Profiler
-from nemo_gym.rollout_correlation import ROUTED_PATH_STATE_KEY, current_rollout_id, maybe_rollout_id_from_run_body
+from nemo_gym.rollout_correlation import (
+    ROUTED_PATH_STATE_KEY,
+    current_rollout_id,
+    current_verifier_invocation_id,
+    maybe_rollout_id_from_run_body,
+)
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, safe_set_span_attributes
 from nemo_gym.telemetry.connection_pool import (
     QueueTimedTCPConnector,
@@ -962,6 +967,12 @@ class ServerClient(BaseModel):
             and not url_path.startswith(f"/{ROLLOUT_PATH_PREFIX}/")
         ):
             url_path = f"{rollout_path_prefix(rollout_id)}{url_path}"
+            verifier_invocation_id = current_verifier_invocation_id()
+            if verifier_invocation_id is not None:
+                kwargs["headers"] = {
+                    **(kwargs.get("headers") or {}),
+                    "x-ng-verifier-invocation-id": verifier_invocation_id,
+                }
 
         return await request(
             method=method,
