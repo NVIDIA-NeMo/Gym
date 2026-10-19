@@ -51,6 +51,16 @@ bash -lc '
     + ENSURE_RAY_INSTALLED
     + """
     if ray symmetric-run --help >/dev/null 2>&1; then
+        if [ "${{SLURM_NODEID:-0}}" != "0" ]; then
+            _deadline=$(($(date +%s) + RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT))
+            until (</dev/tcp/"$HEAD_NODE_IP"/6379) 2>/dev/null; do
+                if [ "$(date +%s)" -ge "$_deadline" ]; then
+                    echo "Timed out waiting for Ray head $HEAD_NODE_IP:6379"
+                    exit 1
+                fi
+                sleep 2
+            done
+        fi
         ray symmetric-run \\
             --address "$RAY_HEAD_NODE_IP" \\
             --min-nodes {total_nodes} \\

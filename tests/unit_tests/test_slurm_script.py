@@ -317,6 +317,18 @@ def test_build_vllm_ray_command_raises_symmetric_run_node_wait_timeout(vllm_serv
     assert cmd.index("export RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT=") < cmd.index("ray symmetric-run")
 
 
+def test_build_vllm_ray_command_worker_waits_for_head_port(vllm_service):
+    # Ray 2.59 bug: check_head_node_ready() constructs GcsClient outside the retry loop,
+    # so RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT has no effect and workers give up after ~40 s.
+    # The fix: worker nodes poll HEAD_NODE_IP:6379 before handing off to ray symmetric-run.
+    cmd = _build_vllm_ray_command(vllm_service, total_nodes=2)
+    assert '/dev/tcp/"$HEAD_NODE_IP"/6379' in cmd
+    # The wait must be inside the symmetric-run branch and gated on SLURM_NODEID != 0.
+    assert '[ "${SLURM_NODEID:-0}" != "0" ]' in cmd
+    # The wait must appear before the actual ray symmetric-run call (not the --help probe).
+    assert cmd.index('/dev/tcp/"$HEAD_NODE_IP"/6379') < cmd.index('--address "$RAY_HEAD_NODE_IP"')
+
+
 # ---------------------------------------------------------------------------
 # _build_vllm_ray_command - multiple instances (data parallel) span nodes
 # ---------------------------------------------------------------------------
