@@ -114,6 +114,19 @@ def scrape_nodes(config: SubmitConfig) -> dict[str, tuple[int, ...]]:
     return nodes
 
 
+def exporter_nodes(config: SubmitConfig) -> tuple[int, ...]:
+    """Allocation node indexes whose GPU and node exporters are scraped, empty on a single node.
+
+    The exporters run on every node of the allocation, not only beside the collector, so a
+    multi-node job is scraped by hostname on all of them.
+    """
+    compute = next(iter(config.compute.values()))
+    if not isinstance(compute, SlurmComputeConfig):
+        return ()
+    total_nodes = sum(pool.nodes for pool in compute.node_pools.values())
+    return tuple(range(total_nodes)) if total_nodes > 1 else ()
+
+
 def otel_active(config: SubmitConfig) -> bool:
     """Enabled is enough: Gym's own servers push telemetry even when there is no local model to scrape."""
     return config.otel.enabled
@@ -205,14 +218,26 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
         for name, port in scrape_targets(config).items()
     ]
     # Node exporters keep their conventional job names so the standard DCGM / node_exporter
-    # dashboards' queries apply unchanged; DCGM already labels every sample with `hpc_job`.
+    # dashboards' queries apply unchanged; DCGM already labels every sample with `hpc_job`. They run on
+    # every node, so a multi-node job is scraped by hostname on all of them.
+    exporters = exporter_nodes(config)
     for job_name, port in (("dcgm", obs.gpu_metrics_port), ("node", obs.node_metrics_port)):
         if port is not None:
             scrape_configs.append(
                 {
                     "job_name": job_name,
                     "scrape_interval": interval,
-                    "static_configs": [{"targets": [f"localhost:{port}"]}],
+                    "static_configs": (
+                        [
+                            {
+                                "targets": [f"${{env:{node_host_var(index)}}}:{port}"],
+                                "labels": {"gym_node": str(index)},
+                            }
+                            for index in exporters
+                        ]
+                        if exporters
+                        else [{"targets": [f"localhost:{port}"]}]
+                    ),
                 }
             )
     # Each producer's own `service.name` survives as the display identity before `resource` overwrites it.
