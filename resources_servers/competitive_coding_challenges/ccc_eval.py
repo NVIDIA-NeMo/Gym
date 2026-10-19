@@ -234,7 +234,7 @@ def compile_infra_error(compile_result: dict) -> str | None:
     return None
 
 
-# Anything with LocalSandbox's async execute_code(); sandbox_runner.py supplies a local-process one.
+# Anything with LocalSandbox's async execute_code(); sandbox/sandbox_runner.py supplies a local-process one.
 SandboxFactory = Callable[[], LocalSandbox]
 
 

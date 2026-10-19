@@ -89,16 +89,26 @@ elsewhere. Cluster/SLURM users can co-launch the sandbox via Skills'
 
 Instead of the NeMo Skills sandbox, each verification can run in a fresh sandbox from any
 [sandbox provider](https://docs.nvidia.com/nemo/gym/main/infrastructure/sandbox). The server
-uploads `ccc_eval.py` and `sandbox_runner.py`; inside the sandbox the unchanged evaluator runs
-each shell command the way the NeMo Skills sandbox does (`/bin/bash` in a new session, 50 GiB
-`RLIMIT_AS`/`RLIMIT_DATA`, output cut at 1000 characters). The per-test time and memory limits
-still come from each problem's `run.sh`.
+uploads `ccc_eval.py` and `sandbox/sandbox_runner.py`; inside the sandbox the unchanged evaluator
+runs each shell command the way the NeMo Skills sandbox does (`/bin/bash` in a new session,
+50 GiB `RLIMIT_AS`/`RLIMIT_DATA`, output cut at 1000 characters). The per-test time and memory
+limits still come from each problem's `run.sh`.
+
+Where each part runs:
+
+| Files | Where they run |
+|---|---|
+| `sandbox/sandbox_runner.py` | Only in the sandbox; uploaded with every verification. |
+| `ccc_eval.py` | The evaluator: in the Gym server with the NeMo Skills sandbox, or uploaded next to the runner when `sandbox_provider` is set. |
+| `sandbox/Dockerfile` | Builds the sandbox image; not uploaded. |
+| `split_problem_metadata.py` | Run once by hand to write the per-problem data the sandbox reads (step 2 below). |
+| Everything else, including `app.py` and `sandbox_evaluator.py` (which does the upload) | Only in the Gym server. |
 
 1. Build and push the image. It pins the toolchain of the NeMo Skills sandbox the baselines were
    scored with (Debian 13, g++ 14.2.0-19), including `python`, which some problems' `run.sh` call:
 
    ```bash
-   docker build --platform linux/amd64 -t <registry>/ccc-verifier:<tag> resources_servers/competitive_coding_challenges/sandbox_image
+   docker build --platform linux/amd64 -t <registry>/ccc-verifier:<tag> resources_servers/competitive_coding_challenges/sandbox
    docker push <registry>/ccc-verifier:<tag>
    ```
 

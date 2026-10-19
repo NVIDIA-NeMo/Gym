@@ -30,10 +30,11 @@ import yaml
 
 from nemo_gym.failure_kinds import VERIFIER_ERROR
 from nemo_gym.sandbox import SandboxExecResult, SandboxHandle
-from nemo_gym.verifier_utils.sandbox_verification import SandboxVerificationError
+from nemo_gym.verifier_utils.sandbox_verification import RUNNER_FILE, SandboxVerificationError
 from resources_servers.competitive_coding_challenges.ccc_eval import _load_metadata_file
 from resources_servers.competitive_coding_challenges.sandbox_evaluator import (
     _HARNESS_FILES,
+    _RUNNER,
     CCCSandboxConfig,
     evaluate_in_sandbox,
     problem_file,
@@ -190,6 +191,7 @@ def test_split_problem_metadata_streams_like_the_evaluator_load(tmp_path: Path) 
 
 def test_uploaded_harness_imports_with_the_standard_library_only(tmp_path: Path) -> None:
     # The image has only Python's standard library, and the runner imports the uploaded ccc_eval as a top-level module.
+    shutil.copy(_RUNNER, tmp_path / RUNNER_FILE)
     for name in _HARNESS_FILES:
         shutil.copy(_CCC_DIR / name, tmp_path / name)
     result = subprocess.run(
@@ -215,7 +217,7 @@ class TestProcessSandbox:
     def process_sandbox(self):
         sys.path.insert(0, str(_CCC_DIR))
         try:
-            spec = importlib.util.spec_from_file_location("ccc_sandbox_runner", _CCC_DIR / "sandbox_runner.py")
+            spec = importlib.util.spec_from_file_location("ccc_sandbox_runner", _RUNNER)
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
         finally:
@@ -344,7 +346,7 @@ _GPP_RUN = (
 
 @pytest.mark.skipif(
     shutil.which("docker") is None or not _DOCKER_IMAGE,
-    reason="needs docker and CCC_SANDBOX_IMAGE built from sandbox_image/",
+    reason="needs docker and CCC_SANDBOX_IMAGE built from sandbox/",
 )
 class TestDockerProvider:
     async def _grade(self, tmp_path: Path, code: str) -> dict:

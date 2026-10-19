@@ -15,7 +15,9 @@
 
 """Grade a submission in a fresh provider sandbox instead of the NeMo Skills sandbox.
 
-``ccc_eval.py`` and ``sandbox_runner.py`` are uploaded with the request and run by
+This module runs in the Gym server. Each verification uploads ``sandbox/sandbox_runner.py``, which
+runs only in the sandbox, and the unchanged ``ccc_eval.py``, the evaluator the NeMo Skills path
+runs in this server; nothing else from this server is uploaded. The upload and run go through
 ``nemo_gym.verifier_utils.sandbox_verification.run_verification_sandbox``, which raises
 ``SandboxVerificationError`` on a sandbox or runner failure so the caller can mask the sample.
 The problem's grader files and tests are read from ``problem_data_dir``, which must already
@@ -34,11 +36,17 @@ from typing import Any
 from pydantic import BaseModel
 
 from nemo_gym.sandbox import SandboxProvider
-from nemo_gym.verifier_utils.sandbox_verification import SandboxVerificationConfig, run_verification_sandbox
+from nemo_gym.verifier_utils.sandbox_verification import (
+    RUNNER_FILE,
+    SandboxVerificationConfig,
+    run_verification_sandbox,
+)
 
 
 _CCC_DIR = Path(__file__).parent
-_HARNESS_FILES = ("ccc_eval.py", "sandbox_runner.py")
+_RUNNER = _CCC_DIR / "sandbox" / RUNNER_FILE
+# The evaluator the NeMo Skills path runs, uploaded under the same name so the runner can import it.
+_HARNESS_FILES = ("ccc_eval.py",)
 DEFAULT_WORK_DIR = "/tmp/ccc_verify"
 
 
@@ -88,7 +96,10 @@ async def evaluate_in_sandbox(
     return await run_verification_sandbox(
         provider=provider,
         config=config,
-        files={name: (_CCC_DIR / name).read_text(encoding="utf-8") for name in _HARNESS_FILES},
+        files={
+            RUNNER_FILE: _RUNNER.read_text(encoding="utf-8"),
+            **{name: (_CCC_DIR / name).read_text(encoding="utf-8") for name in _HARNESS_FILES},
+        },
         request={
             "entry": entry,
             "problem_file": problem_file(config.problem_data_dir, entry.get("competition_id"), entry["problem_id"]),

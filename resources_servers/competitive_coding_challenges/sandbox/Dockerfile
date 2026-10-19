@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Runtime for competitive_coding_challenges' sandboxed grading. ccc_eval.py and the runner
-# are uploaded with every verification; problem data is mounted or added at
+# Runtime for competitive_coding_challenges' sandboxed grading. The runner next to this file
+# and ../ccc_eval.py are uploaded with every verification, not built in (see
+# ../sandbox_evaluator.py); problem data is mounted or added at
 # sandbox_config.problem_data_dir (see ../README.md).
 #
 # The toolchain matches the NeMo Skills sandbox the baselines were scored with
