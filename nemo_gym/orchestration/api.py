@@ -350,8 +350,32 @@ class SlurmComputeConfig(BaseComputeConfig):
     extra_args: dict[str, str] = {}  # Job-level #SBATCH directives (e.g. --comment, --mail-user).
 
 
+class KubernetesComputeConfig(BaseComputeConfig):
+    type: Literal["kubernetes"]
+    context: str | None = None  # kubeconfig context; None means whatever is already current.
+    namespace: str = "default"
+    # v1 is single-node only: one implicit pool, sized by this rather than named node_pools.
+    gpus_per_node: int | None = None
+    node_selector: dict[str, str] = {}
+    service_account: str | None = None
+    # A pre-existing PVC, mounted at job.output_path in every container. Required: the driver
+    # container always mounts this volume, so an unset pvc_name would leave that reference
+    # dangling and the pod rejected outright ("volumeMounts[0].name: Not found").
+    pvc_name: str
+    # Memory *request* per requested GPU on a service container (e.g. "32Gi"). Without it a pod
+    # is QoS class BestEffort, which the kubelet kills first under node memory pressure.
+    memory_per_gpu: str = "32Gi"
+    extra_args: dict[str, str] = {}  # Forwarded verbatim as pod labels/annotations.
+    # Seconds after a Job finishes before k8s garbage-collects it and its pods. 24h by default so
+    # finished Jobs don't need manual cleanup, but logs/results stay around long enough to check.
+    ttl_seconds_after_finished: int = 60 * 60 * 24
+    # Kills a still-Running Job (e.g. a hung vLLM) after this long, freeing its GPUs. None (the
+    # default) sets no deadline -- benchmark runtimes vary too widely for one default to be safe.
+    active_deadline_seconds: int | None = None
+
+
 ComputeConfig = Annotated[
-    Annotated[SlurmComputeConfig, Tag("slurm")],
+    Annotated[SlurmComputeConfig, Tag("slurm")] | Annotated[KubernetesComputeConfig, Tag("kubernetes")],
     Discriminator("type"),
 ]
 
@@ -531,11 +555,13 @@ class SubmitConfig(_StrictModel):
 
         sole_compute = next(iter(compute_names))
         compute = self.compute[sole_compute]
-        total_nodes = (
-            sum(p.nodes for p in compute.node_pools.values()) if isinstance(compute, SlurmComputeConfig) else 1
-        )
-
-        pool_names = set(compute.node_pools) if isinstance(compute, SlurmComputeConfig) else set()
+        if isinstance(compute, SlurmComputeConfig):
+            total_nodes = sum(p.nodes for p in compute.node_pools.values())
+            pool_names = set(compute.node_pools)
+        else:
+            # Kubernetes v1: always exactly one implicit node/pool, sized by gpus_per_node.
+            total_nodes = 1
+            pool_names = set()
 
         for name, service in self.services.items():
             if isinstance(service, VllmPDServiceConfig):
@@ -595,7 +621,11 @@ class SubmitConfig(_StrictModel):
                     )
                 # Each node serves on its own, so size it as a single-node deployment.
                 service_nodes = 1
-            service_gpus = [p.gpus_per_node for p in service_pools.values() if p.gpus_per_node is not None]
+            if isinstance(compute, SlurmComputeConfig):
+                service_gpus = [p.gpus_per_node for p in service_pools.values() if p.gpus_per_node is not None]
+            else:
+                # Kubernetes v1: no named pools (enforced above), one implicit node/pool.
+                service_gpus = [compute.gpus_per_node] if compute.gpus_per_node is not None else []
 
             is_ray_serve = effective_ray_serve(service, service_nodes, service_gpus)
 

@@ -22,7 +22,6 @@ import math
 import os
 import re
 import signal
-import tempfile
 import time
 import warnings
 from asyncio import Future, Semaphore
@@ -61,9 +60,9 @@ from nemo_gym.config_types import (
     BaseServerConfig,
     ConfigError,
     ConfigPathNotFoundError,
+    RemovedRolloutOptionsMixin,
     UploadRolloutsConfigMixin,
 )
-from nemo_gym.deliverables import is_deliverable
 from nemo_gym.episode_types import EpisodeId, is_materialized_task_row
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
 from nemo_gym.failure_kinds import CANCELLED, JUDGE_FAILED, is_namespaced, is_registered
@@ -1020,7 +1019,7 @@ def _normalize_health_check_ignored_checks(value) -> List[str]:
     return list(normalize_ignored_checks(value))
 
 
-class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLIConfig):
+class SharedRolloutCollectionConfig(RemovedRolloutOptionsMixin, UploadRolloutsConfigMixin, BaseNeMoGymCLIConfig):
     output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
     batch_manifest_fpath: Optional[str] = Field(
         default=None,
@@ -1604,147 +1603,21 @@ def is_terminal_failure(record: Mapping[str, Any], *, retry_terminal_timeouts: b
     ``retry_terminal_timeouts`` is for agents whose older builds incorrectly
     stamped per-attempt timeouts terminal. A timeout reflects the
     load/remaining walltime of that attempt, so it remains retryable (up to the
-    normal max-attempt cap). A skipped sample is unusable regardless of which
-    agent version wrote the sidecar and stays terminal.
+    normal max-attempt cap).
 
-    The class names below are ``_ng_failure_class`` labels that agents and
-    resources servers already write to the failures sidecar. They predate
-    ``nemo_gym.failure_kinds`` and are not registered there:
-
-    - ``timeout_exceeded`` (Stirrup, pinchbench): the per-task timeout; ``agent_timeout``
-      in the shared vocabulary.
-    - ``reference_missing``, ``eval_missing``, ``transport_ineligible`` (GDPVal): environment
-      faults with no shared name (namespaced, they would be ``gdpval:<kind>``).
-    - ``skipped`` (Stirrup): the sample cannot be run; no shared name.
+    ``timeout_exceeded`` is an ``_ng_failure_class`` label that agents already
+    write to the failures sidecar (pinchbench, nooa). It predates
+    ``nemo_gym.failure_kinds`` and is not registered there; ``agent_timeout`` is
+    the shared name.
 
     As ``failure_kinds`` requires, this function decides retryability for the
-    occurrence, under an explicit caller opt-in; the names carry no retry meaning.
+    occurrence, under an explicit caller opt-in; the name carries no retry meaning.
     """
     if not retry_terminal_timeouts:
         return bool(record.get(NG_TERMINAL_KEY))
-    failure_class = record.get(NG_FAILURE_CLASS_KEY)
-    if failure_class == "timeout_exceeded":
+    if record.get(NG_FAILURE_CLASS_KEY) == "timeout_exceeded":
         return False
-    if failure_class in ("reference_missing", "eval_missing", "transport_ineligible"):
-        # Environment faults: the deliverable tree can be repaired after the
-        # run (remounted reference view, restored eval dir). Terminal within a
-        # run, but re-validated on resume; the /verify recheck is cheap and the
-        # normal max-attempt cap still bounds re-dispatch.
-        return False
-    if failure_class == "skipped":
-        return True
     return bool(record.get(NG_TERMINAL_KEY))
-
-
-_MIGRATED_INVALID_JUDGE_KEY = "_ng_migrated_invalid_judge_response"
-
-
-def migrate_invalid_judge_main_rows(output_fpath: Path) -> int:
-    """Move legacy invalid-judge rows from the main JSONL into the sidecar.
-
-    Old builds persisted ``invalid_judge_response=True`` as a zero-reward main
-    success, which both contaminated aggregation and gated resume. Sidecar-first
-    migration is idempotent via a marker keyed by
-    stage/task/rollout/attempt; the main file is then atomically rewritten so
-    a crash cannot lose retry state.
-
-    Run it only for environments that opt in (``retry_invalid_judge_responses``):
-    other verifiers score an invalid judge response as a zero-reward row on purpose.
-
-    Migrated rows are classed ``judge_invalid``, the sidecar label reverification uses for
-    the same condition (``judge_unparseable`` in ``nemo_gym.failure_kinds``).
-    """
-    if not output_fpath.exists():
-        return 0
-
-    invalid_count = 0
-    with output_fpath.open("rb") as handle:
-        for line in handle:
-            stripped = line.strip()
-            if not stripped:
-                continue
-            if orjson.loads(stripped).get("invalid_judge_response"):
-                invalid_count += 1
-    if not invalid_count:
-        return 0
-
-    def migration_key(row: Mapping[str, Any]) -> Tuple[Any, Any, Any, Any]:
-        return (
-            int(row.get("stage_index", 0) or 0),
-            row.get(TASK_INDEX_KEY_NAME),
-            row.get(ROLLOUT_INDEX_KEY_NAME),
-            int(row.get(ATTEMPT_INDEX_KEY_NAME, 0) or 0),
-        )
-
-    failures_fpath = failures_path_for(output_fpath)
-    failures_fpath.parent.mkdir(parents=True, exist_ok=True)
-    already_migrated: set[Tuple[Any, Any, Any, Any]] = set()
-    if failures_fpath.exists():
-        with failures_fpath.open("rb") as handle:
-            for line in handle:
-                stripped = line.strip()
-                if not stripped:
-                    continue
-                row = orjson.loads(stripped)
-                if row.get(_MIGRATED_INVALID_JUDGE_KEY):
-                    already_migrated.add(migration_key(row))
-
-    mode = output_fpath.stat().st_mode & 0o7777
-    temp_path: Optional[Path] = None
-    try:
-        with (
-            tempfile.NamedTemporaryFile(
-                mode="wb", dir=output_fpath.parent, prefix=f".{output_fpath.name}.migrate-", delete=False
-            ) as output_handle,
-            output_fpath.open("rb") as source,
-            failures_fpath.open("ab") as failures_handle,
-        ):
-            temp_path = Path(output_handle.name)
-            for line in source:
-                stripped = line.strip()
-                if not stripped:
-                    continue
-                legacy = orjson.loads(stripped)
-                if not legacy.get("invalid_judge_response"):
-                    output_handle.write(stripped + b"\n")
-                    continue
-
-                key = migration_key(legacy)
-                if key in already_migrated:
-                    continue
-                migrated = dict(legacy)
-                migrated[NG_FAILURE_CLASS_KEY] = migrated.get(NG_FAILURE_CLASS_KEY) or "judge_invalid"
-                migrated.pop(NG_TERMINAL_KEY, None)
-                deliverables_dir = migrated.get("deliverables_dir")
-                try:
-                    has_cached_deliverable = bool(
-                        deliverables_dir
-                        and Path(deliverables_dir).is_dir()
-                        and any(is_deliverable(path) for path in Path(deliverables_dir).iterdir())
-                    )
-                except (OSError, TypeError):
-                    has_cached_deliverable = False
-                if has_cached_deliverable:
-                    migrated["reuse_cached_deliverable"] = True
-                else:
-                    migrated.pop("reuse_cached_deliverable", None)
-                migrated[_MIGRATED_INVALID_JUDGE_KEY] = True
-                failures_handle.write(orjson.dumps(migrated) + b"\n")
-                already_migrated.add(key)
-
-            # Make every retry record durable before removing the corresponding
-            # legacy success from the main file.
-            failures_handle.flush()
-            os.fsync(failures_handle.fileno())
-            output_handle.flush()
-            os.fsync(output_handle.fileno())
-        os.chmod(temp_path, mode)
-        os.replace(temp_path, output_fpath)
-        temp_path = None
-    finally:
-        if temp_path is not None:
-            temp_path.unlink(missing_ok=True)
-    return invalid_count
 
 
 class RolloutCollectionConfig(SharedRolloutCollectionConfig):
@@ -2006,23 +1879,10 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         default=False,
         description=(
             "On resume, retry failures-sidecar rows of class `timeout_exceeded` even when they are stamped "
-            "`_ng_failure_terminal`, up to NEMO_GYM_MAX_ROLLOUT_ATTEMPTS. The environment faults "
-            "`reference_missing`, `eval_missing` and `transport_ineligible`, which can be repaired between "
-            "runs, are retried the same way, and `skipped` rows are never retried, stamped or not. For sidecars "
+            "`_ng_failure_terminal`, up to NEMO_GYM_MAX_ROLLOUT_ATTEMPTS. For sidecars "
             "whose per-attempt timeouts were stamped terminal but should be retried. Off (default): a sidecar row "
             "is terminal iff it is stamped `_ng_failure_terminal`, so an agent that marks its timeouts terminal "
             "on purpose keeps them gated."
-        ),
-    )
-
-    retry_invalid_judge_responses: bool = Field(
-        default=False,
-        description=(
-            "On resume, move rows flagged `invalid_judge_response` out of the rollouts jsonl and into the "
-            "failures sidecar as retryable `judge_invalid` attempts, so they leave the score and are judged "
-            "again (reusing the persisted deliverable when there is one). For environments whose invalid judge "
-            "responses were written as zero-reward successes but should be judged again. Off (default): the "
-            "rollouts jsonl is left as is, so a verifier that scores invalid judge responses as zero keeps those rows."
         ),
     )
 
@@ -2406,6 +2266,183 @@ def _coverage_report(
     return report
 
 
+class _EagerCompletionQueue:
+    """Own undelivered outcomes independently of the iterator and its handed-out awaitables."""
+
+    def __init__(self, progress):
+        self.ready: asyncio.Queue[Future] = asyncio.Queue()
+        self.drained = False
+        self.progress = progress
+
+    def put(self, task: Future) -> None:
+        if not self.drained:
+            self.ready.put_nowait(task)  # Wake one consumer for each available outcome.
+
+    async def get(self):
+        try:
+            task = await self.ready.get()
+        except asyncio.QueueShutDown:
+            raise asyncio.CancelledError from None
+        self.progress.update(1)
+        if self.progress.n == self.progress.total:
+            self.progress.close()
+        return await task
+
+    def drain(self) -> list[Future]:
+        self.drained = True
+        tasks = []
+        while not self.ready.empty():
+            tasks.append(self.ready.get_nowait())
+        # Only drain wakes every consumer, including issued awaitables started later.
+        self.ready.shutdown()
+        return tasks
+
+
+class _EagerCompletionIterator:
+    """Start every rollout in input order on first use, yielding completion-order awaitables."""
+
+    def __init__(self, awaitables: Iterator, *, total: int):
+        self._awaitables = awaitables
+        self._total = total
+        self._remaining = total
+        self._tasks: set[Future] = set()
+        self._queue: Optional[_EagerCompletionQueue] = None
+        self._closed = False
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self._closed or self._remaining <= 0:
+            raise StopIteration
+        if self._queue is None:
+            progress = tqdm(desc="Collecting rollouts", miniters=10, total=self._total, maxinterval=60)
+            self._queue = _EagerCompletionQueue(progress)
+            # Creating tasks explicitly preserves input order (as_completed uses a set).
+            for awaitable in self._awaitables:
+                task = asyncio.ensure_future(awaitable)
+                self._tasks.add(task)
+                task.add_done_callback(functools.partial(self._on_done, self._queue))
+        self._remaining -= 1
+        return self._queue.get()
+
+    def _on_done(self, queue: _EagerCompletionQueue, task: Future) -> None:
+        self._tasks.discard(task)
+        if not task.cancelled():
+            # Retrieve failures even if no caller consumes this completion. Awaiting it still raises.
+            task.exception()
+        queue.put(task)
+
+    async def aclose(self) -> None:
+        await self._close(drain=False)
+
+    async def aclose_and_drain(self) -> list[Future]:
+        return await self._close(drain=True)
+
+    async def _close(self, *, drain: bool) -> list[Future]:
+        if self._closed:
+            return []
+        self._closed = True
+        queue, self._queue = self._queue, None
+        tasks = list(self._tasks)
+        self._tasks.clear()
+        completed = []
+        if queue is not None:
+            if drain:
+                completed = queue.drain()
+                # Some tasks may have finished before their done callbacks ran.
+                completed.extend(task for task in tasks if task.done())
+            queue.progress.close()
+        # Plain aclose leaves the detached queue available to existing awaitables.
+        # With no such awaitables, the queue and its payloads are released after callbacks run.
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        return completed
+
+
+class _RowResultIterator:
+    """What ``run_examples`` returns: ``(row, result)`` awaitables in completion order.
+
+    A thin map over the internal completion iterator that keeps its ``aclose()`` reachable, so a
+    direct caller can stop collecting and cancel the rollouts still in flight.
+    """
+
+    def __init__(self, completions: Iterator[Future]):
+        self._completions = completions
+        self._closed = False
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self._closed:
+            raise StopIteration
+        return self._without_metadata(next(self._completions))
+
+    @staticmethod
+    async def _without_metadata(future: Future) -> Tuple[Dict, Dict]:
+        completed = await future
+        return completed.row, completed.result
+
+    async def aclose(self) -> None:
+        """Cancel unfinished rollouts and await the end of their client tasks in this process.
+
+        Cancelling an in-flight `/run` request closes its connection. A server using
+        ``ClientDisconnectCancellationMiddleware`` subsequently cancels its handler. This method
+        does not wait for or acknowledge server/agent cleanup, which depends on the agent and may
+        continue after return; it does not guarantee sandbox release or retire an attempt.
+
+        A handed-out awaitable may return an already completed result or raise its exception,
+        including ``CancelledError`` for cancelled work. In bounded mode, an awaitable first
+        awaited after closure raises ``CancelledError`` even if a result was ready. This error
+        propagates in the awaiting caller's task without a call to that task's ``cancel()``;
+        ``asyncio.gather`` and ``TaskGroup`` treat it as cancellation. Iteration stops after closure.
+        Safe to call again after closure completes, or before first use (no rollouts start).
+        """
+        self._closed = True
+        await self._completions.aclose()
+
+    async def aclose_and_drain(self) -> list[Future[Tuple[Dict, Dict]]]:
+        """Stop admission, cancel unfinished client tasks, and preserve completed outcomes.
+
+        Before its first suspension, this operation stops admitting rollouts and snapshots
+        completed outcomes not yet claimed by a completion awaitable. It then cancels and
+        awaits unfinished client tasks, and returns settled futures yielding ``(row, result)``
+        or raising the original exception. No new rollouts start while draining, including
+        in bounded mode. Outcomes are transferred once; repeated calls return an empty list.
+
+        A handed-out awaitable that already claimed an outcome retains it. Other issued
+        awaitables raise ``CancelledError``. Callers with an outstanding waiter must also
+        await that waiter and consume its outcome if it was not cancelled. The returned
+        futures have their exceptions retrieved even if abandoned; awaiting them still raises.
+        An outcome already cancelled at the snapshot is returned as a cancelled future and
+        raises ``CancelledError`` when awaited. Tasks cancelled by this operation are excluded.
+
+        Calling this before first use starts nothing. Calling it after ``aclose()`` returns
+        nothing. Like ``aclose()``, it waits only for local client tasks, not server/agent
+        cleanup, and does not guarantee sandbox release.
+        """
+        self._closed = True
+        completed = await self._completions.aclose_and_drain()
+        outcomes = []
+        loop = asyncio.get_running_loop()
+        for task in completed:
+            outcome = loop.create_future()
+            if task.cancelled():
+                outcome.cancel()
+            elif (error := task.exception()) is not None:
+                outcome.set_exception(error)
+                outcome.exception()
+            else:
+                result = task.result()
+                outcome.set_result((result.row, result.result))
+            outcomes.append(outcome)
+        return outcomes
+
+
 class _BoundedCompletionIterator:
     """Completion-order iterator with a bounded set of resident asyncio tasks."""
 
@@ -2469,10 +2506,17 @@ class _BoundedCompletionIterator:
                 if not self._pending:
                     raise RuntimeError("rollout completion iterator exhausted unexpectedly")
 
-                done, self._pending = await asyncio.wait(
+                done, pending = await asyncio.wait(
                     self._pending,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
+                if self._closed:
+                    # Close owns the snapshot; do not put drained outcomes back or refill.
+                    # A cancelled waiter's traceback must not retain the transferred payloads.
+                    done.clear()
+                    pending.clear()
+                    raise asyncio.CancelledError
+                self._pending = pending
                 self._ready.extend(done)
 
             task = self._ready.pop()
@@ -2485,23 +2529,28 @@ class _BoundedCompletionIterator:
         return await task
 
     async def aclose(self) -> None:
-        # A concurrent consumer may hold the lock while waiting for a task.
-        # Cancel resident tasks without taking the lock so it can wake up.
-        if self._closed:
-            return
+        await self._close(drain=False)
 
+    async def aclose_and_drain(self) -> list[Future]:
+        return await self._close(drain=True)
+
+    async def _close(self, *, drain: bool) -> list[Future]:
+        # A concurrent consumer may hold the lock while waiting for a task.
+        # Freeze admission and snapshot outcomes before yielding, without taking that lock.
+        if self._closed:
+            return []
         self._closed = True
-        resident = [*self._pending, *self._ready]
+        resident = [*self._ready, *self._pending]
+        completed = [task for task in resident if task.done()] if drain else []
         self._pending.clear()
         self._ready.clear()
-
         for task in resident:
-            task.cancel()
-
+            if not task.done():
+                task.cancel()
         if resident:
             await asyncio.gather(*resident, return_exceptions=True)
-
         self._progress.close()
+        return completed
 
 
 class RolloutCollectionHelper(BaseModel):
@@ -2830,8 +2879,6 @@ class RolloutCollectionHelper(BaseModel):
         retain_results_in_memory: bool = True,
         success_keys: Optional[set] = None,
     ) -> Tuple[List[Dict], List[Dict], List[Dict], List[List[bytes]]]:
-        if config.retry_invalid_judge_responses:
-            migrate_invalid_judge_main_rows(Path(config.output_jsonl_fpath))
         with config.materialized_jsonl_fpath.open() as f:
             original_input_rows = list(map(orjson.loads, tqdm(f, desc="Reading materialized input rows")))
         _reject_attempt_qualified_rollout_ids(original_input_rows, config.materialized_jsonl_fpath)
@@ -2861,7 +2908,6 @@ class RolloutCollectionHelper(BaseModel):
         attempts_by_key: Counter = Counter()
         terminal_keys: set = set()
         elapsed_by_key: Dict[Tuple, float] = {}
-        reuse_cached_keys: set[Tuple[Any, Any]] = set()
         if failures_fpath.exists():
             with failures_fpath.open("rb") as f:
                 for line in f:
@@ -2875,8 +2921,6 @@ class RolloutCollectionHelper(BaseModel):
                     attempts_by_key[k] += 1
                     if is_terminal_failure(fr, retry_terminal_timeouts=config.retry_terminal_timeouts):
                         terminal_keys.add(k)
-                    if fr.get("reuse_cached_deliverable"):
-                        reuse_cached_keys.add(k)
                     # A failed attempt still tells us how long this task runs -
                     # the only duration signal available for a task that has not
                     # succeeded yet. Keep the longest attempt seen.
@@ -2898,11 +2942,6 @@ class RolloutCollectionHelper(BaseModel):
             attempt = attempts_by_key.get(key, 0)
             if attempt > 0:
                 row[ATTEMPT_INDEX_KEY_NAME] = attempt
-            if key in reuse_cached_keys:
-                # A failed judging attempt can still have a valid persisted
-                # policy deliverable. Preserve the sidecar's signal so resume
-                # rejudges that artifact instead of rerunning the policy.
-                row["reuse_cached_deliverable"] = True
 
         # Longest-first: known-long tasks go to the front so they get a whole
         # allocation to finish in rather than being cut off at its boundary.
@@ -2931,7 +2970,7 @@ class RolloutCollectionHelper(BaseModel):
 - {len(original_input_rows)} original input rows
 - {len(successes_seen)} rows already done (in main jsonl)
 - {sum(attempts_by_key.values())} prior failure attempts ({len(attempts_by_key)} unique tasks) in sidecar
-- {len(terminal_keys)} sidecar-terminal (for example skipped) → not retried
+- {len(terminal_keys)} sidecar-terminal → not retried
 - {len(maxed_out)} hit max_attempts={max_attempts} → not retried
 - {len(input_rows)} rows that still need to be run"""
         )
@@ -3563,7 +3602,7 @@ class RolloutCollectionHelper(BaseModel):
                 _restore_sigterm(sigterm_previous)
                 if run_timing is not None:
                     print(run_timing.table(), flush=True)
-                if isinstance(completion_iterator, _BoundedCompletionIterator):
+                if hasattr(completion_iterator, "aclose"):
                     await completion_iterator.aclose()
             finally:
                 try:
@@ -4130,7 +4169,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         When ``max_resident_tasks`` is set, at most that many rollout tasks are admitted
         at once. When unset, all examples are scheduled as before. The collection
-        owner closes the bounded iterator on cancellation or error.
+        owner closes either iterator on completion, cancellation or error.
 
         ``dispatch_budget_s`` stops starting rows that many seconds after this call, and
         ``drain_margin_s`` stops sooner for rows that would not have time to finish. A row
@@ -4265,21 +4304,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 total=len(examples),
             )
 
-        def _start_in_input_order() -> Iterator[Future]:
-            # asyncio.as_completed creates its tasks from a set, so create them here to start rollouts in input order.
-            # It drains this generator in order before it builds that set, so tasks are still created in input order.
-            # A finished task keeps its result, so a list of tasks would keep every /run result until the run ends.
-            # A generator leaves the consumer holding the only reference to a result once it takes one.
-            tasks = (asyncio.ensure_future(awaitable) for awaitable in awaitables)
-            yield from tqdm.as_completed(
-                tasks,
-                desc="Collecting rollouts",
-                miniters=10,
-                total=len(examples),
-                maxinterval=60,
-            )
-
-        return _start_in_input_order()
+        return _EagerCompletionIterator(awaitables, total=len(examples))
 
     def run_examples(
         self,
@@ -4293,7 +4318,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         dispatch_budget_s: Optional[float] = None,
         drain_margin_s: Optional[float] = None,
         latency_tracker: Optional["DispatchLatencyTracker"] = None,
-    ) -> Iterator[Future]:  # pragma: no cover
+    ) -> _RowResultIterator:  # pragma: no cover
         """
         We provide this function as a lower level interface for running rollout collection.
 
@@ -4308,8 +4333,37 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         ``max_resident_tasks`` limits admitted tasks and therefore concurrent requests,
         even when ``semaphore`` allows more. Admission starts when the first returned
         awaitable is awaited. None schedules all examples up front, as with
-        ``asyncio.as_completed``. Stopping iteration early leaves up to
-        ``max_resident_tasks`` tasks running because this mapped iterator has no ``aclose()``.
+        ``asyncio.as_completed``.
+
+        To stop early, ``await`` the returned iterator's ``aclose()``: it cancels unfinished
+        rollouts and waits for their client tasks in this process to end. Cancelling an in-flight
+        `/run` closes its connection; a server with ``ClientDisconnectCancellationMiddleware``
+        subsequently cancels its handler. Server/agent cleanup is not awaited or acknowledged,
+        depends on the agent, and may continue after return. Sandbox release is not guaranteed.
+        Handed-out awaitables may return completed results or raise their exceptions, including
+        ``CancelledError``; bounded awaitables first awaited after closure raise ``CancelledError``.
+        The error propagates in the awaiting caller's task even without cancelling that task,
+        and ``asyncio.gather`` and ``TaskGroup`` treat it as cancellation.
+        Without it, abandoned rollouts keep running to completion in the background.
+
+        To preserve completed but unconsumed work when stopping, use
+        ``await completions.aclose_and_drain()`` instead. It stops admission before suspending,
+        cancels and awaits unfinished client tasks, and returns settled ``(row, result)``
+        futures, including failures. Consume those futures and any outcome already claimed
+        by an outstanding completion waiter; an unclaimed waiter raises ``CancelledError``.
+        Repeated drains return an empty list. This also works with bounded admission without
+        starting more rows, and has the same server/agent cleanup limits as ``aclose()``.
+
+        Use ``finally`` to close the iterator if collection stops early::
+
+            completions = helper.run_examples(examples)
+            try:
+                for future in completions:
+                    row, result = await future
+                    if should_stop(row, result):
+                        break
+            finally:
+                await completions.aclose()
 
         ``dispatch_budget_s`` stops starting rows that many seconds after this call, and
         ``drain_margin_s`` stops sooner for rows that would not have time to finish.
@@ -4324,12 +4378,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         failure row with ``_ng_failure_*`` fields.
         """
 
-        async def _without_metadata(future: Future) -> Tuple[Dict, Dict]:
-            completed = await future
-            return completed.row, completed.result
-
-        return map(
-            _without_metadata,
+        return _RowResultIterator(
             self._run_examples_with_metadata(
                 examples,
                 head_server_config=head_server_config,
@@ -4340,7 +4389,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 dispatch_budget_s=dispatch_budget_s,
                 drain_margin_s=drain_margin_s,
                 latency_tracker=latency_tracker,
-            ),
+            )
         )
 
     def setup_server_client(
