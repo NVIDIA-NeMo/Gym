@@ -381,16 +381,29 @@ class SandboxPty:
         )
 
 
-def _rollout_attributes() -> dict[str, str]:
-    """The rollout id Gym's endpoint spans carry, so sandbox spans are filterable per rollout too.
+#: Extra attributes for every sandbox span, supplied by whoever runs the sandbox. The sandbox
+#: package knows nothing about rollouts; Gym's telemetry setup registers the rollout id here.
+SpanAttributeProvider = Callable[[], Mapping[str, Any]]
+_span_attribute_provider: SpanAttributeProvider | None = None
 
-    Imported here, not at module level: `global_config` imports the sandbox registry while it is
-    still initialising, and `rollout_correlation` imports constants from `global_config`.
+
+def set_span_attribute_provider(provider: SpanAttributeProvider | None) -> None:
+    """Register a callable whose attributes are added to every `gym.sandbox.*` span.
+
+    Called once by the telemetry setup of the embedding application; None removes it. The
+    provider runs when a span opens, so it may read request-scoped state such as a ContextVar.
+    An explicit ``span_attributes`` argument to :meth:`AsyncSandbox.start` or
+    :meth:`AsyncSandbox.exec` wins over it key by key.
     """
-    from nemo_gym.rollout_correlation import current_rollout_id
+    global _span_attribute_provider
+    _span_attribute_provider = provider
 
-    rollout_id = current_rollout_id()
-    return {"nemo.gym.rollout.id": rollout_id} if rollout_id else {}
+
+def _span_attributes(explicit: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    attributes: dict[str, Any] = dict(_span_attribute_provider()) if _span_attribute_provider is not None else {}
+    if explicit:
+        attributes.update(explicit)
+    return attributes
 
 
 def _sandbox_id(handle: Any) -> str | None:
@@ -436,6 +449,8 @@ class AsyncSandbox:
     async def start(
         self,
         spec: SandboxSpec | None = None,
+        *,
+        span_attributes: Mapping[str, Any] | None = None,
     ) -> "AsyncSandbox":
         if self._closed:
             raise RuntimeError("Sandbox has been stopped")
@@ -454,7 +469,7 @@ class AsyncSandbox:
             with managed_span(
                 GymSpanGroup.SANDBOX,
                 "gym.sandbox.start",
-                **{"nemo.gym.sandbox.provider": provider_name, **_rollout_attributes()},
+                **{"nemo.gym.sandbox.provider": provider_name, **_span_attributes(span_attributes)},
             ) as span:
                 handle = await self._provider.create(requested_spec)
                 if span is not None:
@@ -508,6 +523,7 @@ class AsyncSandbox:
         timeout_s: int | float | None = 180,
         user: str | int | None = None,
         preserve_background_services: bool = False,
+        span_attributes: Mapping[str, Any] | None = None,
     ) -> SandboxExecResult:
         """Run a command, optionally preserving services needed by later commands.
 
@@ -536,7 +552,7 @@ class AsyncSandbox:
         with managed_span(
             GymSpanGroup.SANDBOX,
             "gym.sandbox.exec",
-            **{"nemo.gym.sandbox.provider": provider_name, **_rollout_attributes()},
+            **{"nemo.gym.sandbox.provider": provider_name, **_span_attributes(span_attributes)},
         ) as span:
             result = await self._exec_uninstrumented(
                 command,
@@ -666,7 +682,7 @@ class AsyncSandbox:
                     **{
                         "nemo.gym.sandbox.provider": self._telemetry_provider_name(),
                         "nemo.gym.sandbox.id": _sandbox_id(self._handle),
-                        **_rollout_attributes(),
+                        **_span_attributes(),
                     },
                 ):
                     await self._provider.close(self._handle)

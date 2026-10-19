@@ -546,3 +546,11 @@ def test_the_fastapi_instrumentor_is_installed_only_while_traces_export(monkeypa
     server_utils.SimpleServer.instrument_app_for_telemetry(None, app)
 
     assert instrumented == ([app] if traces_exporting else [])
+
+
+def test_init_registers_the_rollout_id_provider_for_sandbox_spans(enabled_console_env):
+    import nemo_gym.sandbox.api as sandbox_api
+    from nemo_gym.telemetry.setup import init_telemetry, rollout_span_attributes
+
+    init_telemetry()
+    assert sandbox_api._span_attribute_provider is rollout_span_attributes

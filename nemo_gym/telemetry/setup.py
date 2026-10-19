@@ -189,7 +189,8 @@ def event_loop_settings_from_env() -> tuple[float, bool]:
     defaults = TelemetryConfig()
     interval = float(
         os.environ.get(
-            _EVENT_LOOP_ENV_FIELD_MAP["event_loop_sample_interval_seconds"], defaults.event_loop_sample_interval_seconds
+            _EVENT_LOOP_ENV_FIELD_MAP["event_loop_sample_interval_seconds"],
+            defaults.event_loop_sample_interval_seconds,
         )
     )
     if interval <= 0:
@@ -448,6 +449,23 @@ def _sdk_tracer_provider_installed() -> bool:
     return isinstance(trace.get_tracer_provider(), TracerProvider)
 
 
+def rollout_span_attributes() -> dict[str, str]:
+    """The correlation attribute Gym's endpoint spans carry, for spans opened by code that does not
+    know about rollouts (the sandbox API). Empty outside a rollout context."""
+    from nemo_gym.rollout_correlation import current_rollout_id
+
+    rollout_id = current_rollout_id()
+    return {"nemo.gym.rollout.id": rollout_id} if rollout_id else {}
+
+
+def _register_sandbox_span_attributes() -> None:
+    """Hand the sandbox API its extra span attributes. The sandbox package must not import rollout
+    correlation itself: `global_config` imports the sandbox registry while initialising."""
+    from nemo_gym.sandbox.api import set_span_attribute_provider
+
+    set_span_attribute_provider(rollout_span_attributes)
+
+
 def init_telemetry(
     server_name: Optional[str] = None,
     server_type: Optional[str] = None,
@@ -496,6 +514,8 @@ def init_telemetry(
 
         # Registers Gym's span groups, which setup_telemetry resolves the spec against.
         import nemo_gym.telemetry.span_groups  # noqa: F401
+
+        _register_sandbox_span_attributes()
 
         # nemo-lens raises on a second setup_telemetry in one process. Its init flag is
         # private, but it is the only signal that another library owns the providers. Lens

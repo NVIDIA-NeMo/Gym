@@ -47,6 +47,17 @@ def recorded_spans(monkeypatch):
     set_enabled_span_groups(frozenset())
 
 
+@pytest.fixture
+def rollout_attributes_registered():
+    """What Gym's telemetry setup does: hand the sandbox API the rollout-id provider."""
+    from nemo_gym.sandbox.api import set_span_attribute_provider
+    from nemo_gym.telemetry.setup import rollout_span_attributes
+
+    set_span_attribute_provider(rollout_span_attributes)
+    yield
+    set_span_attribute_provider(None)
+
+
 # --------------------------------------------------------------------------- #
 # Sandbox
 # --------------------------------------------------------------------------- #
@@ -121,9 +132,12 @@ async def test_sandbox_stop_emits_a_span_for_the_release(recorded_spans, started
     assert stop_span.attributes["nemo.gym.sandbox.id"] == "handle-1"
 
 
-async def test_sandbox_spans_carry_the_rollout_id_inside_a_rollout(recorded_spans, started_sandbox):
+async def test_sandbox_spans_carry_the_rollout_id_inside_a_rollout(
+    recorded_spans, started_sandbox, rollout_attributes_registered
+):
     """The same correlation key the endpoint spans carry, so a rollout's sandbox time is filterable
-    by attribute and not only through the parent chain."""
+    by attribute and not only through the parent chain. The sandbox API learns it through the
+    provider Gym's telemetry setup registers, not by importing rollout correlation."""
     from nemo_gym.rollout_correlation import rollout_context
 
     with rollout_context("7-0"):
@@ -136,7 +150,9 @@ async def test_sandbox_spans_carry_the_rollout_id_inside_a_rollout(recorded_span
         assert by_name[name].attributes["nemo.gym.rollout.id"] == "7-0", name
 
 
-async def test_sandbox_spans_have_no_rollout_id_outside_a_rollout(recorded_spans, started_sandbox):
+async def test_sandbox_spans_have_no_rollout_id_outside_a_rollout(
+    recorded_spans, started_sandbox, rollout_attributes_registered
+):
     sandbox = await started_sandbox().start()
     await sandbox.exec("echo hi")
     await sandbox.stop()
@@ -167,7 +183,9 @@ class _FailingProvider(_StubProvider):
 
 
 @pytest.mark.parametrize("fail", ["create", "exec"])
-async def test_sandbox_spans_keep_the_rollout_id_when_the_provider_fails(recorded_spans, fail):
+async def test_sandbox_spans_keep_the_rollout_id_when_the_provider_fails(
+    recorded_spans, fail, rollout_attributes_registered
+):
     """Correlation is attached before the awaited work, so a failed start or exec is still filterable."""
     from opentelemetry.trace import StatusCode
 
@@ -472,3 +490,30 @@ def test_lens_imports_are_function_local_outside_the_fallback_resolver():
             if targets and path.name not in allowed_at_module_scope:
                 offenders.append((path.name, targets))
     assert not offenders, f"module-scope nemo.lens imports outside the resolvers: {offenders}"
+
+
+async def test_sandbox_spans_have_no_extra_attributes_without_a_provider(recorded_spans, started_sandbox):
+    """The sandbox package on its own knows nothing about rollouts."""
+    from nemo_gym.rollout_correlation import rollout_context
+
+    with rollout_context("7-0"):
+        sandbox = await started_sandbox().start()
+        await sandbox.exec("echo hi")
+    for span in recorded_spans():
+        if span.name.startswith("gym.sandbox."):
+            assert "nemo.gym.rollout.id" not in span.attributes
+
+
+async def test_explicit_span_attributes_win_over_the_provider(
+    recorded_spans, started_sandbox, rollout_attributes_registered
+):
+    from nemo_gym.rollout_correlation import rollout_context
+
+    with rollout_context("7-0"):
+        sandbox = await started_sandbox().start(span_attributes={"nemo.gym.rollout.id": "explicit", "extra": "x"})
+        await sandbox.exec("echo hi", span_attributes={"nemo.gym.rollout.id": "explicit-exec"})
+
+    by_name = {span.name: span for span in recorded_spans()}
+    assert by_name["gym.sandbox.start"].attributes["nemo.gym.rollout.id"] == "explicit"
+    assert by_name["gym.sandbox.start"].attributes["extra"] == "x"
+    assert by_name["gym.sandbox.exec"].attributes["nemo.gym.rollout.id"] == "explicit-exec"
