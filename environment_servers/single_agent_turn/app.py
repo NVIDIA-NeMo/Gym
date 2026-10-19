@@ -202,7 +202,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 except Exception as error:
                     raise self._failure(
                         stage="cleanup",
-                        failure_reason=str(error),
+                        failure_reason=describe_dependency_error(error),
                         terminal=not _is_retryable_dependency_error(error),
                         partial_response=agent_response,
                     ) from error
@@ -275,7 +275,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         except Exception as error:
             raise self._failure(
                 stage="seed",
-                failure_reason=str(error),
+                failure_reason=describe_dependency_error(error),
                 terminal=not _is_retryable_dependency_error(error),
             ) from error
         return seed
@@ -378,7 +378,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         except Exception as error:
             raise self._failure(
                 stage="agent",
-                failure_reason=str(error),
+                failure_reason=describe_dependency_error(error),
                 terminal=not _is_retryable_dependency_error(error),
             ) from error
 
@@ -447,7 +447,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         except Exception as error:
             raise self._failure(
                 stage="verification",
-                failure_reason=str(error),
+                failure_reason=describe_dependency_error(error),
                 terminal=not _is_retryable_dependency_error(error),
                 partial_response=agent_response,
                 agent_observations=observations,

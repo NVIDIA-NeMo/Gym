@@ -438,6 +438,29 @@ async def test_an_agent_seed_refusal_fails_the_episode_once_with_the_agents_reas
     ]
 
 
+async def test_a_resources_seed_refusal_fails_the_episode_once_with_the_servers_reason() -> None:
+    environment, client = _environment_server()
+    # What raise_for_status raises for a resources server's ResourcesSessionConflictError.
+    refusal = ClientResponseError(
+        request_info=SimpleNamespace(real_url="http://resources:8000/seed_session"),
+        history=(),
+        status=409,
+        message="Conflict",
+    )
+    refusal.response_content = b'{"detail":"resources_session_id is already bound to another episode or task"}'
+    responses = client.responses
+    client.responses = [refusal, responses[5]]
+
+    result = await environment.run_request(_request())
+
+    assert result.result is None
+    assert result.failure.stage == "seed"
+    assert result.failure.terminal is True
+    assert "already bound to another episode or task" in result.failure.failure_reason
+    # The close registered before the seed still runs, so a seed whose reply was a refusal leaks nothing.
+    assert [path for _, path, _ in client.calls] == ["/seed_session", "/close_session"]
+
+
 async def test_verifier_only_episode_does_not_expose_resource_tools() -> None:
     environment, client = _environment_server()
     seed = orjson.loads(client.responses[0].body)
