@@ -7,7 +7,7 @@ from typing import Any
 
 from nemo_gym.responses_converter import ResponsesConverter
 from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint
-from nemo_gym.token_id_capture.records import response_to_output_items, strip_token_fields
+from nemo_gym.token_id_capture.records import response_finish_reason, response_to_output_items, strip_token_fields
 from nemo_gym.token_id_capture.replay import replay_context
 
 
@@ -30,19 +30,8 @@ def completion_items(response: dict[str, Any]) -> list[dict]:
 
 
 def completion_metadata(response: dict[str, Any]) -> tuple[str | None, str | None]:
-    """Read existing dialect completion fields; never infer success from absence."""
-    choices = response.get("choices")
-    first = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
-    incomplete = response.get("incomplete_details")
-    incomplete = incomplete if isinstance(incomplete, dict) else {}
-    reason = next(
-        (
-            value
-            for value in (response.get("stop_reason"), first.get("finish_reason"), incomplete.get("reason"))
-            if isinstance(value, str)
-        ),
-        None,
-    )
+    """Read completion status and normalize its dialect-specific stop reason."""
+    reason = response_finish_reason(response)
     status = response.get("status")
     if response.get("error") is not None:
         status = "failed"
