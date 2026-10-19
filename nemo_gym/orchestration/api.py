@@ -30,6 +30,8 @@ from pydantic import (
     model_validator,
 )
 
+from nemo_gym.orchestration.executors.script_templates import bash_var
+
 
 # Reject unknown fields on all config models so typos in YAML surface immediately.
 class _StrictModel(BaseModel):
@@ -185,6 +187,14 @@ class VllmServiceConfig(BaseModelServiceConfig):
 
 class VllmNodeServiceConfig(VllmServiceConfig):
     server_per_node: bool = False
+
+    def node_host_var(self, index: int) -> str:
+        """The env var the batch script exports with the host of one node of this service's pool."""
+        return f"GYM_POOL_{bash_var(self.node_pool)}_NODE_{index}"
+
+    def node_urls(self, count: int) -> list[str]:
+        """One base URL per node, with each host left for the driver to resolve from its env var."""
+        return [f"http://${{oc.env:{self.node_host_var(i)}}}:{self.port}/v1" for i in range(count)]
 
 
 def effective_ray_serve(service: "VllmServiceConfig", total_nodes: int, gpus_per_node_values: list[int]) -> bool:
@@ -685,7 +695,12 @@ class SubmitConfig(_StrictModel):
                             f"Benchmark '{bench_name}' run config already sets {conflicts} "
                             f"but driver.policy_model is also set. Remove one."
                         )
-                    benchmark.run["policy_base_url"] = f"http://{self.driver.policy_host}:{service.port}/v1"
+                    if isinstance(service, VllmNodeServiceConfig) and service.server_per_node:
+                        benchmark.run["policy_base_url"] = service.node_urls(
+                            compute.node_pools[service.node_pool].nodes
+                        )
+                    else:
+                        benchmark.run["policy_base_url"] = f"http://{self.driver.policy_host}:{service.port}/v1"
                     benchmark.run["policy_model_name"] = service.served_model_name or service.model
                     # vLLM doesn't require auth; dummy key satisfies clients that require the header.
                     benchmark.run["policy_api_key"] = "dummy"  # pragma: allowlist secret

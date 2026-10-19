@@ -2616,6 +2616,17 @@ def test_a_per_node_service_exports_every_pool_node_to_the_driver(tmp_path):
         assert f'export GYM_POOL_GPU_NODE_{node}="${{gym_nodes[{node}]}}"' in script
 
 
+def test_a_per_node_service_names_the_variable_and_url_of_each_node(tmp_path):
+    config = _per_node_vllm_config(tmp_path)
+    service = config.services["policy"]
+    assert service.node_host_var(2) == "GYM_POOL_GPU_NODE_2"
+    assert service.node_urls(2) == [
+        "http://${oc.env:GYM_POOL_GPU_NODE_0}:8000/v1",
+        "http://${oc.env:GYM_POOL_GPU_NODE_1}:8000/v1",
+    ]
+    assert config.driver.benchmarks["b"].run["policy_base_url"] == service.node_urls(4)
+
+
 def test_a_service_per_node_exports_no_node_variables_when_it_is_off(tmp_path):
     with pytest.warns(UserWarning):
         script = _per_node_vllm_script(tmp_path, server_per_node=False)

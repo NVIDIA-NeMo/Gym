@@ -483,11 +483,6 @@ def pool_nodes_var(pool: str) -> str:
     return f"GYM_POOL_{bash_var(pool)}_NODES"
 
 
-def pool_node_var(pool: str, index: int) -> str:
-    """The env var build_sbatch_script exports with one node's host of a per-node service's pool."""
-    return f"GYM_POOL_{bash_var(pool)}_NODE_{index}"
-
-
 def _places_services(config: SubmitConfig, is_multi_node: bool) -> bool:
     """Whether the script declares the allocation's host array to place services with."""
     return is_multi_node or any(s.node_pool for s in config.deployed_services.values())
@@ -504,9 +499,7 @@ def _render_pool_nodes(config: SubmitConfig, compute: SlurmComputeConfig, is_mul
     for service in config.deployed_services.values():
         if isinstance(service, VllmNodeServiceConfig) and service.server_per_node:
             start, count = _pool_offsets(compute)[service.node_pool]
-            lines.extend(
-                f'export {pool_node_var(service.node_pool, i)}="${{gym_nodes[{start + i}]}}"' for i in range(count)
-            )
+            lines.extend(f'export {service.node_host_var(i)}="${{gym_nodes[{start + i}]}}"' for i in range(count))
     return "\n".join(lines)
 
 
@@ -827,17 +820,6 @@ def _with_default_capture_dir(run: dict[str, Any], remote_bench_dir: Path) -> di
     return run
 
 
-def _with_per_node_policy_urls(
-    run: dict[str, Any], config: SubmitConfig, compute: SlurmComputeConfig
-) -> dict[str, Any]:
-    policy = config.deployed_services.get(config.driver.policy_model or "")
-    if not (isinstance(policy, VllmNodeServiceConfig) and policy.server_per_node):
-        return run
-    count = _pool_offsets(compute)[policy.node_pool][1]
-    urls = [f"http://${{oc.env:{pool_node_var(policy.node_pool, i)}}}:{policy.port}/v1" for i in range(count)]
-    return {**run, "policy_base_url": urls}
-
-
 def _command_env(benchmark: BenchmarkRunConfig, remote_bench_dir: Path) -> dict[str, str]:
     """Environment a `command` benchmark gets in place of `gym eval run` arguments.
 
@@ -1023,9 +1005,7 @@ def build_sbatch_script(
             **driver_env,
         }
     if benchmark.command is None:
-        run_args = _with_default_capture_dir(
-            _with_per_node_policy_urls(benchmark.run, config, compute), remote_bench_dir
-        )
+        run_args = _with_default_capture_dir(benchmark.run, remote_bench_dir)
         run_args.setdefault("require_complete", True)
         run_args = _with_resume_flag(run_args, resume is not None)
         gym_cmd = render_gym_cmd("eval run", "GYM_CMD", [output_path] + extra_flags + flatten_run_args(run_args))
