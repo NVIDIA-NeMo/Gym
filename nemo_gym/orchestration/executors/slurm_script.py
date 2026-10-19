@@ -493,12 +493,13 @@ def _render_pool_nodes(config: SubmitConfig, compute: SlurmComputeConfig, is_mul
     if not _places_services(config, is_multi_node):
         return ""
     lines = [_NODE_ARRAY]
-    for name, (start, count) in _pool_offsets(compute).items():
+    offsets = _pool_offsets(compute)
+    for name, (start, count) in offsets.items():
         if count:
             lines.append(f'export {pool_nodes_var(name)}="$(IFS=,; echo "${{gym_nodes[*]:{start}:{count}}}")"')
     for service in config.deployed_services.values():
         if isinstance(service, VllmNodeServiceConfig) and service.server_per_node:
-            start, count = _pool_offsets(compute)[service.node_pool]
+            start, count = offsets[service.node_pool]
             lines.extend(f'export {service.node_host_var(i)}="${{gym_nodes[{start + i}]}}"' for i in range(count))
     return "\n".join(lines)
 
@@ -976,7 +977,7 @@ def build_sbatch_script(
             )
             for name, service in config.deployed_services.items()
             if isinstance(service, VllmNodeServiceConfig) and service.server_per_node and service.health_check
-            for start, count in [_pool_offsets(compute)[service.node_pool]]
+            for start, count in [offsets[service.node_pool]]
             for i in range(1, count)
         ]
     )
