@@ -29,7 +29,7 @@ from nemo_gym.episode_types import EpisodeId
 from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, TrajectoryRecord
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from responses_api_agents.opencode_sandboxed_agent.app import (
-    _CONTINUE_PROMPT,
+    _REMOTE_RESUME_HELPER,
     OpenCodeSandboxedAgent,
     OpenCodeSandboxedAgentConfig,
     OpenCodeSandboxedAgentRunRequest,
@@ -176,7 +176,8 @@ class FakeSandbox:
             if self.launching:
                 self.stop_launch()
             return done()
-        if "opencode run" in command:
+        # A fresh launch runs ``opencode run``; a resumed one runs the helper that re-enters the saved user turn.
+        if "opencode run" in command or _REMOTE_RESUME_HELPER in command:
             self.runs += 1
             self.started.set()
             if self.runs >= self.saves_session_from:
@@ -299,7 +300,12 @@ def signal_of(interrupt: str) -> str:
 
 
 def launch_commands(sandbox: FakeSandbox) -> list[str]:
-    return [c for c in sandbox.commands if "opencode run" in c]
+    return [c for c in sandbox.commands if "opencode run" in c or _REMOTE_RESUME_HELPER in c]
+
+
+def resumes(command: str) -> bool:
+    """A launch that re-enters the saved user turn instead of starting OpenCode with a prompt."""
+    return _REMOTE_RESUME_HELPER in command and "opencode run" not in command
 
 
 def interrupt_commands(sandbox: FakeSandbox) -> list[str]:
@@ -386,8 +392,8 @@ async def test_a_checkpoint_interrupts_opencode_and_the_resume_continues_the_ses
     assert record.episode["sandbox"] == {"descriptor": {"sandbox_id": "sb-1"}, "workdir": "/testbed"}
     assert record.episode["cookies"]["ng_session"] == "s"
     first, second = launch_commands(sandbox)
-    assert "--continue" not in first and "--continue" in second
-    assert _CONTINUE_PROMPT in second
+    assert not resumes(first) and resumes(second)
+    assert "interrupted" not in second, "the resume adds no user turn"
     assert data_home_of(first) == data_home_of(second) == record.episode["state"]["data_home"]
     assert 'test -x "$HOME/.opencode/bin/opencode"' in second, "the install is skipped when the binary is present"
     # SIGINT ended the launch; the kill that follows stops whatever it left running before the sandbox is parked.
@@ -428,7 +434,7 @@ async def test_opencode_that_ignores_the_interrupt_is_killed_after_the_grace(
 
     assert sandbox.signals == ["INT", "KILL"], "the grace expired, so the kill followed"
     assert record.episode["resume"] is True
-    assert "--continue" in launch_commands(sandbox)[1]
+    assert resumes(launch_commands(sandbox)[1])
     assert result.reward == 1.0
 
 
@@ -436,7 +442,7 @@ async def test_a_relaunch_without_a_saved_session_starts_over_with_the_task(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A launch that neither signal ends (the sandbox stopped answering) is abandoned after both graces, and
-    OpenCode had saved nothing: ``--continue`` would open an empty session, so the relaunch starts over with the
+    OpenCode had saved nothing: a resume would find no user turn to re-enter, so the relaunch starts over with the
     task, in a fresh data folder."""
     monkeypatch.setattr(f"{HARNESS}._GRACEFUL_S", 0.05)
     monkeypatch.setattr(f"{HARNESS}._KILL_S", 0.05)
@@ -452,7 +458,7 @@ async def test_a_relaunch_without_a_saved_session_starts_over_with_the_task(
     assert sandbox.signals == ["INT", "KILL"], "both signals were sent and neither reached a process"
     assert record.episode["resume"] is True, "the bookmark asks to continue; the relaunch checks first"
     first, second = launch_commands(sandbox)
-    assert "--continue" not in second and _CONTINUE_PROMPT not in second
+    assert not resumes(second)
     assert "fix the bug" in second, "the relaunch carries the task"
     assert data_home_of(second) != data_home_of(first), "a fresh data folder: no empty session is ever continued"
     assert result.reward == 1.0 and result.opencode_finished is True
@@ -482,7 +488,7 @@ async def test_a_park_requested_before_the_launch_starts_nothing_until_the_resum
 
     assert record.episode["next"] == "harness" and record.episode["resume"] is False
     [launch] = launch_commands(sandbox)
-    assert "--continue" not in launch and "fix the bug" in launch
+    assert not resumes(launch) and "fix the bug" in launch
     assert result.reward == 1.0
 
 
@@ -503,7 +509,7 @@ async def test_a_replacement_attempt_continues_from_the_opencode_boundary_withou
     result = await asyncio.wait_for(agent.run(make_request("agent-session-2", {}), body_for("r", attempt=1)), 10)
 
     [launch] = launch_commands(sandbox)
-    assert "--continue" in launch and data_home_of(launch) == RESTORED_DATA_HOME
+    assert resumes(launch) and data_home_of(launch) == RESTORED_DATA_HOME
     assert resources.calls == ["/sandbox_access", "/verify"], "no re-seed: the session is the checkpoint's"
     # The run continued in the fork the resources server named, not in the sandbox the boundary recorded.
     assert agent._start_sandbox.await_args.kwargs == {"sandbox_id": "sb-2", "workdir": "/testbed"}
@@ -526,7 +532,7 @@ async def test_a_replacement_from_a_boundary_before_the_first_launch_asks_which_
     result = await asyncio.wait_for(agent.run(make_request("agent-session-4", {}), body_for("r", attempt=1)), 10)
 
     [launch] = launch_commands(sandbox)
-    assert "--continue" not in launch, "OpenCode never ran before the checkpoint: there is nothing to continue"
+    assert not resumes(launch), "OpenCode never ran before the checkpoint: there is nothing to continue"
     assert resources.calls == ["/sandbox_access", "/verify"], "no re-seed, and the fork is asked for"
     assert agent._start_sandbox.await_args.kwargs == {"sandbox_id": "sb-2", "workdir": "/testbed"}
     assert result.reward == 1.0
@@ -582,7 +588,7 @@ async def test_a_resources_server_that_cannot_capture_its_session_makes_the_run_
 
     assert report.restarts == ["r"] and report.blockers == []
     [launch] = launch_commands(sandbox)
-    assert "--continue" not in launch
+    assert not resumes(launch)
     assert result.reward == 1.0
 
 
@@ -823,6 +829,6 @@ async def test_without_checkpointing_the_run_is_unchanged(tmp_path: Path) -> Non
     result = await asyncio.wait_for(agent.run(make_request("agent-session", {}), body_for("r")), 10)
 
     [launch] = launch_commands(sandbox)
-    assert "--continue" not in launch
+    assert not resumes(launch)
     assert resources.calls == ["/seed_session", "/verify"]
     assert result.reward == 1.0 and sandbox.stopped

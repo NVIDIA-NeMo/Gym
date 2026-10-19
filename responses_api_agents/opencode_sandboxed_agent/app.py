@@ -97,6 +97,9 @@ from responses_api_agents.opencode_agent.runtime import (
 
 
 _REMOTE_ASSISTANT_MESSAGE_PLUGIN = "/tmp/nemo-gym-opencode-assistant-message-header.js"
+# Continues a saved session at its last user turn through OpenCode's own API, without a new prompt.
+_RESUME_HELPER = Path(__file__).with_name("resume_opencode.py")
+_REMOTE_RESUME_HELPER = "/tmp/nemo-gym-opencode-resume.py"
 
 
 def _load_json(value: Any) -> dict[str, Any]:
@@ -467,11 +470,6 @@ class OpenCodeSandboxedAgentRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
 
 
-# The prompt a continued session gets: OpenCode's session database on the sandbox root filesystem carries the
-# turns before the interruption, so the continued run only has to pick the task back up.
-_CONTINUE_PROMPT = "Your previous session was interrupted. Continue working on the task from where you left off."
-
-
 def _build_remote_opencode_install_command(
     install_script_path: str,
     binary_path: str,
@@ -559,8 +557,9 @@ class OpenCodeOutcome(BaseModel):
 class OpenCodeSandboxedAgent(SandboxedHarnessAgent):
     config: OpenCodeSandboxedAgentConfig
     # A legacy /run takes part in partial-rollout checkpoints through SandboxedHarnessAgent: the OpenCode step is
-    # stopped at a checkpoint's request and relaunched with ``opencode run --continue`` after the resume, or by the
-    # replacement attempt after a crash, in the sandbox the resources server names then (OpenCodeAdapter).
+    # stopped at a checkpoint's request and relaunched at its saved user turn (resume_opencode.py, no new prompt)
+    # after the resume, or by the replacement attempt after a crash, in the sandbox the resources server names then
+    # (OpenCodeAdapter).
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
@@ -913,18 +912,21 @@ class OpenCodeSandboxedAgent(SandboxedHarnessAgent):
             apply_observability_patch(effective_config, plugin_path=Path(_REMOTE_ASSISTANT_MESSAGE_PLUGIN))
         opencode_config_content = json.dumps(effective_config)
         collect_observations = observation_invocation_id is not None
-        # Pinned per rollout: a relaunch with --continue must find the same session database.
+        # Pinned per rollout: a relaunch must find the same session database.
         remote_data_home = launch.state.get("data_home")
         remote_data_home = remote_data_home if isinstance(remote_data_home, str) else None
         xdg_home_str = f"XDG_DATA_HOME={remote_data_home}" if remote_data_home is not None else ""
-        continue_str = ""
+        opencode_command = (
+            f'opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str} -- {quote(query)}'
+        )
         if launch.resume:
-            # The binary survived on the root filesystem; the session is continued, with Gym's prompt.
+            # The binary survived on the root filesystem. The session is re-entered at its saved user turn: a new
+            # prompt would put a message the task never had into the trajectory at every checkpoint.
             install_str = (
                 f'(test -x "$HOME/.opencode/bin/opencode" && echo "OpenCode already installed") || ({install_str})'
             )
-            continue_str = "--continue"
-            query = _CONTINUE_PROMPT
+            await launch.sandbox.upload(_RESUME_HELPER, _REMOTE_RESUME_HELPER)
+            opencode_command = f"python3 {quote(_REMOTE_RESUME_HELPER)}"
 
         # OpenCode's glob/grep tools otherwise download rg inside the sandbox.
         ripgrep_remote_path = None
@@ -953,7 +955,7 @@ class OpenCodeSandboxedAgent(SandboxedHarnessAgent):
         && echo "Installed OpenCode" \
         && rm -f /tmp/nemo-gym-mcp-setup-error \
         && NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps([s.name for s in self.config.tool_servers]))} OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} \
-            opencode run {continue_str} --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str} -- {quote(query)} \
+            {opencode_command} \
         && echo "OpenCode run finished"
         """
 
@@ -1183,8 +1185,8 @@ class OpenCodeSandboxedAgent(SandboxedHarnessAgent):
     async def _resume_decision(self, sandbox: AsyncSandbox, data_home: str) -> ResumeDecision:
         """Whether the relaunch continues OpenCode's session in ``data_home``: only one that starts with the task.
 
-        ``opencode run --continue`` reopens the newest session and silently starts an empty one when there is none,
-        so a relaunch continues only a session that already carries the task. Any failure means starting over.
+        The resume re-enters the newest session's last user turn, so a relaunch continues only a session that already
+        carries the task. Any failure means starting over.
         """
         env = {"XDG_DATA_HOME": data_home}
         opencode = 'export PATH="$HOME/.opencode/bin:$PATH" && opencode'
@@ -1252,7 +1254,7 @@ class OpenCodeAdapter:
     """OpenCode as a :class:`~nemo_gym._checkpoint.harness_run.HarnessAdapter`.
 
     OpenCode keeps its session in SQLite under a per-rollout ``XDG_DATA_HOME`` on the sandbox's root filesystem,
-    outside the graded workdir, so the owner's snapshot carries it and ``opencode run --continue`` picks it up.
+    outside the graded workdir, so the owner's snapshot carries it and resume_opencode.py re-enters it.
     """
 
     outcome_model = OpenCodeOutcome
