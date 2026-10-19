@@ -204,6 +204,7 @@ class TestEvalSubmitSelect:
     def test_malformed_driver_shapes_reach_schema_validation(
         self, tmp_path, monkeypatch: MonkeyPatch, capsys, driver, select, expected: str
     ) -> None:
+        monkeypatch.setenv("COLUMNS", "1000")  # rich soft-wraps at 80 columns off-TTY, splitting the message
         captured = _capture_submit(monkeypatch)
         config_path = tmp_path / "submit.yaml"
         config_path.write_text(
