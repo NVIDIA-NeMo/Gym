@@ -22,7 +22,7 @@ NeMo Gym implements environments as composable FastAPI servers that communicate 
 | Agent Harness | FastAPI Agent Server |
 | Verifier + State | FastAPI Resources Server |
 | Model | FastAPI Model Server or managed by your own agent harness |
-| Episode orchestration | FastAPI Environment Server, which binds an agent and a Resources Server and runs one episode |
+| Episode orchestration | FastAPI Environment Server, which receives each episode and either decides the order of its calls or relays it to the agent |
 
 All components are composable. Use different datasets with the same resources server, the same resources server with different models, or the same model with different agent harnesses.
 
@@ -34,7 +34,7 @@ This gives you flexibility to integrate with your existing models and agents:
 
 ## How an Agent Runs a Task in NeMo Gym Environments
 
-Each task attempt is an *episode*. An Environment Server runs it in order, and the resulting trajectory is called a *rollout*:
+Each task attempt is an *episode*. Rollout collection sends every episode to an Environment Server. A native Environment Server, such as `single_agent_turn`, runs it in this order, and the resulting trajectory is called a *rollout*:
 
 1. **Seed** — The Environment Server receives a task row from the dataset and seeds a session on the Resources Server, which sets up isolated state for this task. It then seeds a session on the Agent Server, passing along any tool and sandbox access that the Resources Server returned.
 2. **Agent Loop** — The Environment Server activates the agent session. The agent calls a model for inference, then routes tool calls to either its own tools or the Resources Server. This repeats until the agent decides the task is complete.
@@ -65,17 +65,19 @@ sequenceDiagram
     E->>R: close_session
 ```
 
-The Agent Server does not decide when to verify. The Environment Server orders the calls, so a different agent or a different benchmark can be swapped in through configuration, with no pair-specific launcher. The built-in `single_agent_turn` Environment Server runs one agent turn against one Resources Server. Other interaction patterns, such as a simulated user, define their own Environment Server.
+With a native Environment Server, the Agent Server does not decide when to verify. The Environment Server orders the calls, so a different benchmark, or any agent that implements agent sessions, can be swapped in through configuration, with no pair-specific launcher. The built-in `single_agent_turn` Environment Server runs one agent turn against one Resources Server. Other interaction patterns, such as a simulated user, define their own Environment Server.
+
+Most shipped configurations still use the `legacy_agent` Environment Server, which Gym also generates by default for any agent that no Environment Server names. It relays `/run` to the agent, and the agent runs the whole episode itself, including any `seed_session` and `verify` calls. Cleanup then depends on the agent, so Resources Servers on this path usually release per-task state in `verify()` (see [Session Cleanup](/main/environment-tutorials/resources-server-apis#session-cleanup)). For that request flow, see [System Design](/main/infrastructure/engineering-notes/system-design).
 
 ## Server Types
 
 ### Environment Server
 
-Orchestrates one episode: it seeds the Resources Server and Agent Server sessions, activates the agent, closes the agent session, verifies, and cleans up, including on failure. It binds an agent and a resources server by reference and exposes a `/run` endpoint that rollout collection submits tasks to. It does not implement tools, agent logic, or scoring.
+Receives each episode: rollout collection submits tasks to its `/run` endpoint. A native Environment Server, such as `single_agent_turn`, binds an agent and a Resources Server by reference and decides the order of calls: it seeds the Resources Server and Agent Server sessions, activates the agent, closes the agent session, verifies, and cleans up, including on failure. `legacy_agent` binds only an agent and relays `/run` to it. An Environment Server does not implement tools, agent logic, or scoring.
 
 ### Agent Server
 
-Hosts agent harnesses that orchestrate rollouts. Use your own harness, or use built-in harnesses such as OpenHands or NeMo Gym's native harnesses such as Simple Agent.
+Hosts agent harnesses, which call the model and route tool calls. Use your own harness, or use built-in harnesses such as OpenHands or NeMo Gym's native harnesses such as Simple Agent.
 
 ### Model Server
 
@@ -88,7 +90,7 @@ Manages environment-specific tools, per-task state isolation, and verification:
 - **Environment-Specific Tools** — capabilities the environment provides to any agent (e.g., code execution, database queries, API calls)
 - **State Isolation** — each rollout gets its own session, so attempts never interfere with each other. Environments range from lightweight (verify a math answer, no setup needed) to heavyweight (provision a Docker container with a specific repo checkout for SWE-Bench-style tasks).
 - **Verification** — scoring logic that evaluates the agent's output and returns a reward
-- **Sandbox ownership** — when a task needs an isolated runtime, the Resources Server usually creates the sandbox and passes the agent a handle to it. The agent borrows the sandbox and never destroys it. The Resources Server decides whether to verify in the same sandbox or in a fresh one, and destroys each sandbox it owns. This keeps the benchmark's verification policy the same no matter which agent runs the task.
+- **Sandbox ownership** — when a task needs an isolated runtime, the Resources Server usually creates the sandbox and passes the agent a handle to it. With a native Environment Server, the agent borrows the sandbox and never destroys it; some agents behind `legacy_agent` still stop it themselves. The Resources Server decides whether to verify in the same sandbox or in a fresh one, and destroys each sandbox it owns. This keeps the benchmark's verification policy the same no matter which agent runs the task.
 
 ## Where Tools Live
 
