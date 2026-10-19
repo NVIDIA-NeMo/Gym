@@ -14,6 +14,7 @@
 # limitations under the License.
 from abc import abstractmethod
 from enum import Enum
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Optional, TypeVar, get_args
 
 from fastapi import FastAPI, Request
@@ -41,6 +42,7 @@ from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.failure_kinds import validate_failure_kind
 from nemo_gym.judge import judge_failsafe
+from nemo_gym.observability.verifiers import observe_verifier
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -300,10 +302,16 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
 
         app.post("/seed_session")(self.seed_session)
         app.post("/close_session")(self.close_resources_session)
+        config = getattr(self.server_client, "global_config_dict", {})
+        capture_dir = (
+            Path(config["model_call_capture_dir"])
+            if config.get("observability_enabled", False) is True and config.get("model_call_capture_dir")
+            else None
+        )
         # Wrapped outside judge_failsafe so the span covers the failsafe's own handling too.
         app.post("/verify")(
             traced_verify_endpoint(
-                judge_failsafe(self.verify),
+                observe_verifier(judge_failsafe(self.verify), capture_dir=capture_dir),
                 static_attributes={"nemo.gym.server.name": self.config.name},
             )
         )
