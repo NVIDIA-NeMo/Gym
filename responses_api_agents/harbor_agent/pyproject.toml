@@ -6,7 +6,7 @@ name = "gym-responses-api-agents-harbor-agent"
 version = "0.0.0"
 requires-python = ">=3.13.14"
 dependencies = [
-    "nemo-gym[dev,ray,sandbox]",
+    "nemo-gym[dev,ray,sandbox,cwsandbox]",
     "harbor @ git+https://github.com/laude-institute/harbor.git@9dddd797b57ab8a0f9d6352a20fce73abbb29573",
     "pathspec==1.1.1",
 ]
