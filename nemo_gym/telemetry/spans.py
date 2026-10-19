@@ -73,3 +73,56 @@ def client_span(name: str, tracer: Any = None, **attributes: Any):
     finally:
         otel_ctx.detach(token)
         span.end()
+
+
+@contextmanager
+def rollout_root_span(name: str, tracer: Any = None, **attributes: Any):
+    """Start *name* as the root of a **new trace**, linked to the current span, and attach it.
+
+    The eval driver uses this around each rollout dispatch. Under the run-long ``gym.job``
+    span, parent/child nesting would put every rollout of a run into one trace whose size
+    grows with the run and which stays open until the job ends; backends cap and buffer
+    traces as units, so long runs lose spans. A root per rollout keeps each trace bounded
+    by one rollout's work, and the span link keeps the job ↔ rollout relation.
+
+    Only applied when the current span is itself a trace root, that is, when the driver owns
+    the trace. Under an embedder's span (a caller that opened its own trace and runs the
+    driver in-process) the dispatch nests as before, so the embedder's trace keeps its shape.
+    Without a valid current span the span is started normally and is a root anyway.
+
+    Args:
+        name: Span name.
+        tracer: OTel tracer; defaults to the globally registered one.
+        **attributes: Set via ``safe_set_span_attributes``.
+
+    Yields:
+        The active span. Only call this behind a span-group gate.
+    """
+    from opentelemetry import context as otel_ctx
+    from opentelemetry import trace as otel_trace
+    from opentelemetry.trace import Link, StatusCode, set_span_in_context
+
+    from nemo_gym.telemetry._fallbacks import safe_set_span_attributes
+
+    if tracer is None:
+        tracer = otel_trace.get_tracer("nemo.gym")
+
+    current = otel_trace.get_current_span()
+    current_ctx = current.get_span_context()
+    detach = current_ctx.is_valid and getattr(current, "parent", None) is None
+    if detach:
+        span = tracer.start_span(name, context=otel_ctx.Context(), links=[Link(current_ctx)])
+    else:
+        span = tracer.start_span(name)
+    if attributes:
+        safe_set_span_attributes(span, attributes)
+    token = otel_ctx.attach(set_span_in_context(span))
+    try:
+        yield span
+    except Exception as exc:
+        span.record_exception(exc)
+        span.set_status(StatusCode.ERROR, str(exc))
+        raise
+    finally:
+        otel_ctx.detach(token)
+        span.end()

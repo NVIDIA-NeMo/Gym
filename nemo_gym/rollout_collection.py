@@ -28,7 +28,7 @@ import warnings
 from asyncio import Future, Semaphore
 from collections import Counter, defaultdict, deque
 from collections.abc import Iterable, Mapping
-from contextlib import ExitStack, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
 from difflib import get_close_matches
@@ -2045,6 +2045,32 @@ _SERVER_DID_NOT_RUN_STATUSES = frozenset({429, 502, 503, 504})
 _MAX_FAILURE_BODY_CHARS = 2000
 
 
+@contextmanager
+def _dispatch_span(request_body: Any, dispatch_name: str) -> Iterator[None]:
+    """One rollout's dispatch as the root of its own trace, linked to the run's `job` span.
+
+    The `/run` call made inside carries this span as `traceparent`, so the agent's
+    `gym.rollout` span and everything below it join the new trace instead of nesting under
+    `gym.job`. The link, not a parent edge, ties the trace back to the job; both carry the
+    run id as a resource attribute. Under an embedder's own trace the dispatch keeps nesting
+    (see `rollout_root_span`).
+    """
+    if not is_span_group_enabled(GymSpanGroup.ROLLOUT):
+        yield None
+        return
+    from nemo_gym.telemetry.spans import rollout_root_span
+
+    attributes: Dict[str, Any] = {"nemo.gym.rollout.dispatch.name": dispatch_name}
+    try:
+        rollout_id = maybe_rollout_id_from_run_body(request_body)
+    except ValueError:
+        rollout_id = None
+    if rollout_id:
+        attributes["nemo.gym.rollout.id"] = rollout_id
+    with rollout_root_span("gym.rollout.dispatch", **attributes):
+        yield None
+
+
 def _record_rollout_outcome(result: Dict[str, Any], outcome: str, dispatch_name: str) -> None:
     """One ``gym.rollout.completed_total`` increment, after the driver wrote or omitted the attempt.
 
@@ -3126,10 +3152,11 @@ class RolloutCollectionHelper(BaseModel):
     async def run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
         """Collect rollouts for a whole config. Wrapped in the run-scoped `job` span.
 
-        This is the driver side of an evaluation run and the outermost span Gym produces,
-        so every rollout it dispatches is a descendant of it. `job` is in the `default`
-        preset but deliberately not in `per_rollout`, where each rollout is meant to be
-        its own bounded root trace.
+        This is the driver side of an evaluation run and the outermost span Gym produces.
+        Rollouts are not its descendants: each dispatch opens its own trace, linked to this
+        span (see `_dispatch_span`), so a run's traces stay bounded by one rollout each while
+        `job` keeps the run's own lifecycle. `job` is in the `default` preset and not in
+        `per_rollout`.
         """
         async with observe_event_loop("driver"):
             if not is_span_group_enabled(GymSpanGroup.JOB):
@@ -4394,7 +4421,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 succeeded = False
                 try:
                     request_body = _episode_request_body(row) if _materialized_taskset(row) else row
-                    res = await server_client.post(server_name=server_name, url_path="/run", json=request_body)
+                    with _dispatch_span(request_body, server_name):
+                        res = await server_client.post(server_name=server_name, url_path="/run", json=request_body)
                     await raise_for_status(res)
                     result = await get_response_json(res)
                     if run_timing is not None and isinstance(result, Mapping):

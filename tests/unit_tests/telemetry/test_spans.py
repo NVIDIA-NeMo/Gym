@@ -25,7 +25,7 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import SpanKind, StatusCode
 
-from nemo_gym.telemetry.spans import client_span
+from nemo_gym.telemetry.spans import client_span, rollout_root_span
 
 
 @pytest.fixture
@@ -104,3 +104,54 @@ def test_client_span_accepts_attributes(recorder):
 
     (finished,) = exporter.get_finished_spans()
     assert finished.name == "gym.test"
+
+
+def test_rollout_root_span_starts_a_new_trace_linked_to_a_root_current_span(recorder):
+    """Under the driver's own root (``gym.job``) a dispatch must not nest: new trace id, one link back."""
+    tracer, exporter = recorder
+
+    with tracer.start_as_current_span("gym.job") as job:
+        with rollout_root_span("gym.rollout.dispatch", tracer=tracer, **{"nemo.gym.rollout.id": "3-0"}) as span:
+            assert trace_current_span() is span
+            assert span.get_span_context().trace_id != job.get_span_context().trace_id
+            assert span.parent is None
+
+    dispatch = next(s for s in exporter.get_finished_spans() if s.name == "gym.rollout.dispatch")
+    (link,) = dispatch.links
+    assert link.context.span_id == job.get_span_context().span_id
+    assert dispatch.attributes["nemo.gym.rollout.id"] == "3-0"
+
+
+def test_rollout_root_span_nests_under_an_embedders_trace(recorder):
+    """When a caller owns the trace (the current span has a parent), keep its shape."""
+    tracer, exporter = recorder
+
+    with tracer.start_as_current_span("embedder.step"):
+        with tracer.start_as_current_span("gym.job") as job:
+            with rollout_root_span("gym.rollout.dispatch", tracer=tracer) as span:
+                assert span.get_span_context().trace_id == job.get_span_context().trace_id
+                assert span.parent.span_id == job.get_span_context().span_id
+
+    dispatch = next(s for s in exporter.get_finished_spans() if s.name == "gym.rollout.dispatch")
+    assert dispatch.links == ()
+
+
+def test_rollout_root_span_without_a_current_span_is_a_plain_root(recorder):
+    tracer, exporter = recorder
+
+    with rollout_root_span("gym.rollout.dispatch", tracer=tracer) as span:
+        assert span.parent is None
+
+    (dispatch,) = exporter.get_finished_spans()
+    assert dispatch.links == ()
+
+
+def test_rollout_root_span_detaches_and_records_exceptions(recorder):
+    tracer, exporter = recorder
+
+    with pytest.raises(RuntimeError), rollout_root_span("gym.rollout.dispatch", tracer=tracer):
+        raise RuntimeError("boom")
+
+    (dispatch,) = exporter.get_finished_spans()
+    assert dispatch.status.status_code == StatusCode.ERROR
+    assert not trace_current_span().get_span_context().is_valid

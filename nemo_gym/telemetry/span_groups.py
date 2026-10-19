@@ -33,9 +33,9 @@ Presets
     agent, model, and resources server processes** — the whole point of the integration
     works without tuning.
 ``per_rollout``
-    The spine plus per-request detail (``verify``, ``agent``, ``model_call``). Omits
-    ``job`` so each rollout is its own bounded root trace rather than nesting every
-    rollout under one run-long span — the same reasoning behind NeMo-RL's ``per_step``.
+    The spine plus per-request detail (``verify``, ``agent``, ``model_call``), without the
+    run-level ``job`` and ``startup`` spans. Trace shape does not depend on it: the eval
+    driver opens every rollout as its own root trace under any preset.
 ``all``
     Reserved by nemo-lens: every group registered in the process, including ``sandbox``.
 
@@ -111,7 +111,8 @@ class GymSpanGroup:
     #: ``all`` is not here: nemo-lens reserves it as a wildcard over every registered group.
     _PRESETS: ClassVar[dict] = {
         "default": frozenset([JOB, STARTUP]) | CROSS_PROCESS_SPINE,
-        # NOTE: ``per_rollout`` deliberately omits ``job`` so each rollout is its own root trace with a bounded span count.
+        # NOTE: ``per_rollout`` omits the run-level ``job`` and ``startup`` spans; rollouts are
+        # their own root traces under every preset (see ``rollout_root_span``).
         # ``job`` wraps a whole eval run and lives in ``default`` and ``all``.
         # It also omits ``startup``, which happens once per run rather than once per rollout.
         "per_rollout": frozenset([VERIFY, AGENT, MODEL_CALL]) | CROSS_PROCESS_SPINE,

@@ -131,12 +131,14 @@ Spans export in batches. A process that exits before its batch flushes drops wha
 pending. NeMo Gym flushes on normal shutdown, but a `SIGKILL` cannot be caught. Prefer
 `Ctrl-C`, which sends `SIGINT` and lets each server shut down cleanly.
 
-### Traces Are Enormous
+### One Trace Per Rollout, Linked to the Job
 
-The `default` preset includes `job`, which wraps a whole rollout-collection run, so every
-rollout in the run nests inside one trace. For long runs, use `per_rollout` instead. It
-omits `job`, so each rollout becomes its own bounded root trace. See
-[Span Groups](/main/observability/span-groups).
+The eval driver's `gym.job` span wraps a whole rollout-collection run, but rollouts are not
+its children. Each dispatch opens `gym.rollout.dispatch` as the root of a new trace with a
+span link to `gym.job`, and the agent's `gym.rollout` span and everything below it join that
+trace. A run therefore produces one small job trace and one bounded trace per rollout, all
+carrying the same `run_id`, instead of one trace that grows with the run and stays open until
+the job ends. An embedder that runs the driver inside its own trace keeps parent/child nesting.
 
 ### Startup Traces
 
