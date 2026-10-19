@@ -88,7 +88,8 @@ Claude Code talks to the model via the Anthropic Messages API (`/v1/messages`). 
 
 By default the agent runs with `--bare`, which skips auto-discovery of hooks, skills, plugins, MCP servers, memory, and CLAUDE.md so each scripted call starts clean and fast; Claude still has access to Bash, file read, and file edit tools. This isolation is the default because it keeps evals reproducible — a rollout depends only on the model, the task input, and the explicit config, not on ambient state of the host. This is the recommended mode for scripted and SDK calls per [Claude docs](https://code.claude.com/docs/en/headless#start-faster-with-bare-mode). The runtime is configurable via `bare`, `mcp_config`, and `settings` (see [Runtime capabilities](#runtime-capabilities)).
 
-Claude Code is auto-installed on first startup via npm or a local Node.js binary if not already on PATH.
+For local execution, Claude Code is auto-installed on the first local invocation
+via npm or a local Node.js binary if not already on PATH.
 
 ## Configuration
 
