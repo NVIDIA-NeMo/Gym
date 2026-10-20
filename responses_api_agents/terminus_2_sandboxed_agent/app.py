@@ -187,11 +187,20 @@ class NeMoGymLLM(BaseLLM):
         model_output_limit: int | None,
         llm_request_timeout: int,
         observations: TerminusObservations | None = None,
+        responses_create_params: NeMoGymResponseCreateParamsNonStreaming | None = None,
     ):
         super().__init__()
         self._client = client
         self.observations = observations
         self._model_name = model_name
+        # Task-set request fields (temperature, top_p, ...) go on every model call; the agent owns model and input.
+        self._request_params = (
+            responses_create_params.model_dump(
+                mode="json", exclude_unset=True, exclude_none=True, exclude={"input", "model"}
+            )
+            if responses_create_params is not None
+            else {}
+        )
         self._model_context_limit = model_context_limit
         self._model_output_limit = model_output_limit
         self._llm_request_timeout = llm_request_timeout
@@ -264,6 +273,7 @@ class NeMoGymLLM(BaseLLM):
                 async with asyncio.timeout(delay=self._llm_request_timeout):
                     response = NeMoGymResponse.model_validate(
                         await self._client.create_response(
+                            **self._request_params,
                             model=self._model_name,
                             input=request_input,
                         )
@@ -540,6 +550,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             model_output_limit=self.config.model_output_limit,
             llm_request_timeout=self.config.llm_request_timeout,
             observations=observations,
+            responses_create_params=body,
         )
 
         with tempfile.TemporaryDirectory(prefix="nemo-gym-terminus-2-") as log_dir:

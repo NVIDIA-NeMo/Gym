@@ -458,3 +458,113 @@ async def test_run_stops_sandbox_once_and_returns_merged_result_on_success(monke
     assert server._session_sandboxes == {}
     assert result["reward"] == 1.0
     assert result["terminus2_completed"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "task_params, forwarded",
+    [
+        pytest.param(
+            {"temperature": 1.0, "top_p": 0.95, "max_output_tokens": 2048},
+            {"temperature": 1.0, "top_p": 0.95, "max_output_tokens": 2048},
+            id="task_sets_sampling",
+        ),
+        pytest.param({"top_p": None}, {}, id="task_leaves_sampling_unset"),
+    ],
+)
+async def test_execute_forwards_task_sampling_params_to_every_model_call(monkeypatch, task_params, forwarded):
+    config = Terminus2AgentConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="app.py",
+        name="terminus_2_1_agent",
+        resources_server=ResourcesServerRef(type="resources_servers", name="swebench_resources_server"),
+        model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+        max_turns=100,
+        enable_summarize=True,
+        proactive_summarization_threshold=8000,
+        tmux_pane_width=160,
+        tmux_pane_height=40,
+        model_context_limit=32_000,
+        model_output_limit=4_000,
+        interleaved_thinking=False,
+        llm_request_timeout=60,
+        sandbox_provider="opensandbox",
+        sandbox_timeout=10,
+        remote_tmux_binary_path=None,
+    )
+    server = Terminus2Agent(config=config, server_client=MagicMock(spec=ServerClient))
+    requests = []
+
+    class FakeModelClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def create_response(self, **kwargs):
+            requests.append(kwargs)
+            return NeMoGymResponse(
+                id=f"resp_{len(requests)}",
+                created_at=0,
+                model="policy_model",
+                object="response",
+                output=[
+                    NeMoGymResponseOutputMessage(
+                        id=f"msg_{len(requests)}",
+                        content=[NeMoGymResponseOutputText(type="output_text", text="answer", annotations=[])],
+                        role="assistant",
+                        status="completed",
+                        type="message",
+                    )
+                ],
+                tool_choice="auto",
+                tools=[],
+                parallel_tool_calls=True,
+            )
+
+    class FakeTerminus:
+        def __init__(self, **kwargs):
+            self.llm = kwargs["llm"]
+            self._times_spent = []
+            self._num_proactive_compactions = 0
+
+        async def setup(self, environment):
+            return None
+
+        async def run(self, instruction, environment, context):
+            await self.llm.call(instruction)
+            # Harbor's summarization subagents call the same LLM with their own prompt and history.
+            await self.llm.call("summarize", message_history=[{"role": "user", "content": instruction}])
+
+    async def sandbox_exec(command, **kwargs):
+        return SimpleNamespace(stdout="", stderr="", return_code=0)
+
+    monkeypatch.setattr(app_module, "NeMoGymAsyncOpenAI", FakeModelClient)
+    monkeypatch.setattr(app_module, "NeMoGymTerminus2", FakeTerminus)
+    monkeypatch.setattr(
+        app_module,
+        "AgentContext",
+        lambda: SimpleNamespace(n_input_tokens=None, n_cache_tokens=None, n_output_tokens=None),
+    )
+    monkeypatch.setattr(Terminus2Agent, "base_url_for_run", lambda *_args, **_kwargs: "http://model")
+    monkeypatch.setattr(app_module, "get_server_url", lambda _: "http://model")
+
+    async def request_json():
+        return {"task_id": "task"}
+
+    request = SimpleNamespace(json=request_json, session={app_module.SESSION_ID_KEY: "session-1"})
+    _, metrics = await server._execute(
+        request,
+        NeMoGymResponseCreateParamsNonStreaming.model_validate({"input": "solve this", **task_params}),
+        SimpleNamespace(exec=sandbox_exec),
+    )
+
+    assert metrics["error"] is None
+    task_message = {"content": "solve this", "role": "user", "type": "message"}
+    assert requests == [
+        {"model": "policy_model", "input": [task_message], **forwarded},
+        {
+            "model": "policy_model",
+            "input": [task_message, {"content": "summarize", "role": "user", "type": "message"}],
+            **forwarded,
+        },
+    ]
