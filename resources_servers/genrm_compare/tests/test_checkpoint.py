@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import resources_servers.genrm_compare.app as genrm
+from nemo_gym._checkpoint.control import next_attempt
+from nemo_gym._checkpoint.resources import ResourcesParticipant
 from nemo_gym.episode_types import EpisodeId
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_correlation import rollout_context
@@ -168,3 +170,44 @@ async def test_a_restored_cohort_refuses_an_older_attempt_of_its_group(config):
     with pytest.raises(genrm.HTTPException, match="superseded"):
         await verify_as(restored, EPISODES[1], member(1, attempt=0))
     await restored.aclose()
+
+
+def participant_server(config) -> tuple[genrm.GenRMCompareResourcesServer, ResourcesParticipant]:
+    """A server behind the real resources participant, so restores bind sessions as Gym does."""
+    server = genrm.GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
+    participant = ResourcesParticipant(server, "exported", verify_mode="replay")
+    server._checkpoint = participant
+    server._run_single_comparison = AsyncMock(return_value=comparison_result())
+    return server, participant
+
+
+async def test_a_restored_cohort_survives_another_checkpoint_before_its_members_replay(config):
+    """A restore installs state before it binds sessions to their attempts, so the export must not need a replay."""
+    server, participant = participant_server(config)
+    for index, episode in enumerate(EPISODES):
+        participant.seeded(f"session-{index}", episode)
+    first = asyncio.create_task(verify_as(server, EPISODES[0], member(0)))
+    await asyncio.sleep(0)
+    reward = (await verify_as(server, EPISODES[1], member(1))).reward
+    await first
+    # Member 0 recorded its reward and closed its session; member 1 has not.
+    participant.ended("session-0")
+    checkpoint_a = await participant.export(None)
+    assert [record.session_id for record in checkpoint_a] == ["session-1"]
+    await server.aclose()
+
+    restored, restored_participant = participant_server(config)
+    await restored_participant.install(checkpoint_a, [record.episode_id for record in checkpoint_a])
+    # Checkpoint B lands before member 1 replays its verification.
+    checkpoint_b = await restored_participant.export(None)
+    assert [record.state for record in checkpoint_b] == [record.state for record in checkpoint_a]
+    await restored.aclose()
+
+    again, again_participant = participant_server(config)
+    await again_participant.install(checkpoint_b, [record.episode_id for record in checkpoint_b])
+    replacement = next_attempt(next_attempt(EPISODES[1]))
+    replayed = await asyncio.wait_for(verify_as(again, replacement, member(1)), timeout=0.5)
+
+    assert replayed.reward == reward
+    again._run_single_comparison.assert_not_awaited()
+    await again.aclose()

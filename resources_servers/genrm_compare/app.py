@@ -397,6 +397,10 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
     # With checkpointing on, the cohort member each attempt verified as, by capture key,
     # so a session export can find its member's reward.
     _episode_members: Dict[str, Tuple[str, int]] = PrivateAttr(default_factory=dict)
+    # The member each restored session holds a saved reward for, by session ID. A restore installs session state
+    # before its sessions are bound to their attempts, so it cannot key these by attempt; a later checkpoint
+    # exports them again even if the member has not replayed its verification yet.
+    _session_members: Dict[str, Tuple[str, int]] = PrivateAttr(default_factory=dict)
 
     _cohort_tasks: set[asyncio.Task] = PrivateAttr(default_factory=set)
     _closed: bool = PrivateAttr(default=False)
@@ -950,6 +954,11 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 for capture_key, member in self._episode_members.items()
                 if member[0] in self._verify_cohorts
             }
+            self._session_members = {
+                session_id: member
+                for session_id, member in self._session_members.items()
+                if member[0] in self._verify_cohorts
+            }
 
     def _remember_member(self, prompt_key: str, rollout_index: int) -> None:
         """Record which cohort member the requesting attempt verified as; only checkpointing needs it."""
@@ -962,6 +971,8 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         participant = self.checkpoint_participant
         episode_id = participant.session_episode(session_id) if participant is not None else None
         member = self._episode_members.get(episode_id.capture_key) if episode_id is not None else None
+        if member is None:
+            member = self._session_members.get(session_id)
         if member is None:
             return {}
         prompt_key, rollout_index = member
@@ -986,10 +997,12 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
     async def restore_session_states(self, states: dict[str, JsonValue]) -> None:
         """Rebuild every completed cohort the sessions name, so a replayed verification gets its saved reward."""
         cohorts: Dict[str, _CohortState] = {}
+        session_members: Dict[str, Tuple[str, int]] = {}
         for session_id, raw in states.items():
             if not raw:
                 continue
             state = _CompletedMemberState.model_validate(raw)
+            session_members[session_id] = (state.cohort_key, state.rollout_index)
             cohort = cohorts.get(state.cohort_key)
             if cohort is None:
                 cohort = _CohortState(
@@ -1017,6 +1030,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             cohort.members[state.rollout_index] = _CohortMember(body=None, response_digest=state.response_digest)
             cohort.results[state.rollout_index] = state.result
         # Validated in full before anything is installed.
+        self._session_members.update(session_members)
         now = time.monotonic()
         for key, cohort in cohorts.items():
             cohort.terminal_at = now
@@ -1032,6 +1046,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
 
     async def retire_session_state(self, session_id: str) -> None:
         """Forget which member a retired attempt verified as; the cohort itself stays for its siblings."""
+        self._session_members.pop(session_id, None)
         participant = self.checkpoint_participant
         episode_id = participant.session_episode(session_id) if participant is not None else None
         if episode_id is not None:
@@ -1069,6 +1084,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         self._verify_cohorts.clear()
         self._latest_group_attempts.clear()
         self._episode_members.clear()
+        self._session_members.clear()
 
     def _get_verify_cohort_key(
         self,
