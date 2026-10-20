@@ -15,6 +15,7 @@
 import logging
 from abc import ABC, abstractmethod
 from copy import deepcopy
+from pathlib import Path
 from typing import Any, ClassVar, Optional
 
 from omegaconf import DictConfig
@@ -81,6 +82,30 @@ class BaseExporter(ABC):
             fn(*args)
         except Exception as e:
             logger.warning(f"Exporter {self.name} failed to log {what}; continuing: {e}", exc_info=True)
+
+    def _run_id_fpath(self) -> Optional[Path]:
+        """`<output stem>_<name>_run_id` next to `output_jsonl_fpath`, or None when the run has no output.
+
+        A resumed or resubmitted run writes to the same output, so a backend that records its run id there
+        reopens that run instead of starting a new one. Deleting the file starts a new run.
+        """
+        output = self.global_config_dict.get("output_jsonl_fpath")
+        if not output:
+            return None
+        output = Path(output)
+        return output.with_name(f"{output.stem}_{self.name}_run_id")
+
+    def _recorded_run_id(self) -> Optional[str]:
+        run_id_fpath = self._run_id_fpath()
+        if run_id_fpath is None or not run_id_fpath.exists():
+            return None
+        return run_id_fpath.read_text().strip()
+
+    def _record_run_id(self, run_id: str) -> None:
+        run_id_fpath = self._run_id_fpath()
+        if run_id_fpath is not None:
+            run_id_fpath.parent.mkdir(parents=True, exist_ok=True)
+            run_id_fpath.write_text(run_id)
 
     def __enter__(self) -> "BaseExporter":
         self.setup()
