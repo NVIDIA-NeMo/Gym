@@ -1,5 +1,6 @@
-# Install nemo-gym[cwsandbox] in the Harbor agent environment first.
-# Compose this provider with harbor_agent_cwsandbox.yaml and a model config. Tasks must declare prebuilt images.
+# Install nemo-gym[cwsandbox] in the process that manages sandboxes.
+# Include this config with any agent/environment that references the sandbox block.
+# SandboxSpec.image must be a prebuilt, pullable OCI image.
 # Authentication can also use the SDK's default CWSANDBOX_API_KEY resolution.
 sandbox:
   cwsandbox:
@@ -10,7 +11,7 @@ sandbox:
     create:
       ttl_s: 21600
       ready_timeout_s: 900
-      # The SDK cannot enforce Harbor storage_mb; warn rather than silently drop.
+      # The SDK cannot enforce SandboxSpec.resources.disk_gib; warn rather than silently drop.
       strict_resources: false
       # runner_ids: [your-runner-id]
     default_exec_timeout_s: 1800

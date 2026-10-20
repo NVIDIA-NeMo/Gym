@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from nemo_gym.sandbox import AsyncSandbox
+from nemo_gym.sandbox import AsyncSandbox, ConnectableProvider, SupportsSandboxEndpoint
 from nemo_gym.sandbox.providers.base import SandboxCreateError, SandboxHandle, SandboxSpec, SandboxStatus
 from nemo_gym.sandbox.providers.cwsandbox import provider as module
 from nemo_gym.sandbox.providers.cwsandbox.provider import CWSandboxConnectionConfig, CWSandboxProvider
@@ -39,13 +39,23 @@ def backend(monkeypatch):
         write_file=AsyncMock(),
         read_file=AsyncMock(return_value=b"\x00\xffbinary"),
         get_status=Mock(return_value="running"),
+        service_endpoints=[],
+        endpoint_share_token=None,
+        snapshot=AsyncMock(return_value="snapshot-test"),
+        _cleanup_channels=Mock(),
     )
     constructor = Mock(return_value=sandbox)
     constructor.delete = AsyncMock()
+    constructor.from_id = AsyncMock(return_value=sandbox)
+    constructor.delete_snapshot = AsyncMock()
     sdk = SimpleNamespace(
         Sandbox=constructor,
         NetworkOptions=lambda **kwargs: kwargs,
         SecurityContext=lambda **kwargs: kwargs,
+        Service=lambda **kwargs: kwargs,
+        ScratchVolumeOptions=lambda **kwargs: kwargs,
+        RegisteredVolumeOptions=lambda **kwargs: kwargs,
+        FileSystemSnapshotOptions=lambda **kwargs: kwargs,
         AuthHeaders=lambda **kwargs: kwargs,
         SandboxTimeoutError=SDKTimeout,
         SandboxNotFoundError=SDKNotFound,
@@ -229,7 +239,6 @@ async def test_missing_sandbox_is_stopped(backend):
     "spec, message",
     [
         (SandboxSpec(), "prebuilt"),
-        (SandboxSpec(image="task", ports=[8080]), "ports"),
         (SandboxSpec(image="task", provider_options={"unknown": True}), "Unknown"),
         (SandboxSpec(image="task", provider_options={"deny_egress": "false"}), "boolean"),
         (SandboxSpec(image="task", resources={"cpu": -1}), "positive"),
@@ -283,8 +292,26 @@ async def test_installed_sdk_constructor_contract(backend, monkeypatch):
     fake.Sandbox.side_effect = construct
     fake.NetworkOptions = sdk.NetworkOptions
     fake.SecurityContext = sdk.SecurityContext
+    fake.Service = sdk.Service
+    fake.ScratchVolumeOptions = sdk.ScratchVolumeOptions
+    fake.RegisteredVolumeOptions = sdk.RegisteredVolumeOptions
+    fake.FileSystemSnapshotOptions = sdk.FileSystemSnapshotOptions
     provider = CWSandboxProvider(create={"runner_ids": ["d51a01c2-fd42-4be9-812d-d4150e083ea4"]})
-    handle = await provider.create(SandboxSpec(image="ubuntu:24.04", resources={"cpu": 1, "memory_mib": 512}))
+    handle = await provider.create(
+        SandboxSpec(
+            image="ubuntu:24.04",
+            resources={"cpu": 1, "memory_mib": 512},
+            ports=[8080],
+            provider_options={
+                "network_policy": {"egress": [{"dns_name": "pypi.org", "ports": [443]}]},
+                "volumes": [
+                    {"name": "cache", "mount_path": "/cache", "size": "1Gi"},
+                    {"name": "data", "volume_id": "test-volume", "mount_path": "/data", "read_only": True},
+                ],
+                "file_system_snapshot": {"mount_path": "/workspace", "size": "1Gi"},
+            },
+        )
+    )
     await provider.close(handle)
 
 
@@ -340,3 +367,157 @@ def test_missing_sdk_gives_install_instruction(monkeypatch):
     monkeypatch.setattr(module, "import_module", missing)
     with pytest.raises(ModuleNotFoundError, match=r"nemo-gym\[cwsandbox\]"):
         CWSandboxProvider()
+
+
+@pytest.mark.asyncio
+async def test_reconnect_descriptor_and_borrower_disconnect(backend):
+    sandbox, sdk, provider = backend
+    assert isinstance(provider, ConnectableProvider)
+    async with AsyncSandbox(provider, SandboxSpec(image="task", ports=[8080], workdir="/work")) as owner:
+        await owner.start()
+        descriptor = await owner.serialize()
+        assert descriptor == {"sandbox_id": "cw-test", "workdir": "/work", "ports": [8080]}
+        assert "api_key" not in descriptor
+        borrower_provider = CWSandboxProvider(connection={"api_key": "borrower-key"})
+        borrower = await AsyncSandbox.connect(descriptor, provider=borrower_provider)
+        await borrower.exec("true")
+        await borrower.disconnect()
+        sandbox._cleanup_channels.assert_called_once()
+        sandbox.stop.assert_not_awaited()
+        sdk.Sandbox.delete.assert_not_awaited()
+        assert await owner.status() == SandboxStatus.RUNNING
+    sdk.Sandbox.from_id.assert_awaited_once_with(
+        "cw-test",
+        base_url=None,
+        auth={"headers": {"Authorization": "Bearer borrower-key"}, "strategy": "api_key"},
+        timeout_seconds=3700,
+    )
+    sandbox.stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sandbox_id", [None, "", " ", 42])
+async def test_connect_requires_valid_id(backend, sandbox_id):
+    _, sdk, provider = backend
+    with pytest.raises(ValueError, match="sandbox_id"):
+        await provider.connect({"sandbox_id": sandbox_id})
+    sdk.Sandbox.from_id.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_connect_nonrunning_releases_client_without_deleting(backend):
+    sandbox, sdk, provider = backend
+    sandbox.status = "completed"
+    with pytest.raises(RuntimeError, match="completed"):
+        await provider.connect({"sandbox_id": "cw-test"})
+    sandbox._cleanup_channels.assert_called_once()
+    sdk.Sandbox.delete.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_services_default_to_authenticated_https_and_route_with_scoped_token(backend):
+    sandbox, sdk, provider = backend
+    assert isinstance(provider, SupportsSandboxEndpoint)
+    sandbox.service_endpoints = [SimpleNamespace(port=8080, url="https://test.example", auth="share_token")]
+    sandbox.endpoint_share_token = SimpleNamespace(as_headers=lambda: {"X-Sandbox-Share-Token": "scoped-token"})
+    async with AsyncSandbox(provider, SandboxSpec(image="task", ports=[8080])) as box:
+        await box.start()
+        result = await box.endpoint(8080)
+        assert result.endpoint == "https://test.example"
+        assert result.headers == {"X-Sandbox-Share-Token": "scoped-token"}
+        assert "Authorization" not in result.headers
+        descriptor = await box.serialize()
+        assert "scoped-token" not in repr(descriptor)
+    assert sdk.Sandbox.call_args.kwargs["services"] == [
+        {"port": 8080, "visibility": "public", "endpoint": {"kind": "https", "auth": "share_token"}}
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "auth, token, message",
+    [
+        ("share_token", None, "create-only"),
+        ("unknown", None, "Unsupported"),
+    ],
+)
+async def test_endpoint_does_not_fall_back_to_control_plane_credentials(backend, auth, token, message):
+    sandbox, _, provider = backend
+    sandbox.service_endpoints = [SimpleNamespace(port=8080, url="https://test.example", auth=auth)]
+    sandbox.endpoint_share_token = token
+    with pytest.raises(ValueError, match=message):
+        await provider.endpoint(SandboxHandle("cw-test", "cwsandbox", sandbox), 8080)
+
+
+@pytest.mark.asyncio
+async def test_open_endpoint_and_unavailable_port(backend):
+    sandbox, _, provider = backend
+    sandbox.service_endpoints = [SimpleNamespace(port=8080, url="https://test.example", auth="open")]
+    handle = SandboxHandle("cw-test", "cwsandbox", sandbox)
+    assert (await provider.endpoint(handle, 8080)).headers == {}
+    with pytest.raises(ValueError, match="No HTTPS endpoint"):
+        await provider.endpoint(handle, 8081)
+
+
+@pytest.mark.asyncio
+async def test_custom_services_network_and_mounts(backend):
+    _, sdk, provider = backend
+    options = {
+        "services": [{"port": 8080, "visibility": "public", "endpoint": {"kind": "https", "auth": "open"}}],
+        "network_policy": {"deny_ingress": True, "egress": [{"dns_name": "pypi.org", "ports": [443]}]},
+        "volumes": [
+            {"name": "scratch", "mount_path": "/work", "size": "1Gi"},
+            {"name": "data", "volume_id": "registered", "mount_path": "/data", "read_only": True},
+        ],
+        "file_system_snapshot": {"mount_path": "/workspace", "file_system_snapshot_id": "snapshot-old"},
+    }
+    handle = await provider.create(SandboxSpec(image="task", ports=[8080, 9090], provider_options=options))
+    kwargs = sdk.Sandbox.call_args.kwargs
+    assert kwargs["network"] == options["network_policy"]
+    assert kwargs["services"][0] == options["services"][0]
+    assert kwargs["services"][1]["endpoint"]["auth"] == "share_token"
+    assert kwargs["volumes"] == options["volumes"]
+    assert kwargs["file_system_snapshot"] == options["file_system_snapshot"]
+    await provider.close(handle)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "options, error, message",
+    [
+        ({"network_policy": []}, TypeError, "network_policy"),
+        ({"network_policy": {"deny_egress": True}, "deny_egress": False}, ValueError, "conflicts"),
+        ({"services": [{"port": 9090}]}, ValueError, "declared"),
+        ({"services": [{"port": 8080}, {"port": 8080}]}, ValueError, "Duplicate"),
+        ({"services": ["8080"]}, TypeError, "list of mappings"),
+        ({"volumes": "bad"}, TypeError, "list of mappings"),
+        ({"file_system_snapshot": "bad"}, TypeError, "mapping"),
+    ],
+)
+async def test_invalid_capability_options_fail_before_allocating(backend, options, error, message):
+    _, sdk, provider = backend
+    with pytest.raises(error, match=message):
+        await provider.create(SandboxSpec(image="task", ports=[8080], provider_options=options))
+    sdk.Sandbox.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_lifecycle_is_explicit(backend):
+    sandbox, sdk, provider = backend
+    handle = SandboxHandle("cw-test", "cwsandbox", sandbox)
+    snapshot_id = await provider.snapshot(handle)
+    assert snapshot_id == "snapshot-test"
+    sandbox.snapshot.assert_awaited_once_with(wait_for_ready=True)
+    await provider.close(handle)
+    sdk.Sandbox.delete_snapshot.assert_not_awaited()
+    await provider.delete_snapshot(snapshot_id)
+    sdk.Sandbox.delete_snapshot.assert_awaited_once_with(
+        "snapshot-test", base_url=None, auth=None, timeout_seconds=3700, missing_ok=True
+    )
+
+
+def test_installed_sdk_detach_contract():
+    sdk = pytest.importorskip("cwsandbox")
+    # CoreWeave exposes no public detach. Guard the sole private SDK method
+    # needed to close an attached client's channels without stopping its owner.
+    assert callable(sdk.Sandbox._cleanup_channels)
