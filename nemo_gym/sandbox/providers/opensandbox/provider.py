@@ -504,11 +504,12 @@ class OpenSandboxAttributionConfig:
     the label keys (Kubernetes prefixed-key convention); set it to ``""`` for bare
     ``team`` / ``user`` / ``workload`` / ``cluster`` / ``run`` keys.
 
-    Unset fields are auto-detected: ``NEMO_GYM_TEAM`` / ``NEMO_GYM_USER`` / ``NEMO_GYM_WORKLOAD`` /
-    ``NEMO_GYM_CLUSTER`` environment variables first, then Slurm job env vars (``SLURM_JOB_ACCOUNT`` /
-    ``SLURM_JOB_USER`` / ``SLURM_JOB_NAME`` / ``SLURM_CLUSTER_NAME``), then the OS login name for ``user`` (``root`` is
+    Unset fields are auto-detected: ``NEMO_GYM_TEAM`` / ``NEMO_GYM_USER`` / ``NEMO_GYM_WORKLOAD``
+    environment variables first, then Slurm job env vars (``SLURM_JOB_ACCOUNT`` /
+    ``SLURM_JOB_USER`` / ``SLURM_JOB_NAME``), then the OS login name for ``user`` (``root`` is
     ignored) and the gym CLI's ``NEMO_GYM_CONFIG_PATH`` server instance name for ``workload``.
-    Fields that cannot be resolved are omitted. ``run`` scopes sandboxes to one launch of the
+    ``cluster`` names the cluster that creates the sandboxes; it defaults to ``SLURM_CLUSTER_NAME``,
+    so runs outside Slurm should set it. Fields that cannot be resolved are omitted. ``run`` scopes sandboxes to one launch of the
     creating process (``NEMO_GYM_RUN_ID``, else generated per process and logged) so a run's
     sandboxes can be listed and cleaned up exactly. Explicit ``SandboxSpec.metadata`` keys
     always take precedence over attribution keys.
