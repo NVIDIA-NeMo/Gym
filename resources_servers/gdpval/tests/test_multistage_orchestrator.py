@@ -3665,6 +3665,7 @@ class TestCachedDeliverableReuse:
         *,
         cached: bool,
         first_failure_stage: Optional[str] = None,
+        first_failure_fields: Optional[Dict[str, Any]] = None,
         failed_cached_verifies: int = 0,
         task_ids: Sequence[str] = ("t0",),
         repeats: int = 1,
@@ -3676,6 +3677,7 @@ class TestCachedDeliverableReuse:
         self.inputs_at_dispatch: List[List[int]] = []
         dispatched: List[Dict[str, Any]] = []
         verified: List[Dict[str, Any]] = []
+        self.verified_calls = verified
         test = self
 
         async def verify_endpoint(request: web.Request) -> web.Response:
@@ -3710,6 +3712,8 @@ class TestCachedDeliverableReuse:
                             NG_FAILURE_CLASS_KEY: ENVIRONMENT_SERVER_FAILURE_CLASS,
                             "_ng_failure_stage": first_failure_stage,
                         }
+                    if first_failure_fields is not None and len(dispatched) == 1:
+                        result = dict(first_failure_fields)
                     if capture_dir is not None:
                         CaptureStore(capture_dir).record(
                             maybe_rollout_id_from_run_body(row), _capture_exchange("dispatched")
@@ -3886,6 +3890,52 @@ class TestCachedDeliverableReuse:
         assert dispatched == []
         assert [call["json"]["stage_index"] for call in verified] == [0, 1]
         assert sorted(row["stage_index"] for row in persisted) == [0, 1]
+
+    @pytest.mark.parametrize("failure_class", ["reference_missing", "transport_ineligible"])
+    async def test_a_resume_judges_a_repairable_terminal_failure_again_without_dispatching(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_class: str
+    ) -> None:
+        from resources_servers.gdpval.app import _gdpval_failure
+
+        with pytest.raises(RuntimeError, match="rejected on coverage"):
+            await self._run_two_stages(
+                tmp_path,
+                monkeypatch,
+                cached=True,
+                first_failure_fields=_gdpval_failure(failure_class, terminal=True),
+                retry_inprocess=False,
+            )
+
+        dispatched, verified, persisted = await self._run_two_stages(
+            tmp_path, monkeypatch, cached=True, retry_inprocess=False, resume_from_cache=True
+        )
+
+        assert dispatched == [], "the policy does not run again"
+        assert [call["json"]["stage_index"] for call in verified] == [0, 1]
+        assert all(call["json"]["reuse_cached_deliverable"] for call in verified[:1])
+        assert sorted(row["stage_index"] for row in persisted) == [0, 1]
+
+    @pytest.mark.parametrize("failure_class", ["eval_missing", "missing_rubric"])
+    async def test_a_resume_leaves_other_terminal_failures_closed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_class: str
+    ) -> None:
+        from resources_servers.gdpval.app import _gdpval_failure
+
+        with pytest.raises(RuntimeError, match="rejected on coverage"):
+            await self._run_two_stages(
+                tmp_path,
+                monkeypatch,
+                cached=True,
+                first_failure_fields=_gdpval_failure(failure_class, terminal=True),
+                retry_inprocess=False,
+            )
+
+        with pytest.raises(RuntimeError, match="rejected on coverage"):
+            await self._run_two_stages(
+                tmp_path, monkeypatch, cached=True, retry_inprocess=False, resume_from_cache=True
+            )
+
+        assert self.verified_calls == [], "a closed failure is not judged again"
 
     async def test_without_a_cached_deliverable_the_policy_runs(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
