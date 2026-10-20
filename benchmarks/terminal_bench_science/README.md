@@ -348,3 +348,7 @@ terminal_bench_science_miniswe:
 
 Then drop `--benchmark` from `gym eval run`. A `--benchmark` config merges after `--config`
 files, so it would restore the three-trial list.
+
+`data/example_rollouts.jsonl` holds one capped trial (3 steps, 900 seconds) of each example
+task, run this way on `data/example.jsonl`. Its local paths and the model server address are
+placeholders.
