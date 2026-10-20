@@ -273,7 +273,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         if not completed:
             failure = (result.get("exception_info") or {}).get("exception_type", "MissingOfficialReward")
             failure_type = failure
-        elif session.termination.reason == "infrastructure_error":
+        elif session.termination.reason == "infrastructure_error" and not result.get("sandbox_resource_limit"):
             failure = session.termination.detail or "Agent infrastructure failure"
         return SandboxedVerifyResponse(
             **(
@@ -283,6 +283,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                 | extra
                 | {"task_id": session.request.task_name}
                 | VerifierTestCounts.model_validate(verifier_result).model_dump()
+                | {"sandbox_resource_limit": result.get("sandbox_resource_limit")}
             ),
             reward=float(rewards.get("reward", 0)),
             evaluation_completed=completed,

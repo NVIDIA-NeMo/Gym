@@ -20,6 +20,8 @@ from pathlib import Path
 from typing import Callable, List, Optional, Union
 
 
+logger = logging.getLogger(__name__)
+
 # /path/to/dir/Gym (PARENT_DIR)
 # |- cache (CACHE_DIR)
 # |- results (RESULTS_DIR)
@@ -123,7 +125,7 @@ def _augment_sys_path() -> None:
     roots into the env (see nemo_gym.cli.main).
     """
     new_path = [str(root) for root in component_search_roots(sys_path=(Path(path) for path in sys.path))]
-    logging.debug(f"Replacing sys.path {sys.path} with {new_path}")
+    logger.debug(f"Replacing sys.path {sys.path} with {new_path}")
     sys.path[:] = new_path
 
 
