@@ -258,6 +258,8 @@ async def test_verify_partial_subtask_score_returns_zero_reward() -> None:
     response = await server.verify(request)
 
     assert response.reward == 0.0
+    assert response.mask_sample is False
+    assert response.failure_kind is None
     evaluator.get_problem_metadata.assert_called_once_with("prob-1", "comp-1")
 
 
@@ -345,6 +347,32 @@ async def test_verify_returns_error_details_when_evaluator_fails(
 
     assert response.reward == 0.0
     assert response.details == {"error": "boom"}
+    assert response.mask_sample is True
+    assert response.failure_kind == "verifier_error"
+    assert response.failure_reason == "boom"
+
+
+@pytest.mark.asyncio
+async def test_verify_masks_a_sandbox_infra_error() -> None:
+    server = _make_server()
+    evaluator = MagicMock()
+    evaluator.eval_single = AsyncMock(
+        return_value={
+            "test_case_results": {"samples": {"score": 0.0, "outputs": [{"compile_success": False, "score": 0.0}]}},
+            "infra_error": "sandbox cannot see the shared work dir",
+        }
+    )
+    evaluator.get_problem_metadata.return_value = {
+        "subtasks": {"samples": {"score": 1.0, "aggregation": "min", "test_names": ["t1"]}}
+    }
+    server._evaluator = evaluator
+
+    response = await server.verify(_make_verify_request())
+
+    assert response.reward == 0.0
+    assert response.mask_sample is True
+    assert response.failure_kind == "provider_unavailable"
+    assert response.failure_reason == "sandbox cannot see the shared work dir"
 
 
 # ---------------------------------------------------------------------------

@@ -28,6 +28,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.failure_kinds import PROVIDER_UNAVAILABLE, VERIFIER_ERROR
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
 from resources_servers.competitive_coding_challenges.ccc_eval import CCCEvaluator
 
@@ -338,6 +339,8 @@ class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
 
         reward = 0.0
         details: dict[str, Any] = {}
+        failure_kind = None
+        failure_reason = None
         try:
             evaluation_entry = {
                 "competition_id": body.competition_id,
@@ -350,8 +353,11 @@ class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
                 evaluation_entry["total_time"] = payload["total_time"]
             details = await self._evaluator.eval_single(evaluation_entry)
             reward = self._compute_reward(body, details)
+            if details.get("infra_error"):
+                failure_kind, failure_reason = PROVIDER_UNAVAILABLE, details["infra_error"]
         except Exception as e:
             details = {"error": str(e)}
+            failure_kind, failure_reason = VERIFIER_ERROR, str(e)
 
         if LOG_JSONL_PATH:
             await self._append_log_jsonl(
@@ -368,6 +374,9 @@ class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
             **payload,
             reward=reward,
             details=details,
+            mask_sample=failure_kind is not None,
+            failure_kind=failure_kind,
+            failure_reason=failure_reason,
             num_tests_run=details.get("num_tests_run", 0),
             total_test_execution_time_s=details.get("total_test_execution_time_s", 0.0),
             mean_test_execution_time_s=details.get("mean_test_execution_time_s", 0.0),
