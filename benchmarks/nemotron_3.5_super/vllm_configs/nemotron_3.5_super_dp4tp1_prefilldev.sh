@@ -24,9 +24,9 @@ export VLLM_USE_V2_MODEL_RUNNER=1
 
 export VLLM_USE_RUST_FRONTEND=1
 
-export VLLM_PREFILL_TIMING=1
-export VLLM_PREFILL_TIMING_INTERVAL_SECONDS=10
-export VLLM_PREFILL_TIMING_SAMPLE_EVERY=10
+# export VLLM_PREFILL_TIMING=1
+# export VLLM_PREFILL_TIMING_INTERVAL_SECONDS=10
+# export VLLM_PREFILL_TIMING_SAMPLE_EVERY=10
 
 # @bxyu-nvidia: `--skip-mm-profiling` Is needed to get Super VL checkpoint working, even with text benchmarks
 # @bxyu-nvidia: We set --prefix-match-unit 128 because the Mooncake store prefill lookup gets more expensive the smaller this number is
