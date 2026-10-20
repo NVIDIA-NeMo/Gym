@@ -81,7 +81,14 @@ class NOOARunFailure(RuntimeError):
     """A failure carrying the same episode representation as a successful run."""
 
     def __init__(self, error: BaseException, result: NOOARunResult) -> None:
-        super().__init__(str(error))
+        message = str(error)
+        cleanup_error = getattr(error, "nooa_cleanup_error", None)
+        if isinstance(cleanup_error, Exception) and cleanup_error is not error:
+            # Keep the secondary failure visible even in bounded worker diagnostics.
+            message = (
+                f"Cleanup failed: {type(cleanup_error).__name__}: {cleanup_error}. Original task failure: {error}"
+            )
+        super().__init__(message)
         self.result = result
 
 

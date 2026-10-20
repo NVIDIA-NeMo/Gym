@@ -103,3 +103,27 @@ def test_cancellation_clears_response_error_and_preserves_partial_output_and_dia
 def test_termination_reason_rejects_aliases_and_collector_routing_classes(reason: str) -> None:
     with pytest.raises(ValueError):
         NOOATerminationReason(reason)
+
+
+@pytest.mark.parametrize("primary_transient", [False, True])
+@pytest.mark.parametrize("cleanup_transient", [False, True])
+def test_retry_classification_checks_primary_and_cleanup_with_cycles(
+    primary_transient: bool, cleanup_transient: bool
+) -> None:
+    from responses_api_agents.nooa_agent.result import is_transient_infrastructure_error
+
+    primary = ConnectionError("primary transport") if primary_transient else ValueError("primary failure")
+    cleanup = TimeoutError("cleanup timeout") if cleanup_transient else ValueError("cleanup failure")
+    primary.nooa_cleanup_error = cleanup
+    cleanup.__context__ = primary
+    wrapper = RuntimeError("wrapper")
+    wrapper.__cause__ = primary
+    assert is_transient_infrastructure_error(wrapper) is (primary_transient or cleanup_transient)
+
+
+def test_close_only_nontransient_cleanup_marker_does_not_loop() -> None:
+    from responses_api_agents.nooa_agent.result import is_transient_infrastructure_error
+
+    error = ValueError("close-only failure")
+    error.nooa_cleanup_error = error
+    assert not is_transient_infrastructure_error(error)

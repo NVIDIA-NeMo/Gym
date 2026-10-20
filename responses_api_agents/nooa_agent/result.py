@@ -58,18 +58,26 @@ def finalize_run_result(run_result: NOOARunResult) -> tuple[NeMoGymResponse, Age
 
 
 def is_transient_infrastructure_error(error: BaseException) -> bool:
-    """Recognize retryable transport failures through NOOA exception wrapping."""
+    """Recognize retryable transport failures in task and retained cleanup errors."""
     seen: set[int] = set()
-    while id(error) not in seen:
+    pending = [error]
+    while pending:
+        error = pending.pop()
+        if id(error) in seen:
+            continue
         seen.add(id(error))
+        cleanup_error = getattr(error, "nooa_cleanup_error", None)
+        if isinstance(cleanup_error, Exception):
+            pending.append(cleanup_error)
         if isinstance(
             error, (aiohttp.ClientConnectionError, aiohttp.ClientPayloadError, TimeoutError, ConnectionError)
         ):
             return True
         if isinstance(error, aiohttp.ClientResponseError):
-            return error.status in {408, 425, 429} or error.status >= 500
+            if error.status in {408, 425, 429} or error.status >= 500:
+                return True
+            continue
         cause = error.__cause__ or error.__context__
-        if cause is None:
-            break
-        error = cause
+        if cause is not None:
+            pending.append(cause)
     return False

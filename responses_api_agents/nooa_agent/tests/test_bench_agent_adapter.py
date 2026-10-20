@@ -496,3 +496,117 @@ async def test_real_benchagent_loop_guard_preserves_gradable_evidence(tmp_path, 
     actual_outputs = {item.call_id for item in response.output if item.type == "function_call_output"}
     assert actual_outputs & expected_calls == expected_outputs
     assert "loop_detected" in {gap.code for gap in observations.gaps}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wire_boundary", ["embedded", "worker"])
+@pytest.mark.parametrize("cleanup_boundary", ["agent", "scope"])
+@pytest.mark.parametrize("error_type", [ConnectionError, TimeoutError, ValueError])
+async def test_cleanup_failure_retry_and_diagnostic_cross_runtime_boundaries(
+    tmp_path, monkeypatch, wire_boundary: str, cleanup_boundary: str, error_type: type[Exception]
+) -> None:
+    from fastapi import HTTPException
+    from nooa.tools._bash_session import BashSession
+
+    module = pytest.importorskip("nooa_bench.bench_agent")
+    from nemo_gym.server_utils import ServerClient
+    from responses_api_agents.nooa_agent import sandbox_entrypoint as entrypoint
+    from responses_api_agents.nooa_agent.app import NOOAAgent
+    from responses_api_agents.nooa_agent.invocation import NOOAInvocationConfig
+    from responses_api_agents.nooa_agent.runner import NOOARunFailure
+    from responses_api_agents.nooa_agent.termination import NOOATerminationReason
+    from responses_api_agents.nooa_agent.tests.test_app import close, open_session
+    from responses_api_agents.nooa_agent.tests.test_config import agent_config
+    from responses_api_agents.nooa_agent.tests.test_gym_llm import FakeHTTPResponse, model_response
+    from responses_api_agents.nooa_agent.tests.test_sandbox_entrypoint import payload
+
+    monkeypatch.chdir(tmp_path)
+    cleanup_error = error_type("secondary cleanup connection failed")
+    fresh_sessions = []
+    solve_errors = []
+    original_solve = module.BenchAgent._solve_task
+    original_session_close = BashSession.close
+    original_shell_close = ShellTools.close
+
+    async def solve(agent, *args, **kwargs):
+        fresh_sessions.append(ShellTools(cwd=str(tmp_path)).session)
+        try:
+            return await original_solve(agent, *args, **kwargs)
+        except Exception as error:
+            solve_errors.append(error)
+            raise
+
+    async def session_close(session):
+        await original_session_close(session)
+        if cleanup_boundary == "scope" and session in fresh_sessions:
+            raise cleanup_error
+
+    async def shell_close(shell):
+        await original_shell_close(shell)
+        if cleanup_boundary == "agent":
+            raise cleanup_error
+
+    calls = []
+
+    async def post(self=None, **kwargs):
+        calls.append(kwargs)
+        return FakeHTTPResponse(
+            model_response(
+                NeMoGymResponseFunctionToolCall(
+                    id="progress", call_id="c1", name="python_cell", arguments='{"code":"print(1)"}'
+                )
+            )
+        )
+
+    monkeypatch.setattr(module.BenchAgent, "_solve_task", solve)
+    monkeypatch.setattr(BashSession, "close", session_close)
+    monkeypatch.setattr(ShellTools, "close", shell_close)
+    invocation = NOOAInvocationConfig(
+        agent_class="nooa_bench.bench_agent:BenchAgent",
+        invocation_adapter="responses_api_agents.nooa_agent.bench_agent_adapter:invoke_bench_agent",
+    )
+    transient = error_type is not ValueError
+    if wire_boundary == "worker":
+        monkeypatch.setattr(entrypoint._ModelClient, "post", post)
+        request = payload()
+        request.invocation = invocation
+        request.max_policy_calls = 1
+        artifact = await entrypoint.execute(request)
+        restored = entrypoint.SandboxResult.model_validate_json(artifact.model_dump_json())
+        assert restored.error.kind == ("transient" if transient else "fatal")
+        assert restored.termination_reason is NOOATerminationReason.INFRASTRUCTURE_ERROR
+        assert restored.response.status == "failed"
+        assert restored.response.error is not None
+        assert restored.response.output
+        diagnostic = restored.error.message
+        assert restored.termination_error == diagnostic
+        assert restored.response.error.message == diagnostic
+    else:
+        client = MagicMock(spec=ServerClient)
+        client.post = AsyncMock(side_effect=post)
+        instance = NOOAAgent(
+            config=agent_config(nooa=invocation.model_dump(), max_policy_calls=1), server_client=client
+        )
+        request = await open_session(instance)
+        try:
+            with pytest.raises(HTTPException if transient else NOOARunFailure) as caught:
+                await instance.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+            failure = caught.value.__cause__ if transient else caught.value
+            assert isinstance(failure, NOOARunFailure)
+            assert failure.__cause__ is solve_errors[0]
+            if transient:
+                assert caught.value.status_code == 503
+            state = instance._require_agent_session("session")
+            assert state.result.termination_reason is NOOATerminationReason.INFRASTRUCTURE_ERROR
+            diagnostic = state.result.termination_error
+        finally:
+            receipt = await close(instance)
+        assert any(
+            gap.code == NOOATerminationReason.INFRASTRUCTURE_ERROR and gap.detail == diagnostic
+            for gap in receipt.agent_observations.gaps
+        )
+
+    assert len(calls) == len(solve_errors) == 1
+    assert solve_errors[0].nooa_cleanup_error is cleanup_error
+    assert str(solve_errors[0]) in diagnostic
+    assert f"{error_type.__name__}: {cleanup_error}" in diagnostic
