@@ -2366,6 +2366,36 @@ class RolloutAggregationConfig(BaseNeMoGymCLIConfig):
         return _normalize_health_check_ignored_checks(value)
 
 
+def _drop_truncated_tail(fpath: Path) -> None:
+    """Repair a jsonl whose last line a hard kill cut short, so resume can read and append to it."""
+    with fpath.open("r+b") as f:
+        size = f.seek(0, os.SEEK_END)
+        if size == 0:
+            return
+        f.seek(size - 1)
+        if f.read(1) == b"\n":
+            return
+        # Scan backwards in chunks: rollout files can be too large to read whole.
+        tail_start, chunk_end = 0, size
+        while chunk_end > 0:
+            chunk_start = max(0, chunk_end - (1 << 20))
+            f.seek(chunk_start)
+            newline_at = f.read(chunk_end - chunk_start).rfind(b"\n")
+            if newline_at >= 0:
+                tail_start = chunk_start + newline_at + 1
+                break
+            chunk_end = chunk_start
+        f.seek(tail_start)
+        tail = f.read()
+        try:
+            orjson.loads(tail)
+        except orjson.JSONDecodeError:
+            f.truncate(tail_start)
+            print(f"Dropped a truncated final line ({len(tail)} bytes) from {fpath} before resuming.")
+        else:
+            f.write(b"\n")
+
+
 def loads_jsonl_line(raw, fpath, line_no: int):
     """Parse one JSONL line, raising a clean `ConfigError` (naming file + line) on malformed JSON."""
     try:
