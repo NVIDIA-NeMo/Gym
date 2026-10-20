@@ -186,10 +186,13 @@ class SandboxSession[Artifacts]:
             # A harness process's nonzero exit can still carry useful, adapter-specific output.
             await self._finish(timeout=close_timeout)
         except BaseException:
-            try:
-                await self._finish(timeout=close_timeout)
-            except Exception:
-                LOG.exception("%s harness termination was not confirmed; close must release the session", self.harness)
+            if self._finalize_task is None or not self._finalize_task.done():
+                try:
+                    await self._finish(timeout=close_timeout)
+                except Exception:
+                    LOG.exception(
+                        "%s harness termination was not confirmed; close must release the session", self.harness
+                    )
             raise
         if result.return_code != 0 and self.capture_error is not None:
             raise RuntimeError(

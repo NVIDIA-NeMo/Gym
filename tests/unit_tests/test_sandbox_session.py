@@ -158,6 +158,27 @@ async def test_cancellation_during_normal_finalization_waits_for_evidence(sessio
     assert session.artifacts == "final snapshot"
 
 
+async def test_failed_normal_finalization_waits_for_explicit_close_retry(session, monkeypatch):
+    failure = RuntimeError("launch outcome is unknown")
+    stop = AsyncMock(side_effect=[failure, RECEIPT])
+    monkeypatch.setattr("nemo_gym.agent_utils.sandbox_session.stop_and_confirm_cleanup", stop)
+    collector = AsyncMock(return_value="recovered transcript")
+
+    with pytest.raises(RuntimeError, match="launch outcome is unknown") as error:
+        await execute(session, collect=collector)
+    assert error.value is failure
+    stop.assert_awaited_once()
+    collector.assert_not_awaited()
+    assert session.cleanup is None
+    session.sandbox.disconnect.assert_not_awaited()
+
+    await session.close(timeout=1)
+    assert stop.await_count == 2
+    collector.assert_awaited_once()
+    assert session.artifacts == "recovered transcript"
+    assert session.closed
+
+
 async def test_rearm_uses_fresh_launch_files_and_close_removes_the_root(session):
     await session.begin_activation(session_dir="/session/activation-1", timeout=1)
     first = AsyncMock(return_value="first")
