@@ -36,12 +36,41 @@ from typing import Literal
 
 MARKER = re.compile(r"VLLM_PREFILL_TIMING\s+(?=\{)")
 SECTIONS = ("cpu_ms", "cuda_elapsed_ms", "batch")
+# Code-level nesting of the instrumented scopes, not inferred event timestamps.
+PHASE_LAYOUT = (
+    ("schedule", None),
+    ("allocate_running_slots", "schedule"),
+    ("allocate_waiting_slots", "schedule"),
+    ("build_kv_connector_meta", "schedule"),
+    ("update_from_output", None),
+    ("execute_start_gap", None),
+    ("execute_model", None),
+    ("gather_batch_req_state", "execute_model"),
+    ("dp_sync_and_graph_dispatch", "execute_model"),
+    ("preprocess", "execute_model"),  # Legacy runner only.
+    ("prepare_inputs", "execute_model"),
+    ("prepare_attn", "execute_model"),
+    ("mamba_preprocess_state", "execute_model"),
+    ("build_attn_metadata", "execute_model"),
+    ("forward", "execute_model"),
+    ("kv_finish_forward", "execute_model"),
+    ("sample_tokens", None),
+    ("sample", "sample_tokens"),
+    ("postprocess_sampled", "sample_tokens"),
+    ("draft", "sample_tokens"),
+)
+SHARED_KV_PARENTS = {
+    "kv_pre_forward": "forward; execute_model on no-forward steps",
+    "kv_post_forward": "sample_tokens; execute_model on no-forward steps",
+    "kv_start_load_kv": "kv_pre_forward for sync loads; kv_post_forward for deferred loads",
+}
 NOTES = [
     "Means are sum(total)/sum(count); totals cover observed samples only and are not scaled by sample_every.",
     "Worker steps are sampled; scheduler CPU phases and execute_start_gap are unsampled.",
     "execute_start_gap is time between execute starts, including work and idle periods; it is not GPU idle time.",
     "Phases can cover different steps (execute_model also includes no-forward calls); compare observation counts.",
     "Nested phases overlap. Do not sum phase totals, CPU+CUDA times, or interpret rank sums as wall time.",
+    "Indentation shows code-level scope nesting, not a reconstructed timeline; shared KV phases have multiple parents.",
     "CUDA intervals include stream waits and host launch gaps; they are not pure kernel compute time.",
     "CUDA completions may land in later windows, so CPU and CUDA counts/windows need not match.",
     "Global p50/p90/p99 cannot be reconstructed. CSV retains logged per-window quantiles (up to 4096 samples).",
@@ -316,19 +345,47 @@ def write_csv(path: Path, windows: list[Window]) -> None:
                     )
 
 
+def phase_rows(phases: dict[str, object]) -> list[tuple[str, int]]:
+    """Order known timing scopes by nesting; leave unknown/shared phases unindented."""
+    depths: dict[str, int] = {}
+    rows = []
+    for phase, parent in PHASE_LAYOUT:
+        if phase not in phases:
+            continue
+        if phase == "prepare_inputs" and "preprocess" in phases:
+            parent = "preprocess"
+        # A partial reporting window may omit the enclosing scope entirely.
+        depth = depths[parent] + 1 if parent in depths else 0
+        depths[phase] = depth
+        rows.append((phase, depth))
+    rows.extend((phase, 0) for phase in sorted(phases.keys() - depths.keys() - SHARED_KV_PARENTS.keys()))
+    rows.extend((phase, 0) for phase in SHARED_KV_PARENTS if phase in phases)
+    return rows
+
+
 def print_group(label: str, group: dict[str, object]) -> None:
     print(f"\n{label}: {group['records']} records; {group['processes']} processes")
     print(f"  Window coverage: {group['first_window_start_utc']} to {group['last_window_end_utc']}")
     print(f"  Counters: {group['counts']}; max pending in one record: {group['max_pending_in_one_record']}")
     for section in SECTIONS:
         print(f"  {section} (batch is values, timing sections are milliseconds):")
-        print(f"    {'phase':34} {'count':>10} {'total':>14} {'mean':>12} {'max':>12}")
-        for phase, raw in mapping(group[section]).items():
-            stats = mapping(raw)
+        phases = mapping(group[section])
+        rows = [(phase, 0) for phase in phases] if section == "batch" else phase_rows(phases)
+        width = max([34, *(len(phase) + depth * 2 for phase, depth in rows)])
+        print(f"    {'phase':{width}} {'count':>10} {'total':>14} {'mean':>12} {'max':>12}")
+        shared_header = False
+        for phase, depth in rows:
+            if section != "batch" and phase in SHARED_KV_PARENTS and not shared_header:
+                print("    Shared KV phases (totals combine different calling paths):")
+                shared_header = True
+            stats = mapping(phases[phase])
+            display_name = "  " * depth + phase
             print(
-                f"    {phase:34} {stats['count']:>10,} {stats['total']:>14,.3f} "
+                f"    {display_name:{width}} {stats['count']:>10,} {stats['total']:>14,.3f} "
                 f"{stats['mean']:>12,.3f} {stats['max']:>12,.3f}"
             )
+            if section != "batch" and phase in SHARED_KV_PARENTS:
+                print(f"      Parents: {SHARED_KV_PARENTS[phase]}")
 
 
 def main() -> None:
