@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 
 
 NG_AGENT_OBSERVATIONS_KEY = "ng_agent_observations"
+NG_VERIFIER_INVOCATIONS_KEY = "ng_verifier_invocations"
 
 
 class ObservationModel(BaseModel):

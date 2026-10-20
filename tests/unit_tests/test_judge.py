@@ -19,6 +19,7 @@ import pytest
 from pydantic import BaseModel, ConfigDict
 
 from nemo_gym.judge import JudgeError, call_judge, judge_failsafe, normalize_math_judge_verdict, reraise_judge_errors
+from nemo_gym.rollout_correlation import VERIFIER_INVOCATION_HEADER
 
 
 @pytest.mark.parametrize(
@@ -163,12 +164,12 @@ async def test_judge_calls_use_enclosing_verifier_identity_even_on_failure():
         await _call(client)
         await _call(client)
         assert all(
-            call.kwargs["headers"] == {"x-ng-verifier-invocation-id": "verify-one"}
+            call.kwargs["headers"] == {VERIFIER_INVOCATION_HEADER: "verify-one"}
             for call in client.post.call_args_list[1:]
         )
         failed = _client(status=400, body=b'{"error":"rejected"}')
         with pytest.raises(JudgeError):
             await _call(failed)
-        assert failed.post.call_args.kwargs["headers"] == {"x-ng-verifier-invocation-id": "verify-one"}
+        assert failed.post.call_args.kwargs["headers"] == {VERIFIER_INVOCATION_HEADER: "verify-one"}
     await _call(client)
     assert client.post.call_args.kwargs["headers"] == {}

@@ -89,6 +89,7 @@ from nemo_gym.global_config import (
 from nemo_gym.profiling import Profiler
 from nemo_gym.rollout_correlation import (
     ROUTED_PATH_STATE_KEY,
+    VERIFIER_INVOCATION_HEADER,
     current_rollout_id,
     current_verifier_invocation_id,
     maybe_rollout_id_from_run_body,
@@ -971,7 +972,7 @@ class ServerClient(BaseModel):
             if verifier_invocation_id is not None:
                 kwargs["headers"] = {
                     **(kwargs.get("headers") or {}),
-                    "x-ng-verifier-invocation-id": verifier_invocation_id,
+                    VERIFIER_INVOCATION_HEADER: verifier_invocation_id,
                 }
 
         return await request(

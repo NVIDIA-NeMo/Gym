@@ -5,34 +5,29 @@
 
 from __future__ import annotations
 
-import asyncio
 import functools
 import json
 import logging
 from collections.abc import Awaitable, Callable, Mapping
-from pathlib import Path
-from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar
+from typing import ParamSpec, TypeVar
 from uuid import uuid4
 
+from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel
-from starlette.responses import Response
+from starlette.exceptions import HTTPException
+from starlette.responses import JSONResponse, Response
 
-from nemo_gym.failure_kinds import CANCELLED, TRANSPORT_TIMEOUT, VERIFIER_ERROR
+from nemo_gym.failure_kinds import TRANSPORT_TIMEOUT, VERIFIER_ERROR
 from nemo_gym.rollout_correlation import (
     current_rollout_id,
-    maybe_rollout_id_from_run_body,
     verifier_invocation_context,
 )
-from nemo_gym.rollout_observability import ModelCallRef, VerifierInvocation
+from nemo_gym.rollout_observability import NG_VERIFIER_INVOCATIONS_KEY, ModelCallRef, VerifierInvocation
 
-
-if TYPE_CHECKING:
-    from nemo_gym.base_responses_api_model import CaptureStore
 
 logger = logging.getLogger(__name__)
 P = ParamSpec("P")
 T = TypeVar("T")
-_DIRECTORY = "verifier_invocations"
 
 
 def merge_verifier_call_observation(
@@ -53,24 +48,6 @@ def merge_verifier_call_observation(
         invocations[invocation_id] = VerifierInvocation(invocation_id=invocation_id, model_calls=[reference])
     else:
         existing.model_calls.append(reference)
-
-
-def _store(directory: Path) -> CaptureStore:
-    # Reuse the locked append-only store without introducing a new persistence format.
-    from nemo_gym.base_responses_api_model import CaptureStore
-
-    return CaptureStore(directory / _DIRECTORY)
-
-
-def _record(store: CaptureStore, rollout_id: str, invocation: VerifierInvocation) -> None:
-    try:
-        store.record(rollout_id, invocation.model_dump(mode="json"))
-    except Exception:
-        logger.warning("Could not record verifier execution for rollout %s.", rollout_id, exc_info=True)
-        try:
-            store.mark_incomplete(rollout_id)
-        except OSError:
-            logger.warning("Could not mark verifier capture incomplete for rollout %s.", rollout_id, exc_info=True)
 
 
 def _finish(invocation: VerifierInvocation, result: object) -> None:
@@ -97,106 +74,54 @@ def _finish(invocation: VerifierInvocation, result: object) -> None:
         invocation.status = "completed"
 
 
-def observe_verifier(verify_fn: Callable[P, Awaitable[T]], *, capture_dir: Path | None) -> Callable[P, Awaitable[T]]:
-    """Observe the shared verify boundary without changing its result or error handling.
+def observe_verifier(verify_fn: Callable[P, Awaitable[T]], *, enabled: bool) -> Callable[P, Awaitable[T | Response]]:
+    """Return verification evidence with its result, leaving persistence to collection.
 
-    Start and terminal records survive missing responses and programmatic grading.
-    The collector uses the last record for each execution and joins captured calls.
+    HTTP failures keep their status and carry evidence in the error body. Cancellation
+    still propagates; a cancelled or lost response cannot deliver in-memory evidence.
     """
-    if capture_dir is None:
-        return verify_fn
-    try:
-        store = _store(capture_dir)
-    except Exception:
-        logger.warning("Could not initialize verifier capture.", exc_info=True)
+    if not enabled:
         return verify_fn
 
     @functools.wraps(verify_fn)
-    async def wrapped(*args: P.args, **kwargs: P.kwargs) -> T:
-        rollout_id = current_rollout_id()
-        if rollout_id is None:
+    async def wrapped(*args: P.args, **kwargs: P.kwargs) -> T | Response:
+        if current_rollout_id() is None:
             return await verify_fn(*args, **kwargs)
         invocation = VerifierInvocation(invocation_id=f"verify-{uuid4().hex}")
-        _record(store, rollout_id, invocation)
         with verifier_invocation_context(invocation.invocation_id):
             try:
                 result = await verify_fn(*args, **kwargs)
-            except asyncio.CancelledError:
-                invocation.status = "incomplete"
-                invocation.failure_kind = CANCELLED
-                raise
-            except TimeoutError:
-                invocation.status = "incomplete"
-                invocation.failure_kind = TRANSPORT_TIMEOUT
-                raise
-            except Exception:
-                invocation.status = "failed"
-                invocation.failure_kind = VERIFIER_ERROR
-                raise
+            except Exception as error:
+                invocation.status = "incomplete" if isinstance(error, TimeoutError) else "failed"
+                invocation.failure_kind = TRANSPORT_TIMEOUT if isinstance(error, TimeoutError) else VERIFIER_ERROR
+                if isinstance(error, HTTPException):
+                    result = JSONResponse(
+                        {"detail": error.detail}, status_code=error.status_code, headers=error.headers
+                    )
+                else:
+                    logger.exception("Verification failed.")
+                    result = JSONResponse({"detail": "Internal Server Error"}, status_code=500)
             else:
-                try:
-                    _finish(invocation, result)
-                except Exception:
-                    logger.warning("Could not read verifier outcome.", exc_info=True)
+                _finish(invocation, result)
+
+        evidence = [invocation.model_dump(mode="json")]
+        if isinstance(result, Response):
+            # Preserve the original status, headers, cookies and background cleanup.
+            # Non-JSON responses cannot carry structured observations.
+            try:
+                data = json.loads(result.body)
+            except (ValueError, AttributeError):
                 return result
-            finally:
-                _record(store, rollout_id, invocation)
+            if not isinstance(data, dict):
+                return result
+            data[NG_VERIFIER_INVOCATIONS_KEY] = evidence
+            result.body = JSONResponse(jsonable_encoder(data)).body
+            result.headers["content-length"] = str(len(result.body))
+            return result
+        if isinstance(result, BaseModel):
+            return result.model_copy(update={NG_VERIFIER_INVOCATIONS_KEY: [invocation]})
+        if isinstance(result, Mapping):
+            return {**result, NG_VERIFIER_INVOCATIONS_KEY: evidence}
+        return result
 
     return wrapped
-
-
-def has_verifier_capture(record: Mapping[str, Any], capture_dirs: list[Path]) -> bool:
-    """Whether a failed rollout reached verification and may have judge calls to retain."""
-    rollout_id = maybe_rollout_id_from_run_body(record)
-    return rollout_id is not None and any(
-        (directory / _DIRECTORY).is_dir() and _store(directory).path_for(rollout_id).exists()
-        for directory in capture_dirs
-    )
-
-
-def merge_verifier_capture_into_record(record: dict[str, Any], capture_dirs: list[Path]) -> None:
-    """Combine verify outcomes with captured call ownership before trajectory projection."""
-    rollout_id = maybe_rollout_id_from_run_body(record)
-    if rollout_id is None:
-        return
-    for directory in capture_dirs:
-        if not (directory / _DIRECTORY).is_dir():
-            continue
-        store = _store(directory)
-        if not store.path_for(rollout_id).exists() and not store.is_incomplete(rollout_id):
-            continue
-        capture = record.setdefault("ng_model_call_capture", {})
-        invocations = {inv["invocation_id"]: inv for inv in capture.get("verifier_invocations", [])}
-        try:
-            records, invalid_count = store.read_available(rollout_id)
-            for _, raw in records:
-                try:
-                    invocation = VerifierInvocation.model_validate(raw)
-                    if not invocation.invocation_id.strip():
-                        raise ValueError("empty verifier invocation ID")
-                    existing = invocations.get(invocation.invocation_id)
-                    if existing is not None:
-                        invocation.model_calls = VerifierInvocation.model_validate(existing).model_calls
-                    invocations[invocation.invocation_id] = invocation.model_dump(mode="json")
-                except (ValueError, TypeError):
-                    invalid_count += 1
-            if invalid_count or store.is_incomplete(rollout_id):
-                capture.setdefault("gaps", []).append({"code": "verifier_capture_incomplete"})
-        except Exception:
-            logger.warning("Could not read verifier capture for rollout %s.", rollout_id, exc_info=True)
-            capture.setdefault("gaps", []).append({"code": "verifier_capture_unreadable"})
-        if invocations:
-            capture["verifier_invocations"] = list(invocations.values())
-
-
-def clear_verifier_captures_for_rollouts(records: list[Any], capture_dirs: list[Path]) -> None:
-    """Clear verifier observations alongside model captures before redispatching a rollout."""
-    for directory in capture_dirs:
-        if not (directory / _DIRECTORY).is_dir():
-            continue
-        store = _store(directory)
-        for record in records:
-            rollout_id = maybe_rollout_id_from_run_body(record)
-            if rollout_id is not None:
-                store.path_for(rollout_id).unlink(missing_ok=True)
-                store.incomplete_path_for(rollout_id).unlink(missing_ok=True)

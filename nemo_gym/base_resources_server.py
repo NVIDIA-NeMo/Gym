@@ -14,11 +14,10 @@
 # limitations under the License.
 from abc import abstractmethod
 from enum import Enum
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Optional, TypeVar, get_args
 
 from fastapi import FastAPI, Request
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, PrivateAttr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, PrivateAttr, TypeAdapter, field_validator
 from starlette.middleware import Middleware
 
 
@@ -49,6 +48,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.rollout_correlation import RolloutContextMiddleware
+from nemo_gym.rollout_observability import VerifierInvocation
 from nemo_gym.sandbox.access import SandboxAccess
 from nemo_gym.server_utils import SESSION_ID_KEY, BaseRunServerInstanceConfig, BaseServer, SimpleServer
 from nemo_gym.telemetry.endpoints import traced_verify_endpoint
@@ -143,6 +143,7 @@ class BaseVerifyRequest(BaseRunRequest):
 
 class BaseVerifyResponse(BaseVerifyRequest):
     reward: float
+    ng_verifier_invocations: list[VerifierInvocation] = Field(default_factory=list, exclude_if=lambda value: not value)
 
     mask_sample: bool = Field(
         default=False,
@@ -321,15 +322,13 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         app.post("/seed_session")(self.seed_session)
         app.post("/close_session")(self.close_resources_session)
         config = getattr(self.server_client, "global_config_dict", {})
-        capture_dir = (
-            Path(config["model_call_capture_dir"])
-            if config.get("observability_enabled", False) is True and config.get("model_call_capture_dir")
-            else None
-        )
         # Wrapped outside judge_failsafe so the span covers the failsafe's own handling too.
         app.post("/verify")(
             traced_verify_endpoint(
-                observe_verifier(judge_failsafe(self.verify), capture_dir=capture_dir),
+                observe_verifier(
+                    judge_failsafe(self.verify),
+                    enabled=TypeAdapter(bool).validate_python(config.get("observability_enabled", False)),
+                ),
                 static_attributes={"nemo.gym.server.name": self.config.name},
             )
         )

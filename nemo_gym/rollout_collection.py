@@ -88,16 +88,12 @@ from nemo_gym.observability.model_calls import (
     model_call_capture_dirs_from_config,
     observability_enabled_from_config,
 )
-from nemo_gym.observability.verifiers import (
-    clear_verifier_captures_for_rollouts,
-    has_verifier_capture,
-    merge_verifier_capture_into_record,
-)
 from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for, materialized_path_for
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import (
     NG_AGENT_OBSERVATIONS_KEY,
+    NG_VERIFIER_INVOCATIONS_KEY,
     AgentInvocation,
     AgentObservationBundle,
     ModelCallRef,
@@ -408,6 +404,8 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
             record["_ng_failure_partial_response"] = failure["partial_response"]
         if failure.get("agent_observations") is not None:
             record[NG_AGENT_OBSERVATIONS_KEY] = failure["agent_observations"]
+        if failure.get("verifier_invocations") is not None:
+            record[NG_VERIFIER_INVOCATIONS_KEY] = failure["verifier_invocations"]
         return record
     result = response.get("result")
     if not isinstance(result, Mapping):
@@ -735,8 +733,11 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
             projected = TrajectoryModelCall.model_validate(merged)
             model_calls[position] = projected
 
-    # Merge captured verifier invocations and their model-call references into the trajectory.
-    for raw_invocation in capture.get("verifier_invocations") or []:
+    # Join returned verifier outcomes with model-call references reconstructed from capture.
+    for raw_invocation in [
+        *(capture.get("verifier_invocations") or []),
+        *(result.get(NG_VERIFIER_INVOCATIONS_KEY) or []),
+    ]:
         try:
             invocation = VerifierInvocation.model_validate(raw_invocation)
             existing = next((i for i in verifier_invocations if i.invocation_id == invocation.invocation_id), None)
@@ -784,6 +785,7 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
 
 
 def _strip_capture_payloads(result: dict[str, Any]) -> None:
+    result.pop(NG_VERIFIER_INVOCATIONS_KEY, None)
     capture = result.get("ng_model_call_capture")
     calls = capture.get("calls") if isinstance(capture, dict) else None
     if isinstance(capture, dict):
@@ -3172,7 +3174,6 @@ class RolloutCollectionHelper(BaseModel):
         if capture_dirs:
             print("Clearing existing model-call captures for rollouts being dispatched")
             clear_model_call_captures_for_rollouts(input_rows, capture_dirs)
-            clear_verifier_captures_for_rollouts(input_rows, capture_dirs)
         token_capture_rows = [
             row
             for row in input_rows
@@ -3358,7 +3359,7 @@ class RolloutCollectionHelper(BaseModel):
                 # when capture is off). Never alters the harness output/reward already in `result`.
                 # A failed episode that returned agent evidence made model calls worth joining.
                 if capture_dirs and (
-                    not no_result or NG_AGENT_OBSERVATIONS_KEY in result or has_verifier_capture(result, capture_dirs)
+                    not no_result or NG_AGENT_OBSERVATIONS_KEY in result or NG_VERIFIER_INVOCATIONS_KEY in result
                 ):
                     # A cancelled call's capture write runs detached, so drain the claims this
                     # rollout still holds before snapshotting; otherwise a late row is lost.
@@ -3371,13 +3372,11 @@ class RolloutCollectionHelper(BaseModel):
                         include_payloads=not _has_observation_gap(result, "multimodal_history_redacted"),
                     )
 
-                if capture_dirs:
-                    merge_verifier_capture_into_record(result, capture_dirs)
-
                 if (
                     "ng_model_call_capture" in result
                     or NG_AGENT_OBSERVATIONS_KEY in result
                     or NG_TRAJECTORY_KEY in result
+                    or NG_VERIFIER_INVOCATIONS_KEY in result
                 ):
                     _attach_trajectory_record(row, result)
 

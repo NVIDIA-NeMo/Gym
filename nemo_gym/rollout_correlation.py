@@ -30,6 +30,9 @@ from nemo_gym.global_config import (
 )
 
 
+VERIFIER_INVOCATION_HEADER = "x-ng-verifier-invocation-id"
+
+
 _ROLLOUT_ID: ContextVar[Optional[str]] = ContextVar("nemo_gym_rollout_id", default=None)
 _VERIFIER_INVOCATION_ID: ContextVar[Optional[str]] = ContextVar("nemo_gym_verifier_invocation_id", default=None)
 

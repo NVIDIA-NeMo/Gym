@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -16,16 +17,12 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.base_responses_api_model import CaptureStore
-from nemo_gym.failure_kinds import CANCELLED, JUDGE_FAILED, SESSION_LOST, TRANSPORT_TIMEOUT, VERIFIER_ERROR
+from nemo_gym.failure_kinds import JUDGE_FAILED, SESSION_LOST, TRANSPORT_TIMEOUT, VERIFIER_ERROR
 from nemo_gym.judge import JudgeError, call_judge, judge_failsafe
 from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
-from nemo_gym.observability.verifiers import (
-    clear_verifier_captures_for_rollouts,
-    merge_verifier_capture_into_record,
-    observe_verifier,
-)
+from nemo_gym.observability.verifiers import observe_verifier
 from nemo_gym.rollout_collection import _build_trajectory_record
-from nemo_gym.rollout_correlation import current_verifier_invocation_id, rollout_context
+from nemo_gym.rollout_correlation import VERIFIER_INVOCATION_HEADER, current_verifier_invocation_id, rollout_context
 from nemo_gym.server_utils import ServerClient
 
 
@@ -37,10 +34,9 @@ class VerifyInput(BaseModel):
     response: dict = {}
 
 
-def collected(path: Path, rollout_id: str) -> dict:
-    record = {"_ng_rollout_id": rollout_id}
+def collected(path: Path, rollout_id: str, result: dict) -> dict:
+    record = {**result, "_ng_rollout_id": rollout_id}
     merge_model_call_capture_into_record(record, [path], include_payloads=True)
-    merge_verifier_capture_into_record(record, [path])
     return record
 
 
@@ -50,7 +46,7 @@ async def test_one_verify_owns_parallel_judge_calls_and_retry_attempts(tmp_path)
     observed_ids = []
 
     async def post(*, server_name, headers, **kwargs):
-        invocation_id = headers["x-ng-verifier-invocation-id"]
+        invocation_id = headers[VERIFIER_INVOCATION_HEADER]
         observed_ids.append(invocation_id)
         for attempt in range(2):
             call_id = f"{server_name}-{attempt}"
@@ -81,11 +77,11 @@ async def test_one_verify_owns_parallel_judge_calls_and_retry_attempts(tmp_path)
         return {"reward": 0.0}
 
     with rollout_context("one-verify"):
-        result = await observe_verifier(verify, capture_dir=tmp_path)()
-    assert result == {"reward": 0.0}
+        result = await observe_verifier(verify, enabled=True)()
+    assert result["reward"] == 0.0
     assert current_verifier_invocation_id() is None
     assert len(set(observed_ids)) == 1
-    record = collected(tmp_path, "one-verify")
+    record = collected(tmp_path, "one-verify", result)
     trajectory = _build_trajectory_record({"_ng_task_index": 0, "_ng_rollout_index": 0}, record)
     assert len(trajectory.verifier_invocations) == 1
     invocation = trajectory.verifier_invocations[0]
@@ -109,12 +105,13 @@ async def test_concurrent_verifications_keep_separate_identities(tmp_path):
         assert current_verifier_invocation_id() == ids[name]
         return {"reward": 1.0}
 
-    wrapped = observe_verifier(verify, capture_dir=tmp_path)
+    wrapped = observe_verifier(verify, enabled=True)
     with rollout_context("parallel"):
-        await asyncio.gather(wrapped("a"), wrapped("b"))
+        results = await asyncio.gather(wrapped("a"), wrapped("b"))
     assert ids["a"] != ids["b"]
     assert current_verifier_invocation_id() is None
-    invocations = collected(tmp_path, "parallel")["ng_model_call_capture"]["verifier_invocations"]
+    invocations = [inv for result in results for inv in result["ng_verifier_invocations"]]
+    assert list(tmp_path.iterdir()) == []
     assert len(invocations) == 2
     assert all(inv["status"] == "completed" and inv["model_calls"] == [] for inv in invocations)
 
@@ -125,16 +122,17 @@ async def test_concurrent_verifications_keep_separate_identities(tmp_path):
     [
         (RuntimeError("scoring broke"), "failed", VERIFIER_ERROR),
         (TimeoutError("grading deadline"), "incomplete", TRANSPORT_TIMEOUT),
-        (asyncio.CancelledError(), "incomplete", CANCELLED),
     ],
 )
-async def test_verify_errors_survive_without_a_response(tmp_path, error, status, kind):
+async def test_verify_errors_return_evidence_in_http_failure(tmp_path, error, status, kind):
     async def verify():
         raise error
 
-    with rollout_context("error"), pytest.raises(type(error)):
-        await observe_verifier(verify, capture_dir=tmp_path)()
-    (invocation,) = collected(tmp_path, "error")["ng_model_call_capture"]["verifier_invocations"]
+    with rollout_context("error"):
+        response = await observe_verifier(verify, enabled=True)()
+    assert response.status_code == 500
+    (invocation,) = json.loads(response.body)["ng_verifier_invocations"]
+    assert list(tmp_path.iterdir()) == []
     assert invocation["status"] == status
     assert invocation["failure_kind"] == kind
     assert current_verifier_invocation_id() is None
@@ -146,9 +144,11 @@ async def test_judge_failsafe_preserves_shared_failure_kind(tmp_path):
         raise JudgeError("judge unavailable")
 
     with rollout_context("judge-failure"):
-        response = await observe_verifier(judge_failsafe(verify), capture_dir=tmp_path)(VerifyInput())
+        response = await observe_verifier(judge_failsafe(verify), enabled=True)(VerifyInput())
     assert response.status_code == 200
-    (invocation,) = collected(tmp_path, "judge-failure")["ng_model_call_capture"]["verifier_invocations"]
+    payload = json.loads(response.body)
+    assert payload["_ng_failure_class"] == JUDGE_FAILED
+    (invocation,) = payload["ng_verifier_invocations"]
     assert invocation["status"] == "failed"
     assert invocation["failure_kind"] == JUDGE_FAILED
 
@@ -167,8 +167,9 @@ async def test_returned_grade_does_not_infer_failure_from_reward_or_mask(tmp_pat
         return result
 
     with rollout_context("grade"):
-        assert await observe_verifier(verify, capture_dir=tmp_path)() is result
-    (invocation,) = collected(tmp_path, "grade")["ng_model_call_capture"]["verifier_invocations"]
+        returned = await observe_verifier(verify, enabled=True)()
+    assert {key: value for key, value in returned.items() if key != "ng_verifier_invocations"} == result
+    (invocation,) = returned["ng_verifier_invocations"]
     assert invocation["status"] == status
     assert invocation["failure_kind"] == result.get("failure_kind")
 
@@ -203,11 +204,10 @@ def test_resources_route_observes_programmatic_verify_without_benchmark_changes(
     )
     assert response.status_code == 200, response.text
     assert response.json()["reward"] == 0.0
-    (invocation,) = collected(tmp_path, "programmatic")["ng_model_call_capture"]["verifier_invocations"]
+    (invocation,) = response.json()["ng_verifier_invocations"]
     assert invocation["status"] == "completed"
     assert invocation["model_calls"] == []
-    clear_verifier_captures_for_rollouts([{"_ng_rollout_id": "programmatic"}], [tmp_path])
-    assert not collected(tmp_path, "programmatic")["ng_model_call_capture"].get("verifier_invocations")
+    assert list(tmp_path.iterdir()) == []
 
 
 @pytest.mark.asyncio
@@ -216,7 +216,7 @@ async def test_observability_disabled_leaves_execution_unchanged(tmp_path):
         assert current_verifier_invocation_id() is None
         return {"reward": 1.0}
 
-    assert observe_verifier(verify, capture_dir=None) is verify
+    assert observe_verifier(verify, enabled=False) is verify
     with rollout_context("disabled"):
         assert await verify() == {"reward": 1.0}
     assert list(tmp_path.iterdir()) == []
@@ -245,33 +245,41 @@ async def test_direct_model_requests_inside_verify_inherit_owner(tmp_path, monke
         await client.post(server_name="judge", url_path="/v1/responses", json={}, headers={"x-custom": "kept"})
         assert transport.call_args.kwargs["headers"] == {
             "x-custom": "kept",
-            "x-ng-verifier-invocation-id": owner,
+            VERIFIER_INVOCATION_HEADER: owner,
         }
         return {"reward": 1.0}
 
     with rollout_context("direct"):
-        await observe_verifier(verify, capture_dir=tmp_path)()
+        await observe_verifier(verify, enabled=True)()
     assert current_verifier_invocation_id() is None
     transport.reset_mock()
     with rollout_context("policy"):
         await client.post(server_name="judge", url_path="/v1/responses", json={})
-    assert "x-ng-verifier-invocation-id" not in transport.call_args.kwargs.get("headers", {})
+    assert VERIFIER_INVOCATION_HEADER not in transport.call_args.kwargs.get("headers", {})
 
 
 @pytest.mark.asyncio
-async def test_corrupt_verifier_record_preserves_good_evidence_and_marks_gap(tmp_path):
-    from nemo_gym.observability.verifiers import has_verifier_capture
+async def test_cancelled_verify_does_not_swallow_cancellation_or_write_files(tmp_path):
+    async def verify():
+        raise asyncio.CancelledError()
+
+    with rollout_context("cancelled"), pytest.raises(asyncio.CancelledError):
+        await observe_verifier(verify, enabled=True)()
+    assert current_verifier_invocation_id() is None
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_http_error_retains_status_headers_and_detail():
+    from fastapi import HTTPException
 
     async def verify():
-        return {"reward": 1.0}
+        raise HTTPException(503, detail="verifier unavailable", headers={"Retry-After": "2"})
 
-    with rollout_context("partial"):
-        await observe_verifier(verify, capture_dir=tmp_path)()
-    store = CaptureStore(tmp_path / "verifier_invocations")
-    with store.path_for("partial").open("a") as out:
-        out.write("{broken\n")
-    assert has_verifier_capture({"_ng_rollout_id": "partial"}, [tmp_path])
-    assert not has_verifier_capture({"_ng_rollout_id": "other"}, [tmp_path])
-    capture = collected(tmp_path, "partial")["ng_model_call_capture"]
-    assert capture["verifier_invocations"][0]["status"] == "completed"
-    assert {"code": "verifier_capture_incomplete"} in capture["gaps"]
+    with rollout_context("http-error"):
+        response = await observe_verifier(verify, enabled=True)()
+    assert response.status_code == 503
+    assert response.headers["retry-after"] == "2"
+    payload = json.loads(response.body)
+    assert payload["detail"] == "verifier unavailable"
+    assert payload["ng_verifier_invocations"][0]["status"] == "failed"

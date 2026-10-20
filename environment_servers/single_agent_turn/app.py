@@ -41,7 +41,12 @@ from nemo_gym.global_config import (
     get_first_server_config_dict,
 )
 from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.rollout_observability import NG_AGENT_OBSERVATIONS_KEY, AgentObservationBundle
+from nemo_gym.rollout_observability import (
+    NG_AGENT_OBSERVATIONS_KEY,
+    NG_VERIFIER_INVOCATIONS_KEY,
+    AgentObservationBundle,
+    VerifierInvocation,
+)
 from nemo_gym.server_utils import (
     get_response_json,
     is_nemo_gym_fastapi_entrypoint,
@@ -424,6 +429,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         observations: AgentObservationBundle | None,
     ) -> SingleAgentTurnResult:
         task_input = request.task.task_input
+        verifier_invocations = None
         try:
             verify_http_response = await self.server_client.post(
                 server_name=self.config.resources_server.name,
@@ -441,8 +447,19 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 # Final cleanup closes the session, so the Resources Server keeps tracking it until then.
                 headers={CHECKPOINT_CLOSE_FOLLOWS_HEADER: "1"},
             )
-            await raise_for_status(verify_http_response)
-            return SingleAgentTurnResult.model_validate(await get_response_json(verify_http_response))
+            # Read returned evidence before raising on an HTTP failure. A non-JSON
+            # error body still follows the original HTTP-error handling path.
+            try:
+                payload = await get_response_json(verify_http_response)
+                if isinstance(payload, dict) and payload.get(NG_VERIFIER_INVOCATIONS_KEY):
+                    verifier_invocations = [
+                        VerifierInvocation.model_validate(value) for value in payload[NG_VERIFIER_INVOCATIONS_KEY]
+                    ]
+            except (ValueError, TypeError):
+                await raise_for_status(verify_http_response, content=await verify_http_response.read())
+                raise
+            await raise_for_status(verify_http_response, content=await verify_http_response.read())
+            return SingleAgentTurnResult.model_validate(payload)
         except Exception as error:
             raise self._failure(
                 stage="verification",
@@ -450,6 +467,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 terminal=not _is_retryable_dependency_error(error),
                 partial_response=agent_response,
                 agent_observations=observations,
+                verifier_invocations=verifier_invocations,
             ) from error
 
     def _agent_responses_path(self, request: SingleAgentTurnRequest) -> str:
@@ -472,6 +490,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         terminal: bool,
         partial_response: Any = None,
         agent_observations: Any = None,
+        verifier_invocations: list[VerifierInvocation] | None = None,
     ) -> HandledEpisodeError:
         return HandledEpisodeError(
             SingleAgentTurnFailure(
@@ -480,6 +499,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 terminal=terminal,
                 partial_response=partial_response,
                 agent_observations=agent_observations,
+                verifier_invocations=verifier_invocations,
             )
         )
 

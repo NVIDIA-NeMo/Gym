@@ -84,7 +84,7 @@ from nemo_gym.responses_streaming import (
     synthesize_responses_sse,
     validate_streaming_responses_params,
 )
-from nemo_gym.rollout_correlation import rollout_context, scope_with_routed_path
+from nemo_gym.rollout_correlation import VERIFIER_INVOCATION_HEADER, rollout_context, scope_with_routed_path
 from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
     BaseServer,
@@ -1478,7 +1478,9 @@ class _CaptureMiddleware:
 
         rollout_id = rollout_from_path
         model_call_id = uuid4().hex
-        verifier_invocation_id = _unique_request_header(scope.get("headers") or [], b"x-ng-verifier-invocation-id")
+        verifier_invocation_id = _unique_request_header(
+            scope.get("headers") or [], VERIFIER_INVOCATION_HEADER.encode("ascii")
+        )
         client_session_id = _unique_request_header(scope.get("headers") or [], _CLIENT_SESSION_HEADER)
         client_assistant_message_id = (
             _unique_request_header(scope.get("headers") or [], self._assistant_message_header)
