@@ -4,7 +4,7 @@
 import { readFileSync } from "node:fs";
 import { Writable } from "node:stream";
 
-// Errors this adapter raises itself. Their messages never carry response bodies, headers or URLs.
+// Errors this adapter raises itself. Their messages never carry response bodies, header values or full URLs.
 class GymMcpError extends Error {}
 
 // Pi's JSON mode replaces console.log and process.stdout.write with writers to stderr.
@@ -21,28 +21,37 @@ function describe(error) {
   return `${error?.name ?? "Error"}${code ? ` (${code})` : ""}`;
 }
 
+// Scheme, host and port only: enough to tell an unreachable address, without the path or query.
+function originOf(url) {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return "an invalid URL";
+  }
+}
+
 // Gym's MCP server uses stateless Streamable HTTP with JSON responses. This
 // adapter deliberately does not implement arbitrary MCP transports or SSE.
 // A server marked `required: false` is skipped when its discovery fails; any other
-// failure registers no tools. A successful call of one of a server's `terminal_tools`
-// ends the run, as a finish tool does, and each terminal tool must be offered.
+// failure registers no tools. A successful call of a tool listed in any server's
+// `terminal_tools` ends the run, as a finish tool does, and each listed tool must be offered.
 export async function registerGymTools(pi, servers, emit = emitEvent) {
   const names = new Set(pi.getAllTools().map((tool) => tool.name));
   const pending = [];
   const offered = new Set();
-  const terminal = new Set();
+  const enabled = Object.entries(servers).filter(([, server]) => server.enabled !== false);
+  const terminal = new Set(enabled.flatMap(([, server]) => server.terminal_tools || []));
   const skipped = [];
-  for (const [serverName, server] of Object.entries(servers)) {
-    if (server.enabled === false) continue;
-    for (const name of server.terminal_tools || []) terminal.add(name);
+  for (const [serverName, server] of enabled) {
     let tools, toolNames;
     try {
-      ({ tools, toolNames } = await discoverTools(serverName, server, names));
+      ({ tools, toolNames } = await discoverTools(serverName, server, names, terminal));
     } catch (error) {
-      if (server.required !== false) throw new GymMcpError(`${serverName}: ${describe(error)}`);
+      const cause = `${describe(error)} at ${originOf(server.url)}`;
+      if (server.required !== false) throw new GymMcpError(`${serverName}: ${cause}`);
       skipped.push(serverName);
       try {
-        emit({ type: "ng_gym_mcp_server_skipped", server: serverName, error: describe(error) });
+        emit({ type: "ng_gym_mcp_server_skipped", server: serverName, error: cause });
       } catch {
         // A lost diagnostic must not fail a session that can run without this server.
       }
@@ -62,14 +71,13 @@ export async function registerGymTools(pi, servers, emit = emitEvent) {
   for (const tool of pending) pi.registerTool(tool);
 }
 
-async function discoverTools(serverName, server, registered) {
+async function discoverTools(serverName, server, registered, terminal) {
   if (!/^[A-Za-z0-9_-]+$/.test(serverName)) {
     throw new GymMcpError("Invalid Gym MCP server name");
   }
   const names = new Set(registered);
   const pending = [];
   const toolNames = [];
-  const terminal = new Set(server.terminal_tools || []);
   let requestId = 0;
   let protocolVersion = "2025-03-26";
   async function rpc(method, params, signal, notification = false) {
@@ -103,7 +111,9 @@ async function discoverTools(serverName, server, registered) {
     let message;
     try {
       message = await response.json();
-    } catch {
+    } catch (error) {
+      // The deadline or a cancellation can also end the body read; report that, not the JSON.
+      if (deadline.aborted || signal?.aborted) throw error;
       throw new GymMcpError(`Gym MCP ${method}: unreadable JSON response`);
     }
     if (message.jsonrpc !== "2.0" || message.id !== id || message.error || !message.result) {
@@ -126,9 +136,13 @@ async function discoverTools(serverName, server, registered) {
     const result = await rpc("tools/list", cursor ? { cursor } : {});
     for (const tool of result.tools) {
       const name = `${serverName}_${tool.name}`;
-      if (!/^[A-Za-z0-9_-]{1,64}$/.test(name) || names.has(name)) {
-        throw new GymMcpError("Invalid or duplicate Gym MCP tool name");
+      if (!/^[A-Za-z0-9_-]{1,64}$/.test(name)) {
+        throw new GymMcpError(
+          `Gym MCP tool name ${JSON.stringify(String(name).slice(0, 100))} is not a Pi tool name ` +
+            "(letters, digits, '-' and '_', at most 64 characters with the server prefix)",
+        );
       }
+      if (names.has(name)) throw new GymMcpError(`Gym MCP tool name ${name} is already taken`);
       names.add(name);
       toolNames.push(tool.name);
       pending.push({

@@ -2,13 +2,32 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:http";
 import { test } from "node:test";
 import { registerGymTools } from "../gym_mcp.mjs";
+
+const GYM_MCP = JSON.stringify(new URL("../gym_mcp.mjs", import.meta.url).href);
+
+// A port that was just released refuses connections (fetch blocks low ports such as 1 outright).
+async function closedPort() {
+  const closed = createServer();
+  await new Promise((resolve) => closed.listen(0, "127.0.0.1", resolve));
+  const { port } = closed.address();
+  await new Promise((resolve) => closed.close(resolve));
+  return port;
+}
+
+function serversFile(t, servers) {
+  const dir = mkdtempSync(join(tmpdir(), "gym-mcp-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const path = join(dir, "servers.json");
+  writeFileSync(path, JSON.stringify(servers));
+  return path;
+}
 
 async function fixture(t, handle) {
   const calls = [];
@@ -76,8 +95,25 @@ test("honors pagination and detects names colliding after namespacing", async (t
   assert.deepEqual(a.tools.map((x) => x.name), ["tavily_web_search", "tavily_find_in_page"]);
   const collision = agent();
   collision.getAllTools = () => [{ name: "tavily_web_search" }];
-  await assert.rejects(registerGymTools(collision, { tavily: f.config }), /duplicate/);
+  await assert.rejects(
+    registerGymTools(collision, { tavily: f.config }),
+    /^Error: tavily: Gym MCP tool name tavily_web_search is already taken at http:\/\/127\.0\.0\.1:\d+$/,
+  );
   assert.deepEqual(collision.tools, []);
+});
+
+test("names a tool whose name Pi cannot use", async (t) => {
+  const long = "x".repeat(60);
+  const f = await fixture(t, (body, _req, res) => {
+    if (body.method !== "tools/list") return false;
+    res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: {
+      tools: [{ name: long, inputSchema: { type: "object" } }],
+    } }));
+    return true;
+  });
+  await assert.rejects(registerGymTools(agent(), { tavily: f.config }), (error) =>
+    error.message.startsWith(`tavily: Gym MCP tool name "tavily_${long}" is not a Pi tool name`) &&
+    error.message.includes("at most 64 characters"));
 });
 
 test("propagates MCP tool failures into Pi tool errors", async (t) => {
@@ -99,6 +135,18 @@ test("tool calls have a deadline and honor cancellation", async (t) => {
   await assert.rejects(a.tools[0].execute("b", {}, AbortSignal.abort()), (e) => e.name === "AbortError");
 });
 
+test("a deadline that ends the response body is reported as a timeout", async (t) => {
+  const f = await fixture(t, (body, _req, res) => {
+    if (body.method !== "tools/call") return false;
+    res.writeHead(200, { "content-type": "application/json" });
+    res.write('{"jsonrpc": "2.0", '); // and never finish the body
+    return true;
+  });
+  const a = agent();
+  await registerGymTools(a, { tavily: { ...f.config, timeout: 100 } });
+  await assert.rejects(a.tools[0].execute("a", { query: "x" }), (e) => e.name === "TimeoutError");
+});
+
 test("does not connect disabled entries", async () => {
   const a = agent();
   await registerGymTools(a, { unused: { enabled: false } });
@@ -109,8 +157,13 @@ test("skips an unavailable optional server but not a required one", async (t) =>
   const f = await fixture(t);
   const down = await fixture(t, (_body, _req, res) => { res.writeHead(503).end(); return true; });
   const a = agent();
-  await registerGymTools(a, { tavily: f.config, extra: { ...down.config, required: false } });
+  const events = [];
+  await registerGymTools(a, { tavily: f.config, extra: { ...down.config, required: false } }, (e) => events.push(e));
   assert.deepEqual(a.tools.map((x) => x.name), ["tavily_web_search"]);
+  const origin = new URL(down.config.url).origin;
+  assert.deepEqual(events, [
+    { type: "ng_gym_mcp_server_skipped", server: "extra", error: `Gym MCP initialize: HTTP 503 at ${origin}` },
+  ]);
   const b = agent();
   await assert.rejects(registerGymTools(b, { tavily: f.config, extra: down.config }), /HTTP 503/);
   assert.deepEqual(b.tools, []);
@@ -120,8 +173,10 @@ test("an optional server whose tools collide registers none of them", async (t) 
   const f = await fixture(t);
   const a = agent();
   a.getAllTools = () => [{ name: "tavily_web_search" }];
-  await registerGymTools(a, { tavily: { ...f.config, required: false } });
+  const events = [];
+  await registerGymTools(a, { tavily: { ...f.config, required: false } }, (e) => events.push(e));
   assert.deepEqual(a.tools, []);
+  assert.match(events[0].error, /^Gym MCP tool name tavily_web_search is already taken at /);
 });
 
 test("a terminal tool ends the run after a successful call", async (t) => {
@@ -149,31 +204,37 @@ test("a failed terminal tool call does not end the run", async (t) => {
   await assert.rejects(a.tools[0].execute("a", { query: "x" }), /Files do not exist/);
 });
 
+test("a finish tool is terminal on whichever granted server offers it", async (t) => {
+  const f = await fixture(t);
+  const other = await fixture(t, (body, _req, res) => {
+    if (body.method !== "tools/list") return false;
+    res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { tools: [] } }));
+    return true;
+  });
+  const a = agent();
+  // Only the server without the tool lists it.
+  await registerGymTools(a, { empty: { ...other.config, terminal_tools: ["web_search"] }, tavily: f.config });
+  assert.equal((await a.tools[0].execute("a", { query: "x" })).terminate, true);
+});
+
 test("names the failed server and reports a skipped optional one as an event", async (t) => {
-  // A port that was just released refuses connections (fetch blocks low ports such as 1 outright).
-  const closed = createServer();
-  await new Promise((resolve) => closed.listen(0, "127.0.0.1", resolve));
-  const { port } = closed.address();
-  await new Promise((resolve) => closed.close(resolve));
-  const unreachable = { url: `http://127.0.0.1:${port}/mcp`, headers: {}, timeout: 1000 };
-  await assert.rejects(registerGymTools(agent(), { gdpval: unreachable }), /^Error: gdpval: TypeError \(ECONNREFUSED\)$/);
+  const port = await closedPort();
+  const unreachable = { url: `http://127.0.0.1:${port}/mcp?key=secret`, headers: {}, timeout: 1000 };
+  const cause = `TypeError (ECONNREFUSED) at http://127.0.0.1:${port}`;
+  await assert.rejects(registerGymTools(agent(), { gdpval: unreachable }), (error) => error.message === `gdpval: ${cause}`);
   const events = [];
   await registerGymTools(agent(), { extra: { ...unreachable, required: false } }, (event) => events.push(event));
-  assert.deepEqual(events, [{ type: "ng_gym_mcp_server_skipped", server: "extra", error: "TypeError (ECONNREFUSED)" }]);
+  assert.deepEqual(events, [{ type: "ng_gym_mcp_server_skipped", server: "extra", error: cause }]);
 });
 
 test("a required server failure exits 78 and reports its cause past Pi's redirected stdout", async (t) => {
-  const closed = createServer();
-  await new Promise((resolve) => closed.listen(0, "127.0.0.1", resolve));
-  const { port } = closed.address();
-  await new Promise((resolve) => closed.close(resolve));
-  const config = join(mkdtempSync(join(tmpdir(), "gym-mcp-")), "servers.json");
-  writeFileSync(config, JSON.stringify({ resources: { url: `http://127.0.0.1:${port}/mcp`, headers: {}, timeout: 1000 } }));
+  const port = await closedPort();
+  const config = serversFile(t, { resources: { url: `http://127.0.0.1:${port}/mcp`, headers: {}, timeout: 1000 } });
   // Pi's JSON mode points process.stdout.write and console.log at stderr before it loads extensions.
   const script = `
     process.stdout.write = (chunk) => process.stderr.write(chunk);
     console.log = (...args) => process.stderr.write(args.join(" ") + "\\n");
-    const { default: extension } = await import(${JSON.stringify(new URL("../gym_mcp.mjs", import.meta.url).href)});
+    const { default: extension } = await import(${GYM_MCP});
     const handlers = {};
     extension({ on: (name, handler) => { handlers[name] = handler; }, getAllTools: () => [], registerTool: () => {} });
     await handlers.session_start();
@@ -185,14 +246,48 @@ test("a required server failure exits 78 and reports its cause past Pi's redirec
     timeout: 20000,
   });
   assert.equal(child.status, 78, child.stderr);
-  assert.equal(child.stdout, '{"type":"ng_gym_mcp_setup_failed","error":"resources: TypeError (ECONNREFUSED)"}\n');
+  const event = { type: "ng_gym_mcp_setup_failed", error: `resources: TypeError (ECONNREFUSED) at http://127.0.0.1:${port}` };
+  assert.equal(child.stdout, JSON.stringify(event) + "\n");
   assert.ok(!child.stderr.includes("model call would start here"));
+});
+
+test("the setup-failure event survives a backed-up stdout pipe", async (t) => {
+  const port = await closedPort();
+  const config = serversFile(t, { resources: { url: `http://127.0.0.1:${port}/mcp`, headers: {}, timeout: 1000 } });
+  const script = `
+    import { Writable } from "node:stream";
+    process.stdout.write = (chunk) => process.stderr.write(chunk);
+    // Pi's own queued output: more than a pipe holds, so it is still pending when setup fails.
+    Writable.prototype.write.call(process.stdout, JSON.stringify({ type: "filler", data: "x".repeat(1 << 20) }) + "\\n");
+    const { default: extension } = await import(${GYM_MCP});
+    const handlers = {};
+    extension({ on: (name, handler) => { handlers[name] = handler; }, getAllTools: () => [], registerTool: () => {} });
+    await handlers.session_start();
+  `;
+  const child = spawn(process.execPath, ["--input-type=module", "-e", script], {
+    env: { ...process.env, NEMO_GYM_PI_MCP_CONFIG: config },
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  const killer = setTimeout(() => child.kill("SIGKILL"), 20000);
+  t.after(() => clearTimeout(killer));
+  // Listen for the exit before stalling the reader, so the test cannot miss it.
+  const exited = new Promise((resolve) => child.on("close", resolve));
+  let stdout = "";
+  child.stdout.setEncoding("utf8").pause();
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  child.stdout.on("data", (chunk) => { stdout += chunk; });
+  child.stdout.resume();
+  assert.equal(await exited, 78);
+  assert.deepEqual(JSON.parse(stdout.trim().split("\n").at(-1)), {
+    type: "ng_gym_mcp_setup_failed",
+    error: `resources: TypeError (ECONNREFUSED) at http://127.0.0.1:${port}`,
+  });
 });
 
 test("the default event writer reaches stdout past Pi's redirect", () => {
   const script = `
     process.stdout.write = (chunk) => process.stderr.write(chunk);
-    const { registerGymTools } = await import(${JSON.stringify(new URL("../gym_mcp.mjs", import.meta.url).href)});
+    const { registerGymTools } = await import(${GYM_MCP});
     await registerGymTools(
       { getAllTools: () => [], registerTool: () => {} },
       { extra: { url: "http://127.0.0.1:9/mcp", headers: {}, timeout: 1000, required: false } },
@@ -218,13 +313,14 @@ test("a configured finish tool that no server offers fails setup", async (t) => 
   );
 });
 
-test("setup errors never quote response bodies or header values", async (t) => {
+test("setup errors never quote response bodies, header values or URL paths", async (t) => {
   const f = await fixture(t, (_body, _req, res) => {
     res.writeHead(200, { "content-type": "application/json" }).end("<html>secret-token</html>");
     return true;
   });
-  await assert.rejects(registerGymTools(agent(), { tavily: f.config }), (error) =>
-    error.message === "tavily: Gym MCP initialize: unreadable JSON response");
+  const origin = new URL(f.config.url).origin;
+  await assert.rejects(registerGymTools(agent(), { tavily: { ...f.config, url: `${f.config.url}?key=secret-token` } }), (error) =>
+    error.message === `tavily: Gym MCP initialize: unreadable JSON response at ${origin}`);
   const header = { ...f.config, headers: { "X-Session": "secret-token\nInjected: 1" } };
   await assert.rejects(registerGymTools(agent(), { tavily: header }), (error) =>
     /^tavily: TypeError/.test(error.message) && !error.message.includes("secret-token"));

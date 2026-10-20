@@ -103,18 +103,28 @@ stdout and stderr so provider status messages do not hide the actual failure.
 Project extensions, skills, prompt templates, and themes are disabled; repository context
 files may still be read by Pi.
 
-Pi provides its own sandbox tools. To add the Resources server's tools, set
-`resources_tool_transports: [mcp]`: Pi registers each tool of an MCP grant as
-`<grant name>_<tool name>` through `gym_mcp.mjs`, and each call waits up to
-`sandbox_mcp_timeout_seconds` (default 300). A required grant that Pi cannot reach fails the episode
-before inference, with the cause in the error; an optional one is skipped and recorded as an
-`mcp_server_skipped` observation gap. Grant names may contain only letters, digits, `_` and `-`.
-A successful call of a tool listed in `finish_tool_names` (its name on the server, such as `finish`)
-ends the run when every tool call of that turn is such a call; Pi does not stop a turn that also ran
-another tool. Setup fails if no granted server offers a listed tool, so an optional grant that offers
-one is effectively required; without MCP grants the setting has no effect. Responses name MCP calls
-`mcp__<grant name>__<tool name>`, which Gym strips before `/verify`; observations and model calls
-keep the names the model saw.
+Pi provides its own sandbox tools. It can also use the Resources server's tools through MCP tool grants:
+
+- Set `expose_tools_over_mcp: true` on the Resources server and `resources_tool_transports: [mcp]` on the
+  Environment Server. Pi speaks only the stateless JSON MCP endpoint that Gym's Resources servers expose,
+  and the sandbox must reach the grant's URL, as it must reach the model server.
+- `gym_mcp.mjs` registers each tool as `<grant name>_<tool name>`, at most 64 characters. Grant names may
+  contain only letters, digits, `-` and `_`. Seeding rejects a required grant with another name, and grants
+  whose names start with another grant's name and `_`; an optional grant with another name is left out.
+- Tool discovery waits up to 30 seconds per request. Each tool call waits up to
+  `sandbox_mcp_timeout_seconds` (default 300); a call that times out keeps running on the server, so set
+  it above the slowest call the server makes. Tool errors from the server reach the model.
+- A required grant that Pi cannot set up fails the episode before the first model call, with the cause in
+  the error and in an `mcp_setup_failed` observation gap. An optional one is skipped and recorded as an
+  `mcp_server_skipped` gap.
+- A successful call of a tool in `finish_tool_names` (its name on the server, such as `finish`) ends the run
+  when every tool call of that turn is such a call; a turn that also ran another tool continues. Pi may still
+  compact its context after it. Setup fails if no granted server offers a listed tool, so an optional grant
+  that offers one is effectively required. Without MCP grants the setting has no effect.
+- Responses name MCP calls `mcp__<grant name>__<tool name>`, which the Resources server strips from its own
+  grant's calls before `/verify`. Observations and model calls keep the names the model saw.
+- The grant's headers, including its session token, are readable inside the sandbox.
+
 Required Resources HTTP tools (`direct_http`) are rejected. Sandbox sessions also reject host command,
 extra-argument, and environment overrides; those remain available on the local path.
 
@@ -201,7 +211,8 @@ detail, not a separate endpoint or a setup step users must run.
 - `sandbox_bash_timeout_seconds`: maximum runtime of each sandbox bash tool call (default 900);
   shorter tool-requested deadlines are preserved
 - `sandbox_mcp_timeout_seconds`: maximum time of each call to a granted MCP tool (default 300)
-- `finish_tool_names`: granted MCP tools whose successful call ends the run (default none)
+- `finish_tool_names`: granted MCP tools whose successful call ends the run (default none; uses Pi's
+  `terminate`, available from Pi 0.69.0)
 - `session_close_timeout_seconds`: sandbox process cleanup timeout (default 60)
 
 ## Results and limits
