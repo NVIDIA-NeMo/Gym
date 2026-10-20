@@ -85,6 +85,7 @@ async def test_model_route_applied_once_and_cookie_jar_forwarded(monkeypatch) ->
         NOOATerminationReason.POLICY_BUDGET_EXCEEDED,
         NOOATerminationReason.MAX_ITERATIONS_EXCEEDED,
         NOOATerminationReason.MAX_OUTPUT_TOKENS_EXCEEDED,
+        NOOATerminationReason.LOOP_DETECTED,
         "transient",
         "fatal",
         "cancelled",

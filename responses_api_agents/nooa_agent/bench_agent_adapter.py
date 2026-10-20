@@ -21,6 +21,17 @@ if TYPE_CHECKING:
     from nooa_bench.bench_agent import BenchAgent, TaskResult
 
 
+def _retain_cleanup_failure(failure: BaseException | None, cleanup_error: Exception) -> BaseException:
+    if failure is None:
+        failure = cleanup_error
+    else:
+        LOGGER.warning("BenchAgent cleanup failed during invocation failure", exc_info=True)
+    # Preserve the task exception's identity and cause while telling the runner
+    # that this invocation cannot be graded as a normal policy termination.
+    failure.nooa_cleanup_error = cleanup_error
+    return failure
+
+
 async def invoke_bench_agent(agent: BenchAgent, request: NeMoGymResponseCreateParamsNonStreaming) -> TaskResult:
     """Keep the Resources-provided cwd, structured result and honest failures.
 
@@ -29,23 +40,29 @@ async def invoke_bench_agent(agent: BenchAgent, request: NeMoGymResponseCreatePa
     policy-budget/transport/cancellation outcomes distinct. Defaults for the
     summarizer, delegation and CodeActV2 strategy remain upstream-owned.
     """
-    async with preserve_background_services() as shells:
-        shells.adopt(agent.shell.session)
-        failed = False
-        try:
-            cwd = Path.cwd()
-            if Path(agent.shell.cwd).resolve() != cwd:
-                await agent.shell.close()
-                agent._install_python_tools(str(cwd))
-            return await agent._solve_task(_latest_user_text(request))
-        except BaseException:
-            failed = True
-            raise
-        finally:
+    failure: BaseException | None = None
+    try:
+        async with preserve_background_services() as shells:
+            shells.adopt(agent.shell.session)
+            try:
+                cwd = Path.cwd()
+                if Path(agent.shell.cwd).resolve() != cwd:
+                    await agent.shell.close()
+                    agent._install_python_tools(str(cwd))
+                result = await agent._solve_task(_latest_user_text(request))
+            except BaseException as error:
+                # Defer propagation so the upstream scope does not suppress its
+                # own cleanup failure while unwinding the task exception.
+                failure = error
             # Drain summaries and close the shell before Gym projects the final trace.
             try:
                 await agent.aclose()
-            except BaseException:
-                if not failed:
-                    raise
-                LOGGER.warning("BenchAgent cleanup failed during invocation failure", exc_info=True)
+            except Exception as error:
+                failure = _retain_cleanup_failure(failure, error)
+    except Exception as error:
+        failure = _retain_cleanup_failure(failure, error)
+    # Cancellation delivered during either cleanup await bypasses the Exception
+    # handlers above; a previously caught task cancellation also remains intact.
+    if failure is not None:
+        raise failure
+    return result

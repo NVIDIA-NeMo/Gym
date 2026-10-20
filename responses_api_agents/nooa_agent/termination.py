@@ -12,6 +12,7 @@ class NOOATerminationReason(StrEnum):
     POLICY_BUDGET_EXCEEDED = "policy_budget_exceeded"
     MAX_ITERATIONS_EXCEEDED = "max_iterations_exceeded"
     MAX_OUTPUT_TOKENS_EXCEEDED = "max_output_tokens_exceeded"
+    LOOP_DETECTED = "loop_detected"
     INVALID_POLICY_OUTPUT = "invalid_policy_output"
     TIMEOUT_EXCEEDED = "timeout_exceeded"
     CANCELLED = "cancelled"

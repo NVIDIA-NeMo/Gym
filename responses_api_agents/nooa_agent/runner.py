@@ -26,7 +26,7 @@ from types import FrameType
 from typing import Any, Protocol
 from uuid import uuid4
 
-from nooa.errors import GenerationError
+from nooa.errors import GenerationError, LoopDetectedError
 from nooa.runtime.hooks import hooks_scope
 from nooa.strategies.codeact import CodeActSession, CodeActStrategy
 from nooa.strategies.predict import PredictStrategy
@@ -136,6 +136,19 @@ def _is_codeact_iteration_exhaustion(error: BaseException) -> bool:
     )
 
 
+def _is_codeact_loop_stop(error: BaseException) -> bool:
+    # Only the pinned loop guard's model-driven stop is a gradable outcome.
+    if type(error) is not LoopDetectedError or error.__traceback__ is None:
+        return False
+    traceback = error.__traceback__
+    while traceback.tb_next is not None:
+        traceback = traceback.tb_next
+    return traceback.tb_frame.f_code in (
+        CodeActStrategy._loop_guard_before.__code__,
+        CodeActStrategy._loop_guard_after.__code__,
+    )
+
+
 class InProcessNOOARunner:
     """Construct and invoke one isolated NOOA agent instance per Gym rollout."""
 
@@ -231,6 +244,8 @@ class InProcessNOOARunner:
             # Only known NOOA strategy wrappers deliberately chain model errors.
             # Cleanup failures can carry a preceding limit as context and must stay fatal.
             cause: BaseException | None = error
+            if isinstance(getattr(error, "nooa_cleanup_error", None), Exception):
+                cause = None
             seen: set[int] = set()
             while isinstance(error, Exception) and cause is not None and id(cause) not in seen:
                 seen.add(id(cause))
@@ -248,6 +263,10 @@ class InProcessNOOARunner:
                     break
                 if _is_codeact_iteration_exhaustion(cause):
                     termination_reason = NOOATerminationReason.MAX_ITERATIONS_EXCEEDED
+                    termination_error = str(cause)
+                    break
+                if _is_codeact_loop_stop(cause):
+                    termination_reason = NOOATerminationReason.LOOP_DETECTED
                     termination_error = str(cause)
                     break
                 frame = _generation_error_frame(cause)

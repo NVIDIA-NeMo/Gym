@@ -272,3 +272,227 @@ def test_benchagent_runtime_profile_matches_default_packages():
     assert len(pins) == 3 and len(set(pins)) == 1
     assert "subdirectory=packages/nooa-cli" in actual
     assert "subdirectory=packages/nooa-bench" in actual
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", [None, RuntimeError("invocation failed"), asyncio.CancelledError()])
+async def test_scope_cleanup_preserves_original_exception(tmp_path, monkeypatch, caplog, terminal):
+    from nooa.tools._bash_session import BashSession
+
+    monkeypatch.chdir(tmp_path)
+    cleanup_error = RuntimeError("fresh shell cleanup failed")
+    fresh_sessions = []
+    original_close = BashSession.close
+
+    async def solve(task):
+        fresh_sessions.append(ShellTools(cwd=str(tmp_path)).session)
+        if terminal is not None:
+            raise terminal
+        return "completed"
+
+    async def close(session):
+        await original_close(session)
+        if session in fresh_sessions:
+            raise cleanup_error
+
+    monkeypatch.setattr(BashSession, "close", close)
+    shell = ShellTools(cwd=str(tmp_path))
+    agent = SimpleNamespace(shell=shell, _solve_task=solve, aclose=shell.close)
+    expected = terminal if terminal is not None else cleanup_error
+    with pytest.raises(type(expected)) as caught:
+        await invoke_bench_agent(agent, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+    assert caught.value is expected
+    if terminal is not None:
+        assert "fresh shell cleanup failed" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["agent", "scope"])
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+@pytest.mark.parametrize("terminal", ["policy_budget", "output_limit"])
+async def test_real_cleanup_failure_remains_ungradable(tmp_path, monkeypatch, boundary, cleanup_fails, terminal):
+    from nooa.tools._bash_session import BashSession
+
+    module = pytest.importorskip("nooa_bench.bench_agent")
+    from responses_api_agents.nooa_agent.invocation import NOOAInvocationConfig
+    from responses_api_agents.nooa_agent.result import finalize_run_result
+    from responses_api_agents.nooa_agent.runner import InProcessNOOARunner, NOOARunFailure, NOOARunRequest
+    from responses_api_agents.nooa_agent.tests.test_gym_llm import FakeHTTPResponse, model_response
+
+    monkeypatch.chdir(tmp_path)
+    cleanup_error = RuntimeError("injected cleanup failure")
+    fresh_sessions = []
+    solve_errors = []
+    cleanup_attempts = []
+    original_solve = module.BenchAgent._solve_task
+    original_close = BashSession.close
+    original_aclose = ShellTools.close
+
+    async def solve(agent, *args, **kwargs):
+        fresh_sessions.append(ShellTools(cwd=str(tmp_path)).session)
+        try:
+            return await original_solve(agent, *args, **kwargs)
+        except Exception as error:
+            solve_errors.append(error)
+            raise
+
+    async def close(session):
+        await original_close(session)
+        if boundary == "scope" and session in fresh_sessions:
+            cleanup_attempts.append(session)
+            if cleanup_fails:
+                raise cleanup_error
+
+    async def aclose(agent):
+        await original_aclose(agent)
+        if boundary == "agent":
+            cleanup_attempts.append(agent)
+            if cleanup_fails:
+                raise cleanup_error
+
+    async def post(**kwargs):
+        response = model_response(response_id="truncated")
+        response.update(status="incomplete", incomplete_details={"reason": "max_output_tokens"})
+        return FakeHTTPResponse(response)
+
+    monkeypatch.setattr(module.BenchAgent, "_solve_task", solve)
+    monkeypatch.setattr(ShellTools, "close", aclose)
+    monkeypatch.setattr(BashSession, "close", close)
+    runner = InProcessNOOARunner(
+        invocation=NOOAInvocationConfig(
+            agent_class="nooa_bench.bench_agent:BenchAgent",
+            invocation_adapter="responses_api_agents.nooa_agent.bench_agent_adapter:invoke_bench_agent",
+        ),
+        server_client=SimpleNamespace(post=post),
+        model_server_name="policy",
+        max_policy_calls=0 if terminal == "policy_budget" else None,
+    )
+    request = NOOARunRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="task"),
+        model_url_path="/v1/responses",
+    )
+    if cleanup_fails:
+        with pytest.raises(NOOARunFailure) as caught:
+            await runner.run(request)
+        assert caught.value.__cause__ is solve_errors[0]
+        assert caught.value.result.termination_reason is None
+    else:
+        result = await runner.run(request)
+        expected = "policy_budget_exceeded" if terminal == "policy_budget" else "max_output_tokens_exceeded"
+        assert result.termination_reason == expected
+        response, _ = finalize_run_result(result)
+        assert response.status == "incomplete" and response.error is None
+    assert len(cleanup_attempts) == len(solve_errors) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["agent", "scope"])
+async def test_timeout_during_cleanup_overrides_policy_termination(tmp_path, monkeypatch, boundary):
+    from nooa.tools._bash_session import BashSession
+
+    module = pytest.importorskip("nooa_bench.bench_agent")
+    from responses_api_agents.nooa_agent.invocation import NOOAInvocationConfig
+    from responses_api_agents.nooa_agent.runner import InProcessNOOARunner, NOOARunRequest
+
+    monkeypatch.chdir(tmp_path)
+    fresh_sessions = []
+    cleanup_started = []
+    original_solve = module.BenchAgent._solve_task
+    original_close = BashSession.close
+    original_aclose = ShellTools.close
+
+    async def interrupt_cleanup():
+        cleanup_started.append(boundary)
+        deadline.reschedule(asyncio.get_running_loop().time())
+        await asyncio.Event().wait()
+
+    async def solve(agent, *args, **kwargs):
+        fresh_sessions.append(ShellTools(cwd=str(tmp_path)).session)
+        return await original_solve(agent, *args, **kwargs)
+
+    async def close(session):
+        await original_close(session)
+        if boundary == "scope" and session in fresh_sessions:
+            await interrupt_cleanup()
+
+    async def aclose(agent):
+        await original_aclose(agent)
+        if boundary == "agent":
+            await interrupt_cleanup()
+
+    monkeypatch.setattr(module.BenchAgent, "_solve_task", solve)
+    monkeypatch.setattr(ShellTools, "close", aclose)
+    monkeypatch.setattr(BashSession, "close", close)
+    runner = InProcessNOOARunner(
+        invocation=NOOAInvocationConfig(
+            agent_class="nooa_bench.bench_agent:BenchAgent",
+            invocation_adapter="responses_api_agents.nooa_agent.bench_agent_adapter:invoke_bench_agent",
+        ),
+        server_client=SimpleNamespace(),
+        model_server_name="policy",
+        max_policy_calls=0,
+    )
+    with pytest.raises(TimeoutError) as caught:
+        async with asyncio.timeout(None) as deadline:
+            await runner.run(
+                NOOARunRequest(
+                    responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="task"),
+                    model_url_path="/v1/responses",
+                )
+            )
+    assert cleanup_started == [boundary]
+    assert isinstance(caught.value.__cause__, asyncio.CancelledError)
+    assert caught.value.__cause__.nooa_result.termination_reason is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_fails", [False, True])
+async def test_real_benchagent_loop_guard_preserves_gradable_evidence(tmp_path, monkeypatch, tool_fails):
+    pytest.importorskip("nooa_bench.bench_agent")
+    from responses_api_agents.nooa_agent.invocation import NOOAInvocationConfig
+    from responses_api_agents.nooa_agent.result import finalize_run_result
+    from responses_api_agents.nooa_agent.runner import InProcessNOOARunner, NOOARunRequest
+    from responses_api_agents.nooa_agent.tests.test_gym_llm import FakeHTTPResponse, model_response
+
+    monkeypatch.chdir(tmp_path)
+    calls = []
+    code = "raise ValueError('repeated failure')" if tool_fails else "print('repeated success')"
+
+    async def post(**kwargs):
+        calls.append(kwargs)
+        output = NeMoGymResponseFunctionToolCall(
+            id=f"f{len(calls)}",
+            call_id=f"c{len(calls)}",
+            name="python_cell",
+            arguments=json.dumps({"code": code}),
+        )
+        return FakeHTTPResponse(model_response(output, response_id=f"r{len(calls)}"))
+
+    runner = InProcessNOOARunner(
+        invocation=NOOAInvocationConfig(
+            agent_class="nooa_bench.bench_agent:BenchAgent",
+            invocation_adapter="responses_api_agents.nooa_agent.bench_agent_adapter:invoke_bench_agent",
+        ),
+        server_client=SimpleNamespace(post=post),
+        model_server_name="policy",
+        max_policy_calls=8,
+    )
+    result = await runner.run(
+        NOOARunRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="task"),
+            model_url_path="/v1/responses",
+        )
+    )
+    assert result.termination_reason == "loop_detected"
+    assert len(calls) == len(result.trajectory.turns) == 8
+    response, observations = finalize_run_result(result)
+    assert response.status == "incomplete" and response.error is None
+    expected_calls = {f"c{index}" for index in range(1, 9)}
+    assert {
+        item.call_id for item in response.output if item.type == "function_call" and item.name == "python_cell"
+    } == expected_calls
+    # Failed repeats are blocked before execution on calls 7 and 8.
+    expected_outputs = {f"c{index}" for index in range(1, 7 if tool_fails else 9)}
+    actual_outputs = {item.call_id for item in response.output if item.type == "function_call_output"}
+    assert actual_outputs & expected_calls == expected_outputs
+    assert "loop_detected" in {gap.code for gap in observations.gaps}

@@ -234,6 +234,7 @@ async def test_failed_activation_replays_error_and_returns_evidence_on_close(
         NOOATerminationReason.POLICY_BUDGET_EXCEEDED,
         NOOATerminationReason.MAX_ITERATIONS_EXCEEDED,
         NOOATerminationReason.MAX_OUTPUT_TOKENS_EXCEEDED,
+        NOOATerminationReason.LOOP_DETECTED,
         NOOATerminationReason.INVALID_POLICY_OUTPUT,
     ],
 )

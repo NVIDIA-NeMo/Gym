@@ -21,7 +21,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from nooa import Agent, strategy
-from nooa.errors import GenerationError
+from nooa.errors import GenerationError, LoopDetectedError
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseFunctionToolCall
 from nemo_gym.rollout_observability import AgentInvocation, ToolCallObservation
@@ -646,3 +646,29 @@ async def test_summary_transport_state_is_separate_from_main(main_failed: bool, 
     else:
         result = await runner.run(request)
         assert result.return_value == "completed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wrapped", [False, True])
+async def test_arbitrary_loop_error_is_not_a_policy_termination(wrapped: bool) -> None:
+    runner, _ = make_runner()
+    error = LoopDetectedError("not raised by the pinned loop guard")
+
+    async def invoke(agent, request):
+        try:
+            raise error
+        except LoopDetectedError as cause:
+            if wrapped:
+                raise GenerationError("arbitrary wrapper") from cause
+            raise
+
+    runner._invocation_adapter = invoke
+    with pytest.raises(NOOARunFailure) as caught:
+        await runner.run(
+            NOOARunRequest(
+                responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="question"),
+                model_url_path="/v1/responses",
+            )
+        )
+    assert caught.value.result.termination_reason is None
+    assert type(caught.value.__cause__) is (GenerationError if wrapped else LoopDetectedError)
