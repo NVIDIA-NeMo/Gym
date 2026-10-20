@@ -100,6 +100,17 @@ _REMOTE_ASSISTANT_MESSAGE_PLUGIN = "/tmp/nemo-gym-opencode-assistant-message-hea
 # Continues a saved session at its last user turn through OpenCode's own API, without a new prompt.
 _RESUME_HELPER = Path(__file__).with_name("resume_opencode.py")
 _REMOTE_RESUME_HELPER = "/tmp/nemo-gym-opencode-resume.py"
+# The resume helper needs Python 3.8+, but a task image's own environment may come first on PATH and be older:
+# SWE-bench's testbed is Python 3.5 or 3.6 for old Django, scikit-learn and astropy versions, where the helper
+# fails with a SyntaxError before it touches the session. Pick the first interpreter that is new enough; the
+# harness and the commands the model runs keep the task's environment.
+_SELECT_RESUME_PYTHON = (
+    'NEMO_GYM_RESUME_PYTHON="$(for py in python3 /usr/bin/python3 /opt/miniconda3/bin/python3 '
+    '/usr/local/bin/python3; do if command -v "$py" >/dev/null 2>&1 && "$py" -c '
+    "'import sys; sys.exit(sys.version_info < (3, 8))' >/dev/null 2>&1; then command -v \"$py\"; exit 0; fi; done; "
+    'echo "No Python 3.8+ found for the OpenCode resume helper; python3 is $(python3 --version 2>&1)" >&2; '
+    'exit 1)"'
+)
 
 
 def _load_json(value: Any) -> dict[str, Any]:
@@ -927,10 +938,11 @@ class OpenCodeSandboxedAgent(SandboxedHarnessAgent):
             # The binary survived on the root filesystem. The session is re-entered at its saved user turn: a new
             # prompt would put a message the task never had into the trajectory at every checkpoint.
             install_str = (
-                f'(test -x "$HOME/.opencode/bin/opencode" && echo "OpenCode already installed") || ({install_str})'
+                f'((test -x "$HOME/.opencode/bin/opencode" && echo "OpenCode already installed") || ({install_str})) '
+                f"&& {_SELECT_RESUME_PYTHON}"
             )
             await launch.sandbox.upload(_RESUME_HELPER, _REMOTE_RESUME_HELPER)
-            opencode_command = f"python3 {quote(_REMOTE_RESUME_HELPER)}"
+            opencode_command = f'"$NEMO_GYM_RESUME_PYTHON" {quote(_REMOTE_RESUME_HELPER)}'
 
         # OpenCode's glob/grep tools otherwise download rg inside the sandbox.
         ripgrep_remote_path = None
