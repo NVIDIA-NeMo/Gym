@@ -49,6 +49,7 @@ DIRECT_RAY_COMPONENTS = {
 }
 
 INHERITED_RAY_DECLARATIONS = {
+    ("responses_api_agents/partner_if_harbor_agent/app.py", "PartnerIFHarborAgent"): True,
     ("resources_servers/legal_agent_bench/harbor_bridge.py", "LegalAgentBenchHarborBridge"): True,
     ("responses_api_models/genrm_model/app.py", "GenRMModel"): True,
 }

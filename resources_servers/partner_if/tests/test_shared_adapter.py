@@ -1,0 +1,157 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+import json
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+from resources_servers.partner_if.app import VerifyRequest
+from resources_servers.partner_if.grading_contract import GradingContract
+from resources_servers.partner_if.tests.test_app import response, server
+
+
+def shared_request():
+    contract = GradingContract(
+        task_id="smoke",
+        origin="synthetic",
+        source="authored",
+        rubric_version="shared-v1",
+        audit_signoff=True,
+        data_kind="synthetic_smoke",
+        rubrics=[
+            {
+                "id": "deterministic",
+                "constraint": "The answer says HELLO.",
+                "verifier": {"id": "text_contains_v1", "params": {"source": "answer", "literal": "HELLO"}},
+            },
+            {"id": "semantic", "constraint": "The answer is a greeting.", "verifier": {"id": "llm_judge_v1"}},
+        ],
+    )
+    return VerifyRequest.model_validate(
+        {
+            "responses_create_params": {"input": [{"role": "user", "content": "Say HELLO."}]},
+            "verifier_metadata": {"partner_if": contract.model_dump()},
+            "response": response("HELLO").model_dump(),
+        }
+    )
+
+
+async def test_normal_text_resource_dispatches_deterministic_and_llm_items_together():
+    body = shared_request()
+    identity = {
+        "run_id": "text-run",
+        "policy_model": "actor",
+        "code_revision": "a" * 40,
+        "profile": "text",
+        "configuration_sha256": "b" * 64,
+    }
+    judgment = {
+        "items": [
+            {
+                "id": "semantic",
+                "passed": True,
+                "reason": "Greeting",
+                "evidence": "HELLO",
+                "references": [{"source": "answer", "start_line": 1, "end_line": 1}],
+            }
+        ]
+    }
+    with patch(
+        "resources_servers.partner_if.grading_service.call_judge",
+        new_callable=AsyncMock,
+        return_value=response(json.dumps(judgment)),
+    ) as call:
+        result = await server(execution_identity=identity).verify(body)
+    payload = json.loads(call.call_args.kwargs["json"]["input"][1]["content"])
+    assert [r["id"] for r in payload["rubrics"]] == ["semantic"]
+    assert result.grading_result.dimensions["if"].points_earned == 2
+    assert result.grading_result.dimensions["if"].partial_score == 1
+    assert result.grading_result.dimensions["if"].binary_score == 1
+    assert result.reward == 1 and not result.mask_sample
+    assert result.judge_protocol == "partner-if-evidence-v5.2"
+    assert result.grading_result.items[1].quotes[0].quote == "HELLO"
+    assert result.execution_identity.model_dump() == identity
+
+
+async def test_new_text_contract_preserves_unsigned_audit_gate():
+    body = shared_request()
+    body.verifier_metadata.partner_if.audit_signoff = False
+    result = await server().verify(body)
+    assert result.mask_sample and result.if_result.status == "unscorable"
+
+
+async def test_invalid_shared_judge_output_preserves_receipts_and_remains_unscorable():
+    body = shared_request()
+    raw = response('{"items": "not a verdict"}')
+    with patch("resources_servers.partner_if.grading_service.call_judge", new_callable=AsyncMock, return_value=raw):
+        result = await server().verify(body)
+    assert result.mask_sample and result.if_result.status == "unscorable"
+    assert result.judge_request is not None
+    assert result.judge_response == raw
+    assert result.grading_result.status == "unscorable"
+    assert result.grading_result.dimensions["if"].partial_score is None
+
+
+async def test_completion_protocol_error_keeps_independent_if_score_and_original_receipt():
+    from resources_servers.partner_if.tests.test_shared_judge import verdict
+
+    body = shared_request()
+    contract = body.verifier_metadata.partner_if
+    contract.rubrics.append(contract.rubrics[1].model_copy(update={"id": "content", "dimension": "completion"}))
+    reply = verdict(id="semantic")
+    reply["items"].append(reply["items"][0] | {"id": "content", "references": []})
+    raw = response(json.dumps(reply))
+    with patch("resources_servers.partner_if.grading_service.call_judge", new_callable=AsyncMock, return_value=raw):
+        result = await server().verify(body)
+    assert not result.mask_sample and result.reward == 1
+    assert result.if_result.passed == result.if_result.total == 2
+    assert result.grading_result.dimensions["completion"].binary_score is None
+    assert result.judge_response == raw
+    assert "Invalid completion judgment" in result.grading_result.items[-1].reason
+
+
+async def test_judge_abstention_is_a_protocol_error_not_a_model_failure():
+    body = shared_request()
+    raw = response(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "id": "semantic",
+                        "passed": None,
+                        "reason": "Needs review",
+                        "evidence": "Ambiguous greeting",
+                        "references": [],
+                    }
+                ]
+            }
+        )
+    )
+    with patch("resources_servers.partner_if.grading_service.call_judge", new_callable=AsyncMock, return_value=raw):
+        result = await server().verify(body)
+    semantic = next(item for item in result.grading_result.items if item.id == "semantic")
+    assert semantic.reason.startswith("Invalid shared IF judge response:")
+    assert result.mask_sample and result.grading_result.status == "unscorable"
+    assert result.grading_result.dimensions["if"].binary_score is None
+    assert result.judge_response == raw
+
+
+@pytest.mark.parametrize("unexercised", [True, False])
+async def test_retired_scope_field_is_a_protocol_error_not_a_free_point(unexercised):
+    from resources_servers.partner_if.tests.test_shared_judge import verdict
+
+    body = shared_request()
+    raw = response(json.dumps(verdict(id="semantic", unexercised=unexercised)))
+    with patch("resources_servers.partner_if.grading_service.call_judge", new_callable=AsyncMock, return_value=raw):
+        result = await server().verify(body)
+    assert result.mask_sample and result.grading_result.status == "unscorable"
+    assert result.grading_result.dimensions["if"].partial_score is None
+    assert result.judge_response == raw
+    assert "unexercised" in result.grading_result.items[1].reason
+
+
+async def test_new_text_contract_does_not_accept_live_agent_evidence_without_adapter():
+    body = shared_request()
+    body.verifier_metadata.partner_if.evidence_mode = "live_agent"
+    result = await server().verify(body)
+    assert result.mask_sample and result.if_result.status == "unscorable"

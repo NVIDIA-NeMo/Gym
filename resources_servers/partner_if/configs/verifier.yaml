@@ -1,0 +1,14 @@
+config_paths:
+  - resources_servers/partner_if/configs/verifier_base.yaml
+
+partner_if_judge:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${partner_if_judge_base_url}
+      openai_api_key: ${partner_if_judge_api_key}
+      openai_model: ${partner_if_judge_model_name}
+
+partner_if_judge_base_url: null
+partner_if_judge_api_key: null
+partner_if_judge_model_name: null
