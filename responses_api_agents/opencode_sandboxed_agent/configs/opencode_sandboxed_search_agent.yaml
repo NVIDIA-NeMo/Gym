@@ -1,0 +1,127 @@
+# opencode_sandboxed_agent, configured for open-web search tasks.
+#
+# A SEPARATE INSTANCE rather than edits to opencode_sandboxed_agent.yaml. Everything below is
+# either search-specific (an Exa key pool, a contamination guard, a TDM opt-out list) or a
+# deliberate departure from the defaults that suit a patch-graded SWE benchmark. None of it
+# should greet someone opening the default config.
+#
+# This does NOT need the base config to declare anything first. opencode_env, opencode_plugins,
+# opencode_config, opencode_query_via_stdin and exclude_compaction_summaries are all real fields
+# on OpenCodeSandboxedAgentConfig with defaults, so a config that inherits this agent may set
+# keys inside them freely -- verified by resolving a config that sets an opencode_env key present
+# nowhere in the base. (An earlier comment here claimed Hydra's struct lock forbade that and
+# declared ~20 placeholder keys in the shared file to work around it. It does not, and they are
+# gone.)
+#
+# Compose this INSTEAD OF opencode_sandboxed_agent.yaml -- it pulls the base in itself, the same
+# way responses_api_agents/nemo_fabric_agent/configs/nemo_fabric_claude.yaml does -- and inherit
+# from it:
+#
+#   config_paths:
+#     - responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_search_agent.yaml
+#   my_benchmark:
+#     _inherit_from: opencode_sandboxed_search_agent
+config_paths:
+  - responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml
+
+opencode_sandboxed_search_agent:
+  _inherit_from: opencode_sandboxed_agent
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      # A run that ends on a compaction would otherwise hand the judge the summary instead of the
+      # answer. Only matters where the verifier grades the last assistant message; a patch-graded
+      # benchmark wants the full transcript, which is why the default stays false.
+      exclude_compaction_summaries: true
+
+      # Feed the question to `opencode run` on stdin rather than as an argv message. run.ts
+      # re-quotes any argv message containing a space and backslash-escapes the quotes inside it,
+      # which corrupts a natural-language question. Irrelevant to a benchmark whose prompt is a
+      # repo path, which is why the default stays false.
+      opencode_query_via_stdin: true
+
+      # LET THE JOB'S WALL CLOCK CUT A ROLLOUT, NOT A SELF-IMPOSED TIMER. Both defaults below fire
+      # early and score reward 0 with no failure kind -- indistinguishable from a wrong answer, so
+      # a row we hung up on reads as a row the model got wrong. A search rollout is long by nature:
+      # the default 3h sandbox budget sat under a 4h wall and threw away an hour already paid for,
+      # at a measured double-digit percentage of rows on the longest-running models.
+      sandbox_timeout: 21600
+      # null = no per-call deadline. At the default one stalled model call killed the WHOLE
+      # rollout even when the rollout itself was healthy; now a slow call blocks only itself.
+      opencode_model_call_timeout: null
+
+      # Plugins change opencode's behaviour without rebuilding or forking it: each is uploaded
+      # into the sandbox and imported by the opencode process, which calls it at defined hooks.
+      #
+      # The sentinel MUST stay first. opencode swallows plugin load failures silently, so without
+      # it a run with every guardrail switched off looks healthy and still scores; app.py refuses
+      # to grade a rollout whose stderr lacks its marker.
+      #
+      #   nemo_gym_sentinel.js            proves the plugin layer loaded
+      #   nemo_gym_turn_budget.js         ends a run that exhausts its turn budget, and says why
+      #   nemo_gym_web_guard.js           keeps answer-key and opted-out pages out of results
+      #   nemo_gym_compaction_continue.js stops opencode inviting the model to give up
+      #   nemo_gym_tool_surface.js        repairs grep's description when bash is disabled
+      #
+      # tool_surface is loaded unconditionally even though it only acts when its flag is set.
+      # Loading an inert plugin is free; making the list conditional is not, because OmegaConf
+      # replaces lists wholesale -- every arm wanting the plugin would restate all five entries,
+      # and a stale restatement silently drops one.
+      opencode_plugins:
+        - nemo_gym_sentinel.js
+        - nemo_gym_turn_budget.js
+        - nemo_gym_web_guard.js
+        - nemo_gym_compaction_continue.js
+        - nemo_gym_tool_surface.js
+
+      opencode_env:
+        # NOT optional. tool/registry.ts drops the builtin websearch tool from the model's list
+        # unless the provider id is literally "opencode" or this is set, and ours is "nemo_gym".
+        # Measured without it: zero websearch calls, thousands of webfetch calls whose top
+        # destinations were search-engine result pages -- the model hand-rolled a search engine
+        # out of webfetch, and scored far below the same harness with the flag set.
+        OPENCODE_ENABLE_EXA: "true"
+        # Pins Exa explicitly. ENABLE_EXA alone already selects it, but with neither flag the
+        # provider is a coin flip on a session checksum, which makes the arm illegible.
+        OPENCODE_WEBSEARCH_PROVIDER: "exa"
+        # Read by nemo_gym_turn_budget.js. Replaces opencode's agent.build.steps, which only
+        # nudges: at this many model calls the plugin removes every tool, so the model must answer.
+        NEMO_GYM_MAX_TURNS: "400"
+        # Subagents off. opencode_config.tools.task=false alone does not do it -- that sets a
+        # PERMISSION, and the tool stays in the model's list and runs anyway.
+        NEMO_GYM_DISABLE_SUBAGENTS: "1"
+
+        # ---- OPT-IN ARMS. All default to off, so a plain run is the measured baseline. ----
+        # "" rather than "0": app.py drops empty values instead of exporting them, so an unset arm
+        # leaves the sandbox byte-identical to a run that never knew the knob existed.
+        #
+        # NEMO_GYM_DISABLE_BASH=1          remove bash from the request's tool map. Stronger than
+        #                                  the bash guard: guarding filters what bash fetches,
+        #                                  this denies the route. Read by nemo_gym_turn_budget.js,
+        #                                  not a plugin of its own, because the turn cap replaces
+        #                                  the tool map with a key-less Proxy and a second plugin
+        #                                  assigning over it would re-enable every tool at the cap.
+        # NEMO_GYM_FIX_GREP_DESCRIPTION=1  strip the two lines of grep's stock description that
+        #                                  point at bash and Task. Set it WITH the above: with
+        #                                  bash gone they are dead references, and grep is the
+        #                                  recovery path for tool output spilled to disk.
+        # OPENCODE_WEBSEARCH_TYPE=deep     Exa REST `deep` instead of the MCP `auto` default. Not
+        #                                  a one-knob change: it also switches transport MCP->REST,
+        #                                  adds the deep-only summary+outputSchema pair, and makes
+        #                                  contextMaxCharacters bind. Measured as no meaningful
+        #                                  change even with nearly every call carrying genuine
+        #                                  server synthesis -- a real null, not a misfire.
+        NEMO_GYM_DISABLE_BASH: ${oc.env:NEMO_GYM_DISABLE_BASH,""}
+        NEMO_GYM_FIX_GREP_DESCRIPTION: ${oc.env:NEMO_GYM_FIX_GREP_DESCRIPTION,""}
+        OPENCODE_WEBSEARCH_TYPE: ${oc.env:OPENCODE_WEBSEARCH_TYPE,""}
+
+      opencode_config:
+        # Merged RECURSIVELY into the generated config, so the base agent's permission deny-list
+        # survives and only these leaves change.
+        tools:
+          # Off in the base config, which would leave a search benchmark unable to reach the web.
+          webfetch: true
+          websearch: true
+          # Subagent sessions are never captured by the single-session export, so leaving them on
+          # costs trajectory data as well as comparability. See NEMO_GYM_DISABLE_SUBAGENTS above,
+          # which is what actually removes the tool.
+          task: false

@@ -1,9 +1,9 @@
 # Resources server: judge-graded search / BrowseComp-style QA.
 # Creates one general-purpose sandbox per row and grades the final answer with an LLM judge.
 # There is no eval sandbox and no test execution.
-opencode_opensandbox_search_agent_resources_server:              # instance name — how agents/CLI refer to this server
+opencode_search_resources_server:              # instance name — how agents/CLI refer to this server
   resources_servers:
-    opencode_opensandbox_search_agent:   # implementation directory under resources_servers/
+    opencode_search:   # implementation directory under resources_servers/
       allowed_agents: [opencode_sandboxed_agent]
       entrypoint: app.py
       domain: agent

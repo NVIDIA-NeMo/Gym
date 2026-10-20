@@ -1,6 +1,6 @@
 config_paths:
-- responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml
-- resources_servers/opencode_opensandbox_search_agent/configs/opencode_opensandbox_search_agent.yaml
+- responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_search_agent.yaml
+- resources_servers/opencode_search/configs/opencode_search.yaml
 
 # Judge endpoint. Hosted GLM-5.2, deliberately off the policy endpoint so grading does not
 # compete with rollouts for the serving stack and stays comparable across policy checkpoints.
@@ -17,10 +17,16 @@ search_judge_model:
       uses_reasoning_parser: true
 
 search_browsecomp_resources_server:
-  _inherit_from: opencode_opensandbox_search_agent_resources_server
+  _inherit_from: opencode_search_resources_server
 
-opencode_sandboxed_agent_search_browsecomp:
-  _inherit_from: opencode_sandboxed_agent
+# Benchmark-specific additions MERGED INTO the search agent instance, not inherited from it.
+# Gym resolves _inherit_from exactly once, against a frozen pre-resolution snapshot
+# (global_config.py _recursively_swap_keys, and its own TODO says so), so a second level does
+# NOT chain: inheriting from an instance that itself inherits silently yields that instance's
+# overrides WITHOUT the base underneath. That dropped the base permission deny-list -- 74 bash
+# rules, including the destructive-command and git-history-mining guards -- while the config
+# still resolved cleanly. Merging into the same key keeps the single inherit intact.
+opencode_sandboxed_search_agent:
   responses_api_agents:
     opencode_sandboxed_agent:
       # Install opencode from the S3-cached binaries rather than curling opencode.ai per rollout.
@@ -188,7 +194,7 @@ opencode_sandboxed_agent_search_browsecomp:
             # position every turn, breaking turn-to-turn prompt_token_ids contiguity. Setting
             # `steps` here re-enabled exactly the thing the fork removed.
             #
-            # This only works together with mask_sample in resources_servers/opencode_opensandbox_search_agent/app.py.
+            # This only works together with mask_sample in resources_servers/opencode_search/app.py.
             # Legacy did not need the nudge because it HARD-STOPPED at the cap and then dropped
             # the row (swe_agents/app.py:5742-5751). Removing the nudge while still scoring capped
             # rows is the worst of both worlds -- measured: all 21 capped rows then produced "None"

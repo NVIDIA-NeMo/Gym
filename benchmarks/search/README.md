@@ -1,7 +1,7 @@
 # search / BrowseComp (sandboxed opencode)
 
 BrowseComp questions run through `responses_api_agents/opencode_sandboxed_agent` and graded by
-`resources_servers/opencode_opensandbox_search_agent` with an LLM judge.
+`resources_servers/opencode_search` with an LLM judge.
 
 Same source data and same deterministic seed-42 400-row subset as `benchmarks/browsecomp`, but the
 rows are reshaped for the sandboxed agent: exactly one user message, no system message (the agent

@@ -17,7 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from resources_servers.opencode_opensandbox_search_agent.app import (
+from resources_servers.opencode_search.app import (
     SearchResourcesServerConfig,
     _last_assistant_text,
     parse_judge_verdict,

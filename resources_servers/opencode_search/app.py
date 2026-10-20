@@ -82,7 +82,7 @@ from nemo_gym.server_utils import SESSION_ID_KEY
 # which survives under either prompt at high significance. Quote that re-grade, not an identity
 # claim, whenever these numbers are compared.
 from resources_servers.browsecomp_advanced_harness.judge_prompt import JUDGE_PROMPT_TEMPLATE
-from resources_servers.opencode_opensandbox_search_agent.exa_cache import ExaCache
+from resources_servers.opencode_search.exa_cache import ExaCache
 
 
 # A judge that echoes this instead of grading has repeated the template back at us.
