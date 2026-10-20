@@ -321,3 +321,5 @@ uses all of them).
 - `extra_env`: further client environment, e.g. `{API_TIMEOUT_MS: "3600000", CLAUDE_CODE_AUTO_COMPACT_WINDOW:
   "1000000"}`. The variables the agent sets itself (endpoint, credentials, model, `CLAUDE_CONFIG_DIR`, the
   output cap) are rejected.
+- `allow_root_workdir` (sandbox sessions): accept a task working directory of `/` (images without a
+  `WORKDIR`); the runtime and session files stay under `/tmp`, as a harness's own files do there.

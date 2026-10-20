@@ -132,6 +132,9 @@ class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # it, instead of as an argument. It then never appears on a command line that an agent's
     # `pkill -f <word from its task>` could match.
     instruction_on_stdin: bool = False
+    # Sandbox sessions: accept a task workdir of "/" (images without a WORKDIR). The runtime and session
+    # files then sit under /tmp inside it, as a harness's own files do there.
+    allow_root_workdir: bool = False
     # Claude Code's --effort (low, medium, high, xhigh or max), as Harbor passes its reasoning effort.
     reasoning_effort: Optional[str] = None
     # The per-call output cap, as CLAUDE_CODE_MAX_OUTPUT_TOKENS; None keeps the CLI's own default.
@@ -616,11 +619,12 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         spec = SandboxSpec(**{"workdir": "/app", **self.config.sandbox_config}) if owns_sandbox else None
         workdir = access.workdir if access else spec.workdir
         path = PurePosixPath(workdir or "")
+        root_workdir = self.config.allow_root_workdir and path == PurePosixPath("/")
         if (
             not path.is_absolute()
             or ".." in path.parts
             or "\x00" in workdir
-            or path in (PurePosixPath("/"), PurePosixPath("/tmp"))
+            or (path in (PurePosixPath("/"), PurePosixPath("/tmp")) and not root_workdir)
             or str(path).startswith(("/tmp/nemo-gym-claude-sessions", "/tmp/nemo-gym-claude-runtime-"))
         ):
             raise HTTPException(

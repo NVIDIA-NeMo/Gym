@@ -11,12 +11,13 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from fastapi import HTTPException
 from pydantic import ValidationError
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.claude_code_agent import app, sandbox_runner
 from responses_api_agents.claude_code_agent import sandbox as adapter
-from responses_api_agents.claude_code_agent.tests.test_sandbox import agent, seed
+from responses_api_agents.claude_code_agent.tests.test_sandbox import agent, result, seed
 
 
 RESULT = json.dumps({"type": "result", "subtype": "success", "is_error": False, "usage": {"input_tokens": 1}})
@@ -146,3 +147,26 @@ def test_extra_env_cannot_replace_what_the_agent_sets(name):
 def test_output_cap_must_be_positive():
     with pytest.raises(ValidationError):
         app.ClaudeCodeAgentConfig(name="claude", host="h", port=1, entrypoint="app.py", max_output_tokens=0)
+
+
+@pytest.mark.asyncio
+async def test_root_workdir_is_accepted_when_allowed(monkeypatch):
+    # Task images without a WORKDIR start in "/": the runtime and session files stay under /tmp.
+    remote = SimpleNamespace(exec=AsyncMock(return_value=result()), upload=AsyncMock())
+    monkeypatch.setattr(app.AsyncSandbox, "connect", AsyncMock(return_value=remote))
+    monkeypatch.setattr(app, "create_provider", lambda config: object())
+    monkeypatch.setattr(app, "install_sandbox_runtime", AsyncMock())
+    state = await agent(allow_root_workdir=True)._seed_agent_session_state(seed(workdir="/"))
+    assert state.session.workdir == "/"
+    assert state.session.session_dir.startswith("/tmp/nemo-gym-claude-sessions/")
+    assert remote.exec.await_args_list[0].args[0].startswith("test -d / ")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("workdir", ["/tmp", "/tmp/nemo-gym-claude-runtime-2.1.108", "/app/../tmp"])
+async def test_root_workdir_setting_still_rejects_adapter_storage(monkeypatch, workdir):
+    connector = AsyncMock()
+    monkeypatch.setattr(app.AsyncSandbox, "connect", connector)
+    with pytest.raises(HTTPException, match="separate from runtime/session storage"):
+        await agent(allow_root_workdir=True)._seed_agent_session_state(seed(workdir=workdir))
+    connector.assert_not_awaited()
