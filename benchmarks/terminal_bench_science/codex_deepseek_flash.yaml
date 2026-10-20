@@ -1,0 +1,50 @@
+# Terminal-Bench-Science v0.1 with Codex and a self-hosted DeepSeek V4.1 Flash, set up as the run that
+# reproduces the leaderboard's DeepSeek V4.1 Flash / Codex / effort max row: Codex 0.154.0 with no
+# model catalog, effort max, the full 8-hour agent budget, and an OpenAI Responses endpoint serving
+# the model as `deepseek-flash` in front of a chat-completions server (for example Gym's vllm_model
+# with its Codex options). Sampling and output limits belong to the endpoint; Codex sends none.
+# Load this file as a run config, without --model-type:
+#
+#   export POLICY_API_KEY=...  # the endpoint's key (any string if it has no auth)
+#   gym eval run --config benchmarks/terminal_bench_science/codex_deepseek_flash.yaml \
+#     --split benchmark --model-url http://ENDPOINT_HOST:PORT/v1 --output OUT/rollouts.jsonl \
+#     --concurrency 8 ++default_host=GYM_HOST_IP
+#
+# --model-url is the endpoint's base URL, including /v1. ++tbsci_model_api_key_env=NAME reads the
+# key from another variable. See README.md, "Codex with DeepSeek V4.1 Flash".
+config_paths:
+  - benchmarks/terminal_bench_science/codex.yaml
+  - responses_api_models/openai_model/configs/openai_model.yaml
+
+# The endpoint's served name (--model overrides it). Codex itself sees tbsci_codex_model.
+policy_model_name: deepseek-flash
+policy_api_key: ${oc.env:${oc.select:tbsci_model_api_key_env,POLICY_API_KEY}}
+policy_model:
+  responses_api_models:
+    openai_model:
+      # Relay Codex's requests as sent (effort max, multi-agent tools, include and reasoning
+      # fields), replacing only `model` with the served name.
+      responses_stream_passthrough: true
+      # Let Codex see the endpoint's 4xx (e.g. context length exceeded), not a generic 500.
+      propagate_upstream_http_status_codes: [400, 404, 413, 422]
+      # No time limit of Gym's own on a relayed call: Codex's stream idle timeout and retries govern
+      # it, as when Codex calls the endpoint directly, and a max-effort answer can take longer than
+      # the default 30 minutes.
+      upstream_request_timeout_seconds: null
+
+# No model catalog: Codex runs `deepseek-flash` on its fallback model metadata.
+tbsci_codex_model: deepseek-flash
+tbsci_codex_version: 0.154.0
+tbsci_reasoning_effort: max
+tbsci_model_server_forwards_reasoning_effort: true
+tbsci_agent_timeout_sec: 28800
+
+terminal_bench_science_codex_agent:
+  responses_api_agents:
+    codex_agent:
+      # Codex's own feature defaults (no [features] table), so it offers its multi-agent tools.
+      features:
+        multi_agent: null
+        code_mode: null
+      # No --ephemeral, so Codex offers its goal tools.
+      ephemeral: false

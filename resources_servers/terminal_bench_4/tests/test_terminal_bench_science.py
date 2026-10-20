@@ -770,3 +770,116 @@ async def test_seed_rejects_a_task_whose_verifier_budget_outlasts_the_exec_limit
     # Resume gates a terminal failure instead of retrying it.
     assert verified["_ng_failure_terminal"] is True
     assert verified["reward"] == 0.0 and verified["evaluation_completed"] is False
+
+
+@pytest.mark.parametrize("timeout_sec", [28800.0, 3600.0])
+def test_codex_rows_embed_the_official_instruction(tmp_path, monkeypatch, timeout_sec):
+    from benchmarks.terminal_bench_science import prepare_codex
+
+    monkeypatch.setattr(prepare_codex, "OUTPUT_PATH", tmp_path / "benchmark_codex.jsonl")
+    loaded = []
+
+    async def load(names_and_refs, download_dir):
+        loaded.extend(names_and_refs)
+        return [
+            SimpleNamespace(
+                instruction=f"Solve {name}.", config=SimpleNamespace(agent=SimpleNamespace(timeout_sec=timeout_sec))
+            )
+            for name, _ in names_and_refs
+        ]
+
+    monkeypatch.setattr(prepare_codex, "_load_tasks", load)
+    selection = ["mri-harmonization", "eeg-erp-recovery"]
+    if timeout_sec != prepare_codex.AGENT_TIMEOUT_SEC:
+        with pytest.raises(ValueError, match="agent budget"):
+            prepare_codex.prepare(task_names=selection)
+        return
+    rows = read_rows(prepare_codex.prepare(task_names=selection))
+    identities = {
+        row["task_name"]: row
+        for row in (preparation.task_row(preparation.load_manifest(), t) for t in preparation.load_manifest()["tasks"])
+    }
+    assert [(row["task_name"], row["task_ref"]) for row in rows] == loaded
+    for row in rows:
+        assert row["responses_create_params"] == {"input": [{"role": "user", "content": f"Solve {row['task_name']}."}]}
+        assert {key: value for key, value in row.items() if key != "responses_create_params"} == {
+            key: value for key, value in identities[row["task_name"]].items() if key != "responses_create_params"
+        }
+
+
+def test_codex_profile_composes_borrowing_resources_codex_and_the_environment_server():
+    config = OmegaConf.load(BENCHMARK_DIR / "codex.yaml")
+    resources = config.terminal_bench_science_codex_resources_server.resources_servers.terminal_bench_4
+    agent = config.terminal_bench_science_codex_agent.responses_api_agents.codex_agent
+    environment = config.terminal_bench_science_codex.environment_servers.single_agent_turn_legacy
+    assert resources.sandbox_provider_ref == "terminal_bench_science_sandbox"
+    assert list(config.terminal_bench_science_sandbox) == ["opensandbox"]
+    assert resources.datasets[0].num_repeats == 3
+    assert environment.resources_server.name == "terminal_bench_science_codex_resources_server"
+    assert environment.agent_server.name == "terminal_bench_science_codex_agent"
+    assert agent.inherit_sandbox_environment is True
+    assert (agent.timeout, agent.codex_version) == (28800, "0.155.1")
+    assert (agent.verify_after_agent_error, agent.raise_oom_score_adj) == (True, True)
+
+
+def test_codex_deepseek_flash_config_matches_the_reference_codex_launch(monkeypatch):
+    run_config = OmegaConf.load(BENCHMARK_DIR / "codex_deepseek_flash.yaml")
+    assert list(run_config.config_paths) == [
+        "benchmarks/terminal_bench_science/codex.yaml",
+        "responses_api_models/openai_model/configs/openai_model.yaml",
+    ]
+    # A run config's own values win over the files it loads.
+    config = OmegaConf.merge(OmegaConf.load(BENCHMARK_DIR / "codex.yaml"), run_config)
+    agent = OmegaConf.to_container(config.terminal_bench_science_codex_agent.responses_api_agents.codex_agent)
+    resolved = OmegaConf.to_container(
+        config.terminal_bench_science_codex_agent.responses_api_agents.codex_agent, resolve=True
+    )
+    # Codex 0.154.0, no catalog, effort max, the full 8-hour budget, the task's environment.
+    assert {key: resolved[key] for key in ("model", "codex_version", "reasoning_effort", "timeout")} == {
+        "model": "deepseek-flash",
+        "codex_version": "0.154.0",
+        "reasoning_effort": "max",
+        "timeout": 28800,
+    }
+    assert resolved["model_server_forwards_reasoning_effort"] is True
+    assert resolved["inherit_sandbox_environment"] is True
+    # Codex's own feature defaults and session state, as a plain `codex exec` launch has them.
+    assert agent["features"] == {"multi_agent": None, "code_mode": None}
+    assert agent["ephemeral"] is False
+    # Codex's requests reach the endpoint as sent; the endpoint's 4xx reach Codex.
+    model = config.policy_model.responses_api_models.openai_model
+    assert model.responses_stream_passthrough is True
+    assert list(model.propagate_upstream_http_status_codes) == [400, 404, 413, 422]
+    # Gym adds no time limit of its own to a relayed call (openai_model's default is 30 minutes).
+    loaded = _load_run_config(BENCHMARK_DIR / "codex_deepseek_flash.yaml")
+    assert loaded.policy_model.responses_api_models.openai_model.upstream_request_timeout_seconds is None
+    assert config.policy_model_name == "deepseek-flash"
+    # The key comes from the environment variable the run names, POLICY_API_KEY by default.
+    monkeypatch.setenv("POLICY_API_KEY", "default-variable")
+    monkeypatch.setenv("DEEPSEEK_ENDPOINT_KEY", "named-variable")
+    assert config.policy_api_key == "default-variable"
+    assert OmegaConf.merge(config, {"tbsci_model_api_key_env": "DEEPSEEK_ENDPOINT_KEY"}).policy_api_key == (
+        "named-variable"
+    )
+
+
+def _load_run_config(path: Path):
+    """A run config merged the way Gym loads it: its config_paths first, then its own values."""
+    run_config = OmegaConf.load(path)
+    parts = [_load_run_config(REPOSITORY / part) for part in run_config.pop("config_paths", [])]
+    return OmegaConf.merge(*parts, run_config)
+
+
+def test_codex_profile_passes_codex_provider_retries_through():
+    config = _load_run_config(BENCHMARK_DIR / "codex.yaml")
+    path = "terminal_bench_science_codex_agent.responses_api_agents.codex_agent"
+    keys = ("request_max_retries", "stream_max_retries", "stream_idle_timeout_ms")
+    # Codex's own retry defaults and the CLI's 300-second idle timer, as in the reference runs.
+    assert [OmegaConf.select(config, f"{path}.{key}") for key in keys] == [None, None, 300000]
+    overrides = {
+        "tbsci_codex_request_max_retries": 8,
+        "tbsci_codex_stream_max_retries": 10,
+        "tbsci_stream_idle_timeout_ms": 90000000,
+    }
+    tuned = OmegaConf.merge(config, overrides)
+    assert [OmegaConf.select(tuned, f"{path}.{key}") for key in keys] == [8, 10, 90000000]

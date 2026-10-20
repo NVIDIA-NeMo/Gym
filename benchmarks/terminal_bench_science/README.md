@@ -302,6 +302,96 @@ unless you pin a version, so pin it when you compare against Harbor runs.
 The public leaderboard uses the Codex, Claude Code and mini-SWE-agent harnesses; there are no
 Terminus-2 entries.
 
+### Codex in the task sandbox
+
+`terminal_bench_science/codex` (`codex.yaml`) runs the Codex CLI inside each task sandbox
+through [`codex_agent`](../../responses_api_agents/codex_agent/README.md), composed with the
+resources server and `single_agent_turn_legacy`, which seeds both, closes Codex before grading,
+then closes the resources session. The resources server lends the task sandbox through
+`SandboxAccess` (see its README); grading, partial credit, artifacts and cleanup are the same
+as for mini-SWE. Defaults:
+
+- Codex `0.155.1` (`++tbsci_codex_version`), installed in the sandbox with a private Node.
+- The task's 8-hour budget as Codex's timeout (`++tbsci_agent_timeout_sec`).
+- Codex sees the image's environment and `HOME`, as when Harbor starts it in the container.
+- `model` (the name Codex sees, so the catalog entry it applies) defaults to the served name;
+  set `++tbsci_codex_model=...`. The model server still substitutes its own model upstream.
+- No reasoning effort, unless `++tbsci_reasoning_effort=...` and
+  `++tbsci_model_server_forwards_reasoning_effort=true` are both set.
+- The CLI's own provider settings: a 300-second stream idle timeout
+  (`++tbsci_stream_idle_timeout_ms`) and Codex's default request and stream retries
+  (`++tbsci_codex_request_max_retries`, `++tbsci_codex_stream_max_retries`).
+- A Codex run that fails or dies while its sandbox still runs is graded as a nonzero agent exit,
+  as Harbor grades it (`++tbsci_verify_after_agent_error=false` retries it instead); a lost
+  sandbox or a model-endpoint outage is still retried. See `codex_agent`'s
+  `verify_after_agent_error`.
+- Codex and its tools get `oom_score_adj` 1000 (0 when the sandbox starts below zero), so an
+  OOM kill inside the sandbox picks agent work, not the exec daemon
+  (`++tbsci_raise_oom_score_adj=false` turns it off).
+- Without `--ephemeral` (as in `codex_deepseek_flash.yaml`), Codex's session rollouts, with
+  per-call token counts and timestamps, are copied to `/logs/agent/sessions`
+  (`++tbsci_codex_sandbox_logs_dir`). The resources server keeps them in the trial directory
+  (`agent/sessions/`), as Harbor keeps them under `/logs/agent`.
+
+Rows carry the official instruction as their prompt. `prepare_codex.py` reads it from the
+pinned packages, which needs the resources server's environment (it verifies package hashes
+with `pathspec`), and checks every selected task's 8-hour budget:
+
+```sh
+resources_servers/terminal_bench_4/.venv/bin/python -m benchmarks.terminal_bench_science.prepare_codex \
+  --task-names mri-harmonization eeg-erp-recovery
+```
+
+To reproduce the leaderboard's Codex setup (catalog model, `--effort max`) against an OpenAI
+Responses endpoint, Codex's requests must reach it unchanged: for a catalog model,
+Codex 0.155.1 sends its tools as code-mode `additional_tools` items and newer efforts such as
+`max`, which Gym's typed Responses path drops or rejects. Use `openai_model` with
+`responses_stream_passthrough: true`, then confirm `reasoning.effort` in the captured model
+calls (`++observability_enabled=true ++model_call_capture_dir=/abs/dir`):
+
+```yaml
+# run config, with --model-type openai_model --model <served name> --model-url <endpoint>
+policy_model:
+  responses_api_models:
+    openai_model:
+      responses_stream_passthrough: true
+      # Codex's own timers govern each call, as when it calls the endpoint directly.
+      upstream_request_timeout_seconds: null
+tbsci_codex_model: gpt-6-astra
+tbsci_reasoning_effort: max
+tbsci_model_server_forwards_reasoning_effort: true
+```
+
+### Codex with DeepSeek V4.1 Flash
+
+`codex_deepseek_flash.yaml` is the run config for the leaderboard's DeepSeek V4.1 Flash / Codex /
+effort max row with a self-hosted model: Codex `0.154.0` with no model catalog, effort `max` and
+the full 8-hour budget. Sampling and output limits belong to the endpoint; Codex sends none.
+With it, 70 tasks with three trials each scored 31/210 (14.8%), against the leaderboard row's
+33/210 (15.7%).
+
+It expects an OpenAI Responses endpoint that serves the model as `deepseek-flash`, in front of a
+chat-completions server for the model (vLLM with DeepSeek's tokenizer, tool and reasoning
+parsers). Gym's `vllm_model` can be that endpoint with the Codex options of its companion change
+(#PR6). Pass the endpoint and its key as overrides: `--model-url` is the endpoint's
+`/v1` base URL, and the key comes from `POLICY_API_KEY` (or the variable named by
+`++tbsci_model_api_key_env`). Load the file with `--config` and no `--model-type`:
+
+```sh
+export POLICY_API_KEY=...  # any string if the endpoint has no auth
+gym eval run --config benchmarks/terminal_bench_science/codex_deepseek_flash.yaml \
+  --split benchmark --model-url http://ENDPOINT_HOST:PORT/v1 \
+  --output results/tbsci-deepseek/rollouts.jsonl --concurrency 8 ++default_host=GYM_HOST_IP
+```
+
+Codex's requests then match those of a plain `codex exec` launch with the same `config.toml`
+model settings, as Harbor 0.24 starts it: `openai_model` relays them unchanged with no time
+limit of its own, the agent leaves Codex's feature defaults alone
+(`features: {multi_agent: null, code_mode: null}`, so the multi-agent tools stay), and it runs
+without `--ephemeral` (`ephemeral: false`), which keeps Codex's goal tools. Gym's own
+`config.toml` keys (provider name, update checks, analytics, history) do not change the
+requests.
+
 ## Run
 
 The `gym` CLI does not read an env file, and `resources.yaml` falls back to `localhost` when

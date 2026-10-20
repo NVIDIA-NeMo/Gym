@@ -1,0 +1,97 @@
+# Terminal-Bench-Science v0.1 with the Codex CLI running inside each task sandbox.
+#
+# The TB4 resources server owns the task and verifier sandboxes and lends the task sandbox
+# through SandboxAccess, as Terminal-Bench 2.1's server does for codex_agent. codex_agent installs
+# its pinned CLI there and runs it, and single_agent_turn_legacy seeds both, closes Codex before
+# grading, then closes Resources. Grading, partial credit, artifacts, and EFS logs are unchanged
+# from the mini-SWE profile. Rows carry the official instruction as their prompt
+# (prepare_codex.py). See README.md, "Codex in the task sandbox".
+config_paths:
+  - benchmarks/terminal_bench_science/resources.yaml
+  - responses_api_agents/codex_agent/configs/codex_agent.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
+
+# The provider block Codex reconnects through to borrow the task sandbox. It must reach the same
+# OpenSandbox deployment as the resources server's environment.sandbox_provider.
+terminal_bench_science_sandbox:
+  opensandbox:
+    connection:
+      domain: ${oc.env:OPENSANDBOX_DOMAIN,localhost}
+      api_key: ${oc.env:OPENSANDBOX_API_KEY,null}
+      protocol: http
+      use_server_proxy: true
+      transport_backend: aiohttp
+      tls_verify: false
+    operations:
+      # Codex's supervisor runs for the whole 8-hour budget: poll it instead of holding one stream.
+      background_exec: true
+      retries: 5
+      retry_delay_s: 5
+      retry_max_delay_s: 60
+      status_poll_timeout_s: 20
+
+terminal_bench_science_codex_resources_server:
+  _inherit_from: terminal_bench_science
+  resources_servers:
+    terminal_bench_4:
+      description: Pinned Terminal-Bench-Science v0.1 tasks lent to sandbox-borrowing harnesses, with separate offline verification.
+      sandbox_provider_ref: terminal_bench_science_sandbox
+      datasets:
+        - name: terminal_bench_science
+          type: benchmark
+          jsonl_fpath: benchmarks/terminal_bench_science/data/benchmark_codex.jsonl
+          prepare_script: benchmarks/terminal_bench_science/prepare_codex.py
+          # Official protocol: three trials per task. For other counts, replace this dataset list
+          # in a run config (--num-repeats multiplies it).
+          num_repeats: 3
+          license: Apache 2.0
+
+terminal_bench_science_codex_agent:
+  _inherit_from: codex_agent
+  responses_api_agents:
+    codex_agent:
+      # Routes the benchmark dataset to this agent; the Environment Server drives the episode.
+      resources_server:
+        type: resources_servers
+        name: terminal_bench_science_codex_resources_server
+      # The name Codex sees, and so the catalog entry it applies; the model server substitutes
+      # its own configured model upstream. Defaults to the served name.
+      model: ${oc.select:tbsci_codex_model,${policy_model_name}}
+      codex_version: ${oc.select:tbsci_codex_version,0.155.1}
+      # Every v0.1 task has an 8-hour agent budget (prepare_codex.py checks it).
+      timeout: ${oc.select:tbsci_agent_timeout_sec,28800}
+      reasoning_effort: ${oc.select:tbsci_reasoning_effort,null}
+      model_server_forwards_reasoning_effort: ${oc.select:tbsci_model_server_forwards_reasoning_effort,false}
+      # Codex and its shell tools see the task image's environment and HOME, as in Harbor.
+      inherit_sandbox_environment: true
+      # The CLI's own default for its built-in OpenAI provider.
+      stream_idle_timeout_ms: ${oc.select:tbsci_stream_idle_timeout_ms,300000}
+      # Resends before a stream starts and reconnects after one drops; null leaves Codex's defaults.
+      request_max_retries: ${oc.select:tbsci_codex_request_max_retries,null}
+      stream_max_retries: ${oc.select:tbsci_codex_stream_max_retries,null}
+      # Closing an 8-hour session stops its process tree and copies its event log.
+      session_close_timeout_seconds: 300
+      # As Harbor does: grade a Codex run that died (for example the kernel's OOM kill picked
+      # Codex) while its sandbox still runs, instead of retrying it, and make Codex and its tools,
+      # not the exec daemon, the OOM killer's preferred victims.
+      verify_after_agent_error: ${oc.select:tbsci_verify_after_agent_error,true}
+      raise_oom_score_adj: ${oc.select:tbsci_raise_oom_score_adj,true}
+      # Without --ephemeral (codex_deepseek_flash.yaml), keep Codex's session rollouts (per-call token counts and
+      # timestamps, also for a run stopped at its time limit): copied to /logs/agent/sessions, which the resources
+      # server copies into the trial directory (agent/sessions/), as Harbor keeps them under /logs/agent.
+      sandbox_logs_dir: ${oc.select:tbsci_codex_sandbox_logs_dir,/logs/agent}
+
+terminal_bench_science_codex:
+  _inherit_from: single_agent_turn_legacy
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: terminal_bench_science_codex_resources_server
+      agent_server:
+        type: responses_api_agents
+        name: terminal_bench_science_codex_agent
+      # Provisioning, Codex installation, the 8-hour agent budget, and verification (up to
+      # 12000 seconds for the slowest verifier, plus its startup).
+      default_episode_timeout_seconds: ${oc.select:tbsci_episode_timeout_sec,46800}
+      cleanup_timeout_seconds: 600
