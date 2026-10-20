@@ -74,7 +74,8 @@ A new pairing does not need another combined preset.
 ## Runtime and model requirements
 
 Use a pinned `codex_version` (default **0.144.4**), direct `SandboxAccess`,
-and an absolute task workdir disjoint from the adapter directories. Required Resources HTTP/MCP
+and an absolute task workdir disjoint from the adapter directories under `/tmp` (`/` is accepted: a task
+image without `WORKDIR` runs there, as Harbor starts it). Required Resources HTTP/MCP
 tools are rejected; Codex supplies its own tools. The task sandbox supplies isolation, so
 `sandbox_mode` must be `danger-full-access`. No Codex CLI is required on the agent-server host.
 With several agent workers, session routing sends each session's requests to the worker that seeded it.

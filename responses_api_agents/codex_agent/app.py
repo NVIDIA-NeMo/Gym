@@ -125,9 +125,11 @@ import sys
 workdir = Path(sys.argv[1]).resolve(strict=True)
 if not workdir.is_dir():
     raise ValueError("Codex workdir must be an existing directory")
+# The root holds every path: a task image without WORKDIR runs there, as Harbor starts it.
+contains = workdir != Path("/")
 for value in sys.argv[2:]:
     owned = Path(value).resolve()
-    if workdir == owned or workdir in owned.parents or owned in workdir.parents:
+    if workdir == owned or (contains and workdir in owned.parents) or owned in workdir.parents:
         raise ValueError("Codex task workdir and adapter paths must be disjoint after resolving symlinks")
 """
     # The task may provide neither the Python worker runtime nor the Bash installer runtime.
@@ -638,9 +640,9 @@ class CodexAgent(SimpleResponsesAPIAgent):
         if not isinstance(workdir, str) or not workdir.startswith("/") or ".." in PurePosixPath(workdir).parts:
             raise HTTPException(422, "Codex sandbox workdir must be absolute")
         normalized_workdir = PurePosixPath(workdir)
-        if normalized_workdir in (PurePosixPath("/"), PurePosixPath("/tmp")) or str(normalized_workdir).startswith(
-            "/tmp/nemo-gym-codex"
-        ):
+        # The runtime and session files live under /tmp. A task image without WORKDIR lends "/", which holds every
+        # path; Codex runs there as Harbor starts it. Any other workdir must be disjoint from them.
+        if normalized_workdir == PurePosixPath("/tmp") or str(normalized_workdir).startswith("/tmp/nemo-gym-codex"):
             raise HTTPException(422, "Codex runtime/session files must be outside SandboxAccess.workdir")
         if any(access.required for access in self.effective_tool_accesses(body)):
             raise HTTPException(

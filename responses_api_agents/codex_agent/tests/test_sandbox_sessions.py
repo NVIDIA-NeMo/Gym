@@ -1577,6 +1577,70 @@ def test_sandbox_logs_dir_must_be_an_absolute_directory_other_than_root(value):
         )
 
 
+def test_sandbox_prepare_accepts_root_workdir(tmp_path):
+    """A task image without WORKDIR lends "/": the root holds the session and runtime paths, as under Harbor."""
+    from responses_api_agents.codex_agent.app import _sandbox_prepare_command
+
+    directory = tmp_path / "sessions" / "session-1"
+    result = subprocess.run(
+        ["bash", "-c", _sandbox_prepare_command("/", str(directory), str(tmp_path / "runtime"))],
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (directory / "home/.codex").is_dir()
+
+
+def test_sandbox_prepare_rejects_other_workdir_holding_session_files(tmp_path):
+    from responses_api_agents.codex_agent.app import _sandbox_prepare_command
+
+    directory = tmp_path / "sessions" / "session-1"
+    result = subprocess.run(
+        ["bash", "-c", _sandbox_prepare_command(str(tmp_path), str(directory), str(tmp_path / "runtime"))],
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=10,
+    )
+    assert result.returncode != 0
+    assert "must be disjoint" in result.stderr
+    assert not directory.exists()
+
+
+async def test_root_workdir_seeds_with_runtime_and_session_under_tmp(setup):
+    agent, sandbox = setup
+    body = seed()
+    body.sandbox_access.workdir = "/"
+    await agent.seed_agent_session(Request({"type": "http", "session": {}}), body)
+    state = agent._session_records[body.agent_session_id].state
+    assert state.session.workdir == "/"
+    assert state.session.session_dir.startswith("/tmp/nemo-gym-codex-sessions/")
+    assert state.runtime.startswith("/tmp/nemo-gym-codex-node-")
+    assert any(
+        call.kwargs.get("cwd") == "/" and "install_codex_runtime.sh" in call.args[0]
+        for call in sandbox.exec.await_args_list
+    )
+    await agent.close_agent_session(
+        Request({"type": "http", "session": {}}), AgentCloseSessionRequest(**close_body(body.agent_session_id))
+    )
+
+
+@pytest.mark.parametrize(
+    "workdir", ["/tmp", "/tmp/nemo-gym-codex-sessions/other", "/tmp/nemo-gym-codex-node-22.19.0-0.144.4"]
+)
+def test_seed_rejects_workdirs_that_hold_runtime_or_session_files(setup, workdir):
+    agent, sandbox = setup
+    body = seed()
+    body.sandbox_access.workdir = workdir
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=body.model_dump(mode="json"))
+    assert created.status_code == 422
+    assert "outside SandboxAccess.workdir" in created.text
+    sandbox.exec.assert_not_awaited()
+
+
 async def test_seed_is_idempotent_and_binds_complete_payload(setup):
     agent, sandbox = setup
     first = Request({"type": "http", "session": {}})
