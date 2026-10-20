@@ -7,6 +7,8 @@ import json
 from collections import Counter
 from collections.abc import Callable
 
+from nemo_gym.responses_converter import message_content_to_text
+
 from .checks import BehavioralCheck
 from .results import Results
 
@@ -28,16 +30,6 @@ def _terminal_error_reported(attempts: list[dict], responses: list[dict], expect
     message = _mapping(_mapping(attempts[-1].get("response")).get("error")).get("message")
     reported = _mapping(responses[0].get("error")).get("message")
     return isinstance(message, str) and bool(message) and isinstance(reported, str) and message in reported
-
-
-def _as_text(value: object) -> object:
-    """A tool result as text. Parts are joined without a separator, so part boundaries are ignored."""
-    is_text_parts = (
-        isinstance(value, list)
-        and value
-        and all(isinstance(part, dict) and isinstance(part.get("text"), str) for part in value)
-    )
-    return "".join(part["text"] for part in value) if is_text_parts else value
 
 
 def tool_checks(
@@ -90,7 +82,8 @@ def tool_checks(
             values["status"].append(tool.get("status") == ("failed" if expected["exit_code"] else "completed"))
             observed = expected.get("outputs", [])
             values["output"].append(
-                bool(observed) and all(_as_text(o) == _as_text(tool.get("output")) for o in observed)
+                bool(observed)
+                and all(message_content_to_text(o) == message_content_to_text(tool.get("output")) for o in observed)
             )
             if len(requests) != 1:
                 continue
