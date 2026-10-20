@@ -181,7 +181,7 @@ unchanged. Check task-image support and the benchmark's `allowed_agents` before 
 
 ### Runtime and ownership
 
-The task image must be Linux (x86_64 or aarch64, glibc or musl), and the sandbox needs network
+The task image must be Linux (x86_64 or aarch64 with glibc; x86_64 only with musl), and the sandbox needs network
 access to nodejs.org, the npm registry, and the Gym Model Server. Python 3.8+ and Bash must be
 present or, on a root image, are installed with apk or apt-get. Task images need not ship Node:
 session setup runs [install_kilo_runtime.sh](install_kilo_runtime.sh), which downloads a
