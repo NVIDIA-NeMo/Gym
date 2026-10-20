@@ -112,8 +112,8 @@ def _ends_on_finish_tool(messages: list[Any]) -> bool:
 def _gym_mcp_tool_name(name: str, server_names: list[str]) -> str:
     """Rename gym_mcp.mjs' ``<server>_<tool>`` to Gym's ``mcp__<server>__<tool>``, which Gym strips before verify.
 
-    `_mcp_grant_problems` keeps out grant names that start with another grant's name and ``_``, so at most one
-    grant matches.
+    `server_names` must not hold a name that starts with another one and ``_`` (`_mcp_grant_problems` leaves such
+    grants out), so at most one name matches.
     """
     for server in server_names:
         if name.startswith(f"{server}_"):
@@ -122,11 +122,11 @@ def _gym_mcp_tool_name(name: str, server_names: list[str]) -> str:
 
 
 def _mcp_grant_problems(accesses: list[ToolAccess]) -> dict[str, str]:
-    """Why Pi cannot use some of an episode's MCP grants, by grant name.
+    """Return a dict of grant name to reason for each of the episode's MCP grants that Pi cannot use.
 
     gym_mcp.mjs names each tool `<grant>_<tool>`, so the tools of two grants whose names differ by a `_<suffix>`
-    could not be told apart. An optional grant of such a pair is listed, and a required one when the other is
-    required too. Seeding refuses the required grants listed here; activation leaves out the optional ones.
+    could not be told apart. Of such a pair, an optional grant is always listed, and a required one only when the
+    other is required too. Seeding refuses the required grants listed here; activation leaves out the optional ones.
     """
     grants = [access for access in accesses if isinstance(access, MCPToolAccess)]
     problems = {
