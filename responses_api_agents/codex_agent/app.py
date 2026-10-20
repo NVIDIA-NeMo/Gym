@@ -61,7 +61,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
 )
 from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, ObservationGap, ToolCallObservation
-from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, create_provider
+from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, SandboxStatus, create_provider
 from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.server_utils import get_global_config_dict, get_response_json, raise_for_status
@@ -78,6 +78,44 @@ _COMPACTION_ADVISORY = (
     "Heads up: Long threads and multiple compactions can cause the model to be less accurate. "
     "Start a new thread when possible to keep threads small and targeted."
 )
+_ENDPOINT_ERROR_STATUSES = (429, 500, 502, 503, 504)
+# Transport and service failures of the model endpoint in Codex's explicit error events, matched
+# lowercased. A failed run whose terminal failure names one of these is retried instead of graded
+# (see _model_endpoint_error).
+_MODEL_ENDPOINT_ERRORS = (
+    "failed to connect",
+    "could not connect",
+    "couldn't connect",
+    "connection refused",
+    "connection reset",
+    "connection timed out",
+    "empty reply from server",
+    "curl: (7)",
+    "curl: (28)",
+    "curl: (52)",
+    "curl: (56)",
+    *(f"{prefix} {code}" for prefix in ("returned error:", "status code") for code in _ENDPOINT_ERROR_STATUSES),
+    # Codex 0.154.0, in top-level error events (and turn.failed once its retries are spent).
+    *(
+        f"{prefix} {code}"
+        for prefix in ("unexpected status", "exceeded retry limit, last status:")
+        for code in _ENDPOINT_ERROR_STATUSES
+    ),
+    "currently experiencing high demand",  # Codex's message for an HTTP 500
+    "reconnecting... waiting for network",
+    # Not every stream disconnect: "...: Incomplete response returned, reason: max_output_tokens" is the
+    # output cap, a gradable outcome.
+    *(
+        f"stream disconnected before completion: {cause}"
+        for cause in (
+            "transport error",
+            "stream closed before response.completed",
+            "error sending request",
+            "idle timeout waiting for sse",
+        )
+    ),
+)
+_LIVENESS_TIMEOUT_S = 60.0
 
 
 def _sandbox_prepare_command(workdir: str, directory: str, runtime: str) -> str:
@@ -350,6 +388,54 @@ def parse_exec_jsonl(
     return output_items, metadata
 
 
+def _is_error_event(event: dict[str, Any]) -> bool:
+    """An explicit Codex error event (not a tool's)."""
+    event_type = str(event.get("type") or "").lower()
+    if "tool" in event_type:
+        return False
+    return event_type in ("error", "api_error", "provider_error", "model_error", "turn.failed") or (
+        event_type.endswith((".error", "_error", ".failed"))
+    )
+
+
+def _is_model_output(event: dict[str, Any]) -> bool:
+    """An event showing that a model call succeeded: a completed turn, or an item other than an error."""
+    if event.get("type") == "turn.completed":
+        return True
+    item = event.get("item")
+    return (
+        event.get("type") in ("item.started", "item.updated", "item.completed")
+        and isinstance(item, dict)
+        and item.get("type") != "error"
+    )
+
+
+def _model_endpoint_error(events: list[tuple[float, dict[str, Any]]]) -> Optional[str]:
+    """Return the model-endpoint failure that ended a Codex run, if any.
+
+    Only the terminal failure counts, after the run's last model output: ``turn.failed`` and the
+    last error event before it or, when the run ended without ``turn.failed`` (killed while Codex
+    still retried or waited for the network), the run's last event if it is an error event. A
+    retry followed by model output was recovered, so a later unrelated failure stays gradable.
+    """
+    tail = [event for _, event in events]
+    last_output = max((index for index, event in enumerate(tail) if _is_model_output(event)), default=-1)
+    tail = tail[last_output + 1 :]
+    failed_at = max((index for index, event in enumerate(tail) if event.get("type") == "turn.failed"), default=None)
+    if failed_at is None:
+        terminal = tail[-1:]
+    else:
+        before = [event for event in tail[:failed_at] if _is_error_event(event)]
+        terminal = [*before[-1:], tail[failed_at]]
+    for event in terminal:
+        if _is_error_event(event):
+            text = json.dumps(event).lower()
+            for marker in _MODEL_ENDPOINT_ERRORS:
+                if marker in text:
+                    return marker
+    return None
+
+
 def _kill_process_group(proc: Any) -> None:
     """Kill the codex subprocess and every child in its process group.
 
@@ -423,6 +509,18 @@ class CodexAgentConfig(BaseResponsesAPIAgentConfig):
     # CODEX_HOME private. Use only when the sandbox environment is the task's own (remote
     # providers), not a local provider that inherits the agent host's environment.
     inherit_sandbox_environment: bool = False
+    # Sandbox sessions: return a failed run (nonzero or signalled exit, failed turn, missing
+    # turn.completed) as a `failed` response so Resources still grades it, as Harbor grades after
+    # any agent exit, when the supervisor confirmed cleanup, no explicit error event names a
+    # model-endpoint failure, and the sandbox still runs and answers a command. Anything else (a
+    # lost or unresponsive sandbox, an unconfirmed cleanup, an endpoint outage) stays an execution
+    # error that bypasses verification, so the episode is retried.
+    verify_after_agent_error: bool = False
+    # Sandbox sessions: raise the oom_score_adj of Codex and everything it starts to 1000 (0 when
+    # the sandbox starts it below zero), so a memory-cgroup OOM kill picks agent work rather than
+    # the sandbox's exec daemon or the supervisor. Docker's equivalent daemon runs outside the
+    # container's memory cgroup, so there the agent's processes are the only candidates.
+    raise_oom_score_adj: bool = False
     # Required: every config pins an explicit npm version so auto-install is reproducible and cannot
     # silently drift as new Codex releases land. Version bumps are then explicit, tested changes.
     codex_version: str
@@ -728,6 +826,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 "OPENAI_API_KEY": "gym",  # pragma: allowlist secret
             },
             "inherit_env": self.config.inherit_sandbox_environment,
+            "raise_oom_score_adj": self.config.raise_oom_score_adj,
         }
         raw = ""
         failure = None
@@ -827,6 +926,13 @@ class CodexAgent(SimpleResponsesAPIAgent):
         if cleanup and not completed and not cleanup["timed_out"] and not output_limited:
             error = error or "Codex ended without turn.completed"
         status = "failed" if error else "incomplete" if cleanup["timed_out"] or output_limited else "completed"
+        graded_error = None
+        if error and failure is None and self.config.verify_after_agent_error:
+            graded_error = await self._gradable_agent_error(state, error, cleanup=cleanup, events=events)
+            if graded_error is not None:
+                error = None
+                # A run that also hit its time limit is graded as a timeout.
+                status = "incomplete" if cleanup["timed_out"] else "failed"
         conversation = [NeMoGymEasyInputMessage(role="user", content=prompt)]
         if system:
             conversation.insert(0, NeMoGymEasyInputMessage(role="system", content=system))
@@ -947,8 +1053,47 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 **({"harness_hostname": runtime.hostname, "harness_pid": str(runtime.pid)} if runtime else {}),
                 "codex_version": self.config.codex_version,
                 AGENT_TIMEOUT_METADATA_KEY: str(timeout),
+                **({"graded_agent_error": graded_error[:500]} if graded_error else {}),
             },
         )
+
+    async def _gradable_agent_error(
+        self,
+        state: CodexSandboxSession,
+        error: str,
+        *,
+        cleanup: Any,
+        events: list[tuple[float, dict[str, Any]]],
+    ) -> Optional[str]:
+        """Describe a failed Codex run that Resources can still grade, or return None.
+
+        The supervisor's confirmed cleanup means Codex ended and nothing it started still runs. An
+        endpoint outage, or a sandbox that no longer runs or answers, keeps the run an execution
+        error, so the episode is retried rather than graded.
+        """
+        if cleanup is None or cleanup["error"]:
+            return None
+        detail = f"exit {cleanup['return_code']}: {error}"
+        marker = _model_endpoint_error(events)
+        if marker is not None:
+            LOG.warning("Codex failed on a model endpoint error (%r); not grading it: %s", marker, detail)
+            return None
+        sandbox = state.session.sandbox
+        try:
+            async with asyncio.timeout(_LIVENESS_TIMEOUT_S):
+                sandbox_status = await sandbox.status()
+                if sandbox_status != SandboxStatus.RUNNING:
+                    LOG.warning("Sandbox is %s after Codex failed; not grading it: %s", sandbox_status, detail)
+                    return None
+                probe = await sandbox.exec("true", timeout_s=_LIVENESS_TIMEOUT_S)
+        except Exception as probe_error:
+            LOG.warning("Sandbox did not answer after Codex failed (%r); not grading it: %s", probe_error, detail)
+            return None
+        if probe.return_code or probe.error_type:
+            LOG.warning("Sandbox failed a liveness probe after Codex failed; not grading it: %s", detail)
+            return None
+        LOG.warning("Codex failed while its sandbox still runs; grading it as a nonzero agent exit: %s", detail)
+        return detail
 
     def _resolve_call_base_url(self, rollout_id: Optional[str]) -> str:
         """Provider base_url for the CLI's model calls (Codex appends ``/responses`` to it).

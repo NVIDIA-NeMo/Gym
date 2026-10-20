@@ -169,6 +169,31 @@ CLI aggregate usage, and sandbox hostname/PID/version. Wall-time and the pinned 
 model-output-limit event yield incomplete, potentially gradable work. Provider/API/runtime
 failures raise execution errors and bypass verification. Only Resources determines reward.
 
+`verify_after_agent_error: true` grades a failed run the way Harbor grades after any agent
+exit: a nonzero or signalled Codex exit, a failed turn, or a missing `turn.completed` returns a
+`failed` response (`incomplete` if the run also hit its time limit; the error is in
+`metadata.graded_agent_error`) instead of an execution error, so the Environment Server still
+verifies it. It applies only when the supervisor confirmed cleanup, the Codex error that ended
+the run names no model-endpoint transport or 429/5xx failure, and the sandbox still reports
+running and answers a probe command. A lost or unresponsive sandbox, an unconfirmed cleanup,
+and an endpoint outage stay execution errors, so the episode is retried.
+
+The endpoint check reads only the failure that ended the run, after its last model output:
+`turn.failed` and the last error event before it, or the last event when Codex was killed while
+it still retried or waited for the network. A retry followed by model output was recovered, so
+a later unrelated failure (an OOM kill, say) is still graded. It knows Codex 0.154.0's messages:
+`unexpected status` 429, 500, 502, 503 or 504, its `high demand` message for a 500, `exceeded
+retry limit, last status: 429`, `Reconnecting... waiting for network`, and a stream disconnect
+from a transport error, a closed stream, a failed send or the SSE idle timeout. The output
+cap's `stream disconnected before completion: Incomplete response returned, reason:
+max_output_tokens` is not an endpoint failure. A run that completed or hit its time limit is not
+a failed run, so the check never applies to it.
+
+`raise_oom_score_adj: true` raises the score of Codex and everything it starts to 1000 (to 0
+when the sandbox starts it below zero), so a memory-cgroup OOM kill picks agent work rather
+than the sandbox's exec daemon or the supervisor. Docker's equivalent daemon runs outside the
+container's memory cgroup. The runner records the change in the supervisor's `output.log`.
+
 CLI events omit exact model-call join IDs and can omit failed-call usage even after a recovered
 retry. Missing/default-zero cache and reasoning details remain unknown, with observation gaps.
 Compare CLI totals with captured model calls; do not interpret unavailable usage as zero.

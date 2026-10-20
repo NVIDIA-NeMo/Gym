@@ -19,6 +19,8 @@ codex_agent:
       reasoning_effort: null  # passed as `model_reasoning_effort` (e.g. low, medium, high)
       model_server_forwards_reasoning_effort: false  # sandbox sessions: true only if the model server forwards it (see README)
       inherit_sandbox_environment: false  # sandbox sessions: give Codex the task sandbox's full environment
+      verify_after_agent_error: false  # sandbox sessions: grade a failed run while its sandbox still runs (see README)
+      raise_oom_score_adj: false  # sandbox sessions: make Codex and its tools the OOM killer's preferred victims
       codex_version: 0.144.4  # required: npm version pinned on auto-install for reproducibility
       cwd: null  # working root for `codex exec --cd`; null -> fresh temp dir per request
       stream_idle_timeout_ms: null  # provider stream idle budget; null -> timeout * 1000

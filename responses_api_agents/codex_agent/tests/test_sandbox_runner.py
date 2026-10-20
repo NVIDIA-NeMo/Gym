@@ -114,6 +114,29 @@ def test_task_descendants_survive_until_owner_teardown(tmp_path, ending):
                 pass
 
 
+@pytest.mark.parametrize(("start", "expected"), [("0", "1000"), ("500", "1000"), ("-997", "0"), ("-1000", "0")])
+def test_prefer_for_oom_kill_raises_the_score_and_never_lowers_it(tmp_path, start, expected):
+    path = tmp_path / "oom_score_adj"
+    path.write_text(start + "\n")
+    assert sandbox_runner.prefer_for_oom_kill(str(path)) == f"{start} -> {expected}"
+    assert path.read_text() == expected
+    assert sandbox_runner.prefer_for_oom_kill(str(tmp_path / "missing")).startswith("unchanged")
+
+
+@pytest.mark.parametrize("raise_score", [False, True])
+def test_codex_and_its_tools_inherit_the_raised_oom_score(tmp_path, raise_score):
+    start = int(open("/proc/self/oom_score_adj").read())
+    # Stands in for Codex: a tool it starts reports the score it inherited.
+    code = (
+        "import subprocess,sys; subprocess.run([sys.executable,'-c',"
+        "\"import pathlib; pathlib.Path('score').write_text(open('/proc/self/oom_score_adj').read())\"],check=True)"
+    )
+    process = launch(tmp_path, code, raise_oom_score_adj=raise_score)
+    summary = result(tmp_path, process)
+    assert summary["return_code"] == 0
+    assert int((tmp_path / "score").read_text()) == ((0 if start < 0 else 1000) if raise_score else start)
+
+
 def test_spawn_error_is_not_success(tmp_path):
     process = launch(tmp_path, "raise RuntimeError('failed')")
     summary = result(tmp_path, process)
