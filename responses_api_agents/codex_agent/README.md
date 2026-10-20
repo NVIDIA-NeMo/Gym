@@ -338,6 +338,7 @@ codex_agent:
 - `extra_config`: extra `config.toml` content deep-merged over the generated base config — add MCP servers, feature flags, `model_verbosity`, etc. Per-rollout Gym MCP entries take precedence on name collisions
 - `features`: the generated `[features]` table. The defaults turn off `multi_agent` and `code_mode`, whose tool shapes Gym's typed Responses path cannot express. A `null` entry is left out, so the CLI uses its own default, as a launch without a Gym config does; set that only when the model server relays Codex's requests unchanged. Unlike `extra_config`, it also applies to sandbox sessions
 - `ephemeral`: pass `--ephemeral` (the default), so Codex keeps no session state. Codex then omits its goal tools (`create_goal`, `get_goal`, `update_goal`); `false` offers them, as `codex exec` without the flag does, and keeps the session files in the run's `CODEX_HOME`
+- `sandbox_logs_dir`: sandbox sessions only. After Codex stops, copy its session rollouts (`CODEX_HOME/sessions/**/rollout-*.jsonl`, with per-call token counts and timestamps, also for a run stopped at its time limit) to `<sandbox_logs_dir>/sessions` before the session directory is removed, as Harbor does with `/logs/agent`. Needs `ephemeral: false`. Default `null` (not copied)
 
 For the full set of Codex config options see the [Codex configuration reference](https://developers.openai.com/codex/config).
 

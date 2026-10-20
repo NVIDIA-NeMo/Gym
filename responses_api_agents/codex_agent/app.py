@@ -31,7 +31,7 @@ from typing import Any, Literal, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
-from pydantic import ConfigDict, Field, PrivateAttr, model_validator
+from pydantic import ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
 from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
@@ -547,10 +547,24 @@ class CodexAgentConfig(BaseResponsesAPIAgentConfig):
     # its goal tools (create_goal, get_goal, update_goal); false offers them, as launches without
     # the flag do.
     ephemeral: bool = True
+    # Sandbox sessions without --ephemeral: copy Codex's session rollouts (CODEX_HOME/sessions, with per-call token
+    # counts and timestamps) into <sandbox_logs_dir>/sessions after Codex stops, before the session directory is
+    # removed. Point it at a directory the resources server collects, such as /logs/agent for Harbor-format tasks.
+    sandbox_logs_dir: Optional[str] = None
     sandbox_provider: str | None = None
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
     session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
+
+    @field_validator("sandbox_logs_dir")
+    @classmethod
+    def _absolute_logs_dir(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        path = PurePosixPath(value)
+        if not path.is_absolute() or ".." in path.parts or path == PurePosixPath("/"):
+            raise ValueError("sandbox_logs_dir must be an absolute sandbox directory other than /")
+        return str(path)
 
     @model_validator(mode="after")
     def validate_context_budget(self) -> "CodexAgentConfig":
@@ -667,6 +681,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 sandbox=sandbox, session_dir=directory, workdir=workdir, owns_sandbox=owns_sandbox, harness="Codex"
             ),
             runtime=runtime,
+            logs_dir=self.config.sandbox_logs_dir,
         )
         try:
             if owns_sandbox:

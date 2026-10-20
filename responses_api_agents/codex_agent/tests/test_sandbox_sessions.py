@@ -1513,6 +1513,70 @@ def test_sandbox_prepare_accepts_disjoint_quoted_paths(tmp_path):
     assert not list(repository.iterdir())
 
 
+async def _local_exec(command, **kwargs):
+    process = await asyncio.create_subprocess_exec(
+        "sh", "-c", command, cwd=kwargs.get("cwd"), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    stdout, stderr = await process.communicate()
+    return SimpleNamespace(
+        return_code=process.returncode, error_type=None, stdout=stdout.decode(), stderr=stderr.decode()
+    )
+
+
+async def test_session_rollouts_are_copied_to_the_logs_dir(tmp_path):
+    """Codex's session rollouts (per-call token counts) survive the session directory, as Harbor keeps them."""
+    from nemo_gym.agent_utils.sandbox_session import SandboxSession
+    from responses_api_agents.codex_agent.sandbox import CodexSandboxSession
+
+    def state(directory, logs_dir):
+        session = SandboxSession(
+            sandbox=SimpleNamespace(exec=_local_exec), session_dir=str(directory), workdir="/app", harness="Codex"
+        )
+        return CodexSandboxSession(request=seed(), session=session, runtime="/tmp/runtime", logs_dir=logs_dir)
+
+    rollout = tmp_path / "session/home/.codex/sessions/2026/10/16/rollout-2026-10-16T22-15-00-abc.jsonl"
+    rollout.parent.mkdir(parents=True)
+    rollout.write_text('{"type":"event_msg","payload":{"type":"token_count"}}\n')
+    await state(tmp_path / "session", str(tmp_path / "logs/agent")).copy_session_rollouts()
+    copied = tmp_path / "logs/agent/sessions/2026/10/16" / rollout.name
+    assert copied.read_text() == rollout.read_text()
+
+    # --ephemeral (no sessions directory) and no logs_dir are both no-ops.
+    (tmp_path / "ephemeral").mkdir()
+    await state(tmp_path / "ephemeral", str(tmp_path / "logs2")).copy_session_rollouts()
+    assert not (tmp_path / "logs2").exists()
+    await state(tmp_path / "session", None).copy_session_rollouts()
+
+
+async def test_collect_copies_session_rollouts_before_reading_events(setup):
+    agent, sandbox = setup
+    agent.config.sandbox_logs_dir = "/logs/agent"
+    body = seed()
+    await agent.seed_agent_session(Request({"type": "http", "session": {}}), body)
+    state = agent._session_records[body.agent_session_id].state
+    assert state.logs_dir == "/logs/agent"
+    sandbox.files[f"{state.session.session_dir}/events.jsonl"] = events()
+    sandbox.exec.reset_mock()
+    assert await state.collect_artifacts() == events()
+    copy = sandbox.exec.await_args_list[0]
+    assert f"{state.session.session_dir}/home/.codex/sessions" in copy.args[0]
+    assert "/logs/agent/sessions" in copy.args[0]
+
+
+@pytest.mark.parametrize("value", ["/", "relative", "/logs/../tmp"])
+def test_sandbox_logs_dir_must_be_an_absolute_directory_other_than_root(value):
+    with pytest.raises(ValidationError):
+        CodexAgentConfig(
+            name="codex",
+            host="localhost",
+            port=8001,
+            entrypoint="app.py",
+            model_server={"type": "responses_api_models", "name": "policy"},
+            codex_version="0.144.4",
+            sandbox_logs_dir=value,
+        )
+
+
 async def test_seed_is_idempotent_and_binds_complete_payload(setup):
     agent, sandbox = setup
     first = Request({"type": "http", "session": {}})

@@ -5,6 +5,7 @@
 import asyncio
 import json
 import logging
+import shlex
 from dataclasses import dataclass
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
@@ -43,6 +44,7 @@ class CodexSandboxSession(AgentSessionState):
 
     session: SandboxSession[str]
     runtime: str
+    logs_dir: str | None = None
     task: asyncio.Task[NeMoGymResponse] | None = None
     runtime_info: HarnessProcessInfo | None = None
     observations: AgentObservationBundle | None = None
@@ -98,8 +100,26 @@ class CodexSandboxSession(AgentSessionState):
             ],
         )
 
+    async def copy_session_rollouts(self) -> None:
+        """Copy Codex's session rollouts (CODEX_HOME/sessions) to logs_dir/sessions; never fails collection."""
+        if not self.logs_dir:
+            return
+        sessions = f"{self.session.session_dir}/home/.codex/sessions"
+        target = f"{self.logs_dir}/sessions"
+        command = (
+            f"if [ -d {shlex.quote(sessions)} ]; then mkdir -p {shlex.quote(target)} && "
+            f"cp -R {shlex.quote(sessions)}/. {shlex.quote(target)}/; fi"
+        )
+        try:
+            result = await self.session.sandbox.exec(command, cwd="/", timeout_s=120)
+            if result.return_code != 0 or result.error_type:
+                LOG.warning("Codex session rollouts not copied: %s", result.stderr or result.stdout)
+        except Exception:
+            LOG.exception("Codex session rollouts not copied")
+
     async def collect_artifacts(self) -> str:
         """Keep partial events even when worker metadata is unavailable."""
+        await self.copy_session_rollouts()
         try:
             events = await self.read_text("events.jsonl")
         except Exception as error:
