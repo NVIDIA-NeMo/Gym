@@ -13,9 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import random
 import uuid
 from asyncio import sleep
 from collections.abc import Mapping
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import (
     Annotated,
     Any,
@@ -1540,6 +1543,38 @@ RETRY_ERROR_CODES = RATE_LIMIT_ERROR_CODES + [404, 408, 500]
 # generic "quota exceeded" wording is used by per-minute limits that recover.
 PERMANENT_QUOTA_CODES = ("budget_exceeded", "insufficient_quota")
 PERMANENT_AUTH_CODES = ("invalid_api_key", "invalid_api_token", "authentication_error")
+# A provider that says it is busy is waited out on a time budget, not a count of tries.
+WAIT_OUT_ERROR_CODES = (429, 503)
+RETRY_BACKOFF_BASE_SECONDS = 1.0
+RETRY_BACKOFF_MAX_SECONDS = 60.0
+# 2**6 = 64 s already passes the cap, so larger exponents only risk a float overflow on very long retry runs.
+RETRY_BACKOFF_MAX_EXPONENT = 6
+
+
+def _retry_after_seconds(response: ClientResponse) -> Optional[float]:
+    """Seconds a Retry-After header asks for, as a number or an HTTP date; None without a usable one."""
+    value = (getattr(response, "headers", None) or {}).get("Retry-After")
+    if not value:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        pass
+    try:
+        retry_at = parsedate_to_datetime(value)
+    except ValueError:
+        return None
+    return (retry_at.replace(tzinfo=retry_at.tzinfo or timezone.utc) - datetime.now(timezone.utc)).total_seconds()
+
+
+def _retry_wait_seconds(tries: int, response: ClientResponse) -> float:
+    """Full-jitter exponential backoff, or the provider's Retry-After, both capped."""
+    retry_after = _retry_after_seconds(response)
+    # A zero wait would spend none of max_rate_limit_wait_seconds, so it falls back to backoff.
+    if retry_after is not None and retry_after > 0:
+        return min(retry_after, RETRY_BACKOFF_MAX_SECONDS)
+    exponent = min(tries - 1, RETRY_BACKOFF_MAX_EXPONENT)
+    return random.uniform(0, min(RETRY_BACKOFF_MAX_SECONDS, RETRY_BACKOFF_BASE_SECONDS * 2**exponent))
 
 
 def _decode_error_text(content: bytes | str) -> str:
@@ -1624,6 +1659,16 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
     )
 
     max_http_attempts: int = Field(default=MAX_NUM_TRIES, ge=1)
+
+    max_rate_limit_wait_seconds: float = Field(
+        default=3600.0,
+        ge=0,
+        description=(
+            "Total time to wait out 429 and 503 answers before failing the request, instead of "
+            "max_http_attempts tries; the request fails once the next wait would pass it. 0 keeps 429 and 503 "
+            "on the max_http_attempts count. Internal NeMo Gym servers keep retrying them without limit."
+        ),
+    )
 
     default_headers: Dict[str, str] = Field(
         default_factory=dict,
@@ -1719,6 +1764,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             self._raise_permanent_error()
         max_num_tries = self.max_num_tries or self.max_http_attempts
         tries = 0
+        waited = 0.0
         while tries < max_num_tries:
             if self._permanent_trip is not None:
                 self._raise_permanent_error()
@@ -1738,10 +1784,22 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             if response.status == 429 and _error_body_is_permanent_quota(content):
                 self._trip_permanent_error(response.status, content, request_kwargs.get("url"))
 
+            wait = _retry_wait_seconds(tries, response)
             # Internal NeMo Gym servers extend max tries for retryable errors unless
-            # the caller owns the complete retry schedule.
+            # the caller owns the complete retry schedule. A busy provider is waited
+            # out until max_rate_limit_wait_seconds is spent: a positive budget ends the
+            # request even when max_http_attempts allows more tries, and 0 leaves 429
+            # and 503 on the max_http_attempts count.
             if self.max_num_tries is None and response.status in RATE_LIMIT_ERROR_CODES and self.internal:
                 max_num_tries += 1
+            elif (
+                self.max_num_tries is None
+                and response.status in WAIT_OUT_ERROR_CODES
+                and self.max_rate_limit_wait_seconds > 0
+            ):
+                if waited + wait > self.max_rate_limit_wait_seconds:
+                    await raise_for_status(response, content)
+                max_num_tries = max(max_num_tries, tries + 1)
 
             # Preserve the final error body for raise_for_status and avoid sleeping
             # after the last attempt. Reading intermediate bodies releases sockets.
@@ -1750,10 +1808,11 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
 
             kind = "rate_limit" if response.status in RATE_LIMIT_ERROR_CODES else "http_error"
             print(
-                f"[model_retry url={request_kwargs.get('url')} status={response.status} kind={kind} try={tries} max_tries={max_num_tries} error_msg={content.decode('utf-8', errors='replace')[:200]}]",
+                f"[model_retry url={request_kwargs.get('url')} status={response.status} kind={kind} try={tries} max_tries={max_num_tries} wait_s={wait:.1f} error_msg={content.decode('utf-8', errors='replace')[:200]}]",
                 flush=True,
             )
-            await sleep(0.5)
+            waited += wait
+            await sleep(wait)
 
         await raise_for_status(response)
 

@@ -563,6 +563,8 @@ class VLLMModel(SimpleResponsesAPIModel):
                     if (self.config.endpoint_file or self.config.route_around_failing_endpoints)
                     else None
                 ),
+                # The wait budget is for outside providers; a job must notice a down model server quickly.
+                max_rate_limit_wait_seconds=0,
             )
             for base_url in self.config.base_url
         ]
@@ -1920,6 +1922,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 api_key=self.config.api_key,
                 default_headers=self.config.default_headers,
                 max_connection_retries=self.config.endpoint_connection_retries,
+                max_rate_limit_wait_seconds=0,
             )
         ]
         # Every session re-resolves onto the new host.

@@ -17,6 +17,7 @@ from copy import deepcopy
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from pydantic import ValidationError
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
@@ -62,6 +63,13 @@ _VERIFY_RESPONSE = {
     "timeout_rate": 0.0,
 }
 
+# Row fields the request does not declare; a resources server that grades from the row needs them.
+_EXTRA_TASK_FIELDS = {
+    "reference_code": "def solve():\n    return 1.23",
+    "entry": "solve",
+    "testcases": [{"args": [], "expected": 1.23}],
+}
+
 
 def _make_config() -> CritPtAgentConfig:
     return CritPtAgentConfig(
@@ -87,7 +95,7 @@ def _mock_post_response(data: dict) -> AsyncMock:
 
 
 def _make_run_body(
-    problem_id: str = "5", code_template: str = "def solve():\n    return ???"
+    problem_id: str = "5", code_template: str = "def solve():\n    return ???", **extra_fields
 ) -> CritPtAgentRunRequest:
     return CritPtAgentRunRequest(
         responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
@@ -98,6 +106,7 @@ def _make_run_body(
         ),
         problem_id=problem_id,
         code_template=code_template,
+        **extra_fields,
     )
 
 
@@ -154,6 +163,23 @@ class TestHelpers:
         assert template in rendered
         assert "Populate your final answer" in rendered
         assert "No additional reasoning" in rendered
+
+
+class TestRunRequest:
+    @pytest.mark.parametrize("missing_field", ["problem_id", "code_template"])
+    def test_declared_fields_still_required(self, missing_field):
+        row = {
+            "responses_create_params": {"input": [{"role": "user", "content": "Solve this."}]},
+            "problem_id": "5",
+            "code_template": "def solve():\n    return ???",
+            **_EXTRA_TASK_FIELDS,
+        }
+        del row[missing_field]
+
+        with pytest.raises(ValidationError) as exc_info:
+            CritPtAgentRunRequest.model_validate(row)
+
+        assert [(error["type"], error["loc"]) for error in exc_info.value.errors()] == [("missing", (missing_field,))]
 
 
 class TestApp:
@@ -309,3 +335,24 @@ class TestApp:
         assert verify_call.kwargs["url_path"] == "/verify"
         verify_data = verify_call.kwargs["json"]
         assert verify_data["problem_id"] == "42"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("url_path", ["/seed_session", "/verify"])
+    async def test_run_forwards_extra_task_fields_to_resources_server(self, url_path):
+        server = _make_server()
+        server.server_client.post.side_effect = [
+            _mock_post_response({}),  # seed_session
+            _mock_post_response(_MODEL_RESPONSE),  # Turn 1
+            _mock_post_response(_MODEL_RESPONSE),  # Turn 2
+            _mock_post_response(_VERIFY_RESPONSE),  # verify
+        ]
+
+        request_mock = MagicMock()
+        request_mock.cookies = {}
+        await server.run(request_mock, _make_run_body(**_EXTRA_TASK_FIELDS))
+
+        payloads = {call.kwargs["url_path"]: call.kwargs["json"] for call in server.server_client.post.call_args_list}
+        payload = payloads[url_path]
+        assert {field: payload.get(field) for field in _EXTRA_TASK_FIELDS} == _EXTRA_TASK_FIELDS
+        assert payload["problem_id"] == "5"
+        assert payload["code_template"] == "def solve():\n    return ???"
