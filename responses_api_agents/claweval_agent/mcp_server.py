@@ -6,15 +6,17 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
 import json
 import math
-import mimetypes
 import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
+
+from PIL import Image
 
 
 WORKSPACE = Path("/workspace").resolve()
@@ -73,13 +75,19 @@ def _workspace_path(value: object) -> Path:
 
 
 def _image(path: Path) -> dict:
-    mime = mimetypes.guess_type(path.name)[0] or "image/png"
-    if not mime.startswith("image/"):
-        mime = "image/png"
+    raw = path.read_bytes()
+    try:
+        with Image.open(io.BytesIO(raw)) as image:
+            image.load()
+            mime = Image.MIME.get(image.format)
+    except (OSError, SyntaxError, ValueError, Image.DecompressionBombError) as exc:
+        raise ValueError(f"{path.name} is not a decodable image. Use media_type='video' for video files.") from exc
+    if mime is None:
+        raise ValueError(f"{path.name} has an unsupported image format")
     return {
         "type": "image",
         "mimeType": mime,
-        "data": base64.b64encode(path.read_bytes()).decode(),
+        "data": base64.b64encode(raw).decode(),
     }
 
 
@@ -157,11 +165,12 @@ class MediaServer:
             )
         if media_type == "image":
             self._remaining(1)
+            image = _image(path)
             self.frames += 1
             return {
                 "content": [
                     {"type": "text", "text": f"Image: {path.name}"},
-                    _image(path),
+                    image,
                 ],
                 "isError": False,
             }
@@ -186,9 +195,7 @@ class MediaServer:
         if not 32 <= width <= 1920 or not 32 <= height <= 1920:
             raise ValueError("screen_size dimensions must be between 32 and 1920")
         key = hashlib.sha256(
-            json.dumps(
-                [str(path), path.stat().st_mtime_ns, start, end, effective_fps, count, width, height]
-            ).encode()
+            json.dumps([str(path), path.stat().st_mtime_ns, start, end, effective_fps, count, width, height]).encode()
         ).hexdigest()
         destination = STATE_DIR / "frames" / key
         destination.mkdir(parents=True, exist_ok=True)
@@ -248,12 +255,7 @@ class MediaServer:
         count = self._remaining(args.get("frame_count", 4))
         width = args.get("viewport_width", 1080)
         height = args.get("viewport_height", 720)
-        if (
-            type(width) is not int
-            or type(height) is not int
-            or not 320 <= width <= 1920
-            or not 240 <= height <= 1080
-        ):
+        if type(width) is not int or type(height) is not int or not 320 <= width <= 1920 or not 240 <= height <= 1080:
             raise ValueError("viewport dimensions are outside the supported range")
         bundled = [
             *Path("/ms-playwright").glob("chromium-*/chrome-linux/chrome"),
