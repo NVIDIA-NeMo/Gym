@@ -1,10 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Summarize VLLM_PREFILL_TIMING JSON embedded in combined serving logs.
+"""Summarize the early loaded period of VLLM_PREFILL_TIMING serving logs.
 
     python benchmarks/nemotron_3.5_super/analyze_prefill_timing.py temp.log
     python benchmarks/nemotron_3.5_super/analyze_prefill_timing.py temp.log \
-        --skip-first-seconds 60 --json results/prefill_timing.json --csv results/prefill_timing.csv
+        --duration-seconds 300 --json results/prefill_timing.json --csv results/prefill_timing.csv
+    python benchmarks/nemotron_3.5_super/analyze_prefill_timing.py temp.log --all
+
+By default, analyze the first five minutes beginning at the first scheduler timing
+window containing schedule observations. This excludes worker-only initialization
+and the later light-load tail. It selects an early interval, not an automatically
+detected saturation interval. Use --duration-seconds to adjust its length.
+Worker-only log exports require --all and an explicit --skip-first-seconds if needed;
+--all also accepts --duration-seconds for a manually bounded interval.
 
 Uses only the standard library. Reads lines incrementally, retaining parsed windows
 for sorting/filtering and optional CSV export. Damaged/interleaved fragments are
@@ -23,6 +31,7 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 
 MARKER = re.compile(r"VLLM_PREFILL_TIMING\s+(?=\{)")
@@ -36,7 +45,8 @@ NOTES = [
     "CUDA intervals include stream waits and host launch gaps; they are not pure kernel compute time.",
     "CUDA completions may land in later windows, so CPU and CUDA counts/windows need not match.",
     "Global p50/p90/p99 cannot be reconstructed. CSV retains logged per-window quantiles (up to 4096 samples).",
-    "Time filtering uses reporting-window starts; it cannot remove individual samples or delayed CUDA completions.",
+    "Only windows fully inside the selected interval are included; boundary windows are not prorated.",
+    "Time filtering cannot remove individual samples or delayed CUDA completions; later JIT spikes may remain.",
 ]
 
 
@@ -192,16 +202,42 @@ def utc(timestamp: float) -> str:
     return datetime.fromtimestamp(timestamp, UTC).isoformat()
 
 
-def analyze(paths: list[Path], *, skip_first_seconds: float = 0) -> tuple[dict[str, object], list[Window]]:
-    """Discard windows starting before the global observed start plus an offset."""
+def analyze(
+    paths: list[Path],
+    *,
+    skip_first_seconds: float = 0,
+    focus: Literal["early", "all"] = "early",
+    duration_seconds: float | None = None,
+) -> tuple[dict[str, object], list[Window]]:
+    """Select complete early scheduler-aligned windows, or a manual/all-log range."""
     number(skip_first_seconds)
+    if focus not in ("early", "all"):
+        raise ValueError("focus must be 'early' or 'all'")
+    if duration_seconds is not None and number(duration_seconds) == 0:
+        raise ValueError("duration_seconds must be positive")
     windows, parsing = read_windows(paths)
     if not windows:
         raise ValueError(
             f"No valid VLLM_PREFILL_TIMING records ({parsing['malformed_fragments']} malformed fragments)"
         )
     origin = min(w.start for w in windows)
-    selected = [w for w in windows if w.start >= origin + skip_first_seconds]
+    cutoff = origin + skip_first_seconds
+    anchor = None
+    if focus == "early":
+        scheduler_windows = [
+            w for w in windows if w.labels["component"] == "scheduler" and "schedule" in w.sections["cpu_ms"]
+        ]
+        if not scheduler_windows:
+            raise ValueError(
+                "Early focus requires scheduler schedule timings. "
+                "For worker-only logs, use --all with --skip-first-seconds and --duration-seconds."
+            )
+        anchor = min(w.start for w in scheduler_windows)
+        cutoff = max(cutoff, anchor)
+        if duration_seconds is None:
+            duration_seconds = 300
+    end = cutoff + duration_seconds if duration_seconds is not None else None
+    selected = [w for w in windows if w.start >= cutoff and (end is None or w.timestamp <= end)]
     groups: dict[str, list[Window]] = {}
     processes: dict[str, list[Window]] = {}
     for window in selected:
@@ -212,7 +248,15 @@ def analyze(paths: list[Path], *, skip_first_seconds: float = 0) -> tuple[dict[s
         "inputs": [str(p) for p in paths],
         "parsing": parsing,
         "observed_start_utc": utc(origin),
-        "cutoff_utc": utc(origin + skip_first_seconds),
+        "cutoff_utc": utc(cutoff),
+        "selection": {
+            "focus": focus,
+            "scheduler_anchor_utc": utc(anchor) if anchor is not None else None,
+            "start_utc": utc(cutoff),
+            "end_utc": utc(end) if end is not None else None,
+            "duration_seconds": duration_seconds,
+            "policy": "Complete windows only; early focus selects an initial interval, not detected saturation.",
+        },
         "excluded_records": len(windows) - len(selected),
         "included_records": len(selected),
         "groups": {k: summarize(v) for k, v in sorted(groups.items())},
@@ -293,6 +337,12 @@ def main() -> None:
     parser.add_argument("--json", type=Path, help="Write pooled and per-process summaries")
     parser.add_argument("--csv", type=Path, help="Write original per-window phase statistics, including quantiles")
     parser.add_argument("--per-worker", action="store_true", help="Also print each worker/scheduler process")
+    parser.add_argument("--all", action="store_true", help="Disable the default early five-minute focus")
+    parser.add_argument(
+        "--duration-seconds",
+        type=float,
+        help="Interval length (default: 300 in early focus, unlimited with --all)",
+    )
     parser.add_argument(
         "--skip-first-seconds",
         type=float,
@@ -301,10 +351,21 @@ def main() -> None:
     )
     args = parser.parse_args()
     try:
-        report, windows = analyze(args.logs, skip_first_seconds=args.skip_first_seconds)
+        report, windows = analyze(
+            args.logs,
+            skip_first_seconds=args.skip_first_seconds,
+            focus="all" if args.all else "early",
+            duration_seconds=args.duration_seconds,
+        )
     except (OSError, ValueError) as exc:
         parser.error(str(exc))
     print(f"Parsing: {report['parsing']}")
+    selection = mapping(report["selection"])
+    print(f"Focus: {selection['focus']}; interval: {selection['start_utc']} to {selection['end_utc'] or 'end of log'}")
+    if selection["scheduler_anchor_utc"] is not None:
+        print(
+            f"Scheduler activity starts: {selection['scheduler_anchor_utc']}; early interval, not detected saturation"
+        )
     print(f"Included: {report['included_records']}; excluded by time filter: {report['excluded_records']}")
     for label, group in mapping(report["groups"]).items():
         print_group(label, mapping(group))
