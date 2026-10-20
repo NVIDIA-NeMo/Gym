@@ -1,0 +1,110 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Sandboxed grader for CritPt-like tasks with operator-supplied task data. Every reference, candidate and comparator
+# step runs in a sandbox created through Gym's sandbox API. Pick the provider by adding its config to config_paths:
+#   export CRITPT_CUSTOM_GRADER_IMAGE=<registry>/<path>:<tag>  # your build of runtime/Dockerfile (see sandbox_spec.image)
+#   gym env start --config resources_servers/critpt_custom_grader/configs/critpt_custom_grader.yaml \
+#       --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml --model-type openai_model ...
+# Every shipped provider config binds the name `sandbox`, which `sandbox_provider` below references.
+critpt_custom_grader:
+  resources_servers:
+    critpt_custom_grader:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+      description: Sandboxed execution grader for CritPt-like tasks with operator-supplied expectations
+      value: Sandboxed, locally executed grading for CritPt-like tasks without an external grading API
+      sandbox_provider: sandbox
+      # Network isolation is the provider's job, not the grader's: the candidate sandbox runs untrusted code, so the
+      # provider configuration must block its egress. docker: sandbox.docker.create.network: none; e2b:
+      # sandbox.e2b.create.allow_internet_access: false; daytona: sandbox.daytona.create.network_block_all: true;
+      # OpenSandbox: a deny-by-default network_policy in sandbox_spec.provider_options (an OpenSandbox key that
+      # daytona, e2b and openshell reject). apptainer and enroot have no egress setting; local has no isolation at
+      # all and suits trusted inputs only.
+      sandbox_spec:
+        # No grading image is shipped. Build runtime/Dockerfile (Python 3.13 with pinned pydantic, sympy, mpmath, numpy
+        # and scipy in the interpreter's own site-packages, as the runner runs with -I; a non-root `grader` user and a
+        # /work directory it owns), publish it where the provider pulls from, and set CRITPT_CUSTOM_GRADER_IMAGE or
+        # this key to it. The `local` provider runs the host interpreter and needs none. On every other provider the
+        # server refuses to start without one (image_missing), even when the provider could start from a snapshot or
+        # template: the reference cache names the runtime by its image. On e2b, map the image to its template with
+        # create.template_map. OpenSandbox does not create the workdir, so it must exist in the image.
+        image: ${oc.env:CRITPT_CUSTOM_GRADER_IMAGE,null}
+        # Must equal execution.workdir (default /work); every grading domain works in a directory below it.
+        workdir: /work
+        ready_timeout_s: 600
+        # Provider-side orphan backstop: job_timeout_s (9700) plus a margin. Startup refuses a value below
+        # job_timeout_s + cleanup_timeout_s (9760); null leaves the lifetime to the provider's default. docker,
+        # opensandbox, e2b and ecs_fargate enforce it; apptainer, enroot, openshell and local ignore it. Daytona does
+        # not read it: its stop, archive and delete intervals (create.auto_stop_interval,
+        # create.auto_archive_interval, create.auto_delete_interval) are the backstop there.
+        ttl_s: 10400
+        resources:
+          cpu: 1
+          memory_mib: 4096
+      execution:
+        interpreter: /usr/local/bin/python3
+        # Every runner command runs as this non-root identity (docker --user, su on opensandbox/enroot/apptainer).
+        # Set to null for the `local` provider, which cannot switch users; the host process must then be non-root.
+        exec_user: grader
+        # Limits: 1536 MiB of address space per process, single-threaded BLAS, 1800 s per suite.
+        memory_limit_mib: 1536
+        cpu_time_limit_s: 1800
+        max_processes: 64
+        suite_timeout_s: 1800
+        # One comparison case may take 20 s; a batch takes cases * 20 s + 30 s, never more than compare_timeout_s.
+        compare_per_case_s: 20
+        compare_timeout_s: 600
+        # Bounds one sandbox create: the provider's create and readiness wait, the spec's files and the workdir setup.
+        # Startup refuses a value below sandbox_spec.ready_timeout_s + 2 * transfer_timeout_s (600 + 120 = 720).
+        create_timeout_s: 900
+        transfer_timeout_s: 60
+        # The runner needs suite_deadline plus its 15 s reap/sweep budget to write a timeout result; keep >= 15.
+        exec_timeout_margin_s: 20
+        # At least every bound one job awaits: two runs and two compare batches at their deadlines plus two margins,
+        # three creates, 27 file transfers at transfer_timeout_s + 5 s and three stops:
+        # 2 * (1800 + 40) + 2 * (600 + 40) + 3 * 900 + 27 * (60 + 5) + 3 * 60 = 9595, rounded up to the next 100 s
+        # (9600) plus a 100 s buffer. Startup refuses a value below that sum.
+        job_timeout_s: 9700
+        cleanup_timeout_s: 60
+        max_candidate_source_bytes: 65536
+        # Jobs graded at once by this process; Gym's num_samples_in_parallel bounds the client side.
+        max_concurrent_jobs: 4
+      # Server default numeric tolerance for a leaf with no authored tolerance and no honoured statement promise:
+      # twelve significant digits (rtol 5e-12, atol 0). Authored tolerances always win; see README.
+      comparison:
+        default_rtol: "5e-12"
+        default_atol: "0"
+      # Optional directory for the per-task reference cache (memory only when null).
+      reference_cache_dir: null
+      # The startup probe creates one sandbox before the server reports ready, and Gym gives every server
+      # server_spinup_timeout_seconds (default 600) to get there. On a slow provider raise it above
+      # execution.create_timeout_s plus a margin (e.g. ++server_spinup_timeout_seconds=1200), or set this to false.
+      startup_probe: true
+
+critpt_custom_grader_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: critpt_custom_grader
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      max_steps: 1
+      skip_verification: false
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/critpt_custom_grader/data/example.jsonl
+          num_repeats: 1
+          license: Apache 2.0
+
+critpt_custom_grader_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: critpt_custom_grader_simple_agent
