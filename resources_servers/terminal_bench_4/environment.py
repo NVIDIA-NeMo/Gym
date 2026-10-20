@@ -279,6 +279,18 @@ class Environment:
                     document["services"]["kafka"]["x-sandbox"] = {"hosts": []}
                     # Use the image's default appuser without an explicit su.
                     document["services"]["kafka"].pop("user", None)
+                elif self.task.name == "terminal-bench-science/protein-active-learning":
+                    # The non-root submission service cannot edit /etc/hosts. Its
+                    # one peer URL is passed in ASSAY_STATUS (with the v0.1 default),
+                    # resolved to the assay sandbox IP; see the benchmark README.
+                    submission = document["services"]["submission"]
+                    submission["environment"] = {
+                        **submission.get("environment", {}),
+                        "ASSAY_STATUS": "http://assay:8080/status",
+                    }
+                    submission["x-sandbox"] = {"hosts": [], "resolve_environment": ["ASSAY_STATUS"]}
+                    # Use the image's default submission user without an explicit su.
+                    submission.pop("user", None)
             if "opensandbox" in self.provider_config:
                 for service in document["services"].values():
                     if service.get("shm_size") is not None:

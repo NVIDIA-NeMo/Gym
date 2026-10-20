@@ -48,6 +48,7 @@ def resources_server(args: argparse.Namespace) -> TerminalBench4ResourcesServer:
     overrides = {
         "tbsci_agent_image": args.agent_image,
         "tbsci_verifier_image": args.verifier_image,
+        "tbsci_service_image": args.service_image,
         "tbsci_task_images": json.loads(args.images.read_text()) if args.images else {},
         "tbsci_jobs_dir": str(args.output / "resources"),
         "tbsci_concurrency": args.concurrency,
@@ -206,7 +207,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--verifier-image", help="Verifier image template, e.g. 'REGISTRY/tbsci/{task}:tests-{digest}'"
     )
-    parser.add_argument("--images", type=Path, help='JSON map {"<task>": {"agent": ..., "verifier": ...}}')
+    parser.add_argument(
+        "--service-image", help="Compose sidecar image template, e.g. 'REGISTRY/tbsci/{task}:{service}-{digest}'"
+    )
+    parser.add_argument(
+        "--images",
+        type=Path,
+        help='JSON map {"<task>": {"agent": ..., "verifier": ..., "services": {"<service>": ...}}}',
+    )
     parser.add_argument("--tasks", nargs="*", help="Task names (default: every task)")
     parser.add_argument("--category", choices=sorted(preparation.CATEGORIES))
     parser.add_argument("--domain", choices=sorted(preparation.DOMAINS))

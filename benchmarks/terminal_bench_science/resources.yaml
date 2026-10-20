@@ -11,11 +11,14 @@ terminal_bench_science:
       manifest_path: benchmarks/terminal_bench_science/manifest.json
       environment:
         # TB-Science packages ship Dockerfiles only. Supply images built from
-        # each task's environment/ (agent) and tests/ (verifier) directories.
-        # Templates accept {org}, {task}, and {digest}; by_task pins exact images.
+        # each task's environment/ (agent) and tests/ (verifier) directories,
+        # and from the Compose tasks' sidecar Dockerfiles (service).
+        # Templates accept {org}, {task}, {digest} and, for service, {service};
+        # by_task pins exact images.
         task_images:
           agent: ${oc.select:tbsci_agent_image,null}
           verifier: ${oc.select:tbsci_verifier_image,null}
+          service: ${oc.select:tbsci_service_image,null}
           by_task: ${oc.select:tbsci_task_images,{}}
         # 58 packages declare a separate [verifier.environment] without cpus or
         # memory, which Harbor leaves unlimited on Docker. Give those verifiers
@@ -41,9 +44,12 @@ terminal_bench_science:
         sandbox_env_by_task: {}
         sandbox_provider_options:
           resource_requests: limits
-        # The five Compose tasks build their sidecars from Dockerfiles and need
-        # recorded sidecar image metadata before they can run (see README).
-        compose_image_configs: null
+        # Startup metadata of the images built from the five Compose tasks'
+        # Dockerfiles, keyed <task>/<service> (see README).
+        compose_image_configs: benchmarks/terminal_bench_science/compose-images.json
+        # Docker isolation that separate sandboxes cannot enforce. The Compose
+        # tasks' services run without it, on one network (see README).
+        compose_ignored_settings: [init, read_only, tmpfs, pids_limit, cap_drop, security_opt, networks]
         sandbox_provider:
           opensandbox:
             connection:
@@ -79,6 +85,14 @@ terminal_bench_science:
               capability_probes:
                 SYS_PTRACE: awk '/^CapEff:/ { print $2 }' /proc/self/status | { read caps; test $((0x$caps & (1
                   << 19))) -ne 0; }
+                # noisy-blackbox-optimization's evaluator (cap_add after cap_drop: [ALL]).
+                # Root holds these in OpenSandbox's default capability set.
+                KILL: awk '/^CapEff:/ { print $2 }' /proc/self/status | { read caps; test $((0x$caps & (1 << 5)))
+                  -ne 0; }
+                SETGID: awk '/^CapEff:/ { print $2 }' /proc/self/status | { read caps; test $((0x$caps & (1 << 6)))
+                  -ne 0; }
+                SETUID: awk '/^CapEff:/ { print $2 }' /proc/self/status | { read caps; test $((0x$caps & (1 << 7)))
+                  -ne 0; }
         sandbox_metadata:
           nemo.nvidia.com/resources: custom
         # OpenSandbox renews this TTL while the episode is live; it bounds orphans only.

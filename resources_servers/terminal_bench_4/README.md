@@ -123,7 +123,7 @@ the official evaluation did not complete. `reward` stays the official binary gra
 
 ## Non-root Compose services
 
-When loading agent Compose YAML, two task-specific adaptations use the
+When loading agent Compose YAML, three task-specific adaptations use the
 [Compose extensions](../../fern/versions/latest/pages/infrastructure/sandbox/compose.mdx):
 
 - `medical-claims-processing`: `playwright-mcp` keeps `pwuser`, disables host-file
@@ -132,8 +132,13 @@ When loading agent Compose YAML, two task-specific adaptations use the
 - `payments-pipeline-fix`: `kafka` keeps `appuser` and disables host-file injection.
   Its single-broker controller uses localhost; clients retain the `kafka` alias
   needed by the advertised listener.
+- Terminal-Bench-Science `protein-active-learning`: `submission` keeps its `submission`
+  user, disables host-file injection, and receives its only peer URL as
+  `ASSAY_STATUS=http://assay:8080/status`, resolved to the assay sandbox IP. The image's
+  server must read that variable; see the
+  [benchmark README](../../benchmarks/terminal_bench_science/README.md#protein-active-learning-submission).
 
-Both services use their image's default user, omitting the redundant explicit
+These services use their image's default user, omitting the redundant explicit
 `user` value copied from image metadata. This avoids the provider attempting
 `su` from a non-root process to the same user.
 
