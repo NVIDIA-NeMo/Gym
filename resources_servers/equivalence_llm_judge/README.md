@@ -15,9 +15,9 @@ https://huggingface.co/datasets/nvidia/Nemotron-RL-knowledge-openqa
 - `check_twice_swap` (bool, default false): if true, after an initial equal verdict, performs a second judge call swapping expected and generated answers to reduce bias.
 - `reward_if_swap_fails` (float, default 0.0): reward to assign if the second (swap) pass disagrees (i.e., fails). You may set this to -1.0 or other value to catch it on the training side..
 - `use_per_record_regex` (bool, default true): enable independent per-problem overrides from `template_metadata.question_regex` for questions and `template_metadata.output_regex` for answers. Missing overrides fall back to the corresponding global regex.
-- `check_full_generation_on_fail` (bool, default true): if true, when regex extraction fails, retry with full generation (no regex) for partial credit. Only activates when per-record regex exists.
+- `check_full_generation_on_fail` (bool, default true): if true, when the first judge pass fails, retry with the full generation (no answer regex) for partial credit. Requires `use_per_record_regex=true` and `template_metadata.output_regex`.
 - `reward_if_full_generation_succeeds` (float, default 0.5): reward when full generation check succeeds after extraction failure. Set to 1.0 for full credit.
-- `extraction_length_threshold` (int, default 120): skip regex extraction when expected answer exceeds this length. Use full generation instead. Only applies when per-record regex is present. Set to null to disable.
+- `extraction_length_threshold` (int, default 120): skip answer extraction when the expected answer exceeds this length. Use the full generation instead. Requires `use_per_record_regex=true` and `template_metadata.output_regex`. Set to null to disable.
 
 ### Empty answers, answer-length guard, and judge recovery
 
@@ -59,6 +59,13 @@ Accepts the same outer request structure as other resources servers:
 - `expected_answer`: gold answer to compare against.
 
 ### Per-problem question extraction
+
+A single training job can mix many environments and datasets with different
+prompt templates. Questions routed to the same equivalence judge may contain
+different instruction prefixes or wrappers, so one server-wide extraction
+pattern cannot describe every question. Keeping the extraction rule on each
+problem lets a shared judge receive the relevant question text while the policy
+still receives the complete original prompt.
 
 With `use_per_record_regex: true`, set `template_metadata.question_regex` on each
 problem to override the server-wide `question_extract_regex`. For example, this
@@ -142,4 +149,3 @@ You should always check the license of your chosen judge model to make sure your
 ## Licensing
 Code: Apache 2.0   
 Data: CC-BY-NC-3.0 (Examples from https://huggingface.co/datasets/allenai/sciq)
-
