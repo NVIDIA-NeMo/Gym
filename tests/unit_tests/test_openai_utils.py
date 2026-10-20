@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import re
 from copy import deepcopy
 from types import SimpleNamespace, UnionType
 from typing import (
@@ -121,6 +122,7 @@ from nemo_gym.responses_converter import (
     _RESPONSE_NON_BOUNDARY_TYPES,
     _RESPONSE_OUTPUT_BOUNDARY_TYPES,
 )
+from nemo_gym.rollout_correlation import rollout_context
 
 
 def _response_with_output(output: list) -> dict:
@@ -188,6 +190,39 @@ class TestOpenAIUtils:
         assert isinstance(captured["timeout"], ClientTimeout)
         assert captured["timeout"].total == 300
         assert captured["timeout"].connect == 60
+
+    async def test_request_id_names_the_rollout_inside_a_rollout_context(self, monkeypatch) -> None:
+        captured = {}
+
+        async def fake_request(**kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(status=200)
+
+        monkeypatch.setattr(openai_utils_module, "request", fake_request)
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://api.openai.com/v1")
+        with rollout_context("3-0"):
+            await client._request(method="POST", url="https://example.test")
+        first = captured["headers"]["X-Request-Id"]
+        assert re.fullmatch(r"3-0-[0-9a-f]{8}", first)
+        with rollout_context("3-0"):
+            await client._request(method="POST", url="https://example.test")
+        assert captured["headers"]["X-Request-Id"] != first
+
+    async def test_request_id_is_absent_outside_a_rollout_and_never_overrides_the_callers(self, monkeypatch) -> None:
+        captured = {}
+
+        async def fake_request(**kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(status=200)
+
+        monkeypatch.setattr(openai_utils_module, "request", fake_request)
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://api.openai.com/v1")
+        await client._request(method="POST", url="https://example.test")
+        assert "X-Request-Id" not in captured["headers"]
+        with rollout_context("3-0"):
+            await client._request(method="POST", url="https://example.test", headers={"x-request-id": "mine"})
+        assert captured["headers"]["x-request-id"] == "mine"
+        assert "X-Request-Id" not in captured["headers"]
 
     @pytest.mark.parametrize("internal", [False, True])
     @pytest.mark.parametrize("status", [429, 500, 504])
@@ -1227,6 +1262,45 @@ class TestNeMoGymChatCompletionSchemas:
         params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate({"messages": messages})
 
         assert params.model_dump(exclude_unset=True)["messages"][2] == messages[2]
+
+    def test_tool_message_accepts_image_parts(self) -> None:
+        # A vision tool may return the image it loaded inside its result for a vision-capable model to see.
+        tool_message = {
+            "role": "tool",
+            "tool_call_id": "c1",
+            "content": [
+                {"type": "text", "text": "Image loaded."},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,YWJj", "detail": "auto"}},
+            ],
+        }
+        messages = [
+            {"role": "user", "content": "What color is the image?"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {"id": "c1", "type": "function", "function": {"name": "load_image", "arguments": "{}"}}
+                ],
+            },
+            tool_message,
+        ]
+        params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate({"messages": messages})
+
+        assert params.model_dump(exclude_unset=True)["messages"][2] == tool_message
+
+    @pytest.mark.parametrize(
+        "part",
+        [
+            {"type": "input_audio", "input_audio": {"data": "YWJj", "format": "wav"}},
+            {"type": "video_url", "video_url": {"url": "data:video/mp4;base64,YWJj"}},
+        ],
+        ids=["audio", "video"],
+    )
+    def test_tool_message_refuses_other_media_parts(self, part: dict) -> None:
+        tool_message = {"role": "tool", "tool_call_id": "c1", "content": [{"type": "text", "text": "x"}, part]}
+
+        with pytest.raises(ValidationError):
+            NeMoGymChatCompletionCreateParamsNonStreaming.model_validate({"messages": [tool_message]})
 
     def test_custom_tool_and_training_tool_call_round_trip(self) -> None:
         payload = {

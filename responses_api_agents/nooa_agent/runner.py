@@ -19,18 +19,24 @@ import asyncio
 import copy
 import inspect
 from dataclasses import dataclass, field
+from types import FrameType
 from typing import Any, Protocol
 from uuid import uuid4
 
+from nooa.errors import GenerationError
 from nooa.runtime.hooks import hooks_scope
+from nooa.strategies.codeact import CodeActSession, CodeActStrategy
+from nooa.strategies.predict import PredictStrategy
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentEpisode, TrajectoryRecord
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.tool_access import DirectHTTPToolAccess
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig, validate_invocation
 from responses_api_agents.nooa_agent.gym_llm import (
+    GymModelClient,
     GymResponsesLLM,
     InvalidPolicyOutputError,
+    OutputTokenLimitExceeded,
     PolicyCallBudgetExceeded,
     RolloutLLMState,
 )
@@ -40,12 +46,14 @@ from responses_api_agents.nooa_agent.resource_tools import (
     create_agent_class_with_resource_methods,
     validate_agent_resource_method_bindings,
 )
+from responses_api_agents.nooa_agent.termination import NOOATerminationReason
 
 
 @dataclass(slots=True)
 class NOOARunRequest:
     responses_create_params: NeMoGymResponseCreateParamsNonStreaming
     model_url_path: str
+    tool_access: DirectHTTPToolAccess | None = None
     model_cookies: dict[str, str] = field(default_factory=dict)
     resource_cookies: dict[str, str] = field(default_factory=dict)
     task_id: str = "unknown"
@@ -58,7 +66,7 @@ class NOOARunResult:
     return_value: Any
     model_cookies: dict[str, str]
     resource_cookies: dict[str, str]
-    termination_reason: str | None = None
+    termination_reason: NOOATerminationReason | None = None
     termination_error: str | None = None
     trajectory: TrajectoryRecord | None = None
 
@@ -91,24 +99,51 @@ def _validate_agent_llm_bindings(agent_class: type) -> None:
         )
 
 
-class EmbeddedNOOARunner:
+def _generation_error_frame(error: BaseException) -> FrameType | None:
+    # GenerationError is also available to arbitrary agent code. Recognize the
+    # pinned strategies by the code that raised it, not its type or message alone.
+    if type(error) is not GenerationError or error.__traceback__ is None:
+        return None
+    traceback = error.__traceback__
+    while traceback.tb_next is not None:
+        traceback = traceback.tb_next
+    return traceback.tb_frame
+
+
+def _codeact_failure_session(error: BaseException) -> CodeActSession | None:
+    frame = _generation_error_frame(error)
+    if frame is None or frame.f_code is not CodeActStrategy._run_generation.__code__:
+        return None
+    session = frame.f_locals.get("session")
+    return session if isinstance(session, CodeActSession) else None
+
+
+def _is_codeact_iteration_exhaustion(error: BaseException) -> bool:
+    # The pinned NOOA uses the same error type for iteration and retry exhaustion.
+    session = _codeact_failure_session(error)
+    return (
+        session is not None
+        and session.max_iterations is not None
+        and session.iteration >= session.max_iterations
+        and session.error_count < session.max_retries
+        and str(error) == str(session.build_failure_error())
+    )
+
+
+class InProcessNOOARunner:
     """Construct and invoke one isolated NOOA agent instance per Gym rollout."""
 
     def __init__(
         self,
         *,
         invocation: NOOAInvocationConfig,
-        server_client: ServerClient,
+        server_client: GymModelClient,
         model_server_name: str,
-        resources_server_name: str,
-        max_policy_calls: int,
+        max_policy_calls: int | None,
     ) -> None:
-        if invocation.execution_mode == "sandboxed":
-            raise NotImplementedError("NOOA sandboxed execution is not implemented")
         self._invocation = invocation
         self._server_client = server_client
         self._model_server_name = model_server_name
-        self._resources_server_name = resources_server_name
         self._max_policy_calls = max_policy_calls
         self._agent_class, self._invocation_adapter = validate_invocation(invocation)
         _validate_agent_llm_bindings(self._agent_class)
@@ -129,8 +164,7 @@ class EmbeddedNOOARunner:
             sampling_overrides=sampling_overrides,
         )
         dispatcher = ResourceToolDispatcher(
-            server_client=self._server_client,
-            resources_server_name=self._resources_server_name,
+            tool_access=request.tool_access,
             cookies=request.resource_cookies,
             trace_hooks=trace,
         )
@@ -151,20 +185,48 @@ class EmbeddedNOOARunner:
                 return_value = await self._invocation_adapter(agent, request.responses_create_params)
         except BaseException as error:
             failure = error
-            # NOOA may wrap a model error after its strategy retry loop.
+            # Only known NOOA strategy wrappers deliberately chain model errors.
+            # Cleanup failures can carry a preceding limit as context and must stay fatal.
             cause: BaseException | None = error
             seen: set[int] = set()
-            while cause is not None and id(cause) not in seen:
+            while isinstance(error, Exception) and cause is not None and id(cause) not in seen:
                 seen.add(id(cause))
+                if isinstance(cause, OutputTokenLimitExceeded):
+                    termination_reason = NOOATerminationReason.MAX_OUTPUT_TOKENS_EXCEEDED
+                    termination_error = str(cause)
+                    break
                 if isinstance(cause, (PolicyCallBudgetExceeded, InvalidPolicyOutputError)):
                     termination_reason = (
-                        "policy_budget_exceeded"
+                        NOOATerminationReason.POLICY_BUDGET_EXCEEDED
                         if isinstance(cause, PolicyCallBudgetExceeded)
-                        else "invalid_policy_output"
+                        else NOOATerminationReason.INVALID_POLICY_OUTPUT
                     )
                     termination_error = str(cause)
                     break
-                cause = cause.__cause__ or cause.__context__
+                if _is_codeact_iteration_exhaustion(cause):
+                    termination_reason = NOOATerminationReason.MAX_ITERATIONS_EXCEEDED
+                    termination_error = str(cause)
+                    break
+                frame = _generation_error_frame(cause)
+                if frame is None or frame.f_code not in (
+                    CodeActStrategy._run_generation.__code__,
+                    PredictStrategy._execute_inner.__code__,
+                ):
+                    break
+                cause = cause.__cause__
+
+        fatal_error = dispatcher.fatal_error
+        if state.fatal_error is not None:
+            # A budget or output error after an unrecovered transport failure
+            # still lacks a valid rollout to grade. Keep the terminal cause.
+            termination_reason = None
+            termination_error = None
+        if fatal_error is None and failure is None:
+            fatal_error = state.fatal_error
+        if fatal_error is not None and not isinstance(failure, asyncio.CancelledError):
+            failure = fatal_error
+            termination_reason = None
+            termination_error = None
 
         episode, trajectory = trace.project(
             create_params=request.responses_create_params,

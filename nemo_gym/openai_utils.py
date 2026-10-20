@@ -13,7 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import uuid
 from asyncio import sleep
+from collections.abc import Mapping
 from typing import (
     Annotated,
     Any,
@@ -187,6 +189,7 @@ from pydantic import (
 )
 from typing_extensions import TypedDict
 
+from nemo_gym.rollout_correlation import current_rollout_id
 from nemo_gym.server_utils import (
     MAX_NUM_TRIES,
     ClientResponse,
@@ -1365,8 +1368,15 @@ class NeMoGymChatCompletionAssistantMessageForTrainingParam(
 
 
 class NeMoGymChatCompletionToolMessageParam(ChatCompletionToolMessageParam):
-    # Override the iterable which is annoying to work with.
-    content: Required[Union[str, List[NeMoGymChatCompletionContentPartTextParam]]]
+    # Override the iterable which is annoying to work with. Unlike the OpenAI SDK type, the content may also hold image
+    # parts: a vision tool may return the image it loaded for a vision-capable model to see, and vLLM parses a tool
+    # message's content parts like any other message's, leaving their rendering to the chat template.
+    content: Required[
+        Union[
+            str,
+            List[Union[NeMoGymChatCompletionContentPartTextParam, NeMoGymChatCompletionContentPartImageParam]],
+        ]
+    ]
     # Not in the OpenAI SDK type. OpenHands' Message serializer includes name
     # alongside tool_call_id on tool-result messages.
     name: NotRequired[str]
@@ -1572,6 +1582,25 @@ class PermanentEndpointError(ClientResponseError):
     """The upstream key is spent or unauthorized; further calls on this client skip the wire."""
 
 
+REQUEST_ID_HEADER = "X-Request-Id"
+
+
+def _rollout_request_id(headers: Mapping[str, str]) -> Optional[str]:
+    """A request id that names the rollout, for calls made inside a rollout context.
+
+    vLLM takes its request id from ``X-Request-Id`` and records it as ``gen_ai.request.id`` on
+    the request's span and in its request log, so an engine span or log line can be matched to a
+    rollout without walking the trace. The suffix keeps every call distinct, including across
+    server workers that cannot share a counter. A caller's own header wins.
+    """
+    if any(key.lower() == REQUEST_ID_HEADER.lower() for key in headers):
+        return None
+    rollout_id = current_rollout_id()
+    if not rollout_id:
+        return None
+    return f"{rollout_id}-{uuid.uuid4().hex[:8]}"
+
+
 class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
     """This is just a stub class that wraps around aiohttp"""
 
@@ -1665,12 +1694,12 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         if self._permanent_trip is not None:
             self._raise_permanent_error()
         request_headers = request_kwargs.pop("headers", {})
+        headers = self.default_headers | request_headers | {"Authorization": f"Bearer {self.api_key}"}
+        request_id = _rollout_request_id(headers)
+        if request_id is not None:
+            headers["X-Request-Id"] = request_id
         request_kwargs = request_kwargs | {
-            "headers": self.default_headers
-            | request_headers
-            | {
-                "Authorization": f"Bearer {self.api_key}",
-            },
+            "headers": headers,
             "_internal": self.internal,
             "_max_num_tries": self.max_num_tries,
             "_max_connection_retries": self.max_connection_retries,
