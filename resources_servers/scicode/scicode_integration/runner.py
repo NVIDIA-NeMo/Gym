@@ -196,9 +196,72 @@ def cmp_tuple_or_list(var1, var2):
     return True
 """
 
+_STDERR_LIMIT = 4000
+_GRADING_THREAD_ENV = {
+    "BLIS_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "NUMEXPR_NUM_THREADS": "1",
+    "OMP_NUM_THREADS": "1",
+    "OMP_THREAD_LIMIT": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "VECLIB_MAXIMUM_THREADS": "1",
+}
+_INHERITED_PYTHON_ENV = (
+    "PYTHONHOME",
+    "PYTHONPATH",
+    "PYTHONUSERBASE",
+    "UV_PROJECT_ENVIRONMENT",
+    "VIRTUAL_ENV",
+    "__PYVENV_LAUNCHER__",
+)
+# Check only grader-owned dependencies. Solution libraries can legitimately differ
+# between the canonical environments and must remain ordinary per-environment failures.
+_GRADING_PREFLIGHT_PROGRAM = """
+import numpy
+import scipy.sparse
+import h5py
+numpy.linalg.solve(numpy.eye(1), numpy.ones(1))
+"""
+
+
+def _bounded_stderr(stderr: bytes) -> str:
+    """Decode stderr while retaining both the root cause and the terminal traceback."""
+    decoded = stderr.decode("utf-8", errors="replace")
+    if len(decoded) <= _STDERR_LIMIT:
+        return decoded
+    half = _STDERR_LIMIT // 2
+    return f"{decoded[:half]}\n... stderr truncated ...\n{decoded[-half:]}"
+
+
+def _grading_child_env() -> dict[str, str]:
+    """Keep the resource server's Python paths out of separately frozen grading environments."""
+    child_env = os.environ.copy()
+    for variable in _INHERITED_PYTHON_ENV:
+        child_env.pop(variable, None)
+    child_env.update(_GRADING_THREAD_ENV)
+    return child_env
+
+
+def preflight_grading_interpreter(python_executable: str, *, timeout_secs: float = 30.0) -> str | None:
+    """Check required libraries in a separate process that never executes model code."""
+    try:
+        proc = subprocess.run(
+            [python_executable, "-c", _GRADING_PREFLIGHT_PROGRAM],
+            capture_output=True,
+            env=_grading_child_env(),
+            timeout=timeout_secs,
+        )
+    except subprocess.TimeoutExpired:
+        return "grading environment preflight timed out"
+    except OSError as error:
+        return str(error)
+    if proc.returncode != 0:
+        return _bounded_stderr(proc.stderr) or f"grading environment preflight exited with code {proc.returncode}"
+    return None
+
+
 # Bound on the stdout/stderr tails a result carries; the server's `output_tail_chars` overrides it.
 DEFAULT_OUTPUT_TAIL_CHARS = 2000
-_STDERR_TAIL = DEFAULT_OUTPUT_TAIL_CHARS
 
 # The last line of a Python traceback: `ValueError: boom`, `numpy.linalg.LinAlgError: Singular matrix`,
 # or a bare `AssertionError`. The final name component must start with an upper-case letter, which
@@ -254,14 +317,20 @@ def build_test_program(full_generation: str, h5_path: str, step_number: str, san
     return program
 
 
-def run_substep(program: str, timeout_secs: float, output_tail_chars: int = DEFAULT_OUTPUT_TAIL_CHARS) -> dict:
+def run_substep(
+    program: str,
+    timeout_secs: float,
+    python_executable: str | None = None,
+    output_tail_chars: int = DEFAULT_OUTPUT_TAIL_CHARS,
+) -> dict:
     """Run one sub-step program in a subprocess. Exit code 0 == all assertions passed.
 
-    Returns `passed` and the legacy `error` (the stderr tail on failure, "timeout" on a timeout, "" on a
-    pass) plus the execution details a caller may record: `returncode` (None on a timeout), `timed_out`,
-    `duration_s`, `exception_class` (see exception_class_from_stderr; read from the complete stderr, so a
-    long exception message never hides the class) and the bounded `stdout_tail` / `stderr_tail` (the last
-    `output_tail_chars` characters of each stream; 0 keeps none)."""
+    Returns `passed`, the legacy `error` (the bounded stderr on failure, "timeout" on a timeout, the OS
+    error text when the interpreter could not be started, "" on a pass) and `infrastructure_error`, plus
+    the execution details a caller may record: `returncode` (None when no process exit code exists),
+    `timed_out`, `duration_s`, `exception_class` (see exception_class_from_stderr; read from the complete
+    stderr, so a long exception message never hides the class) and the bounded `stdout_tail` /
+    `stderr_tail` (the last `output_tail_chars` characters of each stream; 0 keeps none)."""
     # Passing a large generated solution through `python -c <program>` is
     # bounded by Linux's execve argument-size limit (ARG_MAX). SciCode's
     # accumulated solutions can exceed that late in a run. A temporary source
@@ -278,17 +347,38 @@ def run_substep(program: str, timeout_secs: float, output_tail_chars: int = DEFA
         ) as source:
             source.write(program)
             source_path = source.name
-        proc = subprocess.run([sys.executable, source_path], capture_output=True, timeout=timeout_secs)
+        # Numerical libraries otherwise size their native thread pools to the host's CPU count.
+        # Concurrent SciCode subprocesses can then exceed a cluster's process/thread quota before
+        # any model code executes. Pin each isolated grading process to one native thread.
+        proc = subprocess.run(
+            [python_executable or sys.executable, source_path],
+            capture_output=True,
+            env=_grading_child_env(),
+            timeout=timeout_secs,
+        )
     except subprocess.TimeoutExpired as expired:
         return {
             "passed": False,
             "error": "timeout",
+            "infrastructure_error": False,
             "returncode": None,
             "timed_out": True,
             "duration_s": time.monotonic() - started,
             "exception_class": None,
             "stdout_tail": _tail(expired.stdout, output_tail_chars),
             "stderr_tail": _tail(expired.stderr, output_tail_chars),
+        }
+    except OSError as error:
+        return {
+            "passed": False,
+            "error": str(error),
+            "infrastructure_error": True,
+            "returncode": None,
+            "timed_out": False,
+            "duration_s": time.monotonic() - started,
+            "exception_class": None,
+            "stdout_tail": "",
+            "stderr_tail": "",
         }
     finally:
         if source_path is not None:
@@ -298,16 +388,18 @@ def run_substep(program: str, timeout_secs: float, output_tail_chars: int = DEFA
                 pass
     duration_s = time.monotonic() - started
     passed = proc.returncode == 0
+    error = "" if passed else _bounded_stderr(proc.stderr)
     stderr_text = _decode(proc.stderr)
-    stderr_tail = _tail_text(stderr_text, output_tail_chars)
     return {
         "passed": passed,
-        "error": "" if passed else stderr_tail,
+        "error": error,
+        # Once model code runs, stderr is model-controlled and cannot identify infrastructure failures.
+        "infrastructure_error": False,
         "returncode": proc.returncode,
         "timed_out": False,
         "duration_s": duration_s,
         # Classified from the whole stream: the tail may hold only the end of a long exception message.
         "exception_class": None if passed else exception_class_from_stderr(stderr_text),
         "stdout_tail": _tail(proc.stdout, output_tail_chars),
-        "stderr_tail": stderr_tail,
+        "stderr_tail": _tail_text(stderr_text, output_tail_chars),
     }
