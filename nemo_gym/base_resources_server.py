@@ -13,7 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from abc import abstractmethod
+from collections import OrderedDict
 from enum import Enum
+from time import monotonic
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Optional, TypeVar, get_args
 
 from fastapi import FastAPI, Request
@@ -122,7 +124,9 @@ class BaseResourcesServerConfig(BaseRunServerInstanceConfig):
         allow_inf_nan=False,
         description=(
             "With several workers, how long a resources_session_id stays with the worker that served it "
-            "after its close or failed seed; cover the caller's retry horizon and the server's own close fences."
+            "after its close or failed seed; cover the caller's retry horizon and the server's own close fences. "
+            "Servers that remember closed sessions with ClosedResourcesSessionRecords keep them this long, "
+            "with any number of workers."
         ),
     )
     # The mode of reverification (for gym eval reverify) of this server.
@@ -229,7 +233,8 @@ class ResourcesSeedSessionRequest(BaseModel):
     """Idempotently initialize resources state under a caller-assigned identifier.
 
     Repeating the same identifier and episode must return the existing session.
-    Closing an unknown identifier must prevent a racing seed from creating it later.
+    Closing an unknown identifier must prevent a racing seed from creating it
+    for session_close_retry_window_seconds (see ClosedResourcesSessionRecords).
     External resources should use provider TTLs when available. Current process-local
     session records may remain until the server shuts down.
     """
@@ -280,6 +285,53 @@ class ResourcesCloseSessionResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     resources_session_id: str
+
+
+ClosedRecordT = TypeVar("ClosedRecordT")
+
+
+class ClosedResourcesSessionRecords(Generic[ClosedRecordT]):
+    """The resources sessions this worker closed, each kept for a fixed window after its first close.
+
+    A server uses it to refuse a late seed of a closed ``resources_session_id``, or to check a retried close.
+    Construct it with the server's ``session_close_retry_window_seconds``.
+    With several workers, the routing claim on the ID ends that long after the reply to the session's last close.
+    So the claim never ends before the record (see ``nemo_gym.session_routing.ResourcesSessionLifetimes``).
+    While the claim lasts, a late seed reaches the worker that remembers the close and is refused.
+    After it ends, every worker treats the ID as new, so the answer does not depend on which worker gets it.
+    """
+
+    def __init__(self, window_seconds: float) -> None:
+        if not window_seconds > 0:
+            raise ValueError(f"window_seconds must be positive, got {window_seconds!r}")
+        self._window_seconds = window_seconds
+        # Earliest expiry first: every record lasts the same window, and a record is never moved.
+        self._records: OrderedDict[str, tuple[float, ClosedRecordT]] = OrderedDict()
+
+    def remember(self, resources_session_id: str, record: ClosedRecordT) -> None:
+        """Record a close; a retried close keeps the first record and its expiry."""
+        self._expire()
+        if resources_session_id not in self._records:
+            self._records[resources_session_id] = (monotonic() + self._window_seconds, record)
+
+    def get(self, resources_session_id: str) -> Optional[ClosedRecordT]:
+        """Return the record of the session's close, or None if it is not closed or its window has passed."""
+        self._expire()
+        entry = self._records.get(resources_session_id)
+        return None if entry is None else entry[1]
+
+    def __contains__(self, resources_session_id: object) -> bool:
+        self._expire()
+        return resources_session_id in self._records
+
+    def __len__(self) -> int:
+        self._expire()
+        return len(self._records)
+
+    def _expire(self) -> None:
+        now = monotonic()
+        while self._records and next(iter(self._records.values()))[0] <= now:
+            self._records.popitem(last=False)
 
 
 class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleServer):
