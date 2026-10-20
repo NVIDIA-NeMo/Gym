@@ -32,6 +32,7 @@ osworld_nano_omni_agent:
       history_policy:
         name: hysteresis
         params:
+          _delete_key: keep_images
           low_water: ${oc.decode:${oc.env:OSWORLD_HISTORY_LOW_WATER,3}}
           high_water: ${oc.decode:${oc.env:OSWORLD_HISTORY_HIGH_WATER,10}}
       task_timeout: ${oc.decode:${oc.env:OSWORLD_TASK_TIMEOUT,7200}}
