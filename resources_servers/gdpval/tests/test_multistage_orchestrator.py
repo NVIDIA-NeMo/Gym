@@ -4677,7 +4677,6 @@ async def test_multistage_driver_completion_and_resume_are_bounded(tmp_path, mon
 @pytest.mark.parametrize("recovers", [False, True])
 async def test_multistage_http_outage_resumes_until_recovery_or_budget(tmp_path, monkeypatch, recovers):
     from nemo_gym.rollout_recovery import IncompleteEvaluationError
-    from tests.unit_tests.test_rollout_collection import FakeResponse, http_error, install_fake_server_client
 
     dispatches = []
 
@@ -4693,24 +4692,39 @@ async def test_multistage_http_outage_resumes_until_recovery_or_budget(tmp_path,
         attempt = row.get(ATTEMPT_INDEX_KEY_NAME, 0)
         dispatches.append((row["task_id"], attempt))
         if row["task_id"] == "t1" and not (recovers and attempt == 1):
-            raise http_error(503, "Temporary gateway unavailable")
+            raise ClientResponseError(
+                request_info=SimpleNamespace(method="POST", url="http://agent/run", real_url="http://agent/run"),
+                history=(),
+                status=503,
+                message="Temporary gateway unavailable",
+            )
         ref = row["reference_ids"][0]
-        return FakeResponse(
-            200,
-            {
-                "task_id": row["task_id"],
-                "reward": 1.0,
-                "response": {},
-                "per_reference": {ref: {"wins": 1, "losses": 0, "ties": 0, "reference_elo": REF_ELOS[ref]}},
-            },
-        )
+        payload = {
+            "task_id": row["task_id"],
+            "reward": 1.0,
+            "response": {},
+            "per_reference": {ref: {"wins": 1, "losses": 0, "ties": 0, "reference_elo": REF_ELOS[ref]}},
+        }
+        return MagicMock(status=200, ok=True, read=AsyncMock(return_value=json.dumps(payload).encode()))
 
     monkeypatch.setattr(rollout_collection_module, "RolloutCollectionHelper", Helper)
     monkeypatch.setattr(
         multistage_module, "ensure_distribution", lambda *args, **kwargs: (_distribution(["t0", "t1"]), None)
     )
     monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "3")
-    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post), agent_names=("gdpval_stirrup_agent",))
+    # Keep the HTTP fixture local: server suites run with their own `tests` package.
+    server_client = MagicMock(
+        post=AsyncMock(side_effect=post),
+        global_config_dict=OmegaConf.create(
+            {
+                "gdpval_stirrup_agent": {"responses_api_agents": {"impl": {}}},
+                "gdpval_stirrup_agent_environment_server": {
+                    "environment_servers": {"legacy_agent": {"agent_server": {"name": "gdpval_stirrup_agent"}}}
+                },
+            }
+        ),
+    )
+    monkeypatch.setattr(rollout_collection_module, "setup_server_client_utils", lambda *args, **kwargs: server_client)
     output = tmp_path / "rollouts.jsonl"
     config = rollout_collection_module.RolloutCollectionConfig(
         input_jsonl_fpath=str(tmp_path / "input.jsonl"),
