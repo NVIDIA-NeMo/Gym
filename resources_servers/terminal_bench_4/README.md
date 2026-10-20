@@ -86,12 +86,22 @@ Packages that ship only Dockerfiles leave `docker_image` unset. Supply images th
 `environment.task_images`:
 
 - `agent` and `verifier`: templates that accept `{org}`, `{task}` and `{digest}`.
-- `by_task.<task>.agent|verifier`: explicit per-task images, which take precedence over the
-  templates.
+- `service`: a template for Compose services that the package builds from a Dockerfile. It
+  also accepts `{service}`, the Compose service name.
+- `by_task.<task>.agent|verifier` and `by_task.<task>.services.<service>`: explicit per-task
+  images, which take precedence over the templates.
 
 An image declared by the package always wins. A separate verifier without
 `[verifier.environment]` uses the agent image, as in Harbor. A role with no image fails at
 seed, before allocation.
+
+Such packages' Compose files can build sidecars (`build:`). The server then runs each
+sidecar's configured image, and `main` runs the agent image. It also applies Harbor's `CPUS`
+and `MEMORY` Compose variables from the task's resources. These images have no published
+name, so their `compose_image_configs` records are keyed `<task>/<service>`. Records keyed by
+image name take precedence. `environment.compose_ignored_settings` lists Compose service
+settings, or `networks`, that the deployment cannot enforce; they are removed instead of
+rejected. It is empty by default, and a benchmark that sets it documents what it drops.
 
 Two opt-in verifier settings adapt packages to a deployment. Both default to the package
 values:
