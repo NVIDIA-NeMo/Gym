@@ -29,6 +29,8 @@ from httpx import Cookies
 
 import nemo_gym.server_utils as server_utils
 from nemo_gym.server_utils import ServerClient
+from resources_servers.enterpriseops_gym.app import EnterpriseOpsGymResourcesServer, SessionGym
+from resources_servers.enterpriseops_gym.mcp_client import MCPGymClient
 
 
 GYM_NAME = "stub-gym"
@@ -536,3 +538,153 @@ class TestVerifierKinds:
         assert result["num_verifiers_scored"] == 2
         # Strict counts the skipped verifier as failed.
         assert result["strict_success"] is False
+
+
+class TestDatabaseCleanupFailures:
+    @pytest.mark.parametrize("cleanup_fails", [False, True])
+    def test_partial_seed_failure_cleans_late_success(
+        self, gym_env, make_server, monkeypatch: pytest.MonkeyPatch, cleanup_fails: bool
+    ) -> None:
+        stub_url, state = gym_env
+        server = make_server()
+        other_gym = "stub-gym-late"
+        server._managed_runtime.urls[other_gym] = stub_url
+        row = make_row(stub_url, [V_COUNT])
+        row["verifier_metadata"]["gym_servers_config"].append(
+            row["verifier_metadata"]["gym_servers_config"][0] | {"mcp_server_name": other_gym}
+        )
+        original_seed = EnterpriseOpsGymResourcesServer._seed_gym_database
+        original_delete = MCPGymClient.delete_database
+
+        async def fail_first_seed(
+            instance: EnterpriseOpsGymResourcesServer, gym: SessionGym, seed_database_file: str
+        ) -> None:
+            if gym.gym_name == GYM_NAME:
+                raise RuntimeError("seed service unavailable")
+            # The other seed finishes after its sibling has already failed.
+            await asyncio.sleep(0.01)
+            await original_seed(instance, gym, seed_database_file)
+
+        async def flaky_delete(instance: MCPGymClient, database_id: str) -> bool:
+            if cleanup_fails:
+                return False
+            return await original_delete(instance, database_id)
+
+        monkeypatch.setattr(EnterpriseOpsGymResourcesServer, "_seed_gym_database", fail_first_seed)
+        monkeypatch.setattr(MCPGymClient, "delete_database", flaky_delete)
+        with TestClient(server.setup_webserver()) as client:
+            with pytest.raises(RuntimeError, match="seed service unavailable"):
+                client.post("/seed_session", json=row)
+            assert len(state.seed_events) == 1
+            if cleanup_fails:
+                session = next(iter(server.sessions.values()))
+                assert session.gyms[other_gym].database_id in state.dbs
+                assert session.dbs_deleted is False
+                cleanup_fails = False
+                assert client.portal.call(server.cleanup_expired_sessions, time.time() + 100_000) == 1
+            assert state.delete_events == state.seed_events
+            assert state.dbs == {}
+            assert server.sessions == {}
+
+    @pytest.mark.parametrize("failure_mode", ["false", "exception"])
+    def test_failed_delete_keeps_session_until_janitor_succeeds(
+        self, gym_env, make_server, monkeypatch: pytest.MonkeyPatch, failure_mode: str
+    ) -> None:
+        stub_url, state = gym_env
+        server = make_server()
+        row = make_row(stub_url, [V_COUNT])
+        verify_body = row | {"response": make_nemogym_response([FINAL_MESSAGE_ITEM])}
+        original_delete = MCPGymClient.delete_database
+        attempts = 0
+
+        async def flaky_delete(instance: MCPGymClient, database_id: str) -> bool:
+            nonlocal attempts
+            attempts += 1
+            if attempts <= 2:
+                if failure_mode == "exception":
+                    raise RuntimeError("delete service unavailable")
+                return False
+            return await original_delete(instance, database_id)
+
+        monkeypatch.setattr(MCPGymClient, "delete_database", flaky_delete)
+        with TestClient(server.setup_webserver()) as client:
+            seeded = client.post("/seed_session", json=row).json()
+            database_id = seeded["databases"][GYM_NAME]
+            session = next(iter(server.sessions.values()))
+            result = client.post("/verify", json=verify_body).json()
+            assert result["reward"] == 1.0
+            assert session.dbs_deleted is False
+            assert session.gyms[GYM_NAME].database_id == database_id
+            assert client.post("/verify", json=verify_body).json() == result
+            assert attempts == 1
+
+            assert client.portal.call(server.cleanup_expired_sessions, time.time() + 100_000) == 0
+            assert database_id in state.dbs
+            assert len(server.sessions) == 1
+            assert client.portal.call(server.cleanup_expired_sessions, time.time() + 100_000) == 1
+            assert attempts == 3
+            assert session.dbs_deleted is True
+            assert session.gyms[GYM_NAME].database_id is None
+            assert server.sessions == {}
+            assert state.dbs == {}
+            assert state.delete_events == [database_id]
+
+    @pytest.mark.parametrize("cleanup_fails", [False, True])
+    def test_reseed_cleans_previous_database_before_replacing_session(
+        self, gym_env, make_server, monkeypatch: pytest.MonkeyPatch, cleanup_fails: bool
+    ) -> None:
+        stub_url, state = gym_env
+        server = make_server()
+        row = make_row(stub_url, [V_COUNT])
+        original_delete = MCPGymClient.delete_database
+
+        async def flaky_delete(instance: MCPGymClient, database_id: str) -> bool:
+            if cleanup_fails:
+                return False
+            return await original_delete(instance, database_id)
+
+        monkeypatch.setattr(MCPGymClient, "delete_database", flaky_delete)
+        with TestClient(server.setup_webserver()) as client:
+            first = client.post("/seed_session", json=row).json()["databases"][GYM_NAME]
+            previous_session = next(iter(server.sessions.values()))
+            if cleanup_fails:
+                with pytest.raises(RuntimeError, match="Could not clean databases for existing session"):
+                    client.post("/seed_session", json=row)
+                assert next(iter(server.sessions.values())) is previous_session
+                assert state.seed_events == [first]
+                assert first in state.dbs
+                cleanup_fails = False
+            second = client.post("/seed_session", json=row).json()["databases"][GYM_NAME]
+            assert first != second
+            assert state.delete_events == [first]
+            assert first not in state.dbs
+            assert second in state.dbs
+        assert state.dbs == {}
+        assert state.delete_events == [first, second]
+
+    def test_janitor_keeps_session_replaced_during_cleanup(self, gym_env, make_server, monkeypatch) -> None:
+        stub_url, state = gym_env
+        server = make_server()
+        row = make_row(stub_url, [V_COUNT])
+        original_delete = MCPGymClient.delete_database
+        with TestClient(server.setup_webserver()) as client:
+            first = client.post("/seed_session", json=row).json()["databases"][GYM_NAME]
+            session_id, previous_session = next(iter(server.sessions.items()))
+            replacement = previous_session.model_copy(deep=True)
+            replacement.created_at = time.time() + 100_000
+
+            async def replace_session_during_delete(instance: MCPGymClient, database_id: str) -> bool:
+                # Model a reseed completing while the janitor awaits the old delete.
+                if database_id == first:
+                    gym = replacement.gyms[GYM_NAME]
+                    seed_file = row["verifier_metadata"]["gym_servers_config"][0]["seed_database_file"]
+                    await server._seed_gym_database(gym, seed_file)
+                    server.sessions[session_id] = replacement
+                return await original_delete(instance, database_id)
+
+            monkeypatch.setattr(MCPGymClient, "delete_database", replace_session_during_delete)
+            client.portal.call(server.cleanup_expired_sessions, time.time() + 100_000)
+            assert server.sessions[session_id] is replacement
+            assert replacement.gyms[GYM_NAME].database_id in state.dbs
+            assert first not in state.dbs
+        assert state.dbs == {}
