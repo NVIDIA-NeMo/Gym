@@ -765,6 +765,11 @@ def _to_result(payload: Any):
     return (content, payload) if isinstance(payload, dict) else content
 
 
+def session_token_serializer(server: Any) -> URLSafeSerializer:
+    """The serializer that signs and verifies this server's MCP session tokens."""
+    return mcp_session_token_serializer(server.get_session_middleware_key())
+
+
 def maybe_auto_expose(server: Any, app: FastAPI) -> Optional[dict[str, MCPTool]]:
     """Install MCP auto-exposure iff the server opts in (``expose_tools_over_mcp: true`` in the config).
 
@@ -793,8 +798,7 @@ def install_auto_exposure(server: Any, app: FastAPI) -> dict[str, MCPTool]:
             "on the same server. Remove the hand-rolled /mcp mount and rely on expose_tools_over_mcp."
         )
 
-    secret = server.get_session_middleware_key()
-    serializer = mcp_session_token_serializer(secret)
+    serializer = session_token_serializer(server)
     tools = harvest_tools(app, server)
 
     mint_metadata = functools.partial(_mint_session_metadata, server, serializer)
