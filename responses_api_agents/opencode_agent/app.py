@@ -26,7 +26,7 @@ from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 from shlex import quote
 from time import monotonic, time
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
@@ -97,6 +97,8 @@ from responses_api_agents.opencode_agent.setup_opencode import ensure_opencode
 LOG = logging.getLogger(__name__)
 _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
 _INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
+# Sandbox-session plugin that drops max_tokens from the session provider's requests.
+_REMAINING_CONTEXT_PLUGIN = "remaining_context.mjs"
 
 
 def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
@@ -200,6 +202,17 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     model_base_url: Optional[str] = None
     # The key OpenCode sends to model_base_url ("EMPTY" when unset).
     model_api_key: Optional[str] = None
+    # Sandbox sessions: sent as chat `reasoning_effort` on every request (the model's reasoningEffort
+    # option), e.g. "max". None sends none.
+    reasoning_effort: Optional[str] = None
+    # Sandbox sessions: the assistant-message field that replays each turn's reasoning to the model.
+    interleaved_reasoning_field: str = "reasoning_content"
+    # Sandbox sessions: "remaining_context" sends no max_tokens, so the endpoint chooses the output
+    # budget from the context left; "fixed" caps every call at max_output_tokens.
+    output_token_policy: Literal["fixed", "remaining_context"] = "fixed"
+    # Sandbox sessions: declare context_window and max_output_tokens as the model's limits. False leaves
+    # the model's size unknown to OpenCode, which then compacts only when the endpoint reports an overflow.
+    declare_model_limits: bool = True
 
     @property
     def command_parts(self) -> list[str]:
@@ -706,6 +719,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             self._check_sandbox_setup(command, result)
             await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/sandbox_runner.py")
             await sandbox.upload(Path(__file__).with_name("task_environment.mjs"), f"{directory}/task_environment.mjs")
+            if self.config.output_token_policy == "remaining_context":
+                await sandbox.upload(
+                    Path(__file__).with_name(_REMAINING_CONTEXT_PLUGIN), f"{directory}/{_REMAINING_CONTEXT_PLUGIN}"
+                )
             if self._session_captures_model_calls():
                 await sandbox.upload(OBSERVABILITY_PATCH, f"{directory}/{OBSERVABILITY_PATCH.name}")
         except BaseException as error:
@@ -1043,6 +1060,15 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         started = monotonic()
         previous_session_id = state.harness_session_id
         base_url, api_key, model_id = self._session_endpoint(state.request.episode_id.capture_key)
+        model: dict[str, Any] = {"interleaved": {"field": self.config.interleaved_reasoning_field}}
+        if self.config.declare_model_limits:
+            model["limit"] = {
+                "context": self.config.context_window,
+                "input": self.config.context_window,
+                "output": self.config.max_output_tokens,
+            }
+        if self.config.reasoning_effort:
+            model["options"] = {"reasoningEffort": self.config.reasoning_effort}
         config = {
             "model": f"nemo_gym/{model_id}",
             "small_model": f"nemo_gym/{model_id}",
@@ -1057,16 +1083,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                         "apiKey": api_key,
                         "timeout": False,
                     },
-                    "models": {
-                        model_id: {
-                            "interleaved": {"field": "reasoning_content"},
-                            "limit": {
-                                "context": self.config.context_window,
-                                "input": self.config.context_window,
-                                "output": self.config.max_output_tokens,
-                            },
-                        }
-                    },
+                    "models": {model_id: model},
                 }
             },
             **self.config.opencode_config,
@@ -1077,6 +1094,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         if self._session_captures_model_calls():
             apply_observability_patch(config, plugin_path=Path(state.persistent_directory) / OBSERVABILITY_PATCH.name)
         config.setdefault("plugin", []).append((Path(state.session.session_dir) / "task_environment.mjs").as_uri())
+        if self.config.output_token_policy == "remaining_context":
+            # Uploaded once at seed into the session root, which every activation shares.
+            config["plugin"].append((Path(state.persistent_directory) / _REMAINING_CONTEXT_PLUGIN).as_uri())
         command = [f"{state.runtime}/opencode", "run", "--format", "json", "--title", "NeMo Gym"]
         if self.config.thinking:
             command.append("--thinking")

@@ -3,15 +3,20 @@
 """Opt-in sandbox-session settings for running OpenCode as a harness started in the task container."""
 
 import json
+import shutil
+import subprocess
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
+from responses_api_agents.opencode_agent.app import _REMAINING_CONTEXT_PLUGIN as REMAINING_CONTEXT_PLUGIN
 from responses_api_agents.opencode_agent.runtime import OBSERVABILITY_PATCH
 from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import close_body, seed, setup  # noqa: F401
 
 
 ROLLOUT = "/ng-rollout/opencode-smoke-a2/v1/responses"
+PACKAGE = Path(__file__).parents[1]
 
 
 def configure_direct(agent, **overrides):
@@ -89,3 +94,60 @@ def test_direct_endpoint_accepts_its_own_model_name_in_requests(setup):
     configure_direct(agent)
     response, _, _ = run_session(agent, sandbox, request={"input": "Fix the code", "model": "deepseek-flash"})
     assert response.status_code == 200, response.text
+
+
+def test_request_settings_reach_the_session_provider(setup):
+    agent, sandbox = setup
+    configure_direct(
+        agent,
+        reasoning_effort="max",
+        interleaved_reasoning_field="reasoning",
+        output_token_policy="remaining_context",
+        declare_model_limits=False,
+    )
+    response, payload, _ = run_session(agent, sandbox)
+    assert response.status_code == 200, response.text
+    config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
+    # No size: OpenCode compacts only on an overflow error; effort goes on every request.
+    assert config["provider"]["nemo_gym"]["models"]["deepseek-flash"] == {
+        "interleaved": {"field": "reasoning"},
+        "options": {"reasoningEffort": "max"},
+    }
+    plugin = f"{sandbox.directory}/{REMAINING_CONTEXT_PLUGIN}"
+    assert Path(plugin).as_uri() in config["plugin"]
+    assert sandbox.files[plugin] == (PACKAGE / REMAINING_CONTEXT_PLUGIN).read_text()
+
+
+def test_default_request_settings_keep_the_declared_limits(setup):
+    agent, sandbox = setup
+    response, payload, _ = run_session(agent, sandbox)
+    assert response.status_code == 200, response.text
+    config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
+    assert config["provider"]["nemo_gym"]["models"]["dummy_model"] == {
+        "interleaved": {"field": "reasoning_content"},
+        "limit": {"context": 32000, "input": 32000, "output": 4096},
+    }
+    assert not any(REMAINING_CONTEXT_PLUGIN in plugin for plugin in config["plugin"])
+    assert not any(path.endswith(REMAINING_CONTEXT_PLUGIN) for path in sandbox.files)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node is required to execute the OpenCode plugin")
+def test_remaining_context_plugin_drops_max_tokens_for_the_session_provider_only():
+    script = """
+import assert from 'node:assert/strict';
+const { RemainingContext } = await import(process.argv[1]);
+const hooks = await RemainingContext();
+for (const [providerID, kept] of [['nemo_gym', false], ['other', true]]) {
+  const output = { maxOutputTokens: 32000, temperature: 1 };
+  await hooks['chat.params']({ model: { providerID } }, output);
+  assert.equal('maxOutputTokens' in output, kept);
+  assert.equal(output.temperature, 1);
+}
+"""
+    completed = subprocess.run(
+        [shutil.which("node"), "--input-type=module", "-e", script, (PACKAGE / REMAINING_CONTEXT_PLUGIN).as_uri()],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr

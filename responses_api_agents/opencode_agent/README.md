@@ -141,6 +141,14 @@ uses all of them). Local calls ignore them.
   OpenCode calls directly from the sandbox as `model`, instead of a Gym `model_server` (set exactly one),
   and its key (default `EMPTY`). Gym does not capture these calls, so the model-call correlation plugin
   is not loaded.
+- `reasoning_effort`: sent as chat `reasoning_effort` on every request (the model's `reasoningEffort`
+  option), e.g. `max`.
+- `interleaved_reasoning_field`: the assistant-message field that replays each turn's reasoning
+  (default `reasoning_content`; set the field the endpoint reads, e.g. `reasoning`).
+- `output_token_policy: remaining_context`: requests carry no `max_tokens`, so the endpoint chooses the
+  output budget from the context left (default `fixed`: `max_output_tokens`).
+- `declare_model_limits: false`: the model's size stays unknown to OpenCode, so it compacts only when
+  the endpoint reports a context overflow (default true: `context_window` and `max_output_tokens`).
 
 ## Configuration compatibility
 
