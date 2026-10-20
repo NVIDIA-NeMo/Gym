@@ -127,3 +127,22 @@ def test_close_only_nontransient_cleanup_marker_does_not_loop() -> None:
     error = ValueError("close-only failure")
     error.nooa_cleanup_error = error
     assert not is_transient_infrastructure_error(error)
+
+
+@pytest.mark.parametrize("first_transient", [False, True])
+@pytest.mark.parametrize("second_transient", [False, True])
+def test_retry_classification_checks_all_cleanup_errors_with_cycles(
+    first_transient: bool, second_transient: bool
+) -> None:
+    from responses_api_agents.nooa_agent.result import is_transient_infrastructure_error
+
+    primary = ValueError("task failure")
+    first = ConnectionError("agent close") if first_transient else ValueError("agent close")
+    second = TimeoutError("scope close") if second_transient else ValueError("scope close")
+    primary.nooa_cleanup_errors = (first, second, first)
+    primary.nooa_cleanup_error = second
+    first.__context__ = primary
+    second.__cause__ = primary
+    wrapper = RuntimeError("wrapper")
+    wrapper.__cause__ = primary
+    assert is_transient_infrastructure_error(wrapper) is (first_transient or second_transient)

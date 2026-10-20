@@ -28,6 +28,8 @@ def _retain_cleanup_failure(failure: BaseException | None, cleanup_error: Except
         LOGGER.warning("BenchAgent cleanup failed during invocation failure", exc_info=True)
     # Preserve the task exception's identity and cause while telling the runner
     # that this invocation cannot be graded as a normal policy termination.
+    failure.nooa_cleanup_errors = (*getattr(failure, "nooa_cleanup_errors", ()), cleanup_error)
+    # Keep the existing marker for callers that inspect a single cleanup failure.
     failure.nooa_cleanup_error = cleanup_error
     return failure
 

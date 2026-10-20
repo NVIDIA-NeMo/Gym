@@ -66,6 +66,7 @@ def is_transient_infrastructure_error(error: BaseException) -> bool:
         if id(error) in seen:
             continue
         seen.add(id(error))
+        pending.extend(getattr(error, "nooa_cleanup_errors", ()))
         cleanup_error = getattr(error, "nooa_cleanup_error", None)
         if isinstance(cleanup_error, Exception):
             pending.append(cleanup_error)

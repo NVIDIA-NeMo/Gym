@@ -82,12 +82,16 @@ class NOOARunFailure(RuntimeError):
 
     def __init__(self, error: BaseException, result: NOOARunResult) -> None:
         message = str(error)
-        cleanup_error = getattr(error, "nooa_cleanup_error", None)
-        if isinstance(cleanup_error, Exception) and cleanup_error is not error:
-            # Keep the secondary failure visible even in bounded worker diagnostics.
-            message = (
-                f"Cleanup failed: {type(cleanup_error).__name__}: {cleanup_error}. Original task failure: {error}"
+        cleanup_errors = getattr(error, "nooa_cleanup_errors", ())
+        if not cleanup_errors:
+            cleanup_error = getattr(error, "nooa_cleanup_error", None)
+            cleanup_errors = (
+                (cleanup_error,) if isinstance(cleanup_error, Exception) and cleanup_error is not error else ()
             )
+        if cleanup_errors:
+            # Bound each cleanup detail so both stages fit in the worker's 2,000-character diagnostic.
+            details = "; ".join(f"{type(cleanup).__name__}: {str(cleanup)[:500]}" for cleanup in cleanup_errors)
+            message = f"Cleanup failed: {details}. Original task failure: {error}"
         super().__init__(message)
         self.result = result
 
@@ -251,7 +255,9 @@ class InProcessNOOARunner:
             # Only known NOOA strategy wrappers deliberately chain model errors.
             # Cleanup failures can carry a preceding limit as context and must stay fatal.
             cause: BaseException | None = error
-            if isinstance(getattr(error, "nooa_cleanup_error", None), Exception):
+            if getattr(error, "nooa_cleanup_errors", ()) or isinstance(
+                getattr(error, "nooa_cleanup_error", None), Exception
+            ):
                 cause = None
             seen: set[int] = set()
             while isinstance(error, Exception) and cause is not None and id(cause) not in seen:

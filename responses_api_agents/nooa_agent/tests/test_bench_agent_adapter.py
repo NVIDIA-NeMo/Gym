@@ -7,6 +7,7 @@ import os
 import shlex
 import signal
 import sys
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -60,6 +61,51 @@ async def test_cleanup_failure_preserves_the_original_invocation_exception(tmp_p
     if terminal is not None:
         assert "BenchAgent cleanup failed during invocation failure" in caplog.text
         assert "cleanup also failed" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_kind", ["success", "failure", "cancelled"])
+@pytest.mark.parametrize("same_error", [False, True])
+async def test_sequential_cleanup_preserves_all_errors_and_original_exception(
+    tmp_path, monkeypatch, terminal_kind: str, same_error: bool
+) -> None:
+    from responses_api_agents.nooa_agent import bench_agent_adapter
+
+    monkeypatch.chdir(tmp_path)
+    terminal = {
+        "success": None,
+        "failure": RuntimeError("original task failure"),
+        "cancelled": asyncio.CancelledError(),
+    }[terminal_kind]
+    cause = ValueError("original cause")
+    context = ValueError("original context")
+    if terminal is not None:
+        terminal.__cause__ = cause
+        terminal.__context__ = context
+    first = ConnectionError("agent close failed")
+    second = first if same_error else ValueError("scope close failed")
+
+    @asynccontextmanager
+    async def failing_scope():
+        yield SimpleNamespace(adopt=lambda session: None)
+        raise second
+
+    monkeypatch.setattr(bench_agent_adapter, "preserve_background_services", failing_scope)
+    agent = SimpleNamespace(
+        shell=SimpleNamespace(cwd=str(tmp_path), session=object()),
+        _solve_task=AsyncMock(return_value="done", side_effect=terminal),
+        aclose=AsyncMock(side_effect=first),
+    )
+    expected = first if terminal is None else terminal
+    with pytest.raises(type(expected)) as caught:
+        await invoke_bench_agent(agent, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+
+    assert caught.value is expected
+    assert caught.value.nooa_cleanup_errors == (first, second)
+    if terminal is not None:
+        assert terminal.__cause__ is cause
+        assert terminal.__context__ is context
+    agent.aclose.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -500,7 +546,7 @@ async def test_real_benchagent_loop_guard_preserves_gradable_evidence(tmp_path, 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("wire_boundary", ["embedded", "worker"])
-@pytest.mark.parametrize("cleanup_boundary", ["agent", "scope"])
+@pytest.mark.parametrize("cleanup_boundary", ["agent", "scope", "both"])
 @pytest.mark.parametrize("error_type", [ConnectionError, TimeoutError, ValueError])
 async def test_cleanup_failure_retry_and_diagnostic_cross_runtime_boundaries(
     tmp_path, monkeypatch, wire_boundary: str, cleanup_boundary: str, error_type: type[Exception]
@@ -521,7 +567,10 @@ async def test_cleanup_failure_retry_and_diagnostic_cross_runtime_boundaries(
     from responses_api_agents.nooa_agent.tests.test_sandbox_entrypoint import payload
 
     monkeypatch.chdir(tmp_path)
-    cleanup_error = error_type("secondary cleanup connection failed")
+    cleanup_error = error_type(
+        "secondary cleanup connection failed" + ("x" * 2500 if cleanup_boundary == "both" else "")
+    )
+    scope_error = (ConnectionError if error_type is ValueError else ValueError)("scope close failed" + "y" * 2500)
     fresh_sessions = []
     solve_errors = []
     original_solve = module.BenchAgent._solve_task
@@ -538,12 +587,15 @@ async def test_cleanup_failure_retry_and_diagnostic_cross_runtime_boundaries(
 
     async def session_close(session):
         await original_session_close(session)
-        if cleanup_boundary == "scope" and session in fresh_sessions:
-            raise cleanup_error
+        if session in fresh_sessions:
+            if cleanup_boundary == "scope":
+                raise cleanup_error
+            if cleanup_boundary == "both":
+                raise scope_error
 
     async def shell_close(shell):
         await original_shell_close(shell)
-        if cleanup_boundary == "agent":
+        if cleanup_boundary in {"agent", "both"}:
             raise cleanup_error
 
     calls = []
@@ -565,7 +617,7 @@ async def test_cleanup_failure_retry_and_diagnostic_cross_runtime_boundaries(
         agent_class="nooa_bench.bench_agent:BenchAgent",
         invocation_adapter="responses_api_agents.nooa_agent.bench_agent_adapter:invoke_bench_agent",
     )
-    transient = error_type is not ValueError
+    transient = cleanup_boundary == "both" or error_type is not ValueError
     if wire_boundary == "worker":
         monkeypatch.setattr(entrypoint._ModelClient, "post", post)
         request = payload()
@@ -607,6 +659,12 @@ async def test_cleanup_failure_retry_and_diagnostic_cross_runtime_boundaries(
         )
 
     assert len(calls) == len(solve_errors) == 1
-    assert solve_errors[0].nooa_cleanup_error is cleanup_error
+    expected_errors = (cleanup_error, scope_error) if cleanup_boundary == "both" else (cleanup_error,)
+    assert solve_errors[0].nooa_cleanup_errors == expected_errors
+    assert solve_errors[0].nooa_cleanup_error is expected_errors[-1]
     assert str(solve_errors[0]) in diagnostic
-    assert f"{error_type.__name__}: {cleanup_error}" in diagnostic
+    for error in expected_errors:
+        detail = str(error)[:100] if cleanup_boundary == "both" else str(error)
+        assert f"{type(error).__name__}: {detail}" in diagnostic
+    if wire_boundary == "worker":
+        assert len(diagnostic) <= 2000
