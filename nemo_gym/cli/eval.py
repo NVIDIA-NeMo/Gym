@@ -761,10 +761,11 @@ def reward_profile():  # pragma: no cover
     with open(config.rollouts_jsonl_fpath) as f:
         results = [loads_jsonl_line(line, config.rollouts_jsonl_fpath, i) for i, line in enumerate(f, 1)]
 
+    rp = RewardProfiler()
+    bayes_metrics = rp.compute_bayes_at_n_metrics(rows, results) if config.bayes_at_n else {}
+
     # Results may be out of order.
     results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
-
-    rp = RewardProfiler()
 
     # Completeness is judged on what was actually collected, before any masking filter:
     # dropping masked pairs first would hide a genuinely missing rollout behind a set that
@@ -786,6 +787,7 @@ def reward_profile():  # pragma: no cover
     agent_coverage = coverage_by_agent(rows, results)
     for entry in agent_level_metrics:
         name = (entry.get("agent_ref") or {}).get("name")
+        entry.update(bayes_metrics.get(name, {}))
         if name in agent_coverage:
             entry.update(agent_coverage.pop(name))
     for name, entry_coverage in agent_coverage.items():

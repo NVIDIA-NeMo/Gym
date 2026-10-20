@@ -14,7 +14,12 @@
 # limitations under the License.
 
 
+import math
+import os
+import subprocess
 import sys
+from copy import deepcopy
+from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
@@ -48,6 +53,192 @@ def _result(task_idx: int, rollout_idx: int, reward: float = 1.0, total_tokens: 
         "response": {"usage": {"total_tokens": total_tokens}},
         "reward": reward,
     }
+
+
+def _binary_profile_data(outcomes: list[list[float]]) -> tuple[list[dict], list[dict]]:
+    rows, results = [], []
+    for task, rewards in enumerate(outcomes):
+        for rollout, reward in enumerate(rewards):
+            rows.append(_row(task, rollout))
+            results.append(_result(task, rollout, reward))
+    return rows, results
+
+
+class TestBayesAtNProfile:
+    @pytest.mark.parametrize(
+        "outcomes, mean, variance",
+        [
+            ([[0, 0], [1, 1]], Fraction(1, 2), Fraction(3, 160)),
+            ([[0, 1], [0, 1]], Fraction(1, 2), Fraction(1, 40)),
+            ([[0]], Fraction(1, 3), Fraction(1, 18)),
+            ([[True]], Fraction(2, 3), Fraction(1, 18)),
+            ([[0, 0], [0, 0]], Fraction(1, 4), Fraction(3, 160)),
+            ([[1, 1], [1, 1]], Fraction(3, 4), Fraction(3, 160)),
+        ],
+    )
+    def test_exact_question_posteriors(self, outcomes, mean, variance) -> None:
+        rows, results = _binary_profile_data(outcomes)
+        original = deepcopy((rows, results))
+        metrics = RewardProfiler().compute_bayes_at_n_metrics(rows[::-1], results[::-1])["my_agent"]
+        n = len(outcomes[0])
+        assert metrics[f"bayes@{n}/reward"] == pytest.approx(float(mean), abs=1e-15)
+        assert metrics[f"std/bayes@{n}/reward"] == pytest.approx(math.sqrt(variance), abs=1e-15)
+        assert (rows, results) == original
+
+    @pytest.mark.parametrize("shape", [(1, 5), (17, 8), (164, 64)])
+    def test_fraction_oracle(self, shape) -> None:
+        m, n = shape
+        outcomes = np.random.default_rng(2026).integers(0, 2, size=shape).tolist()
+        successes = [sum(row) for row in outcomes]
+        expected_mean = sum(Fraction(s + 1, n + 2) for s in successes) / m
+        expected_variance = sum(Fraction((s + 1) * (n - s + 1), (n + 2) ** 2 * (n + 3)) for s in successes) / m**2
+        metrics = RewardProfiler().compute_bayes_at_n_metrics(*_binary_profile_data(outcomes))["my_agent"]
+        assert metrics[f"bayes@{n}/reward"] == pytest.approx(float(expected_mean), rel=1e-14)
+        assert metrics[f"std/bayes@{n}/reward"] == pytest.approx(math.sqrt(expected_variance), rel=1e-14)
+
+    @pytest.mark.parametrize("reward", [None, "1", 0.5, -1, 2, float("nan"), float("inf"), 1 + 0j])
+    def test_requires_binary_numeric_rewards(self, reward) -> None:
+        rows, results = _binary_profile_data([[reward]])
+        with pytest.raises(ValueError, match="binary rewards"):
+            RewardProfiler().compute_bayes_at_n_metrics(rows, results)
+
+    def test_missing_reward_is_not_a_failure(self) -> None:
+        rows, results = _binary_profile_data([[0]])
+        results[0].pop("reward")
+        with pytest.raises(ValueError, match="binary rewards"):
+            RewardProfiler().compute_bayes_at_n_metrics(rows, results)
+
+    @pytest.mark.parametrize("field", ["mask_sample", "_ng_failure_class", "_ng_no_persist"])
+    def test_rejects_unmeasured_results(self, field) -> None:
+        rows, results = _binary_profile_data([[0, 1]])
+        results[0][field] = True
+        with pytest.raises(ValueError, match="measured, unmasked"):
+            RewardProfiler().compute_bayes_at_n_metrics(rows, results)
+
+    @pytest.mark.parametrize("missing_task", [False, True])
+    def test_manifest_keeps_missing_trials_and_whole_tasks(self, missing_task) -> None:
+        rows, results = _binary_profile_data([[0, 0], [1, 1]])
+        results = results[:2] if missing_task else results[:-1]
+        with pytest.raises(ValueError, match="Missing rollout results"):
+            RewardProfiler().compute_bayes_at_n_metrics(rows, results)
+
+    @pytest.mark.parametrize("kind", ["input", "result", "extra", "ragged", "empty"])
+    def test_rejects_invalid_cohorts(self, kind) -> None:
+        rows, results = _binary_profile_data([[0, 0], [1, 1]])
+        if kind == "input":
+            rows.append(deepcopy(rows[0]))
+        elif kind == "result":
+            results.append(deepcopy(results[0]))
+        elif kind == "extra":
+            results.append(_result(5, 0))
+        elif kind == "ragged":
+            rows.pop()
+            results.pop()
+        else:
+            rows, results = [], []
+        with pytest.raises(ValueError):
+            RewardProfiler().compute_bayes_at_n_metrics(rows, results)
+
+    @pytest.mark.parametrize("value", [None, True, -1, "0", 0.5])
+    @pytest.mark.parametrize("key", [TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME])
+    @pytest.mark.parametrize("side", ["input", "result"])
+    def test_requires_integer_identities(self, value, key, side) -> None:
+        rows, results = _binary_profile_data([[0]])
+        (rows if side == "input" else results)[0][key] = value
+        with pytest.raises(ValueError, match="nonnegative integer"):
+            RewardProfiler().compute_bayes_at_n_metrics(rows, results)
+
+    def test_requires_a_run_identity(self) -> None:
+        rows, results = _binary_profile_data([[0]])
+        rows[0].pop("agent_ref")
+        with pytest.raises(ValueError, match="identity"):
+            RewardProfiler().compute_bayes_at_n_metrics(rows, results)
+
+    @pytest.mark.parametrize("field", ["input", "temperature", "verifier_metadata"])
+    def test_repeated_inputs_must_agree(self, field) -> None:
+        rows, results = _binary_profile_data([[0, 1]])
+        if field == "verifier_metadata":
+            rows[1][field] = {"answer": "changed"}
+        else:
+            rows[1]["responses_create_params"][field] = "changed"
+        with pytest.raises(ValueError, match="identical repeated task inputs"):
+            RewardProfiler().compute_bayes_at_n_metrics(rows, results)
+
+    @pytest.mark.parametrize("seeds, valid", [([0, 1], True), ([0, 0], False), ([True, 1], False)])
+    def test_native_seed_variation(self, seeds, valid) -> None:
+        rows, results = _binary_profile_data([[0, 1]])
+        for row, seed in zip(rows, seeds):
+            row["responses_create_params"]["metadata"] = {"extra_body": orjson.dumps({"seed": seed}).decode()}
+        original = deepcopy(rows)
+        if valid:
+            metrics = RewardProfiler().compute_bayes_at_n_metrics(rows, results)["my_agent"]
+            assert metrics["bayes@2/reward"] == 0.5
+            assert rows == original
+        else:
+            with pytest.raises(ValueError, match="distinct integer RNG seeds"):
+                RewardProfiler().compute_bayes_at_n_metrics(rows, results)
+
+    @pytest.mark.parametrize("extra_body", ["not json", "[]", "null"])
+    def test_invalid_native_seed_container(self, extra_body) -> None:
+        rows, results = _binary_profile_data([[0]])
+        rows[0]["responses_create_params"]["metadata"] = {"extra_body": extra_body}
+        with pytest.raises(ValueError, match="metadata.extra_body"):
+            RewardProfiler().compute_bayes_at_n_metrics(rows, results)
+
+    @pytest.mark.parametrize("environment_servers", [False, True])
+    def test_fan_out_runs_have_separate_posteriors(self, environment_servers) -> None:
+        rows, results = _binary_profile_data([[0, 0, 1]])
+        for i, row in enumerate(rows):
+            name = "first" if i < 2 else "second"
+            row["agent_ref"] = {"name": "shared" if environment_servers else name}
+            if environment_servers:
+                row["_ng_environment_server"] = name
+        metrics = RewardProfiler().compute_bayes_at_n_metrics(rows, results)
+        assert metrics["first"]["bayes@2/reward"] == 0.25
+        assert metrics["first"]["std/bayes@2/reward"] == pytest.approx(math.sqrt(Fraction(3, 80)))
+        assert metrics["second"]["bayes@1/reward"] == pytest.approx(2 / 3)
+        assert metrics["second"]["std/bayes@1/reward"] == pytest.approx(math.sqrt(Fraction(1, 18)))
+
+    @pytest.mark.parametrize("invalid", [None, "masked", "partial"])
+    def test_profile_cli_exports_posterior_moments(self, tmp_path, invalid) -> None:
+        rows, results = _binary_profile_data([[0, 0], [1, 1]])
+        inputs_path, results_path = tmp_path / "inputs.jsonl", tmp_path / "rollouts.jsonl"
+        inputs_path.write_bytes(b"\n".join(orjson.dumps(row) for row in rows) + b"\n")
+        if invalid == "masked":
+            results[0]["mask_sample"] = True
+        elif invalid == "partial":
+            results.pop()
+        results_path.write_bytes(b"\n".join(orjson.dumps(result) for result in results[::-1]) + b"\n")
+        command = [
+            sys.executable,
+            "-c",
+            "from nemo_gym.cli.main import main; main()",
+            "eval",
+            "profile",
+            "--inputs",
+            str(inputs_path),
+            "--rollouts",
+            str(results_path),
+        ]
+        env = {key: value for key, value in os.environ.items() if key != "NEMO_GYM_CONFIG_DICT"}
+        output_path = tmp_path / "rollouts_agent_metrics.json"
+        if invalid:
+            completed = subprocess.run(
+                [*command, "--bayes-at-n", "+allow_partial_rollouts=true"], env=env, capture_output=True, text=True
+            )
+            assert completed.returncode != 0
+            expected_error = "unmasked" if invalid == "masked" else "Missing rollout results"
+            assert expected_error in completed.stderr
+            assert not output_path.exists()
+        else:
+            subprocess.run(command, env=env, check=True, capture_output=True, text=True)
+            default_metrics = orjson.loads(output_path.read_bytes())[0]
+            assert not any("bayes@" in key for key in default_metrics)
+            subprocess.run([*command, "--bayes-at-n"], env=env, check=True, capture_output=True, text=True)
+            metrics = orjson.loads(output_path.read_bytes())[0]
+            assert metrics["bayes@2/reward"] == 0.5
+            assert metrics["std/bayes@2/reward"] == pytest.approx(math.sqrt(Fraction(3, 160)))
+            assert {key: value for key, value in metrics.items() if "bayes@" not in key} == default_metrics
 
 
 class TestRewardProfile:

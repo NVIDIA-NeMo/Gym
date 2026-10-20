@@ -750,6 +750,10 @@ class TestEvalProfileFlags:
             "+rollouts_jsonl_fpath=r.jsonl",
         }
 
+    def test_bayes_at_n_flag(self, monkeypatch: MonkeyPatch) -> None:
+        _, overrides = _dispatch_for(monkeypatch, ["eval", "profile", "--bayes-at-n"])
+        assert overrides == ["+bayes_at_n=true"]
+
     def test_profile_does_not_accept_config(self, monkeypatch: MonkeyPatch) -> None:
         # reward_profile reads file paths, not config_paths, so --config is not offered and is rejected.
         monkeypatch.setattr(cli_main, "dispatch", lambda target, overrides: None)

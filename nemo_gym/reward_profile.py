@@ -19,6 +19,7 @@ import re
 import statistics
 import warnings
 from collections import Counter, defaultdict
+from copy import deepcopy
 from numbers import Real
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
@@ -57,6 +58,10 @@ class RewardProfileConfig(BaseNeMoGymCLIConfig):
         default=False,
         description="Allow reward profiling from partial rollout outputs by dropping input rows with no completed rollouts.",
     )
+    bayes_at_n: bool = Field(
+        default=False,
+        description="Add Bayes@N posterior moments for a complete fixed-repeat evaluation with binary rewards.",
+    )
 
 
 def _rollout_key(row: Dict[str, Any]) -> Tuple[int, int]:
@@ -64,6 +69,95 @@ def _rollout_key(row: Dict[str, Any]) -> Tuple[int, int]:
 
 
 class RewardProfiler:
+    def compute_bayes_at_n_metrics(
+        self,
+        rows: List[Dict[str, Any]],
+        results: List[Dict[str, Any]],
+    ) -> Dict[str, Dict[str, float]]:
+        """Return binary Bayes@N mean and posterior standard deviation per run.
+
+        ``rows`` must be the full materialized-input manifest from one evaluation,
+        and ``results`` must contain one measured binary reward for every scheduled
+        rollout. Each task within a run must have the same positive number of trials.
+        Repeated inputs must agree apart from their rollout index and native RNG seed.
+
+        Use independent generations with a fixed model, agent, environment and binary
+        verifier. File contents alone cannot establish these experimental conditions.
+        A repeated verification of one generation is not an independent trial.
+
+        Each question has a Beta(successes + 1, failures + 1) posterior. The returned
+        ``bayes@N/reward`` is the equal-question mean, and ``std/bayes@N/reward``
+        is sqrt(sum of question variances) / number of questions, both on [0, 1].
+        N in the keys is the observed trial count. No historical observations are used.
+
+        See https://arxiv.org/abs/2510.04265, Algorithm 1, for the categorical method.
+        Raises ValueError for incomplete, masked, nonbinary or inconsistent inputs.
+        """
+        if not rows:
+            raise ValueError("Bayes@N requires a nonempty materialized-input manifest.")
+        for name, records in (("materialized input", rows), ("result", results)):
+            for record in records:
+                for key in (TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME):
+                    value = record.get(key)
+                    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                        raise ValueError(f"Bayes@N requires a nonnegative integer {key} in every {name} row.")
+
+        aligned = self.align_rows_and_results(rows, results)
+        labels = rollout_run_labels(rows)
+        outcomes: Dict[str, Dict[int, List[float]]] = defaultdict(lambda: defaultdict(list))
+        inputs_by_task: Dict[Tuple[str, int], Dict[str, Any]] = {}
+        seeds_by_task: Dict[Tuple[str, int], set[int]] = defaultdict(set)
+        for row, result in aligned:
+            run = rollout_run_key(row)
+            if not isinstance(run, str) or not run:
+                raise ValueError("Bayes@N requires an agent or environment-server identity for every input row.")
+            task_key = (run, row[TASK_INDEX_KEY_NAME])
+            if result.get("mask_sample") or result.get("_ng_failure_class") or result.get("_ng_no_persist"):
+                raise ValueError(f"Bayes@N requires measured, unmasked rollouts; invalid result for {task_key}.")
+            reward = result.get("reward")
+            if not isinstance(reward, Real) or reward not in (0, 1):
+                raise ValueError(f"Bayes@N requires finite binary rewards (0 or 1); invalid reward for {task_key}.")
+
+            task_input = deepcopy(row)
+            task_input.pop(ROLLOUT_INDEX_KEY_NAME)
+            params = task_input.get("responses_create_params") or {}
+            metadata = params.get("metadata") or {}
+            if "extra_body" in metadata:
+                try:
+                    extra_body = orjson.loads(metadata["extra_body"])
+                except (orjson.JSONDecodeError, TypeError) as error:
+                    raise ValueError(f"Bayes@N requires JSON metadata.extra_body for {task_key}.") from error
+                if not isinstance(extra_body, dict):
+                    raise ValueError(f"Bayes@N requires object metadata.extra_body for {task_key}.")
+                if "seed" in extra_body:
+                    seed = extra_body.pop("seed")
+                    if isinstance(seed, bool) or not isinstance(seed, int) or seed in seeds_by_task[task_key]:
+                        raise ValueError(f"Bayes@N requires distinct integer RNG seeds within {task_key}.")
+                    seeds_by_task[task_key].add(seed)
+                metadata["extra_body"] = extra_body
+            if task_key in inputs_by_task and inputs_by_task[task_key] != task_input:
+                raise ValueError(
+                    f"Bayes@N requires identical repeated task inputs apart from RNG seed for {task_key}."
+                )
+            inputs_by_task[task_key] = task_input
+            outcomes[run][row[TASK_INDEX_KEY_NAME]].append(float(reward))
+
+        metrics_by_run = {}
+        for run, task_outcomes in outcomes.items():
+            trial_counts = {len(values) for values in task_outcomes.values()}
+            if len(trial_counts) != 1:
+                raise ValueError(f"Bayes@N requires the same positive trial count for every task in run {run!r}.")
+            n = trial_counts.pop()
+            successes = [sum(values) for values in task_outcomes.values()]
+            m = len(successes)
+            mean = math.fsum((s + 1) / (n + 2) for s in successes) / m
+            variance_sum = math.fsum((s + 1) * (n - s + 1) / ((n + 2) ** 2 * (n + 3)) for s in successes)
+            metrics_by_run[labels[run]] = {
+                f"bayes@{n}/reward": mean,
+                f"{Stat.STD.prefix}bayes@{n}/reward": math.sqrt(variance_sum) / m,
+            }
+        return metrics_by_run
+
     def _index_by_rollout_key(self, rows: List[Dict[str, Any]], name: str) -> Dict[Tuple[int, int], Dict[str, Any]]:
         indexed: Dict[Tuple[int, int], Dict[str, Any]] = {}
         for row in rows:
