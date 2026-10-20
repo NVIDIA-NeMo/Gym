@@ -35,6 +35,29 @@ aws s3 cp opencode /path/to/folder/opencode/$APP-$target
 aws s3 ls /path/to/folder/opencode/
 ```
 
+## Checkpoint resume
+
+With checkpointing on, a checkpoint pauses OpenCode (`pause_at_checkpoints`, default true) and the same process
+continues once the checkpoint opens. OpenCode is relaunched on its saved session only after a crash restore, or
+when a pause cannot be confirmed and the launch is stopped instead.
+
+Checkpointed runs keep OpenCode's session database inside the sandbox snapshot.
+On resume, Gym uploads `resume_opencode.py` and re-enters the saved user message
+through OpenCode's API, using its existing ID and no new message parts. This
+preserves the request an unfinished generation prefix belongs to. Adding an
+"interrupted session" prompt changes that request and forces regeneration.
+
+The helper runs an authenticated OpenCode server bound to loopback for the
+duration of the resumed run, and stops it on completion or checkpoint interruption.
+The sandbox needs `python3` (3.8+) and the same OpenCode version used before the
+checkpoint. OpenCode 1.17.11 is covered by an interruption/resume regression with
+a real runtime and a local model stub:
+
+```bash
+OPENCODE_TEST_BINARY=/path/to/opencode OPENCODE_TEST_PYTHON=/path/to/sandbox-python3 uv run pytest \
+    responses_api_agents/opencode_sandboxed_agent/tests/test_resume_opencode.py
+```
+
 ## Optional offline ripgrep
 
 OpenCode's `glob` and `grep` tools also need ripgrep (`rg`). Without it, OpenCode
