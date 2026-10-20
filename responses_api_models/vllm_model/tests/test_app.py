@@ -819,6 +819,8 @@ class TestApp:
         endpoint_failure_threshold: int = 3,
         endpoint_retry_after_s: float = 60.0,
         forward_session_id_as_conversation_id: bool = False,
+        return_token_id_information: bool = False,
+        dynamo_frontend: bool = False,
     ):
         config = VLLMModelConfig(
             host="0.0.0.0",
@@ -828,7 +830,8 @@ class TestApp:
             model="dummy_model",
             entrypoint="",
             name="",
-            return_token_id_information=False,
+            return_token_id_information=return_token_id_information,
+            dynamo_frontend=dynamo_frontend,
             uses_reasoning_parser=False,
             propagate_context_overflow_errors=propagate_context_overflow_errors,
             use_completions_api=use_completions_api,
@@ -1413,6 +1416,144 @@ class TestApp:
             "generation_log_probs",
         ):
             assert field_name not in served_message, field_name
+
+    @mark.parametrize(
+        ("capture", "engine_data", "error"),
+        [
+            (False, {"prompt_token_ids": [1, 2], "completion_token_ids": [3], "completion_logprobs": [-0.5]}, None),
+            (False, None, "without nvext.engine_data"),
+            (
+                False,
+                {"prompt_token_ids": [1, 2], "completion_token_ids": [3]},
+                "without a list for: completion_logprobs",
+            ),
+            (
+                False,
+                {"prompt_token_ids": [1, 2], "completion_token_ids": [3], "completion_logprobs": [-0.5, -0.1]},
+                "mismatched generation token IDs and log probabilities",
+            ),
+            (True, None, None),
+        ],
+        ids=["token-information", "missing-engine-data", "missing-logprobs", "logprob-count-mismatch", "capture"],
+    )
+    async def test_dynamo_frontend_dialect(self, monkeypatch: MonkeyPatch, capture, engine_data, error) -> None:
+        # The Dynamo frontend rejects unknown top-level fields and returns tokens only under
+        # nvext.engine_data; a capture call's admission and acknowledgement ride in nvext too.
+        server = self._setup_server(
+            monkeypatch,
+            dynamo_frontend=True,
+            return_token_id_information=not capture,
+            external_staging_backend="dynamo_worker" if capture else None,
+        )
+        context = None
+        if capture:
+            context = CaptureContext(
+                rollout_id="rollout-1",
+                model_call_id="c1",
+                token_sink=None,
+                lineage_store=InMemoryLineageStore(),
+                external_staging=True,
+                request_items=[{"role": "user", "content": "go"}],
+                capture_admission=CaptureAdmission(rollout_id="rollout-1", model_call_id="c1", mode="text"),
+            )
+            engine_data = {
+                "ng_commit_coords": {
+                    "rollout_id": "rollout-1",
+                    "model_call_id": "c1",
+                    "prev_len": 0,
+                    "delta_len": 3,
+                    "cum_len": 3,
+                    "weight_version": 7,
+                    "digest": "0" * 64,
+                    "extras_digest": "1" * 64,
+                    "staging_key": "rollout-1/c1",
+                    "chain_hash": "2" * 64,
+                    "cumulative_hash": "3" * 64,
+                }
+            }
+        engine_response = {
+            "id": "dynamo-1",
+            "object": "chat.completion",
+            "created": FIXED_TIME,
+            "model": "dummy_model",
+            "choices": [
+                {"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "done"}},
+            ],
+        }
+        if engine_data is not None:
+            engine_response["nvext"] = {"engine_data": engine_data}
+        sent = []
+
+        async def fake_request(**kwargs):
+            sent.append(kwargs)
+            return SimpleNamespace(status=200, ok=True, read=AsyncMock(return_value=json.dumps(engine_response)))
+
+        monkeypatch.setattr("nemo_gym.openai_utils.request", fake_request)
+        server._clients = [
+            NeMoGymAsyncOpenAI(base_url="http://dynamo/v1", api_key="key", default_headers={"x-default": "kept"})
+        ]
+        request = MagicMock()
+        request.session = {SESSION_ID_KEY: "session-1"}
+        request.headers = {}
+        body = NeMoGymChatCompletionCreateParamsNonStreaming(
+            messages=[
+                {"role": "user", "content": "hi"},
+                # A token-information turn echoed back by the agent.
+                {
+                    "role": "assistant",
+                    "content": "hello",
+                    "prompt_token_ids": [1],
+                    "generation_token_ids": [2],
+                    "generation_log_probs": [-0.1],
+                },
+                {"role": "user", "content": "go"},
+            ],
+        )
+        token = set_token_sink(context) if capture else None
+        try:
+            with raises(RuntimeError, match=error) if error else nullcontext():
+                response = await server.chat_completions(request, body)
+            if capture:
+                await server._finalize_served_response(response)
+        finally:
+            if token is not None:
+                reset_token_sink(token)
+
+        outbound = sent[0]["json"]
+        assert "prompt_token_ids" not in outbound["messages"][1]
+        assert "generation_token_ids" not in outbound["messages"][1]
+        assert "generation_log_probs" not in outbound["messages"][1]
+        assert outbound["nvext"]["extra_fields"] == ["engine_data"]
+        assert not {"ng_capture", "required_prefix_token_ids"} & outbound.keys()
+        # Every Gym request is marked as rollout traffic; a capture call also carries its admission.
+        *capture_annotations, marker = outbound["nvext"]["annotations"]
+        assert marker == "nemo_gym:rollout"
+        assert len(capture_annotations) == int(capture)
+        assert sent[0]["headers"]["x-default"] == "kept"
+        if error:
+            return
+        served = response.model_dump()
+        assert "nvext" not in served
+        if capture:
+            # The engine stages log probabilities itself; the admission is the only capture field sent.
+            assert "logprobs" not in outbound
+            assert outbound["stream"] is False
+            (annotation,) = capture_annotations
+            assert annotation.startswith("ng_capture:")
+            assert CaptureAdmission.model_validate_json(annotation.removeprefix("ng_capture:")) == (
+                context.capture_admission
+            )
+            assert sent[0]["headers"]["x-dynamo-session-id"] == "rollout-1"
+            assert context.committed is True
+            manifest = await context.lineage_store.manifest("rollout-1")
+            assert manifest["records"][0]["staging_key"] == "rollout-1/c1"
+            assert "ng_commit_coords" not in served
+        else:
+            assert "x-dynamo-session-id" not in sent[0]["headers"]
+            message = served["choices"][0]["message"]
+            assert message["prompt_token_ids"] == [1, 2]
+            assert message["generation_token_ids"] == [3]
+            assert message["generation_log_probs"] == [-0.5]
 
     def test_session_client_routing_is_stable_across_workers(self, monkeypatch: MonkeyPatch) -> None:
         workers = [self._setup_server(monkeypatch) for _ in range(2)]

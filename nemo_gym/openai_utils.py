@@ -1826,10 +1826,12 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         await self._raise_for_status(response, request_kwargs)
         return await get_response_json(response)
 
-    async def create_chat_completion(self, **kwargs):
+    async def create_chat_completion(self, *, extra_headers: Optional[Dict[str, str]] = None, **kwargs):
+        # ``extra_headers`` apply to this request only, over ``default_headers``.
         request_kwargs = dict(
             url=f"{self.base_url}/chat/completions",
             json=kwargs,
+            headers=extra_headers or {},
         )
         response = await self._request(method="POST", **request_kwargs)
 

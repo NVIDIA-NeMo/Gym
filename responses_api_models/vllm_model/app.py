@@ -64,13 +64,24 @@ from nemo_gym.token_id_capture import (
 )
 from nemo_gym.token_id_capture.config import token_id_capture_config
 from nemo_gym.token_id_capture.external_capture import (
+    DYNAMO_GYM_REQUEST_ANNOTATION,
     ExternalCaptureHandler,
+    annotate_dynamo_request,
     make_external_capture_handler,
+    request_dynamo_engine_data,
 )
+from nemo_gym.token_id_capture.records import TOKEN_FIELDS
 from responses_api_models.vllm_model.tar_audio import TarAudioReader, resolve_archive_path, validate_relative_path
 
 
 LOG = logging.getLogger("nemo_gym.vllm_model")
+
+# Dynamo `nvext.engine_data` keys, mapped to the message fields that carry them to Gym.
+_DYNAMO_ENGINE_DATA_FIELDS = {
+    "prompt_token_ids": "prompt_token_ids",
+    "completion_token_ids": "generation_token_ids",
+    "completion_logprobs": "generation_log_probs",
+}
 
 
 def _log_unhandled_engine_error(request: Request, status: int, body: str, route: str) -> None:
@@ -306,6 +317,13 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     return_token_id_information: bool
     # Request inline prompt and generation token IDs from compatible vLLM endpoints.
     request_prompt_and_generation_token_ids: bool = False
+    # Speak the Dynamo frontend's dialect (ai-dynamo >= 1.5.1). The frontend rejects unknown request
+    # fields and returns token data only under `nvext.engine_data`, when `nvext.extra_fields` names it.
+    # On, echoed per-message token fields are stripped from requests, and every request carries the
+    # `nemo_gym:rollout` annotation in `nvext.annotations`. With return_token_id_information,
+    # engine data is requested and copied onto the message token fields. Token capture with
+    # external staging requires `token_id_capture.external_staging_backend: dynamo_worker`.
+    dynamo_frontend: bool = False
     propagate_context_overflow_errors: bool = False
 
     uses_reasoning_parser: bool
@@ -441,6 +459,18 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
             raise ValueError("supply_prefix_token_ids is not supported with use_completions_api=true")
         if self.supply_prefix_token_ids and self.is_responses_native:
             raise ValueError("supply_prefix_token_ids is not supported with is_responses_native=true")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_dynamo_frontend(self) -> "VLLMModelConfig":
+        # The dialect covers only the chat completions call; the frontend rejects required_prefix_token_ids.
+        if self.dynamo_frontend and (
+            self.use_completions_api or self.is_responses_native or self.supply_prefix_token_ids
+        ):
+            raise ValueError(
+                "dynamo_frontend is not supported with use_completions_api, is_responses_native, "
+                "or supply_prefix_token_ids"
+            )
         return self
 
     # When True, outbound calls go to vLLM's /v1/completions endpoint instead
@@ -598,9 +628,13 @@ class VLLMModel(SimpleResponsesAPIModel):
                     "token_id_capture.external_staging requires return_token_id_information=false; "
                     "worker custody replaces the token echo"
                 )
-            self._external_capture_handler = make_external_capture_handler(
-                capture_config.token_id_capture.external_staging_backend
-            )
+            backend = capture_config.token_id_capture.external_staging_backend
+            if (backend == "dynamo_worker") != self.config.dynamo_frontend:
+                raise ValueError(
+                    "token_id_capture.external_staging_backend=dynamo_worker and dynamo_frontend=true "
+                    "must be set together"
+                )
+            self._external_capture_handler = make_external_capture_handler(backend)
 
         self._chat_template_tokenizer = None
         if self.config.use_completions_api and self.config.render_chat_template:
@@ -951,8 +985,44 @@ class VLLMModel(SimpleResponsesAPIModel):
             body_dict = self._external_capture_handler.prepare_request(body_dict)
         else:
             body_dict = self._apply_prefix_supply(body_dict)
+        if self.config.dynamo_frontend:
+            self._prepare_dynamo_request(body_dict)
 
         return body_dict
+
+    def _prepare_dynamo_request(self, body_dict: Dict[str, Any]) -> None:
+        """Fit a chat request to the Dynamo frontend.
+
+        Strip the token fields agents echo on messages, which the frontend rejects, mark the request as
+        Gym rollout traffic, and request engine data.
+        """
+        for message_dict in body_dict.get("messages") or []:
+            for field_name in TOKEN_FIELDS:
+                message_dict.pop(field_name, None)
+        annotate_dynamo_request(body_dict, DYNAMO_GYM_REQUEST_ANNOTATION)
+        if self.config.return_token_id_information:
+            request_dynamo_engine_data(body_dict)
+
+    def _lift_dynamo_engine_data(self, chat_completion_dict: Dict[str, Any]) -> None:
+        """Copy Dynamo's `nvext.engine_data` token arrays onto the message fields read below.
+
+        The token-information path then validates them, including the log probability count.
+        """
+        nvext = chat_completion_dict.pop("nvext", None)
+        if not self.config.return_token_id_information:
+            return
+        engine_data = nvext.get("engine_data") if isinstance(nvext, dict) else None
+        if not isinstance(engine_data, dict):
+            raise RuntimeError(f"`{self.config.name}` got a Dynamo response without nvext.engine_data.")
+        missing = [field for field in _DYNAMO_ENGINE_DATA_FIELDS if not isinstance(engine_data.get(field), list)]
+        if missing:
+            # Dynamo omits completion_logprobs when their count does not match the completion tokens.
+            raise RuntimeError(
+                f"`{self.config.name}` got Dynamo nvext.engine_data without a list for: {', '.join(missing)}."
+            )
+        chat_completion_dict["choices"][0]["message"].update(
+            {message_field: engine_data[field] for field, message_field in _DYNAMO_ENGINE_DATA_FIELDS.items()}
+        )
 
     def _splice_audio_from_metadata(self, body_dict: Dict[str, Any], metadata: Dict[str, Any]) -> None:
         """Move audio metadata into content blocks on the most recent user message."""
@@ -1197,9 +1267,14 @@ class VLLMModel(SimpleResponsesAPIModel):
                 }
             )
 
+        extra_headers = (
+            self._external_capture_handler.request_headers() if self._external_capture_handler is not None else {}
+        )
         execution["upstream_attempted"] = True
         try:
-            chat_completion_dict = await self._call_endpoint(client, client.create_chat_completion(**body_dict))
+            chat_completion_dict = await self._call_endpoint(
+                client, client.create_chat_completion(**body_dict, extra_headers=extra_headers)
+            )
         except ClientResponseError as e:
             execution.update(response_source="upstream", upstream_status_code=e.status)
             if transport_io_enabled:
@@ -1318,6 +1393,8 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         if self._external_capture_handler is not None:
             self._external_capture_handler.prepare_response(chat_completion_dict)
+        elif self.config.dynamo_frontend:
+            self._lift_dynamo_engine_data(chat_completion_dict)
 
         if self.config.return_token_id_information:
             message_dict = choice_dict["message"]
