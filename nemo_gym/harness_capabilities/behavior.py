@@ -223,7 +223,7 @@ def inspect_behavior(
             id="model.terminal_error",
             tier="P0",
             evidence=("TE-1",),
-            location="witness.json/agent_responses",
+            location="witness.json",
             reason="the EnvironmentServer did not receive a failed response retaining the terminal model error",
             predicate=lambda: _terminal_error_reported(attempts, agent_responses, http_errors[-1])
             if terminal_error
