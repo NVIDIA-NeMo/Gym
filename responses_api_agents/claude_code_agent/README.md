@@ -314,3 +314,10 @@ uses all of them).
 - `instruction_on_stdin` (sandbox sessions): pass the instruction on the CLI's stdin, as Harbor 0.24's
   claude-code agent pipes it, instead of as an argument. It then never appears on a command line that an
   agent's `pkill -f <word from its task>` could match.
+- `reasoning_effort`: passed to `--effort` (`low`, `medium`, `high`, `xhigh` or `max`), as Harbor passes
+  its reasoning effort.
+- `max_output_tokens`: the per-call output cap, as `CLAUDE_CODE_MAX_OUTPUT_TOKENS` (null keeps the CLI's
+  default).
+- `extra_env`: further client environment, e.g. `{API_TIMEOUT_MS: "3600000", CLAUDE_CODE_AUTO_COMPACT_WINDOW:
+  "1000000"}`. The variables the agent sets itself (endpoint, credentials, model, `CLAUDE_CONFIG_DIR`, the
+  output cap) are rejected.

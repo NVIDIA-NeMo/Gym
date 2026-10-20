@@ -31,7 +31,7 @@ from typing import Any, Callable, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
-from pydantic import ConfigDict, Field, PrivateAttr
+from pydantic import ConfigDict, Field, PrivateAttr, field_validator
 
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
 from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
@@ -78,6 +78,21 @@ from responses_api_agents.claude_code_agent.setup_claude_code import ensure_clau
 
 
 LOG = logging.getLogger(__name__)
+# Environment the agent sets itself; extra_env may not replace it.
+_MANAGED_ENV = frozenset(
+    {
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "CLAUDE_CODE_SUBAGENT_MODEL",
+        "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+        "CLAUDE_CONFIG_DIR",
+    }
+)
 
 
 class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
@@ -117,6 +132,32 @@ class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # it, instead of as an argument. It then never appears on a command line that an agent's
     # `pkill -f <word from its task>` could match.
     instruction_on_stdin: bool = False
+    # Claude Code's --effort (low, medium, high, xhigh or max), as Harbor passes its reasoning effort.
+    reasoning_effort: Optional[str] = None
+    # The per-call output cap, as CLAUDE_CODE_MAX_OUTPUT_TOKENS; None keeps the CLI's own default.
+    max_output_tokens: Optional[int] = Field(default=None, gt=0)
+    # Further Claude Code client environment, e.g. {API_TIMEOUT_MS: "3600000"}. The variables the agent
+    # sets itself (endpoint, credentials, model, CLAUDE_CONFIG_DIR, the output cap) are rejected.
+    extra_env: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("extra_env", mode="before")
+    @classmethod
+    def _stringify_numbers(cls, value: Any) -> Any:
+        # YAML and Hydra overrides turn API_TIMEOUT_MS=3600000 into an int.
+        if isinstance(value, Mapping):
+            return {
+                key: str(item) if isinstance(item, int) and not isinstance(item, bool) else item
+                for key, item in value.items()
+            }
+        return value
+
+    @field_validator("extra_env")
+    @classmethod
+    def _reject_managed_env(cls, value: dict[str, str]) -> dict[str, str]:
+        managed = sorted(_MANAGED_ENV & value.keys())
+        if managed:
+            raise ValueError(f"extra_env cannot set {', '.join(managed)}; use the agent's own settings")
+        return value
 
 
 class ClaudeCodeAgentRunRequest(BaseRunRequest):
@@ -263,6 +304,8 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         if self.config.bare and not skills_active:
             cmd.append("--bare")
         cmd += ["--model", model]
+        if self.config.reasoning_effort:
+            cmd += ["--effort", self.config.reasoning_effort]
         effective_mcp_config = mcp_config if mcp_config is not None else self.config.mcp_config
         if effective_mcp_config:
             cmd += ["--mcp-config", effective_mcp_config]
@@ -282,6 +325,13 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         if instruction is not None:
             cmd += ["--", instruction]
         return cmd
+
+    def _client_env(self) -> dict[str, str]:
+        """Client settings shared by local and sandbox launches: extra_env and the output cap."""
+        env = dict(self.config.extra_env)
+        if self.config.max_output_tokens is not None:
+            env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(self.config.max_output_tokens)
+        return env
 
     async def _run_claude_code(
         self,
@@ -318,6 +368,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 "ANTHROPIC_DEFAULT_OPUS_MODEL": model,
                 "CLAUDE_CODE_SUBAGENT_MODEL": model,
                 "IS_SANDBOX": "1",
+                **self._client_env(),
                 "CLAUDE_CONFIG_DIR": str(claude_config_dir),
             }
             if base_url:
@@ -709,6 +760,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 ANTHROPIC_BASE_URL=base_url,
                 ANTHROPIC_AUTH_TOKEN="gym" if self.config.model_server else self.config.anthropic_api_key or "local",
             )
+        env.update(self._client_env())
         artifacts = None
         failure = None
         try:

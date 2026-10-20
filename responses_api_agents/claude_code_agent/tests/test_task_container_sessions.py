@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Opt-in sandbox-session settings for running Claude Code as a harness started in the task container."""
 
+import asyncio
 import json
 import subprocess
 import sys
@@ -10,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from pydantic import ValidationError
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.claude_code_agent import app, sandbox_runner
@@ -85,3 +87,62 @@ def test_stdin_setting_is_off_by_default():
     assert (
         app.ClaudeCodeAgentConfig(name="claude", host="h", port=1, entrypoint="app.py").instruction_on_stdin is False
     )
+
+
+@pytest.mark.asyncio
+async def test_effort_output_cap_and_client_env_reach_the_sandbox_launch(monkeypatch):
+    instance = agent(
+        anthropic_base_url="https://model.example",
+        reasoning_effort="max",
+        max_output_tokens=128000,
+        extra_env={"API_TIMEOUT_MS": 3600000, "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1000000"},
+    )
+    payload, _ = await launch(monkeypatch, instance)
+    command = payload["command"]
+    assert command[command.index("--effort") + 1] == "max"
+    env = payload["env"]
+    assert env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "128000"
+    # YAML integers become strings, as the CLI's environment needs.
+    assert (env["API_TIMEOUT_MS"], env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"]) == ("3600000", "1000000")
+    assert env["ANTHROPIC_BASE_URL"] == "https://model.example"
+
+
+@pytest.mark.asyncio
+async def test_no_effort_output_cap_or_client_env_by_default(monkeypatch):
+    payload, _ = await launch(monkeypatch, agent(anthropic_base_url="https://model.example"))
+    assert "--effort" not in payload["command"]
+    assert "CLAUDE_CODE_MAX_OUTPUT_TOKENS" not in payload["env"]
+    assert "API_TIMEOUT_MS" not in payload["env"]
+
+
+def test_local_launch_uses_the_same_client_settings(monkeypatch, tmp_path):
+    monkeypatch.setattr(app, "ensure_claude_code", lambda version: None)
+    monkeypatch.setattr(app.Path, "home", lambda: tmp_path)
+    captured = {}
+
+    class Process:
+        returncode = 0
+
+        async def communicate(self):
+            return RESULT.encode() + b"\n", b""
+
+    async def spawn(*command, **kwargs):
+        captured.update(command=list(command), env=kwargs["env"])
+        return Process()
+
+    monkeypatch.setattr(app.asyncio, "create_subprocess_exec", spawn)
+    instance = agent(reasoning_effort="high", max_output_tokens=64000, extra_env={"API_TIMEOUT_MS": "60000"})
+    asyncio.run(instance._run_claude_code("hello"))
+    assert captured["command"][captured["command"].index("--effort") + 1] == "high"
+    assert (captured["env"]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"], captured["env"]["API_TIMEOUT_MS"]) == ("64000", "60000")
+
+
+@pytest.mark.parametrize("name", ["ANTHROPIC_BASE_URL", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_MAX_OUTPUT_TOKENS"])
+def test_extra_env_cannot_replace_what_the_agent_sets(name):
+    with pytest.raises(ValidationError, match=f"extra_env cannot set {name}"):
+        app.ClaudeCodeAgentConfig(name="claude", host="h", port=1, entrypoint="app.py", extra_env={name: "x"})
+
+
+def test_output_cap_must_be_positive():
+    with pytest.raises(ValidationError):
+        app.ClaudeCodeAgentConfig(name="claude", host="h", port=1, entrypoint="app.py", max_output_tokens=0)
