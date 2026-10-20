@@ -1,11 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Stop a black-box agent harness at a checkpoint: its launch and every process the launch started.
+"""Pause or stop a black-box agent harness at a checkpoint: its launch and every process the launch started.
 
 A harness such as OpenCode runs as one long shell command in a sandbox and starts processes Gym never sees: an
 installer, the harness itself, and the commands the model runs, which the harness may start in sessions of their
-own or which may detach (``nohup server &``). When a checkpoint asks the run to park, all of them must stop before
-the run parks, or they keep changing the sandbox while it is snapshotted and next to the relaunched harness.
+own or which may detach (``nohup server &``). When a checkpoint asks the run to park, all of them must stop
+changing the sandbox before the run parks, or they change it while it is snapshotted.
+
+A run that can pause sends SIGSTOP to every process of the launch, parks while they are all stopped, and sends
+SIGCONT once the checkpoint opens: the same harness process continues where it was, with no relaunch. Nothing
+running in the sandbox changes while it is paused, so the snapshot holds that moment, and a restore after a crash
+relaunches the harness on it as after a stop. A pause that cannot be confirmed (a process neither stopped nor dead
+after the checks) falls back to the stop below. Time spent paused still counts toward the harness's own timers,
+such as a per-command timeout.
+
+A stop ends the launch for good instead: SIGINT, then SIGKILL, and the run relaunches the harness after the resume.
 
 The launch runs with ``NEMO_GYM_HARNESS_LAUNCH=<id>`` in its environment. Every process it starts inherits that,
 wherever it is re-parented, so a stop finds them by reading ``/proc/<pid>/environ``; a walk of parent links adds
@@ -30,7 +39,7 @@ import logging
 import time
 from dataclasses import dataclass
 from shlex import quote
-from typing import Optional
+from typing import Awaitable, Callable, Literal, Optional
 from uuid import uuid4
 
 from anyio import CancelScope, move_on_after
@@ -52,6 +61,11 @@ _SURVIVOR_CHECK_INTERVAL_S = 1.0
 _LATE_RESULT_S = 60.0
 # How long the kill of a cancelled launch may hold up the cancellation.
 _CANCEL_KILL_S = 30.0
+# A pause checks this many times, this far apart, that every process of the launch has stopped.
+_PAUSE_CHECKS = 50
+_PAUSE_CHECK_INTERVAL_S = 0.1
+# Tries to continue a paused launch before it is stopped instead.
+_CONTINUE_ATTEMPTS = 3
 # What the first stop pass prints, instead of signalling, for a launch whose command had already returned.
 _ENDED = "NEMO_GYM_HARNESS_ENDED"
 
@@ -81,25 +95,30 @@ def stdout_only(command: str) -> str:
 
 
 class HarnessLaunch:
-    """One launch of a harness command that a checkpoint can stop completely.
+    """One launch of a harness command that a checkpoint can pause or stop completely.
 
-    Files live in ``state_dir`` only once a stop is requested, and :meth:`cleanup_command` removes them.
+    Files live in ``state_dir`` only once a pause or stop is requested, and :meth:`cleanup_command` removes them.
     """
 
     def __init__(self, *, state_dir: str = "/tmp") -> None:
         self.id = uuid4().hex
         self._stop_file = f"{state_dir}/nemo-gym-harness-{self.id}.stop"
+        self._pause_file = f"{state_dir}/nemo-gym-harness-{self.id}.pause"
         self._found_file = f"{state_dir}/nemo-gym-harness-{self.id}.found"
         self._root_file = f"{state_dir}/nemo-gym-harness-{self.id}.root"
 
     def command(self, command: str) -> str:
-        """``command``, tagged, and exiting with 130 instead of starting once a stop was requested.
+        """``command``, tagged, exiting with 130 instead of starting once a stop was requested, and waiting
+        instead of starting while a pause is.
 
         The root file holds the launch's ``pid:starttime`` while ``command`` runs and ``ended`` once it returned.
+        The pause wait comes after the root file is written: a pause that finds no root file can count on the
+        launch to wait.
         """
         script = (
             f"test ! -e {self._stop_file} || exit 130\n"
             f'read -r s < /proc/$$/stat; s=${{s##*) }}; set -- $s; echo "$$:${{20}}" > {self._root_file}\n'
+            f"while test -e {self._pause_file}; do sleep 0.2; done\n"
             f"{command}\n"
             f"rc=$?; echo ended > {self._root_file}; exit $rc"
         )
@@ -126,6 +145,45 @@ class HarnessLaunch:
             "true"
         )
 
+    def pause_command(self) -> str:
+        """Request a pause, then SIGSTOP every process of the launch until each is stopped or dead.
+
+        Prints ``PAUSED <n>`` once all are (``n`` stopped, not counting those already dead), ``NOT_STARTED`` for a
+        launch that will wait instead of starting, ``NEMO_GYM_HARNESS_ENDED`` for one whose command had already
+        returned (nothing is signalled), or ``PENDING`` and what did not stop within the checks. A stopped process
+        forks nothing, so the checks settle.
+        """
+        record = f'for p in $found; do t=$(starttime "$p") && echo "$p:$t" >> {self._found_file}; done'
+        return self._bash(
+            f"touch {self._pause_file}\n"
+            f"r=$(cat {self._root_file} 2>/dev/null)\n"
+            f'[ "$r" = ended ] && {{ echo {_ENDED}; exit 0; }}\n'
+            '[ -z "$r" ] && { echo NOT_STARTED; exit 0; }\n'
+            "n=0\n"
+            "while :; do\n"
+            f"{self._find_launch_processes()}\n"
+            f"{record}\n"
+            '  pending=""; count=0\n'
+            '  for p in $(echo $found | tr " " "\\n" | sort -nu); do '
+            'read -r s 2>/dev/null < "/proc/$p/stat" || continue; s=${s##*) }; st=${s%% *}; '
+            'case "$st" in T|t) count=$((count+1));; Z|X) ;; '
+            '*) pending="$pending $p:$st"; kill -STOP "$p" 2>/dev/null;; esac; done\n'
+            '  [ -z "$pending" ] && { echo "PAUSED $count"; exit 0; }\n'
+            f'  n=$((n+1)); [ "$n" -gt {_PAUSE_CHECKS} ] && {{ echo "PENDING$pending"; exit 0; }}\n'
+            f"  sleep {_PAUSE_CHECK_INTERVAL_S}\n"
+            "done"
+        )
+
+    def continue_command(self) -> str:
+        """Withdraw the pause and SIGCONT every process of the launch; prints ``CONTINUED <n>``."""
+        return self._bash(
+            f"rm -f {self._pause_file}\n"
+            f"{self._find_launch_processes()}\n"
+            'n=0; for p in $(echo $found | tr " " "\\n" | sort -nu); do '
+            'kill -CONT "$p" 2>/dev/null && n=$((n+1)); done\n'
+            'echo "CONTINUED $n"'
+        )
+
     def survivors_command(self) -> str:
         """Print the processes of the launch that are still alive (zombies are dead), one per line."""
         return self._bash(
@@ -137,7 +195,7 @@ class HarnessLaunch:
 
     def cleanup_command(self) -> str:
         """Remove the launch's files; only once the launch has ended, while the stop file still guards it."""
-        return f"rm -f {self._stop_file} {self._found_file} {self._root_file}"
+        return f"rm -f {self._stop_file} {self._pause_file} {self._found_file} {self._root_file}"
 
     def _find_launch_processes(self) -> str:
         """Set ``$found``: tagged processes, those earlier passes recorded (if still the same process), and all their
@@ -163,40 +221,103 @@ class HarnessLaunch:
 
 
 async def run_until_park_requested(
-    sandbox: AsyncSandbox, command: str, legacy_run: Optional[LegacyRun], *, timeout_s: Optional[float]
+    sandbox: AsyncSandbox,
+    command: str,
+    legacy_run: Optional[LegacyRun],
+    *,
+    timeout_s: Optional[float],
+    park: Optional[Callable[[], Awaitable[None]]] = None,
 ) -> SandboxExecResult:
-    """Run the harness ``command`` in ``sandbox``; with a checkpointed run, stop it when a checkpoint asks to park.
+    """Run the harness ``command`` in ``sandbox``; with a checkpointed run, pause or stop it when a checkpoint asks
+    to park.
 
     Returns the command's result when it ends first, or when it had ended by the time the park request came and
-    its result was still on its way. Otherwise SIGINT goes to every process of the launch, then, after up to
-    ``_GRACEFUL_S`` for the launch to end, SIGKILL to whatever is left, which is killed again until nothing is
-    found; then raises :class:`HarnessInterrupted`. Cancelled, it kills the launch before it re-raises.
+    its result was still on its way. With ``park``, a park request pauses the launch, then awaits ``park()``, which
+    records the run's bookmark and returns once the checkpoint opens, then continues the launch and keeps waiting
+    for it. Without ``park``, or when the pause cannot be confirmed, SIGINT goes to every process of the launch,
+    then, after up to ``_GRACEFUL_S`` for the launch to end, SIGKILL to whatever is left, which is killed again
+    until nothing is found; then raises :class:`HarnessInterrupted`. Cancelled, or when ``park()`` fails, it kills
+    the launch before it re-raises.
     """
     if legacy_run is None:
         return await sandbox.exec(command=command, timeout_s=timeout_s)
     launch = HarnessLaunch()
     exec_task = asyncio.ensure_future(sandbox.exec(command=launch.command(command), timeout_s=timeout_s))
     try:
-        park_task = asyncio.ensure_future(legacy_run.wait_park_requested())
-        try:
-            await asyncio.wait({exec_task, park_task}, return_when=asyncio.FIRST_COMPLETED)
-        finally:
-            park_task.cancel()
-        if exec_task.done():
-            result = exec_task.result()
-            await _remove_files(sandbox, launch)
-            return result
-        return await _stop(sandbox, launch, exec_task)
+        while True:
+            park_task = asyncio.ensure_future(legacy_run.wait_park_requested())
+            try:
+                await asyncio.wait({exec_task, park_task}, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                park_task.cancel()
+            if exec_task.done():
+                result = exec_task.result()
+                await _remove_files(sandbox, launch)
+                return result
+            if park is None or await _pause(sandbox, launch) != "paused":
+                return await _stop(sandbox, launch, exec_task)
+            try:
+                await park()
+            except Exception:
+                await _kill(sandbox, launch)
+                exec_task.cancel()
+                raise
+            if not await _continue(sandbox, launch):
+                return await _stop(sandbox, launch, exec_task)
     except asyncio.CancelledError:
         # Nothing else stops the launch: the sandbox outlives a checkpointed run, which never stops it.
-        with move_on_after(_CANCEL_KILL_S, shield=True):
-            try:
-                await sandbox.exec(command=launch.stop_command("KILL"), timeout_s=30)
-                await _kill_until_gone(sandbox, launch)
-            except Exception as error:
-                LOGGER.warning("Could not kill cancelled harness launch %s: %r", launch.id, error)
+        await _kill(sandbox, launch)
         exec_task.cancel()
         raise
+
+
+async def _kill(sandbox: AsyncSandbox, launch: HarnessLaunch) -> None:
+    """SIGKILL the launch, shielded and time-limited; SIGKILL also ends a paused process."""
+    with move_on_after(_CANCEL_KILL_S, shield=True):
+        try:
+            await sandbox.exec(command=launch.stop_command("KILL"), timeout_s=30)
+            await _kill_until_gone(sandbox, launch)
+        except Exception as error:
+            LOGGER.warning("Could not kill harness launch %s: %r", launch.id, error)
+
+
+async def _pause(sandbox: AsyncSandbox, launch: HarnessLaunch) -> Literal["paused", "ended", "failed"]:
+    """Pause the launch. ``ended``: its command had returned, and the stop keeps its late result. ``failed``: the
+    pause was not confirmed and is withdrawn, so the stop can end the launch."""
+    started = time.monotonic()
+    try:
+        result = await sandbox.exec(command=launch.pause_command(), timeout_s=30)
+        lines = [line for line in (result.stdout or "").split("\n") if line]
+    except Exception as error:
+        lines = [f"error: {error!r}"]
+    if _ENDED in lines:
+        return "ended"
+    if lines and (lines[-1].startswith("PAUSED ") or lines[-1] == "NOT_STARTED"):
+        LOGGER.info(
+            "Harness launch %s paused for a checkpoint in %.2f s: %s", launch.id, time.monotonic() - started, lines[-1]
+        )
+        return "paused"
+    LOGGER.warning("Could not pause harness launch %s (%s); stopping it instead", launch.id, "; ".join(lines))
+    await _continue(sandbox, launch)
+    return "failed"
+
+
+async def _continue(sandbox: AsyncSandbox, launch: HarnessLaunch) -> bool:
+    """Continue a paused launch, shielded: a launch left paused would hold its run until the command's timeout."""
+    with CancelScope(shield=True):
+        for attempt in range(_CONTINUE_ATTEMPTS):
+            if attempt:
+                await asyncio.sleep(_SURVIVOR_CHECK_INTERVAL_S)
+            try:
+                result = await sandbox.exec(command=launch.continue_command(), timeout_s=30)
+            except Exception as error:
+                LOGGER.warning("Could not continue harness launch %s: %r", launch.id, error)
+                continue
+            LOGGER.info(
+                "Harness launch %s continued after the checkpoint: %s", launch.id, (result.stdout or "").strip()
+            )
+            return True
+    return False
 
 
 async def _stop(
