@@ -7,6 +7,8 @@ import json
 from collections import Counter
 from collections.abc import Callable
 
+from nemo_gym.responses_converter import message_content_to_text
+
 from .checks import BehavioralCheck
 from .results import Results
 
@@ -31,11 +33,19 @@ def _terminal_error_reported(attempts: list[dict], responses: list[dict], expect
 
 
 def tool_checks(
-    record: dict | None, witnessed: list[dict], *, applies: bool = True, available: bool = True
+    record: dict | None,
+    witnessed: list[dict],
+    *,
+    finish_id: str | None = None,
+    applies: bool = True,
+    available: bool = True,
 ) -> list[dict]:
     results = Results()
     trajectory = _mapping((record or {}).get("ng_trajectory"))
-    tools = _objects(trajectory.get("tool_calls"))
+    # The scripted finish call ends the episode; it is witnessed by the model exchange, not by a shell marker.
+    tools = [
+        t for t in _objects(trajectory.get("tool_calls")) if finish_id is None or t.get("tool_call_id") != finish_id
+    ]
     invocations = _objects(trajectory.get("invocations"))
     wanted = Counter(t.get("id") for t in witnessed)
     identities = (
@@ -71,7 +81,10 @@ def tool_checks(
             values["join"].append(len(requests) == 1)
             values["status"].append(tool.get("status") == ("failed" if expected["exit_code"] else "completed"))
             observed = expected.get("outputs", [])
-            values["output"].append(bool(observed) and all(o == tool.get("output") for o in observed))
+            values["output"].append(
+                bool(observed)
+                and all(message_content_to_text(o) == message_content_to_text(tool.get("output")) for o in observed)
+            )
             if len(requests) != 1:
                 continue
             request = requests[0]
@@ -309,7 +322,13 @@ def inspect_behavior(
     return (
         results.dump()
         + model_checks(record, attempts, fingerprint=fingerprint, available=available)
-        + tool_checks(record, tools, applies=tool_steps > 0, available=available)
+        + tool_checks(
+            record,
+            tools,
+            finish_id=((witness or {}).get("finish_call") or {}).get("id"),
+            applies=tool_steps > 0,
+            available=available,
+        )
     )
 
 
