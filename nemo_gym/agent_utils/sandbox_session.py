@@ -184,13 +184,13 @@ class SandboxSession[Artifacts]:
             if result.error_type:
                 raise RuntimeError(f"{self.harness} sandbox execution failed: {result.error_type}: {result.stderr}")
             # A harness process's nonzero exit can still carry useful, adapter-specific output.
+            await self._finish(timeout=close_timeout)
         except BaseException:
             try:
                 await self._finish(timeout=close_timeout)
             except Exception:
                 LOG.exception("%s harness termination was not confirmed; close must release the session", self.harness)
             raise
-        await self._finish(timeout=close_timeout)
         if result.return_code != 0 and self.capture_error is not None:
             raise RuntimeError(
                 f"{self.harness} sandbox execution failed (exit {result.return_code}): {result.stderr or ''}"

@@ -112,7 +112,7 @@ dependencies = [
     # pydantic license: MIT https://github.com/pydantic/pydantic/blob/1c79f0e4d3fbdb8b93e837175d7098e016117237/LICENSE
     # pydantic_core license: MIT https://github.com/pydantic/pydantic-core/blob/17cbe988de187701dd21d5cd2306086ced5a8872/LICENSE
     # devtools license: MIT https://github.com/samuelcolvin/python-devtools/blob/5022f1f6f1c55d871b1db208c9c1b2ab0df488fe/LICENSE
-    "pydantic",
+    "pydantic>=2.12",
     "pydantic_core",
     "devtools",
 

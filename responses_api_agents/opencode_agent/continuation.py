@@ -37,15 +37,16 @@ def classify_native_outcome(
     for message in assistants:
         if message["info"].get("error"):
             error = error or json.dumps(message["info"]["error"])
-    resumed_checkpoint = bool(
-        previous_session_id
-        and session_id == previous_session_id
+    resumable_checkpoint = bool(
+        continuation
+        and session_id
+        and (previous_session_id is None or session_id == previous_session_id)
         and timed_out
         and cleanup is not None
         and cleanup["cleanup_confirmed"]
         and not has_native_error(stdout)
     )
-    if not assistants and not resumed_checkpoint:
+    if not assistants and not resumable_checkpoint:
         error = error or "OpenCode produced no assistant result"
     permission_denied = False
     incomplete = timed_out

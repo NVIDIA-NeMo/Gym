@@ -15,8 +15,13 @@ class AgentContinuationRequirements(BaseModel):
     """Native continuation and observation support required before session setup."""
 
     model_config = ConfigDict(extra="forbid")
-    mode: Literal["native_conversation"] = "native_conversation"
-    observations: list[ContinuationObservation] = Field(default_factory=lambda: ["trajectory", "timing"])
+    mode: Literal["native_conversation"] = Field(
+        default="native_conversation", description="Retain the harness's native conversation across activations."
+    )
+    observations: list[ContinuationObservation] = Field(
+        default_factory=lambda: ["trajectory", "timing"],
+        description="Observation kinds required by the caller, or supported by the adapter in a capability response.",
+    )
 
 
 class AgentContinuationCapabilities(AgentContinuationRequirements):

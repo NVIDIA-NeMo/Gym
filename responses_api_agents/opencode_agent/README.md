@@ -159,8 +159,9 @@ local/session score parity or migrate existing benchmark defaults.
 Seed an owned or borrowed sandbox session with `continuation: {mode: native_conversation}`.
 Call the existing `/v1/responses` endpoint with an ordinary Responses request and
 `x-ng-agent-activation: 1`, then increment the header for each new user message.
-Use the session cookie returned by seed; a rollout-prefixed URL, when supplied,
-must match the seeded episode. For example, after saving the seed cookie:
+Use the session cookie returned by seed. Checkpointed calls require the
+`/ng-rollout/<id>` URL prefix. When checkpointing is disabled, the prefix is optional.
+Whenever supplied, it must match the seeded episode. For example, after saving the seed cookie:
 
 ```bash
 curl -b cookies.txt -H 'Content-Type: application/json' \

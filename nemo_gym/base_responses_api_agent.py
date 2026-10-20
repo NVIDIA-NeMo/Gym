@@ -120,7 +120,14 @@ class AgentSeedSessionRequest(BaseModel):
     task_id: TaskId
     tool_accesses: list[ToolAccess] = Field(default_factory=list)
     sandbox_access: SandboxAccess | None = None
-    continuation: AgentContinuationRequirements | None = None
+    continuation: AgentContinuationRequirements | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description=(
+            "Opt into native conversation continuation and require these observations at seed time. "
+            "Omitted for ordinary sessions."
+        ),
+    )
 
     @field_validator("tool_accesses")
     @classmethod
@@ -137,7 +144,14 @@ class AgentSeedSessionResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     agent_session_id: str
-    capabilities: AgentContinuationCapabilities | None = Field(default=None, exclude_if=lambda value: value is None)
+    capabilities: AgentContinuationCapabilities | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description=(
+            "Continuation mode and observations supported by this adapter. "
+            "Returned only when continuation was requested."
+        ),
+    )
 
 
 class AgentCloseSessionRequest(BaseModel):
@@ -156,7 +170,15 @@ class AgentCloseSessionResponse(BaseModel):
 
     agent_session_id: str
     agent_observations: AgentObservationBundle | None = None
-    cleanup_confirmed: bool | None = Field(default=None, exclude_if=lambda value: value is None)
+    cleanup_confirmed: bool | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description=(
+            "True means no harness was launched, termination was confirmed, or an owned sandbox was stopped. "
+            "False means a final negative termination receipt. None is omitted when the adapter does not report "
+            "confirmation. Connection release can succeed with false; the activation remains ungradable."
+        ),
+    )
     resources_cookies: dict[str, str] | None = Field(
         default=None,
         description=(
@@ -165,7 +187,13 @@ class AgentCloseSessionResponse(BaseModel):
         ),
     )
 
-    trajectory: TrajectoryRecord | None = Field(default=None, exclude_if=lambda value: value is None)
+    trajectory: TrajectoryRecord | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description=(
+            "Cumulative trajectory across this native continuation session's activations. Omitted when not reported."
+        ),
+    )
 
 
 @dataclass(frozen=True)

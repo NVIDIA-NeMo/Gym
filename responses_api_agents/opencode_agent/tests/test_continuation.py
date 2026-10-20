@@ -9,10 +9,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from fastapi import Request
 from fastapi.testclient import TestClient
 
 from nemo_gym.agent_activation_types import AgentContinuationRequirements
-from nemo_gym.base_responses_api_agent import AGENT_ACTIVATION_HEADER
+from nemo_gym.base_responses_api_agent import AGENT_ACTIVATION_HEADER, AgentCloseSessionRequest
+from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.opencode_agent.continuation import classify_native_outcome
 from responses_api_agents.opencode_agent.sandbox_runner import snapshot
 from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import seed, setup  # noqa: F401
@@ -346,7 +348,7 @@ def test_native_budget_uses_response_incomplete_details(finish, reason):
     [
         ("native", "native", False, "incomplete"),
         ("other", "native", False, "failed"),
-        ("native", None, False, "failed"),
+        ("native", None, False, "incomplete"),
         ("native", "native", True, "failed"),
     ],
 )
@@ -504,6 +506,150 @@ def test_provider_preparation_timeout_does_not_brick_unstarted_session(setup, tm
         assert activate(client, 2).status_code == 200
         receipt = close(client, request)
         assert [r["status"] for r in roots(receipt["agent_observations"])] == ["incomplete", "completed"]
+
+
+def test_preparation_error_keeps_failed_activation_in_close(setup):
+    agent, sandbox = setup
+    run = sandbox.exec.side_effect
+
+    async def fail(command, **kwargs):
+        if command.startswith("mkdir") and "/activation-1" in command:
+            raise OSError("directory service unavailable")
+        return await run(command, **kwargs)
+
+    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
+        request = start(client)
+        sandbox.exec.side_effect = fail
+        assert activate(client, 1).status_code == 500
+        receipt = close(client, request)
+        [root] = roots(receipt["agent_observations"])
+        assert root["activation_id"] == 1 and root["status"] == "failed"
+        assert root["error_type"] == "server_error"
+    sandbox.launch.assert_not_awaited()
+
+
+@pytest.mark.parametrize("retire", [False, True])
+async def test_cancelled_preparation_retains_activation(setup, retire):
+    agent, sandbox = setup
+    entered = asyncio.Event()
+    run = sandbox.exec.side_effect
+
+    async def prepare(command, **kwargs):
+        if command.startswith("mkdir") and "/activation-1" in command:
+            entered.set()
+            await asyncio.Future()
+        return await run(command, **kwargs)
+
+    request = Request(
+        {"type": "http", "session": {}, "headers": [(AGENT_ACTIVATION_HEADER.encode(), b"1")], "path_params": {}}
+    )
+    body = seed().model_copy(update={"continuation": AgentContinuationRequirements()})
+    await agent.seed_agent_session(request, body)
+    state = agent._require_agent_session(body.agent_session_id)
+    sandbox.exec.side_effect = prepare
+    running = asyncio.create_task(agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task")))
+    await asyncio.wait_for(entered.wait(), 2)
+    if retire:
+        await agent.retire_agent_session(body.agent_session_id)
+    else:
+        await agent.close_agent_session(
+            request, AgentCloseSessionRequest(agent_session_id=body.agent_session_id, episode_id=body.episode_id)
+        )
+    with pytest.raises(asyncio.CancelledError):
+        await running
+    [root] = roots(state.observations.model_dump(mode="json"))
+    assert root["activation_id"] == 1 and root["status"] == "incomplete" and root["error_type"] == "cancelled"
+    if retire:
+        assert body.agent_session_id not in agent._session_records
+    else:
+        assert agent._session_records[body.agent_session_id].state is None
+    sandbox.launch.assert_not_awaited()
+    sandbox.disconnect.assert_awaited_once()
+
+
+async def test_close_timeout_retry_waits_for_finalization_and_retains_evidence(setup, tmp_path):
+    agent, sandbox = setup
+    install_artifact_runner(sandbox, tmp_path)
+    collecting, release = asyncio.Event(), asyncio.Event()
+    request = Request(
+        {"type": "http", "session": {}, "headers": [(AGENT_ACTIVATION_HEADER.encode(), b"1")], "path_params": {}}
+    )
+    body = seed().model_copy(update={"continuation": AgentContinuationRequirements()})
+    await agent.seed_agent_session(request, body)
+    state = agent._require_agent_session(body.agent_session_id)
+    collect = state.collect_artifacts
+
+    async def delayed_collect(*, timeout):
+        collecting.set()
+        await release.wait()
+        return await collect(timeout=timeout)
+
+    state.collect_artifacts = delayed_collect
+    running = asyncio.create_task(agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task")))
+    await asyncio.wait_for(collecting.wait(), 2)
+    close_body = AgentCloseSessionRequest(agent_session_id=body.agent_session_id, episode_id=body.episode_id)
+    agent.config.session_close_timeout_seconds = 0.01
+    try:
+        with pytest.raises(TimeoutError):
+            await agent.close_agent_session(request, close_body)
+        assert agent._session_records[body.agent_session_id].state is state
+        agent.config.session_close_timeout_seconds = 1
+        retry = asyncio.create_task(agent.close_agent_session(request, close_body))
+        await asyncio.sleep(0)
+        release.set()
+        receipt = await retry
+        with pytest.raises(asyncio.CancelledError):
+            await running
+        [root] = roots(receipt.agent_observations.model_dump(mode="json"))
+        assert root["activation_id"] == 1 and root["status"] == "incomplete"
+        assert root["error_type"] == "cancelled"
+        assert any(
+            message.get("role") == "assistant" and message["content"][0]["text"] == "Answer 0"
+            for message in root["conversation"]
+        )
+        assert [turn.activation_id for turn in receipt.trajectory.turns] == [1]
+        assert await agent.close_agent_session(request, close_body) == receipt
+    finally:
+        release.set()
+        await asyncio.gather(running, return_exceptions=True)
+        agent.config.session_close_timeout_seconds = 1
+        await agent.close_agent_session(request, close_body)
+
+
+@pytest.mark.parametrize("receipt", [False, True])
+def test_first_launched_timeout_without_assistant_can_resume(setup, tmp_path, receipt):
+    agent, sandbox = setup
+    payloads = install_artifact_runner(sandbox, tmp_path)
+    launch = sandbox.launch.side_effect
+
+    async def interrupted(**kwargs):
+        result = await launch(**kwargs)
+        if len(payloads) == 1:
+            directory = payloads[0]["directory"]
+            sandbox.files[f"{directory}/export.json"] = json.dumps(
+                {"session_id": "native-session", "message_ids": [], "activation_message_ids": [], "messages": []}
+            )
+            sandbox.files[f"{directory}/stdout.jsonl"] = ""
+            if not receipt:
+                sandbox.files.pop(f"{directory}/task-environment.ready")
+            with sqlite3.connect(tmp_path / "session.db") as con:
+                con.execute("delete from message")
+                con.execute("delete from part")
+        return result
+
+    sandbox.launch.side_effect = interrupted
+    with TestClient(agent.setup_webserver()) as client:
+        request = start(client)
+        sandbox.result.update(timed_out=True, return_code=-9)
+        first = activate(client, 1)
+        assert first.status_code == 200 and first.json()["status"] == "incomplete", first.text
+        sandbox.result.update(timed_out=False, return_code=0)
+        assert activate(client, 2).status_code == 200
+        assert payloads[1]["native_session_id"] == "native-session"
+        assert [r["status"] for r in roots(close(client, request)["agent_observations"])] == [
+            "incomplete",
+            "completed",
+        ]
 
 
 def test_snapshot_scopes_delta_and_keeps_cumulative_store(tmp_path):

@@ -291,6 +291,68 @@ async def test_close_timeout_keeps_fence_until_remote_stop_finishes():
     await ledger.close(timeout=1)
 
 
+async def test_close_retry_does_not_cancel_finalization_twice():
+    ledger = OrderedOperationLedger[NeMoGymResponse]()
+    entered, finalizing, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    evidence = []
+
+    async def operation():
+        entered.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            finalizing.set()
+            await release.wait()
+            evidence.append("captured")
+            raise
+
+    params = NeMoGymResponseCreateParamsNonStreaming(input="task")
+    running = asyncio.create_task(ledger.execute(index=1, request=params, operation=operation))
+    await entered.wait()
+    with pytest.raises(TimeoutError):
+        await ledger.close(timeout=0.01)
+    await finalizing.wait()
+    retry = asyncio.create_task(ledger.close(timeout=1))
+    await asyncio.sleep(0)
+    release.set()
+    await retry
+    with pytest.raises(asyncio.CancelledError):
+        await running
+    assert evidence == ["captured"]
+
+
+async def test_retire_cancels_continuation_and_releases_its_state(agent):
+    request, body = await seed(agent)
+    running = asyncio.create_task(activate(agent, request))
+    await agent._entered.wait()
+    await agent.retire_agent_session(body.agent_session_id)
+    with pytest.raises(asyncio.CancelledError):
+        await running
+    assert agent._close_count == 1
+    assert body.agent_session_id not in agent._session_records
+    with pytest.raises(HTTPException):
+        await activate(agent, request, 2)
+
+
+def test_ordinary_seed_omits_continuation_for_older_agents():
+    from pydantic import ConfigDict, create_model
+
+    body = AgentSeedSessionRequest(
+        agent_session_id="old", episode_id={"rollout_id": "old"}, task_id={"taskset": "t", "task_id": "t"}
+    )
+    old_type = create_model(
+        "OldSeed",
+        __config__=ConfigDict(extra="forbid"),
+        **{
+            name: (field.annotation, field)
+            for name, field in AgentSeedSessionRequest.model_fields.items()
+            if name != "continuation"
+        },
+    )
+    assert old_type.model_validate(body.model_dump(mode="json")).agent_session_id == "old"
+    assert "continuation" not in body.model_dump(mode="json")
+
+
 class CustomRequest(BaseModel):
     task_index: int
 

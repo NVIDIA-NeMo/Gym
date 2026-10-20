@@ -80,7 +80,12 @@ class TrajectoryModelCall(ObservationModel):
 
 class TrajectoryTurn(ObservationModel):
     invocation_id: str
-    activation_id: Optional[int] = Field(default=None, ge=1, exclude_if=lambda value: value is None)
+    activation_id: Optional[int] = Field(
+        default=None,
+        ge=1,
+        exclude_if=lambda value: value is None,
+        description="1-based activation that produced this turn; omitted for producers without activation IDs.",
+    )
     source_message_id: Optional[str] = Field(
         default=None, description="Persisted assistant-message ID in the harness."
     )
@@ -115,8 +120,17 @@ class AgentInvocation(ObservationModel):
 
     kind: Literal["agent_invocation"] = "agent_invocation"
     invocation_id: str
-    activation_id: Optional[int] = Field(default=None, ge=1, exclude_if=lambda value: value is None)
-    native_session_id: Optional[str] = Field(default=None, exclude_if=lambda value: value is None)
+    activation_id: Optional[int] = Field(
+        default=None,
+        ge=1,
+        exclude_if=lambda value: value is None,
+        description="1-based activation owning this invocation; omitted for producers without activation IDs.",
+    )
+    native_session_id: Optional[str] = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description="Harness-native session retained as context across activations; omitted when not reported.",
+    )
     parent_invocation_id: Optional[str] = None
     spawned_by_tool_call_id: Optional[str] = None
     status: Literal["completed", "failed", "incomplete", "unknown"] = Field(

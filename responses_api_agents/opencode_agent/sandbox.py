@@ -213,19 +213,9 @@ class OpenCodeSandboxSession(AgentSessionState):
             if self.stderr:
                 raise RuntimeError(format_sandbox_error(str(error), stderr=self.stderr)) from error
             raise
-        if not self.is_continuation:
-            await self._check_task_environment()
-        try:
-            export_text = await self.read_text("export.json")
-            export = json.loads(export_text)
-        except Exception as error:
-            logs = await self.session.read_output_log()
-            raise RuntimeError(
-                format_sandbox_error(
-                    "OpenCode sandbox runner returned no valid result", output=logs, stderr=self.stderr
-                )
-            ) from error
         if self.is_continuation:
+            export_text = await self._read_export()
+            export = json.loads(export_text)
             native_id = export.get("session_id")
             if not isinstance(native_id, str) or not native_id:
                 raise RuntimeError("OpenCode did not persist a resumable session ID")
@@ -284,16 +274,20 @@ class OpenCodeSandboxSession(AgentSessionState):
             LOG.exception("Failed to read OpenCode runtime metadata")
             runtime = None
         self.runtime_info = parse_runtime_info(runtime)
+        if not self.is_continuation:
+            # Preserve the single-turn evidence/error order. The response layer
+            # parses this raw export and translates malformed content to 502.
+            await self._check_task_environment()
+            return await self._read_export()
         try:
-            if self.is_continuation:
-                await self._check_task_environment()
+            await self._check_task_environment()
         except Exception as error:
-            # A resumed process can exhaust its relative budget before plugins load.
-            # Accept only an unchanged native checkpoint and confirmed timeout;
+            # A process can exhaust its relative budget before plugins load.
+            # Accept only an empty native checkpoint and confirmed timeout;
             # any newly accepted input still requires the task-environment receipt.
             if (
-                previous_session_id is not None
-                and self.native_session_id == previous_session_id
+                self.native_session_id is not None
+                and (previous_session_id is None or self.native_session_id == previous_session_id)
                 and self.session.cleanup is not None
                 and self.session.cleanup["cleanup_confirmed"]
                 and self.session.cleanup["timed_out"]
@@ -305,6 +299,17 @@ class OpenCodeSandboxSession(AgentSessionState):
                 format_sandbox_error("OpenCode task environment initialization was not confirmed", stderr=self.stderr)
             ) from error
         return export_text
+
+    async def _read_export(self) -> str:
+        try:
+            return await self.read_text("export.json")
+        except Exception as error:
+            logs = await self.session.read_output_log()
+            raise RuntimeError(
+                format_sandbox_error(
+                    "OpenCode sandbox runner returned no valid result", output=logs, stderr=self.stderr
+                )
+            ) from error
 
     async def _check_task_environment(self) -> None:
         try:

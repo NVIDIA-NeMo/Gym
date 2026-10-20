@@ -283,3 +283,25 @@ def test_activation_scoping_keeps_child_ownership_and_cross_activation_compactio
     assert compaction.summary == "summary" and compaction.source_message_ids == ["m4"]
     assert all(gap.code != "compaction_first_kept_item_unavailable" for gap in second.gaps)
     assert [(turn.activation_id, turn.turn_no, turn.step_count) for turn in second_trajectory.turns] == [(2, 1, 1)]
+
+
+@pytest.mark.parametrize("current", [False, True])
+@pytest.mark.parametrize("role", ["assistant", "user"])
+def test_compaction_boundary_uses_only_emitted_assistant_items(tmp_path, current, role):
+    from nemo_gym.rollout_observability import ContextCompactionObservation
+
+    db = _session_db(
+        tmp_path,
+        [
+            (
+                role,
+                [{"type": "reasoning", "text": " "}, {"type": "text", "text": ""}, {"type": "text", "text": "kept"}],
+            ),
+            ("user", [{"type": "compaction", "tail_start_id": "m0"}]),
+            _policy({"type": "text", "text": "summary"}, summary=True, parentID="m1", finish="stop"),
+        ],
+    )
+    ids = {"m1", "m2"} | ({"m0"} if current else set())
+    bundle = _parse_opencode_session(db, "fallback", message_ids=ids)
+    compaction = next(r for r in bundle.records if isinstance(r, ContextCompactionObservation))
+    assert compaction.first_kept_item_id == ("p2" if role == "assistant" else None)

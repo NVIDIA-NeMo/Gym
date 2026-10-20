@@ -217,8 +217,9 @@ retries, skipped indices, and overlapping new activations fail. The existing
 `metadata.agent_timeout_sec` sets the per-activation budget, including preparation,
 queueing and staging. Setup and cleanup retain their separate bounds.
 
-Native continuation adapters implement `_validate_agent_activation()` before binding
-an index, `_activate_agent_session_state()` for execution, and
+Native continuation adapters override `_agent_continuation_capabilities()` to return
+the supported mode and observations, implement `_validate_agent_activation()` before
+binding an index, `_activate_agent_session_state()` for execution, and
 `_continuation_close_timeout()` for their cleanup bound. The ordinary `responses()`
 handler delegates to `activate_agent_session()` only for opted-in sessions; its
 existing HTTP signature remains unchanged. The shared ledger protects active work

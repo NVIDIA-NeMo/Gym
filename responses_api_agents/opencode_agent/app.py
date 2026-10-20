@@ -886,6 +886,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
         started = monotonic()
         deadline = started + timeout
+        failure: BaseException | None = None
         try:
             async with asyncio.timeout_at(deadline):
                 await state.prepare_activation(
@@ -899,8 +900,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 timeout=timeout,
                 deadline=deadline,
             )
-        except (TimeoutError, _ActivationDeadlineExpired):
+        except (TimeoutError, _ActivationDeadlineExpired) as error:
             if state.session.launch_started:
+                failure = error
                 raise
             # No native conversation is required until a launch persists one. A
             # pre-launch timeout therefore does not prevent the next activation.
@@ -921,13 +923,41 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 task_id=state.request.task_id.task_id,
                 rollout_id=state.request.episode_id.capture_key,
             )
-            state.retain_activation()
             return self._make_session_response(
                 state,
                 body,
                 timeout=timeout,
                 outcome=NativeOutcome(status="incomplete", error_type="timeout"),
             )
+        except BaseException as error:
+            failure = error
+            raise
+        finally:
+            # execute() finishes capture before propagating cancellation. Retain
+            # once here, including preparation failures and interrupted launches.
+            if failure is not None:
+                observations = state.activation_observations
+                if observations is None:
+                    observations = AgentObservationBundle(source="opencode")
+                    state.activation_observations = observations
+                if not any(
+                    isinstance(r, AgentInvocation) and r.parent_invocation_id is None for r in observations.records
+                ):
+                    invocation_id = state.invocation_prefix
+                    if state.native_session_id is not None:
+                        invocation_id += f":{state.native_session_id}"
+                    cancelled = isinstance(failure, asyncio.CancelledError)
+                    observations.records.append(
+                        AgentInvocation(
+                            invocation_id=invocation_id,
+                            activation_id=activation_id,
+                            native_session_id=state.native_session_id,
+                            status="incomplete" if cancelled else "failed",
+                            error_type="cancelled" if cancelled else "server_error",
+                            duration_ms=(monotonic() - started) * 1000,
+                        )
+                    )
+            state.retain_activation()
 
     def _make_session_response(
         self,
@@ -1167,8 +1197,6 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 detail="Usage comes from OpenCode persisted assistant messages; compare against captured Gym model calls.",
             )
         )
-        if state.is_continuation:
-            state.retain_activation()
         if failure is not None:
             raise failure
         if error:

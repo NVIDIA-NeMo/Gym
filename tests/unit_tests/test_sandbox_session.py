@@ -137,6 +137,80 @@ async def test_close_joins_collection_started_by_normal_completion(session):
     collector.assert_awaited_once()
 
 
+async def test_cancellation_during_normal_finalization_waits_for_evidence(session):
+    collecting, release = asyncio.Event(), asyncio.Event()
+
+    async def collect():
+        collecting.set()
+        await release.wait()
+        return "final snapshot"
+
+    running = asyncio.create_task(execute(session, collect=collect))
+    await collecting.wait()
+    running.cancel()
+    await asyncio.sleep(0)
+    try:
+        assert not running.done()
+    finally:
+        release.set()
+        await asyncio.gather(running, return_exceptions=True)
+        await session.close(timeout=1)
+    assert session.artifacts == "final snapshot"
+
+
+async def test_rearm_uses_fresh_launch_files_and_close_removes_the_root(session):
+    await session.begin_activation(session_dir="/session/activation-1", timeout=1)
+    first = AsyncMock(return_value="first")
+    assert await execute(session, collect=first) == "first"
+    with pytest.raises(ValueError, match="fresh supervisor directory"):
+        await session.begin_activation(session_dir=session.session_dir, timeout=1)
+    await session.begin_activation(session_dir="/session/activation-2", timeout=1)
+    second = AsyncMock(return_value="second")
+    assert await execute(session, collect=second) == "second"
+    assert session.artifacts == "second"
+    first.assert_awaited_once()
+    second.assert_awaited_once()
+    uploads = [c.args[1] for c in session.sandbox.upload.await_args_list]
+    assert uploads == ["/session/activation-1/process_supervisor.py", "/session/activation-2/process_supervisor.py"]
+    await session.close(timeout=1)
+    assert "mv /session /session.closed" in session.sandbox.exec.await_args.args[0]
+    with pytest.raises(RuntimeError, match="closing"):
+        await session.begin_activation(session_dir="/session/activation-3", timeout=1)
+
+
+async def test_rearm_rejects_unconfirmed_termination(session, receipt_reader):
+    receipt_reader.return_value = json.dumps(RECEIPT | {"cleanup_confirmed": False})
+    with pytest.raises(RuntimeError, match="termination was not confirmed"):
+        await execute(session)
+    with pytest.raises(RuntimeError, match="termination was not confirmed"):
+        await session.begin_activation(session_dir="/session/activation-2", timeout=1)
+    assert session.session_dir == "/session"
+    await session.close(timeout=1)
+
+
+async def test_deadline_during_staging_never_launches(session, receipt_reader):
+    from time import monotonic
+
+    cancelled = asyncio.Event()
+
+    async def stage():
+        try:
+            await asyncio.Future()
+        finally:
+            cancelled.set()
+
+    collect = AsyncMock()
+    with pytest.raises(TimeoutError):
+        await session.execute(
+            stage_activation=stage, collect=collect, timeout=10, close_timeout=1, deadline=monotonic() + 0.01
+        )
+    assert cancelled.is_set() and not session.launch_started
+    session.sandbox.exec.assert_not_awaited()
+    receipt_reader.assert_not_awaited()
+    collect.assert_not_awaited()
+    await session.close(timeout=1)
+
+
 async def test_close_during_input_preparation_prevents_launch(session, receipt_reader):
     preparing = asyncio.Event()
 

@@ -69,7 +69,7 @@ class OrderedOperationLedger[Result: BaseModel]:
         async with self._lock:
             self._closing = True
             active = self._operations[-1].task if self._operations else None
-            if active is not None and not active.done():
+            if active is not None and not active.done() and not active.cancelling():
                 active.cancel()
         if active is None:
             return
