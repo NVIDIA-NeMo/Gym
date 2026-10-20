@@ -212,3 +212,56 @@ def test_cli_exports_only_selected_early_windows(
     assert json.loads(json_path.read_text())["included_records"] == 2
     with csv_path.open() as stream:
         assert [r["window_end_utc"] for r in csv.DictReader(stream)] == [timing.utc(70), timing.utc(80)]
+
+
+def test_scheduled_token_deciles_pool_samples_and_print_below_table(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "tokens.log"
+    path.write_text(
+        "".join(
+            line(
+                record(
+                    timestamp=timestamp,
+                    batch={"scheduled_tokens": {"count": len(values), "total": sum(values), "max": max(values)}},
+                    scheduled_token_samples=values,
+                )
+            )
+            for timestamp, values in [(10, [100]), (30, list(range(200, 1001, 100)))]
+        )
+    )
+    report, windows = timing.analyze([path], focus="all")
+    group = next(iter(report["groups"].values()))
+    percentiles = group["scheduled_tokens_percentiles"]
+    assert percentiles == {
+        "sample_count": 10,
+        "observation_count": 10,
+        "complete": True,
+        "values": {f"p{p}": p * 10 for p in range(10, 100, 10)},
+    }
+    timing.print_group("worker", group)
+    output = capsys.readouterr().out
+    assert output.index("Scheduled tokens percentiles") > output.index("scheduled_tokens ")
+    assert "p10=100; p20=200" in output and "p90=900" in output
+    csv_path = tmp_path / "windows.csv"
+    timing.write_csv(csv_path, windows)
+    with csv_path.open() as stream:
+        rows = [r for r in csv.DictReader(stream) if r["section"] == "batch"]
+    assert [json.loads(r["scheduled_token_samples"]) for r in rows] == [[100], list(range(200, 1001, 100))]
+
+
+@pytest.mark.parametrize("samples", [[], [100]])
+def test_missing_or_partial_token_samples_do_not_claim_complete_percentiles(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], samples: list[int]
+) -> None:
+    path = tmp_path / "legacy.log"
+    batch = {"scheduled_tokens": {"count": 2, "total": 300, "max": 200}}
+    path.write_text(
+        line(record(batch=batch)) + line(record(timestamp=30, batch=batch, scheduled_token_samples=samples))
+    )
+    report, _ = timing.analyze([path], focus="all")
+    group = next(iter(report["groups"].values()))
+    assert group["scheduled_tokens_percentiles"]["complete"] is False
+    timing.print_group("worker", group)
+    output = capsys.readouterr().out
+    assert ("partial coverage" if samples else "p10–p90 unavailable") in output

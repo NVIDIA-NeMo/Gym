@@ -17,8 +17,9 @@ Worker-only log exports require --all and an explicit --skip-first-seconds if ne
 Uses only the standard library. Reads lines incrementally, retaining parsed windows
 for sorting/filtering and optional CSV export. Damaged/interleaved fragments are
 counted and skipped; exact repeated records across input files are deduplicated.
-Means are weighted by observation count. Global percentiles cannot be recovered
-from window percentiles; CSV preserves the original per-window quantiles instead.
+Means are weighted by observation count. Scheduled-token deciles pool retained
+samples from newer logs. Other global percentiles cannot be recovered from window
+percentiles; CSV preserves the original per-window quantiles instead.
 """
 
 import argparse
@@ -73,7 +74,8 @@ NOTES = [
     "Indentation shows code-level scope nesting, not a reconstructed timeline; shared KV phases have multiple parents.",
     "CUDA intervals include stream waits and host launch gaps; they are not pure kernel compute time.",
     "CUDA completions may land in later windows, so CPU and CUDA counts/windows need not match.",
-    "Global p50/p90/p99 cannot be reconstructed. CSV retains logged per-window quantiles (up to 4096 samples).",
+    "Scheduled-token deciles use pooled retained samples, nearest rank; coverage is shown if incomplete.",
+    "Other global percentiles cannot be reconstructed. CSV retains logged per-window quantiles.",
     "Only windows fully inside the selected interval are included; boundary windows are not prorated.",
     "Time filtering cannot remove individual samples or delayed CUDA completions; later JIT spikes may remain.",
 ]
@@ -121,6 +123,7 @@ class Window:
     pending: int
     source: str
     line: int
+    scheduled_token_samples: list[int]
 
     @property
     def process(self) -> str:
@@ -154,6 +157,13 @@ class Window:
         sample_every = int(number(record["sample_every"], integer=True))
         if sample_every < 1:
             raise ValueError("sample_every must be positive")
+        raw_samples = record.get("scheduled_token_samples", [])
+        if not isinstance(raw_samples, list):
+            raise ValueError("scheduled_token_samples must be a list")
+        token_samples = [int(number(value, integer=True)) for value in raw_samples]
+        token_count = sections["batch"].get("scheduled_tokens", {}).get("count", 0)
+        if len(token_samples) > token_count:
+            raise ValueError("scheduled_token_samples exceeds observation count")
         return cls(
             labels=labels,
             timestamp=float(number(record["timestamp"])),
@@ -164,6 +174,7 @@ class Window:
             pending=int(number(record["pending_cuda_ranges"], integer=True)),
             source=source,
             line=line,
+            scheduled_token_samples=token_samples,
         )
 
 
@@ -214,6 +225,8 @@ def summarize(windows: list[Window]) -> dict[str, object]:
         for section, phases in window.sections.items():
             for phase, values in phases.items():
                 stats[section].setdefault(phase, Samples()).add(values)
+    token_samples = sorted(value for window in windows for value in window.scheduled_token_samples)
+    token_count = stats["batch"].get("scheduled_tokens", Samples()).count
     return {
         "records": len(windows),
         "processes": len(latest),
@@ -223,6 +236,14 @@ def summarize(windows: list[Window]) -> dict[str, object]:
         "counts": dict(counts),
         "max_pending_in_one_record": max(w.pending for w in windows),
         "pending_at_last_record_per_process": {k: w.pending for k, w in latest.items()},
+        "scheduled_tokens_percentiles": {
+            "sample_count": len(token_samples),
+            "observation_count": token_count,
+            "complete": len(token_samples) == token_count,
+            "values": {f"p{p}": token_samples[math.ceil(p * len(token_samples) / 100) - 1] for p in range(10, 100, 10)}
+            if token_samples
+            else {},
+        },
         **{s: {p: v.report() for p, v in phases.items()} for s, phases in stats.items()},
     }
 
@@ -320,6 +341,7 @@ def write_csv(path: Path, windows: list[Window]) -> None:
         "p90",
         "p99",
         "percentile_samples",
+        "scheduled_token_samples",
     ]
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as stream:
@@ -341,6 +363,9 @@ def write_csv(path: Path, windows: list[Window]) -> None:
                             "phase": phase,
                             **stats,
                             "mean": stats["total"] / stats["count"],
+                            "scheduled_token_samples": json.dumps(window.scheduled_token_samples)
+                            if section == "batch" and phase == "scheduled_tokens"
+                            else "",
                         }
                     )
 
@@ -386,6 +411,22 @@ def print_group(label: str, group: dict[str, object]) -> None:
             )
             if section != "batch" and phase in SHARED_KV_PARENTS:
                 print(f"      Parents: {SHARED_KV_PARENTS[phase]}")
+    if "scheduled_tokens" in mapping(group["batch"]):
+        percentiles = mapping(group["scheduled_tokens_percentiles"])
+        values = mapping(percentiles["values"])
+        print("  Scheduled tokens percentiles (sampled forwards, nearest rank):")
+        if values:
+            print("    " + "; ".join(f"{key}={value:,}" for key, value in values.items()))
+            print(
+                f"    Retained samples: {percentiles['sample_count']:,}/{percentiles['observation_count']:,}"
+                + (
+                    " (partial coverage: older logs or per-window retention limit)"
+                    if not percentiles["complete"]
+                    else ""
+                )
+            )
+        else:
+            print("    p10–p90 unavailable: logs lack scheduled_token_samples; rerun with updated vLLM timing logs.")
 
 
 def main() -> None:
