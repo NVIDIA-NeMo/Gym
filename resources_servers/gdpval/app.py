@@ -68,7 +68,7 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
 from nemo_gym.deliverables import is_deliverable
 from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.failure_kinds import AGENT_TIMEOUT, JUDGE_FAILED
+from nemo_gym.failure_kinds import AGENT_TIMEOUT, JUDGE_FAILED, SESSION_EXPIRED, SESSION_LOST
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_TERMINAL_KEY
 from nemo_gym.sandbox import AsyncSandbox
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
@@ -1818,7 +1818,9 @@ class GDPValResourcesServer(SimpleResourcesServer):
             stage_index = vr.get("stage_index")
             if stage_index is not None:
                 normalized_stage_index = int(stage_index)
-                staged.setdefault(normalized_stage_index, []).append(vr)
+                # A lost session's masked sample holds no measurement, so it is not an observed row of its stage.
+                if vr.get("failure_kind") not in (SESSION_LOST, SESSION_EXPIRED):
+                    staged.setdefault(normalized_stage_index, []).append(vr)
                 expected_stage_row_count = vr.get("expected_stage_row_count")
                 if expected_stage_row_count is not None:
                     expected_stage_row_counts.setdefault(normalized_stage_index, set()).add(
