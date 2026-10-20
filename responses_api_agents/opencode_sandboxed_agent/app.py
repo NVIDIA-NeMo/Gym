@@ -451,6 +451,10 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     concurrency: Optional[int] = Field(default=None)
     preinstalled_opencode: bool = False
     execution_failure_reward_zero: bool = False
+    # With checkpointing: a checkpoint pauses OpenCode and everything it started (SIGSTOP), and the same process
+    # continues once the checkpoint opens. False stops it (SIGINT, then SIGKILL) and relaunches it on the saved
+    # session. A pause that cannot be confirmed falls back to the stop; after a crash, OpenCode is relaunched anyway.
+    pause_at_checkpoints: bool = True
     output_token_policy: Literal["fixed", "remaining_context"] = "fixed"
     network_access: Literal["inherit", "model_only", "model_and_tools"] = "inherit"
     tool_servers: List[ResourcesServerRef] = Field(default_factory=list)
@@ -968,8 +972,9 @@ class OpenCodeSandboxedAgent(SandboxedHarnessAgent):
         run_error_type = None
         try:
             # With checkpointing, the OpenCode step is one long `wait` step with no boundary inside it: when a
-            # checkpoint asks the run to park, the launch and everything it started are stopped, and OpenCode's
-            # session database on the root filesystem goes into the snapshot taken once the run has parked.
+            # checkpoint asks the run to park, the launch and everything it started are paused (or stopped, see
+            # pause_at_checkpoints), and OpenCode's session database on the root filesystem goes into the snapshot
+            # taken once the run has parked.
             result = await launch.run(command, timeout_s=self.config.sandbox_timeout)
         except HarnessInterrupted:
             raise
@@ -1313,6 +1318,9 @@ class OpenCodeAdapter:
             force_zero_reward=agent.config.execution_failure_reward_zero
             and bool(outcome.run_result.get("opencode_failed", False)),
         )
+
+    def pauses_at_checkpoints(self) -> bool:
+        return self._agent.config.pause_at_checkpoints
 
 
 if __name__ == "__main__":

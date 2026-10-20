@@ -119,6 +119,8 @@ class FakeAdapter:
         self.started = asyncio.Event()
         self.verified: list[Outcome] = []
         self.states = 0
+        # How many times a pausing launch has waited for a park request.
+        self.waits = 0
 
     def new_state(self) -> dict[str, JsonValue]:
         self.states += 1
@@ -138,6 +140,14 @@ class FakeAdapter:
         if action == "until_park":
             await launch.wait_park_requested()
             raise HarnessInterrupted("stopped")
+        if action.startswith("pause"):
+            # "pause" or "pause<n>": paused at each of the next n checkpoints, continuing in place, then done.
+            for _ in range(int(action[len("pause") :] or 1)):
+                self.waits += 1
+                await launch.wait_park_requested()
+                assert launch.park is not None, "a run that pauses gets a park callback"
+                await launch.park()
+            return Outcome(text=f"launch {len(self.launched)}")
         if action == "fail":
             raise RuntimeError("the harness crashed")
         if action == "block":
@@ -147,6 +157,13 @@ class FakeAdapter:
     async def verify(self, cookies: dict[str, str], outcome: Outcome) -> dict[str, Any]:
         self.verified.append(outcome)
         return {"reward": 1.0, "text": outcome.text}
+
+
+class PausingAdapter(FakeAdapter):
+    """Pauses its harness at checkpoints instead of having it stopped."""
+
+    def pauses_at_checkpoints(self) -> bool:
+        return True
 
 
 class DriverConfig(BaseResponsesAPIAgentConfig):
@@ -489,3 +506,103 @@ async def test_a_checkpointing_off_run_that_fails_stops_its_sandbox() -> None:
         await driver.run_harness(request(), body(), adapter)
 
     assert adapter.box.stopped and "/close_session" not in resources.calls
+
+
+# -- pausing the harness at checkpoints ------------------------------------------------------------------------
+
+
+async def test_a_paused_launch_is_exported_at_its_bookmark_and_continues_in_place_after_each_checkpoint() -> None:
+    resources, adapter = Resources(), PausingAdapter("pause2")
+    driver = make_driver(resources)
+    participant = driver.checkpoint_participant
+
+    run = asyncio.create_task(driver.run_harness(request(), body(), adapter))
+    await asyncio.wait_for(adapter.started.wait(), 5)
+    records = []
+    for checkpoint in ("c1", "c2"):
+        await participant.close_admission(CheckpointRequest(checkpoint_id=checkpoint, deadline_ts=time.time() + 3600))
+        await wait_until(lambda: participant.readiness().ready)
+        [record] = await participant.export(None, checkpoint_id=checkpoint)
+        records.append(record.episode)
+        assert not run.done(), "the launch is paused, not ended"
+        await participant.open_admission()
+        # The launch continues and waits for the next checkpoint.
+        await wait_until(lambda: adapter.waits == len(records) + 1 or run.done())
+    done = await asyncio.wait_for(run, 5)
+
+    for pauses, bookmark in enumerate(records, start=1):
+        assert (bookmark["next"], bookmark["resume"], bookmark["state"]) == ("harness", True, {"folder": "f1"})
+        assert [(launch["ended"], launch["pauses"]) for launch in bookmark["launches"]] == [("interrupted", pauses)]
+    assert adapter.launched == [({"folder": "f1"}, False)], "launched once: never relaunched"
+    assert [(launch.ended, launch.pauses) for launch in done.launches] == [("finished", 2)]
+    assert done.result == {"reward": 1.0, "text": "launch 1"}
+    assert resources.calls == ["/seed_session", "/sandbox_access"]
+    assert not adapter.box.stopped
+
+
+async def test_a_checkpoint_that_closes_before_a_paused_launch_continues_finds_it_still_paused() -> None:
+    resources, adapter = Resources(), PausingAdapter("pause")
+    driver = make_driver(resources)
+    participant = driver.checkpoint_participant
+
+    run = asyncio.create_task(driver.run_harness(request(), body(), adapter))
+    await asyncio.wait_for(adapter.started.wait(), 5)
+    records = []
+    for checkpoint in ("c1", "c2"):
+        # c2 closes at once after c1 opens, before the run wakes: it stays parked, and paused, for c2 too.
+        await participant.close_admission(CheckpointRequest(checkpoint_id=checkpoint, deadline_ts=time.time() + 3600))
+        await wait_until(lambda: participant.readiness().ready)
+        [record] = await participant.export(None, checkpoint_id=checkpoint)
+        records.append(record.episode)
+        await participant.open_admission()
+    done = await asyncio.wait_for(run, 5)
+
+    assert records[0] == records[1], "both checkpoints export the same paused bookmark"
+    assert [(launch.ended, launch.pauses) for launch in done.launches] == [("finished", 1)]
+    assert adapter.launched == [({"folder": "f1"}, False)]
+
+
+async def test_the_bookmark_of_a_paused_launch_relaunches_on_the_saved_session_after_a_crash() -> None:
+    resources, adapter = Resources(), PausingAdapter("pause")
+    driver = make_driver(resources)
+    participant = driver.checkpoint_participant
+    run = asyncio.create_task(driver.run_harness(request(), body(), adapter))
+    await asyncio.wait_for(adapter.started.wait(), 5)
+    await participant.close_admission(CLOSE)
+    await wait_until(lambda: participant.readiness().ready)
+    [record] = await participant.export(None, checkpoint_id="c")
+    run.cancel()
+    await asyncio.gather(run, return_exceptions=True)
+
+    replacement, relaunched = make_driver(Resources()), PausingAdapter("finish")
+    await install(replacement, record.episode)
+    done = await asyncio.wait_for(replacement.run_harness(request(), body(attempt=1), relaunched), 5)
+
+    assert relaunched.launched == [({"folder": "f1"}, True)], "the crash relaunch continues the saved session"
+    assert [(launch.resumed, launch.ended, launch.pauses) for launch in done.launches] == [
+        (False, "interrupted", 1),
+        (True, "finished", 0),
+    ]
+
+
+async def test_an_adapter_that_does_not_pause_gets_no_park_callback() -> None:
+    resources, adapter = Resources(), FakeAdapter("until_park", "finish")
+    driver = make_driver(resources)
+    seen: list[object] = []
+    launch = adapter.launch
+
+    async def spy(context: LaunchContext) -> Outcome:
+        seen.append(context.park)
+        return await launch(context)
+
+    adapter.launch = spy  # type: ignore[method-assign]
+    participant = driver.checkpoint_participant
+    run = asyncio.create_task(driver.run_harness(request(), body(), adapter))
+    await asyncio.wait_for(adapter.started.wait(), 5)
+    await participant.close_admission(CLOSE)
+    await wait_until(lambda: participant.readiness().ready)
+    await participant.export(None, checkpoint_id="c")
+    await participant.open_admission()
+    await asyncio.wait_for(run, 5)
+
+    assert seen == [None, None], "it is stopped and relaunched, as before"

@@ -8,8 +8,10 @@ launches started, so they are safe on any Linux host.
 """
 
 import asyncio
+import os
 import re
 import shutil
+import signal
 import sys
 from pathlib import Path
 from shlex import quote
@@ -249,3 +251,186 @@ async def test_cancelling_the_run_kills_the_launch_and_everything_it_started(tmp
     assert not alive(int(pids.read_text())), "the detached process the launch started is gone"
     found = await shell.exec(f"grep -l {LAUNCH_TAG}={launch_id(shell)} /proc/[0-9]*/environ 2>/dev/null; true")
     assert not [line for line in (found.stdout or "").split() if alive(int(line.split("/")[2]))], "no process is left"
+
+
+# -- pausing instead of stopping -------------------------------------------------------------------------------
+
+
+class Parker:
+    """The run's ``park``: holds until the test opens the checkpoint, which withdraws the park request."""
+
+    def __init__(self, park: ParkRequest, *, error: Optional[Exception] = None) -> None:
+        self.park = park
+        self.error = error
+        self.calls = 0
+        self.parked = asyncio.Event()
+        self.opened = asyncio.Event()
+
+    async def __call__(self) -> None:
+        self.calls += 1
+        self.parked.set()
+        if self.error is not None:
+            raise self.error
+        await self.opened.wait()
+        self.opened.clear()
+        self.parked.clear()
+        self.park.requested.clear()
+
+
+def run_pausing(
+    shell: LocalShell, command: str, park: ParkRequest, parker: Parker, *, timeout_s: float = 600
+) -> "asyncio.Task[SandboxExecResult]":
+    """``run_until_park_requested`` with ``parker`` as the run's park callback, as a task."""
+    run = run_until_park_requested(shell, command, park, timeout_s=timeout_s, park=parker)  # type: ignore[arg-type]
+    return asyncio.create_task(run)
+
+
+def launch_states(tag: str) -> dict[int, str]:
+    """State of every live process of the launch tagged ``tag``, and of their descendants."""
+    states: dict[int, str] = {}
+    parents: dict[int, int] = {}
+    for proc in Path("/proc").iterdir():
+        if not proc.name.isdigit():
+            continue
+        try:
+            fields = (proc / "stat").read_text().rsplit(") ", 1)[1].split()
+            environ = (proc / "environ").read_bytes().split(b"\0")
+        except OSError:
+            continue
+        parents[int(proc.name)] = int(fields[1])
+        if f"{LAUNCH_TAG}={tag}".encode() in environ:
+            states[int(proc.name)] = fields[0]
+    for pid, parent in parents.items():
+        if parent in states and pid not in states:
+            try:
+                states[pid] = Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()[0]
+            except OSError:
+                pass
+    return {pid: state for pid, state in states.items() if state not in "ZX"}
+
+
+def kill_launch(shell: LocalShell) -> None:
+    """Kill what a test's launch left running, such as a detached writer (not through ``shell``, whose commands
+    the tests inspect)."""
+    for pid in launch_states(launch_id(shell)):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+
+async def test_a_paused_launch_changes_nothing_while_parked_and_continues_in_place(tmp_path: Path) -> None:
+    counter, steps, detached = tmp_path / "counter", tmp_path / "steps", tmp_path / "detached"
+    command = (
+        f"bash -c 'nohup bash -c \"while :; do date +%s%N > {detached}; sleep 0.05; done\" >/dev/null 2>&1 &'\n"
+        f"i=0; while [ $i -lt 60 ]; do i=$((i+1)); echo $i > {counter}; echo $i >> {steps}; sleep 0.05; done; "
+        "echo counted $i"
+    )
+    shell, park = LocalShell(), ParkRequest()
+    parker = Parker(park)
+    run = run_pausing(shell, command, park, parker, timeout_s=60)
+    try:
+        for checkpoint in range(2):
+            await until(
+                lambda: counter.exists() and detached.exists() and int(counter.read_text()) >= 10 * (checkpoint + 1)
+            )
+            park.requested.set()
+            await asyncio.wait_for(parker.parked.wait(), 10)
+
+            states = launch_states(launch_id(shell))
+            assert states and set(states.values()) <= {"T", "t"}, f"every process is stopped: {states}"
+            frozen = (counter.read_text(), detached.read_text())
+            await asyncio.sleep(0.5)
+            assert (counter.read_text(), detached.read_text()) == frozen, "nothing changes while paused"
+            assert launch_states(launch_id(shell)) == states, "the same processes stay stopped"
+
+            parker.opened.set()
+            await until(lambda: counter.read_text() != frozen[0])
+
+        result = await asyncio.wait_for(run, 30)
+    finally:
+        run.cancel()
+        kill_launch(shell)
+
+    assert (result.return_code, result.stdout) == (0, "counted 60\n"), "the same launch finished"
+    assert steps.read_text().split() == [str(i) for i in range(1, 61)], "it continued where it was: no step lost"
+    assert parker.calls == 2
+    assert sum(command.startswith(f"env {LAUNCH_TAG}=") for command in shell.commands) == 1, "never relaunched"
+    assert not [command for command in shell.commands if "kill -INT" in command or "kill -KILL" in command]
+    assert not list(Path("/tmp").glob(f"nemo-gym-harness-{launch_id(shell)}.*")), "no file is left"
+
+
+async def test_a_pause_before_the_launch_starts_holds_it_until_the_checkpoint_opens(tmp_path: Path) -> None:
+    started = tmp_path / "started"
+    shell, park = SlowDaemon(start_delay_s=1.0), ParkRequest()
+    parker = Parker(park)
+    park.requested.set()
+    run = run_pausing(shell, f"touch {started} && echo ran", park, parker, timeout_s=30)
+    await asyncio.wait_for(parker.parked.wait(), 10)
+    await asyncio.sleep(1.5)
+
+    assert not started.exists(), "the launch waits while the checkpoint is open"
+    parker.opened.set()
+    result = await asyncio.wait_for(run, 30)
+
+    assert (result.return_code, result.stdout) == (0, "ran\n") and started.exists()
+    assert not list(Path("/tmp").glob(f"nemo-gym-harness-{launch_id(shell)}.*"))
+
+
+async def test_a_launch_that_ended_before_the_pause_keeps_its_late_result_and_does_not_park() -> None:
+    shell, park = SlowDaemon(result_delay_s=2.0), ParkRequest()
+    parker = Parker(park)
+    run = run_pausing(shell, "echo done", park, parker, timeout_s=30)
+    await asyncio.wait_for(shell.launch_returned.wait(), timeout=10)
+
+    park.requested.set()
+    result = await asyncio.wait_for(run, timeout=30)
+
+    assert (result.return_code, result.stdout) == (0, "done\n")
+    assert parker.calls == 0, "a finished launch returns its result; the run parks after it"
+
+
+async def test_a_pause_that_cannot_be_confirmed_stops_the_launch_instead(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(HarnessLaunch, "pause_command", lambda self: "echo PENDING 1:D")
+    shell, park = LocalShell(), ParkRequest()
+    parker = Parker(park)
+    run = run_pausing(shell, "sleep 300", park, parker, timeout_s=600)
+    await asyncio.sleep(0.5)
+
+    park.requested.set()
+    with pytest.raises(HarnessInterrupted):
+        await asyncio.wait_for(run, timeout=30)
+
+    assert parker.calls == 0
+    assert not launch_states(launch_id(shell)), "the stop ended the launch"
+
+
+async def test_a_park_that_fails_kills_the_paused_launch(tmp_path: Path) -> None:
+    shell, park = LocalShell(), ParkRequest()
+    parker = Parker(park, error=RuntimeError("the bookmark could not be recorded"))
+    run = run_pausing(shell, "sleep 300", park, parker, timeout_s=600)
+    await asyncio.sleep(0.5)
+
+    park.requested.set()
+    with pytest.raises(RuntimeError, match="could not be recorded"):
+        await asyncio.wait_for(run, timeout=60)
+
+    assert not launch_states(launch_id(shell)), "no paused process is left behind"
+
+
+async def test_cancelling_a_paused_run_kills_the_launch_and_everything_it_started(tmp_path: Path) -> None:
+    started, pids = tmp_path / "started", tmp_path / "pids"
+    shell, park = LocalShell(), ParkRequest()
+    parker = Parker(park)
+    command = PHASES["with_a_detached_process"].format(started=started, pids=pids, python=quote(sys.executable))
+    run = run_pausing(shell, command, park, parker, timeout_s=600)
+    await until(lambda: started.exists() and pids.exists() and pids.read_text())
+    park.requested.set()
+    await asyncio.wait_for(parker.parked.wait(), 10)
+
+    run.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(run, timeout=60)
+
+    assert not alive(int(pids.read_text())), "the paused detached process is gone"
+    assert not launch_states(launch_id(shell)), "no process is left"

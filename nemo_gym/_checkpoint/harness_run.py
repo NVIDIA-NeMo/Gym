@@ -7,10 +7,12 @@ there as one long shell command, and verifies what the harness did. :class:`Sand
 checkpoint logic of such an agent once; the harness-specific parts are a :class:`HarnessAdapter`.
 
 The run records a bookmark (a ``LegacyRun`` boundary) before each step: ``seed``, ``harness``, ``verify``,
-``return``. When a checkpoint asks the run to park, the launch is stopped completely
-(``nemo_gym._checkpoint.harness``) and the bookmark continues the harness step with ``resume`` set; after the
-resume, or in the replacement attempt after a crash, the adapter continues the harness's saved session. The
-session lives on the sandbox's disk, so the owner's snapshot carries it into a fork.
+``return``. When a checkpoint asks the run to park during the harness step, the launch is paused if the adapter
+pauses at checkpoints, and stopped completely otherwise (``nemo_gym._checkpoint.harness``). Either way the run
+records a bookmark that continues the harness step with ``resume`` set. A paused launch parks at that bookmark and
+continues in place once the checkpoint opens. A stopped one parks after the launch, and the adapter continues the
+harness's saved session in a relaunch after the resume. After a crash the replacement attempt relaunches from the
+bookmark in both cases. The session lives on the sandbox's disk, so the owner's snapshot carries it into a fork.
 
 The resources server owns the sandbox. After a restore it is a fork of the checkpoint's snapshot under a new id,
 so the sandbox a bookmark names is only a hint: before every launch the run asks ``/sandbox_access`` for the
@@ -27,7 +29,7 @@ import logging
 import time
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, nullcontext
 from dataclasses import dataclass
-from typing import Annotated, Any, ClassVar, Generic, Literal, Optional, Protocol, TypeVar, Union
+from typing import Annotated, Any, Awaitable, Callable, ClassVar, Generic, Literal, Optional, Protocol, TypeVar, Union
 
 from anyio import CancelScope, move_on_after
 from fastapi import Request
@@ -88,12 +90,14 @@ class LentSandbox(BaseModel):
 
 
 class LaunchRecord(BaseModel):
-    """One launch of the harness: whether it continued a saved session, why, how long it ran, how it ended."""
+    """One launch of the harness: whether it continued a saved session, why, how long it ran, how it ended, and how
+    many checkpoints paused it."""
 
     resumed: bool
     reason: Optional[str] = None
     seconds: float
     ended: Literal["finished", "interrupted", "failed"]
+    pauses: int = 0
 
 
 class _Bookmark(BaseModel):
@@ -159,7 +163,8 @@ class LaunchContext:
     """One launch of the harness, as the adapter sees it.
 
     ``state`` is the adapter's per-rollout state (see :meth:`HarnessAdapter.new_state`); ``resume`` says to
-    continue the saved session in it.
+    continue the saved session in it. ``park``, set for a checkpointed run whose adapter pauses at checkpoints,
+    records the run's bookmark and returns once the checkpoint opens.
     """
 
     def __init__(
@@ -169,19 +174,24 @@ class LaunchContext:
         *,
         resume: bool,
         legacy_run: Optional[LegacyRun],
+        park: Optional[Callable[[], Awaitable[None]]] = None,
     ) -> None:
         self.sandbox = sandbox
         self.state = state
         self.resume = resume
+        self.park = park
         self._legacy_run = legacy_run
 
     async def run(self, command: str, *, timeout_s: Optional[float]) -> SandboxExecResult:
-        """Run the harness's long command so that a checkpoint stops it, and everything it started, completely.
+        """Run the harness's long command so that a checkpoint pauses it, or stops it and everything it started.
 
-        Raises :class:`~nemo_gym._checkpoint.harness.HarnessInterrupted` when a checkpoint asked the run to park
-        before the command ended. Run short commands, such as reading the session, with ``sandbox.exec``.
+        With ``park`` set, a checkpoint pauses the command and it continues once the checkpoint opens. Raises
+        :class:`~nemo_gym._checkpoint.harness.HarnessInterrupted` when a checkpoint stopped it before it ended.
+        Run short commands, such as reading the session, with ``sandbox.exec``.
         """
-        return await run_until_park_requested(self.sandbox, command, self._legacy_run, timeout_s=timeout_s)
+        return await run_until_park_requested(
+            self.sandbox, command, self._legacy_run, timeout_s=timeout_s, park=self.park
+        )
 
     async def wait_park_requested(self) -> None:
         """Return once a checkpoint asks this run to park; never for a run that is not checkpointed.
@@ -218,6 +228,18 @@ class HarnessAdapter(Protocol[OutcomeT]):
 
     async def verify(self, cookies: dict[str, str], outcome: OutcomeT) -> dict[str, Any]:
         """Grade the outcome with the resources server; returns the ``/verify`` reply."""
+        ...
+
+
+class PausesAtCheckpoints(Protocol):
+    """Optional for a :class:`HarnessAdapter`: pause the harness at a checkpoint instead of stopping it.
+
+    A paused launch continues in place once the checkpoint opens, so the harness is not relaunched. A launch whose
+    pause cannot be confirmed is stopped as before.
+    """
+
+    def pauses_at_checkpoints(self) -> bool:
+        """Whether this run pauses its harness at checkpoints."""
         ...
 
 
@@ -437,7 +459,27 @@ class _HarnessRun(Generic[OutcomeT]):
             # starting the harness only to stop it during its install.
             return bookmark, None
         started = time.monotonic()
-        launch = LaunchContext(self.sandbox, state, resume=resume, legacy_run=self.legacy_run)
+        pauses = 0
+
+        async def park() -> None:
+            # The launch is paused. Should the process crash before it continues, the replacement attempt continues
+            # the saved session from this bookmark, as after a stop.
+            nonlocal pauses
+            pauses += 1
+            record = LaunchRecord(
+                resumed=resume,
+                reason=reason,
+                seconds=time.monotonic() - started,
+                ended="interrupted",
+                pauses=pauses,
+            )
+            await self.record(bookmark.model_copy(update={"resume": True, "launches": [*bookmark.launches, record]}))
+
+        pauses_at_checkpoints = getattr(self.adapter, "pauses_at_checkpoints", None)
+        pausing = self.legacy_run is not None and pauses_at_checkpoints is not None and pauses_at_checkpoints()
+        launch = LaunchContext(
+            self.sandbox, state, resume=resume, legacy_run=self.legacy_run, park=park if pausing else None
+        )
         async with self.step("wait"):
             try:
                 outcome = await self.adapter.launch(launch)
@@ -446,10 +488,16 @@ class _HarnessRun(Generic[OutcomeT]):
                 # replacement attempt after a crash.
                 LOGGER.info("Harness of %s stopped for a checkpoint: %s", self.rollout_id, stopped)
                 record = LaunchRecord(
-                    resumed=resume, reason=reason, seconds=time.monotonic() - started, ended="interrupted"
+                    resumed=resume,
+                    reason=reason,
+                    seconds=time.monotonic() - started,
+                    ended="interrupted",
+                    pauses=pauses,
                 )
                 return bookmark.model_copy(update={"resume": True, "launches": [*bookmark.launches, record]}), None
-        record = LaunchRecord(resumed=resume, reason=reason, seconds=time.monotonic() - started, ended="finished")
+        record = LaunchRecord(
+            resumed=resume, reason=reason, seconds=time.monotonic() - started, ended="finished", pauses=pauses
+        )
         verify = VerifyBookmark(
             cookies=bookmark.cookies,
             verify_mode=bookmark.verify_mode,
