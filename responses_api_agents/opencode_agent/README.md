@@ -130,6 +130,18 @@ preserved; otherwise the temporary workspace is removed after the call. A local
 working directory is not filesystem isolation. Existing sandboxed benchmarks keep
 using `opencode_sandboxed_agent` directly; there is no bridge or execution-mode flag.
 
+## Task-container settings
+
+These sandbox-session settings are off by default. They run OpenCode the way a harness started in
+the task container runs it, for benchmarks that grade such a harness (the
+[Terminal-Bench-Science profile](../../benchmarks/terminal_bench_science/README.md#opencode-in-the-task-sandbox)
+uses all of them). Local calls ignore them.
+
+- `model_base_url`, `model_api_key`: an OpenAI-compatible chat-completions base URL (with `/v1`) that
+  OpenCode calls directly from the sandbox as `model`, instead of a Gym `model_server` (set exactly one),
+  and its key (default `EMPTY`). Gym does not capture these calls, so the model-call correlation plugin
+  is not loaded.
+
 ## Configuration compatibility
 
 The shipped YAML now uses `model: ${policy_model_name}`, `thinking: true` (the class

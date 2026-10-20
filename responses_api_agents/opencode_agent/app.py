@@ -194,6 +194,13 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
     session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
 
+    # Sandbox sessions: an OpenAI-compatible chat-completions base URL (with /v1) that OpenCode calls
+    # directly from the sandbox as `model`, instead of a Gym model_server (set exactly one). The sandbox
+    # must reach it. Such calls do not pass through Gym, so Gym does not capture them.
+    model_base_url: Optional[str] = None
+    # The key OpenCode sends to model_base_url ("EMPTY" when unset).
+    model_api_key: Optional[str] = None
+
     @property
     def command_parts(self) -> list[str]:
         return shlex.split(self.command)
@@ -603,8 +610,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> OpenCodeSandboxSession:
         """Prepare only the harness runtime; Resources owns borrowed task setup."""
-        if self.config.model_server is None:
-            raise HTTPException(422, "OpenCode sandbox execution requires model_server")
+        if (self.config.model_server is None) == (self.config.model_base_url is None):
+            raise HTTPException(422, "OpenCode sandbox execution requires either model_server or model_base_url")
         owns_sandbox = body.sandbox_access is None
         if owns_sandbox:
             if not self.config.sandbox_provider:
@@ -699,7 +706,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             self._check_sandbox_setup(command, result)
             await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/sandbox_runner.py")
             await sandbox.upload(Path(__file__).with_name("task_environment.mjs"), f"{directory}/task_environment.mjs")
-            if self._model_call_capture_enabled():
+            if self._session_captures_model_calls():
                 await sandbox.upload(OBSERVABILITY_PATCH, f"{directory}/{OBSERVABILITY_PATCH.name}")
         except BaseException as error:
             try:
@@ -754,8 +761,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     422,
                     f"OpenCode sandbox execution does not support request field {key}; configure Gym model limits/sampling",
                 )
-        if body.model not in (None, "", "dummy_model", self.config.model_server.name):
-            raise HTTPException(422, "OpenCode sandbox execution uses the configured Gym model_server")
+        if body.model not in (None, "", "dummy_model", self._session_model_name()):
+            raise HTTPException(422, "OpenCode sandbox execution uses the configured model_server or model")
         items = (
             [NeMoGymEasyInputMessage(role="user", content=body.input)] if isinstance(body.input, str) else body.input
         )
@@ -973,7 +980,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         response = NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
-            model=self.config.model_server.name,
+            model=self._session_model_name(),
             object="response",
             output=output or [],
             usage=usage,
@@ -1005,6 +1012,23 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             )
         return response
 
+    def _session_model_name(self) -> str:
+        """The model name a sandbox session reports: the Gym model server, or the direct endpoint's model."""
+        return self.config.model_server.name if self.config.model_server is not None else self.config.model
+
+    def _session_captures_model_calls(self) -> bool:
+        """Gym captures a session's model calls only through its model server, never a direct endpoint."""
+        return self.config.model_server is not None and self._model_call_capture_enabled()
+
+    def _session_endpoint(self, capture_key: str) -> tuple[str, str, str]:
+        """The base URL, key and model ID OpenCode's session provider uses."""
+        if self.config.model_server is None:
+            api_key = self.config.model_api_key or "EMPTY"  # pragma: allowlist secret
+            return self.config.model_base_url.rstrip("/"), api_key, self.config.model
+        # The Gym model server substitutes its own model, so the ID OpenCode sends is a placeholder.
+        base_url = self.resolve_model_base_url(self.config.model_server.name, capture_key)
+        return base_url, "dummy_key", "dummy_model"  # pragma: allowlist secret
+
     async def _session_response(
         self,
         state: OpenCodeSandboxSession,
@@ -1018,10 +1042,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         timeout = timeout if timeout is not None else resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
         started = monotonic()
         previous_session_id = state.harness_session_id
-        base_url = self.resolve_model_base_url(self.config.model_server.name, state.request.episode_id.capture_key)
+        base_url, api_key, model_id = self._session_endpoint(state.request.episode_id.capture_key)
         config = {
-            "model": "nemo_gym/dummy_model",
-            "small_model": "nemo_gym/dummy_model",
+            "model": f"nemo_gym/{model_id}",
+            "small_model": f"nemo_gym/{model_id}",
             "enabled_providers": ["nemo_gym"],
             "autoupdate": False,
             "share": "disabled",
@@ -1030,11 +1054,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     "npm": "@ai-sdk/openai-compatible",
                     "options": {
                         "baseURL": base_url,
-                        "apiKey": "dummy_key",
+                        "apiKey": api_key,
                         "timeout": False,
-                    },  # pragma: allowlist secret
+                    },
                     "models": {
-                        "dummy_model": {
+                        model_id: {
                             "interleaved": {"field": "reasoning_content"},
                             "limit": {
                                 "context": self.config.context_window,
@@ -1050,7 +1074,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         # System instructions are separate from the user's task and applied to every OpenCode model turn.
         if system:
             config["instructions"] = [f"{state.session.session_dir}/instructions.md"]
-        if self._model_call_capture_enabled():
+        if self._session_captures_model_calls():
             apply_observability_patch(config, plugin_path=Path(state.persistent_directory) / OBSERVABILITY_PATCH.name)
         config.setdefault("plugin", []).append((Path(state.session.session_dir) / "task_environment.mjs").as_uri())
         command = [f"{state.runtime}/opencode", "run", "--format", "json", "--title", "NeMo Gym"]
