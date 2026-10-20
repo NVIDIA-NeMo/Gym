@@ -20,6 +20,7 @@ import uvicorn
 import yaml
 
 from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
+from nemo_gym.base_responses_api_model import NeMoGymResponse
 from nemo_gym.harness_capabilities.cli import digest_file
 
 from .provider import Probe
@@ -175,10 +176,24 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
         os.environ["NEMO_GYM_CONFIG_DICT"] = json.dumps(config)
         (directory / "launch.json").write_text(json.dumps(config, indent=2) + "\n")
         if use_agent_sessions:
-            from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
+            from environment_servers.single_agent_turn.app import (
+                SessionHandles,
+                SingleAgentTurnEnvironmentServerConfig,
+            )
             from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
+            from nemo_gym.single_agent_turn_types import SingleAgentTurnRequest
 
-            environment_cls = SingleAgentTurnLegacyEnvironmentServer
+            class ObservedEnvironment(SingleAgentTurnLegacyEnvironmentServer):
+                async def _invoke_agent(
+                    self, request: SingleAgentTurnRequest, handles: SessionHandles
+                ) -> NeMoGymResponse:
+                    response = await super()._invoke_agent(request, handles)
+                    # Witness what actually reached the caller, before verification or masking.
+                    probe.agent_responses.append(response.model_dump(mode="json", include={"status", "error"}))
+                    probe.save()
+                    return response
+
+            environment_cls = ObservedEnvironment
             environment_config_cls = SingleAgentTurnEnvironmentServerConfig
         else:
             from environment_servers.legacy_agent.app import (
