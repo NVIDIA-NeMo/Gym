@@ -25,6 +25,10 @@ The server here reproduces that window deliberately (a middleware that splits th
 and waits before the terminating message), the client reuses one connection from several
 coroutines with distinct `traceparent` headers, and the test checks every server span's
 parent. The control test shows the window really does mis-parent spans without the fix.
+
+The handler here also leaves a rollout id behind on purpose. With Gym's real stack that id
+does not leak (the `BaseHTTPMiddleware` layers run handlers in a child task); this app has no
+such layer, so the check exercises the guard the middleware keeps for stacks without one.
 """
 
 import asyncio
@@ -38,7 +42,7 @@ from aiohttp import ClientSession, ClientTimeout, TCPConnector
 from fastapi import FastAPI
 
 from nemo_gym.rollout_correlation import _ROLLOUT_ID, current_rollout_id
-from nemo_gym.server_utils import SimpleServer
+from nemo_gym.server_utils import install_request_context_isolation
 from tests.unit_tests.telemetry.conftest import requires_lens
 from tests.unit_tests.telemetry.test_propagation import (
     traces,  # noqa: F401  (fixture: real Lens providers, in-memory exporter)
@@ -50,11 +54,6 @@ pytestmark = requires_lens
 WINDOW_SECONDS = 0.02
 COROUTINES = 8
 CALLS_PER_COROUTINE = 12
-
-
-def install_isolation(app: FastAPI) -> None:
-    """Exactly what `run_webserver` does after instrumenting the app."""
-    SimpleServer.setup_request_context_isolation(None, app)  # the method does not touch `self`
 
 
 def _free_port() -> int:
@@ -95,7 +94,7 @@ def _app(isolate: bool) -> FastAPI:
         from opentelemetry import trace
 
         inherited = current_rollout_id()
-        _ROLLOUT_ID.set("leaked-by-handler")  # a handler that forgets to reset; must not reach the next request
+        _ROLLOUT_ID.set("leaked-by-handler")  # left behind on purpose; see the module docstring
         # What Gym's own instrumentation does inside a handler: open a span that must sit under
         # the request's server span, which is only true if isolation runs *outside* the
         # instrumentor and the instrumentor's server span is current in here.
@@ -106,7 +105,7 @@ def _app(isolate: bool) -> FastAPI:
     app.add_middleware(_LateTerminatingBody)
     instrument_fastapi(app)
     if isolate:
-        install_isolation(app)
+        install_request_context_isolation(app)
     return app
 
 
@@ -181,7 +180,7 @@ async def test_requests_on_a_reused_connection_keep_their_own_parent(served, tra
     if isolated:
         assert len(own_parent) == len(spans), "every server span must be parented to its request's traceparent"
         assert not wrong_kind
-        assert all(value is None for value in inherited), "the rollout id must not leak into the next request"
+        assert all(value is None for value in inherited), "the rollout-id guard must hold without a child-task layer"
         assert len(handler_spans) == len(spans) and len(handler_under_server) == len(spans), (
             "handlers must still run under the server span: isolation has to wrap the instrumentor, not sit inside it"
         )
@@ -192,3 +191,52 @@ async def test_requests_on_a_reused_connection_keep_their_own_parent(served, tra
         assert len(own_parent) < len(spans), "expected the late terminating body to mis-parent some requests"
         assert wrong_kind
         assert any(value is not None for value in inherited)
+
+
+def _layers(app: FastAPI) -> list:
+    """Class names of the middleware stack from the outside in."""
+    names = []
+    layer = app.build_middleware_stack()
+    while layer is not None and not isinstance(layer, FastAPI) and len(names) < 20:
+        names.append(type(layer).__name__)
+        layer = getattr(layer, "app", None)
+    return names
+
+
+def test_isolation_installed_after_the_instrumentor_wraps_it():
+    """The order `run_webserver` uses: instrument, then isolate. Isolation must be the outermost
+    layer and the instrumentor's middleware must sit inside it; revision one of this change had
+    them the other way round because `add_middleware` cannot get outside the instrumentor."""
+    from nemo.lens.contrib.fastapi import instrument_fastapi
+
+    app = FastAPI()
+    app.add_middleware(_LateTerminatingBody)
+    instrument_fastapi(app)
+    install_request_context_isolation(app)
+
+    layers = _layers(app)
+    assert layers[0] == "RequestContextIsolationMiddleware", layers
+    otel = next(i for i, name in enumerate(layers) if "OpenTelemetry" in name or "ExceptionHandler" in name)
+    assert otel > 0 and otel < layers.index("_LateTerminatingBody"), layers
+
+
+def test_isolation_installed_before_the_instrumentor_disables_instrumentation():
+    """Documents why the install order matters. The instrumentor wraps whatever build it finds and
+    insists on Starlette's own outermost layer; finding ours instead, it logs an error and skips
+    instrumenting the app, so a server would have isolation and no server spans at all."""
+    from nemo.lens.contrib.fastapi import instrument_fastapi
+
+    app = FastAPI()
+    install_request_context_isolation(app)
+    instrument_fastapi(app)
+
+    layers = _layers(app)
+    assert layers[0] == "RequestContextIsolationMiddleware", layers
+    assert not any("OpenTelemetry" in name or "ExceptionHandler" in name for name in layers), layers
+
+
+def test_isolation_installs_once():
+    app = FastAPI()
+    install_request_context_isolation(app)
+    install_request_context_isolation(app)
+    assert _layers(app).count("RequestContextIsolationMiddleware") == 1

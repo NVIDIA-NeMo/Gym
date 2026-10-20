@@ -131,9 +131,10 @@ Seen as a server span whose parent is the previous request's server span, in ano
 trace, with the caller's client span left without a child. uvicorn starts a pipelined request's
 task from inside the previous request's task, so it inherits that request's context, and the
 instrumentor then skips `traceparent` extraction. Gym's servers wrap every request in
-`RequestContextIsolationMiddleware`, registered outermost in `run_webserver`, which resets the
-OpenTelemetry context and the rollout id before the instrumentor runs. An app served without
-`run_webserver` needs the same middleware outermost to be safe from this.
+`RequestContextIsolationMiddleware`, installed outside the instrumentor by `run_webserver`, which
+resets the OpenTelemetry context before the instrumentor runs (and clears the rollout id as a
+guard). An app served without `run_webserver` needs `install_request_context_isolation(app)` after
+instrumenting to be safe from this.
 
 ### Traces Are Missing Their Last Spans
 

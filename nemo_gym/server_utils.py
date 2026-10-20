@@ -94,12 +94,6 @@ from nemo_gym.rollout_correlation import (
     rollout_context,
 )
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, safe_set_span_attributes
-
-
-try:
-    from opentelemetry import context as _otel_context
-except ImportError:  # the telemetry extra is optional; without the SDK there is no span context to isolate
-    _otel_context = None
 from nemo_gym.telemetry.connection_pool import (
     QueueTimedTCPConnector,
     build_connection_pool_connector,
@@ -112,6 +106,12 @@ from nemo_gym.telemetry.observer import observe_app_event_loop, request_counts
 from nemo_gym.telemetry.setup import is_trace_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.telemetry.startup import ServerStartupTimeline
+
+
+try:
+    from opentelemetry import context as _otel_context
+except ImportError:  # the telemetry extra is optional; without the SDK there is no span context to isolate
+    _otel_context = None
 
 
 logger = logging.getLogger(__name__)
@@ -1296,14 +1296,19 @@ class RequestContextIsolationMiddleware:
 
     uvicorn starts a *pipelined* request's task from inside the previous request's task
     (``on_response_complete`` → ``loop.create_task``), so that task inherits the previous
-    request's contextvars: the OpenTelemetry current span and Gym's rollout id. The OTel ASGI
-    instrumentation then sees a current span, skips ``traceparent`` extraction, and files the
-    new request as an INTERNAL child of the previous one, under the previous rollout's trace.
-    Pipelining happens whenever a client reuses a kept-alive connection before this server has
-    sent the terminating body message, which Starlette's ``BaseHTTPMiddleware`` sends late.
+    request's contextvars. The OTel ASGI instrumentation, which runs outermost, has the previous
+    request's server span current at that point; for the new request it sees a current span,
+    skips ``traceparent`` extraction, and files the request as an INTERNAL child of the previous
+    one, under the previous rollout's trace. Pipelining happens whenever a client reuses a
+    kept-alive connection before this server has sent the terminating body message, which
+    Starlette's ``BaseHTTPMiddleware`` sends late.
 
-    Registered outermost, this resets both for the request's duration, so the instrumentor
-    extracts the inbound ``traceparent`` and the rollout middleware sets the id from the path.
+    Installed outside the instrumentor (see ``install_request_context_isolation``), this resets
+    the OTel context for the request's duration, so the instrumentor extracts the inbound
+    ``traceparent``. It also clears the rollout id. Today that is a guard only: Gym's
+    ``BaseHTTPMiddleware`` layers run the rollout middleware, ``/run`` and the handlers in a
+    child task, so a rollout id set there does not reach the task uvicorn copies; the guard
+    keeps that true if those layers are ever replaced by plain ASGI middleware.
     """
 
     def __init__(self, app: ASGIApp) -> None:
@@ -1320,6 +1325,28 @@ class RequestContextIsolationMiddleware:
         finally:
             if otel_token is not None:
                 _otel_context.detach(otel_token)
+
+
+def install_request_context_isolation(app: FastAPI) -> None:
+    """Wrap the complete middleware stack, instrumentation included, in context isolation.
+
+    `add_middleware` is not enough: the FastAPI instrumentor installs its middleware by
+    overriding `build_middleware_stack`, so it always ends up outside anything added that way.
+    Wrapping the build the same way, after instrumentation, puts isolation outside the
+    instrumentor, which is the only place it works: the instrumentor must see an empty context
+    so it extracts `traceparent`, and the handlers must still see the server span the
+    instrumentor then makes current. Call it after `instrument_app_for_telemetry`.
+    """
+    if getattr(app.state, "nemo_gym_request_context_isolation_installed", False):
+        return
+    app.state.nemo_gym_request_context_isolation_installed = True
+    build_inner = app.build_middleware_stack
+
+    def build_middleware_stack() -> ASGIApp:
+        return RequestContextIsolationMiddleware(build_inner())
+
+    app.build_middleware_stack = build_middleware_stack  # type: ignore[method-assign]
+    app.middleware_stack = None
 
 
 class ClientDisconnectCancellationMiddleware:
@@ -1601,27 +1628,6 @@ repr(e): {repr(e)}"""
     def setup_cancellation_middleware(self, app: FastAPI) -> None:
         app.add_middleware(ClientDisconnectCancellationMiddleware)
 
-    def setup_request_context_isolation(self, app: FastAPI) -> None:
-        """Wrap the complete middleware stack, instrumentation included, in context isolation.
-
-        `add_middleware` is not enough: the FastAPI instrumentor installs its middleware by
-        overriding `build_middleware_stack`, so it always ends up outside anything added that
-        way. Wrapping the build the same way, after instrumentation, puts isolation outside
-        the instrumentor, which is the only place it works: the instrumentor must see an empty
-        context so it extracts `traceparent`, and the handlers must still see the server span
-        the instrumentor then makes current.
-        """
-        if getattr(app.state, "nemo_gym_request_context_isolation_installed", False):
-            return
-        app.state.nemo_gym_request_context_isolation_installed = True
-        build_inner = app.build_middleware_stack
-
-        def build_middleware_stack() -> ASGIApp:
-            return RequestContextIsolationMiddleware(build_inner())
-
-        app.build_middleware_stack = build_middleware_stack  # type: ignore[method-assign]
-        app.middleware_stack = None
-
     def setup_profiling(self, app: FastAPI, profiling_config: ProfilingMiddlewareConfig) -> None:  # pragma: no cover
         base_profile_dir = WORKING_DIR / profiling_config.profiling_results_dirpath / self.get_session_middleware_key()
         profiler = Profiler(name=self.config.name, base_profile_dir=base_profile_dir)
@@ -1762,9 +1768,9 @@ repr(e): {repr(e)}"""
         # extracts an inbound `traceparent` and parents this server's SERVER span to the
         # caller's CLIENT span.
         server.instrument_app_for_telemetry(app)
-        # Outermost of all, so the instrumentor and the rollout middleware run inside a clean
+        # After the instrumentor and outermost of all, so the instrumentor runs inside a clean
         # context even when uvicorn started this request's task from the previous request's.
-        server.setup_request_context_isolation(app)
+        install_request_context_isolation(app)
 
         app.exception_handler(RequestValidationError)(_validation_exception_handler)
 
