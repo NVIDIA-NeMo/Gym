@@ -34,7 +34,7 @@ from nemo_gym.rollout_observability import (
 
 
 if TYPE_CHECKING:
-    from nemo_gym.base_responses_api_model import ModelCallRecord
+    from nemo_gym.observability.model_calls import ModelCallRecord
 
 
 SOURCE = "claude_code"

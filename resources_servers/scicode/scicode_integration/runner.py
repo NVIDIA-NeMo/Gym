@@ -195,7 +195,68 @@ def cmp_tuple_or_list(var1, var2):
     return True
 """
 
-_STDERR_TAIL = 2000
+_STDERR_LIMIT = 4000
+_GRADING_THREAD_ENV = {
+    "BLIS_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "NUMEXPR_NUM_THREADS": "1",
+    "OMP_NUM_THREADS": "1",
+    "OMP_THREAD_LIMIT": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "VECLIB_MAXIMUM_THREADS": "1",
+}
+_INHERITED_PYTHON_ENV = (
+    "PYTHONHOME",
+    "PYTHONPATH",
+    "PYTHONUSERBASE",
+    "UV_PROJECT_ENVIRONMENT",
+    "VIRTUAL_ENV",
+    "__PYVENV_LAUNCHER__",
+)
+# Check only grader-owned dependencies. Solution libraries can legitimately differ
+# between the canonical environments and must remain ordinary per-environment failures.
+_GRADING_PREFLIGHT_PROGRAM = """
+import numpy
+import scipy.sparse
+import h5py
+numpy.linalg.solve(numpy.eye(1), numpy.ones(1))
+"""
+
+
+def _bounded_stderr(stderr: bytes) -> str:
+    """Decode stderr while retaining both the root cause and the terminal traceback."""
+    decoded = stderr.decode("utf-8", errors="replace")
+    if len(decoded) <= _STDERR_LIMIT:
+        return decoded
+    half = _STDERR_LIMIT // 2
+    return f"{decoded[:half]}\n... stderr truncated ...\n{decoded[-half:]}"
+
+
+def _grading_child_env() -> dict[str, str]:
+    """Keep the resource server's Python paths out of separately frozen grading environments."""
+    child_env = os.environ.copy()
+    for variable in _INHERITED_PYTHON_ENV:
+        child_env.pop(variable, None)
+    child_env.update(_GRADING_THREAD_ENV)
+    return child_env
+
+
+def preflight_grading_interpreter(python_executable: str, *, timeout_secs: float = 30.0) -> str | None:
+    """Check required libraries in a separate process that never executes model code."""
+    try:
+        proc = subprocess.run(
+            [python_executable, "-c", _GRADING_PREFLIGHT_PROGRAM],
+            capture_output=True,
+            env=_grading_child_env(),
+            timeout=timeout_secs,
+        )
+    except subprocess.TimeoutExpired:
+        return "grading environment preflight timed out"
+    except OSError as error:
+        return str(error)
+    if proc.returncode != 0:
+        return _bounded_stderr(proc.stderr) or f"grading environment preflight exited with code {proc.returncode}"
+    return None
 
 
 def sanitize_test(test_case: str) -> str:
@@ -216,7 +277,7 @@ def build_test_program(full_generation: str, h5_path: str, step_number: str, san
     return program
 
 
-def run_substep(program: str, timeout_secs: float) -> dict:
+def run_substep(program: str, timeout_secs: float, python_executable: str | None = None) -> dict:
     """Run one sub-step program in a subprocess. Exit code 0 == all assertions passed."""
     # Passing a large generated solution through `python -c <program>` is
     # bounded by Linux's execve argument-size limit (ARG_MAX). SciCode's
@@ -233,9 +294,19 @@ def run_substep(program: str, timeout_secs: float) -> dict:
         ) as source:
             source.write(program)
             source_path = source.name
-        proc = subprocess.run([sys.executable, source_path], capture_output=True, timeout=timeout_secs)
+        # Numerical libraries otherwise size their native thread pools to the host's CPU count.
+        # Concurrent SciCode subprocesses can then exceed a cluster's process/thread quota before
+        # any model code executes. Pin each isolated grading process to one native thread.
+        proc = subprocess.run(
+            [python_executable or sys.executable, source_path],
+            capture_output=True,
+            env=_grading_child_env(),
+            timeout=timeout_secs,
+        )
     except subprocess.TimeoutExpired:
-        return {"passed": False, "error": "timeout"}
+        return {"passed": False, "error": "timeout", "infrastructure_error": False}
+    except OSError as error:
+        return {"passed": False, "error": str(error), "infrastructure_error": True}
     finally:
         if source_path is not None:
             try:
@@ -243,4 +314,10 @@ def run_substep(program: str, timeout_secs: float) -> dict:
             except FileNotFoundError:
                 pass
     passed = proc.returncode == 0
-    return {"passed": passed, "error": "" if passed else proc.stderr.decode("utf-8", errors="replace")[-_STDERR_TAIL:]}
+    error = "" if passed else _bounded_stderr(proc.stderr)
+    return {
+        "passed": passed,
+        "error": error,
+        # Once model code runs, stderr is model-controlled and cannot identify infrastructure failures.
+        "infrastructure_error": False,
+    }
