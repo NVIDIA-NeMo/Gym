@@ -27,6 +27,7 @@ This module avoids FastAPI, Ray, Torch, and aiohttp imports.
 
 from __future__ import annotations
 
+import warnings
 from typing import Awaitable, Callable
 
 from nemo_gym.token_id_capture.lineage import stamp_continuation
@@ -38,6 +39,7 @@ from nemo_gym.token_id_capture.protocols import (
     TokenSource,
 )
 from nemo_gym.token_id_capture.records import (
+    CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
     ParentResolutionStatus,
     TokenEntry,
     cumulative_tokens,
@@ -47,6 +49,19 @@ from nemo_gym.token_id_capture.records import (
 
 class ConformanceError(AssertionError):
     """One named contract check failed."""
+
+    def __init__(self, check_name: str, detail: str) -> None:
+        self.check_name = check_name
+        self.detail = detail
+        super().__init__(f"{check_name}: {detail}")
+
+
+class ConformanceWarning(UserWarning):
+    """One named contract check was skipped, and the gap has a consequence at run time.
+
+    ``run_conformance`` issues it through ``warnings.warn`` after every check that ran passed, so
+    the transport conforms and the caller still sees what the missing extension costs.
+    """
 
     def __init__(self, check_name: str, detail: str) -> None:
         self.check_name = check_name
@@ -109,6 +124,9 @@ async def run_conformance(
     Raise ``ConformanceError`` on the first failure.
     Lineage checks are skipped without a ``lineage_factory``.
     The ``begin_call`` and ``record_engine_refusal`` checks are skipped when the sink lacks the extension.
+    A sink that implements ``begin_call`` without ``record_engine_refusal`` passes with a
+    ``ConformanceWarning`` for the skipped check: a call the engine refuses then leaves its
+    pre-dispatch intent dangling, and the rollout is masked.
     """
     passed: list[str] = []
     closables: list = []
@@ -151,9 +169,11 @@ async def run_conformance(
             )
         )
     probe_sink = sink()
-    if getattr(probe_sink, "begin_call", None) is not None:
+    registers_intents = getattr(probe_sink, "begin_call", None) is not None
+    records_refusals = getattr(probe_sink, "record_engine_refusal", None) is not None
+    if registers_intents:
         checks.append(("begin_call_custody", lambda r: _check_begin_call_custody(sink(), source(), r)))
-    if getattr(probe_sink, "record_engine_refusal", None) is not None:
+    if records_refusals:
         checks.append(("engine_refusal_resolution", lambda r: _check_refuse_call_resolution(sink(), source(), r)))
 
     try:
@@ -168,6 +188,17 @@ async def run_conformance(
     finally:
         for closable in closables:
             await closable.close()
+    if registers_intents and not records_refusals:
+        # Nothing can resolve the intent of a call the engine refuses, so such a rollout is masked
+        # as if the call were lost. The extension is optional, so the kit reports the gap and passes.
+        warnings.warn(
+            ConformanceWarning(
+                "engine_refusal_resolution",
+                f"{type(probe_sink).__name__} implements begin_call but not record_engine_refusal, so the check "
+                "is skipped; a call the engine refuses leaves its pre-dispatch intent dangling, and the rollout "
+                "is masked",
+            )
+        )
     return passed
 
 
@@ -321,7 +352,7 @@ async def _check_unconditional_retirement(sink: TokenSink, src: TokenSource, rol
     if refuse is not None:
         await _require_fenced(
             name,
-            refuse(rollout_id, model_call_id="call-5", code="context_length_exceeded"),
+            refuse(rollout_id, model_call_id="call-5", code=CONTEXT_LENGTH_EXCEEDED_ERROR_CODE),
             "a late record_engine_refusal",
         )
     _require(await _visible_entries(src, rollout_id) == 0, name, "a write after retirement became visible")
@@ -408,7 +439,7 @@ async def _check_refuse_call_resolution(sink: TokenSink, src: TokenSource, rollo
     await sink.record_engine_refusal(  # type: ignore[attr-defined]
         rollout_id,
         model_call_id="call-2",
-        code="context_length_exceeded",
+        code=CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
         parent_call_id="call-1",
         parent_resolution=ParentResolutionStatus.RESOLVED,
     )
@@ -419,12 +450,14 @@ async def _check_refuse_call_resolution(sink: TokenSink, src: TokenSource, rollo
             (record.model_call_id, record.code, record.parent_call_id, record.parent_resolution)
             for record in snapshot.engine_refusals
         ]
-        == [("call-2", "context_length_exceeded", "call-1", ParentResolutionStatus.RESOLVED)],
+        == [("call-2", CONTEXT_LENGTH_EXCEEDED_ERROR_CODE, "call-1", ParentResolutionStatus.RESOLVED)],
         name,
         f"the frozen snapshot does not report the refusal with its lineage: {snapshot.engine_refusals!r}",
     )
     try:
-        await sink.record_engine_refusal(rollout_id, model_call_id="call-3", code="context_length_exceeded")  # type: ignore[attr-defined]
+        await sink.record_engine_refusal(  # type: ignore[attr-defined]
+            rollout_id, model_call_id="call-3", code=CONTEXT_LENGTH_EXCEEDED_ERROR_CODE
+        )
     except TokenCaptureFrozenError:
         return  # The hard fence the protocol names.
     # A sink that accepts the late refusal must leave the frozen snapshot unchanged: the refusal

@@ -93,7 +93,12 @@ from nemo_gym.token_id_capture.protocols import (
     TokenCaptureRetiredError,
     TokenSource,
 )
-from nemo_gym.token_id_capture.records import response_finish_reason
+from nemo_gym.token_id_capture.records import (
+    ENGINE_REFUSED_CALL_REASON,
+    UNCOMMITTED_CALL_REASON,
+    UNSERVED_CALL_FAILURE_REASONS,
+    response_finish_reason,
+)
 from nemo_gym.token_id_capture.store import make_token_store
 
 
@@ -513,9 +518,6 @@ def test_record_refusal_without_the_extension_warns_once_and_leaves_the_intent_d
 
 def test_the_unserved_call_reasons_are_the_refusal_and_the_uncommitted_call():
     """Pin the set a framework's receipt builder treats as off-chain rather than poisoning."""
-    from nemo_gym.token_id_capture import ENGINE_REFUSED_CALL_REASON, UNCOMMITTED_CALL_REASON
-    from nemo_gym.token_id_capture.staging.records import UNSERVED_CALL_FAILURE_REASONS
-
     assert UNSERVED_CALL_FAILURE_REASONS == frozenset({UNCOMMITTED_CALL_REASON, ENGINE_REFUSED_CALL_REASON})
 
 

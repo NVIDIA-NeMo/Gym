@@ -129,10 +129,6 @@ _SSE_KEEPALIVE = SSE_KEEPALIVE
 # answers with OpenAI's error envelope, and the chat-SSE error event reports it with the same
 # message and code.
 PROPAGATED_REFUSAL_CODE_ATTRIBUTE = "nemo_gym_propagated_refusal_code"
-# ``CONTEXT_LENGTH_EXCEEDED_ERROR_CODE`` is OpenAI's error code for a request that exceeds the
-# model's context window; OpenAI-compatible harnesses (Codex, OpenCode) compact their history and
-# retry when they see it. It is defined next to the refusal record in ``token_id_capture.records``,
-# which the builder reads, and imported above for the model servers.
 
 
 def is_propagated_refusal(error: BaseException) -> bool:

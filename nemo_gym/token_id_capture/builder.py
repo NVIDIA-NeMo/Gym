@@ -42,6 +42,7 @@ from typing import Callable
 
 from nemo_gym.token_id_capture.records import (
     CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
+    MAX_OUTPUT_TOKENS_INCOMPLETE_REASON,
     EngineRefusalRecord,
     ParentResolutionStatus,
     TokenEntry,
@@ -639,10 +640,10 @@ def _engine_refusal_ended_the_chain(refusal: EngineRefusalRecord, terminal: Toke
 
     Known limitation: an auxiliary request the harness sends after the session completed (a
     summary or title call, or an end-of-session compaction) can carry the terminal call's whole
-    history, so it continues the terminal call in lineage too. Refused for the context window,
-    it marks the rollout ``incomplete`` although the harness finished on its own, and delivery
-    then replaces a harness ``completed`` status. A harness that reports its own ending signal
-    keeps the two apart; the capture alone cannot.
+    history, so it continues the terminal call in lineage too. The capture cannot tell such a
+    request from the harness's next turn: a context-window refusal of it marks the rollout
+    ``incomplete`` although the harness finished on its own, and delivery then replaces a
+    harness ``completed`` status with that verdict.
 
     The twin comparison reads the calls' token sequences from ``out.entries`` on demand, so a
     build without refusals compares nothing.
@@ -740,7 +741,7 @@ def project_main_chain_response(
     if incomplete_reason is None and any(
         _engine_refusal_ended_the_chain(refusal, terminal, out) for refusal in engine_refusals
     ):
-        incomplete_reason = "max_output_tokens"
+        incomplete_reason = MAX_OUTPUT_TOKENS_INCOMPLETE_REASON
     if incomplete_reason is not None:
         response["status"] = "incomplete"
         response["incomplete_details"] = {"reason": incomplete_reason}

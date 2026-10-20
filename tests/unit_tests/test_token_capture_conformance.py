@@ -9,6 +9,7 @@ These tests verify Gym's file store and an in-memory backend.
 """
 
 import asyncio
+import warnings
 
 import pytest
 
@@ -21,7 +22,7 @@ from nemo_gym.token_id_capture import (
     TokenCaptureStore,
     TokenEntry,
 )
-from nemo_gym.token_id_capture.conformance import ConformanceError, run_conformance
+from nemo_gym.token_id_capture.conformance import ConformanceError, ConformanceWarning, run_conformance
 
 
 def test_file_store_passes_all_checks(tmp_path):
@@ -148,18 +149,22 @@ class _MemoryLineage:
 
 def test_memory_backend_passes_applicable_checks():
     backend = _MemoryBackend()
-    passed = asyncio.run(
-        run_conformance(
-            lambda: _MemorySink(backend),
-            lambda: _MemorySource(backend),
-            lambda: _MemoryLineage(backend),
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        passed = asyncio.run(
+            run_conformance(
+                lambda: _MemorySink(backend),
+                lambda: _MemorySource(backend),
+                lambda: _MemoryLineage(backend),
+            )
         )
-    )
     # No begin_call or record_engine_refusal on this sink: those checks are skipped, everything else passes.
+    # A sink that registers no intents has nothing a refusal could leave dangling, so the kit stays quiet.
     assert "begin_call_custody" not in passed
     assert "engine_refusal_resolution" not in passed
     assert "lineage_visibility" in passed
     assert len(passed) >= 9
+    assert not [warning for warning in caught if issubclass(warning.category, ConformanceWarning)]
 
 
 class _FeedLineage:
@@ -302,3 +307,39 @@ def test_kit_rejects_a_sink_whose_refusal_leaves_the_intent_dangling(tmp_path):
             )
         )
     assert info.value.check_name == "engine_refusal_resolution"
+
+
+class _IntentOnlySink:
+    """Gym's file store with the ``begin_call`` extension and without ``record_engine_refusal``."""
+
+    def __init__(self, root):
+        self._store = TokenCaptureStore(root)
+
+    async def put(self, entry: TokenEntry) -> None:
+        await self._store.put(entry)
+
+    async def mark_incomplete(self, rollout_id: str, model_call_id: str = "") -> None:
+        await self._store.mark_incomplete(rollout_id, model_call_id)
+
+    async def begin_call(self, rollout_id: str, model_call_id: str) -> None:
+        await self._store.begin_call(rollout_id, model_call_id)
+
+    async def close(self) -> None:
+        await self._store.close()
+
+
+def test_kit_warns_when_a_sink_registers_intents_but_cannot_record_a_refusal(tmp_path):
+    with pytest.warns(ConformanceWarning, match="record_engine_refusal") as caught:
+        passed = asyncio.run(
+            run_conformance(
+                lambda: _IntentOnlySink(tmp_path),
+                lambda: TokenCaptureStore(tmp_path),
+            )
+        )
+    # The sink conforms: the custody check ran and passed, and the refusal check was skipped.
+    assert "begin_call_custody" in passed
+    assert "engine_refusal_resolution" not in passed
+    (warning,) = [record.message for record in caught if isinstance(record.message, ConformanceWarning)]
+    assert warning.check_name == "engine_refusal_resolution"
+    assert "_IntentOnlySink implements begin_call but not record_engine_refusal" in warning.detail
+    assert "the rollout is masked" in warning.detail

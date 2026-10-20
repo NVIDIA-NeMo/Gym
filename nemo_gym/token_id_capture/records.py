@@ -68,8 +68,7 @@ _EMPTY_DIGEST = hashlib.sha256(_DIGEST_DOMAIN).hexdigest()
 # Parent resolution could not admit the call. Written by ``resolve_parent``.
 UNRESOLVED_PARENT_REASON = "unresolved_parent"
 # The call was admitted but finished without worker commit coordinates.
-# Written by the capture middleware. Custody is ambiguous: the worker may have staged tokens
-# whose acknowledgement was lost.
+# Written by the capture middleware.
 UNCOMMITTED_CALL_REASON = "request_finished_without_staged_coordinates"
 # The engine answered the admitted call with a refusal (a prompt that does not fit the context
 # window), so generation never ran and nothing was staged. Unlike a lost response, this outcome
@@ -149,13 +148,11 @@ class EngineRefusalRecord(BaseModel):
     created_at: float = 0.0
     # The recorded call the refused request continued, from the request-time lineage resolution
     # that runs before dispatch (the decision a served call's entry carries as ``parent_call_id``).
-    # ``None`` for a root request, an unresolved continuation, or a record written before the
-    # field existed. The builder counts a refusal as the rollout's ending only when this names
-    # the delivered terminal call, or a call whose token sequence is identical to it and whose
-    # entry's ``created_at`` precedes this record's.
+    # ``None`` for a root request or an unresolved continuation. The builder counts a refusal as
+    # the rollout's ending only when this names the delivered terminal call, or a call whose
+    # token sequence is identical to it and whose entry's ``created_at`` precedes this record's.
     parent_call_id: str | None = None
-    # The status of that lineage decision; ``None`` when none was made or the record predates
-    # the field.
+    # The status of that lineage decision; ``None`` when none was made.
     parent_resolution: ParentResolutionStatus | None = None
 
 
@@ -360,12 +357,22 @@ def response_to_output_items(payload: dict) -> list[dict]:
     return items
 
 
+# The ``incomplete_details.reason`` of a Responses payload whose generation stopped at a token
+# limit: the terminal call's ``length`` finish reason, or an engine refusal of the request that
+# continued the terminal call for the context window (``builder.project_main_chain_response``).
+MAX_OUTPUT_TOKENS_INCOMPLETE_REASON = "max_output_tokens"
 # ``incomplete_details.reason`` values of a Responses payload, keyed to the chat finish
 # reasons that ``nemo_gym.responses_converter`` maps onto them.
-_INCOMPLETE_REASON_TO_FINISH_REASON = {"max_output_tokens": "length", "content_filter": "content_filter"}
+_INCOMPLETE_REASON_TO_FINISH_REASON = {
+    MAX_OUTPUT_TOKENS_INCOMPLETE_REASON: "length",
+    "content_filter": "content_filter",
+}
 # The reverse direction: the Responses ``incomplete_details.reason`` a rebuilt response reports for
 # its terminal call's finish reason. ``stop`` and ``tool_calls`` are complete endings and map to nothing.
-_FINISH_REASON_TO_INCOMPLETE_REASON = {"length": "max_output_tokens", "content_filter": "content_filter"}
+_FINISH_REASON_TO_INCOMPLETE_REASON = {
+    "length": MAX_OUTPUT_TOKENS_INCOMPLETE_REASON,
+    "content_filter": "content_filter",
+}
 
 # The Chat Completions finish reason behind each Anthropic Messages ``stop_reason``: the inverse of
 # the table ``nemo_gym.anthropic_converter`` applies when it serves a Responses payload as a
@@ -403,7 +410,7 @@ def apply_capture_incomplete_verdict(response: dict, incomplete_reason: str | No
     (``builder.project_main_chain_response``). Under worker custody it is
     ``staging.rebuild.LinearizedRow.incomplete_reason``, which carries the finish-reason mapping
     only: the ledger row of a refused call records no code and no lineage, so a rollout rebuilt
-    from staged records reports no verdict for a refusal (issue #4647 tracks carrying both).
+    from staged records reports no verdict for a refusal.
     ``None`` means the chain ended on its own and leaves the response alone. The verdict is
     written only when the harness reported no status or ``completed``: a harness that reported
     ``incomplete`` or ``failed`` itself gave the more specific verdict and keeps its ``status`` and
