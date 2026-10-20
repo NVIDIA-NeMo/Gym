@@ -245,3 +245,13 @@ resources_servers/cvdp/data/gym_cvdp_nonagentic_code_generation_no_commercial.js
 
 # Default shared datasets folder for Harbor-format tasks (see nemo_gym/tasks/harbor).
 datasets/
+
+# Cluster-operational launchers and monitors for the search benchmark. These are how a
+# particular site runs it, not part of the benchmark: they hardcode a scheduler account, local
+# key files, specific container image paths and serving recipes, and the monitors poll the
+# queue and parse one results layout. None of it resolves on another cluster. The per-model
+# wrappers are a few lines each that set an id and exec a launcher, so keeping them in git made
+# the repo look like it had ten launchers when it has two.
+launch_*.sh
+runner_*.slurm
+babysit_*.sh

@@ -1,0 +1,107 @@
+# Resources server: judge-graded search / BrowseComp-style QA.
+# Creates one general-purpose sandbox per row and grades the final answer with an LLM judge.
+# There is no eval sandbox and no test execution.
+opencode_opensandbox_search_agent_resources_server:              # instance name — how agents/CLI refer to this server
+  resources_servers:
+    opencode_opensandbox_search_agent:   # implementation directory under resources_servers/
+      allowed_agents: [opencode_sandboxed_agent]
+      entrypoint: app.py
+      domain: agent
+      verified: false
+
+      # A single general-purpose image for every row. These tasks ship no repo, so there is
+      # nothing to derive a per-instance image from.
+      #
+      # Was ubuntu:22.04, which ships no curl, no python3 and no wget. That was chosen when this
+      # server was a plumbing smoke and quietly became the production image. Legacy ran an
+      # apptainer SWE-bench task image (blitz-js__superjson-78.sif) that carried all three
+      # incidentally, being a real dev container -- so this swap moves TOWARD the legacy arm, not
+      # away from it.
+      #
+      # What the bare image cost, measured over the completed 400-row sharded run: 119
+      # "command not found" errors across 45 rows (11%) -- curl 64, python3 34, wget 7. Of 230
+      # bash commands, 165 (72%) were trying to fetch a URL. The model was reaching for three
+      # things the search tools genuinely cannot do: download PDFs (theses, dissertations, which
+      # webfetch returns as markdown rather than a file), query archive APIs (web.archive.org
+      # CDX), and scrape-then-clean (curl | python3 -c 'html.unescape' | sed 's/<[^>]*>//g').
+      # It even probed the box after being refused -- `which wget curl lynx python node` -- so it
+      # had noticed the environment was bare. Legacy's model used bash 6.7x more (1,547 calls over
+      # 399 rows vs our 230 over 400) because it could.
+      #
+      # python:3.12 rather than a bespoke build: no image builder exists on this cluster (no
+      # builder on hsg, aarch64 login nodes against amd64 sandboxes, no registry push creds), but
+      # arbitrary Docker Hub images work here -- resources_servers/litmus_agent already runs
+      # docker.io/library/python:3.12-slim. The full python image is buildpack-deps based, so it
+      # brings curl, wget, git and bash alongside python3 and pip; pip also lets the model handle
+      # PDFs itself, covering the poppler gap without a custom image.
+      #
+      # The opencode installer is unaffected: it is "network-free, libc-aware" and copies prebuilt
+      # binaries off the S3 mount, which is why ubuntu:22.04 worked at all without curl.
+      #
+      # *** OPEN RISK -- the bash channel is still unguarded. ***
+      # The contamination guard covers websearch and webfetch, NOT bash. 165 of 230 bash commands
+      # fetch a URL and none are filtered. That was survivable only because curl was missing and
+      # 64 of those attempts failed outright. With curl present this is a working, unfiltered route
+      # to any page, including the sites that republish BrowseComp answers (3 of our correct
+      # answers already trace to leaked keys). Legacy carried the same hole, so this is faithful
+      # rather than novel -- but it must be closed before these numbers are quoted as clean.
+      sandbox_image: python:3.12
+
+      # Exa response cache, shared by every shard and every sandbox. The store is a directory on
+      # Lustre so it outlives any job; this server fronts it over HTTP because our agents are
+      # remote pods and cannot reach a localhost sidecar the way the legacy per-node design did.
+      # Unset disables it: the store is never built, the /mcp proxy route is never registered,
+      # and the plugin talks straight to mcp.exa.ai. That is the right default for anyone who is
+      # not us -- the cache is a private directory on our Lustre scratch, so hardcoding a path
+      # here would hand every other user a config pointing somewhere they cannot read.
+      # Point NEMO_GYM_EXA_CACHE_ROOT at a writable directory to turn it on.
+      exa_cache_root: ${oc.env:NEMO_GYM_EXA_CACHE_ROOT,null}
+      exa_cache_fuzzy_threshold: 0.8
+      # An optional pre-existing store, consulted read-only and exact-key only, so it costs
+      # nothing at startup and everything it holds is immediately reusable. Ours holds ~2M
+      # entries accumulated by the legacy runs.
+      exa_cache_legacy_root: ${oc.env:NEMO_GYM_EXA_CACHE_LEGACY_ROOT,null}
+      exa_cache_use_tavily: true
+
+      sandbox_provider: sandbox
+      sandbox_config:
+        # Above sandbox_timeout (21600) so the pod is never reaped before the agent's own
+        # budget expires -- otherwise the TTL silently becomes the real limit.
+        ttl_s: 23400
+        ready_timeout_s: 1200
+        derive_cpu_env: true
+        resources:
+          # Keep cpu >= 1: a 0.25 request produced ~22% rollout timeouts on this cell.
+          cpu: 2
+          # 16 GiB, not the 8 this started at. A 400-turn search rollout keeps the whole message
+          # history plus opencode's SQLite session store live in the sandbox, and the training
+          # arms OOM-killed containers at a 16 GiB LIMIT under the heavier compaction-OFF regime
+          # (worst observed RSS 20.4 GiB). We have compaction ON at 192k and a full run shows no
+          # OOM at all -- zero OOMKilled / exit-137 / SIGKILL across the whole run -- so this is
+          # headroom, not a fix for an observed failure.
+          # Deliberately not 32 GiB: this is a memory REQUEST on a shared cell, and a larger
+          # request reduces how many sandboxes schedule concurrently. Row completeness against the
+          # 4h wall is already the binding constraint, so over-requesting would cost more than the
+          # OOM risk it removes.
+          memory_mib: 16384
+          disk_gib: 30
+        provider_options:
+          resource_requests:
+            cpu: 1
+            memory_mib: 512
+            disk_gib: 30
+        metadata:
+          benchmark: search-browsecomp
+
+      judge_model_server:
+        type: responses_api_models
+        name: search_judge_model
+      # One attempt's budget. Gym's shared HTTP client has no timeout, so an unanswered judge
+      # call would otherwise hold its rollout until the job's wall clock.
+      judge_timeout_seconds: 300.0
+      judge_responses_create_params:
+        input: []
+        # max_output_tokens is overridden per call in app.py. Temperature is NOT: the legacy
+        # judge graded at 0.0 (search_opencode_judge.yaml) because grading is classification, not
+        # generation, and a sampled grader adds variance to every published number.
+        temperature: 0.0

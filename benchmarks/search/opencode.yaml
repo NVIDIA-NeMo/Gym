@@ -1,0 +1,254 @@
+config_paths:
+- responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml
+- resources_servers/opencode_opensandbox_search_agent/configs/opencode_opensandbox_search_agent.yaml
+
+# Judge endpoint. Hosted GLM-5.2, deliberately off the policy endpoint so grading does not
+# compete with rollouts for the serving stack and stays comparable across policy checkpoints.
+# Costs no GPUs. Supply the key with ++inference_api_key=... or an env.yaml entry.
+search_judge_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: https://inference-api.nvidia.com/v1
+      model: nvidia/zai-org/glm-5.2
+      api_key: ${oc.select:inference_api_key,null}
+      return_token_id_information: false
+      # GLM-5.2 is a reasoning model; without this its verdict stays wrapped in the think block.
+      uses_reasoning_parser: true
+
+search_browsecomp_resources_server:
+  _inherit_from: opencode_opensandbox_search_agent_resources_server
+
+opencode_sandboxed_agent_search_browsecomp:
+  _inherit_from: opencode_sandboxed_agent
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      # Install opencode from the S3-cached binaries rather than curling opencode.ai per rollout.
+      remote_opencode_install_script_path: /mnt/s3-data/data/bxyu/opencode/install_cached_opencode.sh
+      remote_opencode_binary_path: /mnt/s3-data/data/bxyu/opencode/opencode-linux-x64
+      remote_opencode_musl_binary_path: /mnt/s3-data/data/bxyu/opencode/opencode-linux-x64-musl-v1.17.11
+      resources_server:
+        type: resources_servers
+        name: search_browsecomp_resources_server
+      # A run that ends on a compaction would otherwise hand the judge the summary instead of
+      # the answer. Compaction fires often here: the smoke measured most rows past the
+      # 242,144-token trigger.
+      exclude_compaction_summaries: true
+
+      # Environment for `opencode run` inside the sandbox. OPENCODE_ENABLE_EXA is NOT optional:
+      # tool/registry.ts drops the builtin websearch tool from the model's tool list unless the
+      # provider id is literally "opencode" or this flag (or OPENCODE_EXPERIMENTAL) is set, and
+      # ours is "nemo_gym". Measured without it on the 400-row run of 2026-10-05: 0 websearch
+      # calls, 2175 webfetch calls, of which the top destinations were google.com/search?q=...
+      # — i.e. the model hand-rolled a search engine out of webfetch, and scored far below the
+      # same harness with the flag set.
+      #
+      # OPENCODE_WEBSEARCH_PROVIDER pins Exa explicitly. ENABLE_EXA alone already selects it
+      # (websearch.ts selectWebSearchProvider), but with neither flag the provider is a coin
+      # flip on a sessionID checksum between Exa and Parallel, so pin it and keep the arm legible.
+      #
+      # EXA_API_KEYS (a ':'-separated pool) is supplied by a 0600 overlay config from the
+      # launcher, never checked in. app.py collapses it to one EXA_API_KEY per row by hashing
+      # the question, so 400 concurrent sandboxes spread over the pool instead of rate-limiting
+      # one key, and a given row always lands on the same key across retries.
+      # Plugins change opencode's behaviour without rebuilding it: they are uploaded into the
+      # sandbox and imported into the opencode process, which calls them at defined hook points.
+      # The sentinel MUST stay first — app.py refuses to score a rollout whose stderr lacks its
+      # marker, because opencode swallows plugin load failures silently.
+      #   nemo_gym_sentinel.js            proves the plugin layer loaded
+      #   nemo_gym_turn_budget.js         ends a run that exhausts its turn budget, and says why
+      #   nemo_gym_web_guard.js           keeps answer-key and opted-out pages out of results
+      #   nemo_gym_compaction_continue.js stops opencode inviting the model to give up
+      #   nemo_gym_tool_surface.js        repairs grep's description when bash is disabled
+      #
+      # tool_surface is loaded unconditionally even though it only acts when
+      # NEMO_GYM_FIX_GREP_DESCRIPTION=1. Loading an inert plugin is free; making the list
+      # conditional is not, because OmegaConf replaces lists wholesale -- every arm that wanted
+      # the plugin had to restate all five entries, and a stale restatement silently drops one.
+      opencode_plugins:
+        - nemo_gym_sentinel.js
+        - nemo_gym_turn_budget.js
+        - nemo_gym_web_guard.js
+        - nemo_gym_compaction_continue.js
+        - nemo_gym_tool_surface.js
+
+      opencode_env:
+        OPENCODE_ENABLE_EXA: "true"
+        OPENCODE_WEBSEARCH_PROVIDER: "exa"
+        # The 47-domain TDM opt-out registry, recovered verbatim from the legacy comparator's own
+        # command line (its recorded apptainer invocation).
+        # The filter code was ported but nothing ever fed it, so the sentinel read exclude_domains=0
+        # and 475 opted-out results reached the model across 93 of 344 rows -- 27% -- content the
+        # legacy arm deleted. That is the largest uncontrolled retrieval difference between the two
+        # arms, and it ran in our favour.
+        OPENCODE_WEBSEARCH_EXCLUDE_DOMAINS: "ad-italia.it:ad-magazin.de:admagazine.fr:allure.com:architecturaldigest.com:arstechnica.com:bonappetit.com:cntraveler.com:cntraveller.com:cntraveller.de:epicurious.com:glamour.com:glamour.de:glamour.es:glamourmagazine.co.uk:gq-magazine.co.uk:gq.com:gqitalia.it:gqmagazine.fr:johansens.com:lacucinaitaliana.com:newyorker.com:nyt.com:nytimes.com:nytimescooking.com:pitchfork.com:revistaad.es:revistagq.com:revistavanityfair.es:self.com:tatler.com:teenvogue.com:theathletic.com:them.us:vanityfair.com:vanityfair.fr:vanityfair.it:vogue.co.uk:vogue.com:vogue.de:vogue.fr:vogue.it:voguebusiness.com:wirecutter.com:wired.com:wired.it:worldofinteriors.com"
+        # Read by nemo_gym_turn_budget.js. Replaces agent.build.steps below, which only nudges:
+        # at this many model calls the plugin removes every tool, so the model must answer.
+        NEMO_GYM_MAX_TURNS: "400"
+        # Legacy ran OPENCODE_SUBAGENTS_ENABLED=false. tools.task=false alone does not do it.
+        NEMO_GYM_DISABLE_SUBAGENTS: "1"
+
+        # NO OUTPUT CAP. OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX used to be pinned to 32768 here
+        # to "restore the legacy cap". That was a misreading: on the apptainer side the
+        # equivalent knob never reaches the wire (Gym maps it to tokens_to_generate, which only
+        # the OpenHands path consumes), so every reference run was UNCAPPED. Ours was not, and
+        # the cap does not truncate -- it KILLS the rollout, and we measured a large accuracy
+        # drop from exactly that. A long-horizon model can emit a single turn far above this
+        # cap, so it bites hard; only short-question benchmarks escape it.
+
+        # ---- OPT-IN ARMS. All default to off, so a plain run is the measured baseline. ----
+        # Each is read by a plugin, not by opencode, because the opencode config route cannot
+        # remove a tool from an in-flight request (same finding recorded for tools.task above).
+        #
+        # NEMO_GYM_DISABLE_BASH=1          drop the bash tool (nemo_gym_turn_budget.js)
+        # NEMO_GYM_FIX_GREP_DESCRIPTION=1  strip the two lines in grep's stock description that
+        #                                  point at bash and Task (nemo_gym_tool_surface.js);
+        #                                  set it WITH the above, or large tool results become
+        #                                  unreachable rather than merely awkward
+        # OPENCODE_WEBSEARCH_TYPE=deep     Exa REST `deep` instead of the MCP `auto` default
+        #                                  (nemo_gym_web_guard.js). Not a one-knob change: it
+        #                                  also switches transport MCP->REST, adds the deep-only
+        #                                  summary+outputSchema pair, and makes
+        #                                  contextMaxCharacters bind. Measured as no meaningful
+        #                                  change on BrowseComp-400 even with nearly every call
+        #                                  carrying genuine server synthesis -- a real null,
+        #                                  not a misfire.
+        # Default "" rather than "0": app.py drops empty values instead of exporting them
+        # (_resolve_opencode_env), so an unset arm leaves the sandbox environment byte-identical
+        # to a run that never knew the knob existed. "0" would export a variable that merely
+        # happens to read as false, which is a different thing and shows up in trajectories.
+        NEMO_GYM_DISABLE_BASH: ${oc.env:NEMO_GYM_DISABLE_BASH,""}
+        NEMO_GYM_FIX_GREP_DESCRIPTION: ${oc.env:NEMO_GYM_FIX_GREP_DESCRIPTION,""}
+        OPENCODE_WEBSEARCH_TYPE: ${oc.env:OPENCODE_WEBSEARCH_TYPE,""}
+
+      # See the field docstring in app.py: `opencode run` double-quotes and backslash-escapes any
+      # single argv message containing a space, so every BrowseComp question was reaching the model
+      # wrapped in quotes (all 400 rows) with internal quotes mangled (30 of 400). Piping is the
+      # only route to a verbatim prompt on a stock binary.
+      opencode_query_via_stdin: true
+
+      # LET THE SLURM WALL CUT A ROLLOUT, NOT A SELF-IMPOSED TIMER. Both deadlines below used to
+      # fire early and score reward 0 with no failure_kind -- indistinguishable from a wrong
+      # answer, so a row we hung up on read as a row the model got wrong.
+      #   sandbox_timeout was 10800 (3h) under a 4h job wall, throwing away an hour already paid
+      #   for. Apptainer allowed 21600, and the measured kill rate reached double-digit percent
+      #   of rows on the longest-running models.
+      # 21600 sits ABOVE the 4h wall on purpose: the wall becomes the only thing that stops a
+      # rollout, so a cut row is attributable to the wall rather than to a knob we chose.
+      sandbox_timeout: 21600
+      # null = no per-call deadline. Previously 1h, where one stalled model call killed the
+      # WHOLE rollout even though the rollout itself was healthy. Now a slow call blocks only
+      # itself.
+      opencode_model_call_timeout: null
+
+      opencode_config:
+        # app.py merges opencode_config RECURSIVELY into the generated config, so the base
+        # agent's permission deny-list and tool flags survive and `agent`/`provider` can be
+        # extended key-by-key. webfetch/websearch are off in the base config, which would
+        # leave a search benchmark with no way to reach the web at all.
+        tools:
+          webfetch: true
+          websearch: true
+          # Legacy ran with subagents disabled (OPENCODE_SUBAGENTS_ENABLED=false). Leaving them on
+          # also costs us the subagent sessions, which the single-session export never captures.
+          task: false
+
+        agent:
+          build:
+            # Replaces opencode's built-in system prompt outright (llm/request.ts prepare():
+            # `input.agent.prompt ? [input.agent.prompt] : SystemPrompt.provider(input.model)`).
+            # Without it the model runs BrowseComp under opencode's SWE prompt — "You are
+            # opencode, an interactive CLI tool that helps users with software engineering
+            # tasks" and "You MUST answer concisely with fewer than 4 lines" — which is hostile
+            # to a research task that has to explain its reasoning and emit an Exact Answer line.
+            #
+            # Text is the legacy harness's frankenstein_system_prompt.txt verbatim (the prompt
+            # behind every published BrowseComp number on the old stack).
+            # Kept byte-identical deliberately: any edit here is an unmeasured confound on the
+            # first run that has search at all. The dynamic <env> block (cwd, today's date) is
+            # still appended by opencode after this.
+            prompt: |
+              You are a General Agent. Your mission is to leverage a diverse set of tools to help the user conduct an in-depth investigation of their question, continuously reflect, and ultimately deliver a precise answer.
+
+              Throughout the investigation, strictly observe the following principles:
+
+              1. Whenever you encounter uncertain information, proactively invoke search tools to verify it.
+              2. Prioritize high-credibility sources (authoritative websites, academic databases, professional media) and maintain a critical stance toward low-credibility ones. Cite the source of any information you use with a format [^index^].
+              3. You should not respond to the user with a counter-question, but instead do your best to provide an accurate answer.
+              4. When providing the final answer, begin by explaining the reasoning process. Avoid presenting only the final answer, as this makes it difficult to understand.
+
+              Your response should be in the following format:
+
+              Explanation: {your explanation for your final answer}
+              Exact Answer: {your succinct, final answer}
+              Confidence: {your confidence score between 0% and 100% for your answer}
+            # NO `steps` on purpose, so stock's "MAXIMUM STEPS REACHED" nudge never arms.
+            # nv-opencode DELETED that nudge (prompt.ts:1630): it appended an ephemeral message
+            # that was never persisted, so once it started firing it re-appended at a shifting
+            # position every turn, breaking turn-to-turn prompt_token_ids contiguity. Setting
+            # `steps` here re-enabled exactly the thing the fork removed.
+            #
+            # This only works together with mask_sample in resources_servers/opencode_opensandbox_search_agent/app.py.
+            # Legacy did not need the nudge because it HARD-STOPPED at the cap and then dropped
+            # the row (swe_agents/app.py:5742-5751). Removing the nudge while still scoring capped
+            # rows is the worst of both worlds -- measured: all 21 capped rows then produced "None"
+            # and zero Exact Answer lines, guaranteed zeros. Never change one without the other.
+            #
+            # The budget itself is unaffected: NEMO_GYM_MAX_TURNS drives nemo_gym_turn_budget.js,
+            # which is what actually stops the run. agent.steps only ever controlled the nudge,
+            # because stock has no break tied to maxSteps -- it appears on exactly two lines of
+            # prompt.ts, the definition and `isLastStep`.
+          # NO `compaction:` block here on purpose: the summariser runs on stock's
+          # PROMPT_COMPACTION, which is what the legacy comparator ran. The key is omitted rather
+          # than set empty -- writing `compaction:` with nothing under it yields null, which
+          # REPLACES the base agent's {prompt: ""} dict instead of inheriting it.
+            #
+            # This used to carry a bespoke search summariser ("Preserve VERBATIM... every candidate
+            # answer considered and its current status, every source URL..."). It was a port-only
+            # invention, not a port of anything. Verified three ways: the fork's
+            # agent/prompt/compaction.txt is byte-identical to stock 1.17.11 (823 bytes, md5
+            # 61d6ad5d); the comparator's instance_config carries no compaction-prompt key, only
+            # opencode_compaction_enabled=True; and its command line has no OPENCODE_CONFIG_CONTENT
+            # at all, so there was no config-side injection either. It fired on every compaction of
+            # the reference run — a divergence on the single path that most shapes a long rollout.
+            #
+            # The base agent declares prompt: "" and _create_opencode_config drops empty leaves, so
+            # omitting it here means opencode never sees the key.
+        compaction:
+          # Fire compaction at 192k instead of the default 242,144. The trigger is
+          # model.limit.input - reserved, so 262144 - 70144 = 192000 exactly. Earlier compaction
+          # leaves the model more room to work after each summary; it also makes compaction more
+          # frequent, and compacted rows score materially worse than uncompacted ones, so treat a
+          # change here as an experiment arm rather than a default.
+          reserved: 70144
+          # REVERTED 2026-10-14. prune / tail_turns / preserve_recent_tokens were set on 2026-10-06
+          # on reasoning alone, never measured, and never flagged as a deviation from stock.
+          # opencode's own defaults: prune is OFF unless explicitly enabled (compaction.ts:306, so
+          # `prune: false` was always a no-op), tail_turns 2 (compaction.ts:40), and
+          # preserve_recent_tokens capped at 8000 (compaction.ts:41-42,140). The removed values
+          # doubled the tail and tripled the preserved tokens. Back to stock -- if we want them
+          # they belong in an explicit A/B arm with a measurement behind them.
+      datasets:
+        # OmegaConf replaces lists wholesale, so this entry is always restated in full.
+        - name: search_browsecomp
+          type: benchmark
+          jsonl_fpath: benchmarks/search/data/search_browsecomp_benchmark.jsonl
+          prepare_script: benchmarks/search/prepare.py
+          num_repeats: 1
+
+# Second half of "no output cap", and the reason it has to be stated twice. The env var removed
+# above stops opencode ASKING for a cap; this stops anything else imposing one, because
+# vllm_model force-applies sampling_overrides onto every outbound body.
+#
+# This used to live only in benchmarks/nemotron_3.5_super/policy_model_override.yaml, which the
+# one launcher happens to compose -- so that arm was uncapped by accident while arms launched
+# through a path that composes no such file ran genuinely capped against
+# comparators that were not. Stating it here makes the guarantee a property of the benchmark
+# instead of a property of which launcher you used.
+policy_model:
+  responses_api_models:
+    vllm_model:
+      sampling_overrides:
+        max_output_tokens: null
+        max_tokens: null
+        max_completion_tokens: null

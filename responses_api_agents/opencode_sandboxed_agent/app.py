@@ -14,7 +14,9 @@
 # limitations under the License.
 
 import asyncio
+import hashlib
 import json
+import re
 import sqlite3
 import sys
 from asyncio import Semaphore
@@ -22,6 +24,7 @@ from contextlib import nullcontext
 from copy import deepcopy
 from pathlib import Path
 from shlex import quote
+from tempfile import TemporaryDirectory
 from time import time
 from traceback import format_exc
 from typing import Any, Dict, List, Literal, Optional
@@ -43,7 +46,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import get_global_config_dict
+from nemo_gym.global_config import get_first_server_config_dict, get_global_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -80,6 +83,12 @@ from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_me
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import (
     SESSION_ID_KEY,
+    # Needed by _resolve_opencode_env to point the web-guard plugin at the search server's
+    # /mcp cache proxy. Missing here, the lookup raised NameError on every row and the
+    # surrounding except swallowed it, so the Exa cache silently never engaged -- the
+    # BrowseComp-400 run on this branch logged this hundreds of times and
+    # went straight to Exa throughout.
+    get_server_url,
     is_nemo_gym_fastapi_entrypoint,
     raise_for_status,
 )
@@ -449,6 +458,44 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     artifacts_dir: Optional[str] = None
     opencode_model_call_timeout: Optional[int] = None
 
+    # Environment variables exported in front of `opencode run` inside the sandbox.
+    #
+    # Several opencode behaviours are reachable ONLY from the process environment, not from
+    # the JSON config. The one this exists for is the builtin `websearch` tool: it is filtered
+    # out of the model's tool list unless the provider id is literally "opencode" or one of
+    # OPENCODE_ENABLE_EXA / OPENCODE_EXPERIMENTAL / OPENCODE_EXPERIMENTAL_EXA is set
+    # (tool/registry.ts `webSearchEnabled`, fed from effect/runtime-flags.ts, i.e. env). Our
+    # provider id is `nemo_gym`, so `tools: {websearch: true}` alone is a silent no-op -- the
+    # model never sees the tool and falls back to webfetch-ing google.com/search.
+    #
+    # Values are shell-quoted individually. Keys are not validated: this is a raw passthrough.
+    opencode_env: Dict[str, str] = Field(default_factory=dict)
+
+    # Pass the user message on stdin instead of as a positional argv.
+    #
+    # `opencode run` re-wraps its message argv: cli/cmd/run.ts does
+    #   [...args.message, ...(args["--"] ?? [])]
+    #     .map((arg) => (arg.includes(" ") ? `"${arg.replace(/"/g, '\\"')}"` : arg)).join(" ")
+    # so a single argv containing spaces -- which is every natural-language question -- reaches
+    # the model wrapped in double quotes with every internal quote backslash-escaped. Verified
+    # on this stack: all 400 BrowseComp rows arrived starting with a stray `"`, and 30 of 400
+    # had internal quotes mangled. Piping instead takes run.ts's `resolveRunInput(value, piped)`
+    # branch, which returns the piped text verbatim when the argv message is empty.
+    opencode_query_via_stdin: bool = False
+
+    # Drop auto-compaction summaries from the converted output items. They are assistant messages
+    # like any other, so a run that ends on a compaction otherwise hands a verifier that grades the
+    # last assistant message (e.g. an answer judge) the summary instead of the answer. Off by
+    # default: a patch-graded benchmark is unaffected and should keep the full transcript. The raw
+    # export.json is downloaded either way, so nothing is lost for offline analysis.
+    exclude_compaction_summaries: bool = False
+
+    # Plugin .js files under plugins/ to upload into the sandbox and register with opencode.
+    # Plugins are how we change opencode's behaviour without rebuilding the binary: opencode
+    # imports them into its own process and calls them at defined hook points, so they can edit
+    # the live request, replace a builtin tool, or end a run. See plugins/ for what each does.
+    opencode_plugins: List[str] = Field(default_factory=list)
+
     # Sandbox config
     sandbox_provider: str
     sandbox_config: Dict[str, Any]
@@ -507,6 +554,48 @@ def _read_opencode_child_messages(db_path: Path, root_session_id: str) -> list[d
     finally:
         con.close()
     return [{"info": json.loads(row[0])} for row in rows]
+
+
+def _terminal_reason(run_output: str) -> str:
+    """How the rollout ended, as reported by nemo_gym_turn_budget.js. "" when it ended normally.
+
+    Two signals, deliberately combined here rather than in the plugin:
+
+    `context_overflow` / `context_overflow_recovered` -- stock publishes the SAME
+    ContextOverflowError event whether the overflow killed the session or merely triggered an
+    emergency compaction (processor.ts:926-935 branches on compaction.auto but publishes in both).
+    With compaction on, the common case is recovery, so the plugin arms a marker on the error and
+    cancels it on the next model call for that session. An overflow still armed at the end is the
+    only one that actually ended the run. Getting this wrong is not cosmetic: context_window masks
+    a row out of scoring, so a false positive silently deletes a healthy rollout from the
+    denominator.
+
+    Precedence follows the fork's bench/terminal_error.ts prefer(): context_window outranks
+    max_iteration, because a run that overflowed was cut off mid-thought by an infrastructure
+    limit, which is the truer description than "spent its turn budget".
+    """
+    # A PTY timeout is an ENDING, not a reason the model chose. It outranks nothing, so it is only
+    # reported when the plugin said nothing -- a row that hit the turn cap and was then killed by
+    # the wall is still a max_iteration row.
+    timed_out = "PTY command timed out" in run_output
+    armed = 0
+    max_iteration = False
+    for line in run_output.splitlines():
+        if "[nemo-gym-plugin] " not in line:
+            continue
+        if "context_overflow_recovered" in line:
+            armed = max(0, armed - 1)
+        elif "context_overflow " in line or line.rstrip().endswith("context_overflow"):
+            armed += 1
+        elif "terminal=" in line:
+            reason = line.split("terminal=", 1)[1].split()[0]
+            if reason.startswith("max_iteration"):
+                max_iteration = True
+    if armed > 0:
+        return "context_window"
+    if max_iteration:
+        return "max_iteration"
+    return "agent_timed_out" if timed_out else ""
 
 
 class OpenCodeSandboxedAgentVerifyRequest(BaseVerifyRequest):
@@ -648,7 +737,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             )
             + "/v1"
         )
-        config = {
+        config: Dict[str, Any] = {
             "model": "nemo_gym/dummy_model",
             "$schema": "https://opencode.ai/config.json",
             "provider": {
@@ -678,14 +767,32 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             },
         }
 
-        def merge(base, override):
+        # Recursive merge, not a top-level dict spread. With a spread, a benchmark that sets
+        # `opencode_config.provider` (to reach e.g. models.dummy_model.limit.input, the real
+        # compaction-trigger knob, or .interleaved for reasoning propagation) silently replaces
+        # the whole provider block above and loses baseURL/apiKey. Matches the merge semantics on
+        # Gym main. `provider` is the block that actually has generated siblings to lose; keys
+        # like `agent` and `compaction` are not generated here, so they merge in whole.
+        # None and "" mean "not set" and are skipped. Hydra configs are struct-locked, so a key a
+        # benchmark wants to override must already exist in the base agent yaml; declaring it empty
+        # there is how it stays available without being forced on every other benchmark. An empty
+        # string is never a meaningful opencode value, whereas false and 0 are, so only ""/None are
+        # dropped.
+        def _merge(base: Dict[str, Any], override: Dict[str, Any]) -> None:
             for key, value in override.items():
+                if value is None or value == "":
+                    continue
                 if isinstance(value, dict) and isinstance(base.get(key), dict):
-                    merge(base[key], value)
+                    _merge(base[key], value)
+                elif isinstance(value, dict):
+                    pruned: Dict[str, Any] = {}
+                    _merge(pruned, value)
+                    if pruned:
+                        base[key] = pruned
                 else:
                     base[key] = deepcopy(value)
 
-        merge(config, self.config.opencode_config)
+        _merge(config, self.config.opencode_config)
         config.setdefault("plugin", []).extend(f"file:///tmp/nemo-gym-{name}" for name in self._runtime_plugins())
         rollout_mcp = getattr(request.state, "_ng_opencode_mcp", None)
         if isinstance(rollout_mcp, dict):
@@ -702,6 +809,50 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             require_reachable=self.config.network_access != "inherit",
         )
         return {name: {"type": "remote", **entry} for name, entry in entries.items()}
+
+    def _resolve_opencode_env(self, query: str) -> Dict[str, str]:
+        """`opencode_env` with any `EXA_API_KEYS` pool collapsed to one per-row `EXA_API_KEY`.
+
+        opencode reads a single `EXA_API_KEY` once at module load (tool/mcp-websearch.ts builds
+        `EXA_URL` from it in a module-scope const), so the pool has to be resolved out here. The
+        pick is a stable hash of the question rather than a counter: every row of a benchmark then
+        lands on the same key across retries and across reruns, which keeps per-key rate-limit
+        behaviour reproducible instead of depending on arrival order. Pool count is decoupled from
+        shard/parallelism count, which is the bug the legacy harness hit by pinning a key per shard.
+        """
+        # Empty values are dropped, not exported. Hydra configs are struct-locked, so every key a
+        # benchmark might set has to be declared in the base agent yaml; declaring them empty there
+        # is how a key stays available without being switched on for every other benchmark.
+        env = {k: v for k, v in self.config.opencode_env.items() if v != ""}
+
+        # Point websearch/webfetch at the resources server's Exa proxy when it is running one, so
+        # every shard and every sandbox shares one cache. Injected here rather than set in the
+        # benchmark yaml because the address is only known at run time, and this is already the
+        # function that resolves a per-row value into the sandbox environment.
+        #
+        # Opt-in and fail-safe: if the search server has no cache root configured the route does
+        # not exist, we leave the variable unset, and the plugin goes straight to Exa exactly as
+        # before. A benchmark that sets NEMO_GYM_EXA_BASE_URL explicitly wins over this.
+        if not env.get("NEMO_GYM_EXA_BASE_URL"):
+            try:
+                cache_root = (
+                    get_first_server_config_dict(get_global_config_dict(), self.config.resources_server.name) or {}
+                ).get("exa_cache_root")
+                if cache_root:
+                    env["NEMO_GYM_EXA_BASE_URL"] = get_server_url(self.config.resources_server.name) + "/mcp"
+            except Exception as e:  # noqa: BLE001 - never let cache wiring break a rollout
+                print(
+                    f"[opencode_sandboxed_agent] exa cache URL lookup failed: {type(e).__name__}: {e}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
+        pool_raw = env.pop("EXA_API_KEYS", "")
+        pool = [k.strip() for k in re.split(r"[:,\s]+", pool_raw) if k.strip()]
+        if pool and not env.get("EXA_API_KEY"):
+            digest = hashlib.sha256(query.encode("utf-8")).digest()
+            env["EXA_API_KEY"] = pool[int.from_bytes(digest[:8], "big") % len(pool)]
+        return env
 
     def _opencode_export_to_usages(self, opencode_export: Dict[str, Any]) -> List[NeMoGymResponseUsage]:
         usages: List[NeMoGymResponseUsage] = []
@@ -738,6 +889,17 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
                 messages.append(NeMoGymEasyInputMessage(content=message_parts, role="user"))
             elif message["info"]["role"] == "assistant":
+                # Compaction summaries carry summary=true and are authored by the "compaction"
+                # agent; both markers are present on exports from opencode 1.17.x.
+                # getattr: this converter is also exercised as a pure function with self=None.
+                config = getattr(self, "config", None)
+                if (
+                    config is not None
+                    and config.exclude_compaction_summaries
+                    and (message["info"].get("summary") is True or message["info"].get("agent") == "compaction")
+                ):
+                    continue
+
                 converter = ResponsesConverter(return_token_id_information=True)
                 for part in message["parts"]:
                     if part["type"] == "text":
@@ -781,6 +943,50 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 raise NotImplementedError(message)
 
         return messages
+
+    async def _upload_plugin_verified(self, sandbox: Any, local: Path, remote: str, attempts: int = 3) -> None:
+        """Upload one plugin and READ IT BACK, retrying until the bytes in the sandbox match.
+
+        Why a read-back rather than trusting the write. opencode swallows plugin load failures, so
+        a plugin that never arrived produces a run that looks entirely healthy; the sentinel gate
+        then discards the row with no trajectory, and we cannot tell afterwards whether the
+        plugins failed or the pod died. One 400-row run lost about a tenth of its rows that way,
+        spread evenly across the dataset and arriving in bursts -- the shape of a transient
+        infrastructure fault, not a bad question.
+
+        A hard upload error already raises. What this adds is the silent case: a write that
+        reports success but leaves the file absent, short or empty. On this cell sandbox creation
+        returns at pod-SCHEDULED rather than pod-READY, so an early write is exactly the kind of
+        operation that can be accepted and then not land.
+
+        Verifying costs one small read per plugin -- 36 KB total across all four -- against a
+        rollout that runs for minutes. Cheap insurance against losing an eighth of a run.
+        """
+        expected = local.read_bytes()
+        last = ""
+        for attempt in range(attempts):
+            try:
+                await sandbox.upload(local, remote)
+                with TemporaryDirectory() as tmp:
+                    check = Path(tmp) / local.name
+                    await sandbox.download(remote, check)
+                    got = check.read_bytes()
+                if got == expected:
+                    return
+                last = f"size mismatch: wrote {len(expected)} bytes, read back {len(got)}"
+            except Exception as e:  # noqa: BLE001 - any failure here is retryable
+                last = f"{type(e).__name__}: {e}"
+            print(
+                f"[opencode_sandboxed_agent] plugin upload verify failed for {remote} "
+                f"(attempt {attempt + 1}/{attempts}): {last}",
+                file=sys.stderr,
+                flush=True,
+            )
+            if attempt + 1 < attempts:
+                await asyncio.sleep(2**attempt)
+        # Fail loudly rather than letting opencode start with a plugin list pointing at a file
+        # that is not there -- that is the silent mode this whole method exists to prevent.
+        raise RuntimeError(f"opencode plugin {local.name} did not land in the sandbox at {remote}: {last}")
 
     async def responses(
         self,
@@ -845,6 +1051,21 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             # Keep the plugin outside the task repo so it cannot enter a generated patch.
             await sandbox.upload(OBSERVABILITY_PATCH, _REMOTE_ASSISTANT_MESSAGE_PLUGIN)
             apply_observability_patch(effective_config, plugin_path=Path(_REMOTE_ASSISTANT_MESSAGE_PLUGIN))
+        if self.config.opencode_plugins:
+            # Uploaded per rollout rather than baked into the image, so a plugin edit ships with a
+            # config change and no image rebuild. Kept in /tmp, outside any task directory, so it
+            # cannot be picked up by tooling that inspects the workspace.
+            plugin_dir = Path(__file__).parent / "plugins"
+            remote_paths = []
+            for name in self.config.opencode_plugins:
+                local = plugin_dir / name
+                if not local.is_file():
+                    raise FileNotFoundError(f"opencode plugin not found: {local}")
+                remote = f"/tmp/nemo-gym-plugin-{name}"
+                await self._upload_plugin_verified(sandbox, local, remote)
+                remote_paths.append(f"file://{remote}")
+            effective_config.setdefault("plugin", []).extend(remote_paths)
+
         opencode_config_content = json.dumps(effective_config)
         observation_invocation_id = getattr(request.state, "_ng_observation_invocation_id", None)
         observation_invocation_id = observation_invocation_id if isinstance(observation_invocation_id, str) else None
@@ -868,6 +1089,25 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 '&& "$HOME/.opencode/bin/rg" --version'
             )
 
+        extra_env_str = " ".join(f"{k}={quote(v)}" for k, v in sorted(self._resolve_opencode_env(query).items()))
+
+        # Query delivery. argv is the default and preserves today's behaviour exactly; stdin is
+        # opt-in because it is the only way to get the message through run.ts un-rewrapped (see
+        # `opencode_query_via_stdin`). The file is written with printf '%s' so there is no trailing
+        # newline and no shell expansion, and the `&&` chain aborts loudly if the write fails
+        # rather than letting opencode exit 1 on an empty message.
+        query_seed_str = ""
+        query_arg_str = f"-- {quote(query)}"
+        query_stdin_str = ""
+        if self.config.opencode_query_via_stdin:
+            query_file = f"/tmp/nemo-gym-query-{uuid4().hex}.txt"
+            # Single line on purpose: the backslashes in `command` below are Python string
+            # continuations, so the whole script is already one physical line by the time the
+            # sandbox shell sees it. Emitting a real newline here would be the only one.
+            query_seed_str = f"printf '%s' {quote(query)} > {query_file} && "
+            query_arg_str = ""
+            query_stdin_str = f"< {query_file}"
+
         # @bxyu-nvidia: Regarding `OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000` below:
         # OpenCode defaults to 32k here https://github.com/anomalyco/opencode/blob/58a99916bb96edf5cf605dc03e1be1e4bacf9ff7/packages/opencode/src/provider/transform.ts#L21
         # and there is no way to set it to null.
@@ -881,8 +1121,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && test "$(opencode --version)" = {quote(self.config.opencode_version)} \
         && echo "Installed OpenCode" \
         && rm -f /tmp/nemo-gym-mcp-setup-error \
-        && NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps([s.name for s in self.config.tool_servers]))} OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} \
-            opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str} -- {quote(query)} \
+        && {query_seed_str}NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps([s.name for s in self.config.tool_servers]))} OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} {extra_env_str} \
+            opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str} {query_arg_str} {query_stdin_str} \
         && echo "OpenCode run finished"
         """
 
@@ -1076,6 +1316,66 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             observations.records.append(agent_sandbox_observation)
             observations.gaps.append(ObservationGap(code="sandbox_lifecycle_timing_unavailable"))
 
+        # Fail closed on the plugin layer. opencode swallows plugin load errors — it catches them,
+        # logs where nothing surfaces, and its user-facing notification is commented out — so a run
+        # whose plugins never loaded is indistinguishable from a healthy one. Without this check
+        # the contamination filter and the turn budget would be silently optional and we would
+        # still score the row. The sentinel plugin prints this marker at import time.
+        # Both streams: opencode runs under a PTY, which has a single stream, so everything the
+        # plugins write to stderr arrives in stdout. Checking only stderr would always fail.
+        run_output = (result_stdout or "") + (result_stderr or "")
+        plugins_loaded = "[nemo-gym-plugin] loaded" in run_output
+        # A PTY timeout replaces the transcript with its own error message -- the timeout string
+        # plus the echoed command, ~6.5KB -- so the sentinel marker is gone along with everything
+        # else the run produced. That is not a plugin failure, and treating it as one throws away a
+        # rollout we still have the full trajectory for.
+        #
+        # This was the real cause of every sentinel rejection, not the silent-plugin-load theory
+        # the gate was built around. In one run EVERY discarded row carried
+        # "PTY command timed out" with export_found=True and finished=False, and their captured
+        # output was the uniform size of that error message, against kilobytes-to-megabytes for
+        # rows that actually ran. Earlier runs' discards are the same thing. These rows ran the
+        # full sandbox budget; the plugins were never the problem.
+        #
+        # The export is already parsed into `output` above, so the row is scored on whatever the
+        # model had produced by the 3h mark -- the honest outcome for a run that did the research
+        # and never got to finish -- and is flagged agent_timed_out for anything that needs to
+        # exclude it.
+        pty_timed_out = "PTY command timed out" in run_output
+        if pty_timed_out and opencode_export_found:
+            plugins_loaded = True
+        if self.config.opencode_plugins and not plugins_loaded and run_output.strip():
+            # Hard-fail only when we actually captured a transcript and the marker is still absent
+            # — that is a genuine silent plugin failure and must never be scored.
+            #
+            # An EMPTY transcript proves nothing either way. A row killed at the sandbox timeout
+            # comes back with no captured output (and sometimes an export from the partial
+            # session), so gating on the export instead of the output rejected those rows too:
+            # the 2026-10-07 bc400 lost 71 and then 67 of 400 that way. Dropping them removes them
+            # from the denominator rather than scoring them zero, which inflates the benchmark
+            # instead of protecting it. They fall through and score normally, with
+            # plugins_loaded=False recorded for the babysitter to surface.
+            # Carry a slice of the transcript into the exception. The failures sidecar keeps only
+            # the exception body -- no response, no trajectory -- so without this a rejected row
+            # records WHICH question failed and nothing about why, leaving the affected rows of
+            # earlier runs permanently undiagnosable.
+            #
+            # What the slice is for: "no sentinel" has at least two causes that look identical from
+            # here. Either the plugins genuinely failed to load (opencode swallows that), or
+            # opencode never started at all -- a failed install, a rejected config, a killed pod --
+            # which also prints something and also has no marker. Truncation is NOT a candidate:
+            # across every scored row of a full run the earliest surviving sentinel was call=1,
+            # including in a multi-megabyte transcript. Head and tail together separate those cases on
+            # sight, and bound what a huge transcript can add to the sidecar.
+            head = run_output[:800].replace("\n", "\\n")
+            tail = run_output[-800:].replace("\n", "\\n")
+            raise RuntimeError(
+                "opencode plugins did not load (no sentinel in run output); configured: "
+                f"{self.config.opencode_plugins}. Refusing to score a rollout that ran without them. "
+                f"captured_chars={len(run_output)} export_found={opencode_export_found} "
+                f"finished={opencode_finished} head={head!r} tail={tail!r}"
+            )
+
         run_result = {
             "opencode_failed": bool(run_error_type or getattr(result, "error_type", None))
             or getattr(result, "return_code", None) != 0
@@ -1089,6 +1389,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             "opencode_run_stderr": result_stderr,
             "opencode_export_found": opencode_export_found,
             "opencode_finished": opencode_finished,
+            "opencode_plugins_loaded": plugins_loaded,
+            # Terminal reason the turn-budget plugin reported, if any. Stock emits nothing here,
+            # so an empty string means the run ended some other way (answered, or infra failure).
+            "opencode_terminal_reason": _terminal_reason(run_output),
         }
         if collect_observations:
             run_result["_ng_agent_observations"] = observations
@@ -1154,10 +1458,19 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             run_result = self._sandbox_id_to_run_result.get(session_key, {}).copy()
             observations = run_result.pop("_ng_agent_observations", None)
             trajectory = run_result.pop("_ng_trajectory", None)
+            # Hand the verifier the terminal reason BEFORE it grades. run_result is merged into the
+            # saved row further down, but that happens after /verify has already returned, so a
+            # verifier that wants to act on how the rollout ended (e.g. masking a budget-exhausted
+            # row rather than scoring it zero) cannot see it from the row alone. The run request is
+            # extra="allow", so this rides through for verifiers that want it and is ignored by the
+            # ones that do not.
+            verify_body = body.model_copy(
+                update={"opencode_terminal_reason": run_result.get("opencode_terminal_reason", "")}
+            )
             response_dict = await verify_agent_response(
                 self.server_client,
                 self.config.resources_server,
-                body,
+                verify_body,
                 response,
                 cookies,
                 force_zero_reward=self.config.execution_failure_reward_zero
