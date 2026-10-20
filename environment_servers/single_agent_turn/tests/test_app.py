@@ -461,6 +461,38 @@ async def test_a_resources_seed_refusal_fails_the_episode_once_with_the_servers_
     assert [path for _, path, _ in client.calls] == ["/seed_session", "/close_session"]
 
 
+@pytest.mark.parametrize(
+    ("stage", "path", "status", "detail"),
+    [
+        ("agent", "/ng-rollout/rollout-a2/v1/responses", 422, "Agent turn refused: unsupported tool_choice"),
+        ("cleanup", "/v1/agent_sessions/close", 409, "Agent close receipt has expired"),
+        ("verification", "/verify", 422, "verify refused: task_data is missing expected_answer"),
+    ],
+)
+async def test_every_dependency_refusal_carries_the_servers_reason(
+    stage: str, path: str, status: int, detail: str
+) -> None:
+    environment, client = _environment_server()
+    refusal = ClientResponseError(
+        request_info=SimpleNamespace(real_url=f"http://dependency:8000{path}"), history=(), status=status
+    )
+    refusal.response_content = orjson.dumps({"detail": detail})
+    responses = client.responses
+    client.responses = {
+        "agent": [responses[0], responses[1], refusal, responses[3], responses[5]],
+        # The final unwind retries the refused agent close once before closing resources.
+        "cleanup": [responses[0], responses[1], responses[2], refusal, responses[3], responses[5]],
+        "verification": [responses[0], responses[1], responses[2], responses[3], refusal, responses[5]],
+    }[stage]
+
+    result = await environment.run_request(_request())
+
+    assert result.result is None
+    assert result.failure.stage == stage
+    assert result.failure.terminal is True
+    assert detail in result.failure.failure_reason
+
+
 async def test_verifier_only_episode_does_not_expose_resource_tools() -> None:
     environment, client = _environment_server()
     seed = orjson.loads(client.responses[0].body)
