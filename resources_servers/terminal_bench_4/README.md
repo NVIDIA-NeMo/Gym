@@ -30,6 +30,17 @@ status, timings, and harness metadata to `/verify`. Failed setup skips grading;
 a started agent is graded even after failure, cancellation, or timeout. Official
 zero and nonzero grades survive agent failure or timeout.
 
+If an executing agent's sandbox dies because it exceeds its memory or local
+ephemeral storage limit, verification records a completed `reward: 0.0` and
+cleans up without starting a verifier. These failures count in the pass-rate
+denominator. `sandbox_resource_limit` retains the resource and provider evidence
+in the rollout and trial result; `verifier_result.source` is
+`sandbox_resource_limit`, and test counts remain null. The original agent
+termination and diagnostics are preserved, but the result carries no
+infrastructure-failure marker. Recognition requires an explicit provider death
+report. Setup failures, node-pressure evictions, unrelated sandbox losses, and
+verifier failures retain their existing infrastructure-error handling.
+
 The wire models in `models.py` are resources-owned. Agent implementations use
 their own HTTP models and need not import this server. `termination.reason` accepts
 `completed`, `timeout`, `nonzero_exit`, `cancelled`, and `infrastructure_error`;

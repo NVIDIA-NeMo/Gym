@@ -21,7 +21,7 @@ from types import SimpleNamespace
 import pytest
 from openai.types.completion_usage import CompletionTokensDetails, CompletionUsage, PromptTokensDetails
 
-from nemo_gym.base_responses_api_model import _cache_signal
+from nemo_gym.observability.model_calls import _cache_signal
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -1458,6 +1458,28 @@ def test_chat_structured_tool_text_to_responses_preserves_parts(converter: Respo
     assert items[0].model_dump()["output"] == [
         {"type": "input_text", "text": "first"},
         {"type": "input_text", "text": "second"},
+    ]
+
+
+def test_chat_tool_image_to_responses_becomes_input_image(converter: ResponsesConverter):
+    items = converter.chat_completions_messages_to_responses_items(
+        [
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": [
+                    {"type": "text", "text": "Image loaded."},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,YWJj", "detail": "high"}},
+                    {"type": "image_url", "image_url": {"url": "https://example.com/image.png"}},
+                ],
+            }
+        ]
+    )
+
+    assert items[0].model_dump()["output"] == [
+        {"type": "input_text", "text": "Image loaded."},
+        {"type": "input_image", "image_url": "data:image/png;base64,YWJj", "detail": "high"},
+        {"type": "input_image", "image_url": "https://example.com/image.png", "detail": "auto"},
     ]
 
 

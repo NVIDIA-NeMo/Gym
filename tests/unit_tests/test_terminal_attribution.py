@@ -44,7 +44,9 @@ from nemo_gym.token_id_capture.delivery import (
     capture_build_can_retire,
     finalize_rollout_token_capture,
 )
-from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint
+from nemo_gym.token_id_capture.fingerprint import FINGERPRINT_VERSION, assistant_fingerprint
+from nemo_gym.token_id_capture.staging.digest import EMPTY_EXTRAS_DIGEST
+from nemo_gym.token_id_capture.staging.records import CallRecord
 from nemo_gym.token_id_capture.terminal import resolve_terminal
 
 
@@ -1242,3 +1244,72 @@ def test_finalize_without_witnesses_keeps_the_strict_policy(tmp_path):
     # Two roots (main chain + aux) and no attribution: masked, as before.
     assert built[MASK_SAMPLE_KEY] is True
     assert result[MASK_SAMPLE_KEY] is True
+
+
+def _rewritten_tool_call_item(call_id: str, arguments: str) -> dict:
+    return {
+        "type": "function_call",
+        "call_id": call_id,
+        "id": call_id,
+        "name": "Bash",
+        "arguments": arguments,
+        "status": "completed",
+    }
+
+
+def test_content_attribution_falls_back_to_tool_call_ids_when_arguments_were_rewritten():
+    """Claude Code echoes tool-call ids verbatim but rewrites arguments (drops `cd /testbed && `)."""
+    served = _entry("c-1", [1, 2], [3], response_id="resp_1")
+    served.output_items = [_rewritten_tool_call_item("t1", '{"command": "cd /testbed && pytest"}')]
+    other = _entry("c-0", [1], [2], response_id="resp_0")
+    other.output_items = [_rewritten_tool_call_item("t0", '{"command": "ls"}')]
+    transcript = {
+        "id": "uuid-from-the-harness",
+        "output": [
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "fix"}]},
+            _rewritten_tool_call_item("t1", '{"command": "pytest", "description": "run tests"}'),
+        ],
+    }
+    attribution = resolve_terminal([other, served], transcript)
+    assert attribution.model_call_id == "c-1"
+    assert attribution.method == "content_tool_ids"
+
+
+def test_content_attribution_refuses_ambiguous_tool_call_ids():
+    a = _entry("c-a", [1], [2], response_id="resp_a")
+    a.output_items = [_rewritten_tool_call_item("dup", "{}")]
+    b = _entry("c-b", [3], [4], response_id="resp_b")
+    b.output_items = [_rewritten_tool_call_item("dup", "{}")]
+    transcript = {
+        "id": "x",
+        "output": [{"type": "message", "role": "user", "content": "q"}, _rewritten_tool_call_item("dup", '{"k": 1}')],
+    }
+    attribution = resolve_terminal([a, b], transcript)
+    assert attribution.model_call_id is None
+    assert "tool_ids_ambiguous" in attribution.reason
+
+
+@pytest.mark.parametrize("matching_id", [False, True])
+def test_staged_terminal_rewritten_tools_abstains_without_crashing(matching_id):
+    row = CallRecord(
+        model_call_id="c1",
+        prev_len=0,
+        delta_len=3,
+        cum_len=3,
+        weight_version=1,
+        digest="b" * 64,
+        extras_digest=EMPTY_EXTRAS_DIGEST,
+        staging_key="r/c1",
+        mode="text",
+        chain_hash="b" * 64,
+        cumulative_hash="b" * 64,
+        response_id="resp_c1",
+        output_fingerprint=assistant_fingerprint([_rewritten_tool_call_item("t1", '{"command":"cd /testbed && ls"}')]),
+        fingerprint_version=FINGERPRINT_VERSION,
+    )
+    response = {
+        "id": "resp_c1" if matching_id else "harness",
+        "output": [_rewritten_tool_call_item("t1", '{"command":"ls"}')],
+    }
+    result = resolve_terminal([row], response)
+    assert result.model_call_id == ("c1" if matching_id else None)
