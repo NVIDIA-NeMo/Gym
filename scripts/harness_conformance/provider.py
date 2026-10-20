@@ -33,6 +33,7 @@ class Probe:
     tool_calls: list[dict] = field(default_factory=list)
     violations: list[str] = field(default_factory=list)
     verifications: list[dict] = field(default_factory=list)
+    agent_responses: list[dict] = field(default_factory=list)
     seeded: int = 0
     closed: int = 0
     finished: bool = False
@@ -44,6 +45,7 @@ class Probe:
             "tool_calls": self.tool_calls,
             "violations": self.violations,
             "verifications": self.verifications,
+            "agent_responses": self.agent_responses,
             "seeded": self.seeded,
             "closed": self.closed,
             "finished": self.finished,
