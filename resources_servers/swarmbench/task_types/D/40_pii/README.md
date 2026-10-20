@@ -91,7 +91,7 @@ build_snapshot.py`.
 ## Provenance
 - All task-facing prose is in `text/k3.json`: intro, policy rules, tool descriptions, unit prompt, directory and
   register headers, and 6 (4) phrasings per passage kind.
-- It was written by self-hosted Kimi K3 (`policy_model`, moonshotai/Kimi-K3 rev 9f62e4e9, family-C pool on aga) via
+- It was written by self-hosted Kimi K3 (`policy_model`, moonshotai/Kimi-K3 rev 9f62e4e9, self-hosted) via
   `k3gen.py`, in one attempt of 334 s.
 - The exact prompt is `text/request.json` ("user"). The raw reply, usage and model are in `text/k3_raw.json`.
 - A second, short K3 call (`text/request_extra.json` -> `text/k3_extra.json`, 35 s) wrote `rule_private_capacity`

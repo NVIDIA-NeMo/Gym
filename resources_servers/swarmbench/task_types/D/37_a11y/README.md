@@ -77,7 +77,7 @@ Claude wrote code only (`type.py`, `a11ydom.py`, `solutions.py`, tests, build sc
 seven rule paragraphs, hidden/scope definitions, answer and unit instructions, tool descriptions), the generic-phrase
 list and every phrase bank used in seeded markup (labels, placeholders, buttons, link texts, icon names, alts,
 captions, headings, notices, table cells/heads) were written by self-hosted Kimi K3 (`policy_model`, revision
-9f62e4e9, family-C pool on aga) on 2026-10-14 (one attempt, 390 s) from the brief in
-`text/request.json` (`user` field, verbatim) through `../k3gen.py`;
+9f62e4e9, self-hosted) on 2026-10-14 (one attempt, 390 s) from the brief in
+`text/request.json` (`user` field, verbatim) through `../../k3gen.py`;
 the frozen reply is `text/k3.json`, the raw call log `text/k3_raw.json`. `text/dev_stub.json` is a code-test stub only.
 Page text is real (see Sources). Canary: first line of every prompt and `world/CANARY.txt`.

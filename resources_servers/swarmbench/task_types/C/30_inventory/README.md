@@ -103,6 +103,6 @@ Procedural (P). No external data. Product descriptions, cities and vendor names 
 
 ## Provenance
 All task-facing prose (prompt, policy, headings, notes, return-reason memos, tool descriptions, unit prompt) comes
-from `text/k3.json`, to be written by self-hosted Kimi K3 with `../k3gen.py` from `text/request.json`.
+from `text/k3.json`, to be written by self-hosted Kimi K3 with `../../k3gen.py` from `text/request.json`.
 `text/k3.json` sha256 5ec5fd3c04905e01..., created 2026-10-14 13:04:58 UTC by self-hosted Kimi K3 (vLLM, served as
-`policy_model`, endpoint http://10.49.69.30:8000/v1), 1 attempt; full prompt and raw reply in `text/k3_raw.json`.
+`policy_model`), 1 attempt; full prompt and raw reply in `text/k3_raw.json`.

@@ -100,7 +100,7 @@ and rules never changed.
 ## Provenance
 - All task-facing prose (intro, rules, the three variants of each of the 16 contract clauses, unit prompt, tool
   descriptions) is K3-written: `text/k3.json`, produced by `k3gen.py` from `text/request.json` on the self-hosted
-  Kimi-K3 pool (`policy_model`, moonshotai/Kimi-K3, family-C replica 1243996 on aga, 2026-10-14, one attempt, 234 s).
+  Kimi-K3 pool (`policy_model`, moonshotai/Kimi-K3, self-hosted, 2026-10-14, one attempt, 234 s).
   The full prompt is `text/request.json["user"]`; the raw reply and usage are in `text/k3_raw.json`.
 - `text/dev_stub.json` was written by Claude for offline tests only and never ships (`text_source` = k3).
 - Claude wrote code only: ids, names, timestamps, parameters, tables (customer header line, log rows) are code.

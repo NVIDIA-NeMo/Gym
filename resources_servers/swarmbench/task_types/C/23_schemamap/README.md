@@ -79,7 +79,7 @@ are independent and need no cross-source information.
 ## Provenance
 All task-facing prose (prompt, schema header, field definitions, transform descriptions, alias banks, dictionary
 sentences, note and errata templates, partner names, tool descriptions, unit prompt) must come from self-hosted
-Kimi K3 via `../k3gen.py` with `text/request.json` (sha256 `08acd3f6...`), frozen as `text/k3.json`.
+Kimi K3 via `../../k3gen.py` with `text/request.json` (sha256 `08acd3f6...`), frozen as `text/k3.json`.
 `text/k3.json` is in place (tests and checks pass with it). `text/dev_stub.json` is Claude-written test text for local development only and must
 not ship (check 9 requires `text_source == "k3"`). After k3gen: rerun tests and `python3 checks.py 23_schemamap`
 (the tests check that every K3 sentence maps to exactly one meaning, which K3 might violate).

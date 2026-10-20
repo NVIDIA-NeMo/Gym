@@ -92,7 +92,7 @@ rounded); no external data.
 ## Provenance
 All task-facing prose (prompt, conventions intro and rules, headings, column labels, meter descriptions, every note
 template, background sentences, FX heading, tool descriptions, unit prompt) is to be written by self-hosted Kimi K3
-from `text/request.json` via `../k3gen.py` and frozen in `text/k3.json`. **Status: pending** (K3 replicas not up yet);
+from `text/request.json` via `../../k3gen.py` and frozen in `text/k3.json`. **Status: pending** (K3 replicas not up yet);
 the code currently runs on `text/dev_stub.json`, Claude-written for local tests only, which never ships (check 9
 requires `text_source == "k3"`). Claude wrote code, verifiers and tests only. Company, facility and city names,
 units, currencies, ids and all numbers are code.

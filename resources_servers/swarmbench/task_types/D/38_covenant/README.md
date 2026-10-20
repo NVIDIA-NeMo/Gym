@@ -55,8 +55,8 @@ applied an equity cure although that agreement has no cure right; gold re-derive
 
 ## Provenance
 All task-facing prose (intro, rules, answer format, every clause/amendment/correspondence template, statement labels,
-tool descriptions, unit prompt) is from self-hosted Kimi K3 (`policy_model`, moonshotai/Kimi-K3, family-C pool replica
-http://10.49.67.132:8000/v1 on aga), one call, 239.8 s, 2,291 prompt / 8,741 completion tokens, 2026-10-14 16:18 UTC.
+tool descriptions, unit prompt) is from self-hosted Kimi K3 (`policy_model`, moonshotai/Kimi-K3),
+one call, 239.8 s, 2,291 prompt / 8,741 completion tokens, 2026-10-14 16:18 UTC.
 The exact prompt is `text/request.json` (sha256 `08839d8a...`), raw reply in `text/k3_raw.json`, frozen output
 `text/k3.json` (sha256 `4cafb3bd0ff19b25f56d71abe89daf9b0828ce4a3833f900fdf33004bc4dcfaf`). `text/dev_stub.json`
 (Claude, tests only) never ships. Claude wrote code, verifier and tests; borrower aliases come from code word lists.
@@ -65,7 +65,7 @@ Canary: first line of every prompt and `world/CANARY.txt`.
 ## Audit fix (2026-10-14)
 The check-4 audit found that the original cure_notice template ("Notice dated {date}: ...") did not say when the cure
 money was received, while gold treats {date} as the receipt date (5 of ~720 audited units). One self-hosted K3 call
-(pool replica http://10.49.64.27:8000/v1, 11.6 s, first attempt valid) rewrote that one template from
+(self-hosted, 11.6 s, first attempt valid) rewrote that one template from
 text/request_cure.json (sha256 21211566bfbe...); the frozen reply text/k3_cure.json (sha256 8dcefe30fa40...) overrides T["cure_notice"] in
 type.py. Gold logic is unchanged; oracle 1.0, check 2 unchanged, new instance hashes in checks.json (calibration in
 RESULTS.md predates the fix).

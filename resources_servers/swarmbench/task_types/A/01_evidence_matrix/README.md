@@ -54,7 +54,7 @@ solo K3 compacts and runs out of time, while articles are independent and split 
 
 ## Provenance
 Task-facing prose (prompt, tool descriptions, unit prompt) was written by self-hosted Kimi K3 (`policy_model`,
-moonshotai/Kimi-K3 rev 9f62e4e9, the shared pool in `../../K3_POOL.md`) via `../k3gen.py` from `text/request.json`;
+moonshotai/Kimi-K3 rev 9f62e4e9, self-hosted) via `../../k3gen.py` from `text/request.json`;
 frozen in `text/k3.json` (raw reply and timing in `text/k3_raw.json`). Article text, ICO strings and ids are real.
 `text/dev_stub.json` is Claude-written development text and never ships (check 9 requires `text_source == "k3"`).
 Every prompt starts with the SwarmBench canary line; every world holds `CANARY.txt`.

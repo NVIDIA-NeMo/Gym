@@ -68,3 +68,31 @@ Replace `opencode_solo` with `opencode_task` for the swarm arm. For pass@1 over 
 - `opencode_max_context_window` is 245760, below a 262144 served context. Lower it for models served with less.
 
 Any other Gym agent can run the same rows. See "Running any Gym agent" in the server README.
+
+## Reference results (v2.1, OpenCode)
+
+Partial-credit score per tier on the test split (95% bootstrap CIs and exact rates in the leaderboard rows).
+
+| config | easy | medium | hard |
+|---|---|---|---|
+| GPT-6.1-sol solo | 0.998 | 0.868 | 0.322 |
+| GPT-6.1-sol `task` | 0.998 | 0.917 | 0.636 |
+| Kimi K3 solo | - | - | 0.099 |
+| Kimi K3 `task` | - | - | 0.134 |
+
+The K3 rows ran under wall-clock budgets on a heavily loaded server, so they understate the model.
+
+## Validation
+
+- Every instance in both manifests regenerates byte for byte (macOS and Linux aarch64, several `PYTHONHASHSEED`
+  values). `prepare` checks every hash.
+- Scripted oracles score 1.0 on every track and type. Empty answers score 0. Shortcut baselines stay low (corpus
+  0.41 or less, search about 0.37, finance 0.15 to 0.28, code about 0).
+- Each type passed 9 checks before promotion: oracle, wrong and empty answers, an audit of at least 20 rollouts,
+  single units solvable at 90% or better, solo vs delegation at k=3 per tier, shortcut checks, determinism, and
+  provenance with the canary.
+- Shell and file tools are denied because agents were scripting the world tools through them.
+- On the hard tier, delegation wins on code, finance, dag and corpus. It loses on entities, rootcause and search,
+  where the root spawns too few workers or never merges their results.
+- Training use: train seeds are integers in [100000, 2^31). Every frozen eval seed is below 10000. The v2 track
+  text was written by Claude and is not training-safe. The task types' text is from Kimi K3 or real sources.

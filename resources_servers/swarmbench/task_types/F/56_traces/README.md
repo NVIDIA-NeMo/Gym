@@ -33,7 +33,7 @@ per-endpoint answer distribution would give about 0.41 without reading, but the 
 `type.py`, `solutions.py`, `tests/test_type.py`, `checks.json`.
 
 ## Provenance
-All task-facing prose (prompt, rules, tool descriptions, phrase banks, unit prompts) was written by Kimi K3 (`nvidia/moonshotai/kimi-k3` on the NVIDIA inference API, served as `kimi-k3-high`) through `../k3gen.py`, with the system prompt below, and frozen in `text/`. Claude wrote only code, schemas, verifiers and tests. Code fills ids and numbers into K3's `{placeholders}`.
+All task-facing prose (prompt, rules, tool descriptions, phrase banks, unit prompts) was written by Kimi K3 (`nvidia/moonshotai/kimi-k3` on the NVIDIA inference API, served as `kimi-k3-high`) through `../../k3gen.py`, with the system prompt below, and frozen in `text/`. Claude wrote only code, schemas, verifiers and tests. Code fills ids and numbers into K3's `{placeholders}`.
 
 ### `text/k3.json` (sha256 ad9c1728d9ede4ee..., created 2026-10-14 06:51:24 UTC, served model nvidia/moonshotai/kimi-k3, 1 attempt(s))
 
