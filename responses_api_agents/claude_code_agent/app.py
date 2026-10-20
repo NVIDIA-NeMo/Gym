@@ -34,6 +34,7 @@ from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field, PrivateAttr
 
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
+from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
 from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
@@ -647,10 +648,12 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         )
 
     def _validate_sandbox_request(self, body: NeMoGymResponseCreateParamsNonStreaming) -> None:
-        supported = {"input", "model", "metadata"}
+        supported = {"input", "model"}
         for name, field in type(body).model_fields.items():
             value = getattr(body, name)
             if name in supported or (name in {"stream", "background"} and value is False):
+                continue
+            if name == "metadata" and value is not None and set(value) <= {AGENT_TIMEOUT_METADATA_KEY}:
                 continue
             if value != field.get_default(call_default_factory=True):
                 raise HTTPException(422, f"Claude sandbox execution does not support request field {name}")
@@ -718,7 +721,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                         "mcp_config": self._get_static_mcp_config() if mcp_config else None,
                         "skills_path": skills_path,
                     },
-                    timeout=self.config.timeout,
+                    timeout=resolve_agent_timeout(body.metadata, ceiling=self.config.timeout),
                     close_timeout=self.config.session_close_timeout_seconds,
                 )
         except BaseException as error:

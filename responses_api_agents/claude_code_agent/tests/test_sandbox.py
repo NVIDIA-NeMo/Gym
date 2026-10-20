@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import io
 import json
+import tarfile
 import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -197,7 +199,7 @@ async def test_artifact_capture_reads_separate_stdout_and_process_info(monkeypat
 @pytest.mark.asyncio
 async def test_close_returns_gap_without_activation_and_honors_cleanup_error():
     instance = agent()
-    session = SimpleNamespace(close=AsyncMock(side_effect=RuntimeError("unconfirmed")))
+    session = SimpleNamespace(close=AsyncMock(side_effect=RuntimeError("unconfirmed")), artifacts=None)
     state = adapter.ClaudeCodeSandboxSession(request=seed(), runtime="/runtime", session=session)
     with pytest.raises(RuntimeError, match="unconfirmed"):
         await instance._close_agent_session_state(state)
@@ -221,7 +223,7 @@ async def test_close_bounds_a_stubborn_activation():
     task = asyncio.create_task(activation())
     await started.wait()
     state = adapter.ClaudeCodeSandboxSession(
-        request=seed(), runtime="/runtime", session=SimpleNamespace(close=AsyncMock()), task=task
+        request=seed(), runtime="/runtime", session=SimpleNamespace(close=AsyncMock(), artifacts=None), task=task
     )
     try:
         with pytest.raises(TimeoutError):
@@ -230,6 +232,103 @@ async def test_close_bounds_a_stubborn_activation():
     finally:
         release.set()
         await task
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("parser_name", ["parse_stream_json", "parse_artifact_observations"])
+async def test_close_joins_captured_observations_during_parsing(monkeypatch, parser_name):
+    entered = threading.Event()
+    release = threading.Event()
+    original = getattr(app, parser_name)
+
+    def paused_parser(*args, **kwargs):
+        entered.set()
+        assert release.wait(timeout=5)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(app, parser_name, paused_parser)
+    native = json.dumps(
+        {
+            "type": "assistant",
+            "sessionId": "captured",
+            "uuid": "answer",
+            "timestamp": "2026-10-20T10:00:00Z",
+            "message": {"role": "assistant", "id": "served", "content": [{"type": "text", "text": "Answer"}]},
+        }
+    ).encode()
+    archive_bytes = io.BytesIO()
+    with tarfile.open(fileobj=archive_bytes, mode="w:gz") as archive:
+        info = tarfile.TarInfo("projects/work/captured.jsonl")
+        info.size = len(native)
+        archive.addfile(info, io.BytesIO(native))
+    artifacts = adapter.ClaudeCodeArtifacts(
+        '{"type":"result","subtype":"success","is_error":false}', archive_bytes.getvalue()
+    )
+    state = adapter.ClaudeCodeSandboxSession(
+        request=seed(),
+        runtime="/runtime",
+        session=SimpleNamespace(
+            session_dir="/tmp/session",
+            workdir="/app",
+            artifacts=artifacts,
+            cleanup={"timed_out": False, "return_code": 0, "cleanup_confirmed": True},
+            close=AsyncMock(),
+        ),
+    )
+    monkeypatch.setattr(adapter.ClaudeCodeSandboxSession, "execute", AsyncMock(return_value=artifacts))
+    instance = agent()
+    body = NeMoGymResponseCreateParamsNonStreaming(input="Question")
+    state.task = asyncio.create_task(instance._sandbox_response(state, body, prompt="Question", system=None))
+    close = None
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        close = asyncio.create_task(instance._close_agent_session_state(state))
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(asyncio.shield(close), timeout=0.02)
+        assert not state.task.cancelling()
+        release.set()
+        receipt = await asyncio.wait_for(close, timeout=5)
+        assert any(record.kind == "agent_invocation" for record in receipt.agent_observations.records)
+        assert any(record.kind == "sandbox" for record in receipt.agent_observations.records)
+        assert "agent_activation_interrupted" not in [gap.code for gap in receipt.agent_observations.gaps]
+    finally:
+        release.set()
+        await asyncio.gather(state.task, *([close] if close else []), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "metadata,expected",
+    [
+        (None, 300),
+        ({}, 300),
+        ({"agent_timeout_sec": "12.5"}, 12.5),
+        ({"agent_timeout_sec": "900"}, 300),
+        ({"agent_timeout_sec": "0"}, 300),
+        ({"agent_timeout_sec": "NaN"}, 300),
+        ({"agent_timeout_sec": "bad"}, 300),
+    ],
+)
+async def test_sandbox_honors_task_timeout_and_server_ceiling(monkeypatch, metadata, expected):
+    instance = agent(timeout=300)
+    state = adapter.ClaudeCodeSandboxSession(
+        request=seed(),
+        runtime="/runtime",
+        session=SimpleNamespace(session_dir="/tmp/session", workdir="/app", cleanup=None),
+    )
+    execute = AsyncMock(return_value=adapter.ClaudeCodeArtifacts(""))
+    monkeypatch.setattr(adapter.ClaudeCodeSandboxSession, "execute", execute)
+    body = NeMoGymResponseCreateParamsNonStreaming(input="Question", metadata=metadata)
+    instance._validate_sandbox_request(body)
+    await instance._sandbox_response(state, body, prompt="Question", system=None)
+    assert execute.await_args.kwargs["timeout"] == expected
+
+
+@pytest.mark.parametrize("metadata", [{"other": "value"}, {"agent_timeout_sec": "10", "other": "value"}])
+def test_sandbox_rejects_unsupported_metadata(metadata):
+    with pytest.raises(HTTPException) as error:
+        agent()._validate_sandbox_request(NeMoGymResponseCreateParamsNonStreaming(input="Question", metadata=metadata))
+    assert error.value.status_code == 422
 
 
 def request(session_id="session", rollout="rollout"):

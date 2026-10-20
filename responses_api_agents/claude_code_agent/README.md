@@ -278,6 +278,12 @@ instructions cannot be silently dropped. Use the leading system message or
 `system_prompt` for instructions. One session runs one activation and does not
 resume a previous Claude conversation. Local prompt conversion is unchanged.
 
+Sandbox requests may set `metadata.agent_timeout_sec` to a positive number of
+seconds, encoded as a string. This bounds the activation's model and tool work,
+capped by the configured `timeout`; missing or invalid values use that ceiling.
+Other metadata keys are rejected with HTTP 422. Setup and cleanup keep their
+separate limits.
+
 The shared `SandboxSession` supervisor stops the harness before reading its
 dedicated stdout stream and native transcripts. The runner keeps `events.jsonl`,
 `stderr.log`, and `runtime.json` separate from supervisor diagnostics. Close returns the observation bundle, disconnects

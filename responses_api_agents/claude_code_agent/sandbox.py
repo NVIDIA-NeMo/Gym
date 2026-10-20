@@ -119,9 +119,16 @@ class ClaudeCodeSandboxSession(AgentSessionState):
                     await self.session.sandbox.upload(source, target)
 
     async def close(self, timeout: float) -> None:
-        """Capture before cancelling the activation and bound the wait for its completion."""
+        """Join captured-artifact parsing before returning observations, within a bound."""
         await self.session.close(timeout=timeout)
-        if self.task is not None and not self.task.done() and not self.task.cancelling():
+        # Captured artifacts are parsed by the activation after execute() returns.
+        # Cancelling that step would discard evidence that close has already retained.
+        if (
+            self.session.artifacts is None
+            and self.task is not None
+            and not self.task.done()
+            and not self.task.cancelling()
+        ):
             self.task.cancel()
         if self.task is not None:
             try:
