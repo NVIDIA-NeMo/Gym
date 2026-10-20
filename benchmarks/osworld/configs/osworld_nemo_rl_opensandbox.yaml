@@ -1,0 +1,39 @@
+# NeMo RL training profile for Nemotron Nano Omni on an OpenSandbox OSWorld
+# KVM pool. The policy server is injected by NeMo RL at runtime.
+
+config_paths:
+  - benchmarks/osworld/configs/osworld_agent_nano_omni.yaml
+  - benchmarks/osworld/configs/osworld_opensandbox.yaml
+
+osworld_nano_omni_agent:
+  responses_api_agents:
+    osworld_agent:
+      concurrency: ${oc.decode:${oc.env:OSWORLD_MAX_PARALLEL_ROLLOUTS,8}}
+      setup_cache_dir: ${oc.env:OSWORLD_CACHE_ROOT}/osworld-assets
+      asset_input_jsonl: ${oc.env:OSWORLD_GRPO_TRAIN_DATA}
+      sandbox_provider: osworld_opensandbox
+      vm_path: /opensandbox/Ubuntu.qcow2
+      sandbox_require_kvm: false
+      sandbox_ready_timeout_s: 600.0
+      sandbox_spec:
+        # OpenSandbox requires an SDK-compatible image value even though the
+        # warm pool supplies the actual OSWorld VM.
+        image: ${oc.env:OPENSANDBOX_COMPAT_IMAGE,busybox:1.36}
+        ttl_s: 14400
+        ready_timeout_s: 1200
+        provider_options:
+          skip_health_check: true
+          extensions:
+            poolRef: ${oc.env:OSWORLD_POOL_REF,osworld-kvm}
+      max_steps: ${oc.decode:${oc.env:OSWORLD_MAX_STEPS,150}}
+      max_tokens: ${oc.decode:${oc.env:OSWORLD_MAX_NEW_TOKENS,16384}}
+      temperature: ${oc.decode:${oc.env:OSWORLD_TEMPERATURE,1.0}}
+      top_p: ${oc.decode:${oc.env:OSWORLD_TOP_P,1.0}}
+      history_policy:
+        name: hysteresis
+        params:
+          _delete_key: keep_images
+          low_water: ${oc.decode:${oc.env:OSWORLD_HISTORY_LOW_WATER,3}}
+          high_water: ${oc.decode:${oc.env:OSWORLD_HISTORY_HIGH_WATER,10}}
+      task_timeout: ${oc.decode:${oc.env:OSWORLD_TASK_TIMEOUT,7200}}
+      exact_trace_transport_version: 3

@@ -12,6 +12,10 @@ osworld_opensandbox:
       api_key: ${oc.env:OPENSANDBOX_API_KEY}
       protocol: http
       request_timeout_s: 300
+      # OSWorld's synchronous Sandbox owns a private event-loop thread. Keep
+      # its transport local to that loop instead of borrowing Gym's process-
+      # global aiohttp session from the parent Ray actor.
+      transport_backend: httpx
       # External controllers may not route a Pool's private Pod network. The
       # OSWorld adapter supplies local host:port forwarders for path-based
       # gateway endpoints, including Chrome CDP WebSockets.

@@ -12,7 +12,6 @@ asr_with_pc:
       - vllm_model
       - local_vllm_model
       - local_vllm_model_proxy
-      - vllm_model_with_compaction
 asr_with_pc_simple_agent:
   responses_api_agents:
     simple_agent:

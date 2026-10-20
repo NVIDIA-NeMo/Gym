@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING, Any
 from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint
 from nemo_gym.token_id_capture.lineage import stamp_continuation
 from nemo_gym.token_id_capture.protocols import (
+    CaptureAdmissionError,
     CaptureLedger,
     LineageResolution,
     LineageResolver,
@@ -103,12 +104,15 @@ class CaptureContext:
     # store doubles as the rollout's capture ledger and admission is the
     # strict tri-state of the lineage result.
     external_staging: bool = False
+    framework_owned_context: bool = False
     # Stamped once when the middleware admits the call. The ledger row reuses
     # this value on every commit retry so idempotent re-records stay
     # byte-identical.
     admitted_at: float | None = None
     capture_admission: CaptureAdmission | None = None
     parent_staging_chain: list[str] = field(default_factory=list)
+    # Only admitted writers participate in completion/failure accounting.
+    intent_registered: bool = False
     parent_chain_hash: str = ""
     # The request items as received from the harness, stashed by
     # ``resolve_parent`` so the commit hook can publish the ledger row with
@@ -224,6 +228,9 @@ async def resolve_parent(request_messages: list | None) -> None:
     if context is None or request_messages is None:
         return
     context.request_items = list(request_messages)
+    if context.framework_owned_context:
+        await _admit_candidate(context, request_messages)
+        return
     try:
         if not assistant_fingerprint(request_messages):
             context.parent_resolution = LineageResolution(ParentResolutionStatus.ROOT)
@@ -329,6 +336,99 @@ async def resolve_parent(request_messages: list | None) -> None:
     )
 
 
+async def _admit_candidate(context: CaptureContext, request_items: list[dict]) -> None:
+    """Select a source-prefix candidate or a root for rewritten history.
+
+    Match source-prefix evidence, including an older accepted call after a retry.
+    RL still verifies the renderer and converted-message boundary.
+    """
+    # Deferred to avoid the staging records/sink import cycle.
+    from nemo_gym.token_id_capture.replay import replay_context, same_replay_source, summarize_replay
+    from nemo_gym.token_id_capture.staging.records import CaptureAdmission, RolloutManifest
+
+    if not context.external_staging or not isinstance(context.lineage_store, CaptureLedger):
+        raise ValueError("Framework context ownership requires an external capture ledger")
+    try:
+        manifest = RolloutManifest.model_validate(await context.lineage_store.manifest(context.rollout_id))
+    except RolloutRetiredError as error:
+        raise CaptureAdmissionError(str(error)) from error
+    if manifest.failures:
+        raise CaptureAdmissionError("Cannot admit a call after incomplete capture in this attempt")
+    predecessor = None
+    request_replay = replay_context(request_items)
+    prefixes = {}
+    matches = []
+    for record in manifest.records:
+        replay = record.replay
+        if replay is None:
+            raise ValueError("Captured call is missing source replay evidence")
+        if replay.item_count > len(request_replay.items):
+            continue
+        if replay.item_count not in prefixes:
+            prefixes[replay.item_count] = summarize_replay(request_replay, item_count=replay.item_count)
+        suffix = request_replay.items[replay.item_count :]
+        if (
+            # This only proposes a predecessor. RL still requires renderer
+            # proof before using an empty-content-equivalent prefix.
+            same_replay_source(prefixes[replay.item_count], replay, allow_empty_tool_content=True)
+            and suffix
+            and all(item.role in ("user", "tool") for item in suffix)
+        ):
+            matches.append(record)
+    if matches:
+        # Prefer the longest complete prefix. Two equally long occurrences
+        # still need explicit identity; equal text is not acceptance evidence.
+        longest = max(record.replay.item_count for record in matches)
+        matches = [record for record in matches if record.replay.item_count == longest]
+        if len(matches) > 1:
+            echoed_ids = {item.get("id") for item in request_items if item.get("id")}
+            identified = [
+                record
+                for record in matches
+                if record.output_items
+                and any(item.id for item in record.output_items)
+                and all(item.id in echoed_ids for item in record.output_items if item.id)
+            ]
+            if len(identified) == 1:
+                matches = identified
+        if len(matches) != 1:
+            raise CaptureAdmissionError("Ambiguous source-prefix candidate")
+        predecessor = matches[0]
+    chain = []
+    if predecessor is not None:
+        by_id = {record.model_call_id: record for record in manifest.records}
+        current = predecessor
+        visited = set()
+        while current is not None:
+            if current.model_call_id in visited:
+                raise ValueError("Cyclic candidate storage chain")
+            visited.add(current.model_call_id)
+            chain.append(current.staging_key)
+            if current.parent_call_id is None:
+                break
+            current = by_id.get(current.parent_call_id)
+            if current is None:
+                raise ValueError("Candidate storage ancestor is missing")
+        chain.reverse()
+    context.parent_staging_chain = chain
+    context.capture_admission = CaptureAdmission(
+        rollout_id=context.rollout_id,
+        model_call_id=context.model_call_id,
+        mode="candidate" if predecessor is not None else "text",
+        parent_call_id=predecessor.model_call_id if predecessor is not None else None,
+        prev_len=predecessor.cum_len if predecessor is not None else 0,
+        parent_chain_hash=predecessor.chain_hash if predecessor is not None else None,
+        staging_chain=chain,
+        request_replay=request_replay,
+        candidate_replay=predecessor.replay if predecessor is not None else None,
+        requires_empty_tool_content_equivalence=(
+            not same_replay_source(prefixes[predecessor.replay.item_count], predecessor.replay)
+            if predecessor is not None
+            else None
+        ),
+    )
+
+
 async def register_call_intent() -> None:
     """Record durable call intent before dispatch starts generation.
 
@@ -339,6 +439,16 @@ async def register_call_intent() -> None:
     Sinks without ``begin_call`` cannot report a missing final entry this way.
     """
     context = _CAPTURE_CONTEXT.get()
+    if context is not None and context.framework_owned_context:
+        begin = getattr(context.lineage_store, "begin_call", None)
+        if begin is None or context.capture_admission is None:
+            raise ValueError("Framework-owned capture requires durable call intents")
+        try:
+            await begin(context.rollout_id, context.model_call_id)
+        except RolloutRetiredError as error:
+            raise CaptureAdmissionError(str(error)) from error
+        context.intent_registered = True
+        return
     if context is None or context.token_sink is None:
         return
     begin = getattr(context.token_sink, "begin_call", None)

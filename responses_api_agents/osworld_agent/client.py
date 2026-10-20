@@ -368,6 +368,21 @@ def _readonly_task_cache_names(task_config: Mapping[str, Any]) -> List[str]:
     return list(dict.fromkeys(names))
 
 
+def _sanitize_setup_task_config(value: Any) -> Any:
+    """Prevent a known cleanup command from killing its own setup shell."""
+
+    if isinstance(value, dict):
+        return {key: _sanitize_setup_task_config(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_setup_task_config(item) for item in value]
+    if isinstance(value, str):
+        return value.replace(
+            "pkill -f 'http.server 8539'",
+            "pkill -f '[h]ttp.server 8539' 2>/dev/null || true",
+        )
+    return value
+
+
 def _stage_setup_cache(task_config: Dict[str, Any], cache_dir: str, setup_cache_dir: Optional[str] = None) -> int:
     """Expose pre-staged read-only artifacts through OSWorld's task cache.
 
@@ -1991,7 +2006,7 @@ def run_osworld_task(
                 "Linked %d pre-staged setup cache entries for task %s", linked_cache_files, _safe_task_id(task_config)
             )
         rollout_phase = "environment_reset"
-        env.reset(task_config=task_config)
+        env.reset(task_config=_sanitize_setup_task_config(task_config))
         if use_gym_sandbox and runner_spec.kind == "pointer_agent":
             _install_guest_idle_inhibitor(env.setup_controller, task_logger)
         rollout_phase = "rollout"

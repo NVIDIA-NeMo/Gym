@@ -83,6 +83,10 @@ class TokenCaptureFrozenError(RuntimeError):
     """
 
 
+class CaptureAdmissionError(ValueError):
+    """Refuse a request whose capture state cannot safely admit generation."""
+
+
 class TokenCaptureRetiredError(TokenCaptureFrozenError):
     """Reject a write that arrived after its rollout's capture was retired.
 
@@ -180,6 +184,11 @@ class CaptureLedger(LineageResolver, Protocol):
     ``manifest`` returns both kinds of rows without including token arrays.
     ``retire`` and ``delete`` remove the rows of rollouts the framework no longer needs.
     Records must be visible to every serving worker before ``record`` returns.
+
+    Framework-owned capture additionally requires ``begin_call(rollout_id,
+    model_call_id)`` and ``close_admissions(rollout_id)``. They share one atomic
+    admission boundary: close returns a manifest and rejects new calls, while
+    existing intents may still commit. These extensions do not freeze writes.
     """
 
     async def record(self, commit: CaptureLedgerCommit) -> None:

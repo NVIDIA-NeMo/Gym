@@ -425,7 +425,7 @@ class TestRolloutCollection:
         )
         dispatched = []
 
-        async def post(server_name: str, url_path: str, json: dict) -> FakeResponse:
+        async def post(server_name: str, url_path: str, json: dict, *, _retry: bool = True) -> FakeResponse:
             assert url_path == "/run"
             assert server_name == f"{json[AGENT_REF_KEY_NAME]['name']}_environment_server"
             dispatched.append(json)
@@ -691,7 +691,7 @@ class TestRolloutCollection:
         first_wave_started = asyncio.Event()
         release = asyncio.Event()
 
-        async def post(server_name: str, url_path: str, json: dict) -> FakeResponse:
+        async def post(server_name: str, url_path: str, json: dict, *, _retry: bool = True) -> FakeResponse:
             assert url_path == "/run"
             started.append((json[AGENT_REF_KEY_NAME]["name"], json[TASK_INDEX_KEY_NAME]))
             if len(started) == 2:
@@ -736,7 +736,7 @@ class TestRolloutCollection:
         first_wave_started = asyncio.Event()
         release = asyncio.Event()
 
-        async def post(server_name: str, url_path: str, json: dict) -> FakeResponse:
+        async def post(server_name: str, url_path: str, json: dict, *, _retry: bool = True) -> FakeResponse:
             nonlocal active_total, max_active_total
             assert url_path == "/run"
             active_total += 1
@@ -787,7 +787,7 @@ class TestRolloutCollection:
         all_started = asyncio.Event()
         release = asyncio.Event()
 
-        async def post(server_name: str, url_path: str, json: dict) -> FakeResponse:
+        async def post(server_name: str, url_path: str, json: dict, *, _retry: bool = True) -> FakeResponse:
             nonlocal active
             assert server_name == "gamma_environment_server"
             assert url_path == "/run"
@@ -1568,6 +1568,18 @@ class TestRolloutCollection:
 
         with pytest.raises(ClientResponseError):
             await next(RolloutCollectionHelper().run_examples([failing_row()]))
+
+    @pytest.mark.parametrize("retry_requests", [True, False])
+    async def test_run_examples_controls_transport_replay(
+        self, monkeypatch: pytest.MonkeyPatch, retry_requests: bool
+    ) -> None:
+        """CC callers can prevent retrying a /run whose first attempt may have mutated state."""
+        post = AsyncMock(side_effect=ServerDisconnectedError())
+        install_fake_server_client(monkeypatch, post)
+        with pytest.raises(ServerDisconnectedError):
+            await next(RolloutCollectionHelper().run_examples([failing_row()], retry_requests=retry_requests))
+        assert post.await_count == 1
+        assert post.call_args.kwargs["_retry"] is retry_requests
 
     @pytest.mark.parametrize("error", [RuntimeError("dispatcher bug"), asyncio.CancelledError()])
     async def test_run_examples_propagates_non_request_failures(
@@ -6925,7 +6937,7 @@ class TestDispatchBudget:
         }
 
     def _helper(self, posted: list) -> RolloutCollectionHelper:
-        async def post(server_name, url_path, json):  # noqa: A002
+        async def post(server_name, url_path, json, *, _retry=True):  # noqa: A002
             posted.append(json[TASK_INDEX_KEY_NAME])
             return MagicMock(status=200)
 
@@ -7340,7 +7352,7 @@ class TestDispatchOrderReachesTheServer:
 
         posted: list = []
 
-        async def post(server_name, url_path, json):  # noqa: A002
+        async def post(server_name, url_path, json, *, _retry=True):  # noqa: A002
             posted.append(json[TASK_INDEX_KEY_NAME])
             await asyncio.sleep(0)
             return MagicMock(status=200)
