@@ -1435,6 +1435,54 @@ async def test_deepswe_agent_exit_137_requires_and_retains_confirmed_oom(
     sandbox.download.assert_not_awaited()
 
 
+async def test_deepswe_successful_split_agent_exec_is_not_marked_failed(tmp_path: Path) -> None:
+    config = TestOpenCodeSandboxedAgent()._create_config()
+    config.artifacts_dir = str(tmp_path)
+    config.score_agent_sandbox_oom_as_zero = True
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = {"observability_enabled": False}
+    server = OpenCodeSandboxedAgent(config=config, server_client=client)
+
+    async def execute(command: str, **kwargs):
+        if "opencode session list" in command:
+            stdout, return_code = '[{"id":"session"}]', 0
+        elif "opencode export" in command:
+            stdout, return_code = "", 0
+        elif "opencode db" in command:
+            stdout, return_code = "", 1
+        elif "opencode run" in command:
+            stdout, return_code = "OpenCode run finished", 0
+        else:
+            stdout, return_code = "Shell: bash\nInstalled OpenCode", 0
+        return SimpleNamespace(stdout=stdout, stderr="", return_code=return_code, error_type=None)
+
+    async def download(remote: str, local: Path) -> None:
+        local.write_text(Path(__file__).with_name("opencode_export_test_data.json").read_text())
+
+    sandbox = MagicMock(
+        exec=AsyncMock(side_effect=execute), upload=AsyncMock(), download=AsyncMock(side_effect=download)
+    )
+    server._sandbox_id_to_sandbox = {"seeded-sandbox": sandbox}
+    server._create_opencode_config = AsyncMock(return_value={})
+
+    response = await server.responses(
+        MagicMock(
+            cookies={"sandbox_id": "seeded-sandbox"},
+            session={SESSION_ID_KEY: "trial"},
+            path_params={},
+            state=SimpleNamespace(),
+        ),
+        NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}]),
+    )
+
+    run_result = server._sandbox_id_to_run_result["seeded-sandbox"]
+    assert response.output
+    assert run_result["opencode_finished"] is True
+    assert run_result["opencode_export_found"] is True
+    assert run_result["opencode_failed"] is False
+    sandbox.download.assert_awaited_once()
+
+
 async def test_deepswe_setup_failure_is_not_scored_as_agent_oom(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
     config = TestOpenCodeSandboxedAgent()._create_config()
     config.artifacts_dir = str(tmp_path)

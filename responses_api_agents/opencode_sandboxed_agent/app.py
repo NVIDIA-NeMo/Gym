@@ -1181,9 +1181,13 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         result_stdout = (result.stdout if result else "") or ""
         result_stderr = (result.stderr if result else "") or ""
         opencode_finished = False
-        std_out_split = result_stdout.rsplit("Shell: ", maxsplit=1)
-        if len(std_out_split) > 1:
-            opencode_finished = "OpenCode run finished" in std_out_split[1]
+        if self.config.score_agent_sandbox_oom_as_zero:
+            # Setup runs in a separate exec, so its "Shell:" marker is absent here.
+            opencode_finished = "OpenCode run finished" in result_stdout
+        else:
+            std_out_split = result_stdout.rsplit("Shell: ", maxsplit=1)
+            if len(std_out_split) > 1:
+                opencode_finished = "OpenCode run finished" in std_out_split[1]
 
         if collect_observations and observations is not None:
             agent_sandbox_observation = self._agent_sandbox_observation(
