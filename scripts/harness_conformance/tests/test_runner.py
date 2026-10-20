@@ -76,9 +76,14 @@ def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, use_agent_
         SingleAgentTurnEnvironmentServerConfig.model_validate(
             config["probe_environment"]["environment_servers"][environment_type]
         )
-        assert agent["sandbox_config"]["workdir"] == str(tmp_path / "workspace")
         assert "resources_server" not in agent
-        assert config[agent["sandbox_provider"]] == {"local": {"concurrency": 1}}
+        if harness == "nooa":
+            assert agent["nooa"]["execution_mode"] == "sandboxed"
+            assert "sandbox_config" not in agent and "sandbox_provider" not in agent
+            assert config["probe_sandbox"] == {"conformance_local": {"concurrency": 1}}
+        else:
+            assert agent["sandbox_config"]["workdir"] == str(tmp_path / "workspace")
+            assert config[agent["sandbox_provider"]] == {"local": {"concurrency": 1}}
         if harness == "codex":
             assert "cwd" not in agent and "extra_config" not in agent
         if harness == "opencode":

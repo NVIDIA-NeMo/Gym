@@ -14,6 +14,7 @@ class NOOATerminationReason(StrEnum):
     MAX_OUTPUT_TOKENS_EXCEEDED = "max_output_tokens_exceeded"
     LOOP_DETECTED = "loop_detected"
     INVALID_POLICY_OUTPUT = "invalid_policy_output"
+    MODEL_REJECTED = "model_rejected"
     TIMEOUT_EXCEEDED = "timeout_exceeded"
     CANCELLED = "cancelled"
     INFRASTRUCTURE_ERROR = "infrastructure_error"

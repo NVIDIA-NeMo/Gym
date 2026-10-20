@@ -9,4 +9,5 @@ HARNESSES = {
     "codex": "CodexAgent",
     "hermes": "HermesAgent",
     "stirrup": "StirrupAgentWrapper",
+    "nooa": "NOOAAgent",
 }

@@ -21,7 +21,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from time import perf_counter, time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from pydantic_core import to_json
@@ -49,6 +49,10 @@ from nemo_gym.rollout_observability import (
 )
 from responses_api_agents.nooa_agent.gym_llm import GymModelCall, RolloutLLMState
 from responses_api_agents.nooa_agent.termination import NOOATerminationReason
+
+
+if TYPE_CHECKING:
+    from nooa.agent import Agent
 
 
 def _json_output(value: Any) -> str:
@@ -86,6 +90,8 @@ class GymTraceHooks:
         self._current: ContextVar[str] = ContextVar("gym_nooa_invocation", default="root")
         self._invocations: dict[str, AgentInvocation] = {}
         self._events: list[GymModelCall | _ToolCall] = []
+        self._python_outputs: dict[tuple[str, str], str] = {}
+        self._python_output_gaps: set[tuple[str, str]] = set()
         self._on_progress = on_progress
 
     def _invocation(self, identity: str) -> AgentInvocation:
@@ -208,8 +214,65 @@ class GymTraceHooks:
     def after_method_invocation(self, **_: Any) -> None:
         pass
 
-    def on_messages_built(self, **_: Any) -> None:
-        pass
+    def on_messages_built(self, *, agent: Agent, messages: list[object], **_: Any) -> None:
+        """Join typed Python results to the exact feedback NOOA rendered for the model."""
+        from nooa.context_blocks.models import BlockMetadata, ResolvedBlock
+        from nooa.context_blocks.renderer import render_context
+        from nooa.events import PythonOutput
+
+        owned_tools = {
+            (event.observation.invocation_id, event.observation.tool_call_id)
+            for event in self._events
+            if isinstance(event, _ToolCall)
+        }
+        visible_text = {
+            item["content"]
+            for item in messages
+            if isinstance(item, dict) and item.get("role") == "user" and isinstance(item.get("content"), str)
+        }
+        for event in agent.events.query(type="PythonOutput"):
+            if not isinstance(event, PythonOutput):
+                continue
+            invocation_id = event.metadata.get("call_id") or self._current.get()
+            key = (invocation_id, event.tool_call_id)
+            if key not in owned_tools or invocation_id != self._current.get():
+                continue
+            tag = event.tag if event.tag is not None else event.id
+            # Use NOOA's configured renderer and persisted per-event truncation,
+            # then verify the result against the actual messages. Neither repr
+            # parsing nor stdout that resembles another event can establish a join.
+            try:
+                rendered = render_context(
+                    [
+                        ResolvedBlock(
+                            key=f"event_{tag}",
+                            content="",
+                            role=event.event_role,
+                            metadata=BlockMetadata(expr=f'self.events["{tag}"]', tag=tag),
+                            event=event,
+                        )
+                    ],
+                    block_formatter=agent.render_config.block_formatter,
+                    provider_formatter=agent.render_config.provider_formatter,
+                    event_format_resolver=agent.runtime._event_format_for_event,
+                ).output
+                outputs = [
+                    item["content"]
+                    for item in rendered
+                    if isinstance(item, dict)
+                    and item.get("role") == "user"
+                    and isinstance(item.get("content"), str)
+                    and item["content"] in visible_text
+                ]
+            except Exception:
+                # A custom formatter may require the full context. Observability
+                # must retain captured execution evidence when an exact join fails.
+                outputs = []
+            if len(outputs) == 1:
+                self._python_outputs[key] = outputs[0]
+                self._python_output_gaps.discard(key)
+            elif key not in self._python_outputs:
+                self._python_output_gaps.add(key)
 
     def project(
         self,
@@ -228,14 +291,33 @@ class GymTraceHooks:
         turns: list[TrajectoryTurn] = []
         turn_counts: dict[str, int] = {}
         initialized_inputs: set[str] = set()
-        # Prefer tool outputs actually sent to the model over an interpreter's
-        # structured return object; keep captured output when no later turn exists.
+        # Requests preserve native history; responses cover final calls that have
+        # not been replayed yet. Prefer the latest captured request for each call.
+        call_items = {}
+        visible_messages: dict[str, set[str]] = {}
+        for call in state.calls:
+            items = _input_items(call.request.input)
+            for item in [*(call.response.output if call.response is not None else []), *items]:
+                if isinstance(item, NeMoGymResponseFunctionToolCall):
+                    call_items[(call.invocation_id, item.call_id)] = item
+            visible_messages.setdefault(call.invocation_id, set()).update(
+                item.content
+                for item in items
+                if getattr(item, "role", None) == "user" and isinstance(getattr(item, "content", None), str)
+            )
+        # Python tool results acknowledge acceptance; execution feedback arrives
+        # separately as a PythonOutput user event. Only use verified feedback that
+        # reached a captured request, not a prompt stopped by the policy-call budget.
+        python_outputs = {
+            key: value for key, value in self._python_outputs.items() if value in visible_messages.get(key[0], set())
+        }
         visible_outputs = {
             (call.invocation_id, item.call_id): item.output
             for call in state.calls
-            for item in call.request.input
+            for item in _input_items(call.request.input)
             if isinstance(item, NeMoGymFunctionCallOutput)
         }
+        visible_outputs.update(python_outputs)
         for event in self._events:
             if isinstance(event, GymModelCall):
                 invocation = invocations[event.invocation_id]
@@ -284,16 +366,24 @@ class GymTraceHooks:
                 # Copy the observation shell; output is replaced with serialized evidence below.
                 record = event.observation.model_copy()
                 invocation = invocations[record.invocation_id]
-                record.output = visible_outputs.get((record.invocation_id, record.tool_call_id), record.output)
+                key = (record.invocation_id, record.tool_call_id)
+                record.output = visible_outputs.get(key, record.output)
+                captured_call = call_items.get(key)
+                if captured_call is not None:
+                    record.tool_name = captured_call.name
                 if not any(
                     isinstance(item, NeMoGymResponseFunctionToolCall) and item.call_id == record.tool_call_id
                     for item in invocation.conversation
                 ):
-                    call_item = NeMoGymResponseFunctionToolCall(
-                        id=record.tool_call_id,
-                        call_id=record.tool_call_id,
-                        name=record.tool_name,
-                        arguments=_json_output(event.arguments),
+                    call_item = (
+                        captured_call.model_copy(deep=True)
+                        if captured_call is not None
+                        else NeMoGymResponseFunctionToolCall(
+                            id=record.tool_call_id,
+                            call_id=record.tool_call_id,
+                            name=record.tool_name,
+                            arguments=_json_output(event.arguments),
+                        )
                     )
                     invocation.conversation.append(call_item)
                     output.append(call_item)
@@ -314,6 +404,18 @@ class GymTraceHooks:
                 output.append(result_item)
                 tools.append(record)
 
+        # The first request can replace an earlier prefill result with its native
+        # acceptance receipt. Normalize after that merge as collection obtains tool
+        # outputs from this conversation. Exact model-call requests stay untouched.
+        for invocation in invocations.values():
+            invocation.conversation = [
+                item.model_copy(update={"output": python_outputs[(invocation.invocation_id, item.call_id)]})
+                if isinstance(item, NeMoGymFunctionCallOutput)
+                and (invocation.invocation_id, item.call_id) in python_outputs
+                else item
+                for item in invocation.conversation
+            ]
+
         if not invocations:
             invocations["root"] = AgentInvocation(invocation_id="root", status="completed")
         if not initialized_inputs:
@@ -321,15 +423,28 @@ class GymTraceHooks:
             if root is not None:
                 root.conversation = [*_input_items(create_params.input), *root.conversation]
 
+        gaps = [
+            *state.gaps,
+            *(
+                ObservationGap(
+                    code="python_output_projection_unavailable",
+                    invocation_id=invocation_id,
+                    detail=f"Native execution feedback for {call_id} did not join exactly to the rendered messages.",
+                )
+                for invocation_id, call_id in sorted(self._python_output_gaps)
+            ),
+        ]
         observations = AgentObservationBundle(
             source="nooa",
             records=[
                 *invocations.values(),
                 *(ToolCallObservation.model_validate(tool.model_dump(exclude={"output"})) for tool in tools),
             ],
-            gaps=list(state.gaps),
+            gaps=gaps,
         )
-        usages = [call.response.usage if call.response is not None else None for call in state.calls]
+        # Aggregate only returned responses. A failed attempt has no reported
+        # usage of its own; it must not erase known totals or invent per-call zeroes.
+        usages = [call.response.usage for call in state.calls if call.response is not None]
         latest_response = next((call.response for call in reversed(state.calls) if call.response is not None), None)
         episode = AgentEpisode(
             response=NeMoGymResponse(
@@ -343,9 +458,7 @@ class GymTraceHooks:
                 tool_choice=create_params.tool_choice,
                 parallel_tool_calls=create_params.parallel_tool_calls,
                 usage=(
-                    NeMoGymResponseUsage.sum_from_list(usages)
-                    if usages and all(usage is not None for usage in usages)
-                    else None
+                    NeMoGymResponseUsage.sum_from_list(usages) if all(usage is not None for usage in usages) else None
                 ),
             ),
             observations=observations,
@@ -356,7 +469,7 @@ class GymTraceHooks:
             invocations=list(invocations.values()),
             turns=turns,
             tool_calls=tools,
-            gaps=list(state.gaps),
+            gaps=gaps,
         )
         return episode, trajectory
 

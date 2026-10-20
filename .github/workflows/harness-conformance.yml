@@ -47,6 +47,8 @@ jobs:
     if: needs.select.outputs.harnesses != '' && needs.select.outputs.harnesses != '[]'
     runs-on: ubuntu-latest
     timeout-minutes: 35
+    # NOOA's private task runtime belongs to a disposable container, never the runner host.
+    container: ${{ matrix.harness == 'nooa' && fromJSON('{"image":"python:3.13.14-slim","options":"--init"}') || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -54,6 +56,9 @@ jobs:
     env:
       HARNESS: ${{ matrix.harness }}
     steps:
+      - name: Install NOOA container tools
+        if: matrix.harness == 'nooa'
+        run: apt-get update && apt-get install -y --no-install-recommends git curl
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           submodules: recursive

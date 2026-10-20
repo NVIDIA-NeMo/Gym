@@ -22,6 +22,7 @@ from responses_api_agents.nooa_agent.tests.test_gym_llm import model_response
         (NOOATerminationReason.MAX_OUTPUT_TOKENS_EXCEEDED, "max_output_tokens_exceeded", "incomplete"),
         (NOOATerminationReason.LOOP_DETECTED, "loop_detected", "incomplete"),
         (NOOATerminationReason.INVALID_POLICY_OUTPUT, "invalid_policy_output", "failed"),
+        (NOOATerminationReason.MODEL_REJECTED, "model_rejected", "failed"),
         (NOOATerminationReason.TIMEOUT_EXCEEDED, "timeout_exceeded", "incomplete"),
         (NOOATerminationReason.CANCELLED, "cancelled", "cancelled"),
         (NOOATerminationReason.INFRASTRUCTURE_ERROR, "infrastructure_error", "failed"),
@@ -97,6 +98,39 @@ def test_cancellation_clears_response_error_and_preserves_partial_output_and_dia
     assert [gap.model_dump(mode="json") for gap in observations.gaps] == [
         {"code": "cancelled", "invocation_id": None, "detail": diagnostic}
     ]
+
+
+def test_model_rejection_survives_worker_result_json_without_becoming_infrastructure_failure() -> None:
+    from responses_api_agents.nooa_agent.sandbox_entrypoint import SandboxResult
+
+    diagnostic = "400: Original provider error: unsupported request"
+    result = NOOARunResult(
+        episode=AgentEpisode(
+            response=NeMoGymResponse.model_validate(model_response()),
+            observations=AgentObservationBundle(source="nooa"),
+        ),
+        return_value=None,
+        model_cookies={},
+        resource_cookies={},
+        termination_reason=NOOATerminationReason.MODEL_REJECTED,
+        termination_error=diagnostic,
+    )
+    response, observations = finalize_run_result(result)
+    artifact = SandboxResult(
+        response=response,
+        observations=observations,
+        model_cookies={},
+        resource_cookies={},
+        termination_reason=result.termination_reason,
+        termination_error=result.termination_error,
+    )
+
+    restored = SandboxResult.model_validate_json(artifact.model_dump_json())
+    assert restored.error is None
+    assert restored.termination_reason is NOOATerminationReason.MODEL_REJECTED
+    restored_response, _ = finalize_run_result(restored.run_result())
+    assert restored_response.status == "failed"
+    assert restored_response.error.message == restored.termination_error == diagnostic
 
 
 @pytest.mark.parametrize("reason", ["timeout", "agent_run_timeout", "transient", "legitimate", "unknown"])

@@ -26,6 +26,7 @@ from types import FrameType
 from typing import Any, Protocol
 from uuid import uuid4
 
+from aiohttp import ClientResponseError
 from nooa.errors import GenerationError, LoopDetectedError
 from nooa.runtime.hooks import hooks_scope
 from nooa.strategies.codeact import CodeActSession, CodeActStrategy
@@ -255,13 +256,23 @@ class InProcessNOOARunner:
             # Only known NOOA strategy wrappers deliberately chain model errors.
             # Cleanup failures can carry a preceding limit as context and must stay fatal.
             cause: BaseException | None = error
-            if getattr(error, "nooa_cleanup_errors", ()) or isinstance(
-                getattr(error, "nooa_cleanup_error", None), Exception
-            ):
-                cause = None
             seen: set[int] = set()
             while isinstance(error, Exception) and cause is not None and id(cause) not in seen:
                 seen.add(id(cause))
+                if getattr(cause, "nooa_cleanup_errors", ()) or isinstance(
+                    getattr(cause, "nooa_cleanup_error", None), Exception
+                ):
+                    break
+                if (
+                    cause is state.fatal_error
+                    and isinstance(cause, ClientResponseError)
+                    and cause.status in {400, 413, 422}
+                ):
+                    # Match other harnesses for terminal request rejection while
+                    # requiring the error to originate in this invocation's model call.
+                    termination_reason = NOOATerminationReason.MODEL_REJECTED
+                    termination_error = str(cause)
+                    break
                 if isinstance(cause, OutputTokenLimitExceeded):
                     termination_reason = NOOATerminationReason.MAX_OUTPUT_TOKENS_EXCEEDED
                     termination_error = str(cause)
@@ -291,7 +302,7 @@ class InProcessNOOARunner:
                 cause = cause.__cause__
 
         fatal_error = dispatcher.fatal_error
-        if state.fatal_error is not None:
+        if state.fatal_error is not None and termination_reason is not NOOATerminationReason.MODEL_REJECTED:
             # A budget or output error after an unrecovered transport failure
             # still lacks a valid rollout to grade. Keep the terminal cause.
             termination_reason = None
