@@ -1,0 +1,33 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "default_agent": "bbh",
+  "subagent_depth": 0,
+  "compaction": {
+    "auto": false
+  },
+  "mcp": {
+    "bbh": {
+      "type": "remote",
+      "url": "http://127.0.0.1:{env:BBH_MCP_PORT}/mcp",
+      "enabled": true,
+      "timeout": 300000
+    }
+  },
+  "provider": {
+    "nvinf": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "NVIDIA Inference",
+      "options": {
+        "baseURL": "https://inference-api.nvidia.com/v1",
+        "apiKey": "{env:NVINF_API_KEY}"
+      }
+    },
+    "vllm": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Self-Hosted vLLM",
+      "options": {
+        "baseURL": "{env:VLLM_API_BASE}"
+      }
+    }
+  }
+}
