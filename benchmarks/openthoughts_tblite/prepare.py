@@ -25,7 +25,8 @@ TASKS_DIR = BENCHMARK_DIR / "data" / "tasks"
 OUTPUT_PATH = BENCHMARK_DIR / "data" / "benchmark.jsonl"
 
 TASK_REPOSITORY = "https://github.com/open-thoughts/OpenThoughts-TBLite.git"
-TASK_REVISION = "f075e463472c7790b85793b392dff1fff20cc0e3"  # Harbor registry openthoughts-tblite@2.0
+# Harbor registry openthoughts-tblite@2.0
+TASK_REVISION = "f075e463472c7790b85793b392dff1fff20cc0e3"  # pragma: allowlist secret
 # The tasks ship only Dockerfiles. These are copies of NousResearch's builds (nousresearch/tblite-<task>:latest)
 # under fixed tags, since a `latest` tag can be repointed.
 DOCKER_IMAGE = "docker.io/kbuchanan31150/tblite:{task}"
