@@ -14,8 +14,11 @@
 # limitations under the License.
 
 import base64
+import contextlib
+import os
 import re
 import shlex
+import signal
 import subprocess
 from pathlib import Path
 
@@ -2616,3 +2619,68 @@ def test_a_ray_head_on_node_0_is_probed_locally(tmp_path):
     }
     script = _render(tmp_path, {"policy": _vllm(8000, "gpu", tensor_parallel_size=4), "ray": ray})
     assert "Waiting for ray at http://localhost:8011" in script
+
+
+def _run_job_script(tmp_path, *, service: str, driver: str) -> subprocess.CompletedProcess:
+    """Run a rendered job.sh with a fake `srun` on PATH: the vllm_model step runs `service`, the driver `driver`."""
+    config = SubmitConfig.model_validate(
+        {
+            "services": {"vllm_model": {"type": "vllm", "container": "vllm:latest", "model": "org/model"}},
+            "compute": {"cluster": {"type": "slurm", "account": "acct"}},
+            "driver": {"container": "gym:latest", "benchmarks": {"b": {"run": {}}}},
+            "job": {"output_path": str(tmp_path)},
+            "otel": {"enabled": False},
+        }
+    )
+    script = build_sbatch_script(config, "b", config.driver.benchmarks["b"], config.compute["cluster"], tmp_path)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fakes = {"srun": f'case "$*" in *logs/driver-*) {driver} ;; *) {service} ;; esac', "curl": "exit 0"}
+    for name, body in fakes.items():
+        (bin_dir / name).write_text(f"#!/bin/bash\n{body}\n")
+        (bin_dir / name).chmod(0o755)
+    (tmp_path / "job.sh").write_text(script)
+    # A file, not a pipe: a service still running when the script exits would hold a pipe open.
+    with (tmp_path / "job.out").open("w") as out:
+        process = subprocess.Popen(
+            ["bash", "job.sh"],
+            stdout=out,
+            stderr=subprocess.STDOUT,
+            cwd=tmp_path,
+            env={"PATH": f"{bin_dir}:/usr/bin:/bin", "SLURM_JOB_ID": "1"},
+            start_new_session=True,
+        )
+        try:
+            returncode = process.wait(timeout=60)
+        finally:
+            # Slurm stops the steps a job leaves running; here the fake steps are killed with the job's group.
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+    return subprocess.CompletedProcess(["job.sh"], returncode, (tmp_path / "job.out").read_text())
+
+
+def test_a_service_that_exits_mid_run_ends_the_job_and_names_the_service(tmp_path):
+    # The service passes its health check and dies 1 s in; the driver alone would run for 10 minutes.
+    result = _run_job_script(
+        tmp_path,
+        service="sleep 1; exit 3",
+        driver="trap 'echo driver got TERM; exit 143' TERM; sleep 600 & wait",
+    )
+
+    assert result.returncode == 1
+    assert "service vllm_model exited (status 3) while the driver was running" in result.stdout
+    assert "driver got TERM" in result.stdout
+
+
+def test_the_driver_exit_code_stands_when_the_driver_finishes_first(tmp_path):
+    result = _run_job_script(tmp_path, service="exec sleep 600", driver="exit 7")
+
+    assert result.returncode == 7
+    assert "exited" not in result.stdout
+
+
+def test_ray_workers_are_watched_and_the_collector_is_not(tmp_path):
+    script = _driver_on_aux(tmp_path, {"ray": _RAY_WITH_PROBE})
+    watch = script[script.index("_gym_run_driver() {") : script.index("\n_gym_run_driver\n")]
+    assert "OTEL_COLLECTOR_PID=$!" in script
+    assert re.findall(r"_gym_service_exited (\S+) ", watch) == ["policy", "ray", "ray_gpu_workers"]

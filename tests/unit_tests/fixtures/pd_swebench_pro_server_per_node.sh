@@ -139,7 +139,26 @@ GYM_CMD=(
     +model_call_capture_dir=/jobs/swebench_pro/model-calls
     +require_complete=True
 )
-env NEMO_GYM_OTEL_ENABLED=1 NEMO_GYM_OTEL_RUN_ID=jobs NEMO_GYM_OTEL_SPAN_GROUPS=default,verify NEMO_GYM_OTEL_LOGS_ENABLED=1 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf srun --overlap --no-container-mount-home --nodelist="${gym_nodes[0]}" --nodes=1 --ntasks=1 --container-mounts=/jobs/swebench_pro:/jobs/swebench_pro --container-image=img --output=logs/driver-$SLURM_JOB_ID.log "${GYM_CMD[@]}"
+env NEMO_GYM_OTEL_ENABLED=1 NEMO_GYM_OTEL_RUN_ID=jobs NEMO_GYM_OTEL_SPAN_GROUPS=default,verify NEMO_GYM_OTEL_LOGS_ENABLED=1 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf srun --overlap --no-container-mount-home --nodelist="${gym_nodes[0]}" --nodes=1 --ntasks=1 --container-mounts=/jobs/swebench_pro:/jobs/swebench_pro --container-image=img --output=logs/driver-$SLURM_JOB_ID.log "${GYM_CMD[@]}" &
+DRIVER_PID=$!
+_gym_service_exited() {
+    wait "$2"
+    local status=$?
+    echo "ERROR: service $1 exited (status $status) while the driver was running; stopping the driver."
+    kill -TERM $DRIVER_PID 2>/dev/null
+    wait $DRIVER_PID
+    return 1
+}
+_gym_run_driver() {
+    while kill -0 $DRIVER_PID 2>/dev/null; do
+        kill -0 $POLICY_PREFILL_PID 2>/dev/null || { _gym_service_exited policy-prefill $POLICY_PREFILL_PID; return; }
+        kill -0 $POLICY_DECODE_PID 2>/dev/null || { _gym_service_exited policy-decode $POLICY_DECODE_PID; return; }
+        kill -0 $POLICY_PID 2>/dev/null || { _gym_service_exited policy $POLICY_PID; return; }
+        sleep 5
+    done
+    wait $DRIVER_PID
+}
+_gym_run_driver
 DRIVER_RC=$?
 sleep 20
 pkill -TERM -u "$USER" -f -- '^otelcol\-contrib --config /jobs/swebench_pro/otel/collector\.yaml' || true

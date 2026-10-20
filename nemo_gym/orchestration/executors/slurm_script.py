@@ -555,6 +555,12 @@ def _pool_of(compute: SlurmComputeConfig, node: int) -> str | None:
     return None
 
 
+def _ray_steps(name: str, service: RayServiceConfig, config: SubmitConfig, compute: SlurmComputeConfig) -> list[str]:
+    """The srun step names of a ray service, as _render_ray_service names them."""
+    head_node = _driver_node(config, compute)
+    return [name] + [f"{name}_{pool}_workers" for pool in _ray_worker_ranges(service, compute, head_node)]
+
+
 def _render_ray_service(
     name: str,
     service: RayServiceConfig,
@@ -755,6 +761,43 @@ def _render_collector_shutdown(config: SubmitConfig, remote_bench_dir: Path) -> 
         f"kill -TERM {pid} 2>/dev/null || true\n"
         "exit $DRIVER_RC"
     )
+
+
+_WATCHED_DRIVER_TEMPLATE = """\
+{driver} &
+DRIVER_PID=$!
+_gym_service_exited() {{
+    wait "$2"
+    local status=$?
+    echo "ERROR: service $1 exited (status $status) while the driver was running; stopping the driver."
+    kill -TERM $DRIVER_PID 2>/dev/null
+    wait $DRIVER_PID
+    return 1
+}}
+_gym_run_driver() {{
+    while kill -0 $DRIVER_PID 2>/dev/null; do
+{checks}
+        sleep 5
+    done
+    wait $DRIVER_PID
+}}
+_gym_run_driver"""
+
+
+def _render_watched_driver(driver: str, services: list[str]) -> str:
+    """The driver step, ended with TERM if a service it depends on exits first.
+
+    A dead service would otherwise leave the driver retrying it until the walltime. The job exits
+    non-zero instead, so the auto-resume chain reruns it with fresh services; TERM is what the
+    driver gets at the time limit, so its in-flight rollouts leave no row and run again on resume.
+    """
+    if not services:
+        return driver
+    checks = "\n".join(
+        f"        kill -0 ${bash_var(name)}_PID 2>/dev/null || {{ _gym_service_exited {name} ${bash_var(name)}_PID; return; }}"
+        for name in services
+    )
+    return _WATCHED_DRIVER_TEMPLATE.format(driver=driver, checks=checks)
 
 
 def _pool_offsets(compute: SlurmComputeConfig) -> dict[str, tuple[int, int]]:
@@ -1073,11 +1116,18 @@ def build_sbatch_script(
     # the host, which is what makes the loss so easy to miss.
     driver_mounts = [*config.driver.mounts, f"{remote_bench_dir}:{remote_bench_dir}"]
     driver_mounts_flag = f" --container-mounts={','.join(shlex.quote(m) for m in driver_mounts)}"
-    driver_command = (f"{gym_cmd}\n" if gym_cmd else "") + (
+    driver_srun = (
         f"{driver_env_prefix}srun --overlap --no-container-mount-home{driver_node_flags}{driver_mounts_flag}"
         f" --container-image={shlex.quote(config.driver.container)} "
         f"--output=logs/driver-$SLURM_JOB_ID.log {entrypoint}"
     )
+    # Every service step but the collector, whose loss costs telemetry, not the run.
+    watched = [
+        step
+        for name, service in config.deployed_services.items()
+        for step in (_ray_steps(name, service, config, compute) if isinstance(service, RayServiceConfig) else [name])
+    ]
+    driver_command = (f"{gym_cmd}\n" if gym_cmd else "") + _render_watched_driver(driver_srun, watched)
     if observed:
         driver_command += "\n" + _render_collector_shutdown(config, remote_bench_dir)
 
