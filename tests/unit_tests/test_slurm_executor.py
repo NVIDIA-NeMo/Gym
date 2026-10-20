@@ -125,6 +125,7 @@ def _submit_config(tmp_path, benchmarks):
             "compute": {"hsg": {"type": "slurm", "account": "my-account", "hostname": None}},
             "driver": {"container": "gym:latest", "benchmarks": {name: {} for name in benchmarks}},
             "job": {"output_path": str(tmp_path / "jobs")},
+            "otel": {"enabled": False},
         }
     )
 
@@ -196,6 +197,23 @@ def test_run_writes_the_local_index(tmp_path, monkeypatch):
     assert SubmissionRecord.load(json.loads(index.read_text())) == record
 
 
+def test_run_dir_is_readable_by_other_users_but_secrets_are_not(tmp_path, monkeypatch):
+    # Staging happens in a 0700 temp dir and the copy keeps modes, so without an explicit
+    # chmod every run dir lands private to the submitter. job.sh holds the resolved secrets;
+    # the resolved config holds only `host:` references, so it is written like the manifest.
+    conn = _FakeConnection(["__GYM_JOB:bench_a:0:111 "])
+    _install(monkeypatch, conn)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+
+    record = SlurmExecutor().run(_submit_config(tmp_path, ["bench_a"]))
+
+    run_dir = Path(record.run_dir)
+    assert oct(run_dir.stat().st_mode & 0o777) == oct(0o755)
+    assert oct((run_dir / "bench_a" / "job.sh").stat().st_mode & 0o777) == oct(0o600)
+    manifest_mode = (run_dir / MANIFEST_NAME).stat().st_mode & 0o777
+    assert oct((run_dir / RESOLVED_CONFIG_NAME).stat().st_mode & 0o777) == oct(manifest_mode)
+
+
 def test_run_records_a_failed_benchmark_without_disturbing_the_others(tmp_path, monkeypatch):
     conn = _FakeConnection(
         ["__GYM_JOB:bench_a:0:111 \n__GYM_JOB:bench_b:1:sbatch: error: bad account \n__GYM_JOB:bench_c:0:333 "]
@@ -241,7 +259,7 @@ def test_two_runs_in_the_same_second_get_different_run_dirs(tmp_path, monkeypatc
 
 def test_a_failed_manifest_write_fails_the_submit_and_names_queued_jobs(tmp_path, monkeypatch):
     class _NoWrite(_FakeConnection):
-        def write_text(self, remote, content):
+        def write_text(self, remote, content, **_):
             raise RuntimeError("permission denied")
 
     conn = _NoWrite(["__GYM_JOB:bench_a:0:111 \n__GYM_JOB:bench_b:0:222 "])
@@ -388,3 +406,74 @@ class TestValidateMounts:
                 raise AssertionError("no mounts, so there is nothing to check")
 
         _validate_mounts(_config_with_driver_mounts(tmp_path, []), _Explodes())
+
+
+def test_a_missing_gym_install_ref_fails_before_anything_is_copied_or_queued(tmp_path, monkeypatch):
+    conn = _FakeConnection([])
+    _install(monkeypatch, conn)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+
+    def reject(config):
+        raise ValueError("ref not found")
+
+    monkeypatch.setattr(slurm_module, "validate_gym_install_ref", reject)
+
+    with pytest.raises(ValueError, match="ref not found"):
+        SlurmExecutor().run(_submit_config(tmp_path, ["bench_a"]))
+
+    assert conn.commands == []
+
+
+def test_runtime_credentials_reach_remote_sbatch_without_being_persisted(tmp_path, monkeypatch):
+    import subprocess
+
+    secret = "test secret with ' quotes and $(false)"
+    monkeypatch.setenv("SUBMIT_JUDGE_KEY", secret)
+    monkeypatch.setenv("UNREFERENCED_SECRET", "must stay local")
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    config = _submit_config(tmp_path, ["bench_a"])
+    config.driver.env = {"JUDGE_KEY": "runtime:SUBMIT_JUDGE_KEY"}
+    config.compute["hsg"].forward_env = ["SUBMIT_JUDGE_KEY"]
+    conn = _FakeConnection(["__GYM_JOB:bench_a:0:111 "])
+    _install(monkeypatch, conn)
+
+    record = SlurmExecutor().run(config)
+
+    commands = conn.commands[0]
+    exports = [command for command in commands if command.startswith("export ")]
+    probe = subprocess.run(
+        ["bash", "-s"],
+        input="\n".join(exports + ['printf %s "$SUBMIT_JUDGE_KEY"']),
+        text=True,
+        capture_output=True,
+        check=True,
+        env={},
+    )
+    assert probe.stdout == secret
+    assert "UNREFERENCED_SECRET" not in "\n".join(commands)
+    for path in Path(record.run_dir).rglob("*"):
+        if path.is_file():
+            assert secret not in path.read_text()
+
+
+def test_runtime_variable_is_not_implicitly_forwarded(tmp_path, monkeypatch):
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    config = _submit_config(tmp_path, ["bench_a"])
+    config.driver.env = {"CUDA_VISIBLE_DEVICES": "runtime:CUDA_VISIBLE_DEVICES"}
+    assert slurm_module._submission_env_exports(config.compute["hsg"]) == []
+
+
+def test_missing_forwarded_variable_fails_before_submission(tmp_path, monkeypatch):
+    monkeypatch.delenv("MISSING_JUDGE_KEY", raising=False)
+    config = _submit_config(tmp_path, ["bench_a"])
+    config.compute["hsg"].forward_env = ["MISSING_JUDGE_KEY"]
+    with pytest.raises(ValueError, match="MISSING_JUDGE_KEY"):
+        SlurmExecutor().run(config)
+
+
+@pytest.mark.parametrize("name", ["BAD;false", "X=Y", "", "1NAME"])
+def test_forwarded_variable_name_is_validated(tmp_path, name):
+    raw = _submit_config(tmp_path, ["bench_a"]).model_dump()
+    raw["compute"]["hsg"]["forward_env"] = [name]
+    with pytest.raises(ValueError, match="Invalid forward_env"):
+        SubmitConfig.model_validate(raw)

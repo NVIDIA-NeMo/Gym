@@ -26,6 +26,7 @@ from responses_api_agents.miniswe_sandboxed_agent.harness import HarnessOutcome
 
 @pytest.fixture
 async def fixture(tmp_path, monkeypatch):
+    monkeypatch.setattr(module, "get_server_url", lambda name: "http://gym-model:8000")
     server = TerminalBench4ResourcesServer(
         config=TerminalBench4Config(
             host="localhost",
@@ -403,29 +404,19 @@ async def test_setup_budget_covers_workdir_and_never_grades(fixture, monkeypatch
     assert all(env.closed for env in f.envs)
 
 
-async def test_live_model_callback_preserves_cookies_and_capture_route(fixture, monkeypatch):
+async def test_sandbox_model_url_keeps_training_capture_route(fixture, monkeypatch):
     f = fixture
     original = module.MiniSWEHarness
     model_response = module.empty_response(f.body.responses_create_params, "model")
-    post = f.agent.server_client.post.side_effect
-
-    async def model_post(**kwargs):
-        if kwargs["url_path"].endswith("/v1/responses"):
-            return SimpleNamespace(value=model_response.model_dump())
-        return await post(**kwargs)
-
-    f.agent.server_client.post.side_effect = model_post
-    monkeypatch.setattr(
-        module.MiniSWESandboxedAgent, "rollout_id_from_run", lambda self, body: body.capture_rollout_id
-    )
+    f.agent.server_client.global_config_dict = {"observability_enabled": True}
     monkeypatch.setattr(module.MiniSWESandboxedAgent, "_token_id_capture_enabled", lambda self: True)
 
     def harness(**kw):
         h = original(**kw)
 
         async def execute(budget):
-            response = await kw["query"]({"input": "task"})
-            return response, HarnessOutcome(reason="completed"), {}
+            assert kw["model_base_url"] == "http://gym-model:8000/ng-rollout/rollout-1/training-token-capture/v1"
+            return model_response, HarnessOutcome(reason="completed"), {}
 
         h.execute.side_effect = execute
         return h
@@ -435,12 +426,7 @@ async def test_live_model_callback_preserves_cookies_and_capture_route(fixture, 
         update={"capture_rollout_id": "rollout-1", "capture_model_calls": True, "capture_token_ids": True}
     )
     result = await f.agent.run(f.request, body)
-    call = next(
-        c.kwargs for c in f.agent.server_client.post.await_args_list if c.kwargs["url_path"].endswith("/v1/responses")
-    )
-    assert call["url_path"] == "/ng-rollout/rollout-1/training-token-capture/v1/responses"
-    assert call["cookies"] == {"session": "resource", "owner": "owner"}
-    assert call["headers"] == {"x-session-id": result.session_id}
+    assert [c.kwargs["url_path"] for c in f.agent.server_client.post.await_args_list] == ["/seed_session", "/verify"]
     assert result.response == model_response
     f.server._sessions.clear()
     f.server._by_identity.clear()
@@ -568,6 +554,120 @@ async def test_optional_agent_logs_do_not_discard_official_grade(fixture, monkey
     result = await f.agent.run(f.request, f.body)
     assert result.reward == 0.75
     assert any(d.get("operation") == "agent_logs" for d in f.server._sessions[result.session_id].diagnostics)
+
+
+@pytest.mark.parametrize("resource", ["storage", "memory"])
+@pytest.mark.parametrize("stage", ["execute", "quiesce", "agent_logs", "collect", "collect_diagnostic", "stop"])
+async def test_agent_sandbox_limit_death_is_a_replayable_zero(fixture, monkeypatch, resource, stage):
+    f = fixture
+    f.body = f.body.model_copy(update={"client_session_id": "owner"})
+    detail = (
+        "[SANDBOX::ENDED] Pod sandbox entered Failed phase (Evicted): "
+        "Pod ephemeral local storage usage exceeds the total limit of containers 10Gi."
+        if resource == "storage"
+        else "Sandbox was OOM-killed. OpenSandbox status: state='Failed', reason='OOMKilled'"
+    )
+    if resource == "storage" and stage == "execute":
+        detail = "Get command status failed: HTTP 410: " + json.dumps(
+            {"code": "SANDBOX::ENDED", "message": detail.removeprefix("[SANDBOX::ENDED] ")}
+        )
+    seed = await f.server.seed_session(f.request, f.body)
+    env = f.envs[0]
+    if stage == "execute":
+        original = module.MiniSWEHarness
+
+        def harness(**kwargs):
+            h = original(**kwargs)
+            h.execute.side_effect = RuntimeError(detail)
+            return h
+
+        monkeypatch.setattr(module, "MiniSWEHarness", harness)
+    elif stage == "quiesce":
+        env.quiesce_agent.side_effect = RuntimeError(detail)
+    elif stage == "agent_logs":
+        lifecycle.download_dir.side_effect = RuntimeError(detail)
+    elif stage == "collect":
+        lifecycle.collect.side_effect = RuntimeError(detail)
+    elif stage == "stop":
+        stop = env.stop.side_effect
+
+        async def stop_after_failure():
+            if env.stop.await_count == 1:
+                raise RuntimeError(detail)
+            await stop()
+
+        env.stop.side_effect = stop_after_failure
+    else:
+        lifecycle.collect.side_effect = lambda environment, directory, diagnostics: diagnostics.append(
+            {"operation": "collect_artifact", "error": detail}
+        )
+    result = await f.agent.run(f.request, f.body)
+    record = result.model_dump(mode="json")
+    session = f.server._sessions[result.session_id]
+    assert seed.session_id == result.session_id
+    assert session.verify_body.agent_started
+    assert result.reward == 0.0 and result.evaluation_completed
+    assert record["sandbox_resource_limit"]["resource"] == resource
+    assert record["sandbox_resource_limit"]["detail"].endswith(detail)
+    assert result.infrastructure_error is None and record["failure_reason"] is None
+    assert "_ng_failure_class" not in record and "_ng_failure_type" not in record
+    assert record["num_tests_total"] is None
+    assert session.result["verifier_result"] == {"rewards": {"reward": 0.0}, "source": "sandbox_resource_limit"}
+    assert any(d.get("operation") == "sandbox_resource_limit" for d in session.diagnostics)
+    assert session.result.get("verifier") is None
+    assert all(env.closed for env in f.envs)
+    assert f.server._slots._value == f.server.config.max_concurrent_sessions
+    f.grade.assert_not_awaited()
+    f.envs[1].start.assert_not_awaited()
+    if stage == "execute":
+        env.quiesce_agent.assert_not_awaited()
+    # Both HTTP retry and process restart must retain the counted zero and evidence.
+    assert (await f.server.verify(f.request, session.verify_body)).model_dump(mode="json") == record
+    f.server._sessions.clear()
+    f.server._by_identity.clear()
+    f.agent._runs.clear()
+    assert (await f.agent.run(f.request, f.body)).model_dump(mode="json") == record
+
+
+@pytest.mark.parametrize("stage", ["provision", "setup", "verifier_setup", "restore", "grade"])
+async def test_resource_failure_outside_agent_execution_remains_infrastructure(fixture, monkeypatch, stage):
+    f = fixture
+    f.body = f.body.model_copy(update={"client_session_id": "owner"})
+    detail = "[SANDBOX::ENDED] container sandbox terminated with OOMKilled (exit code 137)"
+    if stage == "provision":
+        original = lifecycle.Environment
+
+        def environment(*args, **kwargs):
+            env = original(*args, **kwargs)
+            if not kwargs.get("verifier"):
+                env.start.side_effect = RuntimeError(detail)
+            return env
+
+        monkeypatch.setattr(lifecycle, "Environment", environment)
+    elif stage == "setup":
+        original = module.MiniSWEHarness
+
+        def harness(**kwargs):
+            h = original(**kwargs)
+            h.setup.side_effect = RuntimeError(detail)
+            h.close = AsyncMock()
+            return h
+
+        monkeypatch.setattr(module, "MiniSWEHarness", harness)
+    else:
+        await f.server.seed_session(f.request, f.body)
+        if stage == "verifier_setup":
+            f.envs[1].start.side_effect = RuntimeError(detail)
+        elif stage == "restore":
+            lifecycle.restore.side_effect = RuntimeError(detail)
+        else:
+            f.grade.side_effect = RuntimeError(detail)
+    result = await f.agent.run(f.request, f.body)
+    assert not result.evaluation_completed
+    assert result.infrastructure_error
+    assert result.model_dump()["_ng_failure_class"] == "infrastructure_error"
+    assert result.sandbox_resource_limit is None
+    assert all(env.closed for env in f.envs)
 
 
 async def test_resource_routes_only_seed_and_verify(fixture):

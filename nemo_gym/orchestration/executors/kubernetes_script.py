@@ -48,12 +48,8 @@ OUTPUT_VOLUME_NAME = "gym-output"
 # Flat memory request for the driver container, which does no GPU work of its own: enough that it
 # isn't QoS class BestEffort either (see `_gpu_resources`), without needing its own config knob.
 DRIVER_MEMORY_REQUEST = "2Gi"
-# Kubernetes defaults a container's /dev/shm to 64Mi, which is enough for most workloads but not
-# vLLM's multiprocess engine: with tensor_parallel_size > 1 it talks to its GPU worker processes
-# over a /dev/shm-backed ring buffer, and starting one on the default allocation fails outright
-# ("Insufficient space in /dev/shm ... Increase /dev/shm (e.g. --shm-size or --ipc=host)") --
-# observed in practice at TP=2. A well-known vLLM-on-Kubernetes gotcha; 4Gi comfortably covers
-# ordinary single-node tensor-parallel sizes without eating meaningfully into `memory_per_gpu`.
+# K8s defaults /dev/shm to 64Mi; vLLM's multiprocess engine needs more at TP>1 or instances>1
+# ("Insufficient space in /dev/shm ... Increase /dev/shm"). 4Gi comfortably covers single-node use.
 SHM_VOLUME_NAME = "dshm"
 SHM_SIZE = "4Gi"
 
@@ -121,14 +117,13 @@ def _gpu_resources(gpu_count: int, memory_per_gpu: str) -> dict[str, Any]:
     memory = _scale_quantity(memory_per_gpu, gpu_count)
     return {
         "limits": {GPU_RESOURCE_KEY: gpu_count},
-        # A memory *request* (not just a GPU limit) so the pod isn't QoS class BestEffort --
-        # BestEffort pods are the kubelet's first choice to kill under node memory pressure, which
-        # otherwise silently SIGKILLs a GPU sidecar mid-startup on a busy shared node.
+        # A memory *request* (not just a GPU limit) so the pod isn't QoS class BestEffort, which
+        # the kubelet kills first under node memory pressure.
         "requests": {"memory": memory},
     }
 
 
-def _vllm_command(service: VllmServiceConfig, port: int) -> list[str]:
+def _vllm_command(service: VllmServiceConfig, port: int, *, single_node_dp: bool = True) -> list[str]:
     cmd = ["vllm", "serve", service.model, "--port", str(port)]
     if service.served_model_name:
         cmd += ["--served-model-name", service.served_model_name]
@@ -136,6 +131,10 @@ def _vllm_command(service: VllmServiceConfig, port: int) -> list[str]:
         cmd += ["--tensor-parallel-size", str(service.tensor_parallel_size)]
     if service.pipeline_parallel_size > 1:
         cmd += ["--pipeline-parallel-size", str(service.pipeline_parallel_size)]
+    if single_node_dp and service.number_of_instances > 1:
+        # vLLM's plain single-node DP mode: replicas run as local ranks in this one pod/port.
+        # Only viable when replica*TP*PP fits this node's GPUs (api.py's gpus_per_node check).
+        cmd += ["--data-parallel-size", str(service.number_of_instances)]
     if service.trust_remote_code:
         cmd.append("--trust-remote-code")
     if service.extra_args:
@@ -177,7 +176,8 @@ def _vllm_multi_node_command(
     SubmitConfig validation enforces this before build_job_manifest is ever called.
     """
     dp_size_local = service.number_of_instances // total_nodes
-    base = shlex.join(_vllm_command(service, port))
+    # The multi-node DP flags below replace _vllm_command's plain single-node --data-parallel-size.
+    base = shlex.join(_vllm_command(service, port, single_node_dp=False))
     dp_flags = (
         f" --data-parallel-size {service.number_of_instances}"
         f" --data-parallel-size-local {dp_size_local}"
@@ -236,7 +236,6 @@ def _sidecar_containers(
         if service.use_ray_serve:
             raise ValueError(f"Service '{name}': use_ray_serve is not supported by the kubernetes executor yet.")
         is_multi_node = total_nodes > 1 and service.number_of_instances > 1
-        is_single_node_multi_instance = total_nodes == 1 and service.number_of_instances > 1
         _reject_unsupported_mounts(service.mounts)
         gpu_count = service.tensor_parallel_size * service.pipeline_parallel_size
         if is_multi_node:
@@ -251,24 +250,18 @@ def _sidecar_containers(
             command = _vllm_multi_node_command(
                 service, service.port, total_nodes=total_nodes, head_service_fqdn=head_service_fqdn
             )
-        elif is_single_node_multi_instance:
-            # vLLM's plain single-node data-parallel mode: all replicas run as local ranks inside
-            # one process, sharing this one pod/port -- no --headless/--data-parallel-address
-            # split, no head Service, no Indexed Job needed. Only viable when the whole
-            # replica*TP*PP footprint fits this one node's GPUs (already enforced by
-            # SubmitConfig._resolve_and_validate_placements' gpus_per_node check).
-            gpu_count *= service.number_of_instances
-            command = _vllm_command(service, service.port) + ["--data-parallel-size", str(service.number_of_instances)]
         else:
+            # Single node: number_of_instances replicas all run in this one pod (vLLM's plain
+            # single-node data-parallel mode -- see _vllm_command), so the pod needs GPUs for all
+            # of them.
+            gpu_count *= service.number_of_instances
             command = _vllm_command(service, service.port)
         container: dict[str, Any] = {
             "name": _dns_label(name),
             "image": service.container,
-            "restartPolicy": "Always",  # Native sidecar (k8s >= 1.29): torn down after the pod's
-            # regular (driver) container finishes. A `startupProbe` (added below when a
-            # health_check is set) is what actually makes the driver WAIT for this one to be
-            # healthy first -- without it, kubelet starts the driver the instant this container's
-            # process launches, readinessProbe or not; readinessProbe alone never gates that.
+            "restartPolicy": "Always",  # Native sidecar (k8s >= 1.29): torn down after the
+            # driver finishes. Only startupProbe (below) delays the driver starting; readinessProbe
+            # alone doesn't gate it.
             "command": command,
             "ports": [{"containerPort": service.port}],
             "resources": _gpu_resources(gpu_count, compute.memory_per_gpu),
@@ -295,6 +288,21 @@ def _sidecar_containers(
     return containers
 
 
+def _command_env(benchmark: BenchmarkRunConfig, run_dir: str) -> dict[str, str]:
+    """Env a `command` benchmark gets in place of `gym eval run` arguments -- mirrors
+    slurm_script.py's _command_env, kept local to avoid coupling the two executor modules."""
+    env = {"NEMO_GYM_BENCH_DIR": run_dir}
+    for key, name in (
+        ("policy_base_url", "NEMO_GYM_POLICY_BASE_URL"),
+        ("policy_model_name", "NEMO_GYM_POLICY_MODEL_NAME"),
+        ("policy_api_key", "NEMO_GYM_POLICY_API_KEY"),
+    ):
+        value = benchmark.run.get(key)
+        if value is not None:
+            env[name] = str(value)
+    return env
+
+
 def _driver_command(
     config: SubmitConfig,
     benchmark_name: str,
@@ -307,12 +315,19 @@ def _driver_command(
     if benchmark.prepare:
         prepare_cmd = "gym eval prepare " + " ".join(flatten_run_args(benchmark.prepare))
 
-    output_path = f"+output_jsonl_fpath={run_dir}/{ARTIFACTS_DIRNAME}/rollouts.jsonl"
-    policy_type = config.driver.policy_model_type
-    extra_flags = [f"--model-type {shlex.quote(policy_type)}"] if config.driver.policy_model and policy_type else []
-    gym_cmd = render_gym_cmd("eval run", "GYM_CMD", [output_path] + extra_flags + flatten_run_args(benchmark.run))
+    if benchmark.command is None:
+        output_path = f"+output_jsonl_fpath={run_dir}/{ARTIFACTS_DIRNAME}/rollouts.jsonl"
+        policy_type = config.driver.policy_model_type
+        extra_flags = (
+            [f"--model-type {shlex.quote(policy_type)}"] if config.driver.policy_model and policy_type else []
+        )
+        gym_cmd = render_gym_cmd("eval run", "GYM_CMD", [output_path] + extra_flags + flatten_run_args(benchmark.run))
+    else:
+        # A command replaces `gym eval run`, so it reaches the policy/output path via env vars
+        # instead (see _command_env) -- build_job_manifest merges those into the driver's env.
+        gym_cmd = ""
     entrypoint = render_driver_entrypoint(
-        repo=gi.repo if gi else None, ref=gi.ref if gi else None, prepare_cmd=prepare_cmd
+        repo=gi.repo if gi else None, ref=gi.ref if gi else None, prepare_cmd=prepare_cmd, command=benchmark.command
     )
 
     script_lines = [
@@ -322,7 +337,7 @@ def _driver_command(
         gym_cmd,
         entrypoint,
     ]
-    return ["bash", "-c", "\n".join(script_lines)]
+    return ["bash", "-c", "\n".join(line for line in script_lines if line)]
 
 
 def _manifest_write_commands(resolved_config: str, manifest: str, run_dir: str) -> list[str]:
@@ -458,6 +473,10 @@ def build_job_manifest(
     if total_nodes > 1:
         driver_cmd = _wrap_driver_command_for_multi_node(driver_cmd, job_name=name, namespace=compute.namespace)
 
+    driver_env = dict(config.driver.env)
+    if benchmark.command is not None:
+        driver_env |= _command_env(benchmark, run_dir_str)
+
     driver_container: dict[str, Any] = {
         "name": "driver",
         "image": config.driver.container,
@@ -465,8 +484,8 @@ def build_job_manifest(
         "volumeMounts": [_output_volume_mount(config.job.output_path)],
         "resources": {"requests": {"memory": DRIVER_MEMORY_REQUEST}},
     }
-    if config.driver.env:
-        driver_container["env"] = _env_list(config.driver.env)
+    if driver_env:
+        driver_container["env"] = _env_list(driver_env)
 
     pod_spec: dict[str, Any] = {
         "restartPolicy": "Never",
@@ -492,8 +511,11 @@ def build_job_manifest(
 
     job_spec: dict[str, Any] = {
         "backoffLimit": 0,
+        "ttlSecondsAfterFinished": compute.ttl_seconds_after_finished,
         "template": {"metadata": {"labels": labels}, "spec": pod_spec},
     }
+    if compute.active_deadline_seconds is not None:
+        job_spec["activeDeadlineSeconds"] = compute.active_deadline_seconds
     if total_nodes > 1:
         job_spec["completionMode"] = "Indexed"
         job_spec["parallelism"] = total_nodes

@@ -16,9 +16,12 @@ from uuid import uuid4
 
 from fastapi import Request
 from harbor.agents.terminus_2 import Terminus2
+from harbor.agents.terminus_2.terminus_2 import Command
+from harbor.agents.terminus_2.tmux_session import TmuxSession
 from harbor.llms.base import BaseLLM, ContextLengthExceededError, LLMResponse
 from harbor.models.agent.context import AgentContext
 from harbor.models.metric.usage_info import UsageInfo
+from harbor.models.trial.paths import EnvironmentPaths
 from harbor.utils.logger import logger as harbor_logger
 from pydantic import ConfigDict, Field
 
@@ -56,6 +59,13 @@ from nemo_gym.server_utils import (
     raise_for_status,
 )
 from responses_api_agents.terminus_2_sandboxed_agent.observability import TerminusObservations
+from responses_api_agents.terminus_2_sandboxed_agent.terminal import (
+    ShellExitedError,
+    TerminusJSONParser,
+    TerminusTmuxSession,
+    TerminusXMLParser,
+)
+from responses_api_agents.terminus_2_sandboxed_agent.terminal_mounts import private_terminal_bootstrap
 
 
 class Terminus2AgentConfig(BaseResponsesAPIAgentConfig):
@@ -72,6 +82,7 @@ class Terminus2AgentConfig(BaseResponsesAPIAgentConfig):
     model_context_limit: int
     model_output_limit: int | None
     interleaved_thinking: bool
+    terminal_hidden_mounts: list[str] = Field(default_factory=list)
 
     llm_request_timeout: int
 
@@ -176,16 +187,25 @@ class NeMoGymLLM(BaseLLM):
         model_output_limit: int | None,
         llm_request_timeout: int,
         observations: TerminusObservations | None = None,
+        responses_create_params: NeMoGymResponseCreateParamsNonStreaming | None = None,
     ):
         super().__init__()
         self._client = client
         self.observations = observations
         self._model_name = model_name
+        # Task-set request fields (temperature, top_p, ...) go on every model call; the agent owns model and input.
+        self._request_params = (
+            responses_create_params.model_dump(
+                mode="json", exclude_unset=True, exclude_none=True, exclude={"input", "model"}
+            )
+            if responses_create_params is not None
+            else {}
+        )
         self._model_context_limit = model_context_limit
         self._model_output_limit = model_output_limit
         self._llm_request_timeout = llm_request_timeout
         self.trajectory: list[NeMoGymResponseOutputItem] = []
-        self.usages: list[NeMoGymResponseUsage] = []
+        self.usages: list[NeMoGymResponseUsage | None] = []
         self._times_spent = []
         self._last_input_items = []
         self._model_calls_gt_10min = 0
@@ -253,6 +273,7 @@ class NeMoGymLLM(BaseLLM):
                 async with asyncio.timeout(delay=self._llm_request_timeout):
                     response = NeMoGymResponse.model_validate(
                         await self._client.create_response(
+                            **self._request_params,
                             model=self._model_name,
                             input=request_input,
                         )
@@ -328,9 +349,19 @@ class NeMoGymLLM(BaseLLM):
 class NeMoGymTerminus2(Terminus2):
     """Terminus 2 with NeMo Gym model calls and optional Harbor file trajectories."""
 
-    def __init__(self, *args: Any, llm: NeMoGymLLM, dump_trajectory: bool, **kwargs: Any):
+    def __init__(
+        self,
+        *args: Any,
+        llm: NeMoGymLLM,
+        dump_trajectory: bool,
+        terminal_hidden_mounts: list[str] | None = None,
+        **kwargs: Any,
+    ):
         self._nemo_gym_llm = llm
         self._dump_trajectory_enabled = dump_trajectory
+        self._terminal_mount_bootstrap = (
+            private_terminal_bootstrap(terminal_hidden_mounts) if terminal_hidden_mounts else None
+        )
         self._times_spent = []
         self._num_proactive_compactions = 0
         self._completed_command_batches = 0
@@ -339,6 +370,50 @@ class NeMoGymTerminus2(Terminus2):
 
     def _init_llm(self, *args: Any, **kwargs: Any) -> BaseLLM:
         return self._nemo_gym_llm
+
+    def _get_parser(self) -> TerminusJSONParser | TerminusXMLParser:
+        if self._parser_name == "json":
+            return TerminusJSONParser()
+        if self._parser_name == "xml":
+            return TerminusXMLParser()
+        raise ValueError(f"Unknown parser_name: {self._parser_name}. Use 'json' or 'xml'.")
+
+    async def setup(self, environment: NeMoGymSandboxEnvironment) -> None:
+        if self._terminal_mount_bootstrap is not None:
+            # Starting tmux here makes the session below inherit the private mounts. Direct
+            # sandbox execution (including grading) keeps its original view.
+            result = await environment.exec(self._terminal_mount_bootstrap, user="root", timeout_sec=25)
+            if result.return_code != 0:
+                raise RuntimeError(f"Private terminal mount bootstrap failed: {result.stdout}\n{result.stderr}")
+        self._session = TerminusTmuxSession(
+            session_name=self.name(),
+            environment=environment,
+            logging_path=EnvironmentPaths.agent_dir / "terminus_2.pane",
+            local_asciinema_recording_path=(
+                environment.trial_paths.agent_dir / "recording.cast" if self._record_terminal_session else None
+            ),
+            remote_asciinema_recording_path=(
+                EnvironmentPaths.agent_dir / "recording.cast" if self._record_terminal_session else None
+            ),
+            pane_width=self._tmux_pane_width,
+            pane_height=self._tmux_pane_height,
+            extra_env=self._extra_env,
+            user=environment.default_user,
+        )
+        setup_succeeded = False
+        try:
+            await self._session.start()
+            setup_succeeded = True
+        finally:
+            if self._terminal_mount_bootstrap is not None:
+                try:
+                    result = await environment.exec("tmux kill-session -t gym-internal-mount-bootstrap", user="root")
+                    if result.return_code != 0:
+                        raise RuntimeError(f"Private terminal mount bootstrap cleanup failed: {result.stderr}")
+                except Exception:
+                    if setup_succeeded:
+                        raise
+                    self.logger.warning("Private terminal bootstrap cleanup failed after setup failure", exc_info=True)
 
     def _dump_trajectory_with_continuation_index(self, continuation_index: int) -> None:
         if self._dump_trajectory_enabled:
@@ -361,9 +436,16 @@ class NeMoGymTerminus2(Terminus2):
             self._nemo_gym_llm.observations.decision_response = response
         return response
 
-    async def _execute_commands(self, commands, session):
+    async def _execute_commands(self, commands: list[Command], session: TmuxSession) -> tuple[bool, str]:
         start_time = perf_counter()
-        res = await super()._execute_commands(commands, session)
+        try:
+            res = await super()._execute_commands(commands, session)
+        except ShellExitedError:
+            # If the shell exits, do not retry the current command or execute
+            # the remaining commands in the batch. Return partial output and a
+            # shell-reset notice so the model can recover before confirming completion.
+            self._pending_completion = False
+            res = False, self._limit_output_length(await session.recover_shell())
         if commands:
             self._completed_command_batches += 1
         self._times_spent.append(perf_counter() - start_time)
@@ -372,7 +454,9 @@ class NeMoGymTerminus2(Terminus2):
 
     def _count_total_tokens(self, *args, **kwargs):
         if self._is_check_proactive_summarization and self._nemo_gym_llm.usages:
-            return self._nemo_gym_llm.usages[-1].total_tokens
+            usage = self._nemo_gym_llm.usages[-1]
+            if usage is not None:
+                return usage.total_tokens
         return super()._count_total_tokens(*args, **kwargs)
 
     async def _check_proactive_summarization(self, *args, **kwargs):
@@ -414,7 +498,6 @@ class NeMoGymTerminus2(Terminus2):
 
 
 class Terminus2Agent(SimpleResponsesAPIAgent):
-    ray_enabled = False
     config: Terminus2AgentConfig
 
     def model_post_init(self, context: Any, /) -> None:
@@ -467,6 +550,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             model_output_limit=self.config.model_output_limit,
             llm_request_timeout=self.config.llm_request_timeout,
             observations=observations,
+            responses_create_params=body,
         )
 
         with tempfile.TemporaryDirectory(prefix="nemo-gym-terminus-2-") as log_dir:
@@ -485,6 +569,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                 llm=llm,
                 dump_trajectory=self.config.dump_trajectory,
                 interleaved_thinking=self.config.interleaved_thinking,
+                terminal_hidden_mounts=self.config.terminal_hidden_mounts,
             )
 
             await environment.exec("mkdir -p /logs/agent", user="root")
@@ -610,21 +695,24 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         session_key = request.session[SESSION_ID_KEY]
         self._session_sandboxes[session_key] = sandbox
 
-        response, metrics = await self._execute(request, body.responses_create_params, sandbox)
-
-        verification = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/verify",
-            json=body.model_dump() | {"response": response.model_dump()},
-            cookies=cookies,
-        )
-        await raise_for_status(verification)
-
-        self._session_sandboxes.pop(session_key)
+        # Any failure before grading (for example terminal setup) must still release the sandbox, because
+        # /verify, which normally stops it, never runs. The exception still propagates to the caller.
         try:
-            await sandbox.stop()
-        except:
-            print("Failed to stop sandbox", format_exc(), file=sys.stderr)
+            response, metrics = await self._execute(request, body.responses_create_params, sandbox)
+
+            verification = await self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path="/verify",
+                json=body.model_dump() | {"response": response.model_dump()},
+                cookies=cookies,
+            )
+            await raise_for_status(verification)
+        finally:
+            self._session_sandboxes.pop(session_key, None)
+            try:
+                await sandbox.stop()
+            except Exception:
+                print("Failed to stop sandbox", format_exc(), file=sys.stderr)
 
         result = await get_response_json(verification)
         result.update(metrics)

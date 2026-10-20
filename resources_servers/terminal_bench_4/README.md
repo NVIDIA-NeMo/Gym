@@ -30,6 +30,17 @@ status, timings, and harness metadata to `/verify`. Failed setup skips grading;
 a started agent is graded even after failure, cancellation, or timeout. Official
 zero and nonzero grades survive agent failure or timeout.
 
+If an executing agent's sandbox dies because it exceeds its memory or local
+ephemeral storage limit, verification records a completed `reward: 0.0` and
+cleans up without starting a verifier. These failures count in the pass-rate
+denominator. `sandbox_resource_limit` retains the resource and provider evidence
+in the rollout and trial result; `verifier_result.source` is
+`sandbox_resource_limit`, and test counts remain null. The original agent
+termination and diagnostics are preserved, but the result carries no
+infrastructure-failure marker. Recognition requires an explicit provider death
+report. Setup failures, node-pressure evictions, unrelated sandbox losses, and
+verifier failures retain their existing infrastructure-error handling.
+
 The wire models in `models.py` are resources-owned. Agent implementations use
 their own HTTP models and need not import this server. `termination.reason` accepts
 `completed`, `timeout`, `nonzero_exit`, `cancelled`, and `infrastructure_error`;
@@ -46,6 +57,23 @@ Model-call capture and harness trajectories belong to the agent server. Resource
 artifacts, including collected remote `/logs/agent` files, remain under the trial
 directory. The seed's connection configuration is used only for the internal
 agent/resource exchange and is not persisted in session records.
+
+## Test counts
+
+Rollout output includes `num_tests_passed`, `num_tests_total`, `num_tests_failed`,
+and `num_tests_skipped` alongside the official `reward`. These top-level numeric
+fields also participate in Gym's generic aggregate metrics. Counts are retained
+under `verifier_result` in the trial's `result.json`; full reports remain in
+`verifier/`.
+
+Counts come from the canonical `verifier/ctrf.json` summary, or from
+`passed_cases`/`total_cases` in `verifier/trace_results.json`. They describe the
+tests or cases in that report, which may omit checks performed outside the test
+runner. Numbered CTRF reports are not added together. CTRF totals can include
+pending or other outcomes in addition to passed, failed, and skipped tests.
+Missing, malformed, or unsupported reports yield null counts. Verifier timeouts
+also yield null counts. Report parsing diagnostics identify the source file.
+The official reward and evaluation-completion rules remain unchanged.
 
 ## Non-root Compose services
 

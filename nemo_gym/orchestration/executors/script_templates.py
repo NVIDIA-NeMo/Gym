@@ -31,7 +31,7 @@ echo "Head node IP address: $HEAD_NODE_IP\""""
 
 ENSURE_RAY_INSTALLED = 'command -v ray >/dev/null 2>&1 || pip install -q "ray[default]"'
 
-# Default node-join wait (30s) is too short for slow image pulls.
+# Default node-join wait (30s) is too short for slow image pulls. Also bounds a worker's wait for the head.
 RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT_S = 600
 
 # Default replica queue-length RPC deadline (0.1s) is too tight for cross-node hops.
@@ -49,7 +49,21 @@ bash -lc '
     + """
     """
     + ENSURE_RAY_INSTALLED
+    # Ray applies the wait above only to the head waiting for workers: a worker gives up on a late
+    # head after ~40s (GcsClient connect timeout), so workers first wait for the head's GCS port.
+    # Node 0 is the head here as in the fallback below: the prelude takes RAY_HEAD_NODE_IP from it.
     + """
+    if [ "${{SLURM_NODEID:-0}}" != "0" ]; then
+        echo "Waiting up to ${{RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT}}s for the Ray head at $RAY_HEAD_NODE_IP..."
+        deadline=$((SECONDS + RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT))
+        until (: >"/dev/tcp/${{RAY_HEAD_NODE_IP%:*}}/${{RAY_HEAD_NODE_IP##*:}}") 2>/dev/null; do
+            if [ "$SECONDS" -ge "$deadline" ]; then
+                echo "ERROR: timed out waiting for the Ray head at $RAY_HEAD_NODE_IP." >&2
+                exit 1
+            fi
+            sleep 1
+        done
+    fi
     if ray symmetric-run --help >/dev/null 2>&1; then
         ray symmetric-run \\
             --address "$RAY_HEAD_NODE_IP" \\
@@ -178,6 +192,8 @@ def render_driver_entrypoint(
     ref: str | None,
     prepare_cmd: str | None,
     command: str | None = None,
+    *,
+    extras: tuple[str, ...] = (),
 ) -> str:
     """Render the srun entrypoint for the driver step.
 
@@ -187,8 +203,14 @@ def render_driver_entrypoint(
     `command` replaces the `gym eval run` invocation for a benchmark whose harness
     is not Gym's own runner. It is emitted verbatim, so it may be a multi-line
     script; everything before it (the install, and prepare) is unchanged.
+
+    `extras` are optional-dependency groups installed with the checkout; the server
+    venvs Gym builds copy their telemetry packages from this process, so the driver
+    is where `telemetry` has to be installed for any server to have it.
     """
     preamble: list[str] = []
+    # Double quotes: the whole preamble ends up inside a single-quoted `bash -c` block.
+    install_target = f'".[{",".join(extras)}]"' if extras else "."
 
     if repo and ref:
         # Clone to /tmp rather than the job directory: a checkout plus its .venv
@@ -208,7 +230,7 @@ def render_driver_entrypoint(
             # EXTERNALLY-MANAGED (PEP 668), so no --break-system-packages override needed either.
             "uv venv --seed .venv",
             "source .venv/bin/activate",
-            "uv pip install -e .",
+            f"uv pip install -e {install_target}",
         ]
 
     if prepare_cmd:

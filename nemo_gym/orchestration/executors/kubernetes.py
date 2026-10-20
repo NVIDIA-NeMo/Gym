@@ -62,11 +62,16 @@ def _validate_benchmark_names(benchmarks: list[str]) -> None:
         )
 
 
+# kubectl can hang indefinitely (e.g. an expired tsh session retrying login), blocking the whole
+# submit -- bound it and let the caller treat it as a per-benchmark failure instead.
+_KUBECTL_TIMEOUT_SECONDS = 60
+
+
 def _kubectl(compute: KubernetesComputeConfig, *args: str, input: str | None = None) -> subprocess.CompletedProcess:
     cmd = ["kubectl", *args, "-n", compute.namespace]
     if compute.context:
         cmd += ["--context", compute.context]
-    return subprocess.run(cmd, input=input, text=True, capture_output=True)
+    return subprocess.run(cmd, input=input, text=True, capture_output=True, timeout=_KUBECTL_TIMEOUT_SECONDS)
 
 
 class KubernetesExecutor(BaseExecutor):
@@ -101,7 +106,17 @@ class KubernetesExecutor(BaseExecutor):
         for name, docs in manifests:
             job = docs[0]
             rendered = yaml.safe_dump_all(docs, sort_keys=False)
-            result = _kubectl(compute, "apply", "-f", "-", input=rendered)
+            try:
+                result = _kubectl(compute, "apply", "-f", "-", input=rendered)
+            except subprocess.TimeoutExpired:
+                error = (
+                    f"kubectl apply timed out after {_KUBECTL_TIMEOUT_SECONDS}s -- check that the kubeconfig "
+                    "context is reachable and `tsh kube login <cluster>` (or equivalent) hasn't expired."
+                )
+                benchmarks.append(
+                    BenchmarkJob(benchmark=name, job_dir=str(base_run_dir / name), job_id=None, error=error)
+                )
+                continue
             if result.returncode == 0:
                 benchmarks.append(
                     BenchmarkJob(benchmark=name, job_dir=str(base_run_dir / name), job_id=job["metadata"]["name"])
@@ -125,11 +140,9 @@ class KubernetesExecutor(BaseExecutor):
             benchmarks=benchmarks,
             executor_metadata={"namespace": compute.namespace, "context": compute.context or ""},
         )
-        # The manifest/resolved-config write already happened as part of each Job's own apply
-        # (baked into its driver container's preamble -- see kubernetes_script.py), so this
-        # `write_manifest` only needs to satisfy `persist()`'s contract, not perform any I/O of
-        # its own; the local index write is the part that still matters here.
-        self.persist(record, config, lambda _path, _content: None)
+        # The manifest/config write already happened in each Job's own apply (kubernetes_script.py),
+        # so write_manifest is a no-op here; only persist()'s local index write matters.
+        self.persist(record, config, lambda _path, _content, *, private=False: None)
         return record
 
     def _build_manifests(

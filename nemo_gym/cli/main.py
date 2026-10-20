@@ -446,6 +446,10 @@ def _asset_config_path(flag: str, value: str) -> str:
                 for child in (root / parent).iterdir()
                 if child.is_dir()
             ]
+            if server_name in candidates:
+                # The folder exists but has no YAML configs, so the problem is the missing config,
+                # not the name. Suggesting a different server here would point the user elsewhere.
+                candidates = []
 
         hint = did_you_mean(typo, candidates)
 
@@ -575,7 +579,7 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
     from rich.markup import escape
 
     from nemo_gym.config_types import ConfigError
-    from nemo_gym.orchestration.api import SubmitConfig
+    from nemo_gym.orchestration.api import HOST_ENV_REFS, SubmitConfig
     from nemo_gym.orchestration.submit import submit
 
     _reject_scratch_namespace_additions(overrides)
@@ -596,6 +600,28 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
     # strict validation so it fails loudly instead of being silently dropped.
     resolved = OmegaConf.to_container(composed, resolve=True)
     scratch_keys = {key for key in resolved if key.startswith("_")}
+    # Malformed driver/benchmarks shapes are left for SubmitConfig validation to report.
+    driver = resolved.get("driver")
+    available = driver.get("benchmarks") if isinstance(driver, dict) else None
+    if (
+        args.select is not None
+        and isinstance(available, dict)
+        and available
+        and all(isinstance(name, str) for name in available)
+    ):
+        selected = [name.strip() for name in args.select.split(",") if name.strip()]
+        if not selected:
+            raise ConfigError(
+                f"--select was given no benchmark names. Available: {', '.join(available)}. "
+                "Omit --select to submit all of them."
+            )
+        unknown = [name for name in selected if name not in available]
+        if unknown:
+            raise ConfigError(
+                f"--select named {', '.join(unknown)}, which {'is' if len(unknown) == 1 else 'are'} not under "
+                f"driver.benchmarks in '{config_path}'. Available: {', '.join(available)}."
+            )
+        resolved["driver"]["benchmarks"] = {name: available[name] for name in selected}
     # SubmitConfig is an orchestration model: report schema errors against its YAML file
     # rather than using the generic CLI handler's +key=<value> hint.
     try:
@@ -612,10 +638,11 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
         raise ConfigError(f"Submit config '{config_path}' is invalid: {'. '.join(parts)}.") from e
 
     if args.resolve_only:
+        # Same form persist() writes as the run's record, so the two diff and hash alike.
         if args.json:
-            print(config.model_dump_json(indent=2))
+            print(config.model_dump_json(indent=2, context={HOST_ENV_REFS: True}))
         else:
-            print(yaml.safe_dump(config.model_dump(mode="json"), sort_keys=False))
+            print(yaml.safe_dump(config.model_dump(mode="json", context={HOST_ENV_REFS: True}), sort_keys=False))
         return
 
     record = submit(config, dry_run=args.dry_run)
@@ -649,8 +676,41 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
 
 
 def _eval_run(args: argparse.Namespace, overrides: list[str]) -> None:
+    target = getattr(args, "target", None)
+    if target:
+        # A task folder or `harbor:<dataset>` reference: prepare it, then run end to end.
+        from nemo_gym.tasks.harbor.cli import run_target
+
+        run_target(args, overrides)
+        return
     target = "nemo_gym.cli.eval:collect_rollouts" if args.no_serve else "nemo_gym.cli.eval:e2e_rollout_collection"
     dispatch(target, overrides)
+
+
+# `gym eval run <target>`: a Harbor task folder, a folder of task folders, or `harbor:<dataset>[@<version>]`.
+# Register-only: the target is consumed by `_eval_run`, not translated to a Hydra override.
+TASK_TARGET = Flag(
+    register=lambda p: p.add_argument(
+        "target",
+        nargs="?",
+        metavar="TARGET",
+        help=(
+            "Harbor task folder, folder of task folders, or `harbor:<dataset>[@<version>]` hub reference. "
+            "Existing folders (including expanded ~user paths) and explicit ./, ../, /, or ~/ paths "
+            "take precedence over Hydra overrides. Prefix an ambiguous relative path with ./; "
+            "otherwise key=value and ~key are configuration overrides."
+        ),
+    ),
+)
+
+# `--sandbox <provider>`: load the named sandbox provider config (nemo_gym/sandbox/providers/<provider>/configs).
+SANDBOX = Flag(
+    register=lambda p: p.add_argument(
+        "--sandbox",
+        metavar="PROVIDER",
+        help="Sandbox provider for task containers (e.g. opensandbox, docker). Used with a task TARGET.",
+    ),
+)
 
 
 def _eval_health_check(args: argparse.Namespace, overrides: list[str]) -> None:
@@ -1003,10 +1063,33 @@ COMMANDS = {
         summary="Prepare benchmark data and dump it to disk.",
         flags=(CONFIG, BENCHMARK, SEARCH_DIR),
     ),
+    "eval plan": Command(
+        target="nemo_gym.cli.eval:plan_benchmark",
+        summary="Prepare one benchmark and write its task list (stable ids, digests) to a plan file.",
+        flags=(
+            CONFIG,
+            BENCHMARK,
+            SEARCH_DIR,
+            _value_flag("out", "plan_output_fpath", "Plan file to write.", quote=True),
+            _comma_list_flag(
+                "task-ids", "plan_task_ids", "Only plan these task ids (comma-separated).", metavar="ID[,ID...]"
+            ),
+            _bool_flag("schema", "print_plan_schema", "Print the plan file's JSON Schema and exit."),
+        ),
+    ),
     "eval run": Command(
         target=_eval_run,
         summary="Collate data, start servers, and collect rollouts.",
         flags=(
+            TASK_TARGET,
+            SANDBOX,
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--skip-unloadable",
+                    action="store_true",
+                    help="Run the loadable subset of a Harbor TARGET; record omitted tasks in skipped.json.",
+                )
+            ),
             CONFIG,
             BENCHMARK,
             ENVIRONMENT,
@@ -1028,6 +1111,11 @@ COMMANDS = {
             _value_flag("output", "output_jsonl_fpath", "Output rollouts JSONL file.", aliases=("-o",)),
             _value_flag("limit", "limit", "Maximum number of tasks to run."),
             _value_flag("num-repeats", "num_repeats", "Number of rollouts per task."),
+            _bool_flag(
+                "interleave-repeats",
+                "interleave_repeats",
+                "Dispatch repeats round by round rather than each task's back to back.",
+            ),
             _value_flag("prompt-config", "prompt_config", "Prompt template YAML to apply."),
             _value_flag("concurrency", "num_samples_in_parallel", "Maximum number of concurrent samples."),
             _value_flag("split", "split", "Dataset split to use (train, validation, or benchmark)."),
@@ -1190,6 +1278,14 @@ COMMANDS = {
             Flag(
                 register=lambda p: p.add_argument(
                     "--config", "-c", required=True, metavar="PATH", help="Submit config YAML file."
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--select",
+                    metavar="NAME[,NAME...]",
+                    help="Submit only the named entries under driver.benchmarks (comma-separated). "
+                    "Default: submit all of them.",
                 ),
             ),
             Flag(
@@ -1392,6 +1488,32 @@ def _extra_roots_from_search_dir(search_dirs: list[str] | None):
             logger.debug(f"Restored {NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME}={original}")
 
 
+def _is_positional_hydra_override(token: str) -> bool:
+    # Explicit paths and existing folders win, even when '=' or '~' also fits Hydra's grammar.
+    # Do not treat '/' inside an override value or a deletion's config-group name as a path prefix.
+    if token == "~" or token.startswith(("./", "../", "/", "~/", "harbor:")):
+        return False
+    try:
+        if Path(token).is_dir() or Path(token).expanduser().is_dir():
+            return False
+    except (OSError, RuntimeError):
+        # Probing an override as a path can fail (e.g. a long value or unknown ~user).
+        # A failed probe does not rule out a valid Hydra override.
+        pass
+    if "=" in token:
+        return True
+    if not token.startswith("~"):
+        return False
+    # Only syntactically valid, otherwise unclaimed deletions belong to Hydra.
+    from hydra.core.override_parser.overrides_parser import OverridesParser
+    from hydra.errors import HydraException
+
+    try:
+        return OverridesParser.create().parse_override(token).is_delete()
+    except HydraException:
+        return False
+
+
 def main() -> None:
     parser = build_parser()
     args, overrides = parser.parse_known_args()
@@ -1405,11 +1527,8 @@ def main() -> None:
     if unknown_flags:
         error_parser = getattr(args, "_parser", parser)
         known_options = [opt for action in error_parser._actions for opt in action.option_strings]
-        # A flag rejected for its position (not for being unknown) is still in known_options, so exclude it
-        # from its own candidate set — otherwise it matches itself and is suggested as its own correction.
         hints = "".join(
-            did_you_mean(name, [opt for opt in known_options if opt != name])
-            for name in (flag.split("=", 1)[0] for flag in unknown_flags)
+            did_you_mean(name, known_options) for name in (flag.split("=", 1)[0] for flag in unknown_flags)
         )
         error_parser.error(f"unrecognized arguments: {' '.join(unknown_flags)}{hints}")
 
@@ -1436,6 +1555,12 @@ def main() -> None:
             translated = [token for flag in command.flags for token in flag.translate_to_hydra(args)]
         except ValueError as exc:
             getattr(args, "_parser", parser).error(str(exc))
+
+        # argparse can capture a bare Hydra override in eval run's optional TARGET slot.
+        # Restore it before coalescing, keeping translated flags before raw overrides.
+        if command.target is _eval_run and args.target and _is_positional_hydra_override(args.target):
+            overrides = [args.target, *overrides]
+            args.target = None
 
         # --config and the asset selectors all emit +config_paths; coalesce them into one token.
         overrides = _merge_config_paths(translated + overrides)

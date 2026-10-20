@@ -10,8 +10,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import nemo_gym.openai_utils as openai_utils
-from nemo_gym.base_responses_api_model import CaptureStore, merge_model_call_capture_into_record
+from nemo_gym.base_responses_api_model import CaptureStore
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
 from nemo_gym.rollout_collection import _attach_trajectory_record
 from nemo_gym.rollout_health import run_health_checks
 from nemo_gym.server_utils import ServerClient
@@ -152,8 +153,12 @@ def execution(monkeypatch):
 
     async def setup(agent, environment):
         agents.append(agent)
+        if mode.value == "shell_recovery":
+            agent._max_episodes = 4
 
         async def send_keys(keystrokes, **kwargs):
+            if mode.value == "shell_recovery" and len(calls) == 2:
+                raise app_module.ShellExitedError("the interactive shell exited")
             if mode.value == "failure":
                 raise ValueError("terminal command failed")
             if mode.value == "cancel_tool":
@@ -167,10 +172,11 @@ def execution(monkeypatch):
             send_keys=send_keys,
             get_incremental_output=AsyncMock(return_value="terminal output"),
             capture_pane=AsyncMock(return_value="current screen"),
+            recover_shell=AsyncMock(return_value="The interactive shell exited. Shell state reset; commands skipped."),
         )
 
     # Keep Harbor's real run loop, parser, query/retry/fallback and summarization hooks.
-    monkeypatch.setattr(app_module.Terminus2, "setup", setup)
+    monkeypatch.setattr(app_module.NeMoGymTerminus2, "setup", setup)
     monkeypatch.setattr(app_module.Terminus2, "_build_skills_section", AsyncMock(return_value=None))
     monkeypatch.setattr(app_module.Terminus2, "_count_total_tokens", lambda self, chat: 0)
 
@@ -199,6 +205,16 @@ def execution(monkeypatch):
         return json.loads((await server.run(request, body)).model_dump_json(by_alias=True))
 
     return SimpleNamespace(run=run, calls=calls, mode=mode, client=client, agents=agents, commands=commands)
+
+
+@pytest.mark.asyncio
+async def test_shell_exit_requires_a_confirmation_after_the_model_sees_the_state_reset(execution):
+    execution.mode.value = "shell_recovery"
+    result = await execution.run()
+    assert result["terminus2_completed"] is True
+    assert len(execution.calls) == 3
+    assert execution.commands == ["pwd\n", "ls\n", "pwd\n", "ls\n"]
+    assert "Shell state reset" in str(execution.calls[2]["request"]["input"])
 
 
 def save_and_check(execution, result, tmp_path):
@@ -268,7 +284,7 @@ async def test_real_harbor_decisions_survive_saved_projection(
         assert turn["resolved"] is None
         assert turn["timestamp"] > 0
     assert {
-        "model_call_failed",
+        "rollout_ended_on_failed_model_call",
         "model_call_zero_completion_tokens",
         "model_call_missing_token_counts",
         "model_call_runaway_generation",

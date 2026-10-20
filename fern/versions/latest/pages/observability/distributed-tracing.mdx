@@ -38,6 +38,12 @@ traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
              version
 ```
 
+CLIENT spans measure total request time. When metrics export is enabled, the separate
+`gym.http.connection_pool.queue_duration_ms` histogram measures connection-pool wait without
+requiring a span for every request. See
+[Configuration](/main/reference/configuration#http-connection-pool) for the metric and pool-sizing
+reference.
+
 **Inbound.** Every NeMo Gym server applies OpenTelemetry FastAPI auto-instrumentation,
 which reads `traceparent` off the incoming request and makes the caller's span the parent
 of its own SERVER span.
@@ -71,6 +77,14 @@ jq -r 'select(.attributes."nemo.gym.rollout.id") | .attributes."nemo.gym.rollout
 # From a rollout ID, find its captured model calls
 ls <capture_dir>/<rollout_id>.capture.jsonl
 ```
+
+### Engine Request Ids
+
+Inside a rollout, every call a Gym model server makes to its inference backend carries
+`X-Request-Id: <rollout id>-<8 hex chars>`. vLLM uses that header as its request id and records it
+as `gen_ai.request.id` on its request span and in its request log, so an engine span or log line
+can be matched to a rollout directly, without walking the trace. A caller's own `X-Request-Id`
+header is kept.
 
 ## Span Kinds
 
@@ -119,6 +133,17 @@ The `traceparent` header is not arriving. Check, in order:
    telemetry does not extract the header. Confirm that the environment reached it —
    `NEMO_GYM_OTEL_ENABLED` must be set in the server process, not only in your shell.
 
+### A Request Nests Under the Previous One on the Same Connection
+
+Seen as a server span whose parent is the previous request's server span, in another rollout's
+trace, with the caller's client span left without a child. uvicorn starts a pipelined request's
+task from inside the previous request's task, so it inherits that request's context, and the
+instrumentor then skips `traceparent` extraction. Gym's servers wrap every request in
+`RequestContextIsolationMiddleware`, installed outside the instrumentor by `run_webserver`, which
+resets the OpenTelemetry context before the instrumentor runs (and clears the rollout id as a
+guard). An app served without `run_webserver` needs `install_request_context_isolation(app)` after
+instrumenting to be safe from this.
+
 ### Traces Are Missing Their Last Spans
 
 Spans export in batches. A process that exits before its batch flushes drops whatever was
@@ -132,7 +157,19 @@ rollout in the run nests inside one trace. For long runs, use `per_rollout` inst
 omits `job`, so each rollout becomes its own bounded root trace. See
 [Span Groups](/main/observability/span-groups).
 
-### Only the Orchestrator Emits Spans
+### Startup Traces
+
+Server startup is its own trace, separate from the `gym.job` trace of the run. Both traces carry the same `run_id`, so a backend can group them.
+
+The supervisor, which is the process running `gym env start` or `gym eval run`, opens a `gym.startup` span. Under it, the supervisor adds one span per stage of its own work, such as `spawn_servers` and `wait_for_servers`. It also adds one `gym.startup.server` span per server, which runs from spawning the server to the server's first answered health probe.
+
+Each server receives a `traceparent` for its `gym.startup.server` span in its environment. The server parents its own `gym.server.startup` span to it, with one child span per startup stage. In a multi-worker server, every Uvicorn worker inherits the same `traceparent` and adds its own `gym.server.startup.worker` span next to the main process's span.
+
+Every startup span carries `nemo.gym.startup.outcome`. A startup that completes ends with `ready`. A startup that times out, fails, or is interrupted still exports its trace: the supervisor ends `gym.startup` and the span of every server that was not ready yet with `timeout`, `failed`, or `interrupted` and an error status, and records the stage it was in as `unfinished`. Filter on that attribute to find the servers that held up a failed run.
+
+These spans belong to the `startup` span group, which is in the `default` preset.
+
+### Only the Supervisor Emits Spans
 
 The `telemetry:` block reaches servers through environment variables exported before the
 servers start. If you set them after `gym env start` is already running, the servers never

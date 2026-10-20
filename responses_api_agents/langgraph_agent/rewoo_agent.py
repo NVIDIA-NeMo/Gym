@@ -111,8 +111,12 @@ def _extract_text(outputs):
     return "".join(c.text for o in outputs if o.type == "message" for c in o.content if c.type == "output_text")
 
 
+def _substitute_evidence(text: str, results: dict[str, str]) -> str:
+    """Replace complete references once, preserving inserted evidence and unresolved references."""
+    return re.sub(r"#E\d+", lambda match: results.get(match.group(0), match.group(0)), text)
+
+
 class ReWOOAgent(LangGraphAgentAdapter):
-    ray_enabled = False
     config: ReWOOAgentConfig
 
     async def _call_model(self, state, prompt):
@@ -157,9 +161,7 @@ class ReWOOAgent(LangGraphAgentAdapter):
             step_idx = state["current_step"]
             _, step_name, tool, tool_input = state["steps"][step_idx]
 
-            # Variable substitution: replace #E1, #E2, etc. with prior results
-            for k, v in state["results"].items():
-                tool_input = tool_input.replace(k, v)
+            tool_input = _substitute_evidence(tool_input, state["results"])
 
             prompt = tool_input
             prompt_msg = NeMoGymEasyInputMessage(role="user", content=f"Step {step_name}: {prompt}")
@@ -187,8 +189,7 @@ class ReWOOAgent(LangGraphAgentAdapter):
             # Build plan string with evidence substituted
             plan_with_evidence = ""
             for _plan, step_name, tool, tool_input in state["steps"]:
-                for k, v in state["results"].items():
-                    tool_input = tool_input.replace(k, v)
+                tool_input = _substitute_evidence(tool_input, state["results"])
                 plan_with_evidence += f"Plan: {_plan}\n{step_name} = {tool}[{tool_input}]\nEvidence: {state['results'].get(step_name, 'N/A')}\n\n"
 
             prompt = SOLVE_PROMPT.format(plan=plan_with_evidence, task=state["task"])

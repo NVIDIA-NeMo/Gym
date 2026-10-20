@@ -93,36 +93,15 @@ def _make_verify_request(text: str, **fields) -> LitmusAgentVerifyRequest:
 
 
 class TestResolveAnswerType:
+    def test_explicit_answer_type(self):
+        assert resolve_answer_type(FLOAT) == FLOAT
+
     def test_supported_set(self):
         assert _SUPPORTED_ANSWER_TYPES == {FLOAT, BOOL, STRING}
 
-    def test_explicit_answer_type_wins(self):
-        assert resolve_answer_type(FLOAT, {"property_type": "float"}) == FLOAT
-
     def test_unsupported_answer_type_raises(self):
         with pytest.raises(ValueError, match="Unsupported answer_type='bogus'"):
-            resolve_answer_type("bogus", {})
-
-    @pytest.mark.parametrize(
-        ("property_type", "expected"),
-        [
-            ("float", FLOAT),
-            ("count", FLOAT),
-            ("fragment", FLOAT),
-            ("bool", BOOL),
-            ("presence", BOOL),
-        ],
-    )
-    def test_legacy_property_type_mapping(self, property_type, expected):
-        assert resolve_answer_type(None, {"property_type": property_type}) == expected
-
-    def test_missing_and_unmappable_raises(self):
-        with pytest.raises(ValueError, match="not mappable"):
-            resolve_answer_type(None, {"property_type": "mystery"})
-
-    def test_missing_entirely_raises(self):
-        with pytest.raises(ValueError, match="not mappable"):
-            resolve_answer_type(None, {})
+            resolve_answer_type("bogus")
 
 
 # ---------------------------------------------------------------------------
@@ -136,12 +115,6 @@ class TestExtractPredictedValue:
 
     def test_double_parens_last_occurrence_wins(self):
         assert extract_predicted_value("First ((3)), actually ((5))", FLOAT) == 5.0
-
-    def test_boxed_via_use_box_format(self):
-        assert extract_predicted_value(r"\boxed{12}", FLOAT, use_box_format=True) == 12.0
-
-    def test_default_double_parens_when_no_format(self):
-        assert extract_predicted_value("((7))", FLOAT, use_box_format=False) == 7.0
 
     def test_bare_number_rejected(self):
         assert extract_predicted_value("42", FLOAT) is None
@@ -172,10 +145,6 @@ class TestExtractPredictedValue:
     def test_unknown_answer_format_raises(self):
         with pytest.raises(ValueError, match="Unsupported answer_format='fmt_99'"):
             extract_predicted_value("((42))", FLOAT, answer_format="fmt_99")
-
-    def test_answer_format_overrides_use_box_format(self):
-        text = r"Ignore \boxed{7}. Final Answer = 42"
-        assert extract_predicted_value(text, FLOAT, answer_format="fmt_28", use_box_format=True) == 42.0
 
     def test_all_formats_registered(self):
         assert set(_ANSWER_FORMAT_REGEXES) == {f"fmt_{i:02d}" for i in range(31)}
@@ -331,92 +300,16 @@ class TestComputeRewardWithMatch:
 
 
 class TestVerify:
-    @pytest.mark.parametrize("use_box_format", [False, True])
-    @pytest.mark.parametrize(
-        ("property_type", "expected_answer", "resolved_answer_type"),
-        [
-            ("count", 5, FLOAT),
-            ("fragment", 2, FLOAT),
-            ("bool", 1, BOOL),
-            ("presence", 0, BOOL),
-        ],
-    )
-    async def test_hf_v01_legacy_rows_use_numeric_exact_policy(
-        self,
-        use_box_format,
-        property_type,
-        expected_answer,
-        resolved_answer_type,
-    ):
-        """Published v0.1 rows have property_type + use_box_format only."""
-        server = _make_server()
-        text = rf"\boxed{{{expected_answer}}}" if use_box_format else f"(({expected_answer}))"
-        result = await server.verify(
-            _make_verify_request(
-                text,
-                expected_answer=expected_answer,
-                property_type=property_type,
-                use_box_format=use_box_format,
-                method="direct",
-                license="CC BY 4.0",
-            )
-        )
-        assert result.reward == 1.0
-        assert result.predicted_value == float(expected_answer)
-        assert result.resolved_answer_type == resolved_answer_type
-        assert result.resolved_reward_rule == "exact"
+    def test_answer_type_is_required(self):
+        from pydantic import ValidationError
 
-    @pytest.mark.parametrize(
-        ("text", "expected_answer", "property_type", "use_box_format", "predicted", "reward"),
-        [
-            ("((4.6))", 5, "count", False, 4.6, 1.0),
-            (r"\boxed{2}", 1, "bool", True, 2.0, 0.0),
-            ("((0.4))", 0, "bool", False, 0.4, 1.0),
-        ],
-    )
-    async def test_legacy_numeric_edge_cases_match_historical_scoring(
-        self,
-        text,
-        expected_answer,
-        property_type,
-        use_box_format,
-        predicted,
-        reward,
-    ):
-        server = _make_server()
-        result = await server.verify(
-            _make_verify_request(
-                text,
-                expected_answer=expected_answer,
-                property_type=property_type,
-                use_box_format=use_box_format,
-            )
-        )
-        assert result.predicted_value == predicted
-        assert result.reward == reward
-        assert result.resolved_reward_rule == "exact"
+        with pytest.raises(ValidationError, match="answer_type"):
+            _make_verify_request("((3))", expected_answer=3)
 
-    @pytest.mark.parametrize(
-        ("text", "expected_answer", "property_type", "abs_error"),
-        [
-            ("((7))", 5, "count", 2.0),
-            ("((5))", 5, "count", 0.0),
-            ("((2))", 3, "fragment", None),
-            ("((1))", 0, "bool", None),
-            ("no answer here", 5, "count", None),
-        ],
-    )
-    async def test_abs_error_set_only_for_continuous_property_types(
-        self, text, expected_answer, property_type, abs_error
-    ):
+    async def test_unresolvable_answer_type_raises(self):
         server = _make_server()
-        result = await server.verify(
-            _make_verify_request(text, expected_answer=expected_answer, property_type=property_type)
-        )
-        if abs_error is None:
-            assert result.abs_error is None
-        else:
-            assert result.abs_error == pytest.approx(abs_error)
+        with pytest.raises(ValueError, match="Unsupported answer_type"):
+            await server.verify(_make_verify_request("((3))", expected_answer="3", answer_type="unsupported"))
 
     @pytest.mark.parametrize(
         ("text", "expected_answer", "answer_type", "abs_error"),
@@ -427,9 +320,7 @@ class TestVerify:
             ("no answer here", 2.1, FLOAT, None),
         ],
     )
-    async def test_abs_error_falls_back_to_answer_type_without_property_type(
-        self, text, expected_answer, answer_type, abs_error
-    ):
+    async def test_abs_error_uses_answer_type(self, text, expected_answer, answer_type, abs_error):
         server = _make_server()
         result = await server.verify(
             _make_verify_request(text, expected_answer=expected_answer, answer_type=answer_type)
@@ -438,57 +329,6 @@ class TestVerify:
             assert result.abs_error is None
         else:
             assert result.abs_error == pytest.approx(abs_error)
-
-    async def test_property_type_wins_over_answer_type_for_abs_error(self):
-        """A `fragment` row stays excluded even though it resolves to FLOAT."""
-        server = _make_server()
-        result = await server.verify(
-            _make_verify_request("((2))", expected_answer=3, property_type="fragment", answer_type=FLOAT)
-        )
-        assert result.abs_error is None
-
-    async def test_legacy_float_keeps_isclose_policy(self):
-        server = _make_server()
-        result = await server.verify(_make_verify_request("((1.0000005))", expected_answer=1.0, property_type="float"))
-        assert result.reward == 1.0
-        assert result.resolved_answer_type == FLOAT
-        assert result.resolved_reward_rule == "isclose"
-
-    async def test_explicit_modern_float_policy_overrides_legacy_property_type(self):
-        server = _make_server()
-        result = await server.verify(
-            _make_verify_request("((4.6))", expected_answer=5, answer_type=FLOAT, property_type="count")
-        )
-        assert result.reward == 0.0
-        assert result.resolved_reward_rule == "isclose"
-
-    async def test_explicit_modern_bool_parsing_overrides_legacy_property_type(self):
-        server = _make_server()
-        result = await server.verify(
-            _make_verify_request(
-                r"\boxed{2}",
-                expected_answer=1,
-                answer_type=BOOL,
-                property_type="bool",
-                use_box_format=True,
-            )
-        )
-        assert result.predicted_value == 1.0
-        assert result.reward == 1.0
-        assert result.resolved_reward_rule == "bool_eq"
-
-    async def test_explicit_match_overrides_legacy_default(self):
-        server = _make_server()
-        result = await server.verify(
-            _make_verify_request(
-                "((4.6))",
-                expected_answer=5,
-                property_type="count",
-                match={"rule": "isclose"},
-            )
-        )
-        assert result.reward == 0.0
-        assert result.resolved_reward_rule == "isclose"
 
     async def test_correct_numeric_int(self):
         server = _make_server()
@@ -552,24 +392,12 @@ class TestVerify:
         )
         assert result.reward == 1.0
 
-    async def test_legacy_property_type_passthrough(self):
-        server = _make_server()
-        result = await server.verify(_make_verify_request("((1))", expected_answer="1", property_type="fragment"))
-        assert result.reward == 1.0
-        assert result.resolved_answer_type == FLOAT
-        assert result.resolved_reward_rule == "exact"
-
     async def test_passthrough_fields_echoed(self):
         server = _make_server()
         result = await server.verify(
             _make_verify_request("((3))", expected_answer="3", answer_type=FLOAT, smiles="CCO")
         )
         assert (result.model_extra or {}).get("smiles") == "CCO"
-
-    async def test_unresolvable_answer_type_raises(self):
-        server = _make_server()
-        with pytest.raises(ValueError, match="not mappable"):
-            await server.verify(_make_verify_request("((3))", expected_answer="3"))
 
     async def test_string_content_message_extracted(self):
         # Some backends emit the assistant message content as a bare string
@@ -612,6 +440,37 @@ class TestVerify:
 
 
 class TestComputeMetrics:
+    def test_mae_grouped_per_property(self):
+        server = _make_server()
+
+        def _row(prop, answer_type, abs_error, correct):
+            return {
+                "method": "direct",
+                "resolved_answer_type": answer_type,
+                "property": prop,
+                "reward": 1.0 if correct else 0.0,
+                "correct": correct,
+                "abs_error": abs_error,
+            }
+
+        tasks = [
+            [_row("MolWt", "float", 0.0, True), _row("MolWt", "float", 4.0, False)],
+            [_row("HeavyAtomCount", "float", 2.0, False), _row("HeavyAtomCount", "float", None, False)],
+            [_row("HasBenzene", "bool", None, True)],
+        ]
+        by_property = server.compute_metrics(tasks)["by_property"]
+
+        assert by_property["MolWt"]["mae"] == pytest.approx(2.0)
+        assert by_property["MolWt"]["mae_count"] == 2
+        # The unparsed rollout is excluded from the mean but still counted.
+        assert by_property["HeavyAtomCount"]["mae"] == pytest.approx(2.0)
+        assert by_property["HeavyAtomCount"]["mae_count"] == 1
+        assert by_property["HeavyAtomCount"]["count"] == 2
+        # bool properties carry no abs_error, so they report no MAE.
+        assert by_property["HasBenzene"]["mae"] is None
+        assert by_property["HasBenzene"]["mae_count"] == 0
+        assert by_property["HasBenzene"]["accuracy"] == 1.0
+
     def _rollout(self, method, atype, reward, correct):
         return {"method": method, "resolved_answer_type": atype, "reward": reward, "correct": correct}
 
@@ -639,38 +498,6 @@ class TestComputeMetrics:
         metrics = server.compute_metrics([[{"reward": 1.0}]])
         assert metrics["unknown"]["by_answer_type"]["unknown"]["count"] == 1
         assert metrics["unknown"]["accuracy"] == 0.0
-
-    def test_mae_grouped_per_property(self):
-        server = _make_server()
-
-        def _row(prop, ptype, abs_error, correct):
-            return {
-                "method": "direct",
-                "resolved_answer_type": FLOAT,
-                "property": prop,
-                "property_type": ptype,
-                "reward": 1.0 if correct else 0.0,
-                "correct": correct,
-                "abs_error": abs_error,
-            }
-
-        tasks = [
-            [_row("MolWt", "float", 0.0, True), _row("MolWt", "float", 4.0, False)],
-            [_row("HeavyAtomCount", "count", 2.0, False), _row("HeavyAtomCount", "count", None, False)],
-            [_row("HasBenzene", "bool", None, True)],
-        ]
-        by_property = server.compute_metrics(tasks)["by_property"]
-
-        assert by_property["MolWt"]["mae"] == pytest.approx(2.0)
-        assert by_property["MolWt"]["mae_count"] == 2
-        # The unparsed rollout is excluded from the mean but still counted.
-        assert by_property["HeavyAtomCount"]["mae"] == pytest.approx(2.0)
-        assert by_property["HeavyAtomCount"]["mae_count"] == 1
-        assert by_property["HeavyAtomCount"]["count"] == 2
-        # bool properties carry no abs_error, so they report no MAE.
-        assert by_property["HasBenzene"]["mae"] is None
-        assert by_property["HasBenzene"]["mae_count"] == 0
-        assert by_property["HasBenzene"]["accuracy"] == 1.0
 
     def test_pass_at_k_metrics_merged_in(self):
         server = _make_server()
@@ -816,6 +643,20 @@ async def _run_code(server: LitmusAgentResourcesServer, session_id: str, code: s
 
 
 class TestCodeExecTool:
+    async def test_verify_failure_still_cleans_up_session_sandbox(self):
+        server = _make_sandbox_server()
+        await _run_code(server, "s1", "print(1)")
+        provider = _LocalFakeProvider.instances[-1]
+
+        with pytest.raises(ValueError, match="Unsupported answer_type"):
+            await server._verify_and_cleanup(
+                _FakeRequest(session_id="s1"),
+                _make_verify_request("((3))", expected_answer="3", answer_type="unsupported"),
+            )
+
+        assert provider.closed == 1 and provider.aclosed == 1
+        assert "s1" not in server._sessions
+
     async def test_single_cell_output(self):
         server = _make_sandbox_server()
         assert (await _run_code(server, "s1", "print(2 + 3)")).strip() == "5"
@@ -907,20 +748,6 @@ class TestCodeExecTool:
             _FakeRequest(session_id="s1"),
             _make_verify_request("((3))", expected_answer="3", answer_type=FLOAT),
         )
-        assert provider.closed == 1 and provider.aclosed == 1
-        assert "s1" not in server._sessions
-
-    async def test_verify_failure_still_cleans_up_session_sandbox(self):
-        server = _make_sandbox_server()
-        await _run_code(server, "s1", "print(1)")
-        provider = _LocalFakeProvider.instances[-1]
-
-        with pytest.raises(ValueError, match="not mappable"):
-            await server._verify_and_cleanup(
-                _FakeRequest(session_id="s1"),
-                _make_verify_request("((3))", expected_answer="3"),
-            )
-
         assert provider.closed == 1 and provider.aclosed == 1
         assert "s1" not in server._sessions
 

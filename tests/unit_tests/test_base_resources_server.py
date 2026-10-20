@@ -15,16 +15,21 @@
 import asyncio
 from unittest.mock import MagicMock
 
+from fastapi.testclient import TestClient
+
 from nemo_gym.base_resources_server import (
     BaseMultiRewardVerifyResponse,
     BaseResourcesServerConfig,
     BaseVerifyResponse,
+    ResourcesSeedSessionRequest,
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.failure_kinds import JUDGE_FAILED, SESSION_LOST
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.testing.session_conformance import check_resources_session_contract
 
 
 def _resources_server() -> SimpleResourcesServer:
@@ -71,6 +76,41 @@ class TestBaseResourcesServer:
 
     def test_reverify_mode(self) -> None:
         assert asyncio.run(_resources_server().get_reverify_mode()) == ReverifyMode.UNKNOWN
+
+    def test_stateless_server_answers_typed_and_legacy_session_calls(self) -> None:
+        """A server with no per-rollout state serves an Environment Server's seed and close without overrides."""
+        client = TestClient(_resources_server().setup_webserver())
+        identity = {"episode_id": {"rollout_id": "rollout", "attempt": 0}}
+
+        typed_seed = client.post(
+            "/seed_session",
+            json={
+                "resources_session_id": "resources-session",
+                "task_id": {"taskset": "tasks", "task_id": "task"},
+                "task_data": {"question": "2+2"},
+            }
+            | identity,
+        )
+        # An Agent's /run seeds with its legacy row, which keeps the empty response.
+        legacy_seed = client.post("/seed_session", json={"responses_create_params": {"input": "2+2"}})
+        typed_close = client.post("/close_session", json={"resources_session_id": "resources-session"} | identity)
+
+        assert typed_seed.status_code == 200
+        assert typed_seed.json()["resources_session_id"] == "resources-session"
+        assert (legacy_seed.status_code, legacy_seed.json()) == (200, {})
+        assert (typed_close.status_code, typed_close.json()) == (200, {"resources_session_id": "resources-session"})
+
+    def test_stateless_server_follows_the_session_contract(self) -> None:
+        check_resources_session_contract(
+            _resources_server().setup_webserver(),
+            ResourcesSeedSessionRequest(
+                resources_session_id="resources-session",
+                episode_id=EpisodeId(rollout_id="rollout"),
+                task_id=TaskId(taskset="tasks", task_id="task"),
+                task_data={},
+            ),
+            keeps_state=False,
+        )
 
 
 class TestVerifyResponseFailureReporting:
