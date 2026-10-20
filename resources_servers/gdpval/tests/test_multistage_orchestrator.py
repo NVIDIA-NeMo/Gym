@@ -3966,14 +3966,11 @@ class TestCachedDeliverableReuse:
 class TestReferenceMissingCoverage:
     """How a ``reference_missing`` row is counted by a partial-completion policy.
 
-    The row is not terminal: it is retried across resumes, since the reference tree can be
-    repaired between runs, and it stays unresolved until it reaches
-    ``NEMO_GYM_MAX_ROLLOUT_ATTEMPTS``. The outcome-level tests below pass
-    ``unresolved_keys=set()``, i.e. the state at the max attempt, where the row
-    is an ordinary omission governed by the coverage floors. Before that, only
-    ``tolerate_unresolved`` accepts it (see the loop-level tests), or
-    ``transport_assignment_repair.reference_availability_only`` avoids it by
-    moving tasks off references without a completed deliverable.
+    The row is terminal: retrying cannot make the reference appear, so it is resolved from the first launch
+    and an ordinary omission governed by the coverage floors. It never holds the stage open, and a resume
+    does not retry it. The outcome-level tests below pass ``unresolved_keys=set()``.
+    ``transport_assignment_repair.reference_availability_only`` avoids it by moving tasks off references
+    without a completed deliverable.
     """
 
     @staticmethod
@@ -4030,7 +4027,7 @@ class TestReferenceMissingCoverage:
         assert _partial_stage_outcome(policy, stage_rows, successful, [], set(), [ref], 1200.0, 1) is None
 
     @pytest.mark.parametrize("tolerate_unresolved", [False, True])
-    async def test_first_launch_advances_only_when_tolerating(self, tolerate_unresolved: bool) -> None:
+    async def test_a_missing_reference_does_not_hold_the_stage_open(self, tolerate_unresolved: bool) -> None:
         task_ids = [f"t{i}" for i in range(20)]
         partial_completion = {
             "min_success_fraction": 0.9,
@@ -4052,25 +4049,21 @@ class TestReferenceMissingCoverage:
             {"a": 1000.0, "b": 1200.0},
             _distribution(task_ids),
             _materialized_rows(task_ids),
-            TestPartialStageCompletion._runner({0}, failure_class="reference_missing", dispatched_stages=dispatched),
+            TestPartialStageCompletion._runner(
+                {0}, failure_class="reference_missing", terminal=True, dispatched_stages=dispatched
+            ),
         )
 
-        if tolerate_unresolved:
-            assert set(dispatched) == {0, 1}
-            assert summaries[0]["partial"] is True
-        else:
-            # Retryable across resumes, so the stage stays open instead of failing.
-            assert set(dispatched) == {0}
-            assert summaries[-1]["incomplete"] is True
-            assert summaries[-1]["coverage_blocked"] is False
-            assert not any(row["stage_index"] == 1 for row in results)
+        # Terminal, so the row is an omission under the coverage floors whether or not unresolved rows are tolerated.
+        assert set(dispatched) == {0, 1}
+        assert summaries[0]["partial"] is True
 
 
 class TestGDPValFailures:
-    """GDPVal's own failures are masked and retried only on resume, when the deliverable tree can be repaired."""
+    """GDPVal's own failures are masked and terminal: not retried in process or on resume, and an omission."""
 
     @pytest.mark.parametrize("failure_class", ["reference_missing", "eval_missing", "transport_ineligible"])
-    async def test_a_failure_holds_a_non_final_stage_open_without_an_in_process_retry(
+    async def test_a_failure_is_not_retried_and_a_strict_stage_cannot_advance_past_it(
         self, failure_class: str
     ) -> None:
         from resources_servers.gdpval.app import _gdpval_failure
@@ -4094,7 +4087,7 @@ class TestGDPValFailures:
             TestPartialStageCompletion._runner(
                 {0},
                 failure_class=failure_class,
-                failure_fields=_gdpval_failure(failure_class),
+                failure_fields=_gdpval_failure(failure_class, terminal=True),
                 dispatched_stages=dispatched,
             ),
         )

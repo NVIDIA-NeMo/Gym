@@ -218,13 +218,12 @@ failure outside the agent stage, such as a dependency outage. A crash in the
 agent stage is never retried in process, and is waived only with
 `tolerate_unresolved: true`, which waives any persisted failure class, including
 agent-server outages (`agent_request_failed`), so set the coverage floors tight.
-It also accepts a missing reference deliverable (`reference_missing`) straight
-away. Otherwise GDPVal retries it across `--resume` launches for up to
-`NEMO_GYM_MAX_ROLLOUT_ATTEMPTS` (default 3) attempts before it becomes an
-omission; `transport_assignment_repair` with `reference_availability_only: true`
-avoids it when a stage is planned. Undispatched or drained
-rows always keep the stage open. Terminal and max-attempt omissions still count
-against every coverage floor.
+A missing reference deliverable (`reference_missing`) is terminal: the row is an
+omission from the first launch, with or without `tolerate_unresolved`, and
+`--resume` does not retry it. `transport_assignment_repair` with
+`reference_availability_only: true` avoids it when a stage is planned.
+Undispatched or drained rows always keep the stage open. Terminal and
+max-attempt omissions still count against every coverage floor.
 
 For a freshly planned policy-enabled stage, task-to-reference assignments are
 balanced before dispatch. When the policy is added while resuming an existing
@@ -528,7 +527,7 @@ Before trials are sampled, a deterministic preflight removes any member that
 cannot carry the matchup within its limits; `images_and_text` members are also
 removed when the matchup's pages and images exceed `judge_max_images_per_request`.
 If every member is removed for every reference matchup, the row fails with the
-terminal class `transport_ineligible` (retried on `--resume`).
+terminal class `transport_ineligible`, which `--resume` does not retry.
 
 Rubric mode samples from the same panel but sends every member the server-level
 `judge_media_mode` (`native_pdf` by default). It ignores the per-member
