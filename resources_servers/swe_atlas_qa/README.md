@@ -45,7 +45,8 @@ gym eval run --benchmark swe_atlas_qa --split benchmark --output runs/swe-atlas/
 ```
 
 Also configure the OpenSandbox provider using its documented connection settings. Set `SWE_ATLAS_GYM_MODEL_HOST`
-to this machine's IP reachable from the task sandbox and optionally `SWE_ATLAS_GYM_MODEL_PORT` (default 8000).
+to this machine's IP reachable from the task sandbox. The model server defaults to port 8000. For another port,
+set `+policy_model.responses_api_models.vllm_model.port=9000`; the sandbox URL follows that setting.
 The default configuration routes the harness through the Gym model server,
 which proxies the configured policy endpoint. The judge endpoint must be reachable from the verifier sandbox.
 

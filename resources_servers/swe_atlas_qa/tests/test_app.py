@@ -203,6 +203,24 @@ async def test_missing_or_empty_answer_scores_zero_without_judge(server, body, a
         provider.download_file.assert_not_awaited()
 
 
+@pytest.mark.parametrize(
+    ("return_code", "error_type"),
+    [(125, "sandbox"), (124, "timeout"), (127, None), (0, "sandbox"), (1, "sandbox")],
+)
+async def test_answer_probe_failure_masks_sample(server, body, return_code, error_type) -> None:
+    provider = server._provider
+    await server.seed_session(_request(), body)
+    agent = server._sessions["session"][1]
+    provider.exec.return_value = SandboxExecResult(None, "runtime failed", return_code, error_type=error_type)
+    result = await server.verify(_request(), body)
+    assert result.reward == 0 and result.mask_sample and not result.evaluation_completed
+    assert provider.create.await_count == 1
+    provider.download_file.assert_not_awaited()
+    provider.upload_file.assert_not_awaited()
+    provider.close.assert_awaited_once_with(agent)
+    assert not server._sessions
+
+
 async def test_task_mismatch_closes_without_collecting_or_grading(server, body) -> None:
     await server.seed_session(_request(), body)
     agent = server._sessions["session"][1]

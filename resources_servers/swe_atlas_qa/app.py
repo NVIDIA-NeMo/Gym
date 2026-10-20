@@ -301,6 +301,8 @@ class SWEAtlasQAResourcesServer(SimpleResourcesServer):
                             f'test "$(wc -c < /logs/agent/answer.txt)" -le {self.config.max_answer_bytes}',
                             timeout_s=30,
                         )
+                        if answer_file.error_type is not None or answer_file.return_code not in (0, 1):
+                            raise RuntimeError("Agent answer inspection failed")
                         if answer_file.return_code == 0:
                             await self._provider.download_file(handle, "/logs/agent/answer.txt", answer_path)
                     finally:

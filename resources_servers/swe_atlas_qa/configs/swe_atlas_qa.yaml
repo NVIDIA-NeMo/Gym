@@ -10,7 +10,7 @@ swe_atlas_qa_resources_server:
       model_server:
         type: responses_api_models
         name: policy_model
-      sandbox_model_base_url: http://${oc.env:SWE_ATLAS_GYM_MODEL_HOST}:${oc.env:SWE_ATLAS_GYM_MODEL_PORT,8000}
+      sandbox_model_base_url: http://${oc.env:SWE_ATLAS_GYM_MODEL_HOST}:${policy_model.responses_api_models.vllm_model.port}
       judge_base_url: ${oc.env:SWE_ATLAS_JUDGE_BASE_URL}
       judge_model: ${oc.env:SWE_ATLAS_JUDGE_MODEL}
       judge_api_key: ${oc.env:SWE_ATLAS_JUDGE_API_KEY,unused}
@@ -54,4 +54,4 @@ policy_model:
   responses_api_models:
     vllm_model:
       host: ${oc.env:SWE_ATLAS_GYM_MODEL_HOST}
-      port: ${oc.env:SWE_ATLAS_GYM_MODEL_PORT,8000}
+      port: 8000
