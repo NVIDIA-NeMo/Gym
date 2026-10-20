@@ -139,29 +139,35 @@ to run `hermes_agent` through an Environment Server. For Hermes specifically:
   Renamed or replaced: `sandbox_timeout` becomes `sandbox_runner_timeout_seconds`, the runner
   deadline, whose shipped default is 21600 against the removed default of 2700;
   `cleanup_timeout` becomes this agent's own `session_close_timeout_seconds`, default 30 and
-  applied in full to each of three cleanup phases, so budget roughly 90 seconds in total
+  used for individual cleanup operations rather than one aggregate teardown deadline,
   against the removed default of 120; and `chat_template_kwargs` becomes the narrower
   `chat_template_kwargs_enabled` boolean, so arbitrary template keyword arguments now belong
   on the Model Server. Removed with no counterpart: `runtime_python`, `remote_run_root`,
-  `results_dir`, `api_timeout`, and `context_length`. The last three change behaviour rather
-  than spelling. `api_timeout` bounded a single model call at 1800 seconds by default, whereas
-  this agent bounds only the whole activation, so size `sandbox_runner_timeout_seconds`
-  accordingly or set `HERMES_API_TIMEOUT` in the sandbox environment. `context_length` set
-  both Hermes' main context window and the summarization auxiliary's; without it Hermes falls
-  back to its catalog default for the served model, which moves the point at which compaction
-  fires on long trajectories. `results_dir` kept per-run artifacts on the host, so a failed
-  activation now leaves only the error it raised.
+  `results_dir`, `api_timeout`, and `context_length`. These require migration rather than
+  renaming. `api_timeout` is no longer an adapter setting, but the pinned Hermes runtime still
+  passes an SDK request timeout of 1800 seconds by default, configurable with `HERMES_API_TIMEOUT`
+  in the sandbox environment. `sandbox_runner_timeout_seconds` separately bounds the whole
+  activation. `context_length` set both Hermes' main context window and the summarization
+  auxiliary's; without that override, Hermes resolves the window through its runtime metadata
+  and fallback logic, which can change when compaction fires on long trajectories.
+  `results_dir` kept per-run artifacts on the host; update consumers
+  to use Environment Server rollout and agent-observation records. A successful session close
+  returns available observations or capture-gap diagnostics even when activation fails.
 - The Environment Server's `default_episode_timeout_seconds` and `cleanup_timeout_seconds`
-  bound the episode and the server's own unwind, not the sandbox teardown. Note that the
-  shipped `sandbox_runner_timeout_seconds` equals the default episode deadline, so the episode
-  deadline fires first unless you lower one of them.
+  bound the episode and each registered cleanup callback, respectively. The agent and
+  Resources Server still own sandbox teardown. Note that the
+  shipped `sandbox_runner_timeout_seconds` equals the default episode deadline. Without a
+  smaller task `metadata.agent_timeout_sec`, the episode deadline can interrupt the runner;
+  leave time for setup and verification when choosing the runner or task budget.
 - The agent-specific `configs/apptainer.yaml` has been removed. Copy its `exec` timeouts into
   your shared configuration under `sandbox.apptainer`, but drop `default_binds`: it existed
   only for the `/opt/hermes` mount this change removes. Review `extra_start_args` before
-  reusing it, because `--contain` and `--containall` replace the container's `/tmp` with a
-  small session directory, 64 MB by default. That starves the seed-time runtime install and
-  also hides a runtime baked into the image under `/tmp`. Either raise the provider's
-  `sessiondir max size` and bind a host path over the runtime directory, or drop those flags.
+  reusing it: containment can exhaust the configured session directory during runtime
+  installation or hide a runtime baked into the image under `/tmp`. Validate the actual
+  `/tmp` mounts and available space, using an explicit runtime bind when needed. Apptainer's
+  administrator-controlled `sessiondir max size` defaults to 64 MiB; `--workdir` can supply
+  containment's temporary directories. Dropping containment alone does not expose a baked
+  runtime when the host's `/tmp` is mounted there.
   See the
   [Apptainer provider reference](../../nemo_gym/sandbox/providers/apptainer/README.md#selecting-and-configuring-the-provider).
 - The old `prepare_runtime.sh`, libc-selecting launcher, and `/opt/hermes` mount convention
