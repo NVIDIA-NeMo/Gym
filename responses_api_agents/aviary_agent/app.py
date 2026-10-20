@@ -33,6 +33,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputItem,
     NeMoGymResponseOutputMessage,
 )
+from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.aviary.schemas import (
     AviaryAgentVerifyRequest,
     AviaryAgentVerifyResponse,
@@ -303,3 +304,6 @@ class AviaryAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     AviaryAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = AviaryAgent.run_webserver()  # noqa: F401

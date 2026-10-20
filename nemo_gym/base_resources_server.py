@@ -12,8 +12,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 from abc import abstractmethod
 from collections import OrderedDict
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from enum import Enum
 from time import monotonic
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Optional, TypeVar, get_args
@@ -332,6 +335,39 @@ class ClosedResourcesSessionRecords(Generic[ClosedRecordT]):
         now = monotonic()
         while self._records and next(iter(self._records.values()))[0] <= now:
             self._records.popitem(last=False)
+
+
+class ResourcesSessionLocks:
+    """One ``asyncio.Lock`` per resources session, kept only while a request holds it or waits for it.
+
+    A server that serializes a session's seed and close holds this lock around them.
+    Requests that do not overlap need no shared lock, so the entry goes when the last of them finishes.
+    A server that kept a lock per ID instead would keep one for every session it ever saw.
+    """
+
+    def __init__(self) -> None:
+        # Each session's lock, and how many requests hold it or wait for it.
+        self._locks: dict[str, tuple[asyncio.Lock, int]] = {}
+
+    @asynccontextmanager
+    async def hold(self, resources_session_id: str) -> AsyncIterator[None]:
+        """Hold the session's lock for the duration of the block."""
+        lock, users = self._locks.get(resources_session_id, (None, 0))
+        if lock is None:
+            lock = asyncio.Lock()
+        self._locks[resources_session_id] = (lock, users + 1)
+        try:
+            async with lock:
+                yield
+        finally:
+            lock, users = self._locks[resources_session_id]
+            if users == 1:
+                del self._locks[resources_session_id]
+            else:
+                self._locks[resources_session_id] = (lock, users - 1)
+
+    def __len__(self) -> int:
+        return len(self._locks)
 
 
 class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleServer):

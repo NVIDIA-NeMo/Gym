@@ -75,5 +75,6 @@ seconds by default, matching the episode plus cleanup windows).
 
 The Environment Server registers cleanup before every seed request and closes
 participant and Resources sessions on every outcome. Closing is idempotent, and
-a short-lived tombstone prevents a delayed seed from recreating closed state.
+a tombstone kept for `session_close_retry_window_seconds` (1980 seconds by
+default) prevents a delayed seed from recreating closed state.
 Unknown or expired active Resources sessions return HTTP 404 when verified.

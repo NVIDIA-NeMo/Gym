@@ -97,7 +97,8 @@ through `/close_session`. An Environment Server assigns the session id and
 registers that close before it seeds, so an episode that ends before `verify`
 still gets its browser released, and a seed that arrives after its close opens
 nothing (`tests/test_resources_sessions.py`). The server keeps browsers in
-process, so it requires `num_workers: 1`.
+process. With `num_workers` above 1, Gym routes a session's seed, tool calls,
+`verify` and close to the worker that holds its browser.
 
 There is no independent episode TTL and no client-side cap on concurrent
 sessions, so:

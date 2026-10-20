@@ -38,10 +38,12 @@ from nemo_gym.base_resources_server import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ClosedResourcesSessionRecords,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
+    ResourcesSessionLocks,
     SimpleResourcesServer,
 )
 from nemo_gym.episode_types import EpisodeId, TaskId
@@ -50,7 +52,7 @@ from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.providers.base import ConnectableProvider
-from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
 from resources_servers.swebench_pro.image_cache import digest_hex, verify_local_image
 from resources_servers.swebench_pro.verification import (
     DEFAULT_ENVIRONMENT_REPAIRS,
@@ -206,15 +208,15 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
-        if self.config.num_workers not in (None, 1):
-            raise ValueError("SWE-bench Pro process-local sessions require num_workers=1")
         self._session_id_to_sandbox: dict[str, AsyncSandbox] = {}
         # Untracked files the image ships, per session. Leading underscore: pydantic needs it.
         self._session_id_to_pristine_untracked: dict[str, frozenset[str]] = {}
         # Typed sessions, which an Environment Server seeds and closes by resources_session_id.
         self._session_id_to_identity: dict[str, tuple[EpisodeId, TaskId]] = {}
-        self._session_locks: dict[str, asyncio.Lock] = {}
-        self._closed_sessions: dict[str, EpisodeId] = {}
+        self._session_locks = ResourcesSessionLocks()
+        self._closed_sessions = ClosedResourcesSessionRecords[EpisodeId](
+            self.config.session_close_retry_window_seconds
+        )
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -249,8 +251,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         except ValidationError as error:
             raise RequestValidationError(error.errors()) from error
         session_id = typed.resources_session_id
-        lock = self._session_locks.setdefault(session_id, asyncio.Lock())
-        async with lock:
+        async with self._session_locks.hold(session_id):
             closed_episode_id = self._closed_sessions.get(session_id)
             if closed_episode_id is not None:
                 if typed.episode_id != closed_episode_id:
@@ -262,7 +263,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                 raise ValueError("episode_id does not match the seeded resources session")
             await self._stop_session_sandbox(session_id)
             self._session_id_to_identity.pop(session_id, None)
-            self._closed_sessions[session_id] = typed.episode_id
+            self._closed_sessions.remember(session_id, typed.episode_id)
             request.session.pop(SESSION_ID_KEY, None)
             return ResourcesCloseSessionResponse(resources_session_id=session_id)
 
@@ -276,8 +277,6 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
 
     async def shutdown(self) -> None:
         self._session_id_to_identity.clear()
-        self._session_locks.clear()
-        self._closed_sessions.clear()
         for session_id in list(self._session_id_to_sandbox):
             try:
                 await self._stop_session_sandbox(session_id)
@@ -360,8 +359,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
 
         session_id = body.resources_session_id
         request.session[SESSION_ID_KEY] = session_id
-        lock = self._session_locks.setdefault(session_id, asyncio.Lock())
-        async with lock:
+        async with self._session_locks.hold(session_id):
             if session_id in self._closed_sessions:
                 raise ValueError(f"Resources session is already closed: {session_id}")
             identity = self._session_id_to_identity.get(session_id)
@@ -601,3 +599,6 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     SWEBenchProResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = SWEBenchProResourcesServer.run_webserver()  # noqa: F401

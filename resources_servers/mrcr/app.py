@@ -40,6 +40,7 @@ from nemo_gym.reward_profile import (
     compute_subset_metrics,
     highest_k_metrics,
 )
+from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 
 
 class MRCRResourcesServerConfig(BaseResourcesServerConfig):
@@ -126,3 +127,6 @@ def _grade(response: str, expected_answer: str, random_string_to_prepend: str) -
 
 if __name__ == "__main__":
     MRCRResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = MRCRResourcesServer.run_webserver()  # noqa: F401

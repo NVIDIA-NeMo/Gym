@@ -70,7 +70,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.profiling import Profiler
 from nemo_gym.rollout_correlation import current_rollout_id
-from nemo_gym.server_utils import apply_rollout_prefix, get_first_server_config_dict
+from nemo_gym.server_utils import apply_rollout_prefix, get_first_server_config_dict, is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.swe_agents.opencode_replay import (
     build_replay_subagent_manifest,
     merge_replay_subagent_trajectories,
@@ -4109,3 +4109,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     SWEBenchWrapper.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = SWEBenchWrapper.run_webserver()  # noqa: F401

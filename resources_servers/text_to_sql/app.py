@@ -42,6 +42,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.text_to_sql.prompts import SQL_JUDGE_PROMPT_TEMPLATE, SQL_JUDGE_SYSTEM_MESSAGE
 
 
@@ -417,3 +418,6 @@ class TextToSqlResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     TextToSqlResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = TextToSqlResourcesServer.run_webserver()  # noqa: F401

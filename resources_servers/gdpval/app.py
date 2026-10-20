@@ -591,12 +591,17 @@ class _TaskSession:
 class GDPValResourcesServer(SimpleResourcesServer):
     config: GDPValResourcesServerConfig
 
+    def multiple_workers_unsupported_reason(self) -> Optional[str]:
+        return (
+            "a seed claims the persisted deliverables directory of its task and repeat in this process's memory, "
+            "keyed by the task ID and rollout ID in the request body, "
+            "so sessions on different workers could write the same directory"
+        )
+
     def model_post_init(self, context: Any) -> None:
         self._judge_prompt_fpath: str = self.config.judge_prompt_template_fpath or _DEFAULT_JUDGE_PROMPT_FPATH
         self._judge_telemetry = JudgeTelemetrySink(self.config.judge_telemetry_output_dir)
         self._tavily = TavilySearch(api_keys=self.config.tavily_api_key, max_sweeps=self.config.tavily_max_sweeps)
-        if self.config.num_workers not in (None, 1):
-            raise ValueError("GDPVal sessions are process-local and require num_workers=1")
         self._sessions: Dict[str, _TaskSession] = {}
         self._closed_sessions: Dict[str, EpisodeId] = {}
         # (task_id, repeat) of the persisted directory each live session will write, to the session holding it.

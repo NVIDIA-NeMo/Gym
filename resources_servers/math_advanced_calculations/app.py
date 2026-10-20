@@ -24,6 +24,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 
 # Import all functions from the tools file
 from resources_servers.math_advanced_calculations.math_advanced_calculations_tools import (
@@ -128,3 +129,6 @@ class MultiVerseMathHardResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     MultiVerseMathHardResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = MultiVerseMathHardResourcesServer.run_webserver()  # noqa: F401

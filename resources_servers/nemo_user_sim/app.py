@@ -16,10 +16,11 @@ from types import SimpleNamespace
 from typing import Any
 
 from fastapi import HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
+    ClosedResourcesSessionRecords,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
     ResourcesSeedSessionRequest,
@@ -34,7 +35,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, raise_for_status
+from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
 from resources_servers.nemo_user_sim.episode_contracts import (
     UserSimSeedResponse,
     UserSimSimulationResult,
@@ -76,6 +77,8 @@ class UserSimResourcesServerConfig(BaseResourcesServerConfig):
     model_call_timeout_seconds: float = Field(300.0, gt=0)
     evaluation_timeout_seconds: float = Field(1200.0, gt=0)
     session_ttl_seconds: float = Field(1980.0, gt=0)
+    # A closed session is remembered as long as an open one lives, so a seed delayed by up to an episode is refused.
+    session_close_retry_window_seconds: float = Field(1980.0, gt=0, allow_inf_nan=False)
 
 
 class SeededUserSimEpisode(BaseModel):
@@ -183,7 +186,11 @@ class UserSimResourcesServer(SimpleResourcesServer):
 
     config: UserSimResourcesServerConfig
     session_id_to_seed: dict[str, SeededUserSimEpisode] = {}
-    closed_resources_session_ids: dict[str, float] = {}
+    _closed_sessions: ClosedResourcesSessionRecords[EpisodeId] = PrivateAttr()
+
+    def model_post_init(self, context: Any, /) -> None:
+        super().model_post_init(context)
+        self._closed_sessions = ClosedResourcesSessionRecords(self.config.session_close_retry_window_seconds)
 
     async def seed_session(
         self,
@@ -203,7 +210,7 @@ class UserSimResourcesServer(SimpleResourcesServer):
         session_id = request.session[SESSION_ID_KEY]
         self._expire_sessions()
         resolved_row = task.resolved_row
-        if body.resources_session_id in self.closed_resources_session_ids:
+        if body.resources_session_id in self._closed_sessions:
             raise HTTPException(status_code=409, detail="Resources session is already closed")
         existing = self.session_id_to_seed.get(session_id)
         if existing is not None:
@@ -436,10 +443,7 @@ class UserSimResourcesServer(SimpleResourcesServer):
             if body.resources_session_id != seeded.resources_session_id or body.episode_id != seeded.episode_id:
                 raise HTTPException(status_code=409, detail="Resources session does not match the active episode")
             del self.session_id_to_seed[session_id]
-        self.closed_resources_session_ids.setdefault(
-            body.resources_session_id,
-            monotonic() + self.config.session_ttl_seconds,
-        )
+        self._closed_sessions.remember(body.resources_session_id, body.episode_id)
         return ResourcesCloseSessionResponse(resources_session_id=body.resources_session_id)
 
     def _seeded_episode(self, request: Request) -> SeededUserSimEpisode:
@@ -456,9 +460,6 @@ class UserSimResourcesServer(SimpleResourcesServer):
         for session_id, seeded in tuple(self.session_id_to_seed.items()):
             if seeded.expires_at <= now:
                 del self.session_id_to_seed[session_id]
-        for resources_session_id, expires_at in tuple(self.closed_resources_session_ids.items()):
-            if expires_at <= now:
-                del self.closed_resources_session_ids[resources_session_id]
 
 
 def _validate_resolved_row(
@@ -558,3 +559,6 @@ def _response_text(response: NeMoGymResponse) -> str:
 
 if __name__ == "__main__":
     UserSimResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = UserSimResourcesServer.run_webserver()  # noqa: F401

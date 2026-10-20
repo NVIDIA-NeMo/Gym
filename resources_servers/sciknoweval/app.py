@@ -20,6 +20,7 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
 from nemo_gym.judge import JudgeError, call_judge
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verifier_fixture import VerifierFixture
 from resources_servers.sciknoweval.grading import grade_task, parse_judgement
 from resources_servers.sciknoweval.task_data import TaskData
@@ -154,3 +155,6 @@ VERIFIER_FIXTURE = VerifierFixture(
 
 if __name__ == "__main__":
     SciKnowEvalResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = SciKnowEvalResourcesServer.run_webserver()  # noqa: F401

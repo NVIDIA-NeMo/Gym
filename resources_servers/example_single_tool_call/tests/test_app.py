@@ -177,4 +177,4 @@ class TestApp:
         assert close.status_code == 200
         # The route reached this server's close, not the base default, so the session was released.
         assert resources_session_id not in server._session_episodes
-        assert resources_session_id in server._closed_session_ids
+        assert resources_session_id in server._closed_sessions

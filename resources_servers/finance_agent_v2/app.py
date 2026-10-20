@@ -75,7 +75,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json
+from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, is_nemo_gym_fastapi_entrypoint
 from resources_servers.finance_agent_v2.local_tools import LocalEDGARSearch, LocalParseHtmlPage, LocalPriceHistory
 from resources_servers.sec_local_index.cache import ToolCache
 from resources_servers.sec_local_index.local_edgar_search import LocalEdgarSearch
@@ -1225,9 +1225,17 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
         return key
 
 
-if __name__ == "__main__":
+def _configure_logging() -> None:
     # Root stays at WARNING: at INFO the HTTP client logs a line per model call.
     logging.basicConfig(level=logging.WARNING)
     for _logger_name in (__name__, "resources_servers"):
         logging.getLogger(_logger_name).setLevel(os.environ.get("NEMO_GYM_LOG_LEVEL", "INFO").upper())
+
+
+if __name__ == "__main__":
+    _configure_logging()
     FinanceAgentV2ResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    _configure_logging()
+    app = FinanceAgentV2ResourcesServer.run_webserver()  # noqa: F401

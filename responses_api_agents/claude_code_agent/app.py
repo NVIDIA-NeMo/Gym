@@ -50,7 +50,12 @@ from nemo_gym.openai_utils import (
     NeMoGymSummary,
 )
 from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle, ObservationGap
-from nemo_gym.server_utils import apply_rollout_prefix, get_response_json, raise_for_status
+from nemo_gym.server_utils import (
+    apply_rollout_prefix,
+    get_response_json,
+    is_nemo_gym_fastapi_entrypoint,
+    raise_for_status,
+)
 from nemo_gym.skills import stage_skills
 from responses_api_agents.claude_code_agent.observability import extract_claude_code_observations
 from responses_api_agents.claude_code_agent.setup_claude_code import ensure_claude_code
@@ -339,6 +344,10 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
 
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
+        # This install takes no lock across processes, and it relies on an ordering instead.
+        # With num_workers > 1, the main process builds this server before uvicorn starts the workers,
+        # so the install has finished before any worker gets here,
+        # and the workers find the tool on the PATH they inherit.
         ensure_claude_code(self.config.claude_code_version)
         try:
             ver = subprocess.run(["claude", "--version"], capture_output=True, text=True, timeout=10).stdout.strip()
@@ -819,3 +828,6 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     ClaudeCodeAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = ClaudeCodeAgent.run_webserver()  # noqa: F401

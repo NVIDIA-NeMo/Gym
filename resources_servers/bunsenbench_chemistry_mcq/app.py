@@ -12,6 +12,7 @@ from typing import Any, ClassVar, Optional
 
 from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.mcqa.app import (
     MCQAResourcesServer,
     MCQAResourcesServerConfig,
@@ -547,3 +548,6 @@ def _metric_segment(value: Any) -> str:
 
 if __name__ == "__main__":
     BunsenChemResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = BunsenChemResourcesServer.run_webserver()  # noqa: F401

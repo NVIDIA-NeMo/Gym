@@ -24,6 +24,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     ClosedResourcesSessionRecords,
     ResourcesSeedSessionRequest,
+    ResourcesSessionLocks,
     ReverifyMode,
     SimpleResourcesServer,
 )
@@ -258,3 +259,45 @@ class TestClosedResourcesSessionRecords:
         for window in (0, -1.0, float("nan")):
             with pytest.raises(ValueError, match="window_seconds must be positive"):
                 ClosedResourcesSessionRecords[str](window_seconds=window)
+
+
+class TestResourcesSessionLocks:
+    def test_overlapping_requests_share_one_lock_and_the_last_removes_it(self) -> None:
+        locks = ResourcesSessionLocks()
+        order: list[str] = []
+
+        async def request(name: str, entered: asyncio.Event, release: asyncio.Event) -> None:
+            async with locks.hold("id"):
+                entered.set()
+                order.append(f"{name} in")
+                await release.wait()
+                order.append(f"{name} out")
+
+        async def run() -> None:
+            first_in, second_in, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+            first = asyncio.create_task(request("first", first_in, release))
+            await first_in.wait()
+            second = asyncio.create_task(request("second", second_in, release))
+            await asyncio.sleep(0)
+            assert not second_in.is_set() and len(locks) == 1
+            release.set()
+            await asyncio.gather(first, second)
+
+        asyncio.run(run())
+
+        assert order == ["first in", "first out", "second in", "second out"]
+        assert len(locks) == 0
+
+    def test_a_cancelled_waiter_leaves_no_lock_behind(self) -> None:
+        locks = ResourcesSessionLocks()
+
+        async def run() -> None:
+            async with locks.hold("id"):
+                waiter = asyncio.create_task(locks.hold("id").__aenter__())
+                await asyncio.sleep(0)
+                waiter.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await waiter
+            assert len(locks) == 0
+
+        asyncio.run(run())

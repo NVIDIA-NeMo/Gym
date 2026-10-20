@@ -16,7 +16,7 @@ from nemo_gym.base_resources_server import ResourcesCloseSessionRequest, Resourc
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.server_utils import ServerClient, refuse_unsupported_num_workers
 from nemo_gym.testing.session_conformance import check_resources_session_contract
 from resources_servers.gdpval import persisted_layout, task_sandbox
 from resources_servers.gdpval.app import GDPValResourcesServer, GDPValResourcesServerConfig, GDPValVerifyRequest
@@ -495,8 +495,8 @@ def test_shutdown_stops_the_sandboxes_of_open_sessions(server, root, tmp_path, s
 
 
 def test_sessions_require_a_single_worker(tmp_path):
-    with pytest.raises(ValueError, match="num_workers=1"):
-        _server(tmp_path, num_workers=2)
+    with pytest.raises(ValueError, match="needs num_workers=1: a seed claims the persisted deliverables directory"):
+        refuse_unsupported_num_workers(_server(tmp_path, num_workers=2))
 
 
 def _restart(client: TestClient, tmp_path: Path) -> TestClient:

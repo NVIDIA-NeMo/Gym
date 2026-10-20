@@ -59,6 +59,8 @@ from openair_congestion.render import to_policy_text
 from openair_congestion.schemas import AgentAux, LastActionEcho, ToolCall
 from openair_congestion.tools import TOOL_SCHEMA_BY_NAME
 
+from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
+
 
 _GUARDRAIL_VALIDATION_KEYWORDS = {
     "const",
@@ -590,3 +592,6 @@ class OpenAirCongestionEnv(GymnasiumServer):
 
 if __name__ == "__main__":
     OpenAirCongestionEnv.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = OpenAirCongestionEnv.run_webserver()  # noqa: F401

@@ -960,7 +960,6 @@ async def test_non_retryable_assistant_response_failure_is_verified_as_reward_ze
         server_client=MagicMock(spec=ServerClient),
     )
     resources_server.session_id_to_seed = {}
-    resources_server.closed_resources_session_ids = {}
     resources_request = SimpleNamespace(session={SESSION_ID_KEY: "real-resources-session"})
     seed_body = next(call[2]["json"] for call in client.calls if call[1] == "/seed_session")
     verify_body = next(call[2]["json"] for call in client.calls if call[1] == "/verify")

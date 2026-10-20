@@ -376,6 +376,27 @@ class TestRateLimiter:
         # Requests should be recorded
         assert len(limiter.requests) == 5
 
+    def test_workers_share_the_configured_limit(self, server_config) -> None:
+        """Each worker's limiter allows its share of requests_per_second, so the whole server stays within it."""
+        server_config.requests_per_second = 10
+        server_config.num_workers = 4
+        server = FinanceAgentResourcesServer(config=server_config, server_client=MagicMock(spec=ServerClient))
+
+        assert (server._rate_limiter.max_requests, server._rate_limiter.window_seconds) == (2, 1.0)
+
+    def test_one_worker_keeps_the_configured_limit(self, server_config) -> None:
+        server_config.requests_per_second = 10
+        server = FinanceAgentResourcesServer(config=server_config, server_client=MagicMock(spec=ServerClient))
+
+        assert (server._rate_limiter.max_requests, server._rate_limiter.window_seconds) == (10, 1.0)
+
+    def test_more_workers_than_requests_per_second_stretch_the_window(self, server_config) -> None:
+        server_config.requests_per_second = 2
+        server_config.num_workers = 8
+        server = FinanceAgentResourcesServer(config=server_config, server_client=MagicMock(spec=ServerClient))
+
+        assert (server._rate_limiter.max_requests, server._rate_limiter.window_seconds) == (1, 4.0)
+
 
 # ============================================================================
 # Test: Ticker Lookup

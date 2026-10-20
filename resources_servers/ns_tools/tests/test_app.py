@@ -28,7 +28,7 @@ from nemo_skills.mcp.tool_manager import ToolManager
 from nemo_gym.base_resources_server import SimpleResourcesServer
 from nemo_gym.config_types import ResourcesServerRef
 from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient, refuse_unsupported_num_workers
 
 
 class TestApp:
@@ -41,6 +41,24 @@ class TestApp:
             name="ns_tools",
         )
         NSToolsResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+    @pytest.mark.parametrize("uses_sidecar", [True, False])
+    def test_several_workers_are_refused_only_with_the_http_python_tool(self, uses_sidecar: bool) -> None:
+        config = NSToolsConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="ns_tools",
+            num_workers=2,
+            nemo_skills_tools=["nemo_skills.mcp.servers.python_tool::PythonTool"],
+        )
+        server = NSToolsResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        with patch.object(NSToolsResourcesServer, "_tool_uses_python_tool_sidecar", return_value=uses_sidecar):
+            if uses_sidecar:
+                with pytest.raises(ValueError, match="needs num_workers=1: the HTTP PythonTool starts a sidecar"):
+                    refuse_unsupported_num_workers(server)
+            else:
+                refuse_unsupported_num_workers(server)
 
     def test_config_with_verifiers(self) -> None:
         """Test configuration with verifiers."""

@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI
 from pydantic import BaseModel, PrivateAttr
@@ -23,6 +24,7 @@ from nemo_gym.base_resources_server import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ClosedResourcesSessionRecords,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
     ResourcesSeedSessionRequest,
@@ -30,6 +32,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.episode_types import EpisodeId, TaskId
+from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verifier_fixture import VerifierFixture
 
 
@@ -59,7 +62,11 @@ class SimpleWeatherResourcesServer(SimpleWeatherVerifier, SimpleResourcesServer)
     checkpoint_mode = "stateless"
     config: SimpleWeatherResourcesServerConfig
     _session_episodes: dict[str, tuple[EpisodeId, TaskId]] = PrivateAttr(default_factory=dict)
-    _closed_session_ids: set[str] = PrivateAttr(default_factory=set)
+    _closed_sessions: ClosedResourcesSessionRecords[EpisodeId] = PrivateAttr()
+
+    def model_post_init(self, context: Any, /) -> None:
+        super().model_post_init(context)
+        self._closed_sessions = ClosedResourcesSessionRecords(self.config.session_close_retry_window_seconds)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -77,7 +84,7 @@ class SimpleWeatherResourcesServer(SimpleWeatherVerifier, SimpleResourcesServer)
 
         resources_session_id = body.resources_session_id
         # Nothing below awaits, so no other request can run between the checks and the update.
-        if resources_session_id in self._closed_session_ids:
+        if resources_session_id in self._closed_sessions:
             raise ValueError(f"Resources session is already closed: {resources_session_id}")
         identity = self._session_episodes.setdefault(resources_session_id, (body.episode_id, body.task_id))
         if identity != (body.episode_id, body.task_id):
@@ -92,7 +99,7 @@ class SimpleWeatherResourcesServer(SimpleWeatherVerifier, SimpleResourcesServer)
         if identity is not None and body.episode_id != identity[0]:
             raise ValueError("episode_id does not match the seeded resources session")
         self._session_episodes.pop(resources_session_id, None)
-        self._closed_session_ids.add(resources_session_id)
+        self._closed_sessions.remember(resources_session_id, body.episode_id)
         return ResourcesCloseSessionResponse(resources_session_id=resources_session_id)
 
     async def get_weather(self, body: GetWeatherRequest) -> GetWeatherResponse:
@@ -108,3 +115,6 @@ VERIFIER_FIXTURE = VerifierFixture(
 
 if __name__ == "__main__":
     SimpleWeatherResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = SimpleWeatherResourcesServer.run_webserver()  # noqa: F401

@@ -1096,3 +1096,31 @@ def test_close_session_accepts_cookie_and_typed_bodies_over_http() -> None:
     assert typed_close.status_code == 200
     assert typed_close.json()["resources_session_id"] == "session"
     assert malformed_close.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_a_closed_id_is_refused_for_the_close_retry_window_and_then_forgotten(monkeypatch: MonkeyPatch) -> None:
+    """The record lasts as long as the routing claim, so with several workers every worker gives a late seed one answer."""
+    clock = [0.0]
+    monkeypatch.setattr("nemo_gym.base_resources_server.monotonic", lambda: clock[0])
+    server = make_server(golden=False, session_close_retry_window_seconds=60)
+    request = SimpleNamespace(session={})
+    episode_id = EpisodeId(rollout_id="rollout")
+    seed = ResourcesSeedSessionRequest(
+        resources_session_id="session",
+        episode_id=episode_id,
+        task_id=TaskId(taskset="swebench_pro", task_id="instance_example"),
+        task_data={},
+    )
+    close = ResourcesCloseSessionRequest(resources_session_id="session", episode_id=episode_id)
+
+    await server.close_resources_session(request, close.model_dump(mode="json"))
+    clock[0] = 59.0
+    with pytest.raises(ValueError, match="already closed"):
+        await server.seed_session(request, seed)
+
+    clock[0] = 60.0
+    assert "session" not in server._closed_sessions
+    assert len(server._closed_sessions) == 0
+    # A request holds a session's lock only while it runs, so none is left behind.
+    assert len(server._session_locks) == 0

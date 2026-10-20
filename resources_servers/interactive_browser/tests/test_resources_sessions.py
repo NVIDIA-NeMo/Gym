@@ -24,7 +24,7 @@ from fastapi.testclient import TestClient
 
 from nemo_gym.base_resources_server import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
 from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient, refuse_unsupported_num_workers
 
 
 class _Browser:
@@ -241,10 +241,9 @@ class TestCloseRacingTheSeed:
         assert browsers.created == []
 
 
-def test_more_than_one_worker_is_refused() -> None:
-    """Browsers live in this process; a second worker would get tool calls for browsers it lacks."""
-    with pytest.raises(ValueError, match="num_workers=1"):
-        _server(num_workers=2)
+def test_several_workers_are_allowed() -> None:
+    """Session routing sends a seed and close by resources_session_id to the worker that holds the browser."""
+    refuse_unsupported_num_workers(_server(num_workers=2))
 
 
 def test_verify_after_close_reports_the_missing_browser(browsers) -> None:
@@ -327,3 +326,23 @@ def test_an_agent_run_seed_has_no_episode_to_tag(browsers) -> None:
     client.post("/seed_session", json={"initial_url": "https://example.com/"})
 
     assert set(browsers.created[0].session_metadata) == {"rollout_session_id"}
+
+
+def test_a_closed_id_is_refused_for_the_close_retry_window_and_then_forgotten(browsers, monkeypatch) -> None:
+    """The record lasts as long as the routing claim, so with several workers every worker gives a late seed one answer."""
+    clock = [0.0]
+    monkeypatch.setattr("nemo_gym.base_resources_server.monotonic", lambda: clock[0])
+    server = _server(session_close_retry_window_seconds=60)
+    client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+
+    assert client.post("/seed_session", json=_seed_json()).status_code == 200
+    assert client.post("/close_session", json=_close_json()).status_code == 200
+    clock[0] = 59.0
+    assert client.post("/seed_session", json=_seed_json()).status_code != 200
+    assert len(browsers.created) == 1
+
+    clock[0] = 60.0
+    assert "resources-session" not in server._typed_closed
+    assert len(server._typed_closed) == 0
+    # A request holds a session's lock only while it runs, so none is left behind.
+    assert len(server._typed_locks) == 0

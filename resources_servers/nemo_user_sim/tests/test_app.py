@@ -547,7 +547,6 @@ async def test_closed_and_unknown_sessions_return_404() -> None:
 def test_resources_session_contract() -> None:
     server = _server()
     server.session_id_to_seed = {}
-    server.closed_resources_session_ids = {}
 
     check_resources_session_contract(server.setup_webserver(), _seed_body(_resolved_row()), keeps_state=True)
 

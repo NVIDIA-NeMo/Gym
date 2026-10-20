@@ -434,6 +434,12 @@ def _compute_std_metrics(tasks: List[List[Dict[str, Any]]], score_keys: tuple) -
 class SpeedBenchResourcesServer(SimpleResourcesServer):
     config: SpeedBenchResourcesServerConfig
 
+    def multiple_workers_unsupported_reason(self) -> Optional[str]:
+        return (
+            "the speculative decoding measurement window starts from a metrics snapshot kept in this process's memory, "
+            "so each worker would measure from a different start and report deltas that miss the other workers' traffic"
+        )
+
     # State populated lazily on the first verify() call so the benchmark window
     # is bounded by the first model traffic our server sees, not by server
     # init time. Wrapped in an asyncio.Lock to avoid two concurrent first calls

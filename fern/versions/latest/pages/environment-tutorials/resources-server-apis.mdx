@@ -391,7 +391,7 @@ With `num_workers` above 1, each Uvicorn worker is a separate process with its o
 - Other requests follow the cookie or the token only. State keyed only by an ID in the request body, or reached by a request without the cookie or token, is not routed and may land on another worker. Key state by the session ID as shown above.
 - Agent Server sessions are routed the same way, and a seed or close without the cookie goes to the worker that first saw its `agent_session_id`.
 
-Uvicorn starts several workers by importing the server's module in each of them, so the module must define a module-level `app`:
+Uvicorn starts several workers by importing the server's entrypoint module in each of them and serving its module-level `app`. A server that supports several workers ends its entrypoint with:
 
 ```python
 from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
@@ -399,10 +399,15 @@ from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 if __name__ == "__main__":
     StatefulServer.run_webserver()
 elif is_nemo_gym_fastapi_entrypoint(__file__):
-    app = StatefulServer.run_webserver()
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = StatefulServer.run_webserver()  # noqa: F401
 ```
 
+A server whose state routing cannot reach, such as a registry keyed by another ID in the request body, overrides `multiple_workers_unsupported_reason()` instead and returns why it needs one worker. `run_webserver` then refuses `num_workers` above 1 with that reason before Uvicorn starts, and a dry run reports it too. A unit test checks that every server does one or the other.
+
 A server that keeps no per-session state, or shares it outside the process, can opt out of routing with `routes_sessions_to_owner = False` on its class.
+
+Concurrency limits such as judge semaphores apply per worker, so the server as a whole allows `num_workers` times the configured limit.
 
 ## YAML Configuration
 

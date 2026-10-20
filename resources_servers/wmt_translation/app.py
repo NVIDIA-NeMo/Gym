@@ -311,6 +311,12 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
     ray_enabled = True
     config: WmtTranslationResourcesServerConfig
 
+    def multiple_workers_unsupported_reason(self) -> Optional[str]:
+        return (
+            "each worker builds its own Ray GPU actor pool for COMET scoring, "
+            "so several workers multiply the GPU actors and can fail to schedule them"
+        )
+
     # COMET actor pool state — populated lazily during compute_metrics() so
     # actor creation happens after Ray is fully up and `extra_gpu` is
     # advertised. Pydantic PrivateAttr keeps these out of the config schema.
