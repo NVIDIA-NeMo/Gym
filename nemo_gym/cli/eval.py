@@ -791,6 +791,15 @@ def reward_profile():  # pragma: no cover
     for name, entry_coverage in agent_coverage.items():
         agent_level_metrics.append({"agent_ref": {"name": name}, **entry_coverage})
 
+    # Bayes@N reads the raw collection, not the measured subset: a masked reward is not a trial and a
+    # missing rollout is not a shorter trial, so both are refused rather than silently reduced.
+    bayes_metrics: Dict[str, Dict[str, float]] = {}
+    if config.bayes_at_n:
+        bayes_metrics = rp.compute_bayes_at_n_metrics(rows, results)
+        for entry in agent_level_metrics:
+            name = (entry.get("agent_ref") or {}).get("name")
+            entry.update(bayes_metrics.get(name, {}))
+
     completion_summary = rp.profile_completion_summary(rows, results)
     reward_profiling_fpath, agent_level_metrics_fpath, repeat_level_metrics_fpath = rp.write_to_disk(
         group_level_metrics, agent_level_metrics, repeat_level_metrics, Path(config.rollouts_jsonl_fpath)
@@ -803,6 +812,15 @@ Masked from quality metrics: {len(masked)} rollout rows (kept in completion acco
 Reward profiling outputs: {reward_profiling_fpath}
 Agent-level metrics: {agent_level_metrics_fpath}
 Repeat-level metrics: {repeat_level_metrics_fpath}""")
+
+    if bayes_metrics:
+        print(
+            "Bayes@N posterior moments (binary rewards, uniform prior): "
+            + "; ".join(
+                f"{name}: " + ", ".join(f"{key}={value:.4f}" for key, value in sorted(entry.items()))
+                for name, entry in sorted(bayes_metrics.items())
+            )
+        )
 
 
 @exit_cleanly_on_config_error

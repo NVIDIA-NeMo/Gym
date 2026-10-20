@@ -37,6 +37,8 @@ if TYPE_CHECKING:
 from nemo_gym.config_types import AggregateMetrics, BaseNeMoGymCLIConfig
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
+    RESPONSES_CREATE_PARAMS_KEY_NAME,
+    REWARD_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     rollout_run_key,
@@ -57,10 +59,51 @@ class RewardProfileConfig(BaseNeMoGymCLIConfig):
         default=False,
         description="Allow reward profiling from partial rollout outputs by dropping input rows with no completed rollouts.",
     )
+    bayes_at_n: bool = Field(
+        default=False,
+        description=(
+            "Also report each run's Bayes@N posterior mean and standard deviation of the benchmark's mean "
+            "success probability. Needs a complete collection whose questions all have the same number of "
+            "binary (0 or 1) reward trials."
+        ),
+    )
 
 
 def _rollout_key(row: Dict[str, Any]) -> Tuple[int, int]:
     return row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]
+
+
+# `rollout_collection` writes the repeat number into this field of `responses_create_params`, so it is
+# the one thing that legitimately differs between a question's repeated materialized inputs.
+_SEED_KEY_NAME = "seed"
+
+
+def _materialized_input_fingerprint(row: Dict[str, Any]) -> bytes:
+    """Canonical bytes for one materialized input, ignoring rollout identity and its repeat seed.
+
+    Repeated rollouts of a question are scheduled from one input row, so their materialized rows must
+    agree once the rollout index and the seed derived from it are set aside. Comparing bytes rather
+    than dicts keeps nested values (prompts, tool definitions) order-sensitive in exactly the way the
+    server would see them.
+    """
+    normalized = {k: v for k, v in row.items() if k not in (TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME)}
+    create_params = normalized.get(RESPONSES_CREATE_PARAMS_KEY_NAME)
+    if isinstance(create_params, dict):
+        create_params = {k: v for k, v in create_params.items() if k != _SEED_KEY_NAME}
+        metadata = create_params.get("metadata")
+        if isinstance(metadata, dict):
+            metadata = dict(metadata)
+            extra_body = metadata.get("extra_body")
+            if isinstance(extra_body, str):
+                try:
+                    parsed_extra_body = orjson.loads(extra_body)
+                except orjson.JSONDecodeError:
+                    parsed_extra_body = None
+                if isinstance(parsed_extra_body, dict):
+                    metadata["extra_body"] = {k: v for k, v in parsed_extra_body.items() if k != _SEED_KEY_NAME}
+            create_params["metadata"] = metadata
+        normalized[RESPONSES_CREATE_PARAMS_KEY_NAME] = create_params
+    return orjson.dumps(normalized, option=orjson.OPT_SORT_KEYS)
 
 
 class RewardProfiler:
@@ -494,6 +537,113 @@ class RewardProfiler:
         self._append_repeat_level_aggregates_to_agent_level_metrics(agent_level_metrics, repeat_level_metrics)
 
         return group_level_metrics, agent_level_metrics, repeat_level_metrics
+
+    def compute_bayes_at_n_metrics(
+        self,
+        rows: List[Dict[str, Any]],
+        results: List[Dict[str, Any]],
+    ) -> Dict[str, Dict[str, float]]:
+        """Bayes@N posterior moments of each run's mean success probability, keyed by run label.
+
+        A question is one ``_ng_task_index``; its N trials are the separately collected rollouts of
+        that task. With s successes the question's success probability has posterior
+        ``Beta(s + 1, N - s + 1)`` under a uniform prior, so its mean is ``(s + 1) / (N + 2)``. The
+        benchmark mean is the average of those per-question means, and its posterior variance is the
+        summed per-question variance over the question count squared -- the questions are independent,
+        so the posterior of their average is never the single Beta posterior that pooling the counts
+        would give, and the spread is not the average of the per-question standard deviations.
+
+        Emitted per run (labelled the way ``profile_from_data`` labels agents, so fan-out stays
+        separate) as ``bayes@N/reward`` and ``std/bayes@N/reward``, both in reward units on [0, 1].
+        The second is the posterior standard deviation of the benchmark mean, which is a different
+        quantity from the empirical ``std/reward`` and from standard errors.
+
+        Every scheduled rollout in the supplied manifest must be present, with unique task/rollout
+        keys and rewards that are finite and exactly 0 or 1. Masked, partial and ragged (unequal N)
+        collections are rejected before any posterior is produced: each of them would answer a
+        question the data does not support. Repeated materialized inputs of one question must agree
+        apart from the per-rollout seed, because otherwise the trials did not share an input.
+        """
+        rows_by_key = self._index_by_rollout_key(rows, "materialized input")
+        results_by_key = self._index_by_rollout_key(results, "result")
+
+        missing_results = sorted(rows_by_key.keys() - results_by_key.keys())
+        if missing_results:
+            raise ValueError(
+                "--bayes-at-n needs every scheduled rollout, so a partial collection cannot be profiled. "
+                f"Missing rollout results for {len(missing_results)} materialized input rows. "
+                f"Missing rollout keys: {missing_results[:10]}"
+            )
+        missing_rows = sorted(results_by_key.keys() - rows_by_key.keys())
+        if missing_rows:
+            raise ValueError(
+                "Rollout results contain rows with no matching materialized input rows. "
+                f"Found {len(missing_rows)} extra rollout rows. Extra rollout keys: {missing_rows[:10]}"
+            )
+
+        labels = rollout_run_labels(rows)
+        rewards_by_run: Dict[str, Dict[int, List[float]]] = defaultdict(lambda: defaultdict(list))
+        fingerprints_by_run: Dict[str, Dict[int, bytes]] = defaultdict(dict)
+
+        for key in sorted(rows_by_key):
+            row, result = rows_by_key[key], results_by_key[key]
+            if result.get(MASK_SAMPLE_FIELD):
+                raise ValueError(
+                    "--bayes-at-n cannot profile masked rollouts: a masked reward is not a measurement, "
+                    f"so it cannot count as a trial. Rollout key {key} has {MASK_SAMPLE_FIELD} set."
+                )
+            reward = result.get(REWARD_KEY_NAME)
+            if not (_is_finite_number(reward) and reward in (0, 1)):
+                raise ValueError(
+                    "--bayes-at-n supports binary outcomes only: every reward must be finite and exactly "
+                    f"0 or 1. Rollout key {key} has reward {reward!r}. Continuous rewards need a "
+                    "threshold, which is a different model of the outcome."
+                )
+            run_key = rollout_run_key(row)
+            label = labels.get(run_key) if run_key is not None else None
+            if label is None:
+                raise ValueError(
+                    f"--bayes-at-n cannot tell which run produced rollout key {key}: its row names neither "
+                    "an agent nor an environment server."
+                )
+            task_idx, _ = key
+            fingerprint = _materialized_input_fingerprint(row)
+            previous = fingerprints_by_run[label].setdefault(task_idx, fingerprint)
+            if previous != fingerprint:
+                raise ValueError(
+                    f"--bayes-at-n needs every trial of a question to share its materialized input, but "
+                    f"task {task_idx} of run {label!r} has repeated inputs that differ beyond the "
+                    "per-rollout seed."
+                )
+            rewards_by_run[label][task_idx].append(float(reward))
+
+        metrics: Dict[str, Dict[str, float]] = {}
+        for label, rewards_by_task in rewards_by_run.items():
+            trial_counts = {len(rewards) for rewards in rewards_by_task.values()}
+            if len(trial_counts) > 1:
+                raise ValueError(
+                    f"--bayes-at-n needs the same number of trials for every question in a run, but run "
+                    f"{label!r} has {sorted(trial_counts)} trials across {len(rewards_by_task)} questions. "
+                    "A ragged collection is not a fixed N."
+                )
+            n = trial_counts.pop()
+
+            posterior_means: List[float] = []
+            posterior_variances: List[float] = []
+            for task_idx in sorted(rewards_by_task):
+                successes = int(sum(rewards_by_task[task_idx]))
+                alpha, beta = successes + 1, n - successes + 1
+                posterior_means.append(alpha / (alpha + beta))
+                posterior_variances.append(alpha * beta / ((alpha + beta) ** 2 * (alpha + beta + 1)))
+
+            question_count = len(posterior_means)
+            metrics[label] = {
+                f"bayes@{n}/{REWARD_KEY_NAME}": sum(posterior_means) / question_count,
+                f"{Stat.STD.prefix}bayes@{n}/{REWARD_KEY_NAME}": math.sqrt(sum(posterior_variances))
+                / question_count,
+            }
+
+        return metrics
 
     def prepare_for_serialization(self, metrics: List[Dict]) -> List[Dict]:
         """
