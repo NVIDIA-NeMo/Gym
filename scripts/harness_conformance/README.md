@@ -125,7 +125,7 @@ python scripts/run_harness_conformance.py --harness codex \
 | `usage_omitted` | Successful tool sequence with no provider usage fields | TE-1–TE-9, including unknown usage |
 | `retry_429` | Two 429 replies before the tool sequence | TE-1–TE-9, including distinct attempts with identical request bodies |
 | `retry_500` | One 500 reply before the tool sequence | TE-1–TE-9, including retained error payloads |
-| `model_error` | Persistent 400 with no model response ID | TE-1, TE-2, TE-4, TE-7, and TE-8/TE-9 |
+| `model_error` | Persistent 400 reported to EnvServer as a failed response with the original error | TE-1, TE-2, TE-4, TE-7, TE-8; no grading-policy requirement |
 | `verifier_failure` | Completed tool sequence graded zero | TE-1–TE-9, including a known verifier failure |
 
 Both Chat Completions and Responses are supported, including streaming. Supplied
@@ -135,9 +135,12 @@ argument schema advertised by the harness. Unsupported tool protocols are
 reported as exercise failures.
 
 The runner observes actual retry behavior. A runtime that does not retry the
-injected error leaves that scenario incomplete. A terminal error must still
-produce a collected rollout to satisfy its evidence checks; a failure sidecar
-alone cannot qualify it. Every applicable individual P0 check must pass;
+injected error leaves that scenario incomplete. For `model_error`, the harness
+reports a failed response with the model error to EnvServer; it does not re-raise
+the model failure. The runner witnesses that response before grading. EnvServer
+owns verification and masking policy, so this scenario does not prescribe a grade
+or require verification. Retained model-call evidence is still required.
+Every applicable individual P0 check must pass;
 TE labels group results and do not determine priority or grant exemptions.
 
 ## Results
