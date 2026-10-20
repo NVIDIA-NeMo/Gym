@@ -341,6 +341,10 @@ uv sync --extra mlflow  # MLflow
 If a backend is configured but its extra isn't installed, Gym logs an error naming the missing
 extra and continues the run without that backend.
 
+Each backend writes its run id to `<output stem>_<backend>_run_id` next to `output_jsonl_fpath`, for
+example `rollouts_mlflow_run_id` or `rollouts_wandb_run_id`. A resumed or resubmitted run with the same
+output logs to that run. Delete the file to start a new one.
+
 ### Weights & Biases
 
 | Key | Required | Description |
@@ -366,9 +370,6 @@ gym eval run \
     +mlflow_experiment_name=my-experiment \
     +mlflow_run_name=gpqa
 ```
-
-The exporter writes the MLflow run id to `<output stem>_mlflow_run_id` next to `output_jsonl_fpath`.
-A resumed or resubmitted run with the same output logs to that MLflow run. Delete the file to start a new one.
 
 <Note>
 `mlflow_tracking_uri` and `mlflow_tracking_token` are shared with the GitLab model registry used by

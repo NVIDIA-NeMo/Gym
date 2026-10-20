@@ -16,7 +16,6 @@ import logging
 import re
 from itertools import batched
 from os import environ
-from pathlib import Path
 from time import time
 from typing import Any, ClassVar, Iterator, Optional
 
@@ -135,19 +134,15 @@ class MLflowExporter(BaseExporter):
         tags = dict(self.config.mlflow_run_tags)
         if self.config.mlflow_run_description:
             tags["mlflow.note.content"] = self.config.mlflow_run_description
-        # A resumed or resubmitted run writes to the same output, so it reopens the MLflow run recorded there.
-        output = self.global_config_dict.get("output_jsonl_fpath")
-        run_id_fpath = Path(output).with_name(Path(output).stem + "_mlflow_run_id") if output else None
-        if run_id_fpath is not None and run_id_fpath.exists():
-            self.run_id = run_id_fpath.read_text().strip()
+        # A resumed or resubmitted run reopens the MLflow run recorded next to its output.
+        self.run_id = self._recorded_run_id()
+        if self.run_id is not None:
             self.client.update_run(self.run_id, status="RUNNING")
             return
         self.run_id = self.client.create_run(
             experiment_id, run_name=self.config.mlflow_run_name, tags=tags or None
         ).info.run_id
-        if run_id_fpath is not None:
-            run_id_fpath.parent.mkdir(parents=True, exist_ok=True)
-            run_id_fpath.write_text(self.run_id)
+        self._record_run_id(self.run_id)
 
     def teardown(self) -> None:
         if self.client is not None and self.run_id is not None:

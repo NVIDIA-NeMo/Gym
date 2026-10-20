@@ -303,6 +303,22 @@ class TestWandbExporter:
         init.assert_called_once_with(project="proj", name="run", dir=str(Path("/tmp/results") / "wandb"))
         assert wandb_module.environ["WANDB_API_KEY"] == "secret-key"  # pragma: allowlist secret
 
+    def test_a_resumed_run_resumes_the_wandb_run_recorded_next_to_its_output(
+        self, monkeypatch: MonkeyPatch, wandb_config: DictConfig, tmp_path
+    ) -> None:
+        wandb_config["output_jsonl_fpath"] = str(tmp_path / "rollouts.jsonl")
+        init = MagicMock(return_value=MagicMock(id="run-1"))
+        monkeypatch.setattr(wandb_module.wandb, "init", init)
+        monkeypatch.delenv("WANDB_API_KEY", raising=False)
+
+        WandbExporter(wandb_config).setup()
+        WandbExporter(wandb_config).setup()
+
+        assert (tmp_path / "rollouts_wandb_run_id").read_text() == "run-1"
+        first, second = init.call_args_list
+        assert "id" not in first.kwargs
+        assert (second.kwargs["id"], second.kwargs["resume"]) == ("run-1", "allow")
+
     def test_logging_before_setup_raises(self, wandb_config: DictConfig) -> None:
         with pytest.raises(RuntimeError, match="not open"):
             WandbExporter(wandb_config)._log_metrics({"reward": 1.0})
