@@ -76,6 +76,8 @@ The task sandbox runs on OpenSandbox:
 - `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY` — the OpenSandbox endpoint and key
 - `GDPVAL_SANDBOX_IMAGE` — the sandbox image (see `resources_servers/gdpval/README.md`)
 - `TAVILY_API_KEY` — for the `web_search` and `fetch_web_page` tools
+- `PERSIST_DELIVERABLES_DIR` — an absolute directory for the persisted deliverables. There is no default, so runs
+  do not share one by accident
 
 The agent runs inside the sandbox and calls the model and resources servers from there, so pass
 `++use_absolute_ip=true` when the servers' default addresses are not reachable from the sandbox.
@@ -252,7 +254,7 @@ still scored, but reports `final_stage_degraded: 1` and no flat headline.
 ### Deliverables and re-judging
 
 `/verify` persists each deliverable to `task_<id>/repeat_<n>/` under the GDPVal
-resources server's `persist_deliverables_dir` (`PERSIST_DELIVERABLES_DIR`). Use
+resources server's `persist_deliverables_dir` (`PERSIST_DELIVERABLES_DIR`, required). Use
 an absolute path; `transport_assignment_repair` requires one. A task that recurs
 in a later stage is judged from its persisted deliverable instead of re-running
 the policy.
@@ -774,6 +776,7 @@ that used to skip the policy (`JUDGE_ONLY=true`) now runs it.
   Apptainer. Set `OPENSANDBOX_DOMAIN`, `OPENSANDBOX_API_KEY` and `GDPVAL_SANDBOX_IMAGE`.
 - **Tavily:** `TAVILY_API_KEY` is required and read by the resources server. Without a key the agent used to fall
   back to Stirrup's built-in web tools; now startup fails.
+- **Deliverables directory:** `PERSIST_DELIVERABLES_DIR` is required. The `output/gdpval/deliverables` default is gone.
 - **Timeouts:** `STIRRUP_PER_TASK_TIMEOUT_S` is no longer read; the agent's `sandbox_runner_timeout_seconds`
   (default 12600) replaces it. The environment server also sets `default_episode_timeout_seconds: 18000`,
   `max_concurrent_episodes: 32` and `queue_timeout_seconds: 86400`.
