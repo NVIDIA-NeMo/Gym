@@ -212,7 +212,11 @@ def _render_service_command(
     )
     return (
         f"# service: {name}\n"
-        f"{env_prefix}srun --overlap{node_flags}{container_flags} --output=logs/{name}-$SLURM_JOB_ID.log {command} &\n"
+        # --kill-on-bad-exit and --wait end the whole step within a second when any one of its tasks exits, whatever the
+        # cluster's KillOnBadExit and WaitTime defaults, so a multi-task service (vllm_pd tiers, Ray workers) cannot
+        # lose a task while its srun stays alive and the driver's watch sees nothing.
+        f"{env_prefix}srun --overlap{node_flags}{container_flags} --kill-on-bad-exit=1 --wait=1"
+        f" --output=logs/{name}-$SLURM_JOB_ID.log {command} &\n"
         f"{var}_PID=$!"
     )
 
@@ -765,21 +769,21 @@ def _render_collector_shutdown(config: SubmitConfig, remote_bench_dir: Path) -> 
 
 _WATCHED_DRIVER_TEMPLATE = """\
 {driver} &
-DRIVER_PID=$!
+_gym_driver_pid=$!
 _gym_service_exited() {{
     wait "$2"
     local status=$?
     echo "ERROR: service $1 exited (status $status) while the driver was running; stopping the driver."
-    kill -TERM $DRIVER_PID 2>/dev/null
-    wait $DRIVER_PID
+    kill -TERM "$_gym_driver_pid" 2>/dev/null
+    wait "$_gym_driver_pid"
     return 1
 }}
 _gym_run_driver() {{
-    while kill -0 $DRIVER_PID 2>/dev/null; do
+    while kill -0 "$_gym_driver_pid" 2>/dev/null; do
 {checks}
         sleep 5
     done
-    wait $DRIVER_PID
+    wait "$_gym_driver_pid"
 }}
 _gym_run_driver"""
 
@@ -790,6 +794,7 @@ def _render_watched_driver(driver: str, services: list[str]) -> str:
     A dead service would otherwise leave the driver retrying it until the walltime. The job exits
     non-zero instead, so the auto-resume chain reruns it with fresh services; TERM is what the
     driver gets at the time limit, so its in-flight rollouts leave no row and run again on resume.
+    The driver's PID is kept in a lowercase variable, which no service's uppercase <NAME>_PID can overwrite.
     """
     if not services:
         return driver

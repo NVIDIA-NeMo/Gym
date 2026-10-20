@@ -1159,7 +1159,7 @@ def test_render_service_command_no_pre_command_by_default():
     out = _render_service_command("svc", "img:latest", "vllm serve model")
     assert "bash -c" not in out
     assert (
-        "srun --overlap --no-container-mount-home --container-image=img:latest "
+        "srun --overlap --no-container-mount-home --container-image=img:latest --kill-on-bad-exit=1 --wait=1 "
         "--output=logs/svc-$SLURM_JOB_ID.log vllm serve model &" in out
     )
 
@@ -2621,11 +2621,11 @@ def test_a_ray_head_on_node_0_is_probed_locally(tmp_path):
     assert "Waiting for ray at http://localhost:8011" in script
 
 
-def _run_job_script(tmp_path, *, service: str, driver: str) -> subprocess.CompletedProcess:
-    """Run a rendered job.sh with a fake `srun` on PATH: the vllm_model step runs `service`, the driver `driver`."""
+def _run_job_script(tmp_path, *, service: str, driver: str, name: str = "vllm_model") -> subprocess.CompletedProcess:
+    """Run a rendered job.sh with a fake `srun` on PATH: the `name` service step runs `service`, the driver `driver`."""
     config = SubmitConfig.model_validate(
         {
-            "services": {"vllm_model": {"type": "vllm", "container": "vllm:latest", "model": "org/model"}},
+            "services": {name: {"type": "vllm", "container": "vllm:latest", "model": "org/model"}},
             "compute": {"cluster": {"type": "slurm", "account": "acct"}},
             "driver": {"container": "gym:latest", "benchmarks": {"b": {"run": {}}}},
             "job": {"output_path": str(tmp_path)},
@@ -2684,3 +2684,30 @@ def test_ray_workers_are_watched_and_the_collector_is_not(tmp_path):
     watch = script[script.index("_gym_run_driver() {") : script.index("\n_gym_run_driver\n")]
     assert "OTEL_COLLECTOR_PID=$!" in script
     assert re.findall(r"_gym_service_exited (\S+) ", watch) == ["policy", "ray", "ray_gpu_workers"]
+
+
+def test_a_service_named_driver_is_watched_apart_from_the_driver(tmp_path):
+    # Its launcher PID is DRIVER_PID; the driver's own PID must not overwrite it. The fake srun tells the two apart by the
+    # case-sensitive log name: logs/DRIVER-... is the service, logs/driver-... the driver.
+    result = _run_job_script(
+        tmp_path,
+        service="sleep 1; exit 3",
+        driver="trap 'echo driver got TERM; exit 143' TERM; sleep 600 & wait",
+        name="DRIVER",
+    )
+
+    assert result.returncode == 1
+    assert "service DRIVER exited (status 3) while the driver was running" in result.stdout
+    assert "driver got TERM" in result.stdout
+
+
+def test_one_task_exiting_ends_its_service_step_and_the_driver_step_is_unchanged(tmp_path):
+    # A multi-task service (a vllm_pd tier, a Ray worker pool) must not outlive one of its tasks, whatever the cluster's
+    # KillOnBadExit and WaitTime defaults; the driver step keeps Slurm's defaults.
+    script = _driver_on_aux(tmp_path, {"ray": _RAY_WITH_PROBE})
+    service_steps = [line for line in script.splitlines() if "srun --overlap" in line and "logs/driver-" not in line]
+    driver_steps = [line for line in script.splitlines() if "srun --overlap" in line and "logs/driver-" in line]
+
+    assert service_steps and driver_steps
+    assert all(" --kill-on-bad-exit=1 --wait=1 " in line for line in service_steps)
+    assert not any("--kill-on-bad-exit" in line or " --wait=" in line for line in driver_steps)
