@@ -41,8 +41,9 @@ function originOf(url) {
 // A server marked `required: false` is skipped when its discovery fails; any other
 // failure registers no tools. A tool listed in any server's `terminal_tools` is a finish
 // tool: Pi ends the run after a turn whose calls were all successful finish calls. Each
-// listed tool must be offered. `lastStopReason` reports why the model's latest reply stopped.
-export async function registerGymTools(pi, servers, emit = emitEvent, lastStopReason = () => undefined) {
+// listed tool must be offered. `emit` writes diagnostic events, and `replyCutOff` tells
+// whether the model's latest reply was cut off at the output limit.
+export async function registerGymTools(pi, servers, { emit = emitEvent, replyCutOff = () => false } = {}) {
   const names = new Set(pi.getAllTools().map((tool) => tool.name));
   const pending = [];
   const offered = new Set();
@@ -52,7 +53,7 @@ export async function registerGymTools(pi, servers, emit = emitEvent, lastStopRe
   for (const [serverName, server] of enabled) {
     let tools, toolNames;
     try {
-      ({ tools, toolNames } = await discoverTools(serverName, server, names, terminal, lastStopReason));
+      ({ tools, toolNames } = await discoverTools(serverName, server, names, terminal, replyCutOff));
     } catch (error) {
       const cause = `${describe(error)} at ${originOf(server.url)}`;
       if (server.required !== false) throw new GymMcpError(`${serverName}: ${cause}`);
@@ -78,7 +79,7 @@ export async function registerGymTools(pi, servers, emit = emitEvent, lastStopRe
   for (const tool of pending) pi.registerTool(tool);
 }
 
-async function discoverTools(serverName, server, registered, terminal, lastStopReason) {
+async function discoverTools(serverName, server, registered, terminal, replyCutOff) {
   if (!/^[A-Za-z0-9_-]+$/.test(serverName)) {
     throw new GymMcpError("Invalid Gym MCP server name");
   }
@@ -158,11 +159,12 @@ async function discoverTools(serverName, server, registered, terminal, lastStopR
         description: tool.description || tool.name,
         parameters: tool.inputSchema,
         async execute(_callId, params, signal) {
-          if (terminal.has(tool.name) && lastStopReason() === "length") {
+          if (terminal.has(tool.name) && replyCutOff()) {
             // Pi runs the calls of a reply cut at the output limit with whatever arguments it could parse,
             // and a finish call gives the model no turn to correct them.
             throw new Error(
-              "Not run: the reply with this call hit the output limit, so its arguments may be cut off. Call it again.",
+              "Not run: the reply with this call hit the output limit, so its arguments may be cut off. " +
+                "Call it again in a shorter reply.",
             );
           }
           const result = await rpc("tools/call", { name: tool.name, arguments: params }, signal);
@@ -189,10 +191,20 @@ async function discoverTools(serverName, server, registered, terminal, lastStopR
 }
 
 export default function (pi) {
-  // Pi delivers each reply's message_end to extensions before it runs that reply's tool calls.
-  let stopReason;
+  // Pi gives extensions each request before sending it, and each reply's message_end before it runs
+  // that reply's tool calls. Loaded after output-limit.mjs, this sees the request's final max_tokens.
+  let maxTokens;
+  let cutOff = false;
+  pi.on("before_provider_request", (event) => {
+    maxTokens = event.payload?.max_tokens ?? event.payload?.max_completion_tokens;
+  });
   pi.on("message_end", (event) => {
-    if (event.message?.role === "assistant") stopReason = event.message.stopReason;
+    const message = event.message;
+    if (message?.role !== "assistant") return;
+    // vLLM reports `tool_calls`, not `length`, for a reply it parsed a tool call from even when the
+    // reply stopped at max_tokens, so a reply that used its whole output budget is cut off too.
+    cutOff =
+      message.stopReason === "length" || (Number.isSafeInteger(maxTokens) && message.usage?.output >= maxTokens);
   });
   // getAllTools() needs a bound runtime; session_start runs before inference.
   pi.on("session_start", async () => {
@@ -204,7 +216,7 @@ export default function (pi) {
         // A parse error would quote the file, which holds the session tokens.
         throw new GymMcpError("unreadable Gym MCP configuration");
       }
-      await registerGymTools(pi, servers, emitEvent, () => stopReason);
+      await registerGymTools(pi, servers, { replyCutOff: () => cutOff });
     } catch (error) {
       // Pi normally tolerates extension errors. Required Gym tools must instead
       // fail the rollout, rather than silently run without them.

@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:http";
 import { test } from "node:test";
-import { registerGymTools } from "../gym_mcp.mjs";
+import extension, { registerGymTools } from "../gym_mcp.mjs";
 
 const GYM_MCP = JSON.stringify(new URL("../gym_mcp.mjs", import.meta.url).href);
 
@@ -172,7 +172,7 @@ test("skips an unavailable optional server but not a required one", async (t) =>
   const down = await fixture(t, (_body, _req, res) => { res.writeHead(503).end(); return true; });
   const a = agent();
   const events = [];
-  await registerGymTools(a, { tavily: f.config, extra: { ...down.config, required: false } }, (e) => events.push(e));
+  await registerGymTools(a, { tavily: f.config, extra: { ...down.config, required: false } }, { emit: (e) => events.push(e) });
   assert.deepEqual(a.tools.map((x) => x.name), ["tavily_web_search"]);
   const origin = new URL(down.config.url).origin;
   assert.deepEqual(events, [
@@ -188,7 +188,7 @@ test("an optional server whose tools collide registers none of them", async (t) 
   const a = agent();
   a.getAllTools = () => [{ name: "tavily_web_search" }];
   const events = [];
-  await registerGymTools(a, { tavily: { ...f.config, required: false } }, (e) => events.push(e));
+  await registerGymTools(a, { tavily: { ...f.config, required: false } }, { emit: (e) => events.push(e) });
   assert.deepEqual(a.tools, []);
   assert.match(events[0].error, /^Gym MCP tool name tavily_web_search is already taken at /);
 });
@@ -209,16 +209,30 @@ test("a terminal tool ends the run after a successful call", async (t) => {
 
 test("a finish call from a reply cut at the output limit is not run", async (t) => {
   const f = await fixture(t);
-  let stopReason = "length";
-  const a = agent();
-  await registerGymTools(a, { tavily: { ...f.config, terminal_tools: ["web_search"] } }, () => {}, () => stopReason);
-  await assert.rejects(a.tools[0].execute("a", { query: "x" }), /output limit/);
-  assert.equal(f.calls.filter((c) => c.body.method === "tools/call").length, 0);
-  stopReason = "toolUse";
+  const config = serversFile(t, { tavily: { ...f.config, terminal_tools: ["web_search"] } });
+  process.env.NEMO_GYM_PI_MCP_CONFIG = config;
+  t.after(() => delete process.env.NEMO_GYM_PI_MCP_CONFIG);
+  const handlers = {};
+  const a = { ...agent(), on: (name, handler) => { handlers[name] = handler; } };
+  extension(a);
+  await handlers.session_start();
+  const reply = async (stopReason, output, field = "max_tokens") => {
+    handlers.before_provider_request({ payload: { [field]: 100 } });
+    await handlers.message_end({ message: { role: "assistant", stopReason, usage: { output } } });
+  };
+  const finishCalls = () => f.calls.filter((c) => c.body.method === "tools/call").length;
+  // Pi reports `length`; vLLM reports `tool_calls` (Pi's `toolUse`) but the reply used its whole budget, set as
+  // max_tokens or as Pi's own max_completion_tokens (which output-limit.mjs turns into max_tokens in sessions).
+  for (const [stopReason, output, field] of [["length", 40], ["toolUse", 100], ["toolUse", 100, "max_completion_tokens"]]) {
+    await reply(stopReason, output, field);
+    await assert.rejects(a.tools[0].execute("a", { query: "x" }), /output limit/);
+  }
+  assert.equal(finishCalls(), 0);
+  await reply("toolUse", 99);
   assert.equal((await a.tools[0].execute("b", { query: "x" })).terminate, true);
-  // Other tools still run, as Pi's own do.
+  // Other tools still run.
   const b = agent();
-  await registerGymTools(b, { tavily: f.config }, () => {}, () => "length");
+  await registerGymTools(b, { tavily: f.config }, { replyCutOff: () => true });
   assert.equal((await b.tools[0].execute("c", { query: "x" })).content[0].text, "one:x");
 });
 
@@ -252,7 +266,7 @@ test("names the failed server and reports a skipped optional one as an event", a
   const cause = `TypeError (ECONNREFUSED) at http://127.0.0.1:${port}`;
   await assert.rejects(registerGymTools(agent(), { gdpval: unreachable }), (error) => error.message === `gdpval: ${cause}`);
   const events = [];
-  await registerGymTools(agent(), { extra: { ...unreachable, required: false } }, (event) => events.push(event));
+  await registerGymTools(agent(), { extra: { ...unreachable, required: false } }, { emit: (event) => events.push(event) });
   assert.deepEqual(events, [{ type: "ng_gym_mcp_server_skipped", server: "extra", error: cause }]);
 });
 
@@ -313,13 +327,14 @@ test("the setup-failure event survives a backed-up stdout pipe", async (t) => {
   });
 });
 
-test("the default event writer reaches stdout past Pi's redirect", () => {
+test("the default event writer reaches stdout past Pi's redirect", async () => {
+  const port = await closedPort();
   const script = `
     process.stdout.write = (chunk) => process.stderr.write(chunk);
     const { registerGymTools } = await import(${GYM_MCP});
     await registerGymTools(
       { getAllTools: () => [], registerTool: () => {} },
-      { extra: { url: "http://127.0.0.1:9/mcp", headers: {}, timeout: 1000, required: false } },
+      { extra: { url: "http://127.0.0.1:${port}/mcp", headers: {}, timeout: 1000, required: false } },
     );
   `;
   const child = spawnSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", timeout: 20000 });
@@ -335,9 +350,10 @@ test("a configured finish tool that no server offers fails setup", async (t) => 
     /^Error: No Gym MCP server offers the finish tools finish$/,
   );
   assert.deepEqual(a.tools, []);
-  const down = { url: "http://127.0.0.1:9/mcp", headers: {}, timeout: 1000, required: false, terminal_tools: ["finish"] };
+  const port = await closedPort();
+  const down = { url: `http://127.0.0.1:${port}/mcp`, headers: {}, timeout: 1000, required: false, terminal_tools: ["finish"] };
   await assert.rejects(
-    registerGymTools(agent(), { tavily: { ...f.config, terminal_tools: ["finish"] }, gdpval: down }, () => {}),
+    registerGymTools(agent(), { tavily: { ...f.config, terminal_tools: ["finish"] }, gdpval: down }, { emit: () => {} }),
     /^Error: No Gym MCP server offers the finish tools finish \(skipped optional servers: gdpval\)$/,
   );
 });

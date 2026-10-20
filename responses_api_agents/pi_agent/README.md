@@ -109,23 +109,24 @@ Pi provides its own sandbox tools. It can also use the Resources server's tools 
   Environment Server. Pi speaks only the stateless JSON MCP endpoint that Gym's Resources servers expose,
   and the sandbox must reach the grant's URL, as it must reach the model server; both go through any HTTP
   proxy the sandbox environment sets.
-- `gym_mcp.mjs` names each tool `<grant name>_<tool name>`, which must be at most 64 letters, digits, `-` or
-  `_`, so a grant name may have at most 62 of them. The tools of two grants whose names differ by a
-  `_<suffix>` could not be told apart. Seeding refuses a required grant that breaks either rule (the second
-  only when both grants are required); an optional one is left out and recorded as an `mcp_server_skipped`
-  observation gap. A tool name that does not fit is found only at setup in the sandbox.
+- `gym_mcp.mjs` names each tool `<grant name>_<tool name>`, at most 64 letters, digits, `-` or `_`. Seeding
+  refuses a required grant whose name is not 1 to 62 of these characters, and two required grants whose names
+  differ by a `_<suffix>` (such as `web` and `web_v2`), since their tools could not be told apart. An optional
+  grant with either problem is left out and recorded as an `mcp_server_skipped` observation gap. A tool name
+  that does not fit is found only at setup in the sandbox.
 - Tool discovery waits up to 30 seconds per request. Each tool call waits up to
   `sandbox_mcp_timeout_seconds` (default 300); a call that times out keeps running on the server, so set
   it above the slowest call the server makes. Tool errors from the server reach the model.
 - A required grant that Pi cannot set up stops Pi before the first model call. The error and an
-  `mcp_setup_failed` gap name the grant, the cause and the server's scheme, host and port. An optional one
-  is skipped and recorded as an `mcp_server_skipped` gap.
+  `mcp_setup_failed` gap give the cause, naming the grant and the server's scheme, host and port when a grant
+  failed. An optional one is skipped and recorded as an `mcp_server_skipped` gap.
 - A successful call of a tool in `finish_tool_names` (its name on the server, such as `finish`) ends the run
-  when every tool call of that turn is such a call; a turn that also ran another tool continues. A finish
-  call from a reply that hit the output limit is not run, since its arguments may be cut off, and the model
-  is asked to call it again. Pi may still compact its context after the run ends. Setup fails if no granted
-  server offers a listed tool, so an optional grant that offers one is effectively required. Without usable
-  MCP grants the setting has no effect.
+  when every tool call of that turn is such a call; a turn that also ran another tool continues. The response
+  and observations then count the run as completed. Pi may still make one compaction call after that turn.
+  A finish call from a reply cut off at the output limit is not run, since its arguments may be cut off, and
+  the model is asked to call it again. A reply counts as cut off when the server reports `length`, or when it
+  used all of its `max_tokens`, as vLLM reports `tool_calls` for a reply it parsed a tool call from. Setup
+  fails if no granted server offers a listed tool. Without usable MCP grants the setting has no effect.
 - Responses name MCP calls `mcp__<grant name>__<tool name>`; a Resources server's `/verify` strips its own
   grant's prefix. Observations and model calls keep the names the model saw.
 - The grant's headers are readable inside the sandbox, including by the model's tools. For a Resources
