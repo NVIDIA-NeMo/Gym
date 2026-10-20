@@ -30,8 +30,9 @@ osworld_nano_omni_agent:
       temperature: ${oc.decode:${oc.env:OSWORLD_TEMPERATURE,1.0}}
       top_p: ${oc.decode:${oc.env:OSWORLD_TOP_P,1.0}}
       history_policy:
-        name: fixed
+        name: hysteresis
         params:
-          keep_images: ${oc.decode:${oc.env:OSWORLD_HISTORY_KEEP_IMAGES,2}}
+          low_water: ${oc.decode:${oc.env:OSWORLD_HISTORY_LOW_WATER,3}}
+          high_water: ${oc.decode:${oc.env:OSWORLD_HISTORY_HIGH_WATER,10}}
       task_timeout: ${oc.decode:${oc.env:OSWORLD_TASK_TIMEOUT,7200}}
       exact_trace_transport_version: 3
