@@ -202,6 +202,17 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             metadata.pop(key, None)
         return body.model_copy(update={"metadata": metadata or None})
 
+    def _prepare_model_request_for_turn(
+        self,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        turn_index: int,
+    ) -> NeMoGymResponseCreateParamsNonStreaming:
+        """Allow specialized agents to adjust a fully materialized turn request."""
+
+        del turn_index
+        return body
+
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> SimpleAgentSessionState:
         return self._new_session_state(body)
 
@@ -386,6 +397,10 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 step += 1
                 new_body = body.model_copy(update={"input": body.input + new_outputs})
                 question_length = len(new_outputs)
+                new_body = self._prepare_model_request_for_turn(
+                    new_body,
+                    turn_index=step,
+                )
                 if collect_trajectory:
                     turn_timestamp = time()
 
