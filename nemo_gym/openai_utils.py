@@ -1544,6 +1544,8 @@ PERMANENT_AUTH_CODES = ("invalid_api_key", "invalid_api_token", "authentication_
 WAIT_OUT_ERROR_CODES = (429, 503)
 RETRY_BACKOFF_BASE_SECONDS = 1.0
 RETRY_BACKOFF_MAX_SECONDS = 60.0
+# 2**6 = 64 s already passes the cap, so larger exponents only risk a float overflow on very long retry runs.
+RETRY_BACKOFF_MAX_EXPONENT = 6
 
 
 def _retry_after_seconds(response: ClientResponse) -> Optional[float]:
@@ -1568,7 +1570,8 @@ def _retry_wait_seconds(tries: int, response: ClientResponse) -> float:
     # A zero wait would spend none of max_rate_limit_wait_seconds, so it falls back to backoff.
     if retry_after is not None and retry_after > 0:
         return min(retry_after, RETRY_BACKOFF_MAX_SECONDS)
-    return random.uniform(0, min(RETRY_BACKOFF_MAX_SECONDS, RETRY_BACKOFF_BASE_SECONDS * 2 ** (tries - 1)))
+    exponent = min(tries - 1, RETRY_BACKOFF_MAX_EXPONENT)
+    return random.uniform(0, min(RETRY_BACKOFF_MAX_SECONDS, RETRY_BACKOFF_BASE_SECONDS * 2**exponent))
 
 
 def _decode_error_text(content: bytes | str) -> str:
@@ -1659,7 +1662,8 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         ge=0,
         description=(
             "Total time to wait out 429 and 503 answers before failing the request, instead of "
-            "max_http_attempts tries. Internal NeMo Gym servers keep retrying them without limit."
+            "max_http_attempts tries; the request fails once the next wait would pass it. 0 keeps 429 and 503 "
+            "on the max_http_attempts count. Internal NeMo Gym servers keep retrying them without limit."
         ),
     )
 
@@ -1780,14 +1784,18 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             wait = _retry_wait_seconds(tries, response)
             # Internal NeMo Gym servers extend max tries for retryable errors unless
             # the caller owns the complete retry schedule. A busy provider is waited
-            # out until max_rate_limit_wait_seconds is spent.
+            # out until max_rate_limit_wait_seconds is spent: a positive budget ends the
+            # request even when max_http_attempts allows more tries, and 0 leaves 429
+            # and 503 on the max_http_attempts count.
             if self.max_num_tries is None and response.status in RATE_LIMIT_ERROR_CODES and self.internal:
                 max_num_tries += 1
             elif (
                 self.max_num_tries is None
                 and response.status in WAIT_OUT_ERROR_CODES
-                and waited + wait <= self.max_rate_limit_wait_seconds
+                and self.max_rate_limit_wait_seconds > 0
             ):
+                if waited + wait > self.max_rate_limit_wait_seconds:
+                    await raise_for_status(response, content)
                 max_num_tries = max(max_num_tries, tries + 1)
 
             # Preserve the final error body for raise_for_status and avoid sleeping

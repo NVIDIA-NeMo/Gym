@@ -649,6 +649,73 @@ class TestProviderBackoff:
         assert [c.args[0] for c in sleep.await_args_list] == [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 60.0, 60.0]
         assert request.await_count == 9
 
+    @pytest.mark.parametrize("tries", [7, 1025, 100000])
+    def test_the_backoff_window_stays_capped_for_any_attempt(
+        self, monkeypatch: pytest.MonkeyPatch, tries: int
+    ) -> None:
+        windows = []
+        monkeypatch.setattr(
+            "nemo_gym.openai_utils.random.uniform", lambda low, high: windows.append((low, high)) or low
+        )
+        openai_utils_module._retry_wait_seconds(tries, _busy())
+        assert windows == [(0, 60.0)]
+
+    async def test_an_internal_client_keeps_retrying_a_busy_server_past_a_thousand_tries(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        success = SimpleNamespace(status=200)
+        request = AsyncMock(side_effect=[_busy(429)] * 1025 + [success])
+        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.openai_utils.sleep", AsyncMock())
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="http://127.0.0.1:8000/v1", internal=True)
+
+        assert await client._request_with_retry(url="http://127.0.0.1:8000/v1/responses") is success
+        assert request.await_count == 1026
+
+    @pytest.mark.parametrize("status", [429, 503])
+    async def test_a_positive_budget_ends_the_request_before_max_http_attempts_does(
+        self, monkeypatch: pytest.MonkeyPatch, status: int
+    ) -> None:
+        request = AsyncMock(return_value=_busy(status, retry_after="1"))
+        sleep = AsyncMock()
+        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.openai_utils.sleep", sleep)
+
+        async def raise_status(response, content=None):
+            raise RuntimeError("still busy")
+
+        monkeypatch.setattr("nemo_gym.openai_utils.raise_for_status", raise_status)
+        client = NeMoGymAsyncOpenAI(
+            api_key="abc", base_url="https://example.com/v1", max_http_attempts=36, max_rate_limit_wait_seconds=2
+        )
+
+        with pytest.raises(RuntimeError, match="still busy"):
+            await client._request_with_retry(url="https://example.com/v1/responses")
+
+        assert [c.args[0] for c in sleep.await_args_list] == [1.0, 1.0]
+        assert request.await_count == 3
+
+    async def test_a_zero_budget_keeps_busy_answers_on_the_attempt_count(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        request = AsyncMock(return_value=_busy(503))
+        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.openai_utils.sleep", AsyncMock())
+        monkeypatch.setattr("nemo_gym.openai_utils.random.uniform", lambda low, high: 0.0)
+
+        async def raise_status(response, content=None):
+            raise RuntimeError("still busy")
+
+        monkeypatch.setattr("nemo_gym.openai_utils.raise_for_status", raise_status)
+        client = NeMoGymAsyncOpenAI(
+            api_key="abc", base_url="https://example.com/v1", max_http_attempts=3, max_rate_limit_wait_seconds=0
+        )
+
+        with pytest.raises(RuntimeError, match="still busy"):
+            await client._request_with_retry(url="https://example.com/v1/responses")
+
+        assert request.await_count == 3
+
     async def test_a_429_with_retry_after_waits_that_long_then_succeeds(self, monkeypatch: pytest.MonkeyPatch) -> None:
         success = SimpleNamespace(status=200)
         request = AsyncMock(side_effect=[_busy(retry_after="3"), success])
