@@ -78,7 +78,7 @@ class SwemerOmlResourcesServerConfig(BaseResourcesServerConfig):
     inconclusive_verification_retries: int = 1
     apply_anti_cheating: bool = True
     # Write the Maven Central mirror to ~/.m2/settings.xml in the eval sandbox. Turn off for providers
-    # that mount their own read-only settings.xml (e.g. MFN, which already mirrors Central via sandbank).
+    # that mount their own read-only settings.xml, e.g. one that already mirrors Maven Central.
     overwrite_maven_settings: bool = True
     sandbox_provider: str
     sandbox_config: dict[str, Any]

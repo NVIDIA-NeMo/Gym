@@ -544,7 +544,7 @@ class TestMavenMirror:
         assert "maven-central.storage-download.googleapis.com" in files[MAVEN_SETTINGS_PATH]
 
     def test_maven_settings_can_be_left_to_the_provider(self) -> None:
-        """MFN mounts its own read-only ~/.m2/settings.xml (mirroring Central via sandbank), so
+        """Some providers mount their own read-only ~/.m2/settings.xml that already mirrors Central, so
         writing ours fails sandbox creation; the Gradle script is unaffected."""
         from resources_servers.swe_rebench.verification import (
             GRADLE_INIT_PATH,

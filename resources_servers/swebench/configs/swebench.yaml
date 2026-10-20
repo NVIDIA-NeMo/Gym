@@ -12,8 +12,6 @@ swebench_resources_server:          # instance name — how agents/CLI refer to 
       clear_swebench_debug_logs: true
 
       apply_anti_cheating: true
-      # Set false on providers that mount a read-only ~/.m2/settings.xml (e.g. MFN).
-      overwrite_maven_settings: true
 
       evaluation_timeout: 1800
 
