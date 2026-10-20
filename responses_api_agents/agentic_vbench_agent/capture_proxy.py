@@ -31,6 +31,7 @@ import re
 import socket
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -43,6 +44,10 @@ from nemo_gym.responses_converter import ResponsesConverter
 
 
 AGENT_HEADER = "x-opencode-agent"
+SESSION_HEADER = "x-opencode-session"
+PARENT_SESSION_HEADER = "x-opencode-parent-session"
+SPAWN_CALL_HEADER = "x-opencode-spawn-call"
+TASK_CALL_HEADER = "x-opencode-task-call"
 COMPACTION_AGENT = "compaction"
 # Side calls whose generations are not part of the task trajectory. Title
 # generation is disabled in the OpenCode config for training, but a stray call
@@ -128,14 +133,17 @@ class EpisodeRoute:
     upstream: str
     record_dir: Path
     local_step_cap_reply: bool = False
+    require_native_session_headers: bool = False
     turn: int = 0
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    # Stock OpenCode sends no session header; sessions are keyed by the leading
-    # context of each request (see ``session_key``). The first session is the
+    # Native subagent runs install an observation-only OpenCode headers hook.
+    # Legacy callers without it are keyed by their leading request context.
+    # In that legacy mode the first session is the
     # parent; a session whose opening user turn repeats the ``prompt`` argument of
     # a ``task`` tool call served earlier in this episode is that call's child.
     sessions: dict[str, SessionTrace] = field(default_factory=dict)
     task_prompts: dict[str, tuple[str, str]] = field(default_factory=dict)
+    task_call_owners: dict[str, str] = field(default_factory=dict)
     # A compaction request changes the system prompt, and its continuation may
     # replace the opening user turn. Those contexts still belong to the session
     # whose served history they replay; a changed prefix is not a Task spawn.
@@ -170,7 +178,15 @@ class CaptureProxy:
         if self._runner is not None:
             await self._runner.cleanup()
 
-    def register(self, episode: str, upstream: str, record_dir: Path, *, local_step_cap_reply: bool = False) -> str:
+    def register(
+        self,
+        episode: str,
+        upstream: str,
+        record_dir: Path,
+        *,
+        local_step_cap_reply: bool = False,
+        require_native_session_headers: bool = False,
+    ) -> str:
         """Route ``/avb/<episode>/...`` to ``upstream`` (a root URL without ``/v1``).
 
         ``local_step_cap_reply`` answers OpenCode's step-cap turn here instead of
@@ -184,7 +200,10 @@ class CaptureProxy:
             raise ValueError(f"Episode already registered: {episode}")
         record_dir.mkdir(parents=True, exist_ok=True)
         self._routes[episode] = EpisodeRoute(
-            upstream=upstream.rstrip("/"), record_dir=record_dir, local_step_cap_reply=local_step_cap_reply
+            upstream=upstream.rstrip("/"),
+            record_dir=record_dir,
+            local_step_cap_reply=local_step_cap_reply,
+            require_native_session_headers=require_native_session_headers,
         )
         return f"http://{self.advertise_host}:{self.port}/avb/{episode}/v1"
 
@@ -258,7 +277,15 @@ class CaptureProxy:
         async with route.lock:
             turn = route.turn
             route.turn += 1
-            session = observe_session(route, body, agent=agent)
+            if request.headers.get(SESSION_HEADER):
+                try:
+                    session = observe_native_session(route, request.headers)
+                except ValueError as error:
+                    raise web.HTTPBadRequest(text=str(error)) from error
+            elif route.require_native_session_headers:
+                raise web.HTTPBadRequest(text="OpenCode subagent capture requires native session headers")
+            else:
+                session = observe_session(route, body, agent=agent)
             async with self._session.post(
                 f"{route.upstream}/v1/chat/completions", json=body, headers=self._upstream_headers(request)
             ) as upstream:
@@ -273,6 +300,11 @@ class CaptureProxy:
                 "session_role": session.role,
                 "parent_session_id": session.parent_session_id,
                 "spawn_call_id": session.spawn_call_id,
+                **(
+                    {"delegation_call_id": request.headers[TASK_CALL_HEADER]}
+                    if TASK_CALL_HEADER in request.headers
+                    else {}
+                ),
                 "streamed": streamed,
                 "status": status,
                 "elapsed_seconds": round(time.time() - started, 3),
@@ -286,6 +318,8 @@ class CaptureProxy:
                     session.response_ids.append(completion["id"])
                 for call_id, prompt in task_tool_prompts(completion):
                     route.task_prompts[prompt.strip()] = (session.session_id, call_id)
+                for call_id in task_tool_call_ids(completion):
+                    route.task_call_owners[call_id] = session.session_id
                 _remember_session_messages(route, session, completion, agent=agent)
             else:
                 record["error"] = payload.decode(errors="replace")[:4000]
@@ -389,6 +423,63 @@ def task_tool_prompts(completion: dict) -> list[tuple[str, str]]:
             if isinstance(prompt, str) and prompt and isinstance(call.get("id"), str):
                 prompts.append((call["id"], prompt))
     return prompts
+
+
+def task_tool_call_ids(completion: dict) -> list[str]:
+    """Return Task invocation IDs independently of their prompt or arguments."""
+    return [
+        call["id"]
+        for choice in completion.get("choices") or []
+        for call in (choice.get("message") or {}).get("tool_calls") or []
+        if isinstance((call.get("function") or {}).get("name"), str)
+        and call["function"]["name"].lower() == "task"
+        and isinstance(call.get("id"), str)
+        and call["id"]
+    ]
+
+
+def observe_native_session(route: EpisodeRoute, headers: Mapping[str, str]) -> SessionTrace:
+    """Bind a native session to real, already-served Task calls without prompt inference."""
+    session_id = headers.get(SESSION_HEADER)
+    parent_id = headers.get(PARENT_SESSION_HEADER)
+    spawn_id = headers.get(SPAWN_CALL_HEADER)
+    call_id = headers.get(TASK_CALL_HEADER)
+    if not session_id or any(
+        value is not None and (not value or value != value.strip())
+        for value in (session_id, parent_id, spawn_id, call_id)
+    ):
+        raise ValueError("Native OpenCode session headers require nonempty identifiers")
+    if parent_id:
+        parent = route.sessions.get(parent_id)
+        if parent is None or parent.role != "parent":
+            raise ValueError("Native child session must belong to this episode's main session")
+        if (
+            not spawn_id
+            or not call_id
+            or any(route.task_call_owners.get(value) != parent_id for value in (spawn_id, call_id))
+        ):
+            raise ValueError("Native child session requires its served spawning and current Task calls")
+        if any(
+            trace.spawn_call_id == spawn_id and trace.session_id != session_id for trace in route.sessions.values()
+        ):
+            raise ValueError("A spawning Task call cannot own two native child sessions")
+        role = "child"
+    else:
+        if (
+            spawn_id
+            or call_id
+            or any(trace.role == "parent" and trace.session_id != session_id for trace in route.sessions.values())
+        ):
+            raise ValueError("Native main session has inconsistent ancestry")
+        role = "parent"
+    trace = route.sessions.get(session_id)
+    if trace is not None:
+        if (trace.role, trace.parent_session_id, trace.spawn_call_id) != (role, parent_id, spawn_id):
+            raise ValueError("Native session identity changed role, parent, or original spawn")
+        return trace
+    trace = SessionTrace(session_id=session_id, role=role, parent_session_id=parent_id, spawn_call_id=spawn_id)
+    route.sessions[session_id] = trace
+    return trace
 
 
 def _message_fingerprints(message: dict) -> list[str]:
@@ -529,6 +620,11 @@ def session_traces(records: list[dict]) -> list[dict]:
         response_id = record["response"].get("id")
         if isinstance(response_id, str):
             trace["response_ids"].append(response_id)
+        delegation_call_id = record.get("delegation_call_id")
+        if delegation_call_id:
+            calls = trace.setdefault("delegation_call_ids", [])
+            if delegation_call_id not in calls:
+                calls.append(delegation_call_id)
     return list(traces.values())
 
 

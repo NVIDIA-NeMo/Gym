@@ -20,7 +20,10 @@ from harbor.environments.docker.docker import DockerEnvironment
 class RemoteEnvironment(DockerEnvironment):
     _DOCKER_COMPOSE_BASE_PATH = Path(__file__).with_name("remote-compose.yaml")
 
-    def __init__(self, *, environment_dir: Path, runtime_root: str, **kwargs):
+    def __init__(
+        self, *, environment_dir: Path, runtime_root: str, opencode_session_headers_path: str | None = None, **kwargs
+    ):
+        self._opencode_session_headers_path = opencode_session_headers_path
         if (environment_dir / "docker-compose.yaml").exists():
             raise ValueError("Refusing to replace a task's existing compose definition")
         staged = Path(runtime_root) / "build-context"
@@ -75,6 +78,10 @@ class RemoteEnvironment(DockerEnvironment):
         )
         if result.return_code != 0:
             raise RuntimeError(f"Failed to configure rootless APT sandbox: {result.stdout} {result.stderr}")
+        if self._opencode_session_headers_path is not None:
+            await self.upload_file(
+                Path(__file__).with_name("opencode_session_headers.mjs"), self._opencode_session_headers_path
+            )
 
     async def exec(
         self,

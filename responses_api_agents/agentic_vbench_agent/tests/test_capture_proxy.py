@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 import hashlib
 import json
+import shutil
+import subprocess
 from pathlib import Path
 
 import aiohttp
@@ -77,6 +79,93 @@ def parse_sse(text: str) -> list:
         payload = block[len("data: ") :]
         events.append(payload if payload == "[DONE]" else json.loads(payload))
     return events
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node is required for the native OpenCode plugin contract")
+def test_native_session_header_plugin() -> None:
+    subprocess.run(
+        [shutil.which("node"), "--test", str(Path(__file__).with_name("test_opencode_session_headers.mjs"))],
+        check=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_native_sessions_keep_identical_children_and_same_child_followups(tmp_path: Path) -> None:
+    def task(call_id: str, **extra: str) -> dict:
+        return {
+            "id": call_id,
+            "type": "function",
+            "function": {
+                "name": "task",
+                "arguments": json.dumps(
+                    {
+                        "prompt": "Inspect the clip",
+                        "subagent_type": "general",
+                        **extra,
+                    }
+                ),
+            },
+        }
+
+    def child_headers(child: str, spawn: str, call: str) -> dict:
+        return {
+            "x-opencode-session": child,
+            "x-opencode-parent-session": "ses_main",
+            "x-opencode-spawn-call": spawn,
+            "x-opencode-task-call": call,
+            "x-opencode-agent": "general",
+        }
+
+    upstream = Upstream()
+    await upstream.start()
+    served = [
+        completion(0, {"role": "assistant", "tool_calls": [task("call_A"), task("call_B")]}, "tool_calls"),
+        completion(1, {"role": "assistant", "content": "A found an event at 00:10."}, "stop"),
+        completion(2, {"role": "assistant", "content": "B found an event at 00:40."}, "stop"),
+        completion(3, {"role": "assistant", "tool_calls": [task("call_resume_A", task_id="ses_A")]}, "tool_calls"),
+        completion(4, {"role": "assistant", "content": "A checked its previous finding."}, "stop"),
+    ]
+    upstream.responses = list(served)
+    proxy = CaptureProxy(advertise_host="127.0.0.1")
+    await proxy.start()
+    url = proxy.register("native", upstream.url, tmp_path, require_native_session_headers=True)
+    parent = {"messages": [{"role": "user", "content": "Inspect both clips"}], "model": "policy"}
+    child = {"messages": [{"role": "user", "content": "Inspect the clip"}], "model": "policy"}
+    followup = {
+        **child,
+        "messages": child["messages"]
+        + [served[1]["choices"][0]["message"], {"role": "user", "content": "Check your previous finding"}],
+    }
+    requests = [
+        (parent, {"x-opencode-session": "ses_main"}),
+        (child, child_headers("ses_A", "call_A", "call_A")),
+        (child, child_headers("ses_B", "call_B", "call_B")),
+        (parent, {"x-opencode-session": "ses_main"}),
+        (followup, child_headers("ses_A", "call_A", "call_resume_A")),
+    ]
+    try:
+        async with aiohttp.ClientSession() as client:
+            for index, (body, headers) in enumerate(requests):
+                async with client.post(url + "/chat/completions", json=body, headers=headers) as response:
+                    assert response.status == 200, await response.text()
+                    assert await response.json() == served[index]
+            async with client.post(url + "/chat/completions", json=child) as response:
+                assert response.status == 400
+            bad = child_headers("ses_A", "call_B", "call_resume_A")
+            async with client.post(url + "/chat/completions", json=followup, headers=bad) as response:
+                assert response.status == 400
+        assert [body for _, body, _ in upstream.requests] == [body for body, _ in requests]
+        _, stats = capture_output(load_records(tmp_path))
+        assert len(stats.session_traces) == 3
+        a, b = stats.session_traces[1:]
+        assert a["session_id"] == "ses_A" and b["session_id"] == "ses_B"
+        assert a["spawn_call_id"] == "call_A" and b["spawn_call_id"] == "call_B"
+        assert a["response_ids"] == ["chatcmpl-1", "chatcmpl-4"]
+        assert a["delegation_call_ids"] == ["call_A", "call_resume_A"]
+        assert b["delegation_call_ids"] == ["call_B"]
+    finally:
+        await proxy.stop()
+        await upstream.runner.cleanup()
 
 
 @pytest.mark.asyncio

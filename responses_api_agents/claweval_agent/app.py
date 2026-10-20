@@ -182,6 +182,7 @@ class ClawEvalAgent(AgenticVBenchAgent):
                     endpoint.removesuffix("/v1"),
                     record_dir,
                     local_step_cap_reply=self.config.local_step_cap_reply,
+                    require_native_session_headers=self.config.opencode_subagents_enabled,
                 )
             command = [
                 self._harbor_python,

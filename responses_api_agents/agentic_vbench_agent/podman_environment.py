@@ -16,8 +16,9 @@ from harbor.environments.capabilities import EnvironmentCapabilities
 class PodmanEnvironment(BaseEnvironment):
     """Execute the benchmark's original Dockerfile without a Docker daemon."""
 
-    def __init__(self, *args, runtime_root: str, **kwargs):
+    def __init__(self, *args, runtime_root: str, opencode_session_headers_path: str | None = None, **kwargs):
         super().__init__(*args, **kwargs)
+        self._opencode_session_headers_path = opencode_session_headers_path
         self._runtime = Path(runtime_root).resolve() / hashlib.sha256(self.session_id.encode()).hexdigest()[:16]
         self._runtime.mkdir(parents=True, exist_ok=False)
         self._runroot = Path(tempfile.mkdtemp(prefix="avb-podman-", dir="/tmp"))
@@ -127,6 +128,10 @@ class PodmanEnvironment(BaseEnvironment):
         command.extend(["--entrypoint", "sh", self._image, "-c", "exec sleep infinity"])
         await self._podman(command)
         self._started = True
+        if self._opencode_session_headers_path is not None:
+            await self.upload_file(
+                Path(__file__).with_name("opencode_session_headers.mjs"), self._opencode_session_headers_path
+            )
 
     async def stop(self, delete: bool) -> None:
         if self._started:

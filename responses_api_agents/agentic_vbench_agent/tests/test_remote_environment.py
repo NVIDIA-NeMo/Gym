@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -9,6 +10,24 @@ from harbor.environments.base import ExecResult
 from harbor.environments.docker.docker import DockerEnvironment
 
 from responses_api_agents.agentic_vbench_agent.remote_environment import RemoteEnvironment
+
+
+@pytest.mark.parametrize("plugin_path", [None, "/tmp/nemo-gym-session-headers.mjs"])
+def test_start_uploads_native_session_hook_only_when_configured(monkeypatch: pytest.MonkeyPatch, plugin_path) -> None:
+    environment = object.__new__(RemoteEnvironment)
+    environment._opencode_session_headers_path = plugin_path
+    environment.exec = AsyncMock(return_value=ExecResult(return_code=0))
+    environment.upload_file = AsyncMock()
+    start = AsyncMock()
+    monkeypatch.setattr(DockerEnvironment, "start", start)
+    asyncio.run(environment.start(force_build=False))
+    start.assert_awaited_once_with(False)
+    if plugin_path is None:
+        environment.upload_file.assert_not_awaited()
+    else:
+        source, target = environment.upload_file.await_args.args
+        assert Path(source).name == "opencode_session_headers.mjs" and Path(source).is_file()
+        assert target == plugin_path
 
 
 @pytest.mark.parametrize(

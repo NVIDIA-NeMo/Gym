@@ -170,6 +170,9 @@ def job_config(
     # depth-one boundary.
     if subagents_enabled:
         opencode_config["permission"] = {"*": "allow", "task": "allow"}
+        # Native IDs disambiguate independent identical prompts and identify
+        # Task follow-ups without changing the policy's messages or tool schema.
+        opencode_config["plugin"] = ["file:///tmp/nemo-gym-session-headers.mjs"]
         if delegation_prompt is not None:
             agents.setdefault("build", {})["prompt"] = delegation_prompt
         agents["general"] = {
@@ -213,7 +216,12 @@ def job_config(
         "environment": {
             "import_path": "responses_api_agents.agentic_vbench_agent." + environment_class,
             "delete": True,
-            "kwargs": {"runtime_root": str(runtime_root)},
+            "kwargs": {
+                "runtime_root": str(runtime_root),
+                **(
+                    {"opencode_session_headers_path": "/tmp/nemo-gym-session-headers.mjs"} if subagents_enabled else {}
+                ),
+            },
         },
         "tasks": [{"path": str(task_path)}],
         "agents": [
@@ -252,13 +260,13 @@ NATIVE_JUDGE_ENV = {"ANTHROPIC_API_KEY", "GEMINI_API_KEY"}
 TYPING_DIAGNOSTIC = "find / -name 'typing_extensions*' 2>/dev/null | head -20"
 
 _ASSEMBLY_FAMILY = "agentic_vbench_assembly"
-_ASSEMBLY_MANIFEST_PARSER = '''    segments = sol.get("segments")
+_ASSEMBLY_MANIFEST_PARSER = """    segments = sol.get("segments")
     if not isinstance(segments, list):
         return _zero("solution.json: segments not a list")
 
     pred = [_normalize(seg.get("source", "")) for seg in segments]
-'''
-_ASSEMBLY_HARDENED_PARSER = '''    if not isinstance(sol, dict):
+"""
+_ASSEMBLY_HARDENED_PARSER = """    if not isinstance(sol, dict):
         return _zero("solution.json: expected top-level object")
 
     segments = sol.get("segments")
@@ -270,7 +278,7 @@ _ASSEMBLY_HARDENED_PARSER = '''    if not isinstance(sol, dict):
             return _zero(f"solution.json: segment {i} is not an object")
 
     pred = [_normalize(seg.get("source", "")) for seg in segments]
-'''
+"""
 _ASSEMBLY_JUDGE_SHA256 = {
     "agentic-vbench-assembly-task1": (
         "61a3ec3270a5ecf9ea394c6f7216d08a9af1d9ef794bf6ac297752f30fee168e",
