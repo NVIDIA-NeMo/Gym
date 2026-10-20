@@ -784,6 +784,9 @@ class TestApp:
     def test_provider_attempts_time_out_after_1800_seconds_by_default(self) -> None:
         assert self._setup_server()._client.request_timeout_seconds == 1800.0
 
+    def test_a_busy_provider_is_waited_out_for_up_to_an_hour_by_default(self) -> None:
+        assert self._setup_server()._client.max_rate_limit_wait_seconds == 3600.0
+
     def test_propagated_status_codes_must_be_http_errors(self) -> None:
         with pytest.raises(
             ValueError,

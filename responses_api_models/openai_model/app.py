@@ -106,7 +106,7 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
     extra_body: Dict[str, Any] = Field(default_factory=dict)
     openai_default_headers: Dict[str, str] = Field(default_factory=dict)
     max_http_attempts: int = Field(default=MAX_NUM_TRIES, ge=1)
-    max_rate_limit_wait_seconds: float = Field(default=600.0, ge=0)
+    max_rate_limit_wait_seconds: float = Field(default=3600.0, ge=0)
 
     reasoning_effort_none_replacement: Optional[ReasoningEffort] = Field(
         default=None,

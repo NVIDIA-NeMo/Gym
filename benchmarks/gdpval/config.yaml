@@ -40,7 +40,7 @@ rollout_collection_driver: resources_servers.gdpval.multistage_orchestrator:run_
 # - Each judge proxy below retries upstream 404/408/429/500/502/503/504/520
 #   responses up to max_http_attempts times (Gym's default is 3);
 #   max_rate_limit_wait_seconds: 0 keeps 429 and 503 on that count instead of
-#   Gym's default 600 s wait budget. Each wait is
+#   Gym's default 3600 s wait budget. Each wait is
 #   random up to 1 s, doubling per try and capped at 60 s, or the answer's
 #   Retry-After within that cap. 36 rides out about 15 minutes of throttling per
 #   request on average (at most about 30). A persistent error in that set (e.g. a

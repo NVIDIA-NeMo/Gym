@@ -1658,7 +1658,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
     max_http_attempts: int = Field(default=MAX_NUM_TRIES, ge=1)
 
     max_rate_limit_wait_seconds: float = Field(
-        default=600.0,
+        default=3600.0,
         ge=0,
         description=(
             "Total time to wait out 429 and 503 answers before failing the request, instead of "
