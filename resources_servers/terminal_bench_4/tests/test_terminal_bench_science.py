@@ -6,7 +6,7 @@ import json
 from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import yaml
@@ -18,17 +18,24 @@ from nemo_gym import global_config
 from nemo_gym.config_types import AggregateMetricsRequest
 from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.sandbox import create_provider, resolve_provider_config
 from nemo_gym.sandbox.adapters.docker_compose import AsyncSandboxCompose
+from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from nemo_gym.task_data import TaskDataValidator, load_task_data_schema
+from resources_servers.terminal_bench_4 import environment as environment_module
+from resources_servers.terminal_bench_4 import shared_logs as shared_logs_module
 from resources_servers.terminal_bench_4.app import TerminalBench4Config, TerminalBench4ResourcesServer
 from resources_servers.terminal_bench_4.compose_config import prebuilt_compose, resolve_compose
+from resources_servers.terminal_bench_4.environment import Environment
 from resources_servers.terminal_bench_4.models import (
     AgentTermination,
     SandboxedVerifyRequest,
     SeedSessionResponse,
     TerminalBench4RunRequest,
 )
+from resources_servers.terminal_bench_4.shared_logs import SharedLogs
+from resources_servers.terminal_bench_4.task import TaskSettings
 
 
 SERVER_DIR = Path(__file__).resolve().parents[1]
@@ -333,6 +340,82 @@ async def test_profile_runs_published_compose_isolation_through_the_sandbox_adap
     else:
         assert plans["submission"]["command"] == "python3 /service/submission_server.py"
         assert plans["assay"]["user"] == "root"
+
+
+@pytest.mark.parametrize("task", ["leaky-bloch-meep", "protein-active-learning"])
+async def test_every_trial_sandbox_asks_for_single_process_oom_kills(tmp_path, monkeypatch, task):
+    # Without this label an OpenSandbox sandbox over its memory limit ends as a whole;
+    # Docker, where the leaderboard ran, kills only the largest process.
+    services = {"assay": "registry/assay", "submission": "registry/submission"}
+    images = {"agent": "registry/main", "verifier": "registry/verifier", "services": services}
+    resources = OmegaConf.to_container(
+        benchmark_config(tbsci_task_images={task: images}).terminal_bench_science.resources_servers.terminal_bench_4,
+        resolve=True,
+    )
+    config = TerminalBench4Config.model_validate(resources | {"host": "", "port": 0, "name": "tbsci"}).environment
+    package = tmp_path / "package"
+    for directory in ("environment", "tests"):
+        (package / directory).mkdir(parents=True)
+        (package / directory / "Dockerfile").write_text("FROM scratch")
+    if task in COMPOSE_FILES:
+        (package / "environment/docker-compose.yaml").write_text(COMPOSE_FILES[task])
+    definition = SimpleNamespace(
+        name=f"terminal-bench-science/{task}",
+        ref="sha256:" + "e" * 64,
+        path=package,
+        config=TaskSettings.model_validate(
+            {
+                "environment": {"cpus": 2, "memory_mb": 4096},
+                "verifier": {"environment": {"network_mode": "no-network"}},
+            }
+        ),
+    )
+    specs = {}
+    box = MagicMock(start=AsyncMock(), exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stderr="")))
+
+    def sandbox(role):
+        def create(_provider, spec, **_):
+            specs[role] = spec
+            return box
+
+        return create
+
+    class PlannedCompose(AsyncSandboxCompose):
+        # The adapter creates each service sandbox from its prepared plan's spec.
+        async def start(self):
+            self.document = self._load()
+            self._validate()
+            await self._prepare()
+            specs.update({f"service {name}": plan["spec"] for name, plan in self._plans.items()})
+            self.services = dict.fromkeys(self._plans, box)
+
+    monkeypatch.setattr(environment_module, "AsyncSandboxCompose", PlannedCompose)
+    agent = Environment(definition, config, "episode", tmp_path / "trial")
+    monkeypatch.setattr(shared_logs_module, "AsyncSandbox", sandbox("logs helper"))
+    SharedLogs(agent)
+    monkeypatch.setattr(environment_module, "AsyncSandbox", sandbox("agent"))
+    await agent.start()
+    monkeypatch.setattr(environment_module, "AsyncSandbox", sandbox("verifier"))
+    await Environment(definition, config, "episode__verifier__trial", tmp_path / "trial", verifier=True).start()
+
+    roles = {"logs helper", "verifier"} | (
+        {"service main", "service assay", "service submission"} if task in COMPOSE_FILES else {"agent"}
+    )
+    assert set(specs) == roles
+    assert specs["verifier"].provider_options["network_policy"]["defaultAction"] == "deny"
+    # The OpenSandbox provider sends the spec's metadata, plus attribution keys, with each create request.
+    sent = []
+
+    async def create_with_retries(_provider, spec):
+        sent.append(spec.metadata)
+
+    monkeypatch.setattr(OpenSandboxProvider, "_create_with_retries", create_with_retries)
+    provider = create_provider(resolve_provider_config(agent.provider_config))
+    for role, spec in specs.items():
+        await provider.create(spec)
+        assert sent[-1]["nemo.nvidia.com/oom-kill"] == "process", role
+        assert sent[-1]["nemo.nvidia.com/resources"] == "custom", role
+    await provider.aclose()
 
 
 @pytest.fixture

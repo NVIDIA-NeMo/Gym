@@ -95,6 +95,9 @@ terminal_bench_science:
                   -ne 0; }
         sandbox_metadata:
           nemo.nvidia.com/resources: custom
+          # At its memory limit the cell otherwise ends the whole sandbox (memory.oom.group=1).
+          # As under Docker, kill only the largest process and keep the sandbox running.
+          nemo.nvidia.com/oom-kill: process
         # OpenSandbox renews this TTL while the episode is live; it bounds orphans only.
         sandbox_ttl_s: 28800
         sandbox_ready_timeout_s: 1200

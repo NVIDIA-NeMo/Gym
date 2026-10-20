@@ -150,6 +150,13 @@ packages; see [Deviations from the packages](#deviations-from-the-packages).
 - A 10-hour seeded-session deadline, which covers harness setup and the 8-hour agent budget.
 - An 18-hour per-command ceiling.
 
+Memory limits behave as on Docker, where the leaderboard ran. By default an OpenSandbox sandbox
+that exceeds its memory limit is killed as a whole (`memory.oom.group=1`), while Docker kills
+only the largest process and the container keeps running. The profile's sandbox metadata
+`nemo.nvidia.com/oom-kill: process` asks the cell for the single-process kill, as Terminal-Bench
+4's profile does since #4650; the value `pod` restores whole-sandbox handling. Every sandbox a
+trial creates carries it: agent, verifier, Compose services and the EFS log helper.
+
 ### Deviations from the packages
 
 Gym reads every pinned `task.toml` unchanged. The settings below differ from what a package
