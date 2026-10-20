@@ -42,9 +42,12 @@ and reports `spec_acceptance_length` / `spec_acceptance_rate`. It does not
 require the underlying vLLM URL or `/metrics` endpoint. There is no notion of answer correctness;
 `verify()` always returns `reward = 0.0`.
 
-vLLM must be launched with speculative decoding enabled. Gym automatically
-adds `per_request_spec_decode_metrics: summary` to the local vLLM model bound
-to SPEED-Bench, unless an explicit value is configured. Externally launched
+vLLM must be launched with speculative decoding and per-request metrics enabled.
+For Gym-managed local vLLM, load the shared
+[`configs/local_vllm_metrics.yaml`](configs/local_vllm_metrics.yaml) overlay
+alongside any split config, as shown below. It sets
+`policy_model.responses_api_models.local_vllm_model.vllm_serve_kwargs.per_request_spec_decode_metrics`
+to `summary`. Selecting a benchmark alone does not enable metrics. Externally launched
 servers need `--per-request-spec-decode-metrics summary` (supported by the pinned
 vLLM 0.29.0).
 Two common speculative-decoding configurations:
@@ -65,10 +68,11 @@ gym eval prepare --benchmark speed-bench/config_qualitative
 # Running servers — uses the local_vllm_model demo config that bakes
 # ngram speculative decoding into vllm_serve_kwargs.speculative_config.
 # To use a different target model, swap this for any local_vllm_model
-# config with `speculative_config:`. SPEED-Bench enables response metrics automatically.
+# config with `speculative_config:`. The shared overlay enables response metrics.
 gym env start \
     --model-type local_vllm_model/Qwen/Qwen3-30B-A3B-Instruct-2507-ngram-specdec \
     --benchmark speed-bench/config_qualitative \
+    --config benchmarks/speed-bench/configs/local_vllm_metrics.yaml \
     +policy_model._inherit_from=Qwen3-30B-A3B-Instruct-2507-ngram-specdec
 
 # Collecting rollouts
@@ -79,10 +83,17 @@ gym eval run --no-serve \
     --num-repeats 1
 ```
 
+The same overlay works with `speed-bench/config_throughput_2k` or multiple
+`--benchmark` selections; load it once. It targets the standard `policy_model`
+binding and is only for Gym-managed `local_vllm_model` servers. To request
+`detailed` metrics, add
+`++policy_model.responses_api_models.local_vllm_model.vllm_serve_kwargs.per_request_spec_decode_metrics=detailed`.
+
 If you're using the lighter-weight `vllm_model` config (external vLLM
 endpoint), make sure to launch `vllm serve` with
 `--speculative-config '{"method": "ngram", "num_speculative_tokens": 3, "prompt_lookup_max": 5, "prompt_lookup_min": 2}'`
-and `--per-request-spec-decode-metrics summary`. Missing per-request metrics
+and `--per-request-spec-decode-metrics summary`, and omit the local-vLLM overlay.
+Missing per-request metrics
 produce `spec_decode_unavailable: true` and null acceptance metrics.
 
 ## Deferred items

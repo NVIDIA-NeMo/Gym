@@ -119,13 +119,17 @@ on a `local_vllm_model` config). Without this the resources server
 records `spec_decode_unavailable: true` on every row and
 `spec_acceptance_length` / `spec_acceptance_rate` come back null.
 
-For `metrics_source: response`, Gym automatically adds
-`per_request_spec_decode_metrics: summary` to the bound `local_vllm_model`'s
-serving options during config resolution. This appears in `gym env resolve`.
-Explicit values (`summary`, `detailed`, or `none`) take precedence; `none`
-disables reporting. External endpoints (including local wrappers with `base_url`
-set) need this flag on their own launch command. Other models and legacy
-Prometheus mode are unaffected.
+For `metrics_source: response` with a Gym-managed `local_vllm_model`, load
+[`benchmarks/speed-bench/configs/local_vllm_metrics.yaml`](../../benchmarks/speed-bench/configs/local_vllm_metrics.yaml)
+using `--config`, as shown below. This shared overlay sets
+`per_request_spec_decode_metrics: summary` on `policy_model`; selecting Speed Bench
+alone does not enable metrics. The setting appears in `gym env resolve`.
+To override it, add
+`++policy_model.responses_api_models.local_vllm_model.vllm_serve_kwargs.per_request_spec_decode_metrics=detailed`
+(or `none` to disable reporting). Omit the overlay for other model adapters,
+external endpoints, and legacy Prometheus mode. External endpoints (including
+local wrappers with `base_url` set) need `--per-request-spec-decode-metrics summary`
+on their own launch command.
 
 Use a vLLM version supporting this experimental response schema (the local
 model pins 0.29.0). Metrics are available for single-sequence requests (`n=1`).
@@ -158,6 +162,7 @@ gym env start \
     --model-type local_vllm_model/Qwen/Qwen3-30B-A3B-Instruct-2507-ngram-specdec \
     --resources-server speed_bench \
     --config responses_api_agents/speed_bench_agent/configs/speed_bench_agent.yaml \
+    --config benchmarks/speed-bench/configs/local_vllm_metrics.yaml \
     +policy_model._inherit_from=Qwen3-30B-A3B-Instruct-2507-ngram-specdec
 
 # Collecting rollouts (5-example smoke test)

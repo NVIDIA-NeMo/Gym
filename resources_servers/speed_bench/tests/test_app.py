@@ -173,8 +173,6 @@ def test_local_model_benchmark_resolves_without_backend_url(monkeypatch):
     OmegaConf.to_container(config, resolve=True)
     assert "policy_base_url" not in config
     assert config.speed_bench_qualitative_resources_server.resources_servers.speed_bench.metrics_source == "response"
-    model = config.policy_model.responses_api_models.local_vllm_model
-    assert model.vllm_serve_kwargs.per_request_spec_decode_metrics == "summary"
 
 
 def _request_metrics(histogram, drafted):

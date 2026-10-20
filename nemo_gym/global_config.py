@@ -825,41 +825,6 @@ Duplicate config paths:
             f"{ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME}=1) to bypass the check."
         )
 
-    def apply_speed_bench_model_defaults(self, global_config_dict: DictConfig) -> None:
-        """Enable response metrics on local vLLM models bound to SPEED-Bench.
-
-        Run after inheritance, agent composition, and reference validation so the
-        actual model binding is known. Explicit serving options take precedence;
-        an external endpoint must be configured by whoever launches that server.
-        """
-        for agent in self._agent_instances(global_config_dict):
-            resources_reference = self._resources_server_reference(agent.server_config)
-            if not resources_reference or resources_reference.get("type") != RESOURCES_SERVER_TYPE_KEY_NAME:
-                continue
-            instance = global_config_dict.get(resources_reference.get("name"))
-            if not isinstance(instance, DictConfig):
-                continue
-            resources = instance.get(RESOURCES_SERVER_TYPE_KEY_NAME)
-            if not isinstance(resources, DictConfig):
-                continue
-            speed_bench = resources.get("speed_bench")
-            if not isinstance(speed_bench, DictConfig) or speed_bench.get("metrics_source", "response") != "response":
-                continue
-
-            model_reference = self._model_server_reference(agent.server_config)
-            if not model_reference or model_reference.get("type") != MODEL_SERVER_TYPE_KEY_NAME:
-                continue
-            model_name = model_reference.get("name")
-            if model_type_for(global_config_dict, model_name) != "local_vllm_model":
-                continue
-            model = get_first_server_config_dict(global_config_dict, model_name)
-            if model.get("base_url"):
-                continue
-            serve_kwargs = model.get("vllm_serve_kwargs")
-            if isinstance(serve_kwargs, DictConfig):
-                with open_dict(serve_kwargs):
-                    serve_kwargs.setdefault("per_request_spec_decode_metrics", "summary")
-
     def _runs_against_a_resources_server(self, server_config: DictConfig) -> bool:
         """True when the agent has a task to hand over, so another agent can take its place.
 
@@ -1614,8 +1579,6 @@ Set the keys individually, in a config or as overrides, e.g.:
             skip_verification_reward=global_config_dict.get(SKIP_VERIFICATION_REWARD_KEY_NAME),
             probe_ports=not parse_config.offline,
         )
-
-        self.apply_speed_bench_model_defaults(global_config_dict)
 
         with open_dict(global_config_dict):
             # Head server defaults, filled per key so a config may pin just one.
