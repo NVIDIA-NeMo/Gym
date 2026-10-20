@@ -45,13 +45,6 @@ from tqdm.asyncio import tqdm
 
 from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.base_responses_api_model import (
-    await_model_call_capture_quiescence,
-    clear_model_call_captures_for_rollouts,
-    merge_model_call_capture_into_record,
-    model_call_capture_dirs_from_config,
-    observability_enabled_from_config,
-)
 from nemo_gym.batch_status import AGGREGATION_ERROR_KEY, BatchStatusTracker
 from nemo_gym.config_types import (
     AgentWithoutEnvironmentServerError,
@@ -87,6 +80,13 @@ from nemo_gym.global_config import (
     label_runs,
     pairing_override_enabled,
     resolve_dataset_agent,
+)
+from nemo_gym.observability.model_calls import (
+    await_model_call_capture_quiescence,
+    clear_model_call_captures_for_rollouts,
+    merge_model_call_capture_into_record,
+    model_call_capture_dirs_from_config,
+    observability_enabled_from_config,
 )
 from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for, materialized_path_for
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
