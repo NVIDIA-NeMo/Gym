@@ -203,6 +203,37 @@ def test_a_failed_run_still_reports_what_it_observed(tmp_path, resources):
     assert [t["tool_name"] for t in observations["tool_calls"]] == ["code_exec"]
 
 
+@pytest.mark.parametrize("status", [400, 413, 422])
+def test_a_request_the_model_server_rejects_ends_the_run_as_failed_with_the_turns_so_far(tmp_path, resources, status):
+    model = _ModelServer([_call("code_exec", json.dumps({"cmd": "true"})), status])
+    try:
+        output = asyncio.run(run(_payload(model.base_url, resources.base_url, tmp_path), tmp_path, Observer()))
+    finally:
+        model.close()
+
+    assert output["stop_reason"] == "model_error"
+    assert str(status) in output["model_error"]
+    observations = output["observations"]
+    assert observations["status"] == "failed"
+    assert observations["model_response_ids"] == ["chatcmpl-1"]
+    assert [t["tool_name"] for t in observations["tool_calls"]] == ["code_exec"]
+    assert [item["type"] for item in output["output_items"]] == ["function_call", "function_call_output"]
+    assert [u["total_tokens"] for u in output["usages"]] == [15]
+
+
+@pytest.mark.parametrize("status", [401, 403, 404])
+def test_a_model_server_error_that_is_not_a_rejected_request_still_fails_the_run(tmp_path, resources, status):
+    model = _ModelServer([status])
+    try:
+        output = _run_main(tmp_path, _payload(model.base_url, resources.base_url, tmp_path))
+    finally:
+        model.close()
+
+    assert str(status) in output["error"]
+    assert output["observations"]["status"] == "failed"
+    assert "model_error" not in output
+
+
 def test_a_finish_tool_missing_from_the_request_tools_fails_the_run(tmp_path, resources):
     model = _ModelServer([])
     payload = {**_payload(model.base_url, resources.base_url, tmp_path), "finish_tool_names": ["finish", "nope"]}
