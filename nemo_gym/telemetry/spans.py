@@ -12,21 +12,25 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""A CLIENT-kind span, which nemo-lens cannot currently produce.
+"""Spans nemo-lens cannot produce: a CLIENT-kind span, and a linked root for a new trace.
 
-``nemo.lens.helpers.managed_span`` calls ``tracer.start_span(name)`` with no ``kind``
-argument and exposes no way to pass one, so every span it creates is ``SpanKind.INTERNAL``.
-For spans *inside* a service that is right. For Gym's outbound calls it is not: an
-INTERNAL span on a cross-service hop means a backend cannot tell that the agent server
-called the model server, so Jaeger/Tempo/Honeycomb service maps lose the edge and
-client-vs-server latency attribution stops working.
+``client_span``: ``nemo.lens.helpers.managed_span`` calls ``tracer.start_span(name)`` with no
+``kind`` argument and exposes no way to pass one, so every span it creates is
+``SpanKind.INTERNAL``. For spans *inside* a service that is right. For Gym's outbound calls it
+is not: an INTERNAL span on a cross-service hop means a backend cannot tell that the agent
+server called the model server, so Jaeger/Tempo/Honeycomb service maps lose the edge and
+client-vs-server latency attribution stops working. Gym is pinned to nemo-lens ``4d045c03``,
+so rather than change lens this module creates that one span directly against the OTel API.
+Adding a ``kind`` parameter to ``managed_span`` is the proper fix; when it lands, delete
+``client_span`` and pass ``kind=`` instead.
 
-Gym is pinned to nemo-lens ``4d045c03``, so rather than change lens this module creates
-that one span directly against the OTel API. Adding a ``kind`` parameter to
-``managed_span`` is the proper fix and is raised as a decision in the PR body; when it
-lands, delete this module and pass ``kind=`` instead.
+``linked_root_span``: starts a span as the root of a **new trace**, linked to the span it
+splits from, when the current span is that span; otherwise an ordinary child span. nemo-lens
+has ``create_linked_span`` for cross-rank correlation but nothing that also decides whether
+to split and attaches the result as current. The eval driver uses it so that a run is one
+small job trace plus one bounded trace per rollout.
 
-Everything else is deliberately identical to ``managed_span``: context attach/detach,
+Both are deliberately identical to ``managed_span`` otherwise: context attach/detach,
 exception recording, and an unconditional ``end()`` in ``finally``.
 
 **Callers must gate on the span group themselves.** Nothing here checks it, so that a
@@ -34,8 +38,13 @@ disabled site does not pay for entering a context manager at all
 (``kb/knowledge/conventions/hot-path-overhead.md``).
 """
 
+from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+
+if TYPE_CHECKING:
+    from opentelemetry.trace import Span, SpanContext
 
 
 @contextmanager
@@ -76,25 +85,25 @@ def client_span(name: str, tracer: Any = None, **attributes: Any):
 
 
 @contextmanager
-def rollout_root_span(name: str, tracer: Any = None, *, owner: Any = None, **attributes: Any):
-    """Start *name* as the root of a **new trace**, linked to the current span, and attach it.
+def linked_root_span(
+    name: str, tracer: Any = None, *, split_from: "SpanContext | None" = None, **attributes: Any
+) -> "Iterator[Span]":
+    """Start *name* as the root of a new trace, linked to *split_from*, when that span is current.
 
-    The eval driver uses this around each rollout dispatch. Under the run-long ``gym.job``
-    span, parent/child nesting would put every rollout of a run into one trace whose size
-    grows with the run and which stays open until the job ends; backends cap and buffer
-    traces as units, so long runs lose spans. A root per rollout keeps each trace bounded
-    by one rollout's work, and the span link keeps the job ↔ rollout relation.
+    Under the run-long ``gym.job`` span, parent/child nesting would put every rollout of a run
+    into one trace whose size grows with the run and which stays open until the job ends;
+    backends cap and buffer traces as units, so long runs lose spans. Splitting gives each
+    rollout a trace bounded by its own work, and the span link keeps the job ↔ rollout relation.
 
-    Ownership is explicit: the new root is opened only when the current span **is** *owner*,
-    the ``SpanContext`` of a ``gym.job`` span the driver opened as a standalone root. Under
-    an embedder's span (a caller that opened its own trace and runs the driver in-process),
-    with no owned job, or under a remote non-recording context, the span nests as before, so
-    the caller's trace keeps its shape.
+    The split happens only when the current span **is** *split_from*, the ``SpanContext`` of a
+    ``gym.job`` span the driver opened as a standalone root. In every other case, an embedder's
+    span, no owned job, a remote non-recording context, or a child of the job being current,
+    the span nests as an ordinary child, so the caller's trace keeps its shape.
 
     Args:
         name: Span name.
         tracer: OTel tracer; defaults to the globally registered one.
-        owner: ``SpanContext`` of the driver-owned job span, or None when no such span exists.
+        split_from: ``SpanContext`` of the driver-owned job span, or None when no such span exists.
         **attributes: Set via ``safe_set_span_attributes``.
 
     Yields:
@@ -110,8 +119,8 @@ def rollout_root_span(name: str, tracer: Any = None, *, owner: Any = None, **att
         tracer = otel_trace.get_tracer("nemo.gym")
 
     current_ctx = otel_trace.get_current_span().get_span_context()
-    detach = owner is not None and current_ctx.is_valid and current_ctx == owner
-    if detach:
+    start_new_trace = split_from is not None and current_ctx.is_valid and current_ctx == split_from
+    if start_new_trace:
         span = tracer.start_span(name, context=otel_ctx.Context(), links=[Link(current_ctx)])
     else:
         span = tracer.start_span(name)

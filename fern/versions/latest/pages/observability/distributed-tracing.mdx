@@ -51,10 +51,13 @@ of its own SERVER span.
 The result is a continuous parent chain across processes:
 
 ```
-gym.rollout                    agent server        (span A, root)
-└─ HTTP POST                   agent server        (span B, parent = A)
-   └─ POST /v1/responses       model server        (span C, parent = B)
-      └─ gym.model.responses   model server        (span D, parent = C)
+gym.rollout.dispatch           driver              (span R, root; span link → gym.job)
+└─ HTTP POST                   driver              (parent = R)
+   └─ POST /run                agent server        (parent = the driver's client span)
+      └─ gym.rollout           agent server        (span A)
+         └─ HTTP POST          agent server        (span B, parent = A)
+            └─ POST /v1/responses       model server   (span C, parent = B)
+               └─ gym.model.responses   model server   (span D, parent = C)
 ```
 
 Span C lives in a different operating system process from span B and knows nothing about
@@ -157,7 +160,13 @@ its children. Each dispatch opens `gym.rollout.dispatch` as the root of a new tr
 span link to `gym.job`, and the agent's `gym.rollout` span and everything below it join that
 trace. A run therefore produces one small job trace and one bounded trace per rollout, all
 carrying the same `run_id`, instead of one trace that grows with the run and stays open until
-the job ends. An embedder that runs the driver inside its own trace keeps parent/child nesting.
+the job ends. This holds for a standalone `gym eval run`; an embedder that runs the driver inside
+its own trace keeps parent/child nesting, and nemo-lens's `ENABLE_SINGLE_TRACEID` gives every root
+the job's trace id, which makes the run one trace again.
+
+Sampling is decided per trace, so each rollout trace makes its own decision and the job trace
+makes another. Under a ratio sampler a kept rollout trace can link to a `gym.job` span that was
+not sampled and is absent from the backend.
 
 ### Startup Traces
 

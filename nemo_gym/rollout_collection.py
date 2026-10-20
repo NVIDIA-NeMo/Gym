@@ -35,7 +35,7 @@ from difflib import get_close_matches
 from itertools import repeat
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Callable, Dict, Iterator, List, Literal, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
 import aiohttp
 import orjson
@@ -106,15 +106,21 @@ from nemo_gym.rollout_observability import (
     TrajectoryTurn,
 )
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span
+from nemo_gym.telemetry.endpoints import ROLLOUT_ID_ATTRIBUTE
 from nemo_gym.telemetry.gym_metrics import (
+    DISPATCH_NAME_ATTRIBUTE,
     UNREGISTERED_FAILURE_KIND,
     record_rollout_completed,
     record_rollout_health,
     record_rollout_reward,
 )
 from nemo_gym.telemetry.observer import MeteredAdmission, count_resident, driver_metrics, observe_event_loop
-from nemo_gym.telemetry.setup import is_metrics_exporter_active
+from nemo_gym.telemetry.setup import is_metrics_exporter_active, is_trace_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
+
+
+if TYPE_CHECKING:
+    from opentelemetry.trace import SpanContext
 
 
 _failures_path_for = failures_path_for  # Backwards-compatible alias
@@ -1906,9 +1912,16 @@ _SERVER_DID_NOT_RUN_STATUSES = frozenset({429, 502, 503, 504})
 _MAX_FAILURE_BODY_CHARS = 2000
 
 
+#: The server a dispatch is posted to; differs from the dispatch name for a row routed by agent.
+DISPATCH_SERVER_ATTRIBUTE = "nemo.gym.rollout.dispatch.server"
+
 #: ``SpanContext`` of the ``gym.job`` span the driver opened as a standalone trace root, for the
-#: duration of that run; None under an embedder's trace or when the ``job`` group is off.
-_OWNED_JOB_SPAN: ContextVar[Any] = ContextVar("nemo_gym_owned_job_span", default=None)
+#: duration of that run. None under an embedder's trace or when the ``job`` group is off. With
+#: traces off it holds the *invalid* context of a non-recording span rather than None;
+#: ``linked_root_span`` checks validity, so that case nests like the others.
+_OWNED_JOB_SPAN_CONTEXT: ContextVar[Optional["SpanContext"]] = ContextVar(
+    "nemo_gym_owned_job_span_context", default=None
+)
 
 
 def _current_span_is_valid() -> bool:
@@ -1920,27 +1933,31 @@ def _current_span_is_valid() -> bool:
 
 
 @contextmanager
-def _dispatch_span(row: Mapping[str, Any], dispatch_name: str) -> Iterator[None]:
+def _dispatch_span(row: Mapping[str, Any], dispatch_name: str, *, server_name: str) -> Iterator[None]:
     """One rollout's dispatch as the root of its own trace, linked to the run's `job` span.
 
     The `/run` call made inside carries this span as `traceparent`, so the agent's
     `gym.rollout` span and everything below it join the new trace instead of nesting under
     `gym.job`. The link, not a parent edge, ties the trace back to the job; both carry the
     run id as a resource attribute. The identity comes from the collector *row*, not from
-    the posted body: a materialized episode body carries it only as `episode_id`. Only a
-    job the driver opened as its own root is split; under an embedder's trace the dispatch
-    keeps nesting (see `rollout_root_span`). Gate on the `rollout` group before calling.
+    the posted body: a materialized episode body carries it only as `episode_id`.
+    `dispatch_name` is the value the rollout counters record under the same key, so spans
+    and metrics join on it; `server_name` is the server the call goes to, which differs for
+    a row routed by agent. Only a job the driver opened as its own root is split; under an
+    embedder's trace the dispatch keeps nesting (see `linked_root_span`). Gate on the
+    `rollout` group and the trace exporter before calling.
     """
-    from nemo_gym.telemetry.spans import rollout_root_span
+    from nemo_gym.telemetry.spans import linked_root_span
 
-    attributes: Dict[str, Any] = {"nemo.gym.rollout.dispatch.name": dispatch_name}
+    attributes: Dict[str, Any] = {DISPATCH_NAME_ATTRIBUTE: dispatch_name, DISPATCH_SERVER_ATTRIBUTE: server_name}
     try:
         rollout_id = maybe_rollout_id_from_run_body(row)
-    except ValueError:
+    except (TypeError, ValueError):
+        # Telemetry never decides whether a rollout runs; a malformed row just gets no id.
         rollout_id = None
     if rollout_id:
-        attributes["nemo.gym.rollout.id"] = rollout_id
-    with rollout_root_span("gym.rollout.dispatch", owner=_OWNED_JOB_SPAN.get(), **attributes):
+        attributes[ROLLOUT_ID_ATTRIBUTE] = rollout_id
+    with linked_root_span("gym.rollout.dispatch", split_from=_OWNED_JOB_SPAN_CONTEXT.get(), **attributes):
         yield None
 
 
@@ -3029,11 +3046,11 @@ class RolloutCollectionHelper(BaseModel):
             embedded = _current_span_is_valid()
             with managed_span(GymSpanGroup.JOB, "gym.job") as job:
                 owned = job.get_span_context() if job is not None and not embedded else None
-                token = _OWNED_JOB_SPAN.set(owned)
+                token = _OWNED_JOB_SPAN_CONTEXT.set(owned)
                 try:
                     return await self._run_from_config(config)
                 finally:
-                    _OWNED_JOB_SPAN.reset(token)
+                    _OWNED_JOB_SPAN_CONTEXT.reset(token)
 
     async def _run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
         output_fpath = Path(config.output_jsonl_fpath)
@@ -4292,8 +4309,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 succeeded = False
                 try:
                     request_body = _episode_request_body(row) if _materialized_taskset(row) else row
-                    if is_span_group_enabled(GymSpanGroup.ROLLOUT):
-                        with _dispatch_span(row, server_name):
+                    if is_span_group_enabled(GymSpanGroup.ROLLOUT) and is_trace_exporter_active():
+                        with _dispatch_span(row, self._dispatch_name(row), server_name=server_name):
                             res = await server_client.post(server_name=server_name, url_path="/run", json=request_body)
                     else:
                         res = await server_client.post(server_name=server_name, url_path="/run", json=request_body)
