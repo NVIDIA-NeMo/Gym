@@ -149,6 +149,11 @@ uses all of them). Local calls ignore them.
   output budget from the context left (default `fixed`: `max_output_tokens`).
 - `declare_model_limits: false`: the model's size stays unknown to OpenCode, so it compacts only when
   the endpoint reports a context overflow (default true: `context_window` and `max_output_tokens`).
+- `allow_root_workdir`: accept a task working directory of `/` (images without a `WORKDIR`); the
+  runtime and session files then sit under `/tmp` inside it, as a harness's own files do there.
+- `argv_prompt_quoting`: send the instruction as `opencode run` builds it from one argv word, which is
+  what a model sees when a launcher passes the instruction as an argument: wrapped in double quotes,
+  inner quotes escaped, when it contains a space.
 
 ## Configuration compatibility
 

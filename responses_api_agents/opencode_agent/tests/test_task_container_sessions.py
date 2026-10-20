@@ -3,14 +3,18 @@
 """Opt-in sandbox-session settings for running OpenCode as a harness started in the task container."""
 
 import json
+import shlex
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
 
 from responses_api_agents.opencode_agent.app import _REMAINING_CONTEXT_PLUGIN as REMAINING_CONTEXT_PLUGIN
+from responses_api_agents.opencode_agent.app import _sandbox_prepare_command, argv_prompt
 from responses_api_agents.opencode_agent.runtime import OBSERVABILITY_PATCH
 from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import close_body, seed, setup  # noqa: F401
 
@@ -151,3 +155,73 @@ for (const [providerID, kept] of [['nemo_gym', false], ['other', true]]) {
         timeout=30,
     )
     assert completed.returncode == 0, completed.stderr
+
+
+def test_root_workdir_runs_when_allowed(setup):
+    # Task images without a WORKDIR start in "/": OpenCode's runtime and session files stay under /tmp.
+    agent, sandbox = setup
+    agent.config.allow_root_workdir = True
+    sandbox.expected_workdir = "/"
+    body = seed()
+    body.sandbox_access.workdir = "/"
+    response, payload, _ = run_session(agent, sandbox, body=body)
+    assert response.status_code == 200, response.text
+    assert payload["cwd"] == "/"
+    assert sandbox.directory.startswith("/tmp/nemo-gym-opencode-sessions/")
+    assert "allow_root=True" in sandbox.exec.await_args_list[0].args[0]
+
+
+@pytest.mark.parametrize("workdir", ["/tmp", "/tmp/nemo-gym-opencode-sessions"])
+async def test_root_workdir_setting_still_rejects_adapter_storage(setup, workdir):
+    agent, sandbox = setup
+    agent.config.allow_root_workdir = True
+    body = seed()
+    body.sandbox_access.workdir = workdir
+    with pytest.raises(HTTPException) as error:
+        await agent.seed_agent_session(Request({"type": "http", "session": {}}), body)
+    assert error.value.status_code == 422
+    sandbox.exec.assert_not_awaited()
+
+
+@pytest.mark.parametrize("allow_root", [False, True])
+def test_resolved_root_workdir_check(tmp_path, allow_root):
+    command = shlex.split(
+        _sandbox_prepare_command("/", "/tmp/nemo-gym-opencode-sessions/x", "/tmp/rt", allow_root=allow_root)
+    )
+    script = command[command.index("-I") + 2]
+    sessions, runtime = tmp_path / "sessions", tmp_path / "runtime"
+    checked = subprocess.run(
+        [sys.executable, "-I", "-c", script, "/", str(sessions), str(runtime)], capture_output=True, text=True
+    )
+    assert (checked.returncode == 0) is allow_root, checked.stderr
+    # A storage path that holds the workdir is rejected either way.
+    workdir = sessions / "task"
+    workdir.mkdir(parents=True)
+    held = subprocess.run(
+        [sys.executable, "-I", "-c", script, str(workdir), str(sessions), str(runtime)], capture_output=True, text=True
+    )
+    assert held.returncode != 0
+    assert "overlaps the task workdir" in held.stderr
+
+
+@pytest.mark.parametrize(
+    "instruction,sent",
+    [
+        ('Fix "the" code\nand test it', '"Fix \\"the\\" code\nand test it"'),
+        ("one-word", "one-word"),
+    ],
+)
+def test_argv_prompt_quoting_sends_the_message_opencode_builds_from_one_argument(setup, instruction, sent):
+    agent, sandbox = setup
+    agent.config.argv_prompt_quoting = True
+    response, payload, _ = run_session(agent, sandbox, request={"input": instruction})
+    assert response.status_code == 200, response.text
+    assert payload["prompt"] == sent
+    assert argv_prompt(instruction) == sent
+
+
+def test_prompt_is_sent_as_written_by_default(setup):
+    agent, sandbox = setup
+    response, payload, _ = run_session(agent, sandbox, request={"input": 'Fix "the" code'})
+    assert response.status_code == 200, response.text
+    assert payload["prompt"] == 'Fix "the" code'

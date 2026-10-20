@@ -133,7 +133,16 @@ def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
     return user_message, system_message
 
 
-def _sandbox_prepare_command(workdir: str, directory: str, runtime: str) -> str:
+def argv_prompt(text: str) -> str:
+    """The message `opencode run` builds from its message arguments when the text is one argv word.
+
+    OpenCode 1.17 wraps each argument that contains a space in double quotes (escaping inner ones)
+    before joining them, so a model whose launcher passes the instruction as an argument sees it quoted.
+    """
+    return '"' + text.replace('"', '\\"') + '"' if " " in text else text
+
+
+def _sandbox_prepare_command(workdir: str, directory: str, runtime: str, *, allow_root: bool = False) -> str:
     # Bootstrap with POSIX sh; the runtime installer itself requires Bash.
     bootstrap = """set -eu
 set --
@@ -152,11 +161,13 @@ if [ "$#" -gt 0 ]; then
     fi
 fi
 """
+    # With allow_root, a workdir of / may hold the runtime and session storage (images without a WORKDIR).
     validate_paths = (
-        "from pathlib import Path; import sys; "
+        f"from pathlib import Path; import sys; allow_root={allow_root!r}; "
         "workdir,*roots=[Path(p).resolve() for p in sys.argv[1:]]; "
         "assert workdir.is_dir(), 'OpenCode task workdir is missing'; "
-        "assert all(workdir != root and workdir not in root.parents and root not in workdir.parents "
+        "assert all(workdir != root and root not in workdir.parents "
+        "and ((allow_root and workdir == Path('/')) or workdir not in root.parents) "
         "for root in roots), 'OpenCode runtime/session storage overlaps the task workdir'"
     )
     return (
@@ -213,6 +224,12 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # Sandbox sessions: declare context_window and max_output_tokens as the model's limits. False leaves
     # the model's size unknown to OpenCode, which then compacts only when the endpoint reports an overflow.
     declare_model_limits: bool = True
+    # Sandbox sessions: accept a task workdir of "/" (images without a WORKDIR). The runtime and session
+    # files then sit under /tmp inside it, as a harness's own files do there.
+    allow_root_workdir: bool = False
+    # Sandbox sessions: send the instruction as `opencode run` builds it from one argv word (see
+    # argv_prompt), which is what a model sees when its launcher passes the instruction as an argument.
+    argv_prompt_quoting: bool = False
 
     @property
     def command_parts(self) -> list[str]:
@@ -640,11 +657,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         if not isinstance(workdir, str):
             raise HTTPException(422, "OpenCode sandbox workdir must be absolute")
         normalized_workdir = PurePosixPath(workdir)
+        root_workdir = self.config.allow_root_workdir and normalized_workdir == PurePosixPath("/")
         if (
             not normalized_workdir.is_absolute()
             or "\x00" in workdir
             or ".." in normalized_workdir.parts
-            or normalized_workdir in (PurePosixPath("/"), PurePosixPath("/tmp"))
+            or (normalized_workdir in (PurePosixPath("/"), PurePosixPath("/tmp")) and not root_workdir)
             or str(normalized_workdir).startswith("/tmp/nemo-gym-opencode")
         ):
             raise HTTPException(
@@ -701,7 +719,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     raise RuntimeError(
                         f"Cannot create OpenCode sandbox workdir {workdir}: {workspace.stderr or workspace.stdout}"
                     )
-            command = _sandbox_prepare_command(workdir, directory, runtime)
+            command = _sandbox_prepare_command(workdir, directory, runtime, allow_root=root_workdir)
             result = await sandbox.exec(command, timeout_s=self.config.sandbox_install_timeout_seconds)
             self._check_sandbox_setup(command, result)
             prepared_directory = True
@@ -1107,7 +1125,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             "directory": state.session.session_dir,
             "cwd": state.session.workdir,
             "command": command,
-            "prompt": prompt,
+            "prompt": argv_prompt(prompt) if self.config.argv_prompt_quoting else prompt,
             "harness_session_id": state.harness_session_id,
             "previous_message_ids": state.message_ids,
             "activation_id": state.activation_id,
