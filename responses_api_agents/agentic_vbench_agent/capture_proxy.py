@@ -48,6 +48,7 @@ SESSION_HEADER = "x-opencode-session"
 PARENT_SESSION_HEADER = "x-opencode-parent-session"
 SPAWN_CALL_HEADER = "x-opencode-spawn-call"
 TASK_CALL_HEADER = "x-opencode-task-call"
+TASK_BINDING_HEADER = "x-opencode-task-binding"
 COMPACTION_AGENT = "compaction"
 # Side calls whose generations are not part of the task trajectory. Title
 # generation is disabled in the OpenCode config for training, but a stray call
@@ -144,6 +145,8 @@ class EpisodeRoute:
     sessions: dict[str, SessionTrace] = field(default_factory=dict)
     task_prompts: dict[str, tuple[str, str]] = field(default_factory=dict)
     task_call_owners: dict[str, str] = field(default_factory=dict)
+    task_bindings: dict[str, dict] = field(default_factory=dict)
+    bound_turns: set[int] = field(default_factory=set)
     # A compaction request changes the system prompt, and its continuation may
     # replace the opening user turn. Those contexts still belong to the session
     # whose served history they replay; a changed prefix is not a Task spawn.
@@ -217,7 +220,30 @@ class CaptureProxy:
         tail = request.match_info["tail"]
         if request.method == "POST" and tail == "v1/chat/completions":
             return await self._chat(route, request)
+        if request.method == "POST" and tail == "v1/session-bindings":
+            return await self._bind_session(route, request)
         return await self._forward(route, request, tail)
+
+    async def _bind_session(self, route: EpisodeRoute, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+            fields = ("session_id", "parent_session_id", "delegation_call_id")
+            if not isinstance(body, dict) or set(body) != set(fields):
+                raise ValueError("Task binding requires native child, parent, and invocation IDs")
+            if any(
+                not isinstance(body[key], str) or not body[key] or body[key] != body[key].strip() for key in fields
+            ):
+                raise ValueError("Task binding requires nonempty native identifiers")
+            # No await after parsing: a Task reports only after its own HTTP calls
+            # finish. Other children may still be generating under route.lock;
+            # their turns must neither delay this receipt nor be claimed by it.
+            binding = _bind_native_task(route, **body)
+        except (ValueError, TypeError) as error:
+            errors = route.record_dir / "session_bindings" / "errors"
+            errors.mkdir(parents=True, exist_ok=True)
+            (errors / f"{uuid.uuid4().hex}.json").write_text(json.dumps({"error": str(error)}))
+            raise web.HTTPBadRequest(text=str(error)) from error
+        return web.json_response(binding)
 
     def _upstream_headers(self, request: web.Request) -> dict[str, str]:
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
@@ -300,6 +326,7 @@ class CaptureProxy:
                 "session_role": session.role,
                 "parent_session_id": session.parent_session_id,
                 "spawn_call_id": session.spawn_call_id,
+                **({"native_task_binding_pending": True} if request.headers.get(TASK_BINDING_HEADER) else {}),
                 **(
                     {"delegation_call_id": request.headers[TASK_CALL_HEADER]}
                     if TASK_CALL_HEADER in request.headers
@@ -444,6 +471,9 @@ def observe_native_session(route: EpisodeRoute, headers: Mapping[str, str]) -> S
     parent_id = headers.get(PARENT_SESSION_HEADER)
     spawn_id = headers.get(SPAWN_CALL_HEADER)
     call_id = headers.get(TASK_CALL_HEADER)
+    deferred = headers.get(TASK_BINDING_HEADER) == "deferred"
+    if headers.get(TASK_BINDING_HEADER) and not deferred:
+        raise ValueError("Unknown native Task binding protocol")
     if not session_id or any(
         value is not None and (not value or value != value.strip())
         for value in (session_id, parent_id, spawn_id, call_id)
@@ -453,14 +483,18 @@ def observe_native_session(route: EpisodeRoute, headers: Mapping[str, str]) -> S
         parent = route.sessions.get(parent_id)
         if parent is None or parent.role != "parent":
             raise ValueError("Native child session must belong to this episode's main session")
-        if (
+        if deferred:
+            if spawn_id or call_id:
+                raise ValueError("Deferred native Task headers cannot claim an unverified invocation")
+        elif (
             not spawn_id
             or not call_id
             or any(route.task_call_owners.get(value) != parent_id for value in (spawn_id, call_id))
         ):
             raise ValueError("Native child session requires its served spawning and current Task calls")
         if any(
-            trace.spawn_call_id == spawn_id and trace.session_id != session_id for trace in route.sessions.values()
+            spawn_id and trace.spawn_call_id == spawn_id and trace.session_id != session_id
+            for trace in route.sessions.values()
         ):
             raise ValueError("A spawning Task call cannot own two native child sessions")
         role = "child"
@@ -468,18 +502,59 @@ def observe_native_session(route: EpisodeRoute, headers: Mapping[str, str]) -> S
         if (
             spawn_id
             or call_id
+            or deferred
             or any(trace.role == "parent" and trace.session_id != session_id for trace in route.sessions.values())
         ):
             raise ValueError("Native main session has inconsistent ancestry")
         role = "parent"
     trace = route.sessions.get(session_id)
     if trace is not None:
-        if (trace.role, trace.parent_session_id, trace.spawn_call_id) != (role, parent_id, spawn_id):
+        if (trace.role, trace.parent_session_id) != (role, parent_id) or (
+            not deferred and trace.spawn_call_id != spawn_id
+        ):
             raise ValueError("Native session identity changed role, parent, or original spawn")
         return trace
     trace = SessionTrace(session_id=session_id, role=role, parent_session_id=parent_id, spawn_call_id=spawn_id)
     route.sessions[session_id] = trace
     return trace
+
+
+def _bind_native_task(
+    route: EpisodeRoute, *, session_id: str, parent_session_id: str, delegation_call_id: str
+) -> dict:
+    child = route.sessions.get(session_id)
+    if child is None or child.role != "child" or child.parent_session_id != parent_session_id:
+        raise ValueError("Task binding requires an observed native child of this episode's parent")
+    if route.task_call_owners.get(delegation_call_id) != parent_session_id:
+        raise ValueError("Task binding does not belong to a served parent Task call")
+    previous = route.task_bindings.get(delegation_call_id)
+    if previous is not None:
+        if previous["session_id"] != session_id:
+            raise ValueError("A Task invocation cannot own two native children")
+        return previous
+    spawn_id = child.spawn_call_id or delegation_call_id
+    turns = [turn for turn in child.turns if turn not in route.bound_turns]
+    response_ids = [child.response_ids[child.turns.index(turn)] for turn in turns]
+    binding = {
+        "version": 1,
+        "session_id": session_id,
+        "parent_session_id": parent_session_id,
+        "spawn_call_id": spawn_id,
+        "delegation_call_id": delegation_call_id,
+        "turns": turns,
+        "response_ids": response_ids,
+    }
+    folder = route.record_dir / "session_bindings"
+    folder.mkdir(exist_ok=True)
+    path = folder / f"{hashlib.sha256(delegation_call_id.encode()).hexdigest()}.json"
+    # Receipts are append-only. Raw model requests, completions, and ledger data
+    # remain untouched; readers attach the verified ownership on copies.
+    with path.open("x") as stream:
+        stream.write(json.dumps(binding))
+    child.spawn_call_id = spawn_id
+    route.bound_turns.update(turns)
+    route.task_bindings[delegation_call_id] = binding
+    return binding
 
 
 def _message_fingerprints(message: dict) -> list[str]:
@@ -602,6 +677,8 @@ def session_traces(records: list[dict]) -> list[dict]:
     """
     traces: dict[str, dict] = {}
     for record in records:
+        if record.get("native_task_binding_pending"):
+            raise ValueError("Native child capture still has unresolved Task ownership")
         if record.get("status", 200) != 200 or "response" not in record or record.get("local"):
             continue
         session_id = record.get("session_id")
@@ -632,7 +709,52 @@ def load_records(record_dir: Path) -> list[dict]:
     records = sorted((json.loads(p.read_text()) for p in record_dir.glob("*.json")), key=lambda r: r["turn"])
     if not records:
         raise RuntimeError(f"No model calls were recorded under {record_dir}; inspect runner.log")
+    _join_native_task_bindings(record_dir, records)
     return records
+
+
+def _join_native_task_bindings(record_dir: Path, records: list[dict]) -> None:
+    folder = record_dir / "session_bindings"
+    if any((folder / "errors").glob("*.json")):
+        raise ValueError("Native Task provenance failed; inspect session_bindings/errors before training")
+    by_turn = {record["turn"]: record for record in records}
+    owners = {
+        call_id: record.get("session_id")
+        for record in records
+        if record.get("status", 200) == 200
+        for call_id in task_tool_call_ids(record.get("response") or {})
+    }
+    births: dict[str, str] = {}
+    invocations: dict[str, str] = {}
+    claimed: set[int] = set()
+    for path in sorted(folder.glob("*.json")):
+        binding = json.loads(path.read_text())
+        child, parent = binding["session_id"], binding["parent_session_id"]
+        spawn, call = binding["spawn_call_id"], binding["delegation_call_id"]
+        if binding["version"] != 1 or any(owners.get(value) != parent for value in (spawn, call)):
+            raise ValueError("Native Task receipt does not match served parent calls")
+        if births.setdefault(child, spawn) != spawn or invocations.setdefault(call, child) != child:
+            raise ValueError("Native Task receipt changed a child birth or invocation owner")
+        if len(binding["turns"]) != len(binding["response_ids"]):
+            raise ValueError("Native Task receipt has inconsistent response ownership")
+        for turn, response_id in zip(binding["turns"], binding["response_ids"], strict=True):
+            record = by_turn.get(turn)
+            if (
+                turn in claimed
+                or record is None
+                or not record.get("native_task_binding_pending")
+                or record.get("session_role") != "child"
+                or record.get("session_id") != child
+                or record.get("parent_session_id") != parent
+                or (record.get("response") or {}).get("id") != response_id
+            ):
+                raise ValueError("Native Task receipt does not match exactly one recorded child response")
+            claimed.add(turn)
+            record.update(spawn_call_id=spawn, delegation_call_id=call, native_task_binding_pending=False)
+    if any(invocations.get(spawn) != child for child, spawn in births.items()):
+        raise ValueError("Native child capture is missing its original spawning Task receipt")
+    if any(record.get("native_task_binding_pending") for record in records):
+        raise ValueError("Native child capture still has unresolved Task ownership")
 
 
 @dataclass

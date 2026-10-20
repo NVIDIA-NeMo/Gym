@@ -169,6 +169,115 @@ async def test_native_sessions_keep_identical_children_and_same_child_followups(
 
 
 @pytest.mark.asyncio
+async def test_native_task_results_bind_deferred_children_without_rewriting_calls(tmp_path: Path) -> None:
+    def task(call_id: str) -> dict:
+        return {
+            "id": call_id,
+            "type": "function",
+            "function": {"name": "task", "arguments": '{"prompt":"identical bounded task"}'},
+        }
+
+    upstream = Upstream()
+    await upstream.start()
+    served = [
+        completion(0, {"role": "assistant", "tool_calls": [task("A"), task("B")]}, "tool_calls"),
+        completion(1, {"role": "assistant", "content": "child A initial"}, "stop"),
+        completion(2, {"role": "assistant", "content": "child B initial"}, "stop"),
+        completion(3, {"role": "assistant", "tool_calls": [task("resume_A")]}, "tool_calls"),
+        completion(4, {"role": "assistant", "content": "child A resumed"}, "stop"),
+    ]
+    upstream.responses = list(served)
+    proxy = CaptureProxy(advertise_host="127.0.0.1")
+    await proxy.start()
+    endpoint = proxy.register("deferred", upstream.url, tmp_path, require_native_session_headers=True)
+    body = {"model": "policy", "messages": [{"role": "user", "content": "unchanged bounded task"}]}
+    headers = lambda child: {
+        "x-opencode-session": child,
+        "x-opencode-parent-session": "ses_main",
+        "x-opencode-task-binding": "deferred",
+    }
+    try:
+        async with aiohttp.ClientSession() as client:
+
+            async def call(session_headers: dict, index: int) -> None:
+                async with client.post(endpoint + "/chat/completions", json=body, headers=session_headers) as response:
+                    assert response.status == 200, await response.text()
+                    assert await response.json() == served[index]
+
+            async def bind(child: str, call_id: str) -> dict:
+                async with client.post(
+                    endpoint + "/session-bindings",
+                    json={"session_id": child, "parent_session_id": "ses_main", "delegation_call_id": call_id},
+                ) as response:
+                    assert response.status == 200, await response.text()
+                    return await response.json()
+
+            await call({"x-opencode-session": "ses_main"}, 0)
+            await call(headers("ses_A"), 1)
+            await call(headers("ses_B"), 2)
+            original = {p.name: p.read_bytes() for p in tmp_path.glob("*.json")}
+            with pytest.raises(ValueError, match="unresolved Task"):
+                load_records(tmp_path)
+            # Children can finish in the opposite order to spawning. Metadata
+            # binds exact native IDs; equal prompts do not determine ownership.
+            b = await bind("ses_B", "B")
+            a = await bind("ses_A", "A")
+            assert await bind("ses_A", "A") == a  # idempotent retry
+            assert b["response_ids"] == ["chatcmpl-2"]
+            assert a["response_ids"] == ["chatcmpl-1"]
+            assert {p.name: p.read_bytes() for p in tmp_path.glob("*.json")} == original
+            await call({"x-opencode-session": "ses_main"}, 3)
+            await call(headers("ses_A"), 4)
+            await bind("ses_A", "resume_A")
+        records = load_records(tmp_path)
+        _, stats = capture_output(records)
+        a_trace, b_trace = stats.session_traces[1:]
+        assert a_trace["spawn_call_id"] == "A"
+        assert a_trace["delegation_call_ids"] == ["A", "resume_A"]
+        assert a_trace["response_ids"] == ["chatcmpl-1", "chatcmpl-4"]
+        assert b_trace["spawn_call_id"] == "B" and b_trace["response_ids"] == ["chatcmpl-2"]
+        assert [request_body for _, request_body, _ in upstream.requests] == [body] * len(served)
+        # A corrupt receipt must fail before ownership reaches training.
+        receipt_path = next(p for p in (tmp_path / "session_bindings").glob("*.json") if '"resume_A"' in p.read_text())
+        receipt = json.loads(receipt_path.read_text())
+        receipt["response_ids"] = ["chatcmpl-2"]
+        receipt_path.write_text(json.dumps(receipt))
+        with pytest.raises(ValueError, match="exactly one"):
+            load_records(tmp_path)
+    finally:
+        await proxy.stop()
+        await upstream.runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_invalid_native_task_binding_poisoned_capture_cannot_train(tmp_path: Path) -> None:
+    upstream = Upstream()
+    await upstream.start()
+    upstream.responses = [completion(0, {"role": "assistant", "content": "main"}, "stop")]
+    proxy = CaptureProxy(advertise_host="127.0.0.1")
+    await proxy.start()
+    endpoint = proxy.register("invalid-binding", upstream.url, tmp_path, require_native_session_headers=True)
+    try:
+        async with aiohttp.ClientSession() as client:
+            async with client.post(
+                endpoint + "/chat/completions",
+                json={"model": "policy", "messages": [{"role": "user", "content": "task"}]},
+                headers={"x-opencode-session": "ses_main"},
+            ) as response:
+                assert response.status == 200
+            async with client.post(
+                endpoint + "/session-bindings",
+                json={"session_id": "foreign_child", "parent_session_id": "ses_main", "delegation_call_id": "fake"},
+            ) as response:
+                assert response.status == 400
+        with pytest.raises(ValueError, match="provenance failed"):
+            load_records(tmp_path)
+    finally:
+        await proxy.stop()
+        await upstream.runner.cleanup()
+
+
+@pytest.mark.asyncio
 async def test_proxy_records_and_replays_streamed_calls(tmp_path: Path) -> None:
     upstream = Upstream()
     await upstream.start()
