@@ -73,7 +73,7 @@ jobs:
           # mlflow/wandb are optional extras; the core suite covers both their
           # installed- and missing-dependency paths, so they're synced here too.
           # Mirrors scripts/ci/core_unit_tests.sh, which syncs the same extras.
-          uv sync --extra dev --extra sandbox --extra openshell --extra telemetry --extra mlflow --extra wandb
+          uv sync --extra dev --extra ray --extra sandbox --extra openshell --extra telemetry --extra mlflow --extra wandb
 
       - name: Test
         run: |
@@ -308,4 +308,4 @@ jobs:
         uses: NVIDIA-NeMo/FW-CI-templates/.github/actions/notify-ci-failure@631c404d00a9e60afc591cd071d35d2e18f82fc6
         with:
           needs-json: ${{ toJSON(needs) }}
-          webhook: ${{ secrets.SLACK_WEBHOOK }}
+          webhook: ${{ secrets.SLACK_TEAM_CHANNEL_WEBHOOK }}

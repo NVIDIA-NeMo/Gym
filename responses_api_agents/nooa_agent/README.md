@@ -3,6 +3,24 @@
 The NOOA agent adapter provides typed configuration for constructing NOOA agents and invoking them through
 asynchronous Python adapters that receive validated NeMo Gym Responses requests.
 
+## Default agent and installation
+
+The reusable `configs/nooa_agent.yaml` configuration runs `nooa_bench.bench_agent:BenchAgent` with
+`responses_api_agents.nooa_agent.bench_agent_adapter:invoke_bench_agent`. The adapter passes the task prompt to
+BenchAgent and preserves its structured result. Set `nooa.agent_class` and `nooa.invocation_adapter` together
+when selecting another agent.
+
+Install the agent's requirements from its directory:
+
+```bash
+cd responses_api_agents/nooa_agent
+uv pip install -r requirements.txt
+```
+
+The requirements pin all three NOOA packages: `nooa`, `nooa-cli`, and `nooa-bench`. The CLI supplies executor
+support, and the benchmark package supplies the default BenchAgent. Gym's server installation uses this same
+requirements file.
+
 ## Embedded CodeAct scope
 
 Embedded CodeAct persists for the duration of one invocation. `execute_python` is not computation-only: it can

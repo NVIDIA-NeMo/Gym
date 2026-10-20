@@ -102,6 +102,47 @@ def test_missing_tool_request_blocks_only_request_comparison(behavior_episode):
     assert checks["tools.witness_output"]["status"] == "pass"
 
 
+def test_the_scripted_finish_call_is_not_compared_with_the_shell_witness(behavior_episode):
+    record, witness = behavior_episode
+    tools = record["ng_trajectory"]["tool_calls"]
+    tools.append({**tools[0], "tool_call_id": "finish-1"})
+    assert {c["id"]: c for c in tool_checks(record, witness["tool_calls"])}["tools.witness_ids"]["status"] == "fail"
+    checks = {c["id"]: c for c in tool_checks(record, witness["tool_calls"], finish_id="finish-1")}
+    assert checks["tools.witness_ids"]["status"] == "pass"
+
+
+@pytest.mark.parametrize("finish_call,status", [({"id": "finish-1"}, "pass"), (None, "fail")])
+def test_inspect_behavior_takes_the_finish_call_from_the_witness(behavior_episode, finish_call, status):
+    record, witness = behavior_episode
+    tools = record["ng_trajectory"]["tool_calls"]
+    tools.append({**tools[0], "tool_call_id": "finish-1"})
+    witness["finish_call"] = finish_call
+    options = dict(http_errors=(), terminal_error=False, tool_steps=2, expected_reward=0.0, fingerprint=fingerprint)
+    checks = {c["id"]: c for c in inspect_behavior(witness, record, **options)}
+    assert checks["tools.witness_ids"]["status"] == status
+
+
+def _as_text_parts(outputs: list[str]) -> list[dict]:
+    return [{"type": "text", "text": output} for output in outputs]
+
+
+def test_tool_output_given_as_text_parts_matches_the_same_text(behavior_episode):
+    record, witness = behavior_episode
+    for call in witness["tool_calls"]:
+        call["outputs"] = [_as_text_parts(call["outputs"])]
+    assert {c["id"]: c for c in tool_checks(record, witness["tool_calls"])}["tools.witness_output"]["status"] == "pass"
+    for call in record["ng_trajectory"]["tool_calls"]:
+        call["output"] = _as_text_parts(["val", "ue"])
+    assert {c["id"]: c for c in tool_checks(record, witness["tool_calls"])}["tools.witness_output"]["status"] == "pass"
+
+
+def test_different_text_fails_the_output_check_in_any_form(behavior_episode):
+    record, witness = behavior_episode
+    witness["tool_calls"][0]["outputs"] = [_as_text_parts(["different"])]
+    checks = {c["id"]: c for c in tool_checks(record, witness["tool_calls"])}
+    assert checks["tools.witness_output"]["status"] == "fail"
+
+
 def test_missing_output_witness_cannot_qualify_artifacts(behavior_episode):
     record, witness = behavior_episode
     options = dict(http_errors=(), terminal_error=False, tool_steps=2, expected_reward=0.0, fingerprint=fingerprint)

@@ -80,7 +80,7 @@ _IMAGE_OUTPUT_PLACEHOLDER = "[image omitted from tool output]"
 _REPORTING_ONLY_REASONING_FIELDS = ("summary", "generate_summary")
 
 
-def _message_content_to_text(content: Any) -> str:
+def message_content_to_text(content: Any) -> str:
     """Plain text of a chat message content (a string, or a list of text parts)."""
     if isinstance(content, str):
         return content
@@ -346,7 +346,7 @@ class ResponsesConverter(BaseModel):
         if instructions:
             leading_parts = [instructions]
             while state.messages and state.messages[0]["role"] in ("system", "developer"):
-                leading_parts.append(_message_content_to_text(state.messages.pop(0)["content"]))
+                leading_parts.append(message_content_to_text(state.messages.pop(0)["content"]))
             state.messages.insert(
                 0,
                 NeMoGymChatCompletionSystemMessageParam(content="\n\n".join(leading_parts), role="system"),
@@ -900,6 +900,14 @@ class ResponsesConverter(BaseModel):
     def _extract_reasoning_from_content(self, content: str) -> Tuple[List[str], str]:
         return self._parse_think_tags(content)
 
+    @staticmethod
+    def _chat_tool_content_part_to_responses(part: Dict[str, Any]) -> Dict[str, Any]:
+        """A Chat tool message's text or image part as the matching ``function_call_output`` part."""
+        if part["type"] == "image_url":
+            image_url = part["image_url"]
+            return {"type": "input_image", "image_url": image_url["url"], "detail": image_url.get("detail", "auto")}
+        return {"type": "input_text", "text": part["text"]}
+
     def chat_completions_messages_to_responses_items(
         self, messages: List[Dict[str, Any]]
     ) -> List[NeMoGymResponseOutputItem]:
@@ -916,7 +924,7 @@ class ResponsesConverter(BaseModel):
             elif role == "tool":
                 content = message["content"]
                 if isinstance(content, list):
-                    content = [{"type": "input_text", "text": part["text"]} for part in content]
+                    content = [self._chat_tool_content_part_to_responses(part) for part in content]
                 output_items.append(
                     NeMoGymFunctionCallOutput(
                         call_id=message["tool_call_id"],

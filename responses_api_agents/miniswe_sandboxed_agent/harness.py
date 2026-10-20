@@ -230,6 +230,9 @@ class MiniSWEHarness:
         uv, python = await bootstrap_assets(arch, libc)
         await self.sandbox.upload(uv, remote + "/uv.tar.gz")
         await self.sandbox.upload(python, remote + "/python.tar.gz")
+        await self.sandbox.upload(
+            Path(__file__).with_name("runtime") / "requirements.txt", remote + "/requirements.txt"
+        )
         # Extract as the task user: uploads may be root-owned and non-root task
         # users must own both the executable and the new Python environment.
         result = await self.sandbox.exec(
@@ -237,7 +240,7 @@ class MiniSWEHarness:
             f"uv-{arch}-unknown-linux-musl/uv && "
             f"tar -xzf {remote}/python.tar.gz -C {remote} && "
             f"UV_PYTHON_DOWNLOADS=never {remote}/uv --no-config venv {remote}/venv --python {remote}/python/bin/python3 && "
-            f"{remote}/uv --no-config pip install --python {remote}/venv/bin/python mini-swe-agent==2.4.6",
+            f"{remote}/uv --no-config pip install --python {remote}/venv/bin/python -r {remote}/requirements.txt",
             user=self.context.user,
             cwd=self.context.workdir,
             timeout_s=self.context.setup_timeout_sec,

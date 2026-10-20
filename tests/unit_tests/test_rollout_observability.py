@@ -4,8 +4,8 @@
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym.base_responses_api_model import ModelCallRecord
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.observability.model_calls import ModelCallRecord
 from nemo_gym.rollout_observability import (
     AgentInvocation,
     AgentObservationBundle,
@@ -408,7 +408,8 @@ def test_sandbox_observation_rejects_negative_usage() -> None:
 
 
 def test_capture_merge_joins_declared_message_ids_for_any_harness(tmp_path):
-    from nemo_gym.base_responses_api_model import CaptureStore, merge_model_call_capture_into_record
+    from nemo_gym.base_responses_api_model import CaptureStore
+    from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
     from nemo_gym.rollout_observability import TrajectoryTurn
 
     model = ModelServerRef(type="responses_api_models", name="policy")

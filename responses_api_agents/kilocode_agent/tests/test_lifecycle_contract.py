@@ -90,6 +90,16 @@ async def test_bad_cleanup_keeps_state_retryable_without_capture(invalid):
     assert state.session.cleanup is None
     assert state.session.artifacts is None
     assert "read stdout.jsonl" not in sandbox.events and "snapshot" not in sandbox.events
+    if invalid["cleanup_confirmed"] is False:
+        # A negative receipt is final: close releases the borrowed session for Resources teardown.
+        await state.close(timeout=1)
+        assert state.session.closed
+        assert state.session.termination_error is not None
+        assert state.session.capture_error is state.session.termination_error
+        assert state.session.artifacts is None
+        sandbox.disconnect.assert_awaited_once()
+        sandbox.stop.assert_not_awaited()
+        return
     with pytest.raises(RuntimeError):
         await state.close(timeout=1)
     assert not state.session.closed

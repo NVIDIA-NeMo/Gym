@@ -16,6 +16,8 @@ import asyncio
 import contextlib
 import logging
 import multiprocessing as mp
+import re
+import unicodedata
 from io import StringIO
 from typing import Any, ClassVar, Dict, List, Optional, Union
 
@@ -43,6 +45,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
 from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.telemetry.resources_operations import resources_operation
 
 
 class LibraryJudgeMathResourcesServerConfig(BaseResourcesServerConfig):
@@ -50,6 +53,7 @@ class LibraryJudgeMathResourcesServerConfig(BaseResourcesServerConfig):
     judge_model_server: ModelServerRef
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
     should_use_judge: bool = True
+    format_tolerant_answer_extraction: bool = False
     library_verifier_timeout_seconds: PositiveFloat = 10.0
     library_verifier_max_concurrency: PositiveInt = 32
 
@@ -92,6 +96,226 @@ def _extract_last_boxed_answer(response: str) -> Optional[str]:
                 return response[content_start:index]
 
     return None
+
+
+_ANSWER_LABELS = (
+    r"final[ \t]+answer",
+    r"answer",
+    r"final[ \t]+result",
+    r"result",
+    r"अंतिम[ \t]+उत्तर",
+    r"उत्तर",
+    r"চূড়ান্ত[ \t]+উত্তর",
+    r"উত্তর",
+    r"উত্তৰ",
+    r"અંતિમ[ \t]+જવાબ",
+    r"જવાબ",
+    r"ಅಂತಿಮ[ \t]+ಉತ್ತರ",
+    r"ಉತ್ತರ",
+    r"അന്തിമ[ \t]+ഉത്തരം",
+    r"ഉത്തരം",
+    r"अन्तिम[ \t]+उत्तर",
+    r"ଅନ୍ତିମ[ \t]+ଉତ୍ତର",
+    r"ଉତ୍ତର",
+    r"ਅੰਤਿਮ[ \t]+ਉੱਤਰ",
+    r"ਉੱਤਰ",
+    r"ਜਵਾਬ",
+    r"இறுதி[ \t]+விடை",
+    r"விடை",
+    r"பதில்",
+    r"తుది[ \t]+సమాధానం",
+    r"సమాధానం",
+    r"జవాబు",
+    r"حتمی[ \t]+جواب",
+    r"جواب",
+)
+_ANSWER_LABEL_RE = re.compile(
+    r"(?im)^[ \t]*+(?:\#{1,6}[ \t]+|[-*][ \t]+)?"
+    r"(?:(?:therefore|thus|hence|so|इसलिए)[,،]?[ \t]+|correction[ \t]*+[:：][ \t]*+|"
+    r"after[ \t]+recalculating[ \t]*+,[ \t]*+)?"
+    rf"(?:\*\*|__)?(?:the[ \t]+)?(?:{'|'.join(_ANSWER_LABELS)})(?!\w)"
+    r"[ \t]*+(?:\*\*|__)?[ \t]*+"
+    r"(?:(?:is|है|আছে|છે|ಆಗಿದೆ|ആണ്|आहे|ਹੈ|ہے)(?!\w)[ \t]*+[:：=]?|[:：=]|(?=-[ \t]+)|(?=\r?$))"
+    r"[ \t]*+(?:\*\*|__)?[ \t]*+"
+)
+# A negated or conditional assertion does not replace an affirmative answer.
+# "No solution" remains a valid final answer; it is not a negation of a value.
+_NONANSWER_PREFIX_RE = re.compile(
+    r"(?i)^(?:not|never|neither|if|unless|possibly|probably|perhaps|maybe|"
+    r"hypothetically|suppose|assuming)(?!\w)"
+)
+_OUTER_MATH_DELIMITERS = ((r"\(", r"\)"), (r"\[", r"\]"), ("$$", "$$"), ("$", "$"))
+_MATH_TOKEN_RE = re.compile(r"\\[A-Za-z]++|[A-Za-z](?![A-Za-z])|[\d\s{}\[\]().,+*/^=<>_|!%:;−±-]")
+
+
+def _clean_answer_candidate(candidate: str) -> Optional[str]:
+    """Remove Markdown wrappers while retaining math delimiters for the verifier."""
+    candidate = candidate.strip()
+    # Bound cleanup before running regexes, including for explicitly labelled answers.
+    if len(candidate) > 512:
+        return None
+    candidate = re.sub(r"^(?:\*\*|__|`)+", "", candidate)
+    candidate = re.sub(r"(?:\*\*|__|`)+$", "", candidate).strip()
+    # A list marker is unambiguous before an answer label, but here a leading
+    # hyphen may be a unary minus (including the spaced form "- 18").
+    candidate = re.sub(r"^[ \t]*[:：=][ \t]*", "", candidate)
+    candidate = re.sub(r"(?:\*\*|__)+$", "", candidate.rstrip()).strip()
+
+    candidate = candidate.rstrip(".|।۔").strip()
+    return candidate or None
+
+
+def _extract_leading_answer_block(response: str, start: int = 0) -> Optional[str]:
+    """Select one line or one complete math block immediately following a label."""
+    while start < len(response) and response[start].isspace():
+        start += 1
+    if start == len(response):
+        return None
+    # Inspect only this candidate, not the entire remaining response for every
+    # rejected statement. Repeated negated labels must remain linear to scan.
+    line_end = response.find("\n", start)
+    first_line = response[start : line_end if line_end >= 0 else len(response)]
+    for opening, closing in _OUTER_MATH_DELIMITERS:
+        if response.startswith(opening, start) and closing not in first_line[len(opening) :]:
+            end = response.find(closing, start + len(opening), start + 512)
+            if end < 0:
+                return None
+            return _clean_answer_candidate(response[start : end + len(closing)])
+    return _clean_answer_candidate(first_line)
+
+
+def _extract_unboxed_answer_candidate(response: str) -> Optional[str]:
+    """Extract an explicitly marked or concise final answer without using the reference answer."""
+    matches = list(_ANSWER_LABEL_RE.finditer(response))
+    if matches:
+        for match in reversed(matches):
+            candidate = _extract_leading_answer_block(response, match.end())
+            if candidate and _NONANSWER_PREFIX_RE.match(candidate):
+                continue
+            return candidate
+        return None
+
+    # A final display-math block can span lines even without an answer heading.
+    tail = response.rstrip().rstrip(".|।۔").rstrip()
+    for opening, closing in _OUTER_MATH_DELIMITERS:
+        if tail.endswith(closing):
+            start = tail.rfind(opening, max(0, len(tail) - 512), len(tail) - len(closing))
+            if start < 0:
+                return None
+            if "\n" in tail[start:]:
+                return _clean_answer_candidate(tail[start:])
+            break
+
+    nonempty_lines = [line for line in response.splitlines() if line.strip()]
+    if not nonempty_lines:
+        return None
+
+    candidate = _clean_answer_candidate(nonempty_lines[-1])
+    if candidate is None or len(candidate) > 512 or candidate.startswith(("#", "* ")):
+        return None
+
+    # A standalone final line may be a number, LaTeX expression, equation,
+    # coordinate/interval, or short textual answer such as "east".
+    has_math_signal = re.search(r"\d|\\|[{}\[\]()+\-*/^=<>]", candidate)
+    short_text_answer = re.fullmatch(r"[\w\s'\"]+", candidate) and len(candidate.split()) <= 8
+    if (has_math_signal and len(candidate.split()) <= 50) or short_text_answer:
+        return candidate
+    return None
+
+
+def _leading_math_end(candidate: str) -> int:
+    """Find a math/text boundary without splitting a command from its braced arguments."""
+    index = end = 0
+    stack = []
+    while token := _MATH_TOKEN_RE.match(candidate, index):
+        value = token[0]
+        index = token.end()
+        if value.startswith("\\"):
+            # Consume each command and all adjacent braced arguments once. Text
+            # inside an argument (e.g. \text{ cm}) is part of its LaTeX syntax.
+            while True:
+                opening = index
+                while opening < len(candidate) and candidate[opening].isspace():
+                    opening += 1
+                if opening == len(candidate) or candidate[opening] != "{":
+                    break
+                depth = 1
+                index = opening + 1
+                while index < len(candidate) and depth:
+                    character = candidate[index]
+                    if character == "\\":
+                        index += 2
+                        continue
+                    depth += (character == "{") - (character == "}")
+                    index += 1
+                if depth:
+                    return end
+        elif value in "({[":
+            stack.append(value)
+        elif value in ")}]":
+            if not stack:
+                return end
+            opening = stack.pop()
+            # Parentheses/brackets can mix for half-open intervals.
+            if (opening == "{") != (value == "}"):
+                return end
+        if not stack:
+            end = index
+    return end
+
+
+def _prepare_unboxed_verification_response(candidate: str) -> str:
+    """Preserve mathematical syntax without treating explanatory prose as LaTeX."""
+    expression = candidate[: _leading_math_end(candidate)].rstrip()
+    if expression and expression[-1] not in "+-*/^=<>_|:;−±":
+        candidate = f"${expression}$" + candidate[len(expression) :]
+    # The anchor gives a leading answer precedence over numbers in an explanation.
+    # Only the selected span is passed here; earlier answers are never reintroduced.
+    return f"Final answer is {candidate}"
+
+
+def _normalize_unicode_digits(response: str) -> str:
+    """Convert Unicode decimal digits to ASCII while preserving all other text."""
+    normalized = []
+    for character in response:
+        try:
+            normalized.append(str(unicodedata.decimal(character)))
+        except (TypeError, ValueError):
+            normalized.append(character)
+    return "".join(normalized)
+
+
+def _repair_final_unclosed_box(response: str) -> str:
+    """Close one missing outer brace in the final boxed answer."""
+    boxed_start = response.rfind("\\boxed{")
+    if boxed_start < 0 or _extract_last_boxed_answer(response) is not None:
+        return response
+
+    stripped = response.rstrip()
+    suffix = ""
+    for delimiter in ("$$", r"\]", "$", r"\)"):
+        if stripped.endswith(delimiter):
+            stripped = stripped[: -len(delimiter)].rstrip()
+            suffix = delimiter
+            break
+
+    brace_depth = 0
+    for character in stripped[boxed_start:]:
+        if character == "{":
+            brace_depth += 1
+        elif character == "}":
+            brace_depth -= 1
+            if brace_depth < 0:
+                return response
+
+    if brace_depth != 1:
+        return response
+    return f"{stripped}}}{suffix}"
+
+
+def _prepare_format_tolerant_response(response: str) -> str:
+    """Apply reference-independent repairs used by Indic MATH-500."""
+    return _repair_final_unclosed_box(_normalize_unicode_digits(response))
 
 
 def _run_math_verify(
@@ -150,6 +374,10 @@ def _run_math_verify_in_subprocess(expected_answer: str, generated_answer: str, 
 
 
 class LibraryJudgeMathResourcesServer(SimpleResourcesServer):
+    # Each answer is checked on its own: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     # These judge messages are adapted from ones used in Arena Hard.
     # https://github.com/lmarena/arena-hard-auto/blob/196f6b826783b3da7310e361a805fa36f0be83f3/utils/judge_utils.py
     # They are intended to serve as example messages for an LLM judge, and have not
@@ -226,17 +454,30 @@ Example output: "My final verdict is different [[A!=B]]"."""
         specified question in comparison with the specified expected answer.
         """
 
-        boxed_answer = _extract_last_boxed_answer(generated_answer)
-        if boxed_answer is None or not boxed_answer.strip():
+        verification_response = generated_answer
+        if self.config.format_tolerant_answer_extraction:
+            verification_response = _prepare_format_tolerant_response(generated_answer)
+
+        answer_candidate = _extract_last_boxed_answer(verification_response)
+        if answer_candidate is None and self.config.format_tolerant_answer_extraction:
+            answer_candidate = _extract_unboxed_answer_candidate(verification_response)
+            # Grade only the selected final answer. Parsing the full response can
+            # award credit for a conflicting intermediate number or earlier label.
+            verification_response = (
+                _prepare_unboxed_verification_response(answer_candidate) if answer_candidate else ""
+            )
+        if answer_candidate is None or not answer_candidate.strip():
             return 0.0, None, 0.0, None
 
         library_reward, extracted_answer = await self._verify_answer_with_library_async(
-            expected_answer, generated_answer
+            expected_answer, verification_response
         )
         if not self.config.should_use_judge or library_reward > 0.5:
             return library_reward, extracted_answer, library_reward, None
 
-        judge_reward, judge_evaluations = await self._verify_answer_with_judge(question, expected_answer, boxed_answer)
+        judge_reward, judge_evaluations = await self._verify_answer_with_judge(
+            question, expected_answer, answer_candidate
+        )
         return judge_reward, extracted_answer, library_reward, judge_evaluations
 
     @classmethod
@@ -267,7 +508,9 @@ Example output: "My final verdict is different [[A!=B]]"."""
     async def _verify_answer_with_library_async(
         self, expected_answer: str, generated_answer: str
     ) -> tuple[float, Optional[str]]:
-        async with self._library_verifier_semaphore:
+        async with resources_operation(
+            self._library_verifier_semaphore, operation="verify", executor="subprocess"
+        ) as operation:
             # The production rollout workers run on Linux. Pin fork so the
             # verifier child is cheap to start and can be killed independently
             # if SymPy wedges.
@@ -283,11 +526,12 @@ Example output: "My final verdict is different [[A!=B]]"."""
                 process,
                 result_connection,
                 self.config.library_verifier_timeout_seconds,
+                operation=operation,
             )
 
     @staticmethod
     async def _wait_for_library_verifier_process(
-        process: Any, result_connection: Any, timeout_seconds: float
+        process: Any, result_connection: Any, timeout_seconds: float, *, operation: Optional[Any] = None
     ) -> tuple[float, Optional[str]]:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout_seconds
@@ -304,11 +548,15 @@ Example output: "My final verdict is different [[A!=B]]"."""
                     while process.is_alive():
                         await asyncio.sleep(0.05)
                     process.join(timeout=0)
+                    if operation is not None:
+                        operation.outcome = "timeout"
                     return 0.0, None
                 await asyncio.sleep(min(0.05, remaining))
 
             process.join(timeout=0)
             if process.exitcode != 0 or not result_connection.poll():
+                if operation is not None:
+                    operation.outcome = "crashed"
                 return 0.0, None
             try:
                 return result_connection.recv()

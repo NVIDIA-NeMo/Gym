@@ -34,6 +34,7 @@ from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field, PrivateAttr, model_validator
 
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
+from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
 from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
@@ -675,6 +676,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             self._resolve_call_base_url(state.request.episode_id.capture_key), developer_instructions=system
         )
         await state.upload_text("home/.codex/config.toml", toml_dumps(config))
+        timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
         command = self._build_command("-", state.session.workdir)
         command[0:1] = [
             f"{state.runtime}/node/bin/node",
@@ -686,21 +688,17 @@ class CodexAgent(SimpleResponsesAPIAgent):
             "prompt": prompt,
             "cwd": state.session.workdir,
             "env": {
-                "HOME": f"{state.session.session_dir}/home",
                 "CODEX_HOME": f"{state.session.session_dir}/home/.codex",
-                "XDG_CACHE_HOME": f"{state.session.session_dir}/home/.cache",
                 # Gym receives the calls; never copy the direct OpenAI credential into this path.
                 "OPENAI_API_KEY": "gym",  # pragma: allowlist secret
             },
-            "timeout": self.config.timeout,
-            "cleanup_timeout": self.config.session_close_timeout_seconds / 3,
         }
         raw = ""
         failure = None
         try:
             async with self.sem:
                 raw = await state.execute(
-                    payload, timeout=self.config.timeout, close_timeout=self.config.session_close_timeout_seconds
+                    payload, timeout=timeout, close_timeout=self.config.session_close_timeout_seconds
                 )
         except BaseException as exc:
             failure = exc
@@ -912,6 +910,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 "harness_execution": "sandbox",
                 **({"harness_hostname": runtime.hostname, "harness_pid": str(runtime.pid)} if runtime else {}),
                 "codex_version": self.config.codex_version,
+                AGENT_TIMEOUT_METADATA_KEY: str(timeout),
             },
         )
 
@@ -1045,6 +1044,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
         mcp_servers: Optional[dict[str, Any]] = None,
         skills_path: Optional[str] = None,
         rollout_id: Optional[str] = None,
+        *,
+        timeout: float | None = None,
     ) -> tuple[str, str, Optional[AgentObservationBundle], bool]:
         """Run ``codex exec --json`` and return (stdout, model_name, observations, timed_out).
 
@@ -1052,6 +1053,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
         is applied to the provider base_url so the CLI's streaming /v1/responses calls correlate to
         this rollout.
         """
+        timeout = self.config.timeout if timeout is None else timeout
         await self._ensure_local_runtime()
         base_url = self._resolve_call_base_url(rollout_id)
         # Report the name the config actually pins (so response.model matches what Codex was told);
@@ -1103,12 +1105,12 @@ class CodexAgent(SimpleResponsesAPIAgent):
             )
             timed_out = False
             try:
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.config.timeout)
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             except asyncio.TimeoutError:
                 _kill_process_group(proc)
                 stdout, stderr = await proc.communicate()
                 timed_out = True
-                LOG.warning("codex timed out after %ds", self.config.timeout)
+                LOG.warning("codex timed out after %ss", timeout)
 
             if proc.returncode not in (0, None):
                 LOG.warning("codex exited %d: %s", proc.returncode, stderr.decode(errors="replace")[:500])
@@ -1174,6 +1176,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
         user_message, input_system = _extract_instruction(body.input)
         system_parts = [p for p in [self.config.system_prompt, input_system] if p]
         system_prompt = "\n\n".join(system_parts) if system_parts else None
+        timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
 
         stdout, model_name, observations, timed_out = await self._run_codex(
             user_message,
@@ -1181,6 +1184,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             mcp_servers=mcp_servers,
             skills_path=skills_path,
             rollout_id=rollout_id,
+            timeout=timeout,
         )
         output_items, usage = parse_exec_jsonl(stdout)
 
@@ -1225,6 +1229,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 ),
                 total_tokens=input_tokens + output_tokens,
             ),
+            metadata={AGENT_TIMEOUT_METADATA_KEY: str(timeout)},
         )
 
         if observations is not None:

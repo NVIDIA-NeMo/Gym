@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import re
 from copy import deepcopy
 from types import SimpleNamespace, UnionType
 from typing import (
@@ -75,6 +76,7 @@ from pydantic import ValidationError
 
 from nemo_gym import openai_utils as openai_utils_module
 from nemo_gym.openai_utils import (
+    CHAT_REQUEST_IGNORED_CLIENT_FIELDS,
     CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS,
     MAX_NUM_TRIES,
     RESPONSES_TO_TRAIN,
@@ -120,6 +122,7 @@ from nemo_gym.responses_converter import (
     _RESPONSE_NON_BOUNDARY_TYPES,
     _RESPONSE_OUTPUT_BOUNDARY_TYPES,
 )
+from nemo_gym.rollout_correlation import rollout_context
 
 
 def _response_with_output(output: list) -> dict:
@@ -142,6 +145,23 @@ class TestOpenAIUtils:
 
     async def test_NeMoGymAsyncOpenAI(self) -> None:
         NeMoGymAsyncOpenAI(api_key="abc", base_url="https://api.openai.com/v1")
+
+    @pytest.mark.parametrize("debug_enabled", [True, False])
+    async def test_failed_response_logs_request_only_when_request_debug_is_enabled(
+        self, monkeypatch, capsys, debug_enabled: bool
+    ) -> None:
+        import nemo_gym.server_utils
+
+        # set_global_aiohttp_client sets the flag on server_utils at startup, after openai_utils was imported.
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", debug_enabled)
+        monkeypatch.setattr(openai_utils_module, "raise_for_status", AsyncMock())
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
+        request_kwargs = {"url": "https://example.com/v1/chat/completions", "json": {"model": "m"}}
+
+        await client._raise_for_status(SimpleNamespace(ok=False), request_kwargs)
+
+        logged = "Request kwargs:" in capsys.readouterr().out
+        assert logged is debug_enabled
 
     async def test_explicit_attempt_cap_reaches_low_level_transport(
         self,
@@ -170,6 +190,39 @@ class TestOpenAIUtils:
         assert isinstance(captured["timeout"], ClientTimeout)
         assert captured["timeout"].total == 300
         assert captured["timeout"].connect == 60
+
+    async def test_request_id_names_the_rollout_inside_a_rollout_context(self, monkeypatch) -> None:
+        captured = {}
+
+        async def fake_request(**kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(status=200)
+
+        monkeypatch.setattr(openai_utils_module, "request", fake_request)
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://api.openai.com/v1")
+        with rollout_context("3-0"):
+            await client._request(method="POST", url="https://example.test")
+        first = captured["headers"]["X-Request-Id"]
+        assert re.fullmatch(r"3-0-[0-9a-f]{8}", first)
+        with rollout_context("3-0"):
+            await client._request(method="POST", url="https://example.test")
+        assert captured["headers"]["X-Request-Id"] != first
+
+    async def test_request_id_is_absent_outside_a_rollout_and_never_overrides_the_callers(self, monkeypatch) -> None:
+        captured = {}
+
+        async def fake_request(**kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(status=200)
+
+        monkeypatch.setattr(openai_utils_module, "request", fake_request)
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://api.openai.com/v1")
+        await client._request(method="POST", url="https://example.test")
+        assert "X-Request-Id" not in captured["headers"]
+        with rollout_context("3-0"):
+            await client._request(method="POST", url="https://example.test", headers={"x-request-id": "mine"})
+        assert captured["headers"]["x-request-id"] == "mine"
+        assert "X-Request-Id" not in captured["headers"]
 
     @pytest.mark.parametrize("internal", [False, True])
     @pytest.mark.parametrize("status", [429, 500, 504])
@@ -1178,6 +1231,76 @@ class TestNeMoGymChatCompletionSchemas:
         for field in CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS:
             with pytest.raises(ValidationError):
                 NeMoGymChatCompletionCreateParamsNonStreaming.model_validate({"messages": [], field: "not-a-mapping"})
+
+    @pytest.mark.parametrize("field", sorted(CHAT_REQUEST_IGNORED_CLIENT_FIELDS))
+    @pytest.mark.parametrize("value", [None, "us-east-1", 123, {"ignored": ["value"]}])
+    def test_ignored_client_fields_are_accepted_but_not_forwarded(self, field: str, value: object) -> None:
+        # The pinned OpenHands direct client includes aws_region_name even when unset (null).
+        # Every ignored field must be excluded regardless of its value or serialization mode.
+        assert NeMoGymChatCompletionCreateParamsNonStreaming.model_fields[field].exclude is True
+        params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(
+            {"messages": [{"role": "user", "content": "hi"}], field: value}
+        )
+
+        assert field in params.model_fields_set
+        assert params.model_dump(exclude_unset=True) == {"messages": [{"role": "user", "content": "hi"}]}
+        assert field not in params.model_dump()
+        assert field not in orjson.loads(params.model_dump_json())
+        assert field not in orjson.loads(params.model_dump_json(exclude_unset=True))
+
+    def test_tool_message_accepts_openhands_name(self) -> None:
+        # OpenHands' Message serializer includes name on tool-result messages.
+        messages = [
+            {"role": "user", "content": "hi"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "ls", "arguments": "{}"}}],
+            },
+            {"role": "tool", "tool_call_id": "c1", "name": "ls", "content": "ok"},
+        ]
+        params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate({"messages": messages})
+
+        assert params.model_dump(exclude_unset=True)["messages"][2] == messages[2]
+
+    def test_tool_message_accepts_image_parts(self) -> None:
+        # A vision tool may return the image it loaded inside its result for a vision-capable model to see.
+        tool_message = {
+            "role": "tool",
+            "tool_call_id": "c1",
+            "content": [
+                {"type": "text", "text": "Image loaded."},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,YWJj", "detail": "auto"}},
+            ],
+        }
+        messages = [
+            {"role": "user", "content": "What color is the image?"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {"id": "c1", "type": "function", "function": {"name": "load_image", "arguments": "{}"}}
+                ],
+            },
+            tool_message,
+        ]
+        params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate({"messages": messages})
+
+        assert params.model_dump(exclude_unset=True)["messages"][2] == tool_message
+
+    @pytest.mark.parametrize(
+        "part",
+        [
+            {"type": "input_audio", "input_audio": {"data": "YWJj", "format": "wav"}},
+            {"type": "video_url", "video_url": {"url": "data:video/mp4;base64,YWJj"}},
+        ],
+        ids=["audio", "video"],
+    )
+    def test_tool_message_refuses_other_media_parts(self, part: dict) -> None:
+        tool_message = {"role": "tool", "tool_call_id": "c1", "content": [{"type": "text", "text": "x"}, part]}
+
+        with pytest.raises(ValidationError):
+            NeMoGymChatCompletionCreateParamsNonStreaming.model_validate({"messages": [tool_message]})
 
     def test_custom_tool_and_training_tool_call_round_trip(self) -> None:
         payload = {
@@ -2343,7 +2466,11 @@ def test_chat_request_field_set_matches_sdk_without_deprecated_fields() -> None:
     Deprecated fields remain disabled.
     """
     sdk_fields = set(get_type_hints(CompletionCreateParamsNonStreaming, include_extras=True))
-    expected = (sdk_fields - {"function_call", "functions"}) | CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS
+    expected = (
+        (sdk_fields - {"function_call", "functions"})
+        | CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS
+        | CHAT_REQUEST_IGNORED_CLIENT_FIELDS
+    )
     actual = set(NeMoGymChatCompletionCreateParamsNonStreaming.model_fields)
     assert actual == expected, (
         f"openai {openai.__version__} Chat request fields changed: "

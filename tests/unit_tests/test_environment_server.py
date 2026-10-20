@@ -149,7 +149,7 @@ def test_cleanup_is_lifo() -> None:
     assert calls == ["second", "first"]
 
 
-def test_cleanup_is_bounded() -> None:
+def test_hung_cleanup_does_not_skip_later_resource_owner() -> None:
     calls: list[str] = []
     context = CleanupContext(
         episode_id=_request().episode_id,
@@ -161,12 +161,55 @@ def test_cleanup_is_bounded() -> None:
 
     async def hung() -> None:
         calls.append("hung")
-        await asyncio.sleep(60)
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            calls.append("cancelled")
+            raise
 
     context.register_cleanup("first", first)
     context.register_cleanup("hung", hung)
-    asyncio.run(context.aclose())
-    assert calls == ["hung"]
+
+    async def run() -> None:
+        # A missing per-callback deadline must fail promptly instead of passing after 60 seconds.
+        await asyncio.wait_for(context.aclose(), timeout=1)
+
+    asyncio.run(run())
+    assert calls == ["hung", "cancelled", "first"]
+
+
+def test_each_cleanup_has_its_own_budget() -> None:
+    calls: list[str] = []
+    context = CleanupContext(
+        episode_id=_request().episode_id,
+        cleanup_timeout_seconds=0.05,
+    )
+
+    async def sandbox() -> None:
+        calls.append("sandbox")
+
+    async def slow_but_finishes() -> None:
+        await asyncio.sleep(0.03)
+        calls.append("slow")
+
+    async def hung() -> None:
+        calls.append("hung")
+        await asyncio.sleep(60)
+
+    context.register_cleanup("sandbox", sandbox)
+    context.register_cleanup("slow", slow_but_finishes)
+    context.register_cleanup("hung", hung)
+    loop = asyncio.new_event_loop()
+    try:
+        started = loop.time()
+        loop.run_until_complete(context.aclose())
+        elapsed = loop.time() - started
+    finally:
+        loop.close()
+    # Under one shared budget the slow close would have eaten the time the hung one left; here each
+    # callback is bounded on its own and the sandbox stop at the bottom of the stack still happens.
+    assert calls == ["hung", "slow", "sandbox"]
+    assert elapsed < 0.05 * 3
 
 
 def test_explicit_cleanup_is_bounded_and_final_unwind_retries() -> None:
