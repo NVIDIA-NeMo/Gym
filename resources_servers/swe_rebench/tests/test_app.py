@@ -543,6 +543,19 @@ class TestMavenMirror:
         assert GRADLE_INIT_PATH in files, "Gradle auto-loads $GRADLE_USER_HOME/init.d/*.gradle"
         assert "maven-central.storage-download.googleapis.com" in files[MAVEN_SETTINGS_PATH]
 
+    def test_maven_settings_can_be_left_to_the_provider(self) -> None:
+        """Some providers mount their own read-only ~/.m2/settings.xml that already mirrors Central, so
+        writing ours fails sandbox creation; the Gradle script is unaffected."""
+        from resources_servers.swe_rebench.verification import (
+            GRADLE_INIT_PATH,
+            MAVEN_SETTINGS_PATH,
+            verification_files,
+        )
+
+        files = verification_files(_inputs(), overwrite_maven_settings=False)
+        assert MAVEN_SETTINGS_PATH not in files
+        assert GRADLE_INIT_PATH in files
+
     def test_gradle_home_is_set_or_the_init_script_is_never_read(self) -> None:
         """Shipping init.gradle is useless on its own: Gradle only scans init.d under
         GRADLE_USER_HOME, so without this the file sits there unread."""
