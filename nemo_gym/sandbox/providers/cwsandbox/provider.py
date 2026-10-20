@@ -4,7 +4,7 @@
 
 Requires the optional ``nemo-gym[cwsandbox]`` extra. Images must contain bash;
 non-root exec additionally requires su (and getent for numeric user IDs).
-Harbor directory transfers are handled by NemoGymSandboxEnvironment.
+Directory transfers are handled by the calling harness.
 """
 
 import asyncio
@@ -15,10 +15,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from importlib import import_module
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from nemo_gym.sandbox.providers.base import (
     SandboxCreateError,
+    SandboxEndpoint,
     SandboxExecResult,
     SandboxHandle,
     SandboxSpec,
@@ -68,9 +69,10 @@ class CWSandboxProvider:
     """Run prebuilt OCI images on CoreWeave; no Dockerfile or Compose builds.
 
     CPU/memory requests default to their limits. ``provider_options`` accepts
-    ``resource_requests`` (cpu and memory_mib) and ``deny_egress``. Disk quotas
+    resource requests, network policy, services, volumes, and snapshots. Disk quotas
     are unsupported: warn, or reject with ``create.strict_resources``.
-    Native port endpoints and interactive PTY sessions are not advertised.
+    Declared ports expose HTTPS services with sandbox-scoped share tokens.
+    Native interactive PTY sessions are not advertised.
     """
 
     name = "cwsandbox"
@@ -86,6 +88,7 @@ class CWSandboxProvider:
         self.create_config = coerce_config(create, CWSandboxCreateConfig)
         _positive("default_exec_timeout_s", default_exec_timeout_s)
         self.default_exec_timeout_s = default_exec_timeout_s
+        self._attached: list["Sandbox"] = []
         try:
             self._sdk = import_module("cwsandbox")
         except ModuleNotFoundError as exc:
@@ -103,19 +106,77 @@ class CWSandboxProvider:
             raise ValueError(f"Expected a cwsandbox handle, got {handle.provider_name!r}")
         return handle.raw
 
+    @staticmethod
+    def _mapping_list(value: object, name: str) -> list[dict[str, Any]]:
+        if not isinstance(value, (list, tuple)) or not all(isinstance(item, Mapping) for item in value):
+            raise TypeError(f"{name} must be a list of mappings")
+        return [dict(item) for item in value]
+
+    def _services(self, spec: SandboxSpec) -> list[object]:
+        overrides = {}
+        for service in self._mapping_list(spec.provider_options.get("services", []), "services"):
+            port = service.get("port")
+            if isinstance(port, bool) or not isinstance(port, int) or port not in spec.ports:
+                raise ValueError("Every services port must be declared in SandboxSpec.ports")
+            if port in overrides:
+                raise ValueError(f"Duplicate services port: {port}")
+            overrides[port] = service
+        return [
+            self._sdk.Service(
+                **overrides.get(
+                    port,
+                    {
+                        "port": port,
+                        "visibility": "public",
+                        "endpoint": {"kind": "https", "auth": "share_token"},
+                    },
+                )
+            )
+            for port in spec.ports
+        ]
+
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         """Wait for readiness and an exec probe; reclaim failed allocations."""
         if not spec.image:
             raise ValueError("cwsandbox requires a prebuilt SandboxSpec.image")
-        if spec.ports:
-            raise ValueError("cwsandbox does not support SandboxSpec.ports yet")
+        if spec.sidecars:
+            raise ValueError("cwsandbox does not support SandboxSpec.sidecars yet")
         options = spec.provider_options
-        unknown = options.keys() - {"resource_requests", "deny_egress"}
+        unknown = options.keys() - {
+            "resource_requests",
+            "deny_egress",
+            "network_policy",
+            "services",
+            "volumes",
+            "file_system_snapshot",
+        }
         if unknown:
             raise ValueError(f"Unknown cwsandbox provider_options: {sorted(unknown)}")
         deny_egress = options.get("deny_egress", False)
         if not isinstance(deny_egress, bool):
             raise ValueError("deny_egress must be a boolean")
+        network_policy = options.get("network_policy", {})
+        if not isinstance(network_policy, Mapping):
+            raise TypeError("network_policy must be a mapping of CoreWeave NetworkOptions")
+        network_kwargs = dict(network_policy)
+        if "deny_egress" in options:
+            if "deny_egress" in network_kwargs and network_kwargs["deny_egress"] != deny_egress:
+                raise ValueError("deny_egress conflicts with network_policy.deny_egress")
+            network_kwargs["deny_egress"] = deny_egress
+        elif not network_kwargs:
+            network_kwargs["deny_egress"] = False
+        services = self._services(spec)
+        volumes = []
+        for volume in self._mapping_list(options.get("volumes", []), "volumes"):
+            volume_type = (
+                self._sdk.RegisteredVolumeOptions if "volume_id" in volume else self._sdk.ScratchVolumeOptions
+            )
+            volumes.append(volume_type(**volume))
+        snapshot_options = options.get("file_system_snapshot")
+        if snapshot_options is not None:
+            if not isinstance(snapshot_options, Mapping):
+                raise TypeError("file_system_snapshot must be a mapping")
+            snapshot_options = self._sdk.FileSystemSnapshotOptions(**snapshot_options)
         resources = spec.resources
         if resources.disk_gib is not None:
             message = "cwsandbox cannot enforce disk_gib; storage is determined by the CoreWeave runner"
@@ -168,7 +229,10 @@ class CWSandboxProvider:
             environment_variables=dict(spec.env),
             working_dir=spec.workdir,
             annotations=dict(spec.metadata),
-            network=self._sdk.NetworkOptions(deny_egress=deny_egress),
+            network=self._sdk.NetworkOptions(**network_kwargs),
+            services=services or None,
+            volumes=volumes or None,
+            file_system_snapshot=snapshot_options,
             security_context=self._sdk.SecurityContext(run_as_user=0, run_as_group=0, privileged=False),
             command=spec.entrypoint[0] if spec.entrypoint else None,
             args=spec.entrypoint[1:] if spec.entrypoint else None,
@@ -271,5 +335,79 @@ class CWSandboxProvider:
                 missing_ok=True,
             )
 
+    async def serialize_handle(self, handle: SandboxHandle, *, scope: str | None = None) -> dict[str, Any]:
+        """Return a credential-free descriptor; CoreWeave has no lease scopes.
+
+        The owner's create-only HTTPS share token is deliberately excluded.
+        Reconnected clients need their own control-plane credentials.
+        """
+        self._sandbox(handle)
+        return {"sandbox_id": handle.sandbox_id}
+
+    async def connect(self, descriptor: Mapping[str, Any]) -> SandboxHandle:
+        """Attach to a running sandbox without assuming lifecycle ownership."""
+        sandbox_id = descriptor.get("sandbox_id")
+        if not isinstance(sandbox_id, str) or not sandbox_id.strip():
+            raise ValueError("A cwsandbox descriptor requires a nonempty sandbox_id")
+        sandbox = await self._sdk.Sandbox.from_id(
+            sandbox_id,
+            base_url=self.connection.base_url,
+            auth=self._auth,
+            timeout_seconds=self.connection.request_timeout_s,
+        )
+        if str(sandbox.status) != "running":
+            await asyncio.to_thread(sandbox._cleanup_channels)
+            raise RuntimeError(f"Cannot connect to cwsandbox {sandbox_id!r}: status is {sandbox.status}")
+        self._attached.append(sandbox)
+        return SandboxHandle(sandbox_id, self.name, sandbox)
+
+    async def endpoint(self, handle: SandboxHandle, port: int) -> SandboxEndpoint:
+        """Resolve an HTTPS service, without forwarding the control-plane key.
+
+        Share-token endpoints require the create handle: the SDK's from_id()
+        response does not include the owner-only token. The owner can pass the
+        resolved SandboxEndpoint to a borrower separately if needed.
+        """
+        sandbox = self._sandbox(handle)
+        await asyncio.to_thread(sandbox.get_status)
+        for endpoint in sandbox.service_endpoints:
+            if endpoint.port != port or not endpoint.url:
+                continue
+            headers = {}
+            if str(endpoint.auth) == "share_token":
+                token = sandbox.endpoint_share_token
+                if token is None:
+                    raise ValueError("Reconnected endpoints require the owner's create-only share token")
+                headers = token.as_headers()
+            elif str(endpoint.auth) != "open":
+                raise ValueError(f"Unsupported cwsandbox endpoint authentication: {endpoint.auth}")
+            return SandboxEndpoint(endpoint.url, headers)
+        raise ValueError(f"No HTTPS endpoint is available for sandbox {handle.sandbox_id!r} port {port}")
+
+    async def snapshot(self, handle: SandboxHandle) -> str:
+        """Capture the configured filesystem mount and wait for a ready snapshot.
+
+        Snapshot storage must be enabled for the organization. Snapshots outlive
+        their sandbox and must be removed explicitly with delete_snapshot().
+        """
+        return await self._sandbox(handle).snapshot(wait_for_ready=True)
+
+    async def delete_snapshot(self, snapshot_id: str) -> None:
+        """Delete one caller-owned snapshot; an already-deleted id is harmless."""
+        if not isinstance(snapshot_id, str) or not snapshot_id.strip():
+            raise ValueError("snapshot_id must be a nonempty string")
+        await self._sdk.Sandbox.delete_snapshot(
+            snapshot_id,
+            base_url=self.connection.base_url,
+            auth=self._auth,
+            timeout_seconds=self.connection.request_timeout_s,
+            missing_ok=True,
+        )
+
     async def aclose(self) -> None:
-        """The SDK owns its shared event loop; per-sandbox channels close on stop."""
+        """Release attached clients without stopping the owner's sandboxes."""
+        for sandbox in self._attached:
+            # The SDK has no public detach operation. Its synchronous cleanup
+            # helper schedules channel closure on the SDK's own event loop.
+            await asyncio.to_thread(sandbox._cleanup_channels)
+        self._attached.clear()
