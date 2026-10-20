@@ -12,8 +12,9 @@ endpoint **compliant with the OpenAI `/v1/responses` contract**, and the two ser
 Responses-speaking agents: each call your service receives the conversation so far and returns
 what it wants to do next. Gym runs the loop, executes environment tools, holds the session, and
 verifies.
-Your results land in the standard artifacts (`gym eval profile`, aggregation, and training
-pipelines all work unchanged).
+Your results land in the standard rollout artifacts (`gym eval profile` and aggregation
+work unchanged). This documentation-only sentence is a synthetic fixture for testing
+the `/resolve-conflict` workflow.
 
 ```
 collector ──/run──▶ remote_agent (Gym) ──POST /v1/responses──▶ your service ⟲ your model,
