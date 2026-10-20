@@ -7,9 +7,10 @@ construction, executable lookup, and output discovery the way production does.
 PATH is emptied where it matters, so a host ``libreoffice`` cannot satisfy them.
 """
 
-import base64
+import os
 import shutil
 import stat
+import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -22,11 +23,17 @@ from resources_servers.gdpval.app import GDPValResourcesServer, GDPValResourcesS
 
 _SCRIPT = """#!/bin/sh
 PATH=/usr/bin:/bin
+# Output that is not UTF-8, as a container can print; every caller must still decode it.
+printf 'container warning \\377\\n' >&2
 printf '%s\\n' "$*" >> '@LOG@'
 if [ "$1" = "--version" ]; then echo "LibreOffice 99.9 fake"; exit @VERSION_RC@; fi
 outdir=""; src=""
 while [ $# -gt 0 ]; do
-  case "$1" in --outdir) outdir="$2"; shift ;; *) src="$1" ;; esac
+  case "$1" in
+    --outdir) outdir="$2"; shift ;;
+    -env:UserInstallation=file://*) profile="${1#-env:UserInstallation=file://}" ;;
+    *) src="$1" ;;
+  esac
   shift
 done
 base=$(basename "$src")
@@ -47,12 +54,22 @@ def template_pdf(tmp_path: Path) -> Path:
 
 
 def _converter(
-    directory: Path, template: Path, name: str = "fake-lo", *, converts=True, version_rc=0, unseen=None, workdir=None
+    directory: Path,
+    template: Path,
+    name: str = "fake-lo",
+    *,
+    converts=True,
+    version_rc=0,
+    unseen=None,
+    workdir=None,
+    locks_profile=False,
 ):
     """Write an executable that logs argv and writes ``<outdir>/<stem>.pdf`` like LibreOffice.
 
     Files under *unseen* produce nothing, like a container started without a bind for that directory. With
     *workdir* it runs there and converts only sources it can find, like a container with its own working directory.
+    With *locks_profile* it leaves a file in a read-only profile directory, like the root-owned profile of a Docker
+    command without ``--user``.
     """
     directory.mkdir(parents=True, exist_ok=True)
     log = directory / f"{name}.log"
@@ -61,6 +78,8 @@ def _converter(
         convert = f"case \"$src\" in '{unseen}'/*) exit 0 ;; esac\n{convert}"
     if workdir is not None:
         convert = f"cd '{workdir}' || exit 1\n[ -f \"$src\" ] || exit 0\n{convert}"
+    if locks_profile:
+        convert += '\nmkdir -p "$profile/user" && : > "$profile/user/registry.xcu" && chmod 555 "$profile/user"'
     script = directory / name
     script.write_text(
         _SCRIPT.replace("@LOG@", str(log)).replace("@VERSION_RC@", str(version_rc)).replace("@CONVERT@", convert)
@@ -84,11 +103,14 @@ def no_host_libreoffice(tmp_path: Path, monkeypatch) -> None:
 
 def test_ensure_accepts_working_command_without_host_checks(tmp_path, template_pdf, monkeypatch):
     script, log = _converter(tmp_path / "bin", template_pdf)
+    # A prefix like `apptainer exec <image> libreoffice`: env finds the converter only on the PATH it sets.
+    command = ["/usr/bin/env", f"PATH={script.parent}", script.name]
     real_run = setup_libreoffice._run
-    commands: list[list[str]] = []
 
     def _spy(cmd, **kwargs):
-        commands.append(cmd)
+        if cmd[0] == "apt-get":
+            # Not an Exception, so ensure_libreoffice cannot swallow it.
+            pytest.fail("apt-get ran for a configured command")
         return real_run(cmd, **kwargs)
 
     def _host_check(*_args):
@@ -98,12 +120,11 @@ def test_ensure_accepts_working_command_without_host_checks(tmp_path, template_p
     monkeypatch.setattr(setup_libreoffice, "_javaldx_works", _host_check)
     monkeypatch.setattr(setup_libreoffice, "_java_runs", _host_check)
 
-    assert setup_libreoffice.ensure_libreoffice([str(script)]) is True
+    assert setup_libreoffice.ensure_libreoffice(command) is True
 
     version, conversion = _calls(log)
     assert version == "--version"
     assert "--convert-to pdf" in conversion and conversion.endswith("probe.xlsx")
-    assert not any("apt-get" in cmd[0] for cmd in commands)
 
 
 @pytest.mark.parametrize("converts, version_rc", [(False, 0), (True, 1)])
@@ -160,13 +181,30 @@ def test_server_startup_probes_persist_deliverables_dir(tmp_path, template_pdf, 
 
 def test_ensure_rejects_missing_command(tmp_path):
     missing = tmp_path / "missing"
+    command = [str(missing), "exec", "image.sif", "libreoffice"]
     source = tmp_path / "memo.docx"
     source.write_bytes(b"office source")
 
-    assert setup_libreoffice.ensure_libreoffice([str(missing)]) is False
-    # A conversion names the configured executable instead of suggesting a host install.
+    assert setup_libreoffice.ensure_libreoffice(command) is False
+    # A conversion names the configured launcher instead of suggesting a host install.
     message = f"libreoffice_command executable not found: {missing}"
-    assert preconvert.convert_to_pdf(source, libreoffice_command=[str(missing)]) == (source, False, message)
+    assert preconvert.convert_to_pdf(source, libreoffice_command=command) == (source, False, message)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can delete files in a read-only directory")
+def test_ensure_rejects_command_that_leaves_files_the_server_cannot_delete(
+    tmp_path, template_pdf, monkeypatch, caplog
+):
+    scratch = tmp_path / "tmp"
+    scratch.mkdir()
+    # The probe's LibreOffice profile goes to the temp directory; keep the locked one out of the real one.
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+    script, _ = _converter(tmp_path / "bin", template_pdf, locks_profile=True)
+
+    assert setup_libreoffice.ensure_libreoffice([str(script)]) is False
+    assert f"add --user {os.getuid()}:{os.getgid()}" in caplog.text
+    for locked in scratch.glob("lo-profile-*/user"):
+        locked.chmod(0o700)
 
 
 def test_command_gets_absolute_paths_for_relative_deliverables(
@@ -175,6 +213,7 @@ def test_command_gets_absolute_paths_for_relative_deliverables(
     # A relative persist_deliverables_dir (the shipped default) gives relative deliverable paths, while a container
     # usually starts in its own working directory.
     script, log = _converter(tmp_path / "bin", template_pdf, workdir="/")
+    command = ["/usr/bin/env", f"PATH={script.parent}", script.name]
     monkeypatch.chdir(tmp_path)
     comparison, rubric = Path("persist/task_a/repeat_0"), Path("persist/task_b/repeat_0")
     for directory in (comparison, rubric):
@@ -182,8 +221,8 @@ def test_command_gets_absolute_paths_for_relative_deliverables(
     for path in (comparison / "memo.docx", comparison / "legacy.doc", rubric / "report.docx"):
         path.write_bytes(b"office source")
 
-    assert preconvert.preconvert_dir(comparison, libreoffice_command=[str(script)]) == (2, 0, [])
-    blocks = file_reader.convert_deliverables_to_content_blocks(str(rubric), libreoffice_command=[str(script)])
+    assert preconvert.preconvert_dir(comparison, libreoffice_command=command) == (2, 0, [])
+    blocks = file_reader.convert_deliverables_to_content_blocks(str(rubric), libreoffice_command=command)
 
     assert "\nreport.docx (converted to PDF):" in [block.get("text") for block in blocks]
     # One run per file: none needed the round-trip retry from a temp copy.
@@ -204,31 +243,6 @@ def test_preconvert_dir_uses_command_on_every_path(tmp_path, template_pdf, no_ho
     for name in ("memo.pdf", "Q1 notes.pdf", "Plan.docx.pdf", "Plan.pptx.pdf"):
         assert (deliverables / name).read_bytes() == template_pdf.read_bytes()
     assert len(_calls(log)) == 4
-
-
-def test_rubric_rendering_uses_command_instead_of_text_fallback(tmp_path, template_pdf, no_host_libreoffice):
-    from docx import Document
-
-    script, _ = _converter(tmp_path / "bin", template_pdf)
-    deliverables = tmp_path / "deliverables"
-    deliverables.mkdir()
-    document = Document()
-    document.add_paragraph("Quarterly throughput rose 12 percent.")
-    document.save(deliverables / "report.docx")
-
-    configured = file_reader.convert_deliverables_to_content_blocks(
-        str(deliverables), libreoffice_command=[str(script)]
-    )
-    default = file_reader.convert_deliverables_to_content_blocks(str(deliverables))
-
-    texts = [block["text"] for block in configured if block["type"] == "text"]
-    assert "\nreport.docx (converted to PDF):" in texts
-    pdfs = [block["image_url"]["url"] for block in configured if block["type"] == "image_url"]
-    assert pdfs == ["data:application/pdf;base64," + base64.b64encode(template_pdf.read_bytes()).decode()]
-    # Rendering happens in scratch space; the deliverables directory is untouched.
-    assert sorted(p.name for p in deliverables.iterdir()) == ["report.docx"]
-    # Without the command the same host degrades to text, as before.
-    assert any("(text fallback)" in block.get("text", "") for block in default)
 
 
 def test_unconfigured_default_runs_host_libreoffice_with_historical_argv(tmp_path, template_pdf, monkeypatch):

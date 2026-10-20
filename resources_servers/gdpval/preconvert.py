@@ -523,6 +523,7 @@ def convert_to_pdf(
                 libreoffice_pdf_argv(source, outdir, profile, libreoffice_command),
                 capture_output=True,
                 text=True,
+                errors="replace",
                 timeout=120,
             )
 
@@ -552,7 +553,7 @@ def convert_to_pdf(
                 if retry_pdf.exists():
                     shutil.move(str(retry_pdf), str(final_pdf))
                     return path, True, f"converted {path.name} (after OOXML round-trip retry)"
-                retry_error = f"round-trip retry rc={retry_result.returncode}: {retry_result.stderr.strip()[:300]}"
+                retry_error = f"round-trip retry rc={retry_result.returncode}: {retry_result.stderr.strip()[-300:]}"
             except Exception as exc:
                 retry_error = f"round-trip retry failed: {exc!r}"
 
@@ -561,7 +562,7 @@ def convert_to_pdf(
             path,
             False,
             f"libreoffice rc={result.returncode} did not produce {final_pdf.name}: "
-            f"{result.stderr.strip()[:300]}{retry_suffix}",
+            f"{result.stderr.strip()[-300:]}{retry_suffix}",
         )
     except subprocess.TimeoutExpired:
         return path, False, f"timeout converting {path.name}"

@@ -530,6 +530,7 @@ def _convert_office_to_pdf(
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                errors="replace",
                 timeout=120,
             )
             return completed, output / (source.stem + ".pdf")
@@ -551,13 +552,13 @@ def _convert_office_to_pdf(
                 if retry_pdf.exists():
                     shutil.move(str(retry_pdf), str(out_pdf))
                     return out_pdf
-                retry_detail = f"; round-trip retry rc={retry_result.returncode}: {retry_result.stderr[:200]}"
+                retry_detail = f"; round-trip retry rc={retry_result.returncode}: {retry_result.stderr.strip()[-200:]}"
             except Exception as exc:
                 retry_detail = f"; round-trip retry failed: {exc!r}"
 
         print(
             f"[file_reader] LibreOffice conversion failed for {fpath.name} "
-            f"(rc={first_result.returncode}): {first_result.stderr[:200]}{retry_detail}",
+            f"(rc={first_result.returncode}): {first_result.stderr.strip()[-200:]}{retry_detail}",
             flush=True,
         )
         return None

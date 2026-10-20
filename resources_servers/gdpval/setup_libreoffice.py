@@ -62,6 +62,7 @@ def _run(cmd: list[str], *, timeout: int) -> tuple[int, str, str]:
         cmd,
         capture_output=True,
         text=True,
+        errors="replace",
         timeout=timeout,
     )
     return p.returncode, p.stdout, p.stderr
@@ -113,7 +114,7 @@ def _javaldx_works() -> bool:
 
 
 def _write_probe_workbook(path: Path) -> None:
-    """One sheet with a formula and a chart: the content the javaldx check protects."""
+    """Write the probe workbook: one sheet with a formula and a chart."""
     from openpyxl import Workbook
     from openpyxl.chart import BarChart, Reference
 
@@ -133,39 +134,58 @@ def _probe_converts(libreoffice_command: Sequence[str], root: Path | None) -> bo
 
     This is one LibreOffice run, like the first attempt of every real conversion. ``convert_to_pdf`` would retry
     a workbook it could not convert from a copy in the temp directory, which hides a command that cannot see *root*.
+    The probe also fails when the server cannot delete what the run left behind, such as the root-owned profile of a
+    Docker command without ``--user``; every real conversion would leave the same files.
     """
     from resources_servers.gdpval.preconvert import libreoffice_pdf_argv
 
     if root is not None:
         root.mkdir(parents=True, exist_ok=True)
-    probe_dir = Path(tempfile.mkdtemp(prefix="gdpval-lo-probe-", dir=root))
-    profile_dir = Path(tempfile.mkdtemp(prefix="lo-profile-"))
+    probe_dir = profile_dir = None
     try:
+        probe_dir = Path(tempfile.mkdtemp(prefix="gdpval-lo-probe-", dir=root))
+        profile_dir = Path(tempfile.mkdtemp(prefix="lo-profile-"))
         probe = probe_dir / "probe.xlsx"
         _write_probe_workbook(probe)
         argv = libreoffice_pdf_argv(probe, probe_dir, profile_dir, libreoffice_command)
         try:
             rc, _, err = _run(argv, timeout=_COMMAND_CHECK_TIMEOUT_S)
-        except (OSError, subprocess.TimeoutExpired, UnicodeDecodeError) as exc:
+        except (OSError, subprocess.TimeoutExpired) as exc:
             rc, err = None, repr(exc)
         pdf = probe.with_suffix(".pdf")
-        if pdf.is_file() and pdf.read_bytes().startswith(b"%PDF"):
-            return True
+        # A run that timed out fails like a real conversion, even if it wrote the PDF first.
+        converted = rc is not None and pdf.is_file() and pdf.read_bytes().startswith(b"%PDF")
+    finally:
+        for directory in (probe_dir, profile_dir):
+            if directory is not None:
+                shutil.rmtree(directory, ignore_errors=True)
+    if not converted:
         LOGGER.warning(
             "libreoffice_command %s did not convert a probe workbook in %s (rc=%s): %s",
             libreoffice_command,
             probe_dir,
             rc,
-            (err or "").strip()[:300],
+            # The end of stderr: container startup noise, such as font-cache warnings, comes first.
+            (err or "").strip()[-300:],
         )
         return False
-    finally:
-        shutil.rmtree(probe_dir, ignore_errors=True)
-        shutil.rmtree(profile_dir, ignore_errors=True)
+    left = [str(directory) for directory in (probe_dir, profile_dir) if directory.exists()]
+    if left:
+        LOGGER.warning(
+            "libreoffice_command %s left files that the server cannot delete in %s; "
+            "with rootful Docker, add --user %d:%d",
+            libreoffice_command,
+            ", ".join(left),
+            os.getuid(),
+            os.getgid(),
+        )
+        return False
+    return True
 
 
 def _command_works(libreoffice_command: Sequence[str], probe_dirs: Sequence[Path] = ()) -> bool:
-    """Return True iff *libreoffice_command* runs and converts a probe workbook to PDF.
+    """Return True iff *libreoffice_command* runs, converts a probe workbook to PDF and leaves nothing the server
+    cannot delete.
 
     The probe converts a workbook in the temp directory that real conversions
     use and under each of *probe_dirs*, so a container command that cannot see
@@ -181,7 +201,7 @@ def _command_works(libreoffice_command: Sequence[str], probe_dirs: Sequence[Path
             "libreoffice_command %s --version failed (rc=%d): %s",
             libreoffice_command,
             rc,
-            (err or "").strip()[:300],
+            (err or "").strip()[-300:],
         )
         return False
 

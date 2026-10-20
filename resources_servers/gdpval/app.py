@@ -304,12 +304,12 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     preconvert_max_concurrent: int = 4
     # Command that runs LibreOffice for every Office->PDF conversion (comparison
     # preconvert and rubric rendering), e.g. a container prefix
-    # [apptainer, exec, --bind, /path/to/data, --bind, /tmp, /path/to/gdpval.sif, libreoffice]
+    # [apptainer, exec, --bind, /path/to/data, --bind, /tmp, /path/to/libreoffice.sif, libreoffice]
     # or a wrapper script. It must see persist_deliverables_dir, the reference
-    # deliverables and the temp directory at the same absolute paths. When set,
-    # startup checks it with --version and a probe conversion and fails if the
-    # check fails; the host javaldx check and apt install are skipped. None uses
-    # `libreoffice` on PATH.
+    # deliverables, the temp directory and any other deliverables directory that
+    # /verify gets at the same absolute paths. When set, startup checks it with
+    # --version and a probe conversion and fails if the check fails; the host
+    # javaldx check and apt install are skipped. None uses `libreoffice` on PATH.
     libreoffice_command: Optional[List[str]] = Field(default=None, min_length=1)
 
     # How deliverable/reference files are presented to the judge:
@@ -639,8 +639,10 @@ class GDPValResourcesServer(SimpleResourcesServer):
             if not ensure_libreoffice(self.config.libreoffice_command, probe_dirs=probe_dirs):
                 raise RuntimeError(
                     f"libreoffice_command {self.config.libreoffice_command} failed its startup check "
-                    "(--version and a probe conversion; see the warning above). The command must see "
-                    "persist_deliverables_dir, the reference deliverables and the temp directory at the same paths."
+                    "(--version and a probe conversion); the warning above gives the cause. The command must see "
+                    "persist_deliverables_dir, the reference deliverables and the temp directory at the same paths, "
+                    'and must not leave files that the server cannot delete. See "Office to PDF conversion" in '
+                    "resources_servers/gdpval/README.md."
                 )
         elif self.config.preconvert_office_to_pdf:
             from resources_servers.gdpval.setup_libreoffice import ensure_libreoffice

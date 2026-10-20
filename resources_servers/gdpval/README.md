@@ -65,17 +65,48 @@ default the server runs `libreoffice` from `PATH`, and with `preconvert_office_t
 Java runtime with `apt-get` on Linux when they are missing or broken.
 
 To run LibreOffice from a container or a wrapper script instead, set `libreoffice_command` to the command that replaces
-`libreoffice`:
+`libreoffice`. For example, to use Apptainer, set it like this in `configs/gdpval.yaml`, next to
+`persist_deliverables_dir`:
 
 ```yaml
-libreoffice_command: [apptainer, exec, --bind, /path/to/data, --bind, /tmp, /path/to/gdpval.sif, libreoffice]
+libreoffice_command: [apptainer, exec, --bind, /path/to/data, --bind, /tmp, /path/to/libreoffice.sif, libreoffice]
 ```
 
-The command must see `persist_deliverables_dir`, the reference deliverables and the temp directory at the same absolute
-paths. Startup runs it with `--version` and converts a small workbook in a temp directory and under
-`persist_deliverables_dir`, and fails if any of these checks fails. The reference deliverables are not checked. The
-`apt-get` install is skipped when the command is set. A Docker command also needs `--user` with the server's uid and
-gid; otherwise LibreOffice runs as root and leaves files in the temp directory that the server cannot delete.
+`/path/to/libreoffice.sif` can be any Apptainer image that has LibreOffice. To make one from a Docker image, run
+`apptainer build libreoffice.sif docker://<image>`.
+
+The command must see these directories at the same absolute paths:
+
+- `persist_deliverables_dir`;
+- the reference deliverables;
+- the temp directory (`TMPDIR`, or `/tmp`);
+- any other deliverables directory that `/verify` gets, such as an earlier run's when `gym eval reverify` re-judges it.
+
+Startup runs the command with `--version` and converts a small workbook in the temp directory and under
+`persist_deliverables_dir`. It fails if any of these fails, or if the conversion leaves files that the server cannot
+delete. The other directories are not checked. If the command cannot see one of them, `.docx`, `.xlsx` and `.pptx` files
+there can still convert, without a warning, from a copy that a Python library re-saves and that can lose content such
+as shapes in a workbook; `.doc`, `.xls` and `.ppt` files can fail. The `apt-get` install is skipped when the command is
+set.
+
+The PDFs depend on the command's LibreOffice version and fonts, so they can look different from a host install's.
+Comparison mode keeps each PDF next to its source file and reuses it in later runs.
+
+A Docker command also needs:
+
+- `--user` with the server's uid and gid, so that LibreOffice does not run as root and leave files that the server
+  cannot delete. Leave it out with rootless Docker or Podman, which already run containers as your user;
+- `--rm`, so that each conversion's container is deleted;
+- a time limit inside the container, such as `timeout -k 5 100`, and `--init`, without which the container may not stop
+  when that limit fires. Gym gives each LibreOffice run 120 s, but when that runs out it stops only the `docker`
+  client, and the container keeps running.
+
+For example, with Docker:
+
+```yaml
+libreoffice_command: [docker, run, --rm, --init, --user, "<uid>:<gid>", -v, /path/to/data:/path/to/data, -v, /tmp:/tmp,
+                      libreoffice-image, timeout, -k, "5", "100", libreoffice]
+```
 
 ## Judge failure telemetry
 
