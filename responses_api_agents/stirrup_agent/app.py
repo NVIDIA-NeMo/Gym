@@ -148,6 +148,8 @@ _REMOVED_OPTIONS = [
     "gdpval_container_path",
     "system_prompt_template",
     "user_prompt_template",
+    "model_id",
+    "task",
 ]
 
 

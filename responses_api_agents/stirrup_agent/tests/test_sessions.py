@@ -45,7 +45,6 @@ def agent() -> StirrupAgentWrapper:
         port=8080,
         entrypoint="",
         name="stirrup_agent",
-        task="gdpval",
         resources_server=ResourcesServerRef(type="resources_servers", name="gdpval_resources_server"),
         model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
         finish_tool_names=["finish", "abandon_task_finish"],
