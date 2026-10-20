@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 import pytest
 
+from nemo_gym.task_data import TaskDataValidator, load_task_data_schema
 from resources_servers.swe_atlas_qa import prepare
 
 
@@ -63,6 +64,11 @@ def test_prepare_rows_preserve_instruction_and_exclude_private_assets(source: Pa
     assert prepare.prepare(source_dir=source, output_path=output) == output
     rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
     assert len(rows) == 2
+    validator = TaskDataValidator(
+        server_name="swe_atlas_qa",
+        adapter=load_task_data_schema(prepare.PACKAGE_DIR),
+        dataset_fpath=str(output),
+    )
     for index, row in enumerate(rows):
         task_id = f"task-{index:024x}"
         assert row == {
@@ -73,6 +79,8 @@ def test_prepare_rows_preserve_instruction_and_exclude_private_assets(source: Pa
             },
             "verifier_metadata": {"task_id": task_id},
         }
+        validator.validate_row(index, row)
+    assert validator.report.clean
     assert "PRIVATE_" not in output.read_text(encoding="utf-8")
     assert output.with_name("example.jsonl").read_bytes() == output.read_bytes()
 
