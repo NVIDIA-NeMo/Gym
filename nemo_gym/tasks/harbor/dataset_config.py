@@ -70,6 +70,13 @@ class GymDatasetConfig(BaseModel):
     def path(self) -> Path | None:
         return self._path
 
+    def with_timeout_multiplier(self, timeout_multiplier: float) -> "GymDatasetConfig":
+        """This table with a run's ``timeout_multiplier`` in place of the one in ``[gym.defaults]``."""
+        defaults = GymDatasetDefaults.model_validate(
+            self.defaults.model_dump() | {"timeout_multiplier": timeout_multiplier}
+        )
+        return self.model_copy(update={"defaults": defaults})
+
 
 def read_dataset_config(folder: Path) -> GymDatasetConfig:
     """The ``[gym]`` table of ``<folder>/dataset.toml``; empty when the file or the table is absent."""

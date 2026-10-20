@@ -189,9 +189,9 @@ class TestEpisode:
         loads: list[Path] = []
         real_load_task = load_task
 
-        def counting_load_task(folder):
+        def counting_load_task(folder, **kwargs):
             loads.append(Path(folder))
-            return real_load_task(folder)
+            return real_load_task(folder, **kwargs)
 
         monkeypatch.setattr("environment_servers.harbor.app.load_task", counting_load_task)
 
@@ -684,6 +684,23 @@ class TestSeedWorkdirAndResources:
         assert seeded[0].path != task.path and seeded[0].env["CIRCLE_NODE_TOTAL"] == "3" and "X" not in seeded[0].env
         spec = server._sandbox_spec(seeded[0], "/app")
         assert spec.env["CIRCLE_NODE_TOTAL"] == "3" and "X" not in spec.env
+
+    async def test_the_runs_timeout_multiplier_replaces_the_datasets(self, tmp_path, monkeypatch):
+        server, task, _, _ = make_server(tmp_path, monkeypatch)
+        # The dataset doubles every limit; the run's setting, carried by the taskset mapping, replaces it.
+        (task.path.parent / "dataset.toml").write_text("[gym.defaults]\ntimeout_multiplier = 2.0\n")
+        server.config.tasksets["ds"].timeout_multiplier = 3.0
+        # The rows are materialized with the run's setting, which is part of the digest they carry.
+        materialized = load_task(task.path, timeout_multiplier=3.0)
+        server.config.tasksets["ds"].tasks["hello"] = materialized.digest
+        monkeypatch.setattr(
+            "environment_servers.harbor.app.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+        )
+        seeded: list = []
+        server.server_client.turn_hooks.append(lambda: seeded.append(server._sessions["r1"].task))
+        assert (await run_episode(server, materialized)).failure is None
+        assert seeded[0].config.agent.timeout_sec == task.config.agent.timeout_sec * 3
+        assert seeded[0].config.verifier.timeout_sec == task.config.verifier.timeout_sec * 3
 
     async def test_build_mode_task_seeds_from_its_recorded_image(self, tmp_path, monkeypatch):
         from nemo_gym.tasks.harbor.digest import context_digest

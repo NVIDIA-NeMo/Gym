@@ -192,11 +192,14 @@ def read_instruction(path: Path) -> str:
     return "\n".join(lines)
 
 
-def load_task(path: Path, *, image_configs: Mapping[str, Any] | None = None) -> HarborTask:
+def load_task(
+    path: Path, *, image_configs: Mapping[str, Any] | None = None, timeout_multiplier: float | None = None
+) -> HarborTask:
     """Read ``path`` as one task. Raises :class:`HarborTaskError` when it is not one.
 
     ``image_configs`` is the parent folder's recorded image configurations when the caller has
     read them already (``discover_tasks`` reads the shared file once); otherwise they are read here.
+    ``timeout_multiplier``, a run's setting, replaces the dataset's ``[gym.defaults] timeout_multiplier``.
     """
     path = Path(path)
     if path.is_symlink():
@@ -214,6 +217,8 @@ def load_task(path: Path, *, image_configs: Mapping[str, Any] | None = None) -> 
     # The dataset's own settings sit beside the task folders and shape the effective task.toml.
     try:
         dataset = read_dataset_config(path.parent)
+        if timeout_multiplier is not None:
+            dataset = dataset.with_timeout_multiplier(timeout_multiplier)
         config = apply_dataset_config(config, path.name, dataset)
     except ValueError as exc:
         raise HarborTaskError(str(exc)) from exc
@@ -408,18 +413,20 @@ def task_digest(folder_digest: str, dataset: GymDatasetConfig, task_id: str) -> 
     return hashlib.sha256(f"{folder_digest}\n{json.dumps(applied, sort_keys=True)}".encode()).hexdigest()
 
 
-def discover_tasks(root: Path, *, skipped: dict[str, HarborTaskError] | None = None) -> list[HarborTask]:
+def discover_tasks(
+    root: Path, *, skipped: dict[str, HarborTaskError] | None = None, timeout_multiplier: float | None = None
+) -> list[HarborTask]:
     """A folder with ``task.toml`` is one task; otherwise its direct children are the tasks.
 
     With ``skipped``, a child that fails to load is recorded there under its folder name
     and the others still load; without it the first failure raises. A root that is
-    itself a task always raises.
+    itself a task always raises. ``timeout_multiplier`` is passed to :func:`load_task`.
     """
     root = Path(root).resolve()
     if not root.is_dir():
         raise HarborTaskError(f"{root} is not a directory")
     if is_task_folder(root):
-        return [load_task(root)]
+        return [load_task(root, timeout_multiplier=timeout_multiplier)]
     children = sorted(child for child in root.iterdir() if child.is_dir() and is_task_folder(child))
     if not children:
         raise HarborTaskError(f"{root} is neither a task folder nor a folder of task folders (no {TASK_FILE} found)")
@@ -430,11 +437,13 @@ def discover_tasks(root: Path, *, skipped: dict[str, HarborTaskError] | None = N
     except HarborTaskError:
         image_configs = None
     if skipped is None:
-        return [load_task(child, image_configs=image_configs) for child in children]
+        return [
+            load_task(child, image_configs=image_configs, timeout_multiplier=timeout_multiplier) for child in children
+        ]
     tasks: list[HarborTask] = []
     for child in children:
         try:
-            tasks.append(load_task(child, image_configs=image_configs))
+            tasks.append(load_task(child, image_configs=image_configs, timeout_multiplier=timeout_multiplier))
         except HarborTaskError as exc:
             skipped[child.name] = exc
     if not tasks:
