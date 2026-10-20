@@ -414,8 +414,6 @@ async def test_checkpoint_recovery_preserves_evidence_but_always_fails(final: st
 @pytest.mark.parametrize("final_error", [None, RunnerError(kind="fatal", message="worker setup failed")])
 async def test_valid_final_always_takes_precedence_over_checkpoint(final_error: RunnerError | None) -> None:
     r, s = runner()
-    r.session.launch_started = True
-    r.session._collect = r._collect_artifacts
     s.files[r.directory + "/checkpoint.json"] = checkpoint_artifact().model_dump_json()
     await r._collect_artifacts()
     assert r.checkpoint is not None
@@ -433,8 +431,6 @@ async def test_valid_final_always_takes_precedence_over_checkpoint(final_error: 
 @pytest.mark.parametrize("checkpoint", ["broken", "{}", "unmarked"])
 async def test_invalid_checkpoint_and_interrupted_temporary_are_not_recovered(checkpoint: str) -> None:
     r, s = runner()
-    r.session.launch_started = True
-    r.session._collect = r._collect_artifacts
     s.files[r.directory + "/checkpoint.json"] = (
         artifact().model_dump_json() if checkpoint == "unmarked" else checkpoint
     )
@@ -448,8 +444,6 @@ async def test_invalid_checkpoint_and_interrupted_temporary_are_not_recovered(ch
 @pytest.mark.asyncio
 async def test_failed_recollection_retains_last_valid_checkpoint() -> None:
     r, s = runner()
-    r.session.launch_started = True
-    r.session._collect = r._collect_artifacts
     s.files[r.directory + "/checkpoint.json"] = checkpoint_artifact().model_dump_json()
     await r._collect_artifacts()
     recovered = r.checkpoint.model_copy(deep=True)
