@@ -298,16 +298,23 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
             sql_content, seed_semaphore=self._get_seed_semaphore(gym.base_url)
         )
 
-    async def _delete_session_dbs(self, state: SessionState) -> None:
+    async def _delete_session_dbs(self, state: SessionState) -> bool:
         if state.dbs_deleted:
-            return
-        state.dbs_deleted = True
+            return True
+        all_deleted = True
         for gym in state.gyms.values():
             if gym.database_id:
                 try:
-                    await self._get_gym_client(gym).delete_database(gym.database_id)
+                    deleted = await self._get_gym_client(gym).delete_database(gym.database_id)
                 except Exception as e:
                     logger.error(f"Failed to delete database {gym.database_id} for gym '{gym.gym_name}': {e}")
+                    deleted = False
+                if deleted:
+                    gym.database_id = None
+                else:
+                    all_deleted = False
+        state.dbs_deleted = all_deleted
+        return all_deleted
 
     # ------------------------------------------------------------------
     # Janitor
@@ -337,12 +344,15 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
             for session_id, state in self.sessions.items()
             if now - state.created_at > self.config.session_ttl_seconds
         ]
+        num_removed = 0
         for session_id in expired:
-            state = self.sessions.pop(session_id)
+            state = self.sessions[session_id]
             if not state.dbs_deleted:
                 logger.warning(f"Janitor deleting databases for expired session {session_id} (rollout never verified)")
-            await self._delete_session_dbs(state)
-        return len(expired)
+            if await self._delete_session_dbs(state) and self.sessions.get(session_id) is state:
+                self.sessions.pop(session_id, None)
+                num_removed += 1
+        return num_removed
 
     # ------------------------------------------------------------------
     # Routes
@@ -353,24 +363,42 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
     ) -> EnterpriseOpsSeedSessionResponse:
         session_id = request.session[SESSION_ID_KEY]
 
+        # A retried /seed_session request may reuse the same session cookie. Clean the
+        # previous databases before replacing its state, or refuse the reseed if cleanup
+        # is incomplete so the janitor retains every outstanding database handle.
+        previous_state = self.sessions.get(session_id)
+        if previous_state is not None:
+            if not await self._delete_session_dbs(previous_state):
+                self._ensure_janitor()
+                raise RuntimeError(f"Could not clean databases for existing session {session_id}; retry later")
+            self.sessions.pop(session_id, None)
+
         gyms = self._parse_session_gyms(body.verifier_metadata)
         gym_servers_config = body.verifier_metadata.get("gym_servers_config") or []
-
-        # Seed all gyms' databases concurrently (bounded by per-gym-server semaphores).
-        await asyncio.gather(
-            *(
-                self._seed_gym_database(
-                    gyms[server_config["mcp_server_name"]], server_config.get("seed_database_file", "")
-                )
-                for server_config in gym_servers_config
-            )
-        )
-
         state = SessionState(
             gyms=gyms,
             tool_to_gym=body.verifier_metadata.get("tool_to_gym") or {},
             created_at=time.time(),
         )
+
+        # Seed all gyms' databases concurrently (bounded by per-gym-server semaphores).
+        seed_results = await asyncio.gather(
+            *(
+                self._seed_gym_database(
+                    gyms[server_config["mcp_server_name"]], server_config.get("seed_database_file", "")
+                )
+                for server_config in gym_servers_config
+            ),
+            return_exceptions=True,
+        )
+        seed_errors = [result for result in seed_results if isinstance(result, BaseException)]
+        if seed_errors:
+            if not await self._delete_session_dbs(state):
+                # Retain partially seeded state so the janitor can retry cleanup.
+                self.sessions[session_id] = state
+                self._ensure_janitor()
+            raise seed_errors[0]
+
         self.sessions[session_id] = state
         self._ensure_janitor()
 
