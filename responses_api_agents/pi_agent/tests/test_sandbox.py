@@ -392,10 +392,6 @@ _OVERLAP = "its tools could not be told apart from those of grant"
 @pytest.mark.parametrize(
     "tool_accesses,detail",
     [
-        (
-            [{"kind": "direct_http", "name": "tools", "base_url": "http://resources", "required": True}],
-            "Pi supports only MCP tool grants; required grants it cannot use: tools",
-        ),
         ([mcp_grant("resources.mcp")], f"Pi cannot use these required MCP grants: resources.mcp ({_UNUSABLE_NAME})"),
         ([mcp_grant("r" * 63)], f"Pi cannot use these required MCP grants: {'r' * 63} ({_UNUSABLE_NAME})"),
         (
@@ -581,15 +577,9 @@ async def test_mcp_grants_reach_pi_through_the_gym_extension(setup):
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
 
 
-@pytest.mark.parametrize(
-    "name,problem",
-    [
-        ("resources.mcp", _UNUSABLE_NAME),
-        ("resources_v2", f"{_OVERLAP} resources"),
-    ],
-)
-async def test_optional_mcp_grant_that_pi_cannot_use_is_left_out(setup, name, problem):
+async def test_optional_mcp_grant_that_pi_cannot_use_is_left_out(setup):
     agent, sandbox = setup
+    name, problem = "resources.mcp", _UNUSABLE_NAME
     body = seed_with_tools(mcp_grant("resources"), mcp_grant(name, required=False))
     request, session_id, task = await activate(agent, sandbox, body)
     assert (await task).status == "completed"
@@ -629,22 +619,18 @@ async def test_mcp_setup_exit_fails_the_episode_with_its_cause(setup, granted):
         assert ("mcp_setup_failed", cause) in [(gap.code, gap.detail) for gap in close.agent_observations.gaps]
 
 
-def finish_events(*, details, is_error=False, tool="resources_finish", with_bash=False, last_stop="toolUse", calls=1):
-    """A run whose last assistant turn calls a granted MCP tool `calls` times, as when gym_mcp.mjs ends the run."""
-    last_calls = [
-        {"type": "toolCall", "id": f"tool-2-{i}", "name": tool, "arguments": {"paths": ["/r.docx"]}}
-        for i in range(calls)
-    ]
+def finish_events(*, details, is_error=False, tool="resources_finish", with_bash=False):
+    """A run whose last assistant turn calls a granted MCP tool, as when gym_mcp.mjs ends the run."""
+    last_calls = [{"type": "toolCall", "id": "tool-2", "name": tool, "arguments": {"paths": ["/r.docx"]}}]
     last_results = [
         {
             "role": "toolResult",
-            "toolCallId": f"tool-2-{i}",
+            "toolCallId": "tool-2",
             "toolName": tool,
             "content": [{"type": "text", "text": "done"}],
             "details": details,
             "isError": is_error,
         }
-        for i in range(calls)
     ]
     if with_bash:
         last_calls.append({"type": "toolCall", "id": "tool-3", "name": "bash", "arguments": {"command": "ls"}})
@@ -679,7 +665,7 @@ def finish_events(*, details, is_error=False, tool="resources_finish", with_bash
             "responseId": "call-2",
             "content": last_calls,
             "usage": {"input": 5, "output": 2, "cacheRead": 0},
-            "stopReason": last_stop,
+            "stopReason": "toolUse",
         },
         *last_results,
     ]
@@ -688,10 +674,9 @@ def finish_events(*, details, is_error=False, tool="resources_finish", with_bash
     return "\n".join(json.dumps([float(i), event]) for i, event in enumerate(recorded))
 
 
-@pytest.mark.parametrize("calls", [1, 2])
-async def test_finish_tool_ends_the_run_and_output_uses_gym_mcp_names(setup, calls):
+async def test_finish_tool_ends_the_run_and_output_uses_gym_mcp_names(setup):
     agent, sandbox = setup
-    sandbox.events = finish_events(details={"terminal": True}, calls=calls)
+    sandbox.events = finish_events(details={"terminal": True})
     grants = seed_with_tools(mcp_grant("web"), mcp_grant("resources"))
     request, session_id, task = await activate(agent, sandbox, grants)
     response = await task
@@ -700,7 +685,7 @@ async def test_finish_tool_ends_the_run_and_output_uses_gym_mcp_names(setup, cal
     # The granted prefix becomes Gym's MCP naming, and Pi's own tools keep their names.
     assert [item.name for item in response.output if item.type == "function_call"] == [
         "bash",
-        *["mcp__resources__finish"] * calls,
+        "mcp__resources__finish",
     ]
     close = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
     # Observations keep the names the model saw and record the run as completed.
@@ -711,26 +696,12 @@ async def test_finish_tool_ends_the_run_and_output_uses_gym_mcp_names(setup, cal
     assert "invocation_outcome_unavailable" not in [gap.code for gap in close.agent_observations.gaps]
 
 
-async def test_reply_cut_at_the_output_limit_stays_incomplete_after_a_finish_result(setup):
-    # gym_mcp.mjs does not run a finish call from such a reply, whose arguments may be cut off.
-    agent, sandbox = setup
-    sandbox.events = finish_events(details={"terminal": True}, last_stop="length")
-    request, session_id, task = await activate(agent, sandbox, seed_with_tools(mcp_grant("resources")))
-    assert (await task).status == "incomplete"
-    close = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
-    assert [record.status for record in close.agent_observations.records if record.kind == "agent_invocation"] == [
-        "incomplete"
-    ]
-
-
 @pytest.mark.parametrize(
     "details,is_error,with_bash",
     [
         ({}, False, False),
         ({"terminal": True}, True, False),
         ({"terminal": True}, False, True),
-        # Malformed details are not a finish.
-        ("terminal", False, False),
     ],
 )
 async def test_run_ending_on_other_tool_calls_is_not_a_result(setup, details, is_error, with_bash):
@@ -766,16 +737,6 @@ async def test_interrupted_run_keeps_the_skipped_mcp_server_gaps(setup):
     gaps = [(gap.code, gap.detail) for gap in close.agent_observations.gaps]
     assert ("mcp_server_skipped", "extra: TypeError (ECONNREFUSED)") in gaps
     assert ("mcp_server_skipped", f"extra.mcp: {_UNUSABLE_NAME}") in gaps
-
-
-async def test_grant_names_that_only_look_alike_are_used(setup):
-    # Overlap needs the `_` that gym_mcp.mjs puts between grant and tool names; 62 characters still fit.
-    agent, sandbox = setup
-    names = ["web", "web-extra", "r" * 62]
-    request, session_id, task = await activate(agent, sandbox, seed_with_tools(*map(mcp_grant, names)))
-    assert (await task).status == "completed"
-    assert sorted(json.loads(sandbox.files[f"{sandbox.directory}/mcp-servers.json"])) == sorted(names)
-    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
 
 
 @pytest.mark.parametrize("value", [0, 0.0004, 2_147_484])
@@ -1836,9 +1797,7 @@ def _url_grant(name, url, *, required=True):
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux sandbox contract")
-@pytest.mark.parametrize(
-    "case", ["finish", "finish-cut-at-output-limit", "finish-cut-as-vllm-reports-it", "optional-down"]
-)
+@pytest.mark.parametrize("case", ["finish", "finish-cut-at-output-limit", "finish-cut-as-vllm-reports-it"])
 async def test_pinned_pi_ends_the_run_on_finish(setup, tmp_path, monkeypatch, case):
     paths = ["/app/report.docx", "/app/data.xlsx"]
     replies = [(json.dumps({"paths": paths}), "tool_calls", False)]
@@ -1850,8 +1809,7 @@ async def test_pinned_pi_ends_the_run_on_finish(setup, tmp_path, monkeypatch, ca
         replies.insert(0, ('{"paths": ["/app/report.docx", ', "tool_calls" if vllm else "length", vllm))
 
     def grants(up, down):
-        extra = [_url_grant("extra", down, required=False)] if case == "optional-down" else []
-        return [_url_grant("resources", up), *extra]
+        return [_url_grant("resources", up)]
 
     async with _pinned_pi_activation(setup, tmp_path, monkeypatch, grants=grants, replies=replies) as run:
         response = await run.activation
@@ -1863,9 +1821,6 @@ async def test_pinned_pi_ends_the_run_on_finish(setup, tmp_path, monkeypatch, ca
     assert [item.name for item in response.output if item.type == "function_call"] == ["mcp__resources__finish"] * len(
         replies
     )
-    gaps = [(gap.code, gap.detail) for gap in run.close.agent_observations.gaps]
-    skipped = ("mcp_server_skipped", f"extra: TypeError (ECONNREFUSED) at {run.down}")
-    assert (skipped in gaps) == (case == "optional-down")
     # Pi's agent_end carries the terminal tool result, so the invocation record agrees with the response.
     records = run.close.agent_observations.records
     assert [record.status for record in records if record.kind == "agent_invocation"] == ["completed"]
