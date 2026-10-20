@@ -7728,3 +7728,219 @@ class TestCodexRequests:
         else:
             assert terminal["type"] == "response.completed"
             assert client.create_chat_completion.await_args.kwargs["reasoning_effort"] == expected
+
+    PATCH = "*** Begin Patch\n*** Update File: a.py\n@@\n-x = 1\n+x = 2\n*** End Patch\n"
+    PATCH_OUTPUT = "Success. Updated the following files:\nM a.py\n"
+
+    @classmethod
+    def _apply_patch_completion(cls) -> dict[str, Any]:
+        call = {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "apply_patch", "arguments": json.dumps({"input": cls.PATCH})},
+        }
+        return cls._completion(
+            {"role": "assistant", "content": None, "reasoning": cls.REASONING_TEXT, "tool_calls": [call]}
+        )
+
+    def test_custom_tools_as_functions_needs_the_chat_path_without_token_ids(self) -> None:
+        with raises(ValueError, match="requires is_responses_native=false"):
+            self._server(custom_tools_as_functions=True, is_responses_native=True)
+        with raises(ValueError, match="does not support return_token_id_information"):
+            self._server(custom_tools_as_functions=True, return_token_id_information=True)
+
+    def test_codex_apply_patch_round_trips_through_a_function_tool(self) -> None:
+        # drop_custom_tools stays on for any other server: the conversion takes precedence here.
+        server, client = self._server(**self.CODEX_FIELDS, drop_custom_tools=True, custom_tools_as_functions=True)
+        client.create_chat_completion = AsyncMock(return_value=self._apply_patch_completion())
+        app = server.setup_webserver()
+
+        first = TestClient(app).post("/v1/responses", json=self._codex_body([self.USER]))
+
+        assert first.status_code == 200
+        events = self._events(first.text)
+        assert [event["type"] for event in events] == [
+            "response.created",
+            "response.output_item.done",
+            "response.output_item.done",
+            "response.completed",
+        ]
+        reasoning_item, call_item = (event["item"] for event in events[1:3])
+        assert reasoning_item["type"] == "reasoning"
+        assert call_item == {
+            "type": "custom_tool_call",
+            "call_id": "call_1",
+            "id": "call_1",
+            "name": "apply_patch",
+            "input": self.PATCH,
+            "namespace": None,
+            "status": "completed",
+        }
+        assert events[-1]["response"]["output"] == [reasoning_item, call_item]
+        sent_tools = client.create_chat_completion.await_args.kwargs["tools"]
+        assert sent_tools[1] == {
+            "type": "function",
+            "function": {
+                "name": "apply_patch",
+                "description": "Use the `apply_patch` tool to edit files.\n\n"
+                "Pass the tool's entire free-form input as raw text in the `input` argument.\n\n"
+                "The input must conform to this lark grammar:\nstart: begin_patch hunk+ end_patch",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "input": {
+                            "type": "string",
+                            "description": "The entire free-form input for apply_patch, as raw text.",
+                        }
+                    },
+                    "required": ["input"],
+                    "additionalProperties": False,
+                },
+            },
+        }
+        assert sent_tools[0]["function"]["name"] == "shell_command"
+
+        # Codex replays the reasoning, the custom tool call and its output on the next turn.
+        output = {"type": "custom_tool_call_output", "call_id": "call_1", "output": self.PATCH_OUTPUT}
+        client.create_chat_completion = AsyncMock(
+            return_value=self._completion({"role": "assistant", "content": "Fixed.", "reasoning": "Done."})
+        )
+
+        second = TestClient(app).post(
+            "/v1/responses", json=self._codex_body([self.USER, reasoning_item, call_item, output])
+        )
+
+        assert second.status_code == 200
+        assert self._events(second.text)[-1]["type"] == "response.completed"
+        assert client.create_chat_completion.await_args.kwargs["messages"] == [
+            {"role": "system", "content": "You are Codex."},
+            {"role": "user", "content": [{"type": "text", "text": "fix the test"}]},
+            {
+                # The prior reasoning reaches the engine on the turn that made the call.
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": self.REASONING_TEXT,
+                "reasoning": self.REASONING_TEXT,
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "apply_patch", "arguments": json.dumps({"input": self.PATCH})},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": self.PATCH_OUTPUT},
+        ]
+
+    def test_non_streaming_response_carries_the_custom_tool_call(self) -> None:
+        server, client = self._server(custom_tools_as_functions=True)
+        client.create_chat_completion = AsyncMock(return_value=self._apply_patch_completion())
+
+        response = TestClient(server.setup_webserver()).post(
+            "/v1/responses", json={"input": "fix the test", "tools": [self.APPLY_PATCH_TOOL]}
+        )
+
+        assert response.status_code == 200
+        output = response.json()["output"]
+        assert [item["type"] for item in output] == ["reasoning", "custom_tool_call"]
+        assert (output[1]["call_id"], output[1]["name"], output[1]["input"]) == ("call_1", "apply_patch", self.PATCH)
+        # The response echoes the custom tool as the client sent it.
+        assert [(tool["type"], tool["name"]) for tool in response.json()["tools"]] == [("custom", "apply_patch")]
+        sent_tool = client.create_chat_completion.await_args.kwargs["tools"][0]
+        assert (sent_tool["type"], sent_tool["function"]["name"]) == ("function", "apply_patch")
+
+    def test_custom_tools_are_unchanged_without_the_conversion(self) -> None:
+        server, client = self._server(**self.CODEX_FIELDS)
+        client.create_chat_completion = AsyncMock(return_value=self._apply_patch_completion())
+        app = server.setup_webserver()
+
+        first = TestClient(app).post("/v1/responses", json=self._codex_body([self.USER]))
+
+        # The custom tool is forwarded as a Chat Completions custom tool, and the call stays a function call.
+        assert client.create_chat_completion.await_args.kwargs["tools"][1] == {
+            "type": "custom",
+            "custom": {
+                "name": "apply_patch",
+                "description": "Use the `apply_patch` tool to edit files.",
+                "format": {
+                    "type": "grammar",
+                    "grammar": {"syntax": "lark", "definition": "start: begin_patch hunk+ end_patch"},
+                },
+            },
+        }
+        assert self._events(first.text)[2]["item"]["type"] == "function_call"
+
+        # A replayed custom tool call has no chat representation.
+        client.create_chat_completion.reset_mock()
+        call_item = {"type": "custom_tool_call", "call_id": "call_1", "name": "apply_patch", "input": self.PATCH}
+        output = {"type": "custom_tool_call_output", "call_id": "call_1", "output": self.PATCH_OUTPUT}
+        second = TestClient(app).post("/v1/responses", json=self._codex_body([self.USER, call_item, output]))
+
+        assert second.status_code == 200
+        assert self._events(second.text)[-1]["type"] == "response.failed"
+        client.create_chat_completion.assert_not_awaited()
+
+    VIEW_IMAGE_CALL = {
+        "type": "function_call",
+        "call_id": "call_img",
+        "name": "view_image",
+        "arguments": json.dumps({"path": "/app/work/plot.png"}),
+    }
+    PNG_URL = "data:image/png;base64,iVBORw0KGgo="
+    # As the Codex CLI sends it: the image alone, with detail "high".
+    VIEW_IMAGE_OUTPUT = {
+        "type": "function_call_output",
+        "call_id": "call_img",
+        "output": [{"type": "input_image", "image_url": PNG_URL, "detail": "high"}],
+    }
+
+    def test_inline_tool_output_images_needs_the_chat_path(self) -> None:
+        with raises(ValueError, match="requires is_responses_native=false"):
+            self._server(inline_tool_output_images=True, is_responses_native=True)
+
+    @mark.parametrize(
+        ("overrides", "content"),
+        [
+            (
+                {"inline_tool_output_images": True},
+                [{"type": "image_url", "image_url": {"url": PNG_URL, "detail": "high"}}],
+            ),
+            # Without it, drop_unrepresentable_request_fields puts its placeholder in the image's place.
+            ({}, [{"type": "text", "text": "[image omitted from tool output]"}]),
+        ],
+        ids=["inline", "placeholder"],
+    )
+    def test_codex_view_image_output_reaches_the_engine(
+        self, overrides: dict[str, Any], content: list[dict[str, Any]]
+    ) -> None:
+        server, client = self._server(**self.CODEX_FIELDS, **overrides)
+        client.create_chat_completion = AsyncMock(
+            return_value=self._completion({"role": "assistant", "content": "done", "reasoning": "r"})
+        )
+
+        response = TestClient(server.setup_webserver()).post(
+            "/v1/responses", json=self._codex_body([self.USER, self.VIEW_IMAGE_CALL, self.VIEW_IMAGE_OUTPUT])
+        )
+
+        assert response.status_code == 200
+        assert self._events(response.text)[-1]["type"] == "response.completed"
+        assert client.create_chat_completion.await_args.kwargs["messages"][-1] == {
+            "role": "tool",
+            "tool_call_id": "call_img",
+            "content": content,
+        }
+
+    def test_view_image_output_fails_the_turn_by_default(self) -> None:
+        server, client = self._server()
+        client.create_chat_completion = AsyncMock()
+
+        response = TestClient(server.setup_webserver()).post(
+            "/v1/responses",
+            json={"stream": True, "input": [self.USER, self.VIEW_IMAGE_CALL, self.VIEW_IMAGE_OUTPUT]},
+        )
+
+        assert response.status_code == 200
+        terminal = self._events(response.text)[-1]
+        assert terminal["type"] == "response.failed"
+        assert "input_image" in terminal["response"]["error"]["message"]
+        client.create_chat_completion.assert_not_awaited()

@@ -19,9 +19,10 @@ and the Chat Completions API format. It is used by model servers that need to
 convert between the two formats (e.g. vllm_model, inference_provider).
 """
 
+import json
 import logging
 import re
-from typing import Any, ClassVar, Dict, List, Optional, Tuple
+from typing import Any, ClassVar, Dict, FrozenSet, List, Optional, Tuple
 from uuid import uuid4
 
 from openai.types.responses.response_create_params import ToolParam
@@ -31,6 +32,7 @@ from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionAssistantMessageForTrainingParam,
     NeMoGymChatCompletionAssistantMessageParam,
+    NeMoGymChatCompletionContentPartImageParam,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymChatCompletionDeveloperMessageParam,
     NeMoGymChatCompletionMessageParam,
@@ -47,6 +49,7 @@ from nemo_gym.openai_utils import (
     NeMoGymFunctionDefinition,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseCustomToolCall,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputItem,
@@ -85,6 +88,35 @@ _REPORTING_ONLY_REASONING_FIELDS = ("summary", "generate_summary")
 # earlier turns' reasoning to be left out, which the conversion does not do, so it stays refused.
 # The Codex CLI sends `all_turns` when its model catalog enables reasoning context.
 _DROPPABLE_REASONING_CONTEXTS = ("auto", "all_turns")
+
+# The one string parameter of the function tool that stands in for a custom tool
+# (``custom_tools_as_functions``), named after the ``custom_tool_call`` field that carries the input.
+CUSTOM_TOOL_INPUT_PARAMETER = "input"
+
+
+def custom_tool_names(tools: Optional[List[Any]]) -> FrozenSet[str]:
+    """Names of the Responses ``custom`` tools in a request's ``tools``."""
+    return frozenset(tool["name"] for tool in tools or [] if isinstance(tool, dict) and tool.get("type") == "custom")
+
+
+def _custom_tool_input(name: str, arguments: str) -> str:
+    """The free-form input a call to a custom tool's stand-in function carries.
+
+    Arguments that are not a JSON object with a string ``input`` are passed through as the input
+    unchanged, so the client's tool reports the malformed call to the model instead of the turn failing.
+    """
+    try:
+        parsed = json.loads(arguments)
+    except (TypeError, ValueError):
+        parsed = None
+    if isinstance(parsed, dict) and isinstance(parsed.get(CUSTOM_TOOL_INPUT_PARAMETER), str):
+        return parsed[CUSTOM_TOOL_INPUT_PARAMETER]
+    logger.warning(
+        "Call to custom tool %r has no string %r argument; passing its raw arguments as the input.",
+        name,
+        CUSTOM_TOOL_INPUT_PARAMETER,
+    )
+    return arguments
 
 
 def message_content_to_text(content: Any) -> str:
@@ -215,6 +247,19 @@ class ResponsesConverter(BaseModel):
 
     return_token_id_information: bool
     uses_reasoning_parser: bool = True
+    # Represent each Responses ``custom`` (free-form) tool as a Chat Completions function tool with
+    # one required string parameter, ``input``, for a backend that serves function tools only. The
+    # backend's calls to such a function come back as ``custom_tool_call`` items carrying the raw
+    # input, and replayed ``custom_tool_call`` / ``custom_tool_call_output`` items become the matching
+    # chat tool call and tool message. Off by default: custom tools convert to Chat Completions
+    # custom tools, and custom tool call items have no chat representation.
+    custom_tools_as_functions: bool = False
+    # Keep each ``input_image`` part of a tool call output (e.g. the Codex CLI's view_image) as an
+    # ``image_url`` part of the chat tool message, which engines such as vLLM accept and a vision model
+    # then sees inside the tool result. Detail "original", which chat lacks, is sent as "high". Off by
+    # default: OpenAI's chat tool messages carry text only, so such an output fails the conversion, or
+    # becomes a text placeholder with ``drop_unrepresentable_request_fields``.
+    inline_tool_output_images: bool = False
 
     THINK_TAG_PATTERN: ClassVar = re.compile(r"<think>(.*?)</think>", re.DOTALL)
 
@@ -248,8 +293,8 @@ class ResponsesConverter(BaseModel):
         ``reasoning.generate_summary``, a ``reasoning.context`` of ``auto`` or ``all_turns`` (see
         ``_DROPPABLE_REASONING_CONTEXTS``), and a message ``phase``. An image part in a tool's output
         becomes the text placeholder ``_IMAGE_OUTPUT_PLACEHOLDER``, which does replace that part
-        of the prompt. Every other unrepresentable field, a ``current_turn`` reasoning context
-        included, is still refused.
+        of the prompt, unless ``inline_tool_output_images`` keeps it as an image. Every other
+        unrepresentable field, a ``current_turn`` reasoning context included, is still refused.
         """
         responses_create_params = responses_create_params.model_dump(exclude_none=True, exclude_unset=True)
         if responses_create_params.get("include") == []:
@@ -321,6 +366,13 @@ class ResponsesConverter(BaseModel):
                 case "function_call":
                     self._format_function_call(m, state)
                 case "function_call_output":
+                    self._format_function_call_output(
+                        m, state, drop_unrepresentable_request_fields=drop_unrepresentable_request_fields
+                    )
+                case "custom_tool_call" if self.custom_tools_as_functions:
+                    self._format_custom_tool_call(m, state)
+                case "custom_tool_call_output" if self.custom_tools_as_functions:
+                    # Same shape as a function call output: the call id and a string or text parts.
                     self._format_function_call_output(
                         m, state, drop_unrepresentable_request_fields=drop_unrepresentable_request_fields
                     )
@@ -423,6 +475,14 @@ class ResponsesConverter(BaseModel):
         tool_choice = self._responses_to_chat_tool_choice(responses_create_params.pop("tool_choice", None))
         tools = responses_create_params.pop("tools", None)
         if tools:
+            if self.custom_tools_as_functions:
+                function_names = {tool.get("name") for tool in tools if tool.get("type") == "function"}
+                clashing = sorted(custom_tool_names(tools) & function_names)
+                if clashing:
+                    raise ValueError(
+                        f"Custom tool(s) {clashing} share a name with a function tool, so a call to the "
+                        "function standing in for the custom tool would be ambiguous."
+                    )
             responses_create_params["tools"] = []
             for tool_dict in tools:
                 tool_type = tool_dict.get("type")
@@ -444,6 +504,8 @@ class ResponsesConverter(BaseModel):
                         type="function",
                         function=NeMoGymFunctionDefinition(**tool_dict),
                     )
+                elif self.custom_tools_as_functions:
+                    converted_tool = self._custom_tool_as_function(tool_dict)
                 else:
                     converted_tool = {
                         "type": "custom",
@@ -479,23 +541,25 @@ class ResponsesConverter(BaseModel):
         if isinstance(output, str):
             content = output
         elif isinstance(output, list):
-            # Chat tool messages carry text only, so every other part type fails the conversion.
-            # An image part is the one exception `drop_unrepresentable_request_fields` covers: the
-            # text placeholder keeps the position of the image in the tool's output.
+            # Chat tool messages carry text only in OpenAI's API, so every other part type fails the
+            # conversion. Image parts are the exception: `inline_tool_output_images` keeps each one as an
+            # image part, which engines such as vLLM accept, and otherwise
+            # `drop_unrepresentable_request_fields` replaces it with a text placeholder that keeps its
+            # position in the tool's output.
             representable_types = {"input_text"}
-            if drop_unrepresentable_request_fields:
+            if self.inline_tool_output_images or drop_unrepresentable_request_fields:
                 representable_types.add("input_image")
             unsupported_types = sorted(
                 {part.get("type", "<missing>") for part in output if part.get("type") not in representable_types}
             )
             if unsupported_types:
                 raise NotImplementedError(
-                    "Cannot convert Responses function_call_output "
+                    f"Cannot convert Responses {m['type']} "
                     f"for call {m['call_id']!r} to a Chat Completions tool message: "
                     "Chat tool messages cannot represent content part type(s) "
                     f"{', '.join(repr(part_type) for part_type in unsupported_types)}"
                 )
-            if any(part["type"] == "input_image" for part in output):
+            if not self.inline_tool_output_images and any(part["type"] == "input_image" for part in output):
                 # Debug, like the other drops: the conversion re-converts the whole transcript on
                 # every later turn, so one returned image would otherwise warn on every turn after it.
                 logger.debug(
@@ -505,7 +569,7 @@ class ResponsesConverter(BaseModel):
             content = [
                 {"type": "text", "text": part["text"]}
                 if part["type"] == "input_text"
-                else {"type": "text", "text": _IMAGE_OUTPUT_PLACEHOLDER}
+                else self._tool_output_image_to_chat(part)
                 for part in output
             ]
         else:  # pragma: no cover - guarded by NeMoGymFunctionCallOutput validation
@@ -520,6 +584,34 @@ class ResponsesConverter(BaseModel):
             tool_call_id=m["call_id"],
         )
         state.messages.append(converted)
+
+    def _tool_output_image_to_chat(self, part: dict) -> dict:
+        """What the chat tool message carries for an ``input_image`` part of a tool call output."""
+        if not self.inline_tool_output_images:
+            return {"type": "text", "text": _IMAGE_OUTPUT_PLACEHOLDER}
+        if part.get("detail") == "original":
+            # Chat has no "original" detail (full resolution). The Codex CLI sends it when the model
+            # asks view_image for it; "high" is the closest chat level.
+            part = {**part, "detail": "high"}
+        return self._input_image_to_chat(part)
+
+    @staticmethod
+    def _input_image_to_chat(part_param: dict) -> NeMoGymChatCompletionContentPartImageParam:
+        image_url = part_param.get("image_url")
+        if image_url is None:
+            raise NotImplementedError(
+                "Responses input images referenced by file_id have no Chat Completions representation."
+            )
+        if isinstance(image_url, dict):
+            image_url = image_url.get("url", "")
+        if not image_url:
+            raise ValueError(f"{part_param['type']} requires a non-empty image_url")
+        detail = part_param.get("detail", "auto")
+        if detail == "original":
+            raise NotImplementedError(
+                "Responses input image detail 'original' has no Chat Completions representation."
+            )
+        return {"type": "image_url", "image_url": {"url": image_url, "detail": detail}}
 
     def _format_message(
         self,
@@ -544,23 +636,7 @@ class ResponsesConverter(BaseModel):
                     case "input_text":
                         converted_parts.append({"type": "text", "text": part_param["text"]})
                     case "input_image":
-                        image_url = part_param.get("image_url")
-                        if image_url is None:
-                            raise NotImplementedError(
-                                "Responses input images referenced by file_id have no Chat Completions representation."
-                            )
-                        if isinstance(image_url, dict):
-                            image_url = image_url.get("url", "")
-                        if not image_url:
-                            raise ValueError(f"{part_param['type']} requires a non-empty image_url")
-                        detail = part_param.get("detail", "auto")
-                        if detail == "original":
-                            raise NotImplementedError(
-                                "Responses input image detail 'original' has no Chat Completions representation."
-                            )
-                        converted_parts.append(
-                            {"type": "image_url", "image_url": {"url": image_url, "detail": detail}}
-                        )
+                        converted_parts.append(self._input_image_to_chat(part_param))
                     case "input_video":
                         source_key = "video_url" if "video_url" in part_param else "video"
                         video_url = part_param[source_key]
@@ -697,6 +773,63 @@ class ResponsesConverter(BaseModel):
         )
         state.tool_calls_buffer.append(tool_call)
 
+    def _format_custom_tool_call(
+        self,
+        m: dict,
+        state: ResponsesConverterState,
+    ) -> None:
+        """Replay a custom tool call as a call to the function that stands in for the tool."""
+        state.assistant_item_buffered = True
+        if m.get("namespace") is not None:
+            raise NotImplementedError("Responses custom tool call namespace has no Chat Completions representation.")
+        state.tool_calls_buffer.append(
+            NeMoGymChatCompletionMessageToolCallParam(
+                id=m["call_id"],
+                function=NeMoGymChatCompletionMessageToolCallFunctionParam(
+                    arguments=json.dumps({CUSTOM_TOOL_INPUT_PARAMETER: m["input"]}, ensure_ascii=False),
+                    name=m["name"],
+                ),
+                type="function",
+            )
+        )
+
+    @staticmethod
+    def _custom_tool_as_function(tool: dict) -> NeMoGymChatCompletionToolParam:
+        """The Chat Completions function tool that stands in for a Responses custom tool.
+
+        The function takes the tool's whole free-form input as one string. The description keeps the
+        tool's own text and adds how to pass the input and, for a grammar format, the grammar itself:
+        a string parameter cannot constrain the input the way the grammar does.
+        """
+        name = tool["name"]
+        parts = [tool["description"]] if tool.get("description") else []
+        parts.append(
+            f"Pass the tool's entire free-form input as raw text in the `{CUSTOM_TOOL_INPUT_PARAMETER}` argument."
+        )
+        tool_format = tool.get("format") or {}
+        if tool_format.get("type") == "grammar":
+            parts.append(
+                f"The input must conform to this {tool_format['syntax']} grammar:\n{tool_format['definition']}"
+            )
+        return NeMoGymChatCompletionToolParam(
+            type="function",
+            function=NeMoGymFunctionDefinition(
+                name=name,
+                description="\n\n".join(parts),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        CUSTOM_TOOL_INPUT_PARAMETER: {
+                            "type": "string",
+                            "description": f"The entire free-form input for {name}, as raw text.",
+                        }
+                    },
+                    "required": [CUSTOM_TOOL_INPUT_PARAMETER],
+                    "additionalProperties": False,
+                },
+            ),
+        )
+
     # =======================================================
     # Chat Completion create params to Response create params
     # =======================================================
@@ -754,15 +887,21 @@ class ResponsesConverter(BaseModel):
         if tool_choice is None or isinstance(tool_choice, str):
             return tool_choice
 
+        def reference_to_chat(tool: dict) -> dict:
+            if self.custom_tools_as_functions and tool.get("type") == "custom":
+                # The custom tool is the function that stands in for it.
+                tool = {**tool, "type": "function"}
+            return self._tool_reference_to_chat(tool)
+
         tool_type = tool_choice.get("type")
         if tool_type in {"function", "custom"}:
-            return self._tool_reference_to_chat(tool_choice)
+            return reference_to_chat(tool_choice)
         if tool_type == "allowed_tools":
             return {
                 "type": "allowed_tools",
                 "allowed_tools": {
                     "mode": tool_choice["mode"],
-                    "tools": [self._tool_reference_to_chat(tool) for tool in tool_choice["tools"]],
+                    "tools": [reference_to_chat(tool) for tool in tool_choice["tools"]],
                 },
             }
         raise NotImplementedError(f"Responses tool choice type {tool_type!r} has no Chat representation.")
@@ -909,6 +1048,31 @@ class ResponsesConverter(BaseModel):
 
         return response_output
 
+    @staticmethod
+    def _restore_custom_tool_calls(
+        items: List[NeMoGymResponseOutputItem], names: FrozenSet[str]
+    ) -> List[NeMoGymResponseOutputItem]:
+        """Turn calls to the functions that stand in for custom tools back into ``custom_tool_call`` items."""
+        restored: List[NeMoGymResponseOutputItem] = []
+        for item in items:
+            if isinstance(item, NeMoGymResponseFunctionToolCall) and item.name in names:
+                if isinstance(item, TokenIDLogProbMixin):
+                    # custom_tool_call has no ForTraining variant to carry the sampled tokens.
+                    raise NotImplementedError(
+                        f"Cannot attach token IDs to the call to custom tool {item.name!r}: "
+                        "custom_tools_as_functions does not support return_token_id_information."
+                    )
+                item = NeMoGymResponseCustomToolCall(
+                    type="custom_tool_call",
+                    call_id=item.call_id,
+                    name=item.name,
+                    input=_custom_tool_input(item.name, item.arguments),
+                    id=item.id,
+                    status="completed",
+                )
+            restored.append(item)
+        return restored
+
     def _extract_reasoning_from_content(self, content: str) -> Tuple[List[str], str]:
         return self._parse_think_tags(content)
 
@@ -959,6 +1123,10 @@ class ResponsesConverter(BaseModel):
         choice = chat_completion.choices[0]
 
         response_output = self.postprocess_chat_response(choice)
+        if self.custom_tools_as_functions:
+            response_output = self._restore_custom_tool_calls(
+                response_output, custom_tool_names(responses_create_params.tools)
+            )
         response_output_dicts = [item.model_dump() for item in response_output]
 
         usage = None

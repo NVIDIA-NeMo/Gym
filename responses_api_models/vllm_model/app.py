@@ -360,7 +360,8 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
             "`auto` or `all_turns`: the conversion passes every reasoning item the request carries to the "
             "engine and leaves what is rendered to its chat template. An image part in a tool's output is "
             "replaced with the text placeholder `[image omitted from tool output]`, so the model does not "
-            "see that image. Every other unrepresentable field, a `current_turn` reasoning context included, "
+            "see that image, unless `inline_tool_output_images` is on. Every other unrepresentable field, a "
+            "`current_turn` reasoning context included, "
             "is still refused. The setting has no effect when `is_responses_native` is on, because that path "
             "skips the conversion."
         ),
@@ -372,6 +373,32 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
             "`max`, which the Codex CLI sends when its model catalog offers it) verbatim as the chat "
             "`reasoning_effort`, instead of refusing the request with 422. The engine validates the value. "
             "Efforts the SDK lists keep their existing path. Requires `is_responses_native: false`."
+        ),
+    )
+    custom_tools_as_functions: bool = Field(
+        default=False,
+        description=(
+            "Present each Responses `custom` (free-form) tool to the engine as a function tool with one "
+            "required string parameter, `input`, whose description carries the tool's description, how to "
+            "pass the input, and the tool's grammar if it has one. The engine's calls to that function return "
+            "as `custom_tool_call` items whose `input` is the `input` argument (or the raw arguments when they "
+            "carry no string `input`), and replayed `custom_tool_call` and `custom_tool_call_output` items "
+            "become the matching chat tool call and tool message. A named `tool_choice` of a custom tool "
+            "selects its function. This is how the Codex CLI's freeform `apply_patch` reaches an engine that "
+            "serves function tools only. Takes precedence over `drop_custom_tools`. A custom tool that shares "
+            "a name with a function tool fails the request. Requires `is_responses_native: false` and "
+            "`return_token_id_information: false`: a `custom_tool_call` item cannot carry token IDs."
+        ),
+    )
+    inline_tool_output_images: bool = Field(
+        default=False,
+        description=(
+            "Send each image part of a Responses tool call output (for example from the Codex CLI's "
+            "`view_image`) to the engine as an `image_url` part of the chat tool message, instead of refusing "
+            "the request or, with `drop_unrepresentable_request_fields`, replacing the image with a text "
+            "placeholder. OpenAI's chat tool messages carry text only, but vLLM accepts image parts there and "
+            "a vision model sees the image inside the tool result. Detail `original`, which chat lacks, is "
+            "sent as `high`. Requires `is_responses_native: false`."
         ),
     )
 
@@ -471,10 +498,20 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
 
     @model_validator(mode="after")
     def _validate_chat_conversion_options(self) -> "VLLMModelConfig":
-        if self.forward_unvalidated_reasoning_effort and self.is_responses_native:
+        if self.is_responses_native:
+            for option in (
+                "forward_unvalidated_reasoning_effort",
+                "custom_tools_as_functions",
+                "inline_tool_output_images",
+            ):
+                if getattr(self, option):
+                    raise ValueError(
+                        f"{option} applies to the Chat Completions conversion and requires is_responses_native=false"
+                    )
+        if self.custom_tools_as_functions and self.return_token_id_information:
             raise ValueError(
-                "forward_unvalidated_reasoning_effort applies to the Chat Completions conversion and requires "
-                "is_responses_native=false"
+                "custom_tools_as_functions does not support return_token_id_information: custom_tool_call "
+                "items have no variant that carries token IDs"
             )
         return self
 
@@ -584,7 +621,13 @@ class VLLMModel(SimpleResponsesAPIModel):
         return VLLMConverter(
             return_token_id_information=self.config.return_token_id_information,
             uses_reasoning_parser=self.config.uses_reasoning_parser,
+            custom_tools_as_functions=self.config.custom_tools_as_functions,
+            inline_tool_output_images=self.config.inline_tool_output_images,
         )
+
+    def _streaming_drops_custom_tools(self) -> bool:
+        # A converter that turns every custom tool into a function tool leaves none to drop.
+        return self.config.drop_custom_tools and not self._converter.custom_tools_as_functions
 
     def model_post_init(self, context):
         self._post_init()

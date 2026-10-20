@@ -16,6 +16,7 @@
 
 import json
 import logging
+from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
@@ -33,6 +34,7 @@ from nemo_gym.openai_utils import (
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseCustomToolCall,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseFunctionWebSearch,
     NeMoGymResponseInputText,
@@ -629,6 +631,77 @@ def test_responses_to_chat_completion_still_rejects_other_function_output_parts_
     ):
         converter.responses_to_chat_completion_create_params(
             responses_params, drop_unrepresentable_request_fields=True
+        )
+
+
+PNG_URL = "data:image/png;base64,iVBORw0KGgo="
+
+
+def _tool_output_params(*parts: dict) -> NeMoGymResponseCreateParamsNonStreaming:
+    return NeMoGymResponseCreateParamsNonStreaming(
+        input=[{"type": "function_call_output", "call_id": "call_1", "output": list(parts)}]
+    )
+
+
+@pytest.fixture
+def inlining_converter() -> ResponsesConverter:
+    return ResponsesConverter(return_token_id_information=False, inline_tool_output_images=True)
+
+
+def test_inline_tool_output_images_keeps_each_image_in_the_tool_message(inlining_converter: ResponsesConverter):
+    params = inlining_converter.responses_to_chat_completion_create_params(
+        _tool_output_params(
+            {"type": "input_text", "text": "plot:"},
+            {"type": "input_image", "image_url": PNG_URL, "detail": "high"},
+            {"type": "input_image", "image_url": PNG_URL},
+        )
+    )
+
+    assert params.messages == [
+        {
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": [
+                {"type": "text", "text": "plot:"},
+                {"type": "image_url", "image_url": {"url": PNG_URL, "detail": "high"}},
+                {"type": "image_url", "image_url": {"url": PNG_URL, "detail": "auto"}},
+            ],
+        }
+    ]
+
+
+def test_inline_tool_output_images_takes_precedence_over_the_placeholder(inlining_converter: ResponsesConverter):
+    # The Codex CLI needs drop_unrepresentable_request_fields for its other fields; its images still reach the model.
+    params = inlining_converter.responses_to_chat_completion_create_params(
+        _tool_output_params({"type": "input_image", "image_url": PNG_URL, "detail": "high"}),
+        drop_unrepresentable_request_fields=True,
+    )
+
+    assert params.messages[0]["content"] == [{"type": "image_url", "image_url": {"url": PNG_URL, "detail": "high"}}]
+
+
+def test_inline_tool_output_images_sends_original_detail_as_high(inlining_converter: ResponsesConverter):
+    # The Codex CLI's view_image with detail "original" (full resolution), which Chat Completions lacks.
+    params = inlining_converter.responses_to_chat_completion_create_params(
+        _tool_output_params({"type": "input_image", "image_url": PNG_URL, "detail": "original"})
+    )
+
+    assert params.messages[0]["content"] == [{"type": "image_url", "image_url": {"url": PNG_URL, "detail": "high"}}]
+
+
+def test_inline_tool_output_images_rejects_an_image_without_a_url(inlining_converter: ResponsesConverter):
+    with pytest.raises(NotImplementedError, match="file_id"):
+        inlining_converter.responses_to_chat_completion_create_params(
+            _tool_output_params({"type": "input_image", "file_id": "file_123"})
+        )
+
+
+def test_inline_tool_output_images_leaves_other_parts_unrepresentable(inlining_converter: ResponsesConverter):
+    with pytest.raises(NotImplementedError, match=r"content part type\(s\) 'input_file'$"):
+        inlining_converter.responses_to_chat_completion_create_params(
+            _tool_output_params(
+                {"type": "input_image", "image_url": PNG_URL}, {"type": "input_file", "file_id": "file_123"}
+            )
         )
 
 
@@ -1519,6 +1592,30 @@ def test_chat_tool_image_to_responses_becomes_input_image(converter: ResponsesCo
     ]
 
 
+def test_chat_tool_image_parts_round_trip_through_responses_items(inlining_converter: ResponsesConverter):
+    tool_message = {
+        "role": "tool",
+        "tool_call_id": "call_1",
+        "content": [
+            {"type": "text", "text": "plot:"},
+            {"type": "image_url", "image_url": {"url": PNG_URL, "detail": "high"}},
+        ],
+    }
+
+    items = inlining_converter.chat_completions_messages_to_responses_items([deepcopy(tool_message)])
+    output = items[0].model_dump(exclude_none=True)["output"]
+    assert output == [
+        {"type": "input_text", "text": "plot:"},
+        {"type": "input_image", "image_url": PNG_URL, "detail": "high"},
+    ]
+    params = inlining_converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            input=[{"type": "function_call_output", "call_id": "call_1", "output": output}]
+        )
+    )
+    assert params.messages == [tool_message]
+
+
 def test_chat_messages_to_responses_items_unrecognized_role_raises(converter: ResponsesConverter):
     with pytest.raises(NotImplementedError):
         converter.chat_completions_messages_to_responses_items([{"role": "alien", "content": "x"}])
@@ -2165,3 +2262,276 @@ def test_empty_include_preserves_reasoning_and_tool_history(converter: Responses
     assert converted.messages[2]["content"] == "README.md"
     assert params.include == []
     assert params.input[1].summary[0].text == "Check files first"
+
+
+# ===========================================================================
+# custom_tools_as_functions
+# ===========================================================================
+
+_APPLY_PATCH_GRAMMAR = 'start: begin_patch hunk+ end_patch\nbegin_patch: "*** Begin Patch" LF\n%import common.LF'
+_APPLY_PATCH_TOOL = {
+    "type": "custom",
+    "name": "apply_patch",
+    "description": "Use the `apply_patch` tool to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON.",
+    "format": {"type": "grammar", "syntax": "lark", "definition": _APPLY_PATCH_GRAMMAR},
+}
+_SHELL_TOOL = {
+    "type": "function",
+    "name": "shell",
+    "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]},
+    "strict": False,
+}
+_PATCH = '*** Begin Patch\n*** Update File: app.py\n@@\n-greeting = "hi"\n+greeting = "héllo"\n*** End Patch\n'
+_INPUT_NOTE = "Pass the tool's entire free-form input as raw text in the `input` argument."
+
+
+def _stand_in_parameters(name: str) -> dict:
+    return {
+        "type": "object",
+        "properties": {
+            "input": {"type": "string", "description": f"The entire free-form input for {name}, as raw text."}
+        },
+        "required": ["input"],
+        "additionalProperties": False,
+    }
+
+
+@pytest.fixture
+def bridging_converter() -> ResponsesConverter:
+    return ResponsesConverter(return_token_id_information=False, custom_tools_as_functions=True)
+
+
+def _tool_call_completion(*calls: tuple[str, str, str]) -> NeMoGymChatCompletion:
+    return NeMoGymChatCompletion(
+        id="chatcmpl-1",
+        created=0,
+        model="m",
+        object="chat.completion",
+        choices=[
+            NeMoGymChoice(
+                index=0,
+                finish_reason="tool_calls",
+                message=NeMoGymChatCompletionMessage(
+                    role="assistant",
+                    content=None,
+                    tool_calls=[
+                        NeMoGymChatCompletionMessageToolCall(
+                            id=call_id, type="function", function=NeMoGymFunction(name=name, arguments=arguments)
+                        )
+                        for call_id, name, arguments in calls
+                    ],
+                ),
+            )
+        ],
+    )
+
+
+def test_custom_tools_as_functions_presents_each_custom_tool_as_a_one_string_function(
+    bridging_converter: ResponsesConverter,
+):
+    note_tool = {"type": "custom", "name": "note", "format": {"type": "text"}}
+    params = NeMoGymResponseCreateParamsNonStreaming(
+        input="edit app.py", tools=[_SHELL_TOOL, _APPLY_PATCH_TOOL, note_tool], tool_choice="auto"
+    )
+
+    chat = bridging_converter.responses_to_chat_completion_create_params(params)
+
+    assert chat.tools == [
+        {"type": "function", "function": {"name": "shell", "parameters": _SHELL_TOOL["parameters"], "strict": False}},
+        {
+            "type": "function",
+            "function": {
+                "name": "apply_patch",
+                # The tool's own description, how to pass the input, then the grammar the input follows.
+                "description": f"{_APPLY_PATCH_TOOL['description']}\n\n{_INPUT_NOTE}\n\n"
+                f"The input must conform to this lark grammar:\n{_APPLY_PATCH_GRAMMAR}",
+                "parameters": _stand_in_parameters("apply_patch"),
+            },
+        },
+        {
+            "type": "function",
+            "function": {"name": "note", "description": _INPUT_NOTE, "parameters": _stand_in_parameters("note")},
+        },
+    ]
+    assert chat.tool_choice == "auto"
+
+
+@pytest.mark.parametrize(
+    ("tool_choice", "expected"),
+    [
+        ({"type": "custom", "name": "apply_patch"}, {"type": "function", "function": {"name": "apply_patch"}}),
+        (
+            {
+                "type": "allowed_tools",
+                "mode": "required",
+                "tools": [{"type": "custom", "name": "apply_patch"}, {"type": "function", "name": "shell"}],
+            },
+            {
+                "type": "allowed_tools",
+                "allowed_tools": {
+                    "mode": "required",
+                    "tools": [
+                        {"type": "function", "function": {"name": "apply_patch"}},
+                        {"type": "function", "function": {"name": "shell"}},
+                    ],
+                },
+            },
+        ),
+    ],
+    ids=["named_custom", "allowed_tools"],
+)
+def test_custom_tools_as_functions_points_tool_choice_at_the_stand_in_function(
+    bridging_converter: ResponsesConverter, tool_choice: dict, expected: dict
+):
+    params = NeMoGymResponseCreateParamsNonStreaming(
+        input="edit app.py", tools=[_SHELL_TOOL, _APPLY_PATCH_TOOL], tool_choice=tool_choice
+    )
+    chat = bridging_converter.responses_to_chat_completion_create_params(params)
+    assert json.loads(chat.model_dump_json())["tool_choice"] == expected
+
+
+def test_custom_tools_as_functions_replays_custom_tool_calls_as_function_calls(
+    bridging_converter: ResponsesConverter,
+):
+    patch_output = "Success. Updated the following files:\nM app.py\n"
+    params = NeMoGymResponseCreateParamsNonStreaming(
+        input=[
+            {"role": "user", "content": "edit app.py"},
+            {"type": "reasoning", "id": "rs_1", "summary": [{"type": "summary_text", "text": "Patch the greeting."}]},
+            {
+                "type": "custom_tool_call",
+                "call_id": "call_1",
+                "name": "apply_patch",
+                "input": _PATCH,
+                "status": "completed",
+            },
+            {"type": "custom_tool_call_output", "call_id": "call_1", "output": patch_output},
+            {"type": "reasoning", "id": "rs_2", "summary": [{"type": "summary_text", "text": "Run it."}]},
+            {
+                "type": "function_call",
+                "call_id": "call_2",
+                "name": "shell",
+                "arguments": '{"command":"python app.py"}',
+            },
+            {"type": "function_call_output", "call_id": "call_2", "output": "héllo"},
+        ],
+        tools=[_SHELL_TOOL, _APPLY_PATCH_TOOL],
+    )
+
+    chat = bridging_converter.responses_to_chat_completion_create_params(params)
+
+    patch_arguments = json.dumps({"input": _PATCH}, ensure_ascii=False)
+    assert [dict(message) for message in chat.messages] == [
+        {"role": "user", "content": "edit app.py"},
+        {
+            # The replayed reasoning stays on the assistant turn that made the call.
+            "role": "assistant",
+            "content": "<think>Patch the greeting.</think>",
+            "tool_calls": [
+                {"id": "call_1", "type": "function", "function": {"name": "apply_patch", "arguments": patch_arguments}}
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "content": patch_output},
+        {
+            "role": "assistant",
+            "content": "<think>Run it.</think>",
+            "tool_calls": [
+                {
+                    "id": "call_2",
+                    "type": "function",
+                    "function": {"name": "shell", "arguments": '{"command":"python app.py"}'},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_2", "content": "héllo"},
+    ]
+
+
+def test_custom_tools_as_functions_returns_calls_as_custom_tool_calls(bridging_converter: ResponsesConverter):
+    params = NeMoGymResponseCreateParamsNonStreaming(model="m", input="edit", tools=[_SHELL_TOOL, _APPLY_PATCH_TOOL])
+
+    response = bridging_converter.chat_completion_to_response(
+        responses_create_params=params,
+        chat_completion=_tool_call_completion(
+            ("call_1", "apply_patch", json.dumps({"input": _PATCH}, ensure_ascii=False)),
+            ("call_2", "shell", '{"command":"ls"}'),
+        ),
+    )
+
+    custom_call, function_call = response.output
+    assert isinstance(custom_call, NeMoGymResponseCustomToolCall)
+    assert custom_call.model_dump(exclude_none=True) == {
+        "type": "custom_tool_call",
+        "call_id": "call_1",
+        "id": "call_1",
+        "name": "apply_patch",
+        "input": _PATCH,
+        "status": "completed",
+    }
+    assert isinstance(function_call, NeMoGymResponseFunctionToolCall)
+    assert (function_call.name, function_call.arguments) == ("shell", '{"command":"ls"}')
+    # The response echoes the tools as the client sent them.
+    assert [tool.type for tool in response.tools] == ["function", "custom"]
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    ["*** Begin Patch\n*** End Patch", '{"patch": "x"}', '{"input": 3}', '["x"]'],
+    ids=["not_json", "no_input", "non_string_input", "not_an_object"],
+)
+def test_custom_tools_as_functions_passes_malformed_arguments_through_as_the_input(
+    bridging_converter: ResponsesConverter, arguments: str, caplog: pytest.LogCaptureFixture
+):
+    params = NeMoGymResponseCreateParamsNonStreaming(model="m", input="edit", tools=[_APPLY_PATCH_TOOL])
+    with caplog.at_level("WARNING", logger="nemo_gym.responses_converter"):
+        response = bridging_converter.chat_completion_to_response(
+            responses_create_params=params,
+            chat_completion=_tool_call_completion(("call_1", "apply_patch", arguments)),
+        )
+    assert response.output[0].type == "custom_tool_call"
+    assert response.output[0].input == arguments
+    assert "passing its raw arguments as the input" in caplog.text
+
+
+def test_custom_tools_keep_their_existing_conversion_by_default(converter: ResponsesConverter):
+    params = NeMoGymResponseCreateParamsNonStreaming(model="m", input="edit", tools=[_APPLY_PATCH_TOOL])
+    chat = converter.responses_to_chat_completion_create_params(params)
+    assert chat.tools[0]["type"] == "custom"
+
+    response = converter.chat_completion_to_response(
+        responses_create_params=params,
+        chat_completion=_tool_call_completion(("call_1", "apply_patch", '{"input": "x"}')),
+    )
+    assert isinstance(response.output[0], NeMoGymResponseFunctionToolCall)
+
+    replay = NeMoGymResponseCreateParamsNonStreaming(
+        input=[{"type": "custom_tool_call", "call_id": "call_1", "name": "apply_patch", "input": _PATCH}]
+    )
+    with pytest.raises(NotImplementedError, match="'custom_tool_call' has no Chat Completions representation"):
+        converter.responses_to_chat_completion_create_params(replay)
+
+
+def test_custom_tools_as_functions_rejects_a_custom_tool_named_like_a_function(
+    bridging_converter: ResponsesConverter,
+):
+    params = NeMoGymResponseCreateParamsNonStreaming(
+        input="edit", tools=[{**_SHELL_TOOL, "name": "apply_patch"}, _APPLY_PATCH_TOOL]
+    )
+    with pytest.raises(ValueError, match=r"\['apply_patch'\] share a name with a function tool"):
+        bridging_converter.responses_to_chat_completion_create_params(params)
+
+
+def test_custom_tools_as_functions_refuses_token_ids_on_a_custom_tool_call():
+    converter = ResponsesConverter(return_token_id_information=True, custom_tools_as_functions=True)
+    items = converter.postprocess_assistant_message_dict(
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "call_1", "function": {"name": "apply_patch", "arguments": '{"input": "x"}'}}],
+            "prompt_token_ids": [1, 2],
+            "generation_token_ids": [3],
+            "generation_log_probs": [-0.1],
+        }
+    )
+    with pytest.raises(NotImplementedError, match="does not support return_token_id_information"):
+        converter._restore_custom_tool_calls(items, frozenset({"apply_patch"}))

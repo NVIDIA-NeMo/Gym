@@ -292,7 +292,8 @@ class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
             "Drop Responses ``custom`` (free-form) tools from streaming requests instead of converting "
             "them. A backend that expresses function tools only (a vLLM chat route, for example) answers "
             "a request carrying one with 422, and the client retries the whole request. Off by default "
-            "so a backend with free-form tool support keeps them."
+            "so a backend with free-form tool support keeps them. vllm_model's custom_tools_as_functions, "
+            "which converts them to function tools instead, takes precedence."
         ),
     )
     stream_keepalive_s: Optional[float] = Field(
@@ -518,7 +519,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
         cleaned, ns_map = sanitize_streaming_responses_body(
             body,
-            drop_custom_tools=self.config.drop_custom_tools,
+            drop_custom_tools=self._streaming_drops_custom_tools(),
             drop_hosted_tools=self.config.drop_hosted_tools,
         )
         try:
@@ -527,6 +528,14 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             raise RequestValidationError([{**error, "loc": ("body", *error["loc"])} for error in exc.errors()])
 
         return await self._stream_responses(request, params, ns_map)
+
+    def _streaming_drops_custom_tools(self) -> bool:
+        """Whether a streaming request's ``custom`` tools are dropped before ``responses()`` sees them.
+
+        ``drop_custom_tools`` decides. A server that represents custom tools as function tools
+        itself overrides this to keep the tools it converts.
+        """
+        return self.config.drop_custom_tools
 
     async def _stream_responses(
         self, request: Request, params: NeMoGymResponseCreateParamsNonStreaming, ns_map: NamespaceMap
