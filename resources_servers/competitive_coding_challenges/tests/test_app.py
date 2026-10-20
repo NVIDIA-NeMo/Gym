@@ -40,6 +40,7 @@ class _StubCCCEvaluator:
 ccc_eval_stub.CCCEvaluator = _StubCCCEvaluator
 sys.modules.setdefault("ccc_eval", ccc_eval_stub)
 
+from nemo_gym import PARENT_DIR
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 from resources_servers.competitive_coding_challenges.app import (
@@ -146,6 +147,32 @@ def test_setup_webserver_warns_when_shared_dir_is_tmp(
 
     assert "CCC shared_dir is /tmp" in caplog.text
     assert "Set CCC_SHARED_TEMP_DIR to a path mounted into both containers" in caplog.text
+
+
+def test_setup_webserver_resolves_a_benchmark_test_file_from_the_gym_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    # Benchmark configs (benchmarks/ioi/config.yaml) give repo-relative paths; the server runs from its own dir.
+    repo_relative = "resources_servers/competitive_coding_challenges/app.py"
+    monkeypatch.chdir(tmp_path)
+    server = _make_server(test_file=repo_relative)
+    with patch("resources_servers.competitive_coding_challenges.app.CCCEvaluator") as evaluator_cls:
+        server.setup_webserver()
+
+    assert evaluator_cls.call_args.kwargs["config"]["test_file"] == str(PARENT_DIR / repo_relative)
+
+
+def test_setup_webserver_keeps_a_test_file_found_from_the_server_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "test_metadata.jsonl").write_text("{}\n")
+    monkeypatch.chdir(tmp_path)
+    server = _make_server(test_file="data/test_metadata.jsonl")
+    with patch("resources_servers.competitive_coding_challenges.app.CCCEvaluator") as evaluator_cls:
+        server.setup_webserver()
+
+    assert evaluator_cls.call_args.kwargs["config"]["test_file"] == "data/test_metadata.jsonl"
 
 
 def test_setup_webserver_allows_disabling_local_compile_staging() -> None:

@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Literal, Optional
 from fastapi import FastAPI
 from pydantic import ConfigDict, Field, PrivateAttr
 
+from nemo_gym import PARENT_DIR
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
@@ -74,6 +75,17 @@ def _extract_last_assistant_text(body: BaseVerifyRequest) -> str:
         elif isinstance(content, str):
             texts.append(content)
     return "\n".join(texts).strip()
+
+
+def _resolve_test_file(test_file: str) -> str:
+    """Find a relative ``test_file`` from the server dir, or else from the Gym root.
+
+    The server runs from its own directory, but benchmark configs such as ``benchmarks/ioi/config.yaml`` give
+    paths relative to the Gym root.
+    """
+    if os.path.isabs(test_file) or os.path.exists(test_file) or not (PARENT_DIR / test_file).exists():
+        return test_file
+    return str(PARENT_DIR / test_file)
 
 
 class CompetitiveCodingChallengesResourcesServerConfig(BaseResourcesServerConfig):
@@ -295,7 +307,7 @@ class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
 
         self._evaluator = CCCEvaluator(
             config={
-                "test_file": self.config.test_file,
+                "test_file": _resolve_test_file(self.config.test_file),
                 "test_batch_size": self.config.test_batch_size,
                 "time_scale": self.config.time_scale,
                 "shared_dir": self.config.shared_dir,

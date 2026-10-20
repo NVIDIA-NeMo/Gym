@@ -52,10 +52,18 @@ There is no published image — build it from the NeMo-Skills repo:
 
 ```bash
 git clone --depth 1 https://github.com/NVIDIA-NeMo/Skills.git /tmp/NeMo-Skills \
-  && docker build -t nemo-skills-sandbox \
+  && docker build -t nemo-skills-sandbox --build-arg GITHUB_CI=1 \
        -f /tmp/NeMo-Skills/dockerfiles/Dockerfile.sandbox /tmp/NeMo-Skills \
-  && docker run --rm -p 6000:6000 nemo-skills-sandbox
+  && docker run --rm -p 6000:6000 -v /tmp:/tmp nemo-skills-sandbox
 ```
+
+- `--build-arg GITHUB_CI=1` skips the image's SciCode test-data download from
+  Google Drive. CCC does not use that file, and the download fails when the
+  file's Drive quota is used up.
+- `-v /tmp:/tmp` lets the sandbox see the solutions CCC writes to `shared_dir`
+  (default `/tmp`). Without it every compile fails with `cp: cannot stat` and
+  scores 0. If you set `CCC_SHARED_TEMP_DIR`, mount that directory at the same
+  path instead.
 
 The server defaults to `http://127.0.0.1:6000/execute`; override with
 `NEMO_SKILLS_SANDBOX_HOST` / `NEMO_SKILLS_SANDBOX_PORT` if the sandbox is
