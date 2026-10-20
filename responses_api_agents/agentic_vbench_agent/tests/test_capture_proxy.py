@@ -370,6 +370,90 @@ def test_session_date_normalization_preserves_other_system_and_user_context() ->
     assert session_key(outside_before) != session_key(outside_after)
 
 
+@pytest.mark.asyncio
+async def test_task_file_reference_parts_keep_spawn_ownership_and_forwarded_context(tmp_path: Path) -> None:
+    upstream = Upstream()
+    await upstream.start()
+    prompt = "Inspect @/workspace/input.mp4 and report frozen frame ranges."
+    task_call = {
+        "id": "call_task_reference",
+        "type": "function",
+        "function": {"name": "task", "arguments": json.dumps({"prompt": prompt, "subagent_type": "general"})},
+    }
+    served = [
+        completion(0, {"role": "assistant", "content": "", "tool_calls": [task_call]}, "tool_calls"),
+        completion(1, {"role": "assistant", "content": "Frames 10 through 15 are frozen."}, "stop"),
+    ]
+    upstream.responses = list(served)
+    bodies = [
+        {"model": "policy", "messages": [{"role": "user", "content": "Repair the input video"}]},
+        {
+            "model": "policy",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "text",
+                            "text": 'Called the Read tool with the following input: {"filePath":"/workspace"}',
+                        },
+                        {
+                            "type": "text",
+                            "text": "<path>/workspace</path>\n<type>directory</type>\n<entries>input.mp4</entries>",
+                        },
+                    ],
+                }
+            ],
+        },
+    ]
+    original_bodies = json.dumps(bodies, sort_keys=True)
+    proxy = CaptureProxy(advertise_host="127.0.0.1")
+    await proxy.start()
+    try:
+        endpoint = proxy.register("task-reference", upstream.url, tmp_path / "calls")
+        async with aiohttp.ClientSession() as client:
+            for body, expected in zip(bodies, served, strict=True):
+                async with client.post(f"{endpoint}/chat/completions", json=body) as response:
+                    assert response.status == 200
+                    assert await response.json() == expected
+        assert [request[1] for request in upstream.requests] == bodies
+        assert json.dumps(bodies, sort_keys=True) == original_bodies
+        records = load_records(tmp_path / "calls")
+        parent, child = records
+        assert child["spawn_call_id"] == task_call["id"]
+        assert child["parent_session_id"] == parent["session_id"]
+        assert child["session_id"] != parent["session_id"]
+        _, stats = capture_output(records)
+        assert [trace["session_role"] for trace in stats.session_traces] == ["parent", "child"]
+        assert stats.session_traces[1]["spawn_call_id"] == task_call["id"]
+        assert stats.session_traces[1]["response_ids"] == [served[1]["id"]]
+    finally:
+        await proxy.stop()
+        await upstream.runner.cleanup()
+
+
+def test_attachment_text_cannot_supply_task_spawn_identity(tmp_path: Path) -> None:
+    from responses_api_agents.agentic_vbench_agent.capture_proxy import EpisodeRoute, observe_session
+
+    route = EpisodeRoute(upstream="http://u", record_dir=tmp_path)
+    parent = observe_session(route, {"messages": [{"role": "user", "content": "Repair the video"}]})
+    route.task_prompts["Inspect clip A"] = (parent.session_id, "call_task_A")
+    body = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "An unrelated task"},
+                    {"type": "text", "text": "Inspect clip A"},
+                ],
+            }
+        ]
+    }
+    child = observe_session(route, body)
+    assert child.spawn_call_id is None
+
+
 def test_sessions_are_keyed_by_leading_context_and_children_attributed_to_task_calls(tmp_path: Path) -> None:
     from responses_api_agents.agentic_vbench_agent.capture_proxy import (
         EpisodeRoute,

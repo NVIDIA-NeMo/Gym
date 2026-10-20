@@ -329,9 +329,19 @@ def classify_agent(header_agent: str | None, body: dict) -> str | None:
     return None
 
 
-def _first_user_text(body: dict) -> str:
+def _first_user_text(body: dict, *, include_attachments: bool = True) -> str:
+    """Read the opening turn, or its original OpenCode prompt text part."""
     for message in body.get("messages") or []:
         if isinstance(message, dict) and message.get("role") == "user":
+            content = message.get("content")
+            if not include_attachments and isinstance(content, list):
+                # OpenCode appends Read results for file references as separate
+                # text parts. Only the original prompt identifies a Task spawn;
+                # attachment text must never claim another Task's ownership.
+                return next(
+                    (part["text"] for part in content if isinstance(part, dict) and isinstance(part.get("text"), str)),
+                    "",
+                )
             return _message_text(message)
     return ""
 
@@ -435,7 +445,7 @@ def observe_session(route: EpisodeRoute, body: dict, *, agent: str | None = None
     are never changed. New Task prompts retain their explicit spawn identity.
     """
     key = session_key(body)
-    spawn = route.task_prompts.get(_first_user_text(body).strip())
+    spawn = route.task_prompts.get(_first_user_text(body, include_attachments=False).strip())
     is_compaction = (agent or classify_agent(None, body)) == COMPACTION_AGENT
     trace = None
     if is_compaction:
