@@ -27,10 +27,10 @@ output match this dataset's dotted ids: confirmed for real against the existing 
 validated dataset (149/149 rows across all 5 frameworks, pytest/go/jest/mocha/vitest, resolved
 identically to the previous hand-rolled parsers) before this replaced them.
 
-Only ``SUPPORTED_FRAMEWORKS`` are handled -- kept at the same 5 the hand-rolled parsers covered,
-not swe_bench_ext's full ~22, since the other ~15 aren't in ``data/swemer_v2_training.jsonl`` at
-all (this dataset's raw source isn't available locally to test whether they could be added; see
-swemer_v1's README for the sibling dataset where it was).
+Only ``SUPPORTED_FRAMEWORKS`` are handled. The list is the swe_bench_ext-backed one swemer_v1 grades
+(frameworks.FRAMEWORK_CONFIGS minus bazel/jasmine). It started as the 5 the hand-rolled parsers covered
+(pytest/go/jest/mocha/vitest) and was widened on 2026-10-08, when a 2026-10 delivery supplied cargo/junit/
+gtest/ctest/bun/cppunit rows to golden-patch validate the other parsers against.
 """
 
 from __future__ import annotations
@@ -54,7 +54,38 @@ TEST_PATCH_FAILED = "___NEMO_GYM_SWEMER_V2_TEST_PATCH_FAILED___"
 RESULT_FILE_BEGIN = "___NEMO_GYM_SWEMER_V2_RESULT_FILE_BEGIN___"
 RESULT_FILE_END = "___NEMO_GYM_SWEMER_V2_RESULT_FILE_END___"
 
-SUPPORTED_FRAMEWORKS = frozenset({"pytest", "go", "jest", "mocha", "vitest"})
+# The same swe_bench_ext-backed list swemer_v1 grades (frameworks.FRAMEWORK_CONFIGS minus bazel/jasmine).
+# Widened from the original 5 (pytest/go/jest/mocha/vitest) once a delivery with cargo/junit/gtest/ctest rows
+# was available to golden-patch validate the extra parsers against (2026-10-08).
+SUPPORTED_FRAMEWORKS = frozenset(
+    {
+        "pytest",
+        "unittest",
+        "junit",
+        "maven",
+        "gtest",
+        "cargo-nextest",
+        "cargo",
+        "go",
+        "jest",
+        "vitest",
+        "mocha",
+        "bun",
+        "ctest",
+        "cppunit",
+        "bespoke_libgeos",
+        "xctest",
+        "testing",
+        "busted",
+        "luaunit",
+        "telescope",
+        "lust",
+        "minitest",
+        "tap",
+        "tape",
+        "hardhat",
+    }
+)
 
 PASSED = "PASSED"
 

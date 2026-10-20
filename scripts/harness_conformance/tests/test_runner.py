@@ -16,8 +16,8 @@ from scripts.harness_conformance.provider import Probe
 from scripts.harness_conformance.runner import _fingerprint, inspect_episode, main, run_process, run_suite
 from scripts.harness_conformance.scenarios import SCENARIOS
 
-from nemo_gym.base_responses_api_model import build_model_call_record
 from nemo_gym.harness_capabilities.cli import json_rows
+from nemo_gym.observability.model_calls import build_model_call_record
 from nemo_gym.server_utils import ServerClient
 from tests.unit_tests.harness_capabilities.synthetic import evidence_and_witness
 
