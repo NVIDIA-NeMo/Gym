@@ -211,6 +211,39 @@ class TestVerificationFiles:
         assert GRADLE_INIT_PATH in files
 
 
+class TestSeedSessionMavenSettings:
+    """The agent sandbox is created on the same provider as the eval sandbox, so it must honor
+    overwrite_maven_settings too or a read-only ~/.m2/settings.xml still fails every rollout."""
+
+    class _Stop(Exception):
+        pass
+
+    @pytest.mark.parametrize("overwrite", [True, False])
+    async def test_seed_sandbox_follows_config(self, overwrite: bool) -> None:
+        from unittest.mock import AsyncMock
+
+        from nemo_gym.server_utils import SESSION_ID_KEY
+        from resources_servers.swemer_v1.app import SwemerV1ResourcesServer
+
+        create_sandbox = AsyncMock(side_effect=self._Stop)
+        server = SimpleNamespace(
+            config=SimpleNamespace(overwrite_maven_settings=overwrite),
+            _stop_sandbox=AsyncMock(),
+            _create_sandbox=create_sandbox,
+            _session_id_to_sandbox={},
+            _session_id_to_pristine_untracked={},
+            _session_id_to_base_commit={},
+        )
+        with pytest.raises(self._Stop):
+            await SwemerV1ResourcesServer.seed_session(
+                server, SimpleNamespace(session={SESSION_ID_KEY: "s"}), SimpleNamespace()
+            )
+
+        files = create_sandbox.await_args.kwargs["files"]
+        assert (MAVEN_SETTINGS_PATH in files) is overwrite
+        assert GRADLE_INIT_PATH in files
+
+
 class TestGrade:
     def test_resolved_requires_every_target_id_passing(self) -> None:
         statuses = {"a": "PASSED", "b": "PASSED"}
