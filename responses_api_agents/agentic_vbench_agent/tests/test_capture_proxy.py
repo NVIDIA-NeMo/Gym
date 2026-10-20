@@ -491,3 +491,112 @@ def test_sessions_are_keyed_by_leading_context_and_children_attributed_to_task_c
     assert traces[1]["response_ids"] == ["chatcmpl-2"] and traces[1]["spawn_call_id"] == "call_task_1"
     _, stats = capture_output(records[:3])
     assert stats.session_traces == session_traces(records[:3])
+
+
+@pytest.mark.asyncio
+async def test_compaction_and_rewritten_context_keep_task_session_ownership(tmp_path: Path) -> None:
+    from responses_api_agents.agentic_vbench_agent.capture_proxy import session_key, session_traces
+
+    def tool(call_id: str, name: str, arguments: dict) -> dict:
+        return {"id": call_id, "type": "function", "function": {"name": name, "arguments": json.dumps(arguments)}}
+
+    main_user = {"role": "user", "content": "Assemble the video"}
+    main_system = {"role": "system", "content": "You are the main OpenCode agent."}
+    child_user = {"role": "user", "content": "Inspect clip A"}
+    child_system = {"role": "system", "content": "You are a general subagent."}
+    summary_system = {"role": "system", "content": "You are an anchored context summarization assistant."}
+    compact_user = {"role": "user", "content": "Create a new anchored summary from the conversation history above."}
+    rewritten_user = {"role": "user", "content": "What did we do so far?"}
+    tools = [{"type": "function", "function": {"name": "bash", "parameters": {}}}]
+    messages = [
+        {"role": "assistant", "content": "Inspecting inputs.", "tool_calls": [tool("call_main", "bash", {})]},
+        {"role": "assistant", "content": "Main summary: inputs inspected; delegate preparation next."},
+        {
+            "role": "assistant",
+            "content": "Delegate clip inspection.",
+            "tool_calls": [tool("call_task", "task", {"prompt": "Inspect clip A", "subagent_type": "general"})],
+        },
+        {"role": "assistant", "content": "Inspecting clip A.", "tool_calls": [tool("call_child", "bash", {})]},
+        {"role": "assistant", "content": "Child summary: clip A inspected; report its dimensions."},
+        {"role": "assistant", "content": "Clip A is 1280 by 720."},
+        {"role": "assistant", "content": "Integrated and verified the child report."},
+    ]
+    child_tool_result = {"role": "tool", "tool_call_id": "call_child", "content": "1280x720"}
+    main_tool_result = {"role": "tool", "tool_call_id": "call_main", "content": "clip A found"}
+    task_result = {"role": "tool", "tool_call_id": "call_task", "content": messages[5]["content"]}
+    histories = [
+        [main_system, main_user],
+        [summary_system, main_user, messages[0], main_tool_result, compact_user],
+        [main_system, rewritten_user, messages[1]],
+        # Even replaying a parent's summary cannot override an explicit Task spawn.
+        [child_system, child_user, messages[1]],
+        [summary_system, child_user, messages[3], child_tool_result, compact_user],
+        # Deliberately use the same rewritten prefix as the main session. The
+        # actually served summary, not the shared prefix, identifies its owner.
+        [main_system, rewritten_user, messages[4]],
+        [main_system, rewritten_user, messages[1], messages[2], task_result],
+    ]
+    bodies = [
+        {"model": "policy", "messages": history, **({} if i in (1, 4) else {"tools": tools})}
+        for i, history in enumerate(histories)
+    ]
+    served = [completion(i, m, "tool_calls" if m.get("tool_calls") else "stop") for i, m in enumerate(messages)]
+    upstream = Upstream()
+    await upstream.start()
+    upstream.responses = list(served)
+    proxy = CaptureProxy(advertise_host="127.0.0.1")
+    await proxy.start()
+    try:
+        endpoint = proxy.register("compacted-sessions", upstream.url, tmp_path)
+        async with aiohttp.ClientSession() as client:
+            for body, expected in zip(bodies, served):
+                async with client.post(f"{endpoint}/chat/completions", json=body) as response:
+                    assert response.status == 200
+                    assert await response.json() == expected
+        # Neither the model's input history nor its returned completion changes.
+        assert [body for _, body, _ in upstream.requests] == bodies
+    finally:
+        await proxy.stop()
+        await upstream.runner.cleanup()
+
+    records = load_records(tmp_path)
+    main_id, child_id = session_key(bodies[0]), session_key(bodies[3])
+    assert main_id != child_id
+    assert [r["session_id"] for r in records] == [main_id, main_id, main_id, child_id, child_id, child_id, main_id]
+    assert [r["session_role"] for r in records] == ["parent", "parent", "parent", "child", "child", "child", "parent"]
+    for r in records:
+        assert r["spawn_call_id"] == ("call_task" if r["session_role"] == "child" else None)
+        assert r["parent_session_id"] == (main_id if r["session_role"] == "child" else None)
+    traces = session_traces(records)
+    assert len(traces) == 2
+    assert traces[0]["response_ids"] == [served[i]["id"] for i in (0, 1, 2, 6)]
+    assert traces[1]["response_ids"] == [served[i]["id"] for i in (3, 4, 5)]
+    output, stats = capture_output(records)
+    expected = [item for response in served for item in completion_items(response)]
+    assert stats.compaction_summaries == 2
+    assert [output_item_fingerprint(i) for i in output] == [output_item_fingerprint(i) for i in expected]
+
+
+def test_ambiguous_compaction_text_cannot_claim_another_session(tmp_path: Path) -> None:
+    from responses_api_agents.agentic_vbench_agent.capture_proxy import (
+        COMPACTION_AGENT,
+        EpisodeRoute,
+        _remember_session_messages,
+        observe_session,
+    )
+
+    route = EpisodeRoute(upstream="http://u", record_dir=tmp_path)
+    parent_body = {"messages": [{"role": "user", "content": "Main task"}]}
+    parent = observe_session(route, parent_body)
+    route.task_prompts["Child task"] = (parent.session_id, "call_task")
+    child_body = {"messages": [{"role": "user", "content": "Child task"}]}
+    child = observe_session(route, child_body)
+    summary = {"role": "assistant", "content": "The work is complete."}
+    for session in (parent, child):
+        _remember_session_messages(route, session, completion(0, summary, "stop"), agent=COMPACTION_AGENT)
+    # The shared content is ambiguous. Retain the independently known parent
+    # prefix and the child's explicit Task binding, rather than choosing an owner.
+    assert observe_session(route, {"messages": [*parent_body["messages"], summary]}) is parent
+    assert observe_session(route, {"messages": [*child_body["messages"], summary]}) is child
+    compact_child = {"messages": [{"role": "system", "content": "Summary agent"}, *child_body["messages"], summary]}
+    assert observe_session(route, compact_child, agent=COMPACTION_AGENT) is child

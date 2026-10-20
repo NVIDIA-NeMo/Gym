@@ -134,8 +134,13 @@ class EpisodeRoute:
     # context of each request (see ``session_key``). The first session is the
     # parent; a session whose opening user turn repeats the ``prompt`` argument of
     # a ``task`` tool call served earlier in this episode is that call's child.
-    sessions: dict = field(default_factory=dict)
-    task_prompts: dict = field(default_factory=dict)  # prompt text -> (parent session id, tool call id)
+    sessions: dict[str, SessionTrace] = field(default_factory=dict)
+    task_prompts: dict[str, tuple[str, str]] = field(default_factory=dict)
+    # A compaction request changes the system prompt, and its continuation may
+    # replace the opening user turn. Those contexts still belong to the session
+    # whose served history they replay; a changed prefix is not a Task spawn.
+    message_owners: dict[str, set[str]] = field(default_factory=dict)
+    compaction_messages: set[str] = field(default_factory=set)
 
 
 class CaptureProxy:
@@ -253,7 +258,7 @@ class CaptureProxy:
         async with route.lock:
             turn = route.turn
             route.turn += 1
-            session = observe_session(route, body)
+            session = observe_session(route, body, agent=agent)
             async with self._session.post(
                 f"{route.upstream}/v1/chat/completions", json=body, headers=self._upstream_headers(request)
             ) as upstream:
@@ -281,6 +286,7 @@ class CaptureProxy:
                     session.response_ids.append(completion["id"])
                 for call_id, prompt in task_tool_prompts(completion):
                     route.task_prompts[prompt.strip()] = (session.session_id, call_id)
+                _remember_session_messages(route, session, completion, agent=agent)
             else:
                 record["error"] = payload.decode(errors="replace")[:4000]
             (route.record_dir / f"{turn:04d}.json").write_text(json.dumps(record))
@@ -375,18 +381,84 @@ def task_tool_prompts(completion: dict) -> list[tuple[str, str]]:
     return prompts
 
 
-def observe_session(route: EpisodeRoute, body: dict) -> SessionTrace:
-    """Return the session a request belongs to, registering it on first sight."""
+def _message_fingerprints(message: dict) -> list[str]:
+    if message.get("role") != "assistant":
+        return []
+    fingerprints = []
+    text = _message_text(message)
+    if text.strip():
+        fingerprints.append("text:" + hashlib.sha256(text.encode()).hexdigest())
+    for call in message.get("tool_calls") or []:
+        call_id = call.get("id")
+        if isinstance(call_id, str) and call_id:
+            fingerprints.append("call:" + call_id)
+    return fingerprints
+
+
+def _remember_session_messages(
+    route: EpisodeRoute, session: SessionTrace, completion: dict, *, agent: str | None
+) -> None:
+    if agent in IGNORED_AGENTS:
+        return
+    for choice in completion.get("choices") or []:
+        for fingerprint in _message_fingerprints(choice.get("message") or {}):
+            route.message_owners.setdefault(fingerprint, set()).add(session.session_id)
+            if agent == COMPACTION_AGENT:
+                route.compaction_messages.add(fingerprint)
+
+
+def _session_from_history(route: EpisodeRoute, body: dict, *, compaction_only: bool) -> SessionTrace | None:
+    for message in reversed(body.get("messages") or []):
+        if not isinstance(message, dict):
+            continue
+        owners = set()
+        for fingerprint in _message_fingerprints(message):
+            if compaction_only and fingerprint not in route.compaction_messages:
+                continue
+            candidates = route.message_owners.get(fingerprint, set())
+            # Repeated generic replies (or equal summaries) cannot identify a
+            # session. A unique tool-call id can still disambiguate that turn.
+            if len(candidates) == 1:
+                owners.update(candidates)
+        if len(owners) == 1:
+            owner = next(iter(owners))
+            return next(trace for trace in route.sessions.values() if trace.session_id == owner)
+    return None
+
+
+def observe_session(route: EpisodeRoute, body: dict, *, agent: str | None = None) -> SessionTrace:
+    """Resolve Task ownership and preserve it across OpenCode compaction.
+
+    Compaction replays a session's served assistant messages. Its returned
+    summary then identifies that same session when OpenCode rewrites the leading
+    context. Only unambiguous served history is used; requests and completions
+    are never changed. New Task prompts retain their explicit spawn identity.
+    """
     key = session_key(body)
-    trace = route.sessions.get(key)
+    spawn = route.task_prompts.get(_first_user_text(body).strip())
+    is_compaction = (agent or classify_agent(None, body)) == COMPACTION_AGENT
+    trace = None
+    if is_compaction:
+        trace = _session_from_history(route, body, compaction_only=False)
+    elif not spawn:
+        trace = _session_from_history(route, body, compaction_only=True)
+    if trace is None and spawn:
+        parent_id, call_id = spawn
+        trace = next(
+            (s for s in route.sessions.values() if s.parent_session_id == parent_id and s.spawn_call_id == call_id),
+            None,
+        )
+        if trace is None:
+            trace = SessionTrace(session_id=key, role="child", parent_session_id=parent_id, spawn_call_id=call_id)
+    if trace is None:
+        trace = route.sessions.get(key)
     if trace is None:
         if not route.sessions:
             trace = SessionTrace(session_id=key, role="parent")
         else:
-            spawn = route.task_prompts.get(_first_user_text(body).strip())
             parent_id, call_id = spawn if spawn else (next(iter(route.sessions)), None)
             trace = SessionTrace(session_id=key, role="child", parent_session_id=parent_id, spawn_call_id=call_id)
-        route.sessions[key] = trace
+    route.sessions[key] = trace
     return trace
 
 
