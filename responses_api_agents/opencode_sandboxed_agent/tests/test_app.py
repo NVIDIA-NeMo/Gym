@@ -62,6 +62,132 @@ from responses_api_agents.opencode_sandboxed_agent.app import (
 )
 
 
+@mark.parametrize(
+    "inspect",
+    [
+        """Containers:
+  sandbox:
+    State:          Running
+  sidecar:
+    State:          Terminated (exit=137, reason=OOMKilled)
+""",
+        """Containers:
+  sandbox:
+    State:          Running
+
+Init Containers:
+  execd-installer:
+    State:          Terminated (exit=137, reason=OOMKilled)
+""",
+        """Containers:
+  sandbox:
+    State:          Terminated (exit=137, reason=ContainerFailed)
+""",
+        """Containers:
+  sandbox:
+    State:          Terminated (exit=0, reason=OOMKilled)
+""",
+        """Containers:
+  sandbox:
+    State:          Waiting (exit=137, reason=OOMKilled)
+""",
+        """Containers:
+  sandbox:
+    State:          Terminated (exit=137, reason=OOMKilled)
+    State:          Running
+""",
+        """Containers:
+  sandbox:
+    State:          Terminated (exit=137, reason=OOMKilled)
+  sandbox:
+    State:          Terminated (exit=137, reason=OOMKilled)
+""",
+        """Containers:
+  sandbox:
+    State:          Terminated (exit=137, reason=OOMKilled)
+
+Containers:
+  sandbox:
+    State:          Running
+""",
+    ],
+)
+def test_deepswe_oom_inspect_rejects_other_containers_and_ambiguous_sandbox_state(inspect: str) -> None:
+    assert app_module._inspect_deepswe_agent_oom(inspect) is False
+
+
+def test_deepswe_oom_inspect_accepts_only_current_sandbox_container() -> None:
+    inspect = """Pod Name: example-0
+Phase:          Running
+
+Containers:
+  sandbox:
+    Ready:          False
+    State:          Terminated (exit=137, reason=OOMKilled)
+  sidecar:
+    State:          Terminated (exit=0, reason=Completed)
+
+Init Containers:
+  execd-installer:
+    State:          Terminated (exit=0, reason=Completed)
+
+Resources:
+  sandbox:
+    Limits:        {'memory': '256Mi'}
+"""
+    assert app_module._inspect_deepswe_agent_oom(inspect) is True
+
+
+@mark.parametrize(
+    ("status", "inspect", "confirmed"),
+    [
+        (200, "Containers:\n  sandbox:\n    State: Terminated (exit=137, reason=OOMKilled)\n", True),
+        (
+            200,
+            "Containers:\n  sandbox:\n    State: Running\n  sidecar:\n"
+            "    State: Terminated (exit=137, reason=OOMKilled)\n",
+            False,
+        ),
+        (503, "Containers:\n  sandbox:\n    State: Terminated (exit=137, reason=OOMKilled)\n", False),
+    ],
+    ids=["confirmed", "sidecar-only", "inspect-unavailable"],
+)
+async def test_deepswe_oom_inspect_uses_authenticated_current_sandbox(
+    monkeypatch: MonkeyPatch, status: int, inspect: str, confirmed: bool
+) -> None:
+    connection = MagicMock()
+    connection.get_base_url.return_value = "http://sandbox-control/v1"
+    connection.get_api_key.return_value = "smoke-key"
+    sandbox = MagicMock()
+    sandbox._handle = SandboxHandle(
+        sandbox_id="current-sandbox", provider_name="opensandbox", raw=SimpleNamespace(connection_config=connection)
+    )
+    response = MagicMock(status=status)
+    response.__aenter__ = AsyncMock(return_value=response)
+    response.__aexit__ = AsyncMock(return_value=None)
+    response.content.read = AsyncMock(return_value=inspect.encode())
+    request = AsyncMock(return_value=response)
+    monkeypatch.setattr(app_module.server_utils, "request", request)
+
+    result = await app_module._confirmed_deepswe_agent_oom(sandbox)
+
+    assert result == (
+        ("current-sandbox", "sandbox State: Terminated (exit=137, reason=OOMKilled)") if confirmed else None
+    )
+    request.assert_awaited_once()
+    assert request.await_args.args == (
+        "GET",
+        "http://sandbox-control/v1/sandboxes/current-sandbox/diagnostics/inspect",
+    )
+    assert request.await_args.kwargs["headers"] == {"OPEN-SANDBOX-API-KEY": "smoke-key"}
+    assert request.await_args.kwargs["_control"] is True
+    assert request.await_args.kwargs["_max_num_tries"] == 1
+    if status == 200:
+        response.content.read.assert_awaited_once_with(65537)
+    else:
+        response.content.read.assert_not_awaited()
+
+
 class TestOpenCodeSandboxedAgent:
     def test_import_only_loads_shared_opencode_modules(self) -> None:
         code = (
@@ -1204,6 +1330,189 @@ async def test_export_failure_returns_empty_failed_response(tmp_path, failure):
         assert not (tmp_path / "session" / "export.json").exists()
     if failure in ("exception", "command"):
         sandbox.download.assert_not_awaited()
+
+
+async def test_deepswe_confirmed_agent_oom_retains_visible_evidence_and_skips_export(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    config = TestOpenCodeSandboxedAgent()._create_config()
+    config.artifacts_dir = str(tmp_path)
+    config.score_agent_sandbox_oom_as_zero = True
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = {"observability_enabled": False}
+    server = OpenCodeSandboxedAgent(config=config, server_client=client)
+    sandbox = MagicMock(
+        exec=AsyncMock(
+            side_effect=[
+                SimpleNamespace(stdout="Installed OpenCode", stderr="", return_code=0, error_type=None),
+                RuntimeError("agent sandbox disconnected"),
+            ]
+        ),
+        upload=AsyncMock(),
+        download=AsyncMock(),
+    )
+    server._sandbox_id_to_sandbox = {"seeded-sandbox": sandbox}
+    server._create_opencode_config = AsyncMock(return_value={})
+    inspect = AsyncMock(return_value=("seeded-sandbox", "sandbox State: Terminated (exit=137, reason=OOMKilled)"))
+    monkeypatch.setattr(app_module, "_confirmed_deepswe_agent_oom", inspect)
+    request = MagicMock(
+        cookies={"sandbox_id": "seeded-sandbox"},
+        session={SESSION_ID_KEY: "trial"},
+        path_params={},
+        state=SimpleNamespace(),
+    )
+
+    response = await server.responses(
+        request,
+        NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}]),
+    )
+
+    assert response.output == []
+    assert response.status == "failed"
+    assert json.loads(response.metadata["deepswe_agent_sandbox_oom"]) == {
+        "sandbox_id": "seeded-sandbox",
+        "evidence": "sandbox State: Terminated (exit=137, reason=OOMKilled)",
+    }
+    run_result = server._sandbox_id_to_run_result["seeded-sandbox"]
+    assert run_result["opencode_failed"] is True
+    assert run_result["opencode_export_found"] is False
+    assert run_result["opencode_error_type"] == "RuntimeError"
+    assert run_result["opencode_results_fpath"] == ""
+    observations = run_result["_ng_agent_observations"].records
+    assert [(record.role, record.outcome, record.provider, record.sandbox_id) for record in observations] == [
+        ("agent", "oom", "opensandbox", "seeded-sandbox")
+    ]
+    assert sandbox.exec.await_count == 2
+    assert "opencode run" not in sandbox.exec.await_args_list[0].kwargs["command"]
+    assert "opencode run" in sandbox.exec.await_args_list[1].kwargs["command"]
+    inspect.assert_awaited_once_with(sandbox)
+    sandbox.download.assert_not_awaited()
+
+
+async def test_deepswe_agent_exit_137_requires_and_retains_confirmed_oom(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    config = TestOpenCodeSandboxedAgent()._create_config()
+    config.artifacts_dir = str(tmp_path)
+    config.score_agent_sandbox_oom_as_zero = True
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = {"observability_enabled": False}
+    server = OpenCodeSandboxedAgent(config=config, server_client=client)
+    sandbox = MagicMock(
+        exec=AsyncMock(
+            side_effect=[
+                SimpleNamespace(stdout="Installed OpenCode", stderr="", return_code=0, error_type=None),
+                SimpleNamespace(stdout="agent output", stderr="Killed", return_code=137, error_type=None),
+            ]
+        ),
+        upload=AsyncMock(),
+        download=AsyncMock(),
+    )
+    server._sandbox_id_to_sandbox = {"seeded-sandbox": sandbox}
+    server._create_opencode_config = AsyncMock(return_value={})
+    inspect = AsyncMock(return_value=("seeded-sandbox", "sandbox State: Terminated (exit=137, reason=OOMKilled)"))
+    monkeypatch.setattr(app_module, "_confirmed_deepswe_agent_oom", inspect)
+
+    response = await server.responses(
+        MagicMock(
+            cookies={"sandbox_id": "seeded-sandbox"},
+            session={SESSION_ID_KEY: "trial"},
+            path_params={},
+            state=SimpleNamespace(),
+        ),
+        NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}]),
+    )
+
+    assert response.status == "failed"
+    assert response.output == []
+    assert json.loads(response.metadata["deepswe_agent_sandbox_oom"])["sandbox_id"] == "seeded-sandbox"
+    run_result = server._sandbox_id_to_run_result["seeded-sandbox"]
+    assert run_result["opencode_exit_code"] == 137
+    assert run_result["opencode_error_type"] == "OOMKilled"
+    assert run_result["opencode_run_stdout"] == "agent output"
+    assert "sandbox State: Terminated (exit=137, reason=OOMKilled)" in run_result["opencode_run_stderr"]
+    inspect.assert_awaited_once_with(sandbox)
+    sandbox.download.assert_not_awaited()
+
+
+async def test_deepswe_setup_failure_is_not_scored_as_agent_oom(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+    config = TestOpenCodeSandboxedAgent()._create_config()
+    config.artifacts_dir = str(tmp_path)
+    config.score_agent_sandbox_oom_as_zero = True
+    server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    sandbox = MagicMock(exec=AsyncMock(side_effect=RuntimeError("setup failed")), upload=AsyncMock())
+    server._sandbox_id_to_sandbox = {"seeded-sandbox": sandbox}
+    server._create_opencode_config = AsyncMock(return_value={})
+    inspect = AsyncMock(return_value=("seeded-sandbox", "sandbox State: Terminated (exit=137, reason=OOMKilled)"))
+    monkeypatch.setattr(app_module, "_confirmed_deepswe_agent_oom", inspect)
+
+    with raises(RuntimeError, match="setup failed"):
+        await server.responses(
+            MagicMock(
+                cookies={"sandbox_id": "seeded-sandbox"},
+                session={SESSION_ID_KEY: "trial"},
+                path_params={},
+                state=SimpleNamespace(),
+            ),
+            NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}]),
+        )
+
+    inspect.assert_not_awaited()
+    assert sandbox.exec.await_count == 1
+    assert "opencode run" not in sandbox.exec.await_args.kwargs["command"]
+    assert server._sandbox_id_to_run_result == {}
+
+
+@mark.parametrize("agent_exit", [False, True], ids=["exception", "exit-137"])
+async def test_deepswe_unconfirmed_agent_failure_keeps_existing_failure_path(
+    monkeypatch: MonkeyPatch, tmp_path: Path, agent_exit: bool
+) -> None:
+    config = TestOpenCodeSandboxedAgent()._create_config()
+    config.artifacts_dir = str(tmp_path)
+    config.score_agent_sandbox_oom_as_zero = True
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = {"observability_enabled": False}
+    server = OpenCodeSandboxedAgent(config=config, server_client=client)
+    failed_agent_result = (
+        SimpleNamespace(stdout="", stderr="Killed", return_code=137, error_type=None)
+        if agent_exit
+        else RuntimeError("agent sandbox disconnected")
+    )
+    sandbox = MagicMock(
+        exec=AsyncMock(
+            side_effect=[
+                SimpleNamespace(stdout="Installed OpenCode", stderr="", return_code=0, error_type=None),
+                failed_agent_result,
+                OSError("export unavailable"),
+            ]
+        ),
+        upload=AsyncMock(),
+        download=AsyncMock(),
+    )
+    server._sandbox_id_to_sandbox = {"seeded-sandbox": sandbox}
+    server._create_opencode_config = AsyncMock(return_value={})
+    inspect = AsyncMock(return_value=None)
+    monkeypatch.setattr(app_module, "_confirmed_deepswe_agent_oom", inspect)
+
+    response = await server.responses(
+        MagicMock(
+            cookies={"sandbox_id": "seeded-sandbox"},
+            session={SESSION_ID_KEY: "trial"},
+            path_params={},
+            state=SimpleNamespace(),
+        ),
+        NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}]),
+    )
+
+    assert response.output == []
+    assert not response.metadata or "deepswe_agent_sandbox_oom" not in response.metadata
+    run_result = server._sandbox_id_to_run_result["seeded-sandbox"]
+    assert run_result["opencode_failed"] is True
+    assert run_result["opencode_error_type"] == (None if agent_exit else "RuntimeError")
+    assert run_result["opencode_exit_code"] == (137 if agent_exit else None)
+    assert run_result["opencode_export_found"] is False
+    inspect.assert_awaited_once_with(sandbox)
+    sandbox.download.assert_not_awaited()
 
 
 async def test_required_mcp_failure_is_not_exported_or_scored(monkeypatch):

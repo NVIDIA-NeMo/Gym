@@ -15,6 +15,7 @@
 
 import asyncio
 import json
+import re
 import sqlite3
 import sys
 from asyncio import Semaphore
@@ -25,13 +26,16 @@ from shlex import quote
 from time import time
 from traceback import format_exc
 from typing import Any, Dict, List, Literal, Optional
+from urllib.parse import quote as url_quote
 from uuid import uuid4
 
+import aiohttp
 from anyio import CancelScope
 from fastapi import Request
 from openai.types.responses import ResponseInputTextParam
 from pydantic import ConfigDict, Field, FilePath
 
+from nemo_gym import server_utils
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
@@ -92,6 +96,69 @@ from responses_api_agents.opencode_agent.runtime import (
 
 
 _REMOTE_ASSISTANT_MESSAGE_PLUGIN = "/tmp/nemo-gym-opencode-assistant-message-header.js"
+_DEEPSWE_OOM_METADATA_KEY = "deepswe_agent_sandbox_oom"
+_DEEPSWE_OOM_EVIDENCE = "sandbox State: Terminated (exit=137, reason=OOMKilled)"
+
+
+def _inspect_deepswe_agent_oom(inspect: str) -> bool:
+    """Accept only a terminated OOMKilled user container, never an init container or sidecar."""
+    lines = inspect.splitlines()
+    if lines.count("Containers:") != 1:
+        return False
+    in_containers = False
+    container: str | None = None
+    sandbox_sections = 0
+    sandbox_states: list[str] = []
+    for line in lines:
+        if line == "Containers:":
+            in_containers = True
+            container = None
+        elif in_containers and line and not line.startswith(" "):
+            in_containers = False
+        elif in_containers:
+            header = re.fullmatch(r"  ([^:\s]+):", line)
+            if header is not None:
+                container = header.group(1)
+                if container == "sandbox":
+                    sandbox_sections += 1
+            elif container == "sandbox" and (state := re.fullmatch(r"    State:\s+(.+)", line)):
+                sandbox_states.append(state.group(1))
+    return sandbox_sections == 1 and sandbox_states == ["Terminated (exit=137, reason=OOMKilled)"]
+
+
+async def _confirmed_deepswe_agent_oom(sandbox: AsyncSandbox) -> tuple[str, str] | None:
+    """Use the current OpenSandbox inspect endpoint only for this opt-in DeepSWE workaround."""
+    handle = getattr(sandbox, "_handle", None)
+    if handle is None or getattr(handle, "provider_name", None) != "opensandbox":
+        return None
+    sandbox_id = getattr(handle, "sandbox_id", None)
+    connection = getattr(getattr(handle, "raw", None), "connection_config", None)
+    if not isinstance(sandbox_id, str) or not sandbox_id or connection is None:
+        return None
+    try:
+        url = f"{connection.get_base_url().rstrip('/')}/sandboxes/{url_quote(sandbox_id, safe='')}/diagnostics/inspect"
+        api_key = connection.get_api_key()
+        headers = {"OPEN-SANDBOX-API-KEY": api_key} if api_key else {}
+        response = await server_utils.request(
+            "GET",
+            url,
+            _control=True,
+            _max_num_tries=1,
+            _server_name="opensandbox_control_plane",
+            headers=headers,
+            ssl=getattr(getattr(getattr(sandbox, "_provider", None), "_connection", None), "tls_verify", False),
+            timeout=aiohttp.ClientTimeout(total=2.0),
+        )
+        async with response:
+            if response.status != 200:
+                return None
+            body = await response.content.read(65537)
+    except Exception:
+        print("DeepSWE OOM inspect unavailable; preserving the original agent error", format_exc(), file=sys.stderr)
+        return None
+    if len(body) > 65536 or not _inspect_deepswe_agent_oom(body.decode("utf-8", errors="replace")):
+        return None
+    return sandbox_id, _DEEPSWE_OOM_EVIDENCE
 
 
 def _load_json(value: Any) -> dict[str, Any]:
@@ -443,6 +510,7 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     concurrency: Optional[int] = Field(default=None)
     preinstalled_opencode: bool = False
     execution_failure_reward_zero: bool = False
+    score_agent_sandbox_oom_as_zero: bool = False
     output_token_policy: Literal["fixed", "remaining_context"] = "fixed"
     network_access: Literal["inherit", "model_only", "model_and_tools"] = "inherit"
     tool_servers: List[ResourcesServerRef] = Field(default_factory=list)
@@ -873,15 +941,17 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         # and there is no way to set it to null.
         # Here, we set an exorbitantly high number that cannot ever be reached.
         # In future versions of OpenCode, this can be directly passed via maxOutputTokens in the limit config above https://github.com/anomalyco/opencode/blob/1b18a50418f730aca32630ccfcde850f2b5fc360/packages/opencode/src/provider/transform.ts#L1418
-        command = f"""
+        setup_command = f"""
         echo "Shell: $SHELL" \
         && {install_str} \
         {ripgrep_install_str} \
         && export PATH="$HOME/.opencode/bin:$PATH" \
         && test "$(opencode --version)" = {quote(self.config.opencode_version)} \
         && echo "Installed OpenCode" \
-        && rm -f /tmp/nemo-gym-mcp-setup-error \
-        && NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps([s.name for s in self.config.tool_servers]))} OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} \
+        && rm -f /tmp/nemo-gym-mcp-setup-error
+        """
+        agent_command = f"""
+        NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps([s.name for s in self.config.tool_servers]))} OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} \
             opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str} -- {quote(query)} \
         && echo "OpenCode run finished"
         """
@@ -891,6 +961,14 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         if ripgrep_remote_path is not None:
             await sandbox.upload(self.config.local_ripgrep_binary_path, ripgrep_remote_path)
+
+        if self.config.score_agent_sandbox_oom_as_zero:
+            setup_result = await sandbox.exec(command=setup_command, timeout_s=self.config.sandbox_timeout)
+            if setup_result.return_code != 0 or setup_result.error_type is not None:
+                raise RuntimeError(f"OpenCode setup failed before agent execution: {setup_result}")
+            command = f'export PATH="$HOME/.opencode/bin:$PATH" && {agent_command.strip()}'
+        else:
+            command = f"{setup_command.strip()} && {agent_command.strip()}"
 
         run_error_type = None
         try:
@@ -902,6 +980,60 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             result = None
             run_error_type = type(exc).__name__
             print("OpenCode exec hit error.", format_exc(), file=sys.stderr)
+
+        # Exit 137 alone is ambiguous; the current sandbox container must also report OOMKilled.
+        confirmed_oom = (
+            await _confirmed_deepswe_agent_oom(sandbox)
+            if self.config.score_agent_sandbox_oom_as_zero
+            and (result is None or result.return_code != 0 or result.error_type is not None)
+            else None
+        )
+        if confirmed_oom is not None:
+            sandbox_id, evidence = confirmed_oom
+            observations = AgentObservationBundle(
+                source="opencode",
+                records=(
+                    [AgentInvocation(invocation_id=observation_invocation_id, status="failed")]
+                    if observation_invocation_id is not None
+                    else []
+                )
+                + [
+                    SandboxObservation(
+                        role="agent",
+                        provider="opensandbox",
+                        sandbox_id=sandbox_id,
+                        outcome="oom",
+                        exit_code=137,
+                        error_type="OOMKilled",
+                    )
+                ],
+                gaps=[ObservationGap(code="agent_transcript_unavailable")],
+            )
+            self._sandbox_id_to_run_result[request.cookies["sandbox_id"]] = {
+                "opencode_failed": True,
+                "opencode_exit_code": result.return_code if result is not None else None,
+                "opencode_error_type": run_error_type
+                or (result.error_type if result is not None else None)
+                or "OOMKilled",
+                "opencode_results_fpath": "",
+                "opencode_run_stdout": result.stdout or "" if result is not None else "",
+                "opencode_run_stderr": f"{(result.stderr or '') if result is not None else run_error_type or ''}\n{evidence}",
+                "opencode_export_found": False,
+                "opencode_finished": False,
+                "_ng_agent_observations": observations,
+            }
+            return NeMoGymResponse(
+                id=f"resp_{uuid4().hex}",
+                created_at=int(time()),
+                model=body.model or self.config.model_server.name,
+                object="response",
+                output=[],
+                status="failed",
+                tool_choice=body.tool_choice,
+                tools=body.tools,
+                parallel_tool_calls=body.parallel_tool_calls,
+                metadata={_DEEPSWE_OOM_METADATA_KEY: json.dumps({"sandbox_id": sandbox_id, "evidence": evidence})},
+            )
 
         if self.config.debug and result:
             print("OpenCode install and run stdout:\n", result.stdout, file=sys.stderr)
@@ -1161,7 +1293,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 response,
                 cookies,
                 force_zero_reward=self.config.execution_failure_reward_zero
-                and run_result.get("opencode_failed", False),
+                and run_result.get("opencode_failed", False)
+                and _DEEPSWE_OOM_METADATA_KEY not in (response.metadata or {}),
             )
         finally:
             del request.state._ng_observation_invocation_id

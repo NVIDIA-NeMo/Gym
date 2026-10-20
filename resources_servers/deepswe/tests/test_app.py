@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -9,6 +10,7 @@ from pytest import MonkeyPatch
 
 import resources_servers.deepswe.app as app_module
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.failure_kinds import PROVIDER_OOM_KILLED
 from nemo_gym.sandbox import SandboxResources
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.deepswe.app import (
@@ -30,6 +32,7 @@ def _config(
     tasks_dir: Path,
     *,
     golden: bool = True,
+    score_agent_sandbox_oom_as_zero: bool = False,
 ) -> DeepSWEResourcesServerConfig:
     return DeepSWEResourcesServerConfig(
         host="0.0.0.0",
@@ -39,6 +42,7 @@ def _config(
         tasks_dir=tasks_dir,
         expected_task_count=1,
         is_verifying_golden_patch=golden,
+        score_agent_sandbox_oom_as_zero=score_agent_sandbox_oom_as_zero,
         sandbox_provider="test",
         sandbox_config={},
     )
@@ -61,6 +65,17 @@ def _request() -> dict:
             "tools": [],
         },
     }
+
+
+AGENT_OOM_EVIDENCE = "sandbox State: Terminated (exit=137, reason=OOMKilled)"
+
+
+def _agent_oom_request(*, sandbox_id: str = "agent-sandbox") -> dict:
+    body = _request()
+    body["response"]["metadata"] = {
+        "deepswe_agent_sandbox_oom": json.dumps({"sandbox_id": sandbox_id, "evidence": AGENT_OOM_EVIDENCE})
+    }
+    return body
 
 
 def test_model_endpoint_is_the_only_added_egress_target(
@@ -257,6 +272,127 @@ async def test_rollout_collects_committed_patch_and_verifies_in_fresh_sandbox(
     agent_sandbox.stop.assert_awaited_once()
     verifier_sandbox.stop.assert_awaited_once()
     assert server._agent_sessions == {}
+
+
+async def test_agent_sandbox_oom_is_an_unmasked_zero_without_patch_collection_or_verifier(
+    task_assets: Path, monkeypatch: MonkeyPatch
+) -> None:
+    server = DeepSWEResourcesServer(
+        config=_config(task_assets, golden=False, score_agent_sandbox_oom_as_zero=True),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    agent_sandbox = AsyncMock()
+    agent_sandbox.serialize.return_value = {"sandbox_id": "agent-sandbox"}
+    create_sandbox = AsyncMock(return_value=agent_sandbox)
+    collect_model_patch = AsyncMock()
+    run_verifier = AsyncMock()
+    monkeypatch.setattr(server, "_create_sandbox", create_sandbox)
+    monkeypatch.setattr(server, "_collect_model_patch", collect_model_patch)
+    monkeypatch.setattr(server, "_run_verifier", run_verifier)
+    request = MagicMock()
+    request.session = {SESSION_ID_KEY: "test-session"}
+
+    await server.seed_session(request, DeepSWESeedSessionRequest.model_validate(_request()))
+    response = await server.verify(request, DeepSWEVerifyRequest.model_validate(_agent_oom_request()))
+
+    assert response.reward == 0.0
+    assert response.mask_sample is False
+    assert response.evaluation_completed is False
+    assert response.failure_kind == PROVIDER_OOM_KILLED
+    assert AGENT_OOM_EVIDENCE in (response.failure_reason or "")
+    assert response.model_patch_bytes == 0
+    assert response.response.metadata["deepswe_agent_sandbox_oom"] == json.dumps(
+        {"sandbox_id": "agent-sandbox", "evidence": AGENT_OOM_EVIDENCE}
+    )
+    create_sandbox.assert_awaited_once()
+    collect_model_patch.assert_not_awaited()
+    run_verifier.assert_not_awaited()
+    agent_sandbox.stop.assert_awaited_once()
+    assert server._agent_sessions == {}
+
+
+async def test_agent_sandbox_oom_requires_matching_seeded_sandbox(task_assets: Path, monkeypatch: MonkeyPatch) -> None:
+    server = DeepSWEResourcesServer(
+        config=_config(task_assets, golden=False, score_agent_sandbox_oom_as_zero=True),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    agent_sandbox = AsyncMock()
+    agent_sandbox.serialize.return_value = {"sandbox_id": "agent-sandbox"}
+    collect_model_patch = AsyncMock()
+    run_verifier = AsyncMock()
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=agent_sandbox))
+    monkeypatch.setattr(server, "_collect_model_patch", collect_model_patch)
+    monkeypatch.setattr(server, "_run_verifier", run_verifier)
+    request = MagicMock()
+    request.session = {SESSION_ID_KEY: "test-session"}
+    await server.seed_session(request, DeepSWESeedSessionRequest.model_validate(_request()))
+
+    with pytest.raises(ValueError, match="sandbox"):
+        await server.verify(request, DeepSWEVerifyRequest.model_validate(_agent_oom_request(sandbox_id="other")))
+
+    collect_model_patch.assert_not_awaited()
+    run_verifier.assert_not_awaited()
+    agent_sandbox.stop.assert_awaited_once()
+
+
+async def test_agent_sandbox_oom_requires_explicit_scoring_policy(task_assets: Path) -> None:
+    server = DeepSWEResourcesServer(
+        config=_config(task_assets, golden=False),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    request = MagicMock()
+    request.session = {SESSION_ID_KEY: "test-session"}
+
+    with pytest.raises(ValueError, match="disabled"):
+        await server.verify(request, DeepSWEVerifyRequest.model_validate(_agent_oom_request()))
+
+
+async def test_agent_sandbox_oom_rejects_non_oom_inspect_evidence(task_assets: Path) -> None:
+    server = DeepSWEResourcesServer(
+        config=_config(task_assets, golden=False, score_agent_sandbox_oom_as_zero=True),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    request = MagicMock()
+    request.session = {SESSION_ID_KEY: "test-session"}
+    body = _agent_oom_request()
+    body["response"]["metadata"]["deepswe_agent_sandbox_oom"] = json.dumps(
+        {"sandbox_id": "agent-sandbox", "evidence": "sandbox State: Terminated (exit=137, reason=Error)"}
+    )
+
+    with pytest.raises(ValueError, match="Invalid DeepSWE agent sandbox OOM marker"):
+        await server.verify(request, DeepSWEVerifyRequest.model_validate(body))
+
+
+async def test_agent_sandbox_oom_cannot_override_nonempty_agent_output(task_assets: Path) -> None:
+    server = DeepSWEResourcesServer(
+        config=_config(task_assets, golden=False, score_agent_sandbox_oom_as_zero=True),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    request = MagicMock()
+    request.session = {SESSION_ID_KEY: "test-session"}
+    body = _agent_oom_request()
+    body["response"]["output"] = [
+        {"id": "agent-message", "type": "message", "content": [{"type": "output_text", "text": "answer"}]}
+    ]
+
+    with pytest.raises(ValueError, match="empty"):
+        await server.verify(request, DeepSWEVerifyRequest.model_validate(body))
+
+
+async def test_agent_sandbox_oom_cannot_grade_golden_patch(task_assets: Path, monkeypatch: MonkeyPatch) -> None:
+    server = DeepSWEResourcesServer(
+        config=_config(task_assets, golden=True, score_agent_sandbox_oom_as_zero=True),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    request = MagicMock()
+    request.session = {SESSION_ID_KEY: "golden"}
+    create_sandbox = AsyncMock()
+    monkeypatch.setattr(server, "_create_sandbox", create_sandbox)
+
+    with pytest.raises(ValueError, match="non-golden"):
+        await server.verify(request, DeepSWEVerifyRequest.model_validate(_agent_oom_request()))
+
+    create_sandbox.assert_not_awaited()
 
 
 async def test_collect_model_patch_executes_upstream_hook(task_assets: Path) -> None:

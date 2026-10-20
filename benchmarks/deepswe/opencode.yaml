@@ -9,6 +9,7 @@ deepswe_opencode_resources_server:
   _inherit_from: deepswe_resources_server
   resources_servers:
     deepswe:
+      score_agent_sandbox_oom_as_zero: true
       sandbox_model_server:
         type: responses_api_models
         name: policy_model
@@ -18,6 +19,7 @@ deepswe_opencode_sandboxed_agent:
   responses_api_agents:
     opencode_sandboxed_agent:
       sandbox_timeout: 10800  # DeepSWE agent timeout override: 3 hours.
+      score_agent_sandbox_oom_as_zero: true
 
       resources_server:
         type: resources_servers
