@@ -271,15 +271,18 @@ kubectl get pods -l nemo-gym.nvidia.com/cluster=my-slurm-cluster
 ```
 
 Each field resolves in order: the provider's `attribution` config, then `NEMO_GYM_TEAM` /
-`NEMO_GYM_USER` / `NEMO_GYM_WORKLOAD` / `NEMO_GYM_CLUSTER` environment variables, then Slurm job
-environment variables (`SLURM_JOB_ACCOUNT` / `SLURM_JOB_USER` / `SLURM_JOB_NAME` /
-`SLURM_CLUSTER_NAME`). Slurm sets `SLURM_CLUSTER_NAME` in every job, so sandboxes created
-from a Slurm job are labeled with the Slurm cluster that created them without extra configuration. `user` additionally
+`NEMO_GYM_USER` / `NEMO_GYM_WORKLOAD` environment variables, then Slurm job environment
+variables (`SLURM_JOB_ACCOUNT` / `SLURM_JOB_USER` / `SLURM_JOB_NAME`). `user` additionally
 falls back to the OS login name (`root` is ignored — containers run as root by default, so
 it would attribute the image, not a person), and `workload` to `NEMO_GYM_CONFIG_PATH`, the
 server instance name the gym CLI sets on every server process it spawns. Fields that cannot
 be resolved are omitted. Explicit `sandbox_spec.metadata` and `default_metadata` keys always
 take precedence over attribution keys.
+
+`cluster` names the cluster that creates the sandboxes. Set `attribution.cluster` in the
+provider config; when it is unset, it defaults to `SLURM_CLUSTER_NAME`, which Slurm sets in
+every job. Runs outside Slurm, such as a Kubernetes driver pod, get no `cluster` label unless
+they set it.
 
 `run` identifies one launch of the creating process: `NEMO_GYM_RUN_ID` if set, else an id
 generated per process. The resolved attribution is logged once at the first sandbox create —
@@ -300,7 +303,7 @@ sandbox:
       # team: my-team                     # override auto-detection
       # user: my-user
       # workload: my-benchmark
-      # cluster: my-slurm-cluster
+      # cluster: my-cluster               # defaults to SLURM_CLUSTER_NAME when unset
       # run: my-run-id
 ```
 

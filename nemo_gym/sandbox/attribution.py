@@ -16,12 +16,14 @@
 
 Sandbox providers merge these keys into every sandbox's metadata so cluster
 operators can attribute running sandboxes to the team, user, workload, and
-cluster (for example, the Slurm cluster) that created them (on OpenSandbox, metadata becomes queryable Kubernetes labels on
-the sandbox). Each field resolves from explicit configuration first, then
-``NEMO_GYM_*`` environment variables, then Slurm job environment variables,
-then (for ``user`` only) the OS login name and (for ``workload``) the server
-instance's config path. Fields that cannot be resolved are omitted rather than
-guessed.
+cluster that created them (on OpenSandbox, metadata becomes queryable
+Kubernetes labels on the sandbox). Each field resolves from explicit
+configuration first, then ``NEMO_GYM_*`` environment variables, then Slurm job
+environment variables, then (for ``user`` only) the OS login name and (for
+``workload``) the server instance's config path. ``cluster`` has no
+``NEMO_GYM_*`` variable: it comes from configuration and defaults to the Slurm
+cluster name, so runs outside Slurm must configure it. Fields that cannot be
+resolved are omitted rather than guessed.
 
 ``run`` identifies one launch of the creating process so a run's sandboxes can
 be listed or garbage-collected exactly, even when the same user runs the same
@@ -52,7 +54,7 @@ USER_ENV_VARS = ("NEMO_GYM_USER", "SLURM_JOB_USER")
 # which is the best automatic description of the workload.
 WORKLOAD_ENV_VARS = ("NEMO_GYM_WORKLOAD", "SLURM_JOB_NAME", "NEMO_GYM_CONFIG_PATH")
 # Slurm sets SLURM_CLUSTER_NAME in every job step, naming the cluster the job was submitted on.
-CLUSTER_ENV_VARS = ("NEMO_GYM_CLUSTER", "SLURM_CLUSTER_NAME")
+CLUSTER_ENV_VARS = ("SLURM_CLUSTER_NAME",)
 RUN_ENV_VARS = ("NEMO_GYM_RUN_ID",)
 
 # Container images default to running as root, so a "root" login attributes the
@@ -103,8 +105,8 @@ def resolve_attribution(
         workload: Explicit workload; falls back to ``NEMO_GYM_WORKLOAD``, then
             ``SLURM_JOB_NAME``, then ``NEMO_GYM_CONFIG_PATH`` (the server instance
             name the gym CLI sets on every server process it spawns).
-        cluster: Explicit cluster; falls back to ``NEMO_GYM_CLUSTER``, then
-            ``SLURM_CLUSTER_NAME`` (the Slurm cluster that runs the job).
+        cluster: Configured cluster name; falls back to ``SLURM_CLUSTER_NAME`` (the Slurm
+            cluster that runs the job). Runs outside Slurm must configure it.
         environ: Environment mapping override, for testing. Defaults to ``os.environ``.
 
     Returns:

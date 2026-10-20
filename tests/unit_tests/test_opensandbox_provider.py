@@ -2047,7 +2047,6 @@ ATTRIBUTION_ENV_VARS = (
     "NEMO_GYM_TEAM",
     "NEMO_GYM_USER",
     "NEMO_GYM_WORKLOAD",
-    "NEMO_GYM_CLUSTER",
     "NEMO_GYM_RUN_ID",
     "NEMO_GYM_CONFIG_PATH",
     "SLURM_JOB_ACCOUNT",
@@ -2097,6 +2096,7 @@ async def test_create_spec_metadata_and_config_win_over_attribution_detection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("NEMO_GYM_TEAM", "env-team")
+    monkeypatch.setenv("SLURM_CLUSTER_NAME", "slurm-cluster")
     provider = opensandbox_provider.OpenSandboxProvider(
         connection={"request_timeout_s": 10},
         probe={"command": None},
