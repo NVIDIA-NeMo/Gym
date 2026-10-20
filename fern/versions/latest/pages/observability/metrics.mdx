@@ -193,6 +193,42 @@ Descendants remain attributed while they stay in the server's Linux process tree
 
 Compare these series with `http.server.active_requests`, which requires traces, while increasing workload concurrency. Separate server processes export their HTTP metrics independently, so sum active requests by Gym server name when a server uses several Uvicorn workers.
 
+### Partial-Rollout Checkpoint Metrics
+
+Servers that take part in partial-rollout checkpoints, and the controller that coordinates them, report
+these metrics whenever metrics are exported, whether or not the `checkpoint` span group is enabled.
+
+| Metric | Type | Unit | Meaning |
+| --- | --- | --- | --- |
+| `gym.checkpoint.operation_duration_ms` | Histogram | ms | Wall-clock time of one checkpoint operation, by `nemo.gym.checkpoint.operation`, `nemo.gym.checkpoint.participant_kind`, and `outcome` (`ok` or `error`). |
+| `gym.checkpoint.records_total` | Counter | count | Checkpoint records a participant wrote at commit or restored, by `nemo.gym.checkpoint.operation` (`commit` or `restore`) and `nemo.gym.checkpoint.participant_kind`. |
+| `gym.checkpoint.bytes_total` | Counter | bytes | Size of the records files a participant wrote at commit or read at restore, with the same attributes. |
+| `gym.checkpoint.control_errors_total` | Counter | count | Checkpoint control calls that failed, by `nemo.gym.checkpoint.error_code`. |
+| `gym.checkpoint.events_total` | Counter | count | Events that change a checkpoint's outcome without failing a call, by `nemo.gym.checkpoint.event`. |
+
+The operation is one of a participant's control operations (`prepare`, `commit`, `restore`, `resume`,
+`retire`, or `forget`), `lease_reopen` for one attempt to reopen a participant whose lease expired, or
+`coordinate.<operation>` for one call the controller makes to every participant. The participant kind is
+the server's role in the checkpoint, such as `model`, `agent`, `resources`, or `environment`, and
+`controller` for coordination.
+
+A commit counts its records and bytes once, when its write finishes, and a restore counts them once it
+succeeds. A commit or restore that is retried therefore does not count the same records again. The bytes of
+a restore cover the whole records file it reads, while its records are only those it restores.
+
+`gym.checkpoint.control_errors_total` counts each failed call to a participant's checkpoint control routes
+once. The error code is the `code` in the reply, such as `deadline_exceeded`, `invalid_phase`, or
+`checkpoint_conflict`. A data request refused because of a checkpoint, such as a late request from a retired
+attempt, is not counted.
+
+`gym.checkpoint.events_total` has these events:
+
+| Event | Meaning |
+| --- | --- |
+| `lease_expired` | A participant's lease ran out before its controller resumed it, so the participant started reopening on its own. Counted once per checkpoint, with `nemo.gym.checkpoint.participant_kind` and `nemo.gym.checkpoint.phase`. Each attempt to reopen is a `lease_reopen` operation. |
+| `prepare_not_ready` | A prepare reached its deadline while episodes still blocked it, by `nemo.gym.checkpoint.participant_kind`. |
+| `generation_cut` | In-flight model calls a model server cut while it prepared, by `nemo.gym.checkpoint.disposition`. |
+
 ### What `gym.verify.success_rate` Measures
 
 It measures whether the **verification call completed**, not whether the task passed.

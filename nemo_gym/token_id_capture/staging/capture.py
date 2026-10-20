@@ -371,6 +371,7 @@ class RolloutTokenCapture:
         *,
         generated_token_ids: list[int],
         generated_logprobs: list[float],
+        extras: dict[str, Any] | None = None,
     ) -> StagedCallRecord:
         """Build one independently validated generated-token-only cut chunk."""
         if not generated_token_ids:
@@ -385,7 +386,7 @@ class RolloutTokenCapture:
         cum_len = admission.prev_len + delta_len
         chain_hash = compute_chain_hash(admission.parent_chain_hash, token_ids_delta)
         cumulative_hash = hash_token_ids(call.prefix_token_ids + token_ids_delta)
-        extras_digest = compute_extras_digest(None)
+        extras_digest = compute_extras_digest(extras)
         return StagedCallRecord.from_components(
             rollout_id=admission.rollout_id,
             model_call_id=admission.model_call_id,
@@ -398,7 +399,7 @@ class RolloutTokenCapture:
             token_ids_delta=token_ids_delta,
             token_mask_delta=token_mask_delta,
             generation_log_probs_delta=logprobs_delta,
-            extras=None,
+            extras=extras,
             extras_digest=extras_digest,
             chain_hash=chain_hash,
             cumulative_hash=cumulative_hash,
