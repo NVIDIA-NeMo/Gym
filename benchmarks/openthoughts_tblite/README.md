@@ -32,10 +32,11 @@ tasks changes. `gym eval run` prepares the data itself when it is missing.
 
 ## Run
 
+Install Gym with its Ray extra (`uv sync --extra ray`); `harbor_agent_general` runs each attempt as a Ray task.
 Serve the model on an OpenAI-compatible endpoint, then:
 
 ```bash
-gym eval run --benchmark openthoughts_tblite \
+gym eval run --benchmark openthoughts_tblite --split benchmark \
   --model <served-model-name> --model-url http://<host>:<port>/v1 --model-api-key EMPTY \
   --output results/openthoughts_tblite/rollouts.jsonl --resume
 ```
@@ -79,7 +80,7 @@ openthoughts_tblite:
 ### Gym's Terminus-2
 
 ```bash
-gym eval run --benchmark openthoughts_tblite/terminus_2 --model-type vllm_model \
+gym eval run --benchmark openthoughts_tblite/terminus_2 --split benchmark --model-type vllm_model \
   --model <served-model-name> --model-url http://<host>:<port>/v1 --model-api-key EMPTY \
   --output results/openthoughts_tblite_terminus_2/rollouts.jsonl --resume
 ```
