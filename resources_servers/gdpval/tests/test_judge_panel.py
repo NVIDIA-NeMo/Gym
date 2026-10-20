@@ -154,7 +154,9 @@ def test_benchmark_panel_reaches_intended_upstream_models_and_credentials(monkey
         expected_key = (gemini_key or shared_key) if judge.name == "gemini-3.1-pro" else shared_key
         assert proxy._client.connection["api_key"] == expected_key
         # main bounds client retries at 3; judges must ride out throttling bursts.
-        assert proxy._client.connection["max_http_attempts"] == 1800
+        assert proxy._client.connection["max_http_attempts"] == 36
+        # A zero wait budget keeps 429 and 503 on those 36 attempts.
+        assert proxy._client.connection["max_rate_limit_wait_seconds"] == 0
         if judge.name == "gpt-5.5":
             assert body["reasoning_effort"] == "medium"
         elif judge.name == "gemini-3.1-pro":
@@ -199,13 +201,13 @@ class TestMediaExtensionSetsAgree:
         assert media_keys == expected
 
     def test_rubric_emitter_covers_every_media_ext(self) -> None:
-        from responses_api_agents.stirrup_agent.file_reader import MIME_TYPES
+        from resources_servers.gdpval.file_reader import MIME_TYPES
 
         missing = (AUDIO_EXTS | VIDEO_EXTS) - set(MIME_TYPES)
         assert not missing, f"file_reader.MIME_TYPES is missing: {sorted(missing)}"
 
     def test_rubric_emitter_reuses_canonical_sets(self) -> None:
-        from responses_api_agents.stirrup_agent import file_reader
+        from resources_servers.gdpval import file_reader
 
         assert file_reader.AUDIO_EXTS is AUDIO_EXTS
         assert file_reader.VIDEO_EXTS is VIDEO_EXTS
