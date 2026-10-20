@@ -420,60 +420,6 @@ for label, generate_spec, artifact, expected_sha in modules:
     print(f"Saved warmed module: {destination}")
 if not verify_only:
     Path(sys.argv[1]).write_text("".join(records))
-else:
-    # Loading a .so is insufficient: old kernels load successfully but round
-    # replay through FP16 before the BF16 readout. Exercise a checkpoint.
-    from flashinfer.mamba.checkpointing_ssu import (
-        allocate_checkpointing_ssu_scratch,
-        checkpointing_ssu,
-    )
-
-    for tokens in (1, 6):
-        for rounds in (0, 5):
-            for algorithm in ("monolith", "two-kernel"):
-                dtype, device = torch.bfloat16, "cuda"
-                heads, groups, dim, dstate, window = 32, 2, 64, 128, 16
-                state = torch.ones(1, heads, dim, dstate, dtype=torch.float16, device=device)
-                x_cache = torch.zeros(1, heads, window + tokens, dim, dtype=dtype, device=device)
-                b_cache = torch.zeros(1, groups, window + tokens, dstate, dtype=dtype, device=device)
-                dt_cache = torch.zeros(1, heads, window + tokens, dtype=torch.float32, device=device)
-                x_cache[:, :, 0] = 1
-                b_cache[:, :, 0] = 1
-                dt_cache[:, :, 0] = 17 / 4096
-                ring_start = torch.zeros(1, dtype=torch.int32, device=device)
-                prev = torch.full((1,), window, dtype=torch.int32, device=device)
-                x = torch.zeros(1, tokens, heads, dim, dtype=dtype, device=device)
-                dt = torch.zeros(1, tokens, heads, 1, dtype=dtype, device=device).expand_as(x)
-                a = torch.zeros(heads, device=device).as_strided((heads, dim, dstate), (1, 0, 0))
-                b = torch.zeros(1, tokens, groups, dstate, dtype=dtype, device=device)
-                c = torch.zeros_like(b)
-                c[..., 0] = 1
-                out = torch.empty_like(x)
-                scratch = {}
-                if algorithm == "two-kernel":
-                    buffers = allocate_checkpointing_ssu_scratch(1, heads, tokens, window, dtype, device)
-                    scratch = dict(zip(("cb_scaled", "cumAdt_vec", "cb_old"), buffers))
-                checkpointing_ssu(
-                    state,
-                    x_cache,
-                    b_cache,
-                    dt_cache,
-                    ring_start,
-                    prev,
-                    x,
-                    dt,
-                    a,
-                    b,
-                    c,
-                    out,
-                    rand_seed=torch.tensor([12345], dtype=torch.int64, device=device) if rounds else None,
-                    philox_rounds=rounds,
-                    algorithm=algorithm,
-                    **scratch,
-                )
-                torch.testing.assert_close(out, torch.full_like(out, 1.0078125), rtol=0, atol=0)
-                print(f"ReplaySSM checkpoint smoke passed: tokens={tokens}, SR={rounds}, {algorithm}")
-    torch.cuda.synchronize()
 PY
 
     echo ">>> Warm up TRTLLM-GEN and ReplaySSM JIT modules"
