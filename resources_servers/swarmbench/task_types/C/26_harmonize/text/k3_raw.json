@@ -1,0 +1,124 @@
+{
+ "api": "http://10.49.69.30:8000/v1",
+ "model_requested": "policy_model",
+ "system": "You write task text for an offline evaluation of software agents. Follow the facts you are given exactly; do not add rules, numbers or names that are not in the brief. Reply with exactly one JSON object and nothing else.",
+ "request": {
+  "user": "Write the task-facing text for a data-harmonization task over a fictional manufacturing company's facility energy reports. Every facility publishes one energy report per fiscal year (its fiscal year ends in a facility-specific month). Each report has monthly tables per utility meter in mixed units (kWh, MWh, GJ, therms, MMBtu, m3 of natural gas, litres or US gallons of diesel, tonnes or short tons of coal), costs in the facility's local currency, and notes. Code fills numbers, ids, units and months into your sentences through {placeholders}, and a parser reads the filled sentences back, so: keep every placeholder exactly as named, use each listed placeholder exactly once in its template, keep each template on a single line, do not add numbers, and do not use the characters | or # in templates. Return one JSON object with these keys:\n\n\"company\": a fictional manufacturing company name (2-3 words).\n\"title\": a short report title such as an energy and utilities report (no year, no numbers).\n\"headings\": an object with short section titles for the keys overview, meters, monthly (monthly meter data), notes, adjustments (prior-period adjustments), background.\n\"columns\": an object with short column labels for the keys meter, description, unit, month, consumption, read_type, cost, budget (budgeted cost), prior (prior-year consumption). No units or currencies in the labels.\n\"period\": one sentence: this report covers the fiscal year from {start} to {end}. Placeholders {start}, {end}.\n\"currency_line\": one sentence: all costs in this report are stated in {cur}. Placeholder {cur}.\n\"meter_desc\": an object with keys electricity, gas, diesel, coal, steam; each a list of 5 short meter descriptions (e.g. main incomer, boiler house supply), no numbers, no ids.\n\"scale_note\": one sentence placed above a table: both consumption columns in this table are stated in thousands of {unit}. Placeholder {unit}.\n\"mult_note\": a note: meter {meter} was replaced in {month}; for {month2} and every later month in this report, the figure shown is the register reading, which must be multiplied by {mult} to give consumption. ({month2} is the same month as {month}.)\n\"corr_note\": a note: the consumption shown for meter {meter} in {month} was misreported; the corrected consumption is {value} {unit}, and the cost shown is unchanged.\n\"sub_note\": a note: meter {sub} is a sub-meter of {main}; its consumption and cost are already included in the figures of {main2} and must not be added again. ({main2} is the same meter as {main}.)\n\"est_note\": a prior-period adjustment: the estimated reading for meter {meter} in {month} (reported in the previous fiscal year's report) has been replaced by an actual reading of {value} {unit}, with a restated cost of {cost} {cur}.\n\"no_adjustments\": one sentence saying there are no prior-period adjustments in this report.\n\"decoy_budget\": a note: the approved budget for meter {meter} in {month} was revised to {value} {cur}. (Budgets are not costs.)\n\"decoy_prior\": a note: in {month} of the prior year, meter {meter} recorded {value} {unit}. (A historical comparison, not a correction.)\n\"benign_notes\": 8 short notes about harmless matters (meter ownership, reading schedules, tariff names, audits completed) that change no figure. No placeholders, no numbers.\n\"pad\": 30 different sentences of realistic background prose for a facility energy report (operations, shifts, sustainability programmes, maintenance, staff). Each may use any of the placeholders {name} (this facility), {site} (its city) and {other} (another facility of the company). No numbers.\n\"conventions_intro\": one paragraph introducing the company's energy-reporting conventions document, which lists the exact conversion factor from every unit to MWh in a table below. No numbers.\n\"conventions_rules\": a list of 8 sentences, one per rule, stating exactly: (1) facility totals are for calendar year {year} (January to December), which spans two fiscal-year reports, so months must be taken from both reports and months outside {year2} are excluded; (2) energy is reported in MWh using the factor table exactly; (3) each month's cost is converted to USD at that month's rate (USD per one unit of the currency) from the FX table, and the annual average row is for reference only; (4) read type A means actual and E means estimate, and an estimate stands unless a later report's prior-period adjustment replaces it; (5) a note that a table is stated in thousands applies to both consumption columns of that table; (6) meter replacement notes with a multiplier, sub-meter notes and correction notes in a report must be applied as written; (7) the budget and prior-year columns are not consumption or cost; (8) report energy to 3 decimals and cost to 2 decimals, and values within 0.1% are accepted. Placeholders {year} and {year2} (the same year) appear only in rule 1.\n\"fx_note\": one sentence heading the FX table: monthly exchange rates in USD per one unit of {cur}, with an annual average row for reference. Placeholder {cur}.\n\"intro\": the task prompt's opening paragraph. Placeholders {company}, {n} (number of facilities), {first} and {last} (first and last facility id), {year}. State: compute for each facility its total energy in MWh and total utility cost in USD for calendar year {year}, following the conventions document exactly; every facility has two fiscal-year reports that both contain months of that calendar year; tables use different units and currencies, and the notes and prior-period adjustments change figures.\n\"answer_line\": one or two sentences: the final answer is one JSON object mapping every facility id to its energy_mwh and cost_usd, for example {example}; each facility is graded separately and counts only if both values are within 0.1%.\n\"tools\": an object with a one-sentence description for each of: list_facilities (id, name, city, currency, fiscal year-end month and report ids, paged), read_report (one report by id, about 8k characters per page, optional character offset), read_conventions (the conventions document with the conversion factor table), read_fx (monthly USD rates for one currency over an optional month range), search_report (case-insensitive text search within one facility's reports), calculator (evaluates an arithmetic expression).\n\"unit_prompt\": instructions for a single worker who must compute calendar year {year} total energy in MWh and cost in USD for one facility {fid}, using the tools and the conventions exactly, and end with exactly one final line of the literal form: UNIT | {fid2} | <energy_mwh> | <cost_usd>. ({fid2} is the same id as {fid}.)",
+  "keys": [
+   "company",
+   "title",
+   "headings",
+   "columns",
+   "period",
+   "currency_line",
+   "meter_desc",
+   "scale_note",
+   "mult_note",
+   "corr_note",
+   "sub_note",
+   "est_note",
+   "no_adjustments",
+   "decoy_budget",
+   "decoy_prior",
+   "benign_notes",
+   "pad",
+   "conventions_intro",
+   "conventions_rules",
+   "fx_note",
+   "intro",
+   "answer_line",
+   "tools",
+   "unit_prompt"
+  ],
+  "placeholders": {
+   "period": [
+    "{start}",
+    "{end}"
+   ],
+   "currency_line": [
+    "{cur}"
+   ],
+   "scale_note": [
+    "{unit}"
+   ],
+   "mult_note": [
+    "{meter}",
+    "{month}",
+    "{month2}",
+    "{mult}"
+   ],
+   "corr_note": [
+    "{meter}",
+    "{month}",
+    "{value}",
+    "{unit}"
+   ],
+   "sub_note": [
+    "{sub}",
+    "{main}",
+    "{main2}"
+   ],
+   "est_note": [
+    "{meter}",
+    "{month}",
+    "{value}",
+    "{unit}",
+    "{cost}",
+    "{cur}"
+   ],
+   "decoy_budget": [
+    "{meter}",
+    "{month}",
+    "{value}",
+    "{cur}"
+   ],
+   "decoy_prior": [
+    "{month}",
+    "{meter}",
+    "{value}",
+    "{unit}"
+   ],
+   "fx_note": [
+    "{cur}"
+   ],
+   "intro": [
+    "{company}",
+    "{n}",
+    "{first}",
+    "{last}",
+    "{year}"
+   ],
+   "answer_line": [
+    "{example}"
+   ],
+   "unit_prompt": [
+    "{year}",
+    "{fid}",
+    "{fid2}"
+   ]
+  },
+  "lists": {
+   "benign_notes": 8,
+   "pad": 30,
+   "conventions_rules": 8
+  }
+ },
+ "attempts": [
+  {
+   "seconds": 78.4,
+   "usage": {
+    "prompt_tokens": 1643,
+    "total_tokens": 7986,
+    "completion_tokens": 6343,
+    "prompt_tokens_details": null,
+    "completion_tokens_details": {
+     "reasoning_tokens": 0
+    }
+   },
+   "model": "policy_model",
+   "reply": "```json\n{\n  \"company\": \"Meridian Alloy Works\",\n  \"title\": \"Facility Energy and Utilities Report\",\n  \"headings\": {\n    \"overview\": \"Overview\",\n    \"meters\": \"Meters\",\n    \"monthly\": \"Monthly Meter Data\",\n    \"notes\": \"Notes\",\n    \"adjustments\": \"Prior-Period Adjustments\",\n    \"background\": \"Background\"\n  },\n  \"columns\": {\n    \"meter\": \"Meter\",\n    \"description\": \"Description\",\n    \"unit\": \"Unit\",\n    \"month\": \"Month\",\n    \"consumption\": \"Consumption\",\n    \"read_type\": \"Read Type\",\n    \"cost\": \"Cost\",\n    \"budget\": \"Budget\",\n    \"prior\": \"Prior Year\"\n  },\n  \"period\": \"This report covers the fiscal year from {start} to {end}.\",\n  \"currency_line\": \"All costs in this report are stated in {cur}.\",\n  \"meter_desc\": {\n    \"electricity\": [\n      \"main incomer\",\n      \"production hall subfeed\",\n      \"compressed air plant\",\n      \"office block supply\",\n      \"chiller plant feed\"\n    ],\n    \"gas\": [\n      \"boiler house supply\",\n      \"process furnace feed\",\n      \"paint shop burners\",\n      \"canteen kitchen supply\",\n      \"space heating loop\"\n    ],\n    \"diesel\": [\n      \"standby generator tank\",\n      \"forklift refuelling point\",\n      \"fire pump supply\",\n      \"yard vehicles tank\",\n      \"boiler backup fuel\"\n    ],\n    \"coal\": [\n      \"main boiler bunker\",\n      \"kiln firing supply\",\n      \"space heating stoker\",\n      \"process steam plant\",\n      \"drying oven feed\"\n    ],\n    \"steam\": [\n      \"main steam header\",\n      \"process heating coil\",\n      \"sterilisation line\",\n      \"space heating exchanger\",\n      \"cleaning station supply\"\n    ]\n  },\n  \"scale_note\": \"Both consumption columns in this table are stated in thousands of {unit}.\",\n  \"mult_note\": \"Meter {meter} was replaced in {month}; for {month2} and every later month in this report, the figure shown is the register reading, which must be multiplied by {mult} to give consumption.\",\n  \"corr_note\": \"The consumption shown for meter {meter} in {month} was misreported; the corrected consumption is {value} {unit}, and the cost shown is unchanged.\",\n  \"sub_note\": \"Meter {sub} is a sub-meter of {main}; its consumption and cost are already included in the figures of {main2} and must not be added again.\",\n  \"est_note\": \"The estimated reading for meter {meter} in {month} (reported in the previous fiscal year's report) has been replaced by an actual reading of {value} {unit}, with a restated cost of {cost} {cur}.\",\n  \"no_adjustments\": \"There are no prior-period adjustments in this report.\",\n  \"decoy_budget\": \"The approved budget for meter {meter} in {month} was revised to {value} {cur}.\",\n  \"decoy_prior\": \"In {month} of the prior year, meter {meter} recorded {value} {unit}.\",\n  \"benign_notes\": [\n    \"All meters on site are owned by the facility unless otherwise noted.\",\n    \"Meter readings are taken on the last working day of each month.\",\n    \"The site is billed under the standard industrial tariff.\",\n    \"An external audit of the energy records was completed during the year.\",\n    \"Utility invoices are received monthly and filed with the accounts office.\",\n    \"Meter seals were inspected and found intact during the annual check.\",\n    \"The energy committee meets quarterly to review consumption trends.\",\n    \"Reading schedules are posted on the notice board outside the plant office.\"\n  ],\n  \"pad\": [\n    \"The {name} facility in {site} operates a continuous production schedule throughout the year.\",\n    \"Production at {name} runs across day and night shifts, with weekends reserved for maintenance.\",\n    \"The plant manufactures components for the automotive and agricultural sectors.\",\n    \"A site-wide energy awareness campaign was launched at {name} during the year.\",\n    \"The maintenance team at {name} carries out preventive servicing of the boilers on a rotating schedule.\",\n    \"Compressed air leak surveys were completed across the main production halls.\",\n    \"The facility in {site} sources part of its electricity from a rooftop solar array.\",\n    \"A waste heat recovery project was commissioned on the main furnace exhaust.\",\n    \"Staff at {name} receive regular training on safe isolation of utility supplies.\",\n    \"The canteen and welfare buildings were refurbished during the summer shutdown.\",\n    \"Production volumes were steady for most of the year, with a planned shutdown for line upgrades.\",\n    \"The site shares best practice with {other} through the company energy working group.\",\n    \"A new building management system was installed to monitor heating and ventilation.\",\n    \"The boiler house at {name} underwent its statutory insurance inspection without findings.\",\n    \"Lighting in the warehouse was upgraded to high-efficiency fittings.\",\n    \"The facility participates in the company sustainability programme and reports progress to head office.\",\n    \"Shift patterns at {name} were revised to smooth peak electricity demand.\",\n    \"The site in {site} maintains a spare parts store for critical utility equipment.\",\n    \"Rainwater harvesting supplies the washdown area and reduces mains water use.\",\n    \"The energy manager at {name} presents monthly performance reviews to the site leadership team.\",\n    \"A compressed air ring main replacement was completed during the planned outage.\",\n    \"The facility achieved its internal target for reducing diesel use in yard operations.\",\n    \"Apprentices from {other} visited {name} for a joint training exercise.\",\n    \"The steam distribution pipework was re-lagged to cut heat losses.\",\n    \"Housekeeping audits include checks for equipment left running outside production hours.\",\n    \"The site in {site} holds regular toolbox talks on energy saving for all shifts.\",\n    \"A variable speed drive was fitted to the main cooling water pump.\",\n    \"The facility's vehicle fleet is being phased over to electric models where practical.\",\n    \"Visitors to {name} are briefed on the site's environmental policy on arrival.\",\n    \"The maintenance workshop at {name} fabricates guards and brackets in house.\"\n  ],\n  \"conventions_intro\": \"This document sets out the energy-reporting conventions of the company and must be followed exactly when consolidating facility reports. The table below lists the exact conversion factor from every unit used in the facility reports to MWh; apply these factors exactly as written and do not substitute factors from any other source.\",\n  \"conventions_rules\": [\n    \"Facility totals are for calendar year {year} (January to December), which spans two fiscal-year reports, so months must be taken from both reports and months outside {year2} are excluded.\",\n    \"Energy is reported in MWh using the factor table exactly.\",\n    \"Each month's cost is converted to USD at that month's rate (USD per one unit of the currency) from the FX table, and the annual average row is for reference only.\",\n    \"Read type A means actual and E means estimate, and an estimate stands unless a later report's prior-period adjustment replaces it.\",\n    \"A note that a table is stated in thousands applies to both consumption columns of that table.\",\n    \"Meter replacement notes with a multiplier, sub-meter notes and correction notes in a report must be applied as written.\",\n    \"The budget and prior-year columns are not consumption or cost.\",\n    \"Report energy to 3 decimals and cost to 2 decimals, and values within 0.1% are accepted.\"\n  ],\n  \"fx_note\": \"Monthly exchange rates in USD per one unit of {cur}, with an annual average row for reference.\",\n  \"intro\": \"{company} operates {n} manufacturing facilities, identified by consecutive facility ids from {first} to {last}. Compute for each facility its total energy in MWh and its total utility cost in USD for calendar year {year}, following the conventions document exactly. Every facility has two fiscal-year reports that both contain months of that calendar year; the tables use different units and currencies, and the notes and prior-period adjustments change figures.\",\n  \"answer_line\": \"The final answer is one JSON object mapping every facility id to its energy_mwh and cost_usd, for example {example}. Each facility is graded separately and counts only if both values are within 0.1%.\",\n  \"tools\": {\n    \"list_facilities\": \"Lists the facilities with their id, name, city, currency, fiscal year-end month and report ids, paged.\",\n    \"read_report\": \"Reads one report by id, returning about 8k characters per page with an optional character offset.\",\n    \"read_conventions\": \"Reads the conventions document containing the conversion factor table.\",\n    \"read_fx\": \"Reads monthly USD rates for one currency over an optional month range.\",\n    \"search_report\": \"Performs a case-insensitive text search within one facility's reports.\",\n    \"calculator\": \"Evaluates an arithmetic expression.\"\n  },\n  \"unit_prompt\": \"You are computing the totals for one facility. Using the tools and following the conventions document exactly, compute calendar year {year} total energy in MWh and total cost in USD for facility {fid}: read both of its fiscal-year reports, take only the months that fall in that calendar year, apply every note and prior-period adjustment, convert all energy to MWh with the factor table and all costs to USD with the monthly FX rates, then sum. End with exactly one final line of the literal form: UNIT | {fid2} | <energy_mwh> | <cost_usd>.\"\n}\n```",
+   "problems": []
+  }
+ ],
+ "created": "2026-10-14 13:05:12 UTC"
+}

@@ -1,0 +1,57 @@
+{
+ "api": "https://inference-api.nvidia.com/v1/chat/completions",
+ "model_requested": "nvidia/moonshotai/kimi-k3",
+ "system": "You write task text for an offline evaluation of software agents. Follow the facts you are given exactly; do not add rules, numbers or names that are not in the brief. Reply with exactly one JSON object and nothing else.",
+ "request": {
+  "user": "Write the task-facing text for a distributed-trace analysis task. The agent sees traces of an online-shop microservice system in the style of the OpenTelemetry demo (services such as frontend, cart, checkout, currency, payment, shipping, quote, email, product-catalog, recommendation, ad, accounting, fraud-detection, valkey-cart, flagd). Requests are grouped into {n} request classes (endpoint, client and region), each with {k} sampled traces. Every span row has span_id, parent_id (- for the root span), service, operation, start_us, duration_us and status. Return one JSON object with these keys:\n\n\"intro\": the opening paragraph, with the placeholders {n} and {k}. The job: for every request class, find the operation (identified by service and operation name together) with the largest mean self time under the rules below.\n\"rules\": a list of bullet strings stating these exact rules, one per bullet, in this order, keeping every condition exact:\n 1. The self time of a span is its duration minus the part of its own time interval [start_us, start_us + duration_us) covered by its direct children; children that run in parallel are counted once (take the union of the children's intervals), and any part of a child that lies outside the parent's interval does not count (asynchronous consumers can start after their parent has ended).\n 2. A trace whose root span has status ERROR is excluded from all averages; status values of other spans do not matter.\n 3. An operation's self time in a trace is the total self time of all its spans in that trace (an operation can appear several times in one trace).\n 4. An operation's mean self time in a class is the average, over the class's non-excluded traces, of its self time per trace.\n 5. The answer for a class is the operation with the largest mean self time. Operations are identified as \"<service> <operation>\", for example \"cart oteldemo.CartService/GetCart\". The slowest span by total duration is usually a parent and is often not the answer.\n\"tools\": an object with one-sentence descriptions for list_classes (class ids with their endpoint, client and region, paged, at most 100 per call), list_traces (the trace ids of one class with each root span's status and duration and the span count), get_trace (all spans of one trace as rows: span_id | parent_id | service | operation | start_us | duration_us | status).\n\"answer\": a short paragraph: the final answer is one JSON object mapping every class id to its operation written as \"<service> <operation>\", for example {example}.\n\"score\": one sentence: the score is the fraction of classes answered correctly.\n\"unit_prompt\": instructions for a single worker who must analyse exactly one class, {cid}, with the same tools and the rules placed at {rules}; the worker must end with exactly one final line of the literal form UNIT | {cid2} | <service> <operation>. ({cid2} is the same id as {cid}.)",
+  "keys": [
+   "intro",
+   "rules",
+   "tools",
+   "answer",
+   "score",
+   "unit_prompt"
+  ],
+  "placeholders": {
+   "intro": [
+    "{n}",
+    "{k}"
+   ],
+   "answer": [
+    "{example}"
+   ],
+   "unit_prompt": [
+    "{cid}",
+    "{rules}",
+    "{cid2}"
+   ]
+  },
+  "lists": {
+   "rules": 5
+  }
+ },
+ "attempts": [
+  {
+   "seconds": 31.1,
+   "usage": {
+    "completion_tokens": 2171,
+    "prompt_tokens": 783,
+    "total_tokens": 2954,
+    "completion_tokens_details": {
+     "accepted_prediction_tokens": 1375,
+     "audio_tokens": 0,
+     "reasoning_tokens": 1503,
+     "rejected_prediction_tokens": 217
+    },
+    "prompt_tokens_details": {
+     "audio_tokens": 0,
+     "cached_tokens": 64
+    }
+   },
+   "model": "nvidia/moonshotai/kimi-k3",
+   "reply": "```json\n{\n  \"intro\": \"You are given distributed traces from an online-shop microservice system in the style of the OpenTelemetry demo, with services such as frontend, cart, checkout, currency, payment, shipping, quote, email, product-catalog, recommendation, ad, accounting, fraud-detection, valkey-cart and flagd. Requests are grouped into {n} request classes, each defined by an endpoint, a client and a region, and each class contains {k} sampled traces. Every span row has the fields span_id, parent_id (- for the root span), service, operation, start_us, duration_us and status. Your job: for every request class, find the operation (identified by its service and operation name together) with the largest mean self time, under the rules below.\",\n  \"rules\": [\n    \"- The self time of a span is its duration minus the part of its own time interval [start_us, start_us + duration_us) covered by its direct children; children that run in parallel are counted once (take the union of the children's intervals), and any part of a child that lies outside the parent's interval does not count (asynchronous consumers can start after their parent has ended).\",\n    \"- A trace whose root span has status ERROR is excluded from all averages; status values of other spans do not matter.\",\n    \"- An operation's self time in a trace is the total self time of all its spans in that trace (an operation can appear several times in one trace).\",\n    \"- An operation's mean self time in a class is the average, over the class's non-excluded traces, of its self time per trace.\",\n    \"- The answer for a class is the operation with the largest mean self time. Operations are identified as \\\"<service> <operation>\\\", for example \\\"cart oteldemo.CartService/GetCart\\\". The slowest span by total duration is usually a parent and is often not the answer.\"\n  ],\n  \"tools\": {\n    \"list_classes\": \"Lists the class ids with their endpoint, client and region, paged, returning at most 100 per call.\",\n    \"list_traces\": \"Lists the trace ids of one class, each with its root span's status and duration and the span count.\",\n    \"get_trace\": \"Returns all spans of one trace as rows: span_id | parent_id | service | operation | start_us | duration_us | status.\"\n  },\n  \"answer\": \"The final answer is one JSON object mapping every class id to its operation, written as \\\"<service> <operation>\\\"; for example {example}.\",\n  \"score\": \"The score is the fraction of classes answered correctly.\",\n  \"unit_prompt\": \"Analyse exactly one request class, {cid}, using the same tools (list_classes, list_traces, get_trace) and the rules placed at {rules}. Fetch the traces of the class, apply the self-time and exclusion rules, compute the mean self time of every operation over the class's non-excluded traces, and determine the operation with the largest mean self time. End your reply with exactly one final line of the literal form UNIT | {cid2} | <service> <operation>.\"\n}\n```",
+   "problems": []
+  }
+ ],
+ "created": "2026-10-14 06:51:24 UTC"
+}

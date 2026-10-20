@@ -1,0 +1,3 @@
+{"prompt": "DEV STUB. Fill {n_rows} rows over {n_articles} articles with increased/decreased/no_difference. Answer JSON {\"R0001\": \"decreased\"}.",
+ "tool_list_rows": "DEV STUB list rows.", "tool_list_articles": "DEV STUB list articles.", "tool_read_article": "DEV STUB read.",
+ "tool_search_article": "DEV STUB search.", "unit_prompt": "DEV STUB. {n_rows} rows of article {article}. Answer JSON."}

@@ -1,0 +1,223 @@
+{
+ "summary": {
+  "type": "26_harmonize",
+  "ns": [
+   8,
+   40,
+   80
+  ],
+  "seeds": "0,1",
+  "check1_oracle_min": 1.0,
+  "check2_wrong_max": {
+   "naive_kwh_rawcost": 0.0,
+   "ignore_notes": 0.0,
+   "fiscal_year": 0.0125,
+   "no_fx (partial)": 0.125,
+   "annual_avg_fx (partial)": 0.5,
+   "ignore_scale (partial)": 0.875,
+   "ignore_mult (partial)": 0.525,
+   "ignore_corr (partial)": 0.5625,
+   "ignore_sub (partial)": 0.75,
+   "ignore_est (partial)": 0.5
+  },
+  "check3_format_only_max": 0.0,
+  "check7_tool_errors": 0,
+  "check8_deterministic": true,
+  "canary": true,
+  "text_source": "k3"
+ },
+ "rows": [
+  {
+   "n": 8,
+   "seed": 0,
+   "tier": "easy",
+   "gen_s": 0.02,
+   "hash": "fe61170bc1096ca8f83c01cba1eb53346361317c850fdb10b0f1404a56f71e65",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "naive_kwh_rawcost": 0.0,
+    "ignore_notes": 0.0,
+    "fiscal_year": 0.0,
+    "no_fx (partial)": 0.0,
+    "annual_avg_fx (partial)": 0.125,
+    "ignore_scale (partial)": 0.5,
+    "ignore_mult (partial)": 0.5,
+    "ignore_corr (partial)": 0.5,
+    "ignore_sub (partial)": 0.5,
+    "ignore_est (partial)": 0.5
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 8,
+   "seed": 1,
+   "tier": "easy",
+   "gen_s": 0.01,
+   "hash": "a087d9def0da17067ab744f13a0870062589df862c50560febf8d1b4967f6428",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "naive_kwh_rawcost": 0.0,
+    "ignore_notes": 0.0,
+    "fiscal_year": 0.0,
+    "no_fx (partial)": 0.125,
+    "annual_avg_fx (partial)": 0.5,
+    "ignore_scale (partial)": 0.875,
+    "ignore_mult (partial)": 0.0,
+    "ignore_corr (partial)": 0.5,
+    "ignore_sub (partial)": 0.75,
+    "ignore_est (partial)": 0.125
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 40,
+   "seed": 0,
+   "tier": "medium",
+   "gen_s": 0.04,
+   "hash": "3cc3d62452c5a1db067781bd38942887933d4c7d3c38b48e384a7d79ac6ba828",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "naive_kwh_rawcost": 0.0,
+    "ignore_notes": 0.0,
+    "fiscal_year": 0.0,
+    "no_fx (partial)": 0.0,
+    "annual_avg_fx (partial)": 0.025,
+    "ignore_scale (partial)": 0.5,
+    "ignore_mult (partial)": 0.525,
+    "ignore_corr (partial)": 0.475,
+    "ignore_sub (partial)": 0.475,
+    "ignore_est (partial)": 0.325
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 40,
+   "seed": 1,
+   "tier": "medium",
+   "gen_s": 0.03,
+   "hash": "6affc95001a6afa6dafcdbb7ca79d579782ca43cdf3a5feadfc6188f295848f7",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "naive_kwh_rawcost": 0.0,
+    "ignore_notes": 0.0,
+    "fiscal_year": 0.0,
+    "no_fx (partial)": 0.075,
+    "annual_avg_fx (partial)": 0.225,
+    "ignore_scale (partial)": 0.75,
+    "ignore_mult (partial)": 0.3,
+    "ignore_corr (partial)": 0.45,
+    "ignore_sub (partial)": 0.4,
+    "ignore_est (partial)": 0.425
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 80,
+   "seed": 0,
+   "tier": "hard",
+   "gen_s": 0.06,
+   "hash": "c1ea195697e566d1f2d74a0b559dbe527ed1d7df45e12f221f451ae862caab79",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "naive_kwh_rawcost": 0.0,
+    "ignore_notes": 0.0,
+    "fiscal_year": 0.0125,
+    "no_fx (partial)": 0.0125,
+    "annual_avg_fx (partial)": 0.0875,
+    "ignore_scale (partial)": 0.5,
+    "ignore_mult (partial)": 0.45,
+    "ignore_corr (partial)": 0.55,
+    "ignore_sub (partial)": 0.5125,
+    "ignore_est (partial)": 0.45
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 80,
+   "seed": 1,
+   "tier": "hard",
+   "gen_s": 0.06,
+   "hash": "44c9104f82f3c022b28225d2e13786e54f854115b4fe4c94de153bafd6770748",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "naive_kwh_rawcost": 0.0,
+    "ignore_notes": 0.0,
+    "fiscal_year": 0.0,
+    "no_fx (partial)": 0.05,
+    "annual_avg_fx (partial)": 0.1875,
+    "ignore_scale (partial)": 0.5875,
+    "ignore_mult (partial)": 0.3125,
+    "ignore_corr (partial)": 0.5625,
+    "ignore_sub (partial)": 0.4,
+    "ignore_est (partial)": 0.4625
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  }
+ ]
+}

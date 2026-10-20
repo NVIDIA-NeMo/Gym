@@ -1,0 +1,202 @@
+{
+ "summary": {
+  "type": "23_schemamap",
+  "ns": [
+   12,
+   40,
+   80
+  ],
+  "seeds": "0,1",
+  "check1_oracle_min": 1.0,
+  "check2_wrong_max": {
+   "name_similarity": 0.0,
+   "dictionary_only": 0.0833,
+   "ignore_swaps": 0.6667,
+   "ignore_unit_errata": 0.675,
+   "ignore_renames": 0.8333,
+   "pair_by_order": 1.0,
+   "assume_mdy": 1.0
+  },
+  "check3_format_only_max": 0.0,
+  "check7_tool_errors": 0,
+  "check8_deterministic": true,
+  "canary": true,
+  "text_source": "k3"
+ },
+ "rows": [
+  {
+   "n": 12,
+   "seed": 0,
+   "tier": "easy",
+   "gen_s": 0.03,
+   "hash": "5f224aa277309c820a4593ddab430ba202670e67388d82753837213334b2b611",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "name_similarity": 0.0,
+    "dictionary_only": 0.0833,
+    "ignore_swaps": 0.5833,
+    "ignore_unit_errata": 0.5833,
+    "ignore_renames": 0.8333,
+    "pair_by_order": 1.0,
+    "assume_mdy": 0.75
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 12,
+   "seed": 1,
+   "tier": "easy",
+   "gen_s": 0.0,
+   "hash": "29fbf416a3cb7177fc048b2c0cd7ec1a60a1d37ea6aa3110db419611232637b2",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "name_similarity": 0.0,
+    "dictionary_only": 0.0833,
+    "ignore_swaps": 0.6667,
+    "ignore_unit_errata": 0.6667,
+    "ignore_renames": 0.5,
+    "pair_by_order": 0.8333,
+    "assume_mdy": 1.0
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 40,
+   "seed": 0,
+   "tier": "medium",
+   "gen_s": 0.01,
+   "hash": "2bdf4e3488aa47cfba635b2172936b13bc9554e5ed1d74ab1b0e769010be7245",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "name_similarity": 0.0,
+    "dictionary_only": 0.05,
+    "ignore_swaps": 0.6,
+    "ignore_unit_errata": 0.65,
+    "ignore_renames": 0.725,
+    "pair_by_order": 0.925,
+    "assume_mdy": 0.7
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 40,
+   "seed": 1,
+   "tier": "medium",
+   "gen_s": 0.01,
+   "hash": "3a185e7cdad8d0302e8f78e1d18e80cc5fa28df7d7632e61f73dec53374b3f63",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "name_similarity": 0.0,
+    "dictionary_only": 0.025,
+    "ignore_swaps": 0.6,
+    "ignore_unit_errata": 0.65,
+    "ignore_renames": 0.575,
+    "pair_by_order": 0.85,
+    "assume_mdy": 0.65
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 80,
+   "seed": 0,
+   "tier": "hard",
+   "gen_s": 0.03,
+   "hash": "350f6a42a5e1dcef9de765bed5cb81592f5f126ddf6b20d85f85a546ee6e7e66",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "name_similarity": 0.0,
+    "dictionary_only": 0.075,
+    "ignore_swaps": 0.5875,
+    "ignore_unit_errata": 0.675,
+    "ignore_renames": 0.675,
+    "pair_by_order": 0.8875,
+    "assume_mdy": 0.7375
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 80,
+   "seed": 1,
+   "tier": "hard",
+   "gen_s": 0.03,
+   "hash": "f360501a6536b3787b587e27dc15ad3571fb62316c2a69af69a7f025a8abee95",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "name_similarity": 0.0,
+    "dictionary_only": 0.025,
+    "ignore_swaps": 0.575,
+    "ignore_unit_errata": 0.65,
+    "ignore_renames": 0.675,
+    "pair_by_order": 0.8125,
+    "assume_mdy": 0.65
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  }
+ ]
+}

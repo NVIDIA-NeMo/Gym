@@ -1,0 +1,120 @@
+{
+ "intro": "You are the incident commander running the postmortem review of a simulated microservice estate of {n} services, observed over the one-week period from {start} to {end} (UTC). {k} incident tickets are waiting for your analysis. For each ticket you must name the root-cause service where the failure started, the exact change that caused it, and the full propagation chain: every service the incident reached, each with the upstream service it caught the failure from. Most services are uninvolved in any given incident, and any service may be a member, so work from the evidence in the logs, metrics and change records rather than from assumptions about which services matter.",
+ "tools": {
+  "list_services": "Lists service names together with their tier and owning team. Results are paged, at most 150 services per call, and can be narrowed with an optional team filter.",
+  "get_service_info": "Returns the catalog entry of one service: team, owners, tier, kind, its declared dependencies (which are known to be incomplete), and its metrics.",
+  "query_logs": "Returns log lines of one service between start and end (default: the whole week), in time order, filtered by a case-insensitive regex pattern. It returns the number of matches and the first `limit` lines (default 50, max 200); times are written YYYY-MM-DD HH:MM or YYYY-MM-DD HH:MM:SS.",
+  "query_metrics": "Returns one metric of one service between start and end, aggregated per step_min minutes; the step is raised automatically to keep at most 120 points. Available metric names are: {metrics}.",
+  "list_changes": "Lists deploys, config changes and platform events in time order, either for one service or for all services in a time range. Results are paged, at most 60 changes per call.",
+  "read_ticket": "Reads one incident ticket by id (e.g. INC-1234): the alerting service, the relevant times, the alerts that fired, and the on-call notes."
+ },
+ "rules": [
+  "- A failing service makes its callers log ERROR lines of the form `call to <dep> failed: 503 ...` or `call to <dep> failed: timeout ...`. Callers with high traffic log many such lines, so services far downstream are usually louder than the cause.",
+  "- Such a failure line is real propagation only if <dep> itself logs at least one ERROR line within 15 minutes before or after it. A failure line against a dependency that has no ERROR line in that plus-or-minus 15 minute range is isolated network noise and must be ignored.",
+  "- A service belongs to an incident if, inside the incident window, it logs at least one real propagation line. Its upstream in the propagation chain is the dependency named in its EARLIEST real propagation line inside the window.",
+  "- The incident window runs from 2 hours before the ticket was opened until the ticket was resolved. Incidents start inside their window, and different incidents never overlap in time.",
+  "- The root-cause service fails on its own: it logs ERROR lines in the window but no real propagation line. Following upstream links from the ticket's alerting service leads to it. Services with unrelated ERROR bursts (handler exceptions, crashed jobs) that nobody propagates from are red herrings, however loud they are.",
+  "- The culprit change is the change on the root-cause service that made it fail. Bad deploys and config changes fail within 5 minutes (deploy errors carry the new version tag, config errors name the key); platform (infra) events fail within 5 minutes too.",
+  "- A memory leak is different: the root logs OOMKilled, and the culprit is the deploy at which its memory_mb metric started climbing, often hours before the window, so its metrics must be queried further back.",
+  "- Other changes near the incident (on the root or on failing callers) are coincidences. The service catalog's dependency lists are known to be incomplete: some real calls are undeclared, so members must be found from their logs."
+ ],
+ "answer_intro": "Report your findings as plain lines, one fact per line, for every ticket. Emit one edge line per incident member other than the root, where the upstream is the service that member caught the failure from; lines that do not match the format are ignored, and if a ticket has several root or change lines, the last one counts.",
+ "score": "Your score is 0.1 x the fraction of tickets with the right root + 0.1 x the fraction of tickets with the right change + 0.8 x the F1 score of all your edge lines against all true propagation edges, pooled over every ticket (each member of every incident counts once).",
+ "ticket_titles": [
+  "Elevated 5xx rate on {s}",
+  "Increased errors on {s}",
+  "{s} error rate above SLO threshold",
+  "Intermittent 503s from {s}",
+  "Spike in failed requests to {s}",
+  "High error rate alert for {s}"
+ ],
+ "oncall_note": "Service {svc} was deployed at {time} (change {chg}, {summary}) shortly before the alert fired, and a rollback is being considered.",
+ "impact": [
+  "Some customer requests fail intermittently until the issue is mitigated.",
+  "A fraction of users see sporadic errors and timeouts, with most operations succeeding on retry.",
+  "Customers experience intermittent failures on the affected journeys until mitigation is applied.",
+  "A small share of transactions are delayed or rejected, and some users see elevated error rates."
+ ],
+ "also_firing": "Other alerts that fired around the same time:",
+ "bad_deploy": [
+  "ERROR {C}Handler: java.lang.NullPointerException: cannot invoke getId() because order is null at {C}Handler.process({C}Handler.java:187)",
+  "ERROR {C}Service: panic: runtime error: index out of range [3] with length 0 (goroutine 4412)",
+  "ERROR {C}Controller: unhandled KeyError: 'customer_id' while serializing response",
+  "ERROR {C}Repository: column {C}.total_cents does not exist at character 58",
+  "ERROR {C}Worker: System.InvalidOperationException: Sequence contains no matching element at {C}Worker.Execute()",
+  "ERROR {C}Consumer: failed to deserialize payload: missing required field 'currency' (schema mismatch)"
+ ],
+ "bad_config": [
+  {
+   "key": "db.max_pool_size",
+   "good": "64",
+   "bad": "4",
+   "message": "ERROR connection pool exhausted: db.max_pool_size=4, {w} threads blocked waiting for a connection"
+  },
+  {
+   "key": "http.read_timeout_ms",
+   "good": "2000",
+   "bad": "50",
+   "message": "ERROR request aborted: http.read_timeout_ms=50 exceeded, upstream response too slow"
+  },
+  {
+   "key": "cache.ttl_seconds",
+   "good": "300",
+   "bad": "0",
+   "message": "ERROR cache ineffective: cache.ttl_seconds=0, every entry expires immediately, {w} extra backend reads"
+  },
+  {
+   "key": "retry.max_attempts",
+   "good": "3",
+   "bad": "0",
+   "message": "ERROR invalid retry policy: retry.max_attempts=0, no attempts will be made, failing all queued requests"
+  },
+  {
+   "key": "queue.consumer_threads",
+   "good": "8",
+   "bad": "1",
+   "message": "ERROR consumer lag growing: queue.consumer_threads=1, backlog at {w} messages and rising"
+  },
+  {
+   "key": "grpc.max_message_mb",
+   "good": "16",
+   "bad": "1",
+   "message": "ERROR message rejected: grpc.max_message_mb=1, payload exceeds limit, RESOURCE_EXHAUSTED returned to {w} clients"
+  }
+ ],
+ "infra": [
+  {
+   "summary": "Platform team performed a rolling minor-version upgrade of {s}",
+   "error": "ERROR: server closed the connection unexpectedly during instance restart"
+  },
+  {
+   "summary": "Platform team resized the data volume of {s} to a larger disk",
+   "error": "ERROR: I/O error on data directory: device temporarily unavailable, retrying"
+  },
+  {
+   "summary": "Platform team rotated the TLS certificates on {s}",
+   "error": "ERROR: SSL error: certificate verify failed (unable to get local issuer certificate)"
+  },
+  {
+   "summary": "Platform team applied new firewall rules to the {s} subnet",
+   "error": "ERROR: could not connect to peer 10.14.2.31:5432: connection timed out"
+  }
+ ],
+ "safe_infra": [
+  "Nightly automated backup completed successfully",
+  "Routine OS security patches rolled out to all nodes",
+  "Scheduled index rebuild finished during the maintenance window",
+  "Log rotation and archival to cold storage completed",
+  "Read replica re-sync completed after planned maintenance"
+ ],
+ "noise_errors": [
+  "ERROR unhandled exception in {r} handler: IllegalStateException: session already invalidated",
+  "ERROR nightly reconciliation job for {r} crashed with exit code 1",
+  "ERROR failed to parse {r}: unexpected token at line 412, column 7",
+  "ERROR {r} endpoint returned 500: TypeError: unsupported operand type(s) for +: 'NoneType' and 'int'",
+  "ERROR background worker processing {r} died unexpectedly, restarting"
+ ],
+ "blip_error": "ERROR health-check probe failed (connection refused); recovered on next probe 10s later",
+ "oom": "ERROR container OOMKilled after exceeding memory limit {lim}Mi; restarting",
+ "failover": "Platform team completed the failover and restored the primary; traffic is flowing normally again."
+}

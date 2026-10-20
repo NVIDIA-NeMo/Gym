@@ -1,0 +1,2 @@
+# The task prompt as SwarmBench's native harnesses send it to the root agent.
+user: "{prompt}"

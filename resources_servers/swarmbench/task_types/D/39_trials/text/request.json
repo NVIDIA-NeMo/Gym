@@ -1,0 +1,89 @@
+{
+ "user": "Write the task-facing text for a clinical-trial pre-screening task at a fictional hospital research office. Agents screen synthetic patients, each already assigned to one real recruiting trial. For every trial they see a short list of eligibility lines quoted verbatim from the trial registry, each with an id: inclusion lines I1, I2, ... and exclusion lines E1, E2, .... For every patient they can read chart sections (summary with sex, date of birth, screening date and height; problem list with status active or resolved and onset/resolved dates; an oncology section for cancer patients with histology, AJCC stage, biomarkers and metastatic sites; medications with indication, start and stop; procedures with start/end dates, category major surgery / minor surgery / radiotherapy / diagnostic, intent and indication; immunizations; laboratory results with date, value, unit and the upper limit of normal of that result; weights; ECOG performance status) and dated free-text clinical notes. Code fills ids, dates, drug names, values and names into your sentences through {placeholders}, and a parser reads the filled sentences back, so: keep every placeholder exactly as named, use each listed placeholder exactly once, keep each template on a single line, never use the character \"|\", and do not write any digits, dates or numbers yourself. Return one JSON object with these keys:\n\n\"intro\": the opening paragraph of the task prompt. Placeholders {n} (number of patients), {first} and {last} (first and last patient id), {ntrials} (number of trials). Say the research office must pre-screen the {n} patients against their assigned trials: for each patient decide whether they are eligible and list exactly which criterion ids they fail (an inclusion line that is not met, or an exclusion line that applies). Mention that the work is large and that every patient must be answered.\n\"rule_scope\": a paragraph: judge each patient only against the lines shown for the assigned trial; the patient's screening date stands in for consent, enrollment, randomization, first dose and start of treatment; a patient is eligible only when the failed list is empty; an inclusion line fails when the chart does not show it is met; an exclusion line fails when it applies to the patient.\n\"rule_windows\": a paragraph on time arithmetic: count calendar days back from the screening date; a period of N days, weeks (7 days each), months (30 days each) or years (365 days each) before screening includes an event dated exactly that many days earlier; for a therapy or medication the date that counts is its last dose or stop date, for radiotherapy the end date of the course; a medication with no stop date is ongoing and counts as received on the screening date; when the medication list says the stop date is in the notes, take it from the notes; age is completed years on the screening date.\n\"rule_latest\": a paragraph: for laboratory values, weight, ECOG performance status, pregnancy tests and breastfeeding status use only the most recent record dated on or before the screening date, whether it is in the chart or in a note; older values are superseded; a multiple of the upper limit of normal uses the limit printed with that same result; comparison signs are applied exactly (a value equal to a limit meets \"at least\" and \"no more than\" but not \"greater than\" or \"less than\").\n\"rule_units\": a paragraph saying that results may be reported in different units and must be converted before comparing, ending with the list {conversions}.\n\"rule_history\": a paragraph: conditions in the problem list count whether active or resolved for lines about a history of something, but only active ones count for lines about current or active disease; conditions in relatives (family history) never count unless the line itself mentions family history; a diagnosis that a note says was ruled out or excluded does not count; diagnostic procedures such as biopsies are not therapy; agents must use the drug class of each medication or vaccine (for example whether a drug is a checkpoint inhibitor, a systemic steroid or insulin, or whether a vaccine is live) and route matters (inhaled, nasal or topical steroids are not systemic).\n\"rule_combine\": a paragraph: an inclusion line that lists several requirements is met only if all are met, unless it offers alternatives joined by \"or\", in which case one alternative is enough; an exclusion line that lists several conditions applies if any one of them applies, unless the line requires them together (for example \"concurrent\"); exceptions and alternative limits written into a line (for example a higher limit for patients with liver metastases) must be honoured.\n\"answer_line\": one paragraph telling the agent to end with one JSON object mapping every patient id to an object with \"eligible\" (true or false) and \"failed\" (list of criterion ids, empty when eligible). Placeholder {example} (a one-patient example object).\n\"unit_prompt\": a short self-contained instruction for screening a single patient: placeholders {patient} and {trial}; say to use the tools to read the trial lines and the whole chart and notes, and to end with the JSON answer object for that one patient.\n\"tools\": an object with one short description for each tool: \"list_patients\" (patient ids with assigned trial and screening date, paged with offset and limit), \"list_trials\" (trial ids and titles), \"read_trial\" (the eligibility lines of one trial, by trial_id), \"read_chart\" (one chart section of one patient: patient_id and section, one of summary, problems, oncology, medications, procedures, immunizations, labs, vitals, performance), \"read_notes\" (the dated clinical notes of one patient, paged), \"calculator\" (arithmetic expression).\n\"n_ecog\": a list of 4 variants of one clinical-note sentence recording a performance status assessment at this visit; placeholder {ecog} (the ECOG grade).\n\"n_hcg\": a list of 4 variants of one note sentence recording a pregnancy test done at this visit; placeholder {result} (the word positive or negative).\n\"n_breastfeeding\": a list of 4 variants of one note sentence stating the patient is currently breastfeeding; no placeholders.\n\"n_weaned\": a list of 4 variants of one note sentence stating the patient stopped breastfeeding; placeholder {date}.\n\"n_family\": a list of 4 variants of one note sentence recording family history; placeholders {relative} (e.g. mother) and {condition} (a diagnosis name).\n\"n_ruled_out\": a list of 4 variants of one note sentence stating a suspected diagnosis was investigated and ruled out at this visit; placeholder {condition}.\n\"n_last_dose\": a list of 4 variants of one note sentence giving the date of the last dose of a medication, after which it was stopped; placeholders {drug} and {date}.\n\"n_vaccine\": a list of 4 variants of one note sentence saying the patient received a vaccine at an outside pharmacy or clinic; placeholders {vaccine} and {date}.\n\"n_surgery\": a list of 4 variants of one note sentence saying the patient had surgery at another hospital; placeholders {procedure} (a procedure name), {category} (the word major or minor, used as in \"major surgery\") and {date}.\n\"n_weight\": a list of 4 variants of one note sentence recording body weight measured at this visit; placeholder {weight} (value with unit).\n\"n_pad\": a list of 12 different short routine note sentences about scheduling, transport, consent paperwork, parking or reminders that contain no medical facts at all (no diagnoses, drugs, tests, symptoms, pregnancy or weights) and no placeholders.",
+ "keys": [
+  "intro",
+  "rule_scope",
+  "rule_windows",
+  "rule_latest",
+  "rule_units",
+  "rule_history",
+  "rule_combine",
+  "answer_line",
+  "unit_prompt",
+  "tools",
+  "n_ecog",
+  "n_hcg",
+  "n_breastfeeding",
+  "n_weaned",
+  "n_family",
+  "n_ruled_out",
+  "n_last_dose",
+  "n_vaccine",
+  "n_surgery",
+  "n_weight",
+  "n_pad"
+ ],
+ "placeholders": {
+  "intro": [
+   "{n}",
+   "{first}",
+   "{last}",
+   "{ntrials}"
+  ],
+  "rule_units": [
+   "{conversions}"
+  ],
+  "answer_line": [
+   "{example}"
+  ],
+  "unit_prompt": [
+   "{patient}",
+   "{trial}"
+  ],
+  "n_ecog": [
+   "{ecog}"
+  ],
+  "n_hcg": [
+   "{result}"
+  ],
+  "n_weaned": [
+   "{date}"
+  ],
+  "n_family": [
+   "{relative}",
+   "{condition}"
+  ],
+  "n_ruled_out": [
+   "{condition}"
+  ],
+  "n_last_dose": [
+   "{drug}",
+   "{date}"
+  ],
+  "n_vaccine": [
+   "{vaccine}",
+   "{date}"
+  ],
+  "n_surgery": [
+   "{procedure}",
+   "{category}",
+   "{date}"
+  ],
+  "n_weight": [
+   "{weight}"
+  ]
+ },
+ "lists": {
+  "n_ecog": 4,
+  "n_hcg": 4,
+  "n_breastfeeding": 4,
+  "n_weaned": 4,
+  "n_family": 4,
+  "n_ruled_out": 4,
+  "n_last_dose": 4,
+  "n_vaccine": 4,
+  "n_surgery": 4,
+  "n_weight": 4,
+  "n_pad": 12
+ }
+}

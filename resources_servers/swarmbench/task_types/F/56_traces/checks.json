@@ -1,0 +1,238 @@
+{
+ "summary": {
+  "type": "traces",
+  "ns": [
+   24,
+   384,
+   1024
+  ],
+  "seeds": "0,1,2",
+  "check1_oracle_min": 1.0,
+  "check2_wrong_max": {
+   "longest_non_root_span": 0.0,
+   "errors_included": 0.0
+  },
+  "check3_format_only_max": 0.0,
+  "check7_tool_errors": 0,
+  "check8_deterministic": true,
+  "canary": true
+ },
+ "rows": [
+  {
+   "n": 24,
+   "seed": 0,
+   "tier": "easy",
+   "gen_s": 0.02,
+   "hash": "d15c5df268cbdef5523fecc6ae827f53a8d1f3d071724ca156e913f0e04e3fb3",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "longest_non_root_span": 0.0,
+    "errors_included": 0.0
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 24,
+   "seed": 1,
+   "tier": "easy",
+   "gen_s": 0.01,
+   "hash": "487e934d619289a661dee49ab382c70b32229ad12fcfa54589ea7108c052e333",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "longest_non_root_span": 0.0,
+    "errors_included": 0.0
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 24,
+   "seed": 2,
+   "tier": "easy",
+   "gen_s": 0.01,
+   "hash": "00437579b0a00059cf27117f7cad05738ce44505478229dbddb30435ea64b3a8",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "longest_non_root_span": 0.0,
+    "errors_included": 0.0
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 384,
+   "seed": 0,
+   "tier": "medium",
+   "gen_s": 0.21,
+   "hash": "e0e388e1a3144f8b7f73bea43f5cdbe6b20f8fc9f7176d19bb3c9171e70ea5d5",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.1,
+   "wrong": {
+    "longest_non_root_span": 0.0,
+    "errors_included": 0.0
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 384,
+   "seed": 1,
+   "tier": "medium",
+   "gen_s": 0.21,
+   "hash": "6db6adbd293211a2b58a80ecbc556e283a3635afb5b965325d3fff0554c76899",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.1,
+   "wrong": {
+    "longest_non_root_span": 0.0,
+    "errors_included": 0.0
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 384,
+   "seed": 2,
+   "tier": "medium",
+   "gen_s": 0.23,
+   "hash": "41267fccb56c5db8f79acee968b7acc1bfee805295f05dac51acec83cad0f2c5",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.1,
+   "wrong": {
+    "longest_non_root_span": 0.0,
+    "errors_included": 0.0
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 1024,
+   "seed": 0,
+   "tier": "hard",
+   "gen_s": 0.6,
+   "hash": "d9020cdd9332551d21c18ea72818c0307d6e0b63521972701784fb40b3ec68ed",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.4,
+   "wrong": {
+    "longest_non_root_span": 0.0,
+    "errors_included": 0.0
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 1024,
+   "seed": 1,
+   "tier": "hard",
+   "gen_s": 0.62,
+   "hash": "5b0516e0b4d55842aac2a31ee85fff5a8539c2e284884e4daba4b78f1ae106e9",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.5,
+   "wrong": {
+    "longest_non_root_span": 0.0,
+    "errors_included": 0.0
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 1024,
+   "seed": 2,
+   "tier": "hard",
+   "gen_s": 0.67,
+   "hash": "1d1f015ca857506c3fd1e6c9f02e25e9abfcfd2c982d9123fc8cb8b33626a66e",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.4,
+   "wrong": {
+    "longest_non_root_span": 0.0,
+    "errors_included": 0.0
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  }
+ ]
+}

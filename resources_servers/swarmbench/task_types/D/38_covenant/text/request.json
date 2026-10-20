@@ -1,0 +1,141 @@
+{
+ "user": "Write the task-facing text for a loan-portfolio covenant compliance review at a fictional commercial bank. Agents check, for each of many borrowers, whether the borrower met the financial covenants of its credit agreement for one requested test period. Per borrower they can read: the covenant excerpt of the credit agreement, the amendment file, the correspondence file (which names the requested test period and may contain equity cure notices) and a statement excerpt with three fiscal years of reported figures in thousands of US dollars. Code assembles these files from your sentences and fills ids, names, dates and numbers through {placeholders}; a parser reads the filled sentences back, so: keep every placeholder exactly as named, use each listed placeholder exactly once, keep each template on a single line, never use the characters \"|\" or \"{\" or \"}\" except in placeholders, and do not write any digits yourself (the only exception is inside the key \"example\" format description, see rule_answer). Write precise legal-financial English, like a real credit agreement; every definition must say exactly what the facts below say, no more and no less.\n\nReturn one JSON object with these keys:\n\n\"bank\": a fictional bank name (2-3 words).\n\"intro\": opening paragraph of the task prompt. Placeholders {bank}, {n} (number of borrowers), {first} and {last} (first and last borrower id). Say that the portfolio monitoring team of {bank} must determine, for each of the {n} borrowers, the covenant ratios for the requested test period, whether each tested covenant is met and whether the borrower is in compliance overall, and that all amounts in the files are in thousands of US dollars.\n\"rule_general\": one paragraph of review rules: the test period is the fiscal year ending on the date named in the correspondence file's compliance certificate request, and every figure must come from the statement column for that fiscal year; a dash in a statement means the line was not reported and counts as zero; each tested covenant applies with the definitions of the agreement as amended; an amendment changes the agreement only for test periods ending on or after the date it states, and when several executed amendments change the same item for the test period, the one with the latest such date governs; draft amendments that were never executed have no effect; ratios are computed from unrounded figures and rounded only at the end; a covenant with a maximum is met when the ratio is at or below the maximum, a covenant with a minimum is met when the ratio is at or above the minimum; a borrower is in compliance only if every tested covenant is met.\n\"rule_answer\": one paragraph describing the final answer, with placeholder {example}: one JSON object at the end of the reply, keyed by borrower id; for each borrower an entry for every covenant its agreement tests, under the keys \"net_leverage\", \"interest_coverage\" and \"current_ratio\" (write these three key names literally, in double quotes), each an object with \"ratio\" (number, two decimals) and \"pass\" (true or false), plus \"compliant\" (true or false); a ratio within one hundredth of the exact value counts as correct; covenants the agreement does not test are omitted; then show {example} as the format example.\n\"agreement_title\": header line of a covenant excerpt, placeholders {name} (borrower legal name) and {date} (agreement date).\n\"def_debt_incl\": definition sentence of \"Consolidated Total Debt\": the sum of long-term debt (current and noncurrent portions), short-term borrowings and finance lease liabilities (current and noncurrent portions); operating lease liabilities are excluded. No placeholders.\n\"def_debt_excl\": definition sentence of \"Consolidated Total Debt\": the sum of long-term debt (current and noncurrent portions) and short-term borrowings; finance lease liabilities and operating lease liabilities are excluded. No placeholders.\n\"def_net_full\": definition sentence of \"Net Leverage Ratio\": Consolidated Total Debt minus unrestricted cash and cash equivalents, divided by Consolidated EBITDA. No placeholders.\n\"def_net_cap\": definition sentence of \"Net Leverage Ratio\": Consolidated Total Debt minus unrestricted cash and cash equivalents, provided that the amount of cash deducted shall not exceed {cap} (thousands of US dollars), divided by Consolidated EBITDA.\n\"def_ebitda_cap\": definition sentence of \"Consolidated EBITDA\": operating income plus depreciation and amortization, plus the following items to the extent deducted in computing operating income: {addbacks}; provided that the aggregate amount added back for those listed items shall not exceed {pct} percent of the sum of operating income and depreciation and amortization.\n\"def_ebitda_nocap\": definition sentence of \"Consolidated EBITDA\": operating income plus depreciation and amortization, plus the following items to the extent deducted in computing operating income: {addbacks}; no limit applies to these add-backs.\n\"def_coverage\": definition sentence of \"Interest Coverage Ratio\": Consolidated EBITDA divided by interest expense. No placeholders.\n\"def_current\": definition sentence of \"Current Ratio\": total current assets divided by total current liabilities. No placeholders.\n\"cov_leverage\": covenant sentence: the Net Leverage Ratio for any test period shall not exceed {max}.\n\"cov_leverage_step\": covenant sentence: the Net Leverage Ratio shall not exceed {max1} for any test period ending on or before {date}, and shall not exceed {max2} for any test period ending after that date.\n\"cov_coverage\": covenant sentence: the Interest Coverage Ratio for any test period shall not be less than {min}.\n\"cov_current\": covenant sentence: the Current Ratio as of the last day of any test period shall not be less than {min}.\n\"cure_right\": equity cure clause: a cash common equity contribution received by the Borrower within {days} days after the last day of a test period may, at the Borrower's election, be added to Consolidated EBITDA for that test period solely for computing the Net Leverage Ratio (and for no other covenant).\n\"amend_leverage\": amendment file entry, placeholders {k} (amendment number), {signed} (signing date), {from} (date): executed amendment; for every test period ending on or after {from}, the maximum Net Leverage Ratio is {max}, replacing any earlier level or schedule.\n\"amend_coverage\": executed amendment entry, placeholders {k}, {signed}, {from}, {min}: for every test period ending on or after {from}, the minimum Interest Coverage Ratio is {min}.\n\"amend_current\": executed amendment entry, placeholders {k}, {signed}, {from}, {min}: for every test period ending on or after {from}, the minimum Current Ratio is {min}.\n\"amend_cap\": executed amendment entry, placeholders {k}, {signed}, {from}, {pct}: for every test period ending on or after {from}, the add-back limit in the definition of Consolidated EBITDA is {pct} percent.\n\"amend_fl_excl\": executed amendment entry, placeholders {k}, {signed}, {from}: for every test period ending on or after {from}, finance lease liabilities are excluded from Consolidated Total Debt.\n\"amend_fl_incl\": executed amendment entry, placeholders {k}, {signed}, {from}: for every test period ending on or after {from}, finance lease liabilities (current and noncurrent) are included in Consolidated Total Debt.\n\"amend_draft\": amendment file entry for a draft that was circulated but never signed or executed, placeholders {k}, {signed} (circulation date), {max}: it proposed a maximum Net Leverage Ratio of {max}.\n\"no_amendments\": one sentence saying the amendment file contains no amendments. No placeholders.\n\"request\": correspondence entry, placeholders {date} (letter date) and {end} (test period end date): the agent bank requests the compliance certificate for the test period ending {end}.\n\"cure_notice\": correspondence entry, placeholders {date} (date the contribution was received), {amount} (thousands of US dollars) and {end}: the Borrower received a cash common equity contribution of {amount} and elects to apply it under the equity cure right to the test period ending {end}.\n\"pad_notes\": a list of 12 short routine correspondence entries that do not affect any covenant calculation (for example, change of notice address, request for updated insurance certificate, introduction of a new relationship manager, confirmation of an interest rate reset), each with the placeholder {date} exactly once.\n\"labels\": an object with these keys and short statement line labels as values (no placeholders): \"revenue\", \"op_income\" (operating income), \"da\" (depreciation and amortization), \"sbc\" (share-based compensation expense), \"restructuring\" (restructuring charges), \"impairment\" (asset impairment charges), \"interest\" (interest expense), \"net_income\", \"cash\" (cash and cash equivalents), \"ca\" (total current assets), \"cl\" (total current liabilities), \"ltd_c\" (current portion of long-term debt), \"ltd_nc\" (long-term debt, net of current portion), \"stb\" (short-term borrowings), \"fl_c\" (finance lease liabilities, current), \"fl_nc\" (finance lease liabilities, noncurrent), \"ol_nc\" (operating lease liabilities, noncurrent).\n\"statement_title\": header line of a statement excerpt, placeholder {name}; say figures are in thousands of US dollars and columns are fiscal years.\n\"tools\": an object with one-sentence descriptions (no placeholders) for these tools: \"list_borrowers\" (lists borrower ids and names, paged with offset/limit), \"read_agreement\" (covenant excerpt of one borrower's credit agreement), \"read_amendments\" (one borrower's amendment file), \"read_correspondence\" (one borrower's correspondence file, including the compliance certificate request), \"read_statements\" (one borrower's statement excerpt, three fiscal years), \"calculator\" (evaluates an arithmetic expression).\n\"unit_prompt\": the prompt for a single-borrower version of the task, placeholders {id} (borrower id) and {example}: check only borrower {id} with the tools, following the same rules, and end with the JSON answer for that borrower in the format of {example}.",
+ "keys": [
+  "bank",
+  "intro",
+  "rule_general",
+  "rule_answer",
+  "agreement_title",
+  "def_debt_incl",
+  "def_debt_excl",
+  "def_net_full",
+  "def_net_cap",
+  "def_ebitda_cap",
+  "def_ebitda_nocap",
+  "def_coverage",
+  "def_current",
+  "cov_leverage",
+  "cov_leverage_step",
+  "cov_coverage",
+  "cov_current",
+  "cure_right",
+  "amend_leverage",
+  "amend_coverage",
+  "amend_current",
+  "amend_cap",
+  "amend_fl_excl",
+  "amend_fl_incl",
+  "amend_draft",
+  "no_amendments",
+  "request",
+  "cure_notice",
+  "pad_notes",
+  "labels",
+  "statement_title",
+  "tools",
+  "unit_prompt"
+ ],
+ "placeholders": {
+  "intro": [
+   "{bank}",
+   "{n}",
+   "{first}",
+   "{last}"
+  ],
+  "rule_answer": [
+   "{example}"
+  ],
+  "agreement_title": [
+   "{name}",
+   "{date}"
+  ],
+  "def_net_cap": [
+   "{cap}"
+  ],
+  "def_ebitda_cap": [
+   "{addbacks}",
+   "{pct}"
+  ],
+  "def_ebitda_nocap": [
+   "{addbacks}"
+  ],
+  "cov_leverage": [
+   "{max}"
+  ],
+  "cov_leverage_step": [
+   "{max1}",
+   "{date}",
+   "{max2}"
+  ],
+  "cov_coverage": [
+   "{min}"
+  ],
+  "cov_current": [
+   "{min}"
+  ],
+  "cure_right": [
+   "{days}"
+  ],
+  "amend_leverage": [
+   "{k}",
+   "{signed}",
+   "{from}",
+   "{max}"
+  ],
+  "amend_coverage": [
+   "{k}",
+   "{signed}",
+   "{from}",
+   "{min}"
+  ],
+  "amend_current": [
+   "{k}",
+   "{signed}",
+   "{from}",
+   "{min}"
+  ],
+  "amend_cap": [
+   "{k}",
+   "{signed}",
+   "{from}",
+   "{pct}"
+  ],
+  "amend_fl_excl": [
+   "{k}",
+   "{signed}",
+   "{from}"
+  ],
+  "amend_fl_incl": [
+   "{k}",
+   "{signed}",
+   "{from}"
+  ],
+  "amend_draft": [
+   "{k}",
+   "{signed}",
+   "{max}"
+  ],
+  "request": [
+   "{date}",
+   "{end}"
+  ],
+  "cure_notice": [
+   "{date}",
+   "{amount}",
+   "{end}"
+  ],
+  "pad_notes": [
+   "{date}"
+  ],
+  "statement_title": [
+   "{name}"
+  ],
+  "unit_prompt": [
+   "{id}",
+   "{example}"
+  ]
+ },
+ "lists": {
+  "pad_notes": 12
+ }
+}

@@ -1,0 +1,37 @@
+{
+ "api": "http://10.49.64.27:8000/v1",
+ "model_requested": "policy_model",
+ "system": "You write task text for an offline evaluation of software agents. Follow the facts you are given exactly; do not add rules, numbers or names that are not in the brief. Reply with exactly one JSON object and nothing else.",
+ "request": {
+  "user": "You write task text for a loan-portfolio covenant compliance review at a fictional commercial bank. Rewrite one correspondence-file template. Code fills {placeholders} and a parser reads the filled sentence back, so keep every placeholder exactly as named, use each exactly once, keep it on a single line, never use the characters \"|\" or \"{\" or \"}\" except in placeholders, and write no digits yourself.\n\nReturn one JSON object with one key:\n\"cure_notice\": correspondence entry, placeholders {date}, {amount} (thousands of US dollars) and {end}: the Borrower states that on {date} it received a cash common equity contribution of {amount} thousand US dollars, and it elects to apply that contribution under the equity cure right to the test period ending {end}. The sentence must say unambiguously that {date} is the date the contribution was received (not merely the date of the notice).",
+  "keys": [
+   "cure_notice"
+  ],
+  "placeholders": {
+   "cure_notice": [
+    "{date}",
+    "{amount}",
+    "{end}"
+   ]
+  },
+  "lists": {}
+ },
+ "attempts": [
+  {
+   "seconds": 11.6,
+   "usage": {
+    "prompt_tokens": 330,
+    "total_tokens": 1147,
+    "completion_tokens": 817,
+    "prompt_tokens_details": null,
+    "completion_tokens_details": {
+     "reasoning_tokens": 0
+    }
+   },
+   "model": "policy_model",
+   "reply": "{\"cure_notice\":\"The Borrower states that the cash common equity contribution of {amount} thousand US dollars was received by the Borrower on {date} as the actual date of receipt, and not merely as the date of this notice, and the Borrower elects to apply that contribution under the equity cure right to the test period ending {end}.\"}",
+   "problems": []
+  }
+ ],
+ "created": "2026-10-14 19:41:46 UTC"
+}

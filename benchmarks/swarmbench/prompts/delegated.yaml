@@ -1,0 +1,5 @@
+# The task prompt plus the one-line nudge SwarmBench's native harnesses add when subagents are enabled.
+user: |-
+  {prompt}
+
+  Use subagents.

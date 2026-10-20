@@ -1,0 +1,116 @@
+{
+ "user": "Write the task-facing text for a privacy-scan task at a fictional public library's digitization program. Agents audit digitized documents: each document is an excerpt of a public-domain novel whose scan also picked up short inserted passages (margin notes, loan-slip remarks, reader letters, staff annotations, catalogue notes). Before the archive is published, every item of personal data of a private individual must be found and reported, following a written privacy policy. Two reference lists exist: an officials directory (public officials with title, agency and office phone) and a consent register (people who agreed to have their details published, each with a status that is either granted or withdrawn). Code fills names, numbers, emails, addresses and dates into your sentences through {placeholders}, and a parser reads the filled sentences back, so: keep every placeholder exactly as named, use each listed placeholder exactly once, keep each template on a single line, never use the character \"|\", and do not write any digits, names of people, phone numbers, emails or addresses yourself. Return one JSON object with these keys:\n\n\"program\": a fictional name for the library digitization program (2-4 words).\n\"intro\": the opening paragraph of the task prompt. Placeholders {program}, {n} (number of documents), {first} and {last} (first and last document id). Say that the privacy office must scan all {n} documents and, for every document, list each item of personal data that the policy requires to be reported, and that most of each document is original literary text.\n\"rule_report\": a paragraph defining reportable personal data of a private individual and the seven item types, written with these exact type keys in backticks: `name` (full name of a private person), `phone` (a personal phone number), `email` (a personal email address), `address` (a home address), `dob` (a date of birth), `gov_id` (a government identification number such as a social security number), `card` (a payment card number). Say each distinct item is reported once per document even if it appears several times.\n\"rule_officials\": a paragraph: people listed in the officials directory, mentioned in their official role, are not private individuals; neither their names nor their office phone numbers are reported. Tell the agent to check the directory rather than guess from titles.\n\"rule_business\": a paragraph: organisations are not individuals; business main lines, role or shared mailboxes (such as info, press, support or orders addresses of an organisation) and business addresses are not reported.\n\"rule_numbers\": a paragraph: reference numbers that merely look like identification numbers are not personal data and are not reported: court case or docket numbers, catalogue part numbers and ISBNs; only a number the text presents as a person's government identification number counts as `gov_id`.\n\"rule_samples\": a paragraph: specimen or sample entries printed on blank forms, templates or instructions, which the text presents as illustrations rather than real people, are not personal data and are not reported.\n\"rule_luhn\": a paragraph: a payment card number is reported as `card` only if it passes the Luhn checksum (explain the Luhn check in one or two plain sentences: from the rightmost digit, double every second digit, subtract nine from any result above nine, sum all digits, valid when the sum is a multiple of ten); a number that fails is a mistyped number and is not reported, but the person's other data is still reported.\n\"rule_consent\": a paragraph: when a person is in the consent register with status granted, none of that person's data (name included) is reported; when the status is withdrawn, or the person is not in the register, their data is reported as normal. Tell the agent to check the register for every private person.\n\"rule_source\": a paragraph: characters, historical figures and authors that belong to the original literary text are not private individuals and are not reported; only the inserted passages can contain reportable data.\n\"rule_format\": a paragraph on values: copy names, emails and addresses exactly as written (full address including city, state and postal code), phone, gov_id and card numbers may be written with or without separators, and `dob` must be given as year-month-day (for example the form YYYY-MM-DD, written with letters as shown, since you must not write digits).\n\"answer_line\": the final instruction on the answer format, with placeholder {example}: end the reply with one JSON object that maps every document id to the list of reported items, each item an object with keys type and value, using an empty list for a document with nothing to report, for example {example}.\n\"unit_prompt\": a short task prompt for auditing a single document, with placeholders {doc} (the document id) and {example}: audit only document {doc} under the policy below (the policy text is appended after your text) and end with one JSON object mapping {doc} to its list of items, for example {example}.\n\"directory_header\": one line introducing the officials directory listing.\n\"register_header\": one line introducing the consent register listing.\n\"tools\": an object with one short description (one sentence each) for these tools: \"list_documents\" (lists document ids with source title and paragraph count, paged with offset and limit), \"read_document\" (returns numbered paragraphs of one document from paragraph start, a page at a time), \"search_document\" (finds paragraphs of one document containing a text, case-insensitive), \"read_directory\" (pages through the officials directory), \"search_directory\" (finds directory rows containing a text), \"read_register\" (pages through the consent register), \"search_register\" (finds register rows containing a text).\n\"p_contact\": a list of 6 different inserted passages (one or two sentences each, varied styles: margin note, loan slip, reader letter, staff memo) in which a private person {name} gives a personal phone number {phone} and personal email address {email}.\n\"p_home\": a list of 6 different inserted passages in which a private person {name} is recorded with home address {address} and date of birth {dob}.\n\"p_id\": a list of 6 different inserted passages in which a private person {name} is recorded with a government identification number {id} (for example on an old library registration card).\n\"p_card\": a list of 6 different inserted passages in which a private person {name} wrote down a payment card number {card} (for example to pay a late fee).\n\"p_via_business\": a list of 6 different inserted passages in which a private person {name} (for example a reader or volunteer) asks to be contacted only through the main line {phone} of the organisation {company} where they work, so the number is a business line.\n\"p_official_private\": a list of 6 different inserted passages in which {title} {name} of {agency} appears purely as a private person (for example returning an overdue novel, paying a personal fine or joining a reading circle) and leaves a home phone number {phone}.\n\"d_sample\": a list of 6 different inserted passages describing a specimen or sample entry printed on a blank form or instruction sheet, showing the made-up example name {name} and example identification number {id}.\n\"d_official\": a list of 6 different inserted passages in which an official, {title} {name} of {agency}, acting in that official role (e.g. approving the digitization, inspecting the building), gives an office phone {phone}.\n\"d_business\": a list of 6 different inserted passages in which an organisation {company} gives its main line {phone}, a shared mailbox {email} and its business address {address}.\n\"d_case\": a list of 4 different inserted passages that mention a court docket or case number {case} (e.g. a donated volume from a court library).\n\"d_part\": a list of 4 different inserted passages that mention a catalogue part number {part} (e.g. a replacement shelf bracket or scanner part).\n\"d_isbn\": a list of 4 different inserted passages that mention the ISBN {isbn} of a modern reprint.",
+ "keys": [
+  "program",
+  "intro",
+  "rule_report",
+  "rule_officials",
+  "rule_business",
+  "rule_numbers",
+  "rule_luhn",
+  "rule_consent",
+  "rule_source",
+  "rule_format",
+  "answer_line",
+  "unit_prompt",
+  "directory_header",
+  "register_header",
+  "tools",
+  "p_contact",
+  "p_home",
+  "p_id",
+  "p_card",
+  "d_official",
+  "d_business",
+  "d_case",
+  "d_part",
+  "d_isbn",
+  "rule_samples",
+  "p_via_business",
+  "p_official_private",
+  "d_sample"
+ ],
+ "placeholders": {
+  "intro": [
+   "{program}",
+   "{n}",
+   "{first}",
+   "{last}"
+  ],
+  "answer_line": [
+   "{example}"
+  ],
+  "unit_prompt": [
+   "{doc}",
+   "{example}"
+  ],
+  "p_contact": [
+   "{name}",
+   "{phone}",
+   "{email}"
+  ],
+  "p_home": [
+   "{name}",
+   "{address}",
+   "{dob}"
+  ],
+  "p_id": [
+   "{name}",
+   "{id}"
+  ],
+  "p_card": [
+   "{name}",
+   "{card}"
+  ],
+  "d_official": [
+   "{title}",
+   "{name}",
+   "{agency}",
+   "{phone}"
+  ],
+  "d_business": [
+   "{company}",
+   "{phone}",
+   "{email}",
+   "{address}"
+  ],
+  "d_case": [
+   "{case}"
+  ],
+  "d_part": [
+   "{part}"
+  ],
+  "d_isbn": [
+   "{isbn}"
+  ],
+  "p_via_business": [
+   "{name}",
+   "{phone}",
+   "{company}"
+  ],
+  "p_official_private": [
+   "{title}",
+   "{name}",
+   "{agency}",
+   "{phone}"
+  ],
+  "d_sample": [
+   "{name}",
+   "{id}"
+  ]
+ },
+ "lists": {
+  "p_contact": 6,
+  "p_home": 6,
+  "p_id": 6,
+  "p_card": 6,
+  "d_official": 6,
+  "d_business": 6,
+  "d_case": 4,
+  "d_part": 4,
+  "d_isbn": 4,
+  "p_via_business": 6,
+  "p_official_private": 6,
+  "d_sample": 6
+ }
+}

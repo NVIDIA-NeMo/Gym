@@ -1,0 +1,19 @@
+[
+ {
+  "name": "San Francisco Building Permits (DataSF dataset i98e-djp9), permits filed in 2017-2021",
+  "url": "https://data.sf.gov/resource/i98e-djp9.csv?$limit=N&$order=permit_number&$where=filed_date between 'Y-01-01T00:00:00' and 'Y-12-31T23:59:59' (Y=2019 with N=6000; Y=2017,2018,2020,2021 with N=12000, i.e. the first 12000 permits of each year by permit number)",
+  "license": "Open Data Commons Public Domain Dedication and License (PDDL 1.0), per the dataset metadata https://data.sf.gov/api/views/i98e-djp9.json",
+  "retrieved": "2026-10-14",
+  "raw_files": {
+   "data/raw/sf_permits_raw_2017.csv": "743f5857f8eae848e16b9adbd064a472135ce51a93ffea885652a2268b686248",
+   "data/raw/sf_permits_raw_2018.csv": "f9e702946d767de34805cc2a285c86e2059453c8442529caace3afd36f801893",
+   "data/raw/sf_permits_raw.csv": "5cbc10155ac68eeba56acfaecac5810ead5f238789480d9f2dafaa882df6010d",
+   "data/raw/sf_permits_raw_2020.csv": "8fe652b07f08130d2d56d6da2971889558a5e7d32947d8b8474c8ad9ae603ad2",
+   "data/raw/sf_permits_raw_2021.csv": "b4666c7ddac9522704a19257387fc05ec15006bb74a37cbff6bf6488a8d9238c"
+  },
+  "snapshot_file": "data/permits.csv",
+  "snapshot_sha256": "cac76bc2bd8b12efe3cfc690d5466744828a6cc93b450c3da1bdeea352288a5c",
+  "snapshot_rows": 7200,
+  "derivation": "build_snapshot.py (dedupe, ordered dates, non-empty columns, all non-8 permit types + permit-8 rows to 7200, dates cut to YYYY-MM-DD, numbers to integers)"
+ }
+]

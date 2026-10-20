@@ -1,0 +1,46 @@
+{
+ "api": "http://10.49.67.62:8000/v1",
+ "model_requested": "policy_model",
+ "system": "You write task text for an offline evaluation of software agents. Follow the facts you are given exactly; do not add rules, numbers or names that are not in the brief. Reply with exactly one JSON object and nothing else.",
+ "request": {
+  "user": "Write the task-facing text for an offline evaluation task called 'citation check'. Facts (use exactly these, add nothing else):\n- The agent is given a literature report on natural language processing with {n_paragraphs} paragraphs (ids like P001) containing {n_sentences} citing sentences (ids like S0001). Every sentence cites one paper of the report's bibliography of {n_refs} papers by its reference id in square brackets, like [R0123]. Each bibliography entry has the paper's title and abstract.\n- The agent must check every citation against the abstracts and give one of three verdicts per sentence: \"supported\" (the cited paper's abstract states what the sentence says; paraphrase is fine), \"unsupported\" (the cited paper is the right topic but the sentence misstates it, for example a wrong number, the opposite result, a different dataset or language, task or comparison, and no paper in the bibliography states it), or \"wrong_source\" (the sentence is an accurate statement about a DIFFERENT paper in the bibliography, often a closely related one; then the agent must also give that paper's reference id as \"correct_ref\").\n- Judge only from the abstracts in the bibliography; there is no internet access, and the papers' full texts are not available. Details matter: a sentence that gets one number, direction or dataset wrong is not supported.\n- A paragraph counts as correct only if every sentence in it has the right verdict, and the right correct_ref for every wrong_source.\n- Final answer: one JSON object mapping every sentence id to an object with \"verdict\" (and \"correct_ref\" for wrong_source), for example {\"S0001\": {\"verdict\": \"supported\"}, \"S0002\": {\"verdict\": \"wrong_source\", \"correct_ref\": \"R0456\"}}. Sentences that are missing count as wrong.\n- Tools: read_report (page through the report's paragraphs, with offset and limit), list_refs (page through the bibliography's reference ids and titles), read_refs (read up to 6 references' titles and abstracts by id), search_refs (keyword search over the bibliography's titles and abstracts; returns reference ids and titles).\n\nReturn one JSON object with these keys:\n\"prompt\": the task description addressed to the agent, 280-420 words, containing the literal placeholders {n_paragraphs}, {n_sentences} and {n_refs} (each at least once), with the three verdicts, the per-paragraph judging and the exact final answer format with a short example.\n\"tool_read_report\", \"tool_list_refs\", \"tool_read_refs\", \"tool_search_refs\": one or two sentences each describing the tool for the agent.\n\"unit_prompt\": a shorter version of the task (120-200 words) for a single paragraph, containing the literal placeholders {paragraph_id} and {n_sentences}, with the same three verdicts and final answer format.",
+  "keys": [
+   "prompt",
+   "tool_read_report",
+   "tool_list_refs",
+   "tool_read_refs",
+   "tool_search_refs",
+   "unit_prompt"
+  ],
+  "placeholders": {
+   "prompt": [
+    "{n_paragraphs}",
+    "{n_sentences}",
+    "{n_refs}"
+   ],
+   "unit_prompt": [
+    "{paragraph_id}",
+    "{n_sentences}"
+   ]
+  },
+  "lists": {}
+ },
+ "attempts": [
+  {
+   "seconds": 322.1,
+   "usage": {
+    "prompt_tokens": 747,
+    "total_tokens": 8797,
+    "completion_tokens": 8050,
+    "prompt_tokens_details": null,
+    "completion_tokens_details": {
+     "reasoning_tokens": 0
+    }
+   },
+   "model": "policy_model",
+   "reply": "{\n  \"prompt\": \"You are given a literature report on natural language processing with {n_paragraphs} paragraphs (ids like P001) containing {n_sentences} citing sentences (ids like S0001). Every sentence cites one paper of the report's bibliography of {n_refs} papers by its reference id in square brackets, like [R0123]. Each bibliography entry has the paper's title and abstract.\\n\\nCheck every citation against the abstracts. Give one of three verdicts per sentence:\\n- \\\"supported\\\": the cited paper's abstract states what the sentence says; paraphrase is fine.\\n- \\\"unsupported\\\": the cited paper is the right topic but the sentence misstates it, for example a wrong number, the opposite result, a different dataset or language, task or comparison, and no paper in the bibliography states it.\\n- \\\"wrong_source\\\": the sentence is an accurate statement about a DIFFERENT paper in the bibliography, often a closely related one; then you must also give that paper's reference id as \\\"correct_ref\\\".\\n\\nJudge only from the abstracts in the bibliography; there is no internet access, and the papers' full texts are not available. Details matter: a sentence that gets one number, direction or dataset wrong is not supported.\\n\\nA paragraph counts as correct only if every sentence in it has the right verdict, and the right correct_ref for every wrong_source. Sentences that are missing count as wrong. Your answer must cover every one of the {n_sentences} sentences across all {n_paragraphs} paragraphs.\\n\\nTools:\\n- read_report: page through the report's paragraphs, with offset and limit.\\n- list_refs: page through the bibliography's reference ids and titles.\\n- read_refs: read up to 6 references' titles and abstracts by id.\\n- search_refs: keyword search over the bibliography's titles and abstracts; returns reference ids and titles.\\n\\nFinal answer: one JSON object mapping every sentence id to an object with \\\"verdict\\\" (and \\\"correct_ref\\\" for wrong_source), for example {\\\"S0001\\\": {\\\"verdict\\\": \\\"supported\\\"}, \\\"S0002\\\": {\\\"verdict\\\": \\\"wrong_source\\\", \\\"correct_ref\\\": \\\"R0456\\\"}}.\",\n  \"tool_read_report\": \"Page through the report's paragraphs using offset and limit. Use it to read the paragraphs and their citing sentences.\",\n  \"tool_list_refs\": \"Page through the bibliography's reference ids and titles.\",\n  \"tool_read_refs\": \"Read up to 6 references' titles and abstracts by id.\",\n  \"tool_search_refs\": \"Keyword search over the bibliography's titles and abstracts; returns reference ids and titles.\",\n  \"unit_prompt\": \"Paragraph {paragraph_id} of a literature report on natural language processing contains citing sentences (ids like S0001). The report has {n_sentences} citing sentences; each cites one paper of the bibliography by its reference id in square brackets, like [R0123], and each bibliography entry has the paper's title and abstract.\\n\\nCheck every citation in paragraph {paragraph_id} against the abstracts. Give one of three verdicts per sentence:\\n- \\\"supported\\\": the cited paper's abstract states what the sentence says; paraphrase is fine.\\n- \\\"unsupported\\\": the cited paper is the right topic but the sentence misstates it (a wrong number, the opposite result, a different dataset or language, task or comparison), and no paper in the bibliography states it.\\n- \\\"wrong_source\\\": the sentence is an accurate statement about a DIFFERENT paper in the bibliography, often a closely related one; then also give that paper's reference id as \\\"correct_ref\\\".\\n\\nJudge only from the abstracts; there is no internet access and the full texts are not available. Details matter: one wrong number, direction or dataset means not supported.\\n\\nFinal answer: one JSON object mapping every sentence id in paragraph {paragraph_id} to an object with \\\"verdict\\\" (and \\\"correct_ref\\\" for wrong_source), e.g. {\\\"S0001\\\": {\\\"verdict\\\": \\\"supported\\\"}, \\\"S0002\\\": {\\\"verdict\\\": \\\"wrong_source\\\", \\\"correct_ref\\\": \\\"R0456\\\"}}.\"\n}",
+   "problems": []
+  }
+ ],
+ "created": "2026-10-14 16:43:07 UTC"
+}

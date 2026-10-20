@@ -1,0 +1,100 @@
+{
+ "company": "Stub Cloud",
+ "intro": "STUB {company} audit {n} contracts {first} to {last} for {month}.",
+ "rule_scope": "STUB scope.",
+ "rule_measure": "STUB measure.",
+ "rule_support": "STUB support.",
+ "rule_credit": "STUB credit.",
+ "answer_line": "STUB answer {example}",
+ "unit_prompt": "STUB audit only {customer} for {month}.",
+ "c_target": [
+  "STUB0 target {target}%.",
+  "STUB1 target {target}%.",
+  "STUB2 target {target}%."
+ ],
+ "c_deg_full": [
+  "STUB0 degraded full.",
+  "STUB1 degraded full.",
+  "STUB2 degraded full."
+ ],
+ "c_deg_half": [
+  "STUB0 degraded half.",
+  "STUB1 degraded half.",
+  "STUB2 degraded half."
+ ],
+ "c_deg_none": [
+  "STUB0 degraded none.",
+  "STUB1 degraded none.",
+  "STUB2 degraded none."
+ ],
+ "c_minlen": [
+  "STUB0 shorter than {minutes} minutes not counted.",
+  "STUB1 shorter than {minutes} minutes not counted.",
+  "STUB2 shorter than {minutes} minutes not counted."
+ ],
+ "c_minlen_none": [
+  "STUB0 every incident counts.",
+  "STUB1 every incident counts.",
+  "STUB2 every incident counts."
+ ],
+ "c_maint": [
+  "STUB0 notice {hours} hours, window {window}.",
+  "STUB1 notice {hours} hours, window {window}.",
+  "STUB2 notice {hours} hours, window {window}."
+ ],
+ "c_upstream_counts": [
+  "STUB0 upstream counts.",
+  "STUB1 upstream counts.",
+  "STUB2 upstream counts."
+ ],
+ "c_upstream_excluded": [
+  "STUB0 upstream excluded.",
+  "STUB1 upstream excluded.",
+  "STUB2 upstream excluded."
+ ],
+ "c_force_majeure": [
+  "STUB0 force majeure excluded.",
+  "STUB1 force majeure excluded.",
+  "STUB2 force majeure excluded."
+ ],
+ "c_customer_action": [
+  "STUB0 own actions excluded.",
+  "STUB1 own actions excluded.",
+  "STUB2 own actions excluded."
+ ],
+ "c_support": [
+  "STUB0 P1 {p1} minutes, P2 {p2} business hours, P3 {p3} business hours.",
+  "STUB1 P1 {p1} minutes, P2 {p2} business hours, P3 {p3} business hours.",
+  "STUB2 P1 {p1} minutes, P2 {p2} business hours, P3 {p3} business hours."
+ ],
+ "c_support_credit": [
+  "STUB0 support credit {support_credit}%.",
+  "STUB1 support credit {support_credit}%.",
+  "STUB2 support credit {support_credit}%."
+ ],
+ "c_tiers": [
+  "STUB0 below {t1}% {c1}%, below {t2}% {c2}%, below {t3}% {c3}%.",
+  "STUB1 below {t1}% {c1}%, below {t2}% {c2}%, below {t3}% {c3}%.",
+  "STUB2 below {t1}% {c1}%, below {t2}% {c2}%, below {t3}% {c3}%."
+ ],
+ "c_cap": [
+  "STUB0 cap {cap}%.",
+  "STUB1 cap {cap}%.",
+  "STUB2 cap {cap}%."
+ ],
+ "c_claim": [
+  "STUB0 claim within {days} days.",
+  "STUB1 claim within {days} days.",
+  "STUB2 claim within {days} days."
+ ],
+ "tools": {
+  "list_customers": "STUB",
+  "read_contract": "STUB",
+  "get_subscriptions": "STUB",
+  "search_incidents": "STUB",
+  "read_notice": "STUB",
+  "list_tickets": "STUB",
+  "list_claims": "STUB",
+  "calculator": "STUB"
+ }
+}

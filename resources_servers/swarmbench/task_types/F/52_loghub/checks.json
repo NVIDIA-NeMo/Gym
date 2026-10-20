@@ -1,0 +1,258 @@
+{
+ "summary": {
+  "type": "loghub",
+  "ns": [
+   64,
+   256,
+   2048
+  ],
+  "seeds": "0,1,2",
+  "check1_oracle_min": 1.0,
+  "check2_wrong_max": {
+   "fatal_any": 0.0882,
+   "fatal_by_component": 0.122,
+   "keyword": 0.1132,
+   "all_windows_top": 0.069
+  },
+  "check3_format_only_max": 0.0,
+  "check7_tool_errors": 0,
+  "check8_deterministic": true,
+  "canary": true
+ },
+ "rows": [
+  {
+   "n": 64,
+   "seed": 0,
+   "tier": "easy",
+   "gen_s": 0.18,
+   "hash": "852753ef821c65d802d9267a839a3c2bdb21e707e8ebdc670f1fac14a6a7f68f",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "fatal_any": 0.0656,
+    "fatal_by_component": 0.0656,
+    "keyword": 0.0816,
+    "all_windows_top": 0.0476
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 64,
+   "seed": 1,
+   "tier": "easy",
+   "gen_s": 0.02,
+   "hash": "87729a207c28d5953fe42c7d8db504c9b77eaf8f9f3bf86c85c1ce517c601e24",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "fatal_any": 0.0667,
+    "fatal_by_component": 0.1,
+    "keyword": 0.0,
+    "all_windows_top": 0.0494
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 64,
+   "seed": 2,
+   "tier": "easy",
+   "gen_s": 0.01,
+   "hash": "320b9d0ec0ffcad4bb509989c0365565907e38b32643df12e6126f96c3eb0f1e",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "fatal_any": 0.0882,
+    "fatal_by_component": 0.0588,
+    "keyword": 0.1132,
+    "all_windows_top": 0.069
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 256,
+   "seed": 0,
+   "tier": "medium",
+   "gen_s": 0.03,
+   "hash": "6434557bca9516a343da0927775b956dd1846b31b8a1c6a83d6cac4513a7f60e",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "fatal_any": 0.0407,
+    "fatal_by_component": 0.0976,
+    "keyword": 0.0503,
+    "all_windows_top": 0.0297
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 256,
+   "seed": 1,
+   "tier": "medium",
+   "gen_s": 0.03,
+   "hash": "7b537d7bd88aa596dd491c9ca6552a2d346849f204b9d3d3b59070b23d7f83d2",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "fatal_any": 0.0698,
+    "fatal_by_component": 0.1163,
+    "keyword": 0.0882,
+    "all_windows_top": 0.0529
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 256,
+   "seed": 2,
+   "tier": "medium",
+   "gen_s": 0.03,
+   "hash": "113511d8000b381161762c52a709db08314a18b8c16cf84b1d0c1fd170de7bb2",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "fatal_any": 0.0637,
+    "fatal_by_component": 0.1036,
+    "keyword": 0.0777,
+    "all_windows_top": 0.0473
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 2048,
+   "seed": 0,
+   "tier": "hard",
+   "gen_s": 0.23,
+   "hash": "bc0e17e7c847a4e3d81611287946d2c07cadf0676c784021a97d38c3e05eec1f",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.3,
+   "wrong": {
+    "fatal_any": 0.0671,
+    "fatal_by_component": 0.122,
+    "keyword": 0.0828,
+    "all_windows_top": 0.0494
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 2048,
+   "seed": 1,
+   "tier": "hard",
+   "gen_s": 0.25,
+   "hash": "d5d256614fa95aef7be28eb2c4712fa8d031f634dc21d4099bfcfea36715a31f",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.3,
+   "wrong": {
+    "fatal_any": 0.0671,
+    "fatal_by_component": 0.1162,
+    "keyword": 0.0826,
+    "all_windows_top": 0.0503
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 2048,
+   "seed": 2,
+   "tier": "hard",
+   "gen_s": 0.22,
+   "hash": "fb798a09355be924ab92007521e9e36fa10c51df3b5c01ecfa6b38013eb5ab6f",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.3,
+   "wrong": {
+    "fatal_any": 0.0463,
+    "fatal_by_component": 0.1116,
+    "keyword": 0.057,
+    "all_windows_top": 0.0343
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  }
+ ]
+}

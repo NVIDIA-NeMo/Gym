@@ -1,0 +1,9 @@
+{
+ "user": "You are adding two pieces of text to an existing privacy-scan task at a fictional public library's digitization program. Agents audit digitized documents (public-domain novel excerpts with inserted passages such as margin notes, loan slips, reader letters and staff annotations) and report personal data of private individuals. An officials directory lists public officials; officials mentioned in their official role are not reported. Do not write any digits, names of people, phone numbers, emails or addresses. Reply with exactly one JSON object with these keys:\n\n\"rule_private_capacity\": a paragraph of the privacy policy: a person listed in the officials directory who appears in an inserted passage purely as a private person (for example returning an overdue book, paying a personal fine, joining a reading circle, donating books from home, or writing off duty), and who gives a home or private phone number, is a private individual in that passage even though the passage may still mention the title and agency; in that case both the person's full name (`name`) and that home or private number (`phone`) are reported. Only passages about the official acting in the official role (approvals, inspections, formal notices with the office phone) are exempt.\n\"calculator\": a one-sentence description of a calculator tool that evaluates an arithmetic expression (numbers, + - * / and parentheses, sum of a list), useful for example for adding up the digits of a Luhn check.",
+ "keys": [
+  "rule_private_capacity",
+  "calculator"
+ ],
+ "placeholders": {},
+ "lists": {}
+}

@@ -1,0 +1,4 @@
+task_types/B/_vendor/
+task_types/B/_vendor.tmp/
+task_types/B/repos/*.tar.gz
+task_types/B/repos/*.tmp

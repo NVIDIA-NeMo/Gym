@@ -1,0 +1,106 @@
+{
+ "api": "http://10.49.69.30:8000/v1",
+ "model_requested": "policy_model",
+ "system": "You write task text for an offline evaluation of software agents. Follow the facts you are given exactly; do not add rules, numbers or names that are not in the brief. Reply with exactly one JSON object and nothing else.",
+ "request": {
+  "user": "Write the task-facing text for an inventory roll-forward task over a fictional distribution company's warehouses. Each warehouse has a transaction journal (a table filled by code), opening balances from a physical count, an item master with case pack sizes, and a page of warehouse notes. Agents must compute the ending on-hand quantity in eaches of every SKU in every warehouse as of the period cutoff. Code fills ids, dates and numbers into your sentences through {placeholders}, and a parser reads some filled sentences back, so: keep every placeholder exactly as named, use each listed placeholder exactly once in its template, keep each template on a single line, do not use the character | anywhere, and do not add numbers or dates of your own. Return one JSON object with these keys:\n\n\"company\": a fictional distribution company name (2-3 words).\n\"policy_title\": a short title for the inventory accounting policy document.\n\"rule_units\": one paragraph: on-hand is kept in eaches (EA); journal quantities are in EA or in cases (CS); a case quantity is converted to eaches with the case pack size in effect on the line's effective date, as listed in the item master (pack sizes change on the listed dates).\n\"rule_cutoff\": one paragraph with the placeholder {cutoff}: a line counts only if its effective date is on or before {cutoff}; the posting date does not matter, so lines posted after the cutoff with an earlier effective date count, and lines posted before the cutoff with a later effective date do not.\n\"rule_count\": one paragraph: a COUNT line is a cycle count that sets the SKU's on-hand to the counted quantity as of the end of its effective date; every line for that SKU with an effective date on or before the count date is already reflected in the count and must not be applied again, even if it was posted later; only lines effective after the count date are applied on top of the count.\n\"rule_void\": one paragraph: a VOID line cancels the earlier line whose id is in its reference column; neither line has any effect.\n\"rule_lines\": one paragraph: RECEIPT adds stock, SHIPMENT removes stock, ADJUST adds or removes the signed quantity shown.\n\"rule_returns\": one paragraph: a RETURN line is a customer return, always in eaches; the memo describes the condition of the returned goods; returns are restocked (added to on-hand) only when the goods are resaleable as new; otherwise they are scrapped and do not change on-hand.\n\"rule_transfers\": one paragraph with the placeholder {cutoff}: transfers between warehouses appear as XFER-OUT in the sending journal and XFER-IN in the receiving journal with the same transfer id in the reference column; stock in transit stays on the sending warehouse's books until it is received, so the sender removes the shipped quantity only if the matching XFER-IN has an effective date on or before {cutoff}; the receiver adds the quantity on its XFER-IN line (which can be less than what was shipped), subject to the normal cutoff rule.\n\"rule_notes\": one paragraph: warehouse notes are binding corrections from the inventory control team and override what the journal shows.\n\"note_wrong_sku\": a warehouse note saying receipt line {line} was booked to {wrong} by mistake, the goods received were {right}, and the line counts for {right2} instead. ({right2} is the same SKU as {right}.)\n\"note_consignment\": a warehouse note saying receipt line {line} is consignment stock owned by {vendor} and must not be counted in on-hand.\n\"note_duplicate\": a warehouse note saying line {line} is a duplicate posting of line {orig} and must be ignored.\n\"note_benign\": 10 different warehouse notes about harmless matters (dock scheduling, labeling, safety walks, staffing, system upgrades) that do not affect quantities. No placeholders, no numbers, no line ids.\n\"restock_reasons\": 10 different short memo phrases (3-8 words) a clerk would write for a customer return whose goods are unopened or otherwise resaleable as new. No numbers.\n\"scrap_reasons\": 10 different short memo phrases (3-8 words) for a customer return whose goods are damaged, opened, expired, defective or otherwise not resaleable as new. No numbers.\n\"journal_heading\": one line with placeholders {wh}, {start}, {cutoff}, {extract}: the transaction journal of warehouse {wh} for the period {start} to {cutoff}, extracted on {extract}, which is why it contains some lines posted after the period.\n\"opening_heading\": one line with the placeholder {date}: opening balances in eaches from the physical count at the end of {date}.\n\"notes_heading\": one line with the placeholder {wh}: warehouse notes for {wh}.\n\"intro\": the opening paragraph of the task prompt with placeholders {company}, {n}, {first}, {last}, {start}, {cutoff}: {company} runs {n} warehouses ({first} to {last}); for the period {start} to {cutoff}, report each warehouse's ending on-hand in eaches for every SKU it stocks, following the inventory policy document exactly; transfers link warehouses, so a warehouse's result can depend on another warehouse's journal.\n\"answer_line\": one or two sentences with the placeholder {example}: the final answer is one JSON object mapping each warehouse id to an object mapping each of its SKUs to the whole-number ending on-hand in eaches, for example {example}; a warehouse counts as correct only if every one of its SKUs is exact.\n\"tools\": an object with a one-sentence description for each of: list_warehouses (id, name, city, number of SKUs and journal lines; paged), read_policy (the inventory accounting policy), list_items (item master rows with case pack sizes and their effective dates; paged), read_item (item master rows for one SKU), read_journal (one warehouse's opening balances and transaction journal; offset and limit for paging), search_journal (case-insensitive text search over the journal lines of all warehouses, e.g. a transfer id or line id; up to 20 hits), read_notes (one warehouse's notes), calculator (evaluates an arithmetic expression).\n\"unit_prompt\": instructions for a single worker who must compute the ending on-hand in eaches of every SKU of warehouse {wh} as of {cutoff}, using the tools and following the policy exactly (including notes, voids, the cycle count rule, case conversion and transfers whose receipt is recorded in another warehouse's journal), and who must end with exactly one final line of the literal form: UNIT | {wh2} | SKU-xxxx=<eaches>, SKU-yyyy=<eaches>, ... listing every SKU of the warehouse. ({wh2} is the same id as {wh}.)\n",
+  "keys": [
+   "company",
+   "policy_title",
+   "rule_units",
+   "rule_cutoff",
+   "rule_count",
+   "rule_void",
+   "rule_lines",
+   "rule_returns",
+   "rule_transfers",
+   "rule_notes",
+   "note_wrong_sku",
+   "note_consignment",
+   "note_duplicate",
+   "note_benign",
+   "restock_reasons",
+   "scrap_reasons",
+   "journal_heading",
+   "opening_heading",
+   "notes_heading",
+   "intro",
+   "answer_line",
+   "tools",
+   "unit_prompt"
+  ],
+  "placeholders": {
+   "rule_cutoff": [
+    "{cutoff}"
+   ],
+   "rule_transfers": [
+    "{cutoff}"
+   ],
+   "note_wrong_sku": [
+    "{line}",
+    "{wrong}",
+    "{right}",
+    "{right2}"
+   ],
+   "note_consignment": [
+    "{line}",
+    "{vendor}"
+   ],
+   "note_duplicate": [
+    "{line}",
+    "{orig}"
+   ],
+   "journal_heading": [
+    "{wh}",
+    "{start}",
+    "{cutoff}",
+    "{extract}"
+   ],
+   "opening_heading": [
+    "{date}"
+   ],
+   "notes_heading": [
+    "{wh}"
+   ],
+   "intro": [
+    "{company}",
+    "{n}",
+    "{first}",
+    "{last}",
+    "{start}",
+    "{cutoff}"
+   ],
+   "answer_line": [
+    "{example}"
+   ],
+   "unit_prompt": [
+    "{wh}",
+    "{cutoff}",
+    "{wh2}"
+   ]
+  },
+  "lists": {
+   "note_benign": 10,
+   "restock_reasons": 10,
+   "scrap_reasons": 10
+  }
+ },
+ "attempts": [
+  {
+   "seconds": 64.6,
+   "usage": {
+    "prompt_tokens": 1567,
+    "total_tokens": 6776,
+    "completion_tokens": 5209,
+    "prompt_tokens_details": null,
+    "completion_tokens_details": {
+     "reasoning_tokens": 0
+    }
+   },
+   "model": "policy_model",
+   "reply": "{\"company\":\"Harborline Distribution\",\"policy_title\":\"Inventory Accounting Policy\",\"rule_units\":\"On-hand inventory is kept in eaches (EA). Journal quantities are stated either in EA or in cases (CS); a quantity stated in cases is converted to eaches using the case pack size in effect on that line's effective date, as listed in the item master, where pack sizes change on the listed dates.\",\"rule_cutoff\":\"A journal line counts only if its effective date is on or before {cutoff}; the posting date does not matter, so lines posted after the cutoff with an earlier effective date count, and lines posted before the cutoff with a later effective date do not.\",\"rule_count\":\"A COUNT line is a cycle count that sets the SKU's on-hand to the counted quantity as of the end of its effective date. Every line for that SKU with an effective date on or before the count date is already reflected in the count and must not be applied again, even if it was posted later; only lines effective after the count date are applied on top of the count.\",\"rule_void\":\"A VOID line cancels the earlier line whose id appears in its reference column; neither the voided line nor the VOID line has any effect.\",\"rule_lines\":\"A RECEIPT line adds stock, a SHIPMENT line removes stock, and an ADJUST line adds or removes the signed quantity shown.\",\"rule_returns\":\"A RETURN line is a customer return and is always stated in eaches; the memo describes the condition of the returned goods. Returns are restocked, meaning added back to on-hand, only when the goods are resaleable as new; otherwise they are scrapped and do not change on-hand.\",\"rule_transfers\":\"Transfers between warehouses appear as an XFER-OUT line in the sending warehouse's journal and an XFER-IN line in the receiving warehouse's journal, carrying the same transfer id in the reference column. Stock in transit stays on the sending warehouse's books until it is received, so the sender removes the shipped quantity only if the matching XFER-IN has an effective date on or before {cutoff}; the receiver adds the quantity shown on its own XFER-IN line, which can be less than what was shipped, subject to the normal cutoff rule.\",\"rule_notes\":\"Warehouse notes are binding corrections issued by the inventory control team and override whatever the journal shows.\",\"note_wrong_sku\":\"Receipt line {line} was booked to {wrong} by mistake; the goods actually received were {right}, so the line counts for {right2} instead.\",\"note_consignment\":\"Receipt line {line} is consignment stock owned by {vendor} and must not be counted in on-hand.\",\"note_duplicate\":\"Line {line} is a duplicate posting of line {orig} and must be ignored.\",\"note_benign\":[\"The dock appointment schedule changes next week; see the shift supervisor for the new slots.\",\"New pallet labels have been ordered; keep using the current label stock until it runs out.\",\"The monthly safety walk moves to the morning shift; please keep the aisles clear of pallets.\",\"A part-time picker joins the weekend crew; please help them learn the bin layout.\",\"The warehouse management system will be upgraded over the weekend; expect brief read-only periods.\",\"Reminder to log forklift pre-shift inspections in the binder at the charging station.\",\"The break room refrigerator will be replaced soon; please remove personal items beforehand.\",\"Carrier pickup times may shift slightly while road work continues near the north gate.\",\"A vendor demo of new handheld scanners is scheduled in the training room.\",\"Housekeeping reminder: shrink wrap and banding scraps go in the marked recycling bins.\"],\"restock_reasons\":[\"Unopened case, seals intact, resaleable as new\",\"Customer ordered wrong item, packaging untouched\",\"Returned in original box, never opened\",\"Factory seal intact, shelf-ready condition\",\"Wrong variant shipped, item unopened and clean\",\"Box pristine, contents verified resaleable as new\",\"Duplicate order returned, goods still sealed\",\"Unopened retail pack, no cosmetic damage\",\"Customer refused delivery, packaging fully intact\",\"Sealed inner bags, resaleable as new\"],\"scrap_reasons\":[\"Crushed cartons, contents broken, scrap\",\"Opened by customer, factory seals broken\",\"Past expiration date, must be destroyed\",\"Water damage throughout, not resaleable\",\"Defective unit reported by customer\",\"Packaging torn, product contaminated\",\"Dented cans, unsafe for resale\",\"Item used and returned, unsellable\",\"Melted product, heat damage in transit\",\"Recall hold, quarantine and scrap\"],\"journal_heading\":\"Transaction journal for warehouse {wh}, period {start} to {cutoff}, extracted on {extract}, which is why it contains some lines posted after the period.\",\"opening_heading\":\"Opening balances in eaches from the physical count at the end of {date}.\",\"notes_heading\":\"Warehouse notes for {wh}.\",\"intro\":\"{company} runs {n} warehouses, {first} to {last}. For the period {start} to {cutoff}, report each warehouse's ending on-hand in eaches for every SKU it stocks, following the inventory policy document exactly. Transfers link warehouses, so a warehouse's result can depend on another warehouse's journal.\",\"answer_line\":\"Report the final answer as one JSON object mapping each warehouse id to an object that maps each of its SKUs to the whole-number ending on-hand in eaches, for example {example}. A warehouse counts as correct only if every one of its SKUs is exact.\",\"tools\":{\"list_warehouses\":\"Lists the warehouses with id, name, city, number of SKUs and number of journal lines; results are paged.\",\"read_policy\":\"Returns the inventory accounting policy document.\",\"list_items\":\"Lists item master rows with case pack sizes and their effective dates; results are paged.\",\"read_item\":\"Returns the item master rows for one SKU.\",\"read_journal\":\"Returns one warehouse's opening balances and transaction journal; use offset and limit for paging.\",\"search_journal\":\"Runs a case-insensitive text search over the journal lines of all warehouses, such as a transfer id or line id, returning up to 20 hits.\",\"read_notes\":\"Returns one warehouse's notes.\",\"calculator\":\"Evaluates an arithmetic expression.\"},\"unit_prompt\":\"Compute the ending on-hand in eaches of every SKU of warehouse {wh} as of {cutoff}. Use the tools to read the policy, the item master, and this warehouse's opening balances, journal and notes, and follow the policy exactly: apply warehouse notes as binding corrections, remove voided lines and their voids, apply the cycle count rule, convert case quantities using the pack size in effect on each line's effective date, restock only returns that are resaleable as new, and account for transfers whose matching receipt is recorded in another warehouse's journal, which you can find by searching the other journals for the transfer id. End with exactly one final line of the literal form: UNIT | {wh2} | SKU-xxxx=<eaches>, SKU-yyyy=<eaches>, ... listing every SKU of the warehouse.\"}",
+   "problems": []
+  }
+ ],
+ "created": "2026-10-14 13:04:58 UTC"
+}

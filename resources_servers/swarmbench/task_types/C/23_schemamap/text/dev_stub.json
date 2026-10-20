@@ -1,0 +1,428 @@
+{
+ "_note": "DEV STUB written by Claude for local tests only; never ships (check 9 requires text/k3.json).",
+ "agency": "Harbor City Permit Office",
+ "target_fields": {
+  "permit_id": "The permit application number assigned at filing.",
+  "permit_type": "The numeric permit type code 1-8 from the code table.",
+  "status": "The current status word of the permit.",
+  "filed_date": "The date the permit application was filed.",
+  "issued_date": "The date the permit was issued.",
+  "completed_date": "The date the work was signed off as complete; blank while not complete.",
+  "street_number": "The street number of the work site.",
+  "street_name": "The street name of the work site followed by its suffix abbreviation.",
+  "zipcode": "The five-digit ZIP code of the work site.",
+  "estimated_cost": "The cost estimated on the application, in whole US dollars.",
+  "revised_cost": "The cost as revised after plan review, in whole US dollars.",
+  "existing_stories": "Number of storeys of the building before the work.",
+  "proposed_stories": "Number of storeys of the building after the work.",
+  "existing_use": "The current use of the building.",
+  "proposed_use": "The use of the building after the work.",
+  "description": "Free-text description of the permitted work."
+ },
+ "transforms": {
+  "identity": "The column already holds the field in target format.",
+  "date_mdy": "A month/day/year text date converted to YYYY-MM-DD.",
+  "date_dmy": "A day/month/year text date converted to YYYY-MM-DD.",
+  "date_yyyymmdd": "An 8-digit YYYYMMDD date converted to YYYY-MM-DD.",
+  "cents_to_dollars": "An amount in cents divided by 100.",
+  "thousands_to_dollars": "An amount in thousands of dollars multiplied by 1000.",
+  "decode_codelist": "A partner letter code translated through the source's code list to a type name and then to its numeric code.",
+  "type_name_to_code": "A permit type name translated to its numeric code with the code table.",
+  "address_number": "The street number taken from a combined site-address column.",
+  "address_street": "The street name and suffix taken from a combined site-address column."
+ },
+ "aliases": {
+  "permit_id": [
+   "application_no",
+   "permit_no",
+   "appl_num",
+   "app_ref",
+   "case_number",
+   "pmt"
+  ],
+  "permit_type": [
+   "permit_class",
+   "type_cd",
+   "pmt_category",
+   "kind",
+   "work_class",
+   "ptype"
+  ],
+  "status": [
+   "current_state",
+   "stat",
+   "permit_status",
+   "phase",
+   "state_word",
+   "stage"
+  ],
+  "filed_date": [
+   "submitted_on",
+   "filing_dt",
+   "dt_1",
+   "received",
+   "lodged_date",
+   "app_date"
+  ],
+  "issued_date": [
+   "issue_dt",
+   "granted_on",
+   "dt_2",
+   "released",
+   "issuance",
+   "permit_dt"
+  ],
+  "completed_date": [
+   "finaled_on",
+   "signoff_dt",
+   "dt_3",
+   "closed",
+   "final_insp",
+   "done_date"
+  ],
+  "street_number": [
+   "house_no",
+   "st_num",
+   "addr_no",
+   "bldg_number",
+   "num",
+   "street_no"
+  ],
+  "street_name": [
+   "street",
+   "st_name",
+   "road",
+   "thoroughfare",
+   "addr_street",
+   "way"
+  ],
+  "zipcode": [
+   "postal_code",
+   "zip",
+   "zip5",
+   "post_cd",
+   "mail_zone",
+   "pc"
+  ],
+  "estimated_cost": [
+   "est_value",
+   "job_value",
+   "amt",
+   "valuation",
+   "cost_1",
+   "declared_value"
+  ],
+  "revised_cost": [
+   "final_value",
+   "adj_cost",
+   "amt_2",
+   "cost_2",
+   "reviewed_valuation",
+   "rev_amt"
+  ],
+  "existing_stories": [
+   "floors_now",
+   "storeys_before",
+   "lvls_ex",
+   "height_ex",
+   "stories_1",
+   "ex_floors"
+  ],
+  "proposed_stories": [
+   "floors_new",
+   "storeys_after",
+   "lvls_pr",
+   "height_pr",
+   "stories_2",
+   "pr_floors"
+  ],
+  "existing_use": [
+   "occupancy_now",
+   "use_1",
+   "current_use",
+   "ex_use",
+   "present_use",
+   "use_before"
+  ],
+  "proposed_use": [
+   "occupancy_new",
+   "use_2",
+   "future_use",
+   "pr_use",
+   "intended_use",
+   "use_after"
+  ],
+  "description": [
+   "scope",
+   "work_desc",
+   "notes",
+   "narrative",
+   "job_text",
+   "summary"
+  ]
+ },
+ "decoy_aliases": {
+  "created_date": [
+   "created_dt",
+   "record_date",
+   "entry_date",
+   "date_created"
+  ],
+  "status_date": [
+   "status_dt",
+   "last_change",
+   "completed_status_date",
+   "state_date"
+  ],
+  "approved_date": [
+   "approval_dt",
+   "issued_approval",
+   "plans_ok_date",
+   "approved_on"
+  ],
+  "existing_units": [
+   "units_ex",
+   "existing_stories_units",
+   "du_before",
+   "dwellings_now"
+  ],
+  "proposed_units": [
+   "units_pr",
+   "proposed_units_count",
+   "du_after",
+   "dwellings_new"
+  ],
+  "plansets": [
+   "plan_sets",
+   "sets_submitted",
+   "plans_count",
+   "use_sets"
+  ],
+  "block": [
+   "assessor_block",
+   "blk",
+   "block_no",
+   "parcel_block"
+  ],
+  "lot": [
+   "assessor_lot",
+   "lot_no",
+   "lt",
+   "parcel_lot"
+  ],
+  "record_id": [
+   "row_id",
+   "rec_id",
+   "permit_record_id",
+   "internal_id"
+  ],
+  "district": [
+   "sup_district",
+   "district_no",
+   "dist",
+   "ward"
+  ],
+  "neighborhood": [
+   "hood",
+   "area_name",
+   "neighborhood_name",
+   "locality"
+  ],
+  "construction_type": [
+   "constr_type",
+   "building_class",
+   "frame_type",
+   "construction_desc"
+  ],
+  "mailing_address": [
+   "owner_address",
+   "mail_addr",
+   "site_address_owner",
+   "postal_address"
+  ]
+ },
+ "field_desc": {
+  "permit_id": [
+   "Application number assigned when the permit was filed.",
+   "The permit application number.",
+   "Number identifying the permit application at the agency."
+  ],
+  "status": [
+   "Current status of the permit.",
+   "Status word the permit holds today.",
+   "Latest permit status."
+  ],
+  "filed_date": [
+   "Date the application was filed with the agency.",
+   "Filing date of the application.",
+   "Day the permit application was submitted for filing."
+  ],
+  "issued_date": [
+   "Date the permit was issued.",
+   "Issue date of the permit.",
+   "Day the agency issued the permit."
+  ],
+  "completed_date": [
+   "Date the work was signed off as complete; empty if not yet complete.",
+   "Completion sign-off date of the work.",
+   "Day the final inspection signed the job off as complete."
+  ],
+  "street_number": [
+   "Street number of the site.",
+   "House number of the work site.",
+   "Number on the street where the work takes place."
+  ],
+  "street_name": [
+   "Street name of the site with its suffix.",
+   "Name and suffix of the street where the work takes place.",
+   "Site street, including the suffix abbreviation."
+  ],
+  "zipcode": [
+   "ZIP code of the site.",
+   "Five-digit postal code of the work site.",
+   "Site ZIP code."
+  ],
+  "existing_stories": [
+   "Storeys of the building before the work.",
+   "Number of floors the building has now.",
+   "Existing number of storeys."
+  ],
+  "proposed_stories": [
+   "Storeys of the building after the work.",
+   "Number of floors the building will have after the work.",
+   "Proposed number of storeys."
+  ],
+  "existing_use": [
+   "Current use of the building.",
+   "How the building is used before the work.",
+   "Existing building use."
+  ],
+  "proposed_use": [
+   "Use of the building after the work.",
+   "How the building will be used after the work.",
+   "Proposed building use."
+  ],
+  "description": [
+   "Free-text description of the work.",
+   "Scope of work as written by the applicant.",
+   "Narrative of the permitted work."
+  ]
+ },
+ "estimated_cost_desc": [
+  "Estimated cost of the work stated on the application, in {unit}.",
+  "Cost estimate submitted with the application, in {unit}.",
+  "Applicant's estimated job cost, in {unit}."
+ ],
+ "revised_cost_desc": [
+  "Revised cost of the work after plan review, in {unit}.",
+  "Job cost as revised by plan check, in {unit}.",
+  "Cost after review adjustments, in {unit}."
+ ],
+ "type_code_desc": [
+  "Numeric permit type code as in the agency code table.",
+  "Permit type, as the agency's numeric code."
+ ],
+ "type_letter_desc": [
+  "Permit type as our letter code: {codes}",
+  "Permit category letter; the letters mean: {codes}"
+ ],
+ "type_name_desc": [
+  "Permit type written out as its name.",
+  "Name of the permit type."
+ ],
+ "site_address_desc": [
+  "Full site address: street number, street name and suffix.",
+  "Site address of the work as one text field."
+ ],
+ "decoy_desc": {
+  "created_date": [
+   "Date the record was created in our system (not the filing date).",
+   "Day the application record was entered in our database."
+  ],
+  "status_date": [
+   "Date the status last changed.",
+   "Day of the latest status change."
+  ],
+  "approved_date": [
+   "Date the plans were approved.",
+   "Plan approval date."
+  ],
+  "existing_units": [
+   "Dwelling units before the work.",
+   "Number of existing dwelling units."
+  ],
+  "proposed_units": [
+   "Dwelling units after the work.",
+   "Number of proposed dwelling units."
+  ],
+  "plansets": [
+   "Number of plan sets submitted.",
+   "Count of plan sets."
+  ],
+  "block": [
+   "Assessor block of the parcel.",
+   "Assessor's block number."
+  ],
+  "lot": [
+   "Assessor lot of the parcel.",
+   "Assessor's lot number."
+  ],
+  "record_id": [
+   "Our internal row id (not the permit number).",
+   "Internal record key of our system."
+  ],
+  "district": [
+   "Supervisor district number.",
+   "Supervisorial district of the site."
+  ],
+  "neighborhood": [
+   "Neighborhood name of the site.",
+   "Neighborhood the site belongs to."
+  ],
+  "construction_type": [
+   "Construction type of the building.",
+   "Building construction class description."
+  ],
+  "mailing_address": [
+   "Owner's mailing address (not the site).",
+   "Postal address of the property owner."
+  ]
+ },
+ "pair_col_desc": "Milestone date; see the note below the table.",
+ "date_pair_note": "Columns {a} and {b} hold the {f1} and the {f2}, but which is which was not documented.",
+ "errata_swap": "The descriptions of {a} and {b} were exchanged by mistake; each column holds what is described under the other.",
+ "errata_unit": "Since release {release}, column {col} is exported in {unit}, whatever its description says.",
+ "errata_rename": "Column {old} is now named {new} in the export file; its description is unchanged.",
+ "dict_header": "Data dictionary of source {src} (partner {partner}), {ncols} columns",
+ "notes_header": "Notes",
+ "errata_header": "Errata",
+ "partners": [
+  "Bayline Architects",
+  "Permit Pathways",
+  "Gridstone Builders Guild",
+  "Civica Software",
+  "Northpoint Expediters",
+  "Lumen Design Studio",
+  "Westfield Contractors Assn",
+  "Atlas Plan Services",
+  "Redwood Drafting Co",
+  "Keystone Permit Desk",
+  "Harborview Engineering",
+  "Tessera Systems",
+  "Summit Remodelers Group",
+  "Pacific Plan Room",
+  "Orchard Building Consultants",
+  "Meridian Data Works"
+ ],
+ "schema_header": "Target schema. Every source must be mapped to all target fields below. Dates are YYYY-MM-DD and amounts are whole US dollars. The permit type code table and the transform menu follow.",
+ "intro": "{agency} receives building-permit exports from partners. There are {n} sources, {first} to {last}; each has its own column names, a data dictionary and sample rows. For every source and every target field, find the column that holds the field (or null) and the transform from the menu. Dictionaries can carry notes and errata that override the table; columns may be renamed, mislabelled, or look like a target field without being one; some questions (which date is which, day/month order) are settled only by the values. Each source is graded separately and counts only if all its fields are right.",
+ "answer_line": "Your final answer is one JSON object mapping each source id to an object with every target field as a key and either null or [column, transform], for example {example}.",
+ "tools": {
+  "read_target_schema": "Show the target fields, the permit type code table and the transform menu.",
+  "list_sources": "List sources (id | partner | columns | rows), paged with offset and limit.",
+  "read_dictionary": "Show one source's data dictionary with its notes and errata.",
+  "read_rows": "Show CSV rows of one source with its export header (offset, limit up to 15).",
+  "column_profile": "Profile one column of one source: blanks, distinct values, min, max and examples."
+ },
+ "unit_prompt": "Map source {src} to the target schema using read_target_schema, read_dictionary, read_rows and column_profile, applying its notes and errata. End with exactly one final line: UNIT | {src2} | <JSON object mapping every target field to null or [column, transform]>"
+}

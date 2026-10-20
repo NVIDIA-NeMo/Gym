@@ -1,0 +1,188 @@
+{
+ "summary": {
+  "type": "09_reg_mapping",
+  "ns": [
+   6,
+   60,
+   180
+  ],
+  "seeds": "0,1",
+  "check1_oracle_min": 1.0,
+  "check2_wrong_max": {
+   "bm25_top_hit": 0.0,
+   "bm25_second_distinct_hit": 0.0,
+   "bm25_fourth_distinct_hit": 0.0556,
+   "right_section_first_paragraph": 0.0,
+   "right_section_next_paragraph": 0.0
+  },
+  "check3_format_only_max": 0.0,
+  "check7_tool_errors": 0,
+  "check8_deterministic": true,
+  "canary": true,
+  "text_source": "k3"
+ },
+ "rows": [
+  {
+   "n": 6,
+   "seed": 0,
+   "tier": "easy",
+   "gen_s": 0.04,
+   "hash": "62a19d9bad306c9b07e5d06cf155d802185f2d574f32d83b1b04e8257f745a88",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "bm25_top_hit": 0.0,
+    "bm25_second_distinct_hit": 0.0,
+    "bm25_fourth_distinct_hit": 0.0,
+    "right_section_first_paragraph": 0.0,
+    "right_section_next_paragraph": 0.0
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 6,
+   "seed": 1,
+   "tier": "easy",
+   "gen_s": 0.0,
+   "hash": "50ad28583ebd72605c355103d57f2fff69b9a21406e3bef48fc6ed0fbcfd1fed",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "bm25_top_hit": 0.0,
+    "bm25_second_distinct_hit": 0.0,
+    "bm25_fourth_distinct_hit": 0.0,
+    "right_section_first_paragraph": 0.0,
+    "right_section_next_paragraph": 0.0
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 60,
+   "seed": 0,
+   "tier": "medium",
+   "gen_s": 0.0,
+   "hash": "d0952d25330945ed4e1d619d1838556c128ed720d9df38504535dcceb5a8facb",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "bm25_top_hit": 0.0,
+    "bm25_second_distinct_hit": 0.0,
+    "bm25_fourth_distinct_hit": 0.05,
+    "right_section_first_paragraph": 0.0,
+    "right_section_next_paragraph": 0.0
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 60,
+   "seed": 1,
+   "tier": "medium",
+   "gen_s": 0.0,
+   "hash": "c7a06797e31a92771f5374ecd76983c8d2e758e9c927c74def158e4b6923c1f3",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "bm25_top_hit": 0.0,
+    "bm25_second_distinct_hit": 0.0,
+    "bm25_fourth_distinct_hit": 0.05,
+    "right_section_first_paragraph": 0.0,
+    "right_section_next_paragraph": 0.0
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 180,
+   "seed": 0,
+   "tier": "hard",
+   "gen_s": 0.0,
+   "hash": "0abe2b9523d85675171a8ac570f5ab41126623168fcd2d0ef4963ea02035e11f",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "bm25_top_hit": 0.0,
+    "bm25_second_distinct_hit": 0.0,
+    "bm25_fourth_distinct_hit": 0.0556,
+    "right_section_first_paragraph": 0.0,
+    "right_section_next_paragraph": 0.0
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 180,
+   "seed": 1,
+   "tier": "hard",
+   "gen_s": 0.01,
+   "hash": "55ae5cbb5c40eba7c0feb9584a05ee928040c50d64629f025a1c77d0cfbd7e94",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "bm25_top_hit": 0.0,
+    "bm25_second_distinct_hit": 0.0,
+    "bm25_fourth_distinct_hit": 0.0389,
+    "right_section_first_paragraph": 0.0,
+    "right_section_next_paragraph": 0.0
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  }
+ ]
+}

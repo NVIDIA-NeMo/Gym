@@ -1,0 +1,19 @@
+[
+ {
+  "name": "ClinicalTrials.gov study records (eligibility module), 16 recruiting studies",
+  "url": "https://clinicaltrials.gov/api/v2/studies?query.cond=<condition>&filter.overallStatus=RECRUITING&pageSize=40&fields=NCTId,BriefTitle,EligibilityModule,Phase (conditions: type 2 diabetes, non-small cell lung cancer, breast cancer, chronic kidney disease, heart failure, rheumatoid arthritis)",
+  "license": "ClinicalTrials.gov data are provided by the US National Library of Medicine; per https://clinicaltrials.gov/about-site/terms-conditions the registry content is not subject to copyright restrictions by NLM and may be reused with attribution to ClinicalTrials.gov.",
+  "retrieved": "2026-10-14",
+  "raw_files": {
+   "data/raw/search_breastcancer.json": "d3194824ec50720edd12f477bd0b0ed5534a8d075bebfdd5854247f3f18f0c83",
+   "data/raw/search_chronickidneydisease.json": "fc086c88837d3f4909974ba6af9e9654a76c0b16cb6cbabc05842bca20dfc56f",
+   "data/raw/search_heartfailure.json": "dd7d7318424307730ff1db629e444bcceb4119f6c031852bfd2368f9c0e2d234",
+   "data/raw/search_nonsmallcelllungcancer.json": "f1ecc7d02ff5ce86b367b0e2664e0044c31e03b504bac5f1f71fe661d33469e9",
+   "data/raw/search_rheumatoidarthritis.json": "bc8bd8d14946473bcffb7ef4219f05bf65f1f1d17d95afaf20ef60c476d1cfad",
+   "data/raw/search_typediabetes.json": "cdc78f38141140579cf6880d11309cda60ee77f2e157f1767cc1e0ae1f737015"
+  },
+  "snapshot_file": "data/trials.json",
+  "snapshot_sha256": "e0cdcda27759af29300fc80b327053c9c470aeed5d904b5c7678520fc40daa45",
+  "derivation": "build_snapshot.py: selected criterion lines (trialspec.py) copied verbatim; markdown escape backslashes and leading bullets removed; 'Sex:'/'Ages eligible:' lines from structured fields."
+ }
+]

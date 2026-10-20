@@ -803,6 +803,11 @@ extend-exclude = [
     "*.ipynb",
     # Vendored apple/ToolSandbox source — kept verbatim (see its VENDORING.md).
     "resources_servers/toolsandbox/tool_sandbox",
+    # SwarmBench track generators, kept verbatim apart from package imports: generated worlds must match the
+    # frozen instance hashes (see resources_servers/swarmbench/README.md).
+    "resources_servers/swarmbench/tracks",
+    # The promoted SwarmBench types, same rule (their hashes are in each type's checks.json).
+    "resources_servers/swarmbench/task_types",
 ]
 [tool.ruff.lint]
 # Configure linting rules

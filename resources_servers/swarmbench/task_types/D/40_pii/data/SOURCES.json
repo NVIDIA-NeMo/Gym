@@ -1,0 +1,20 @@
+[
+ {
+  "name": "Project Gutenberg plain-text editions: Pride and Prejudice (#1342), Moby Dick (#2701), The Adventures of Sherlock Holmes (#1661), A Tale of Two Cities (#98), Frankenstein (#84), Little Women (#514)",
+  "url": "https://www.gutenberg.org/cache/epub/<N>/pg<N>.txt",
+  "license": "Public domain in the USA (works published before 1929). The Project Gutenberg License covers only the PG trademark and header/footer; build_snapshot.py strips the header and footer and every line mentioning Gutenberg, so the snapshot carries no PG trademark text.",
+  "retrieved": "2026-10-14",
+  "raw_files": {
+   "data/raw/pg1342.txt": "3f6bb9d6f78e0293b56acd4714dd68cb7d6d1d293402031ce9d5a216bcaf9d75",
+   "data/raw/pg2701.txt": "b5e88b71a1cda068e9ab1d94344c9d932338ba6da1a66def97a1aecd9cfcc87d",
+   "data/raw/pg1661.txt": "922e2a12ccb43a4c9544c260b2166c6ad2097aeb5957faeee113f173bb857cd0",
+   "data/raw/pg98.txt": "d54c2b80d40a40b982cd88852c6180bb944d95acdb028af3d0e01a1750681784",
+   "data/raw/pg84.txt": "7810cd483cffcf2cc8a1d8f0d5807931e69d4f48cd14149b8c76f88af82fead3",
+   "data/raw/pg514.txt": "36831477b339dbcd7e7206119d77e9e58b9727ef3c299d1a1dc4446e1db97850"
+  },
+  "snapshot_file": "data/chunks.json",
+  "snapshot_sha256": "e281d8ed1e78ccd16a1206e0eb3e5b060445d4942caa16bad72bd56f82257d75",
+  "snapshot_chunks": 239,
+  "derivation": "build_snapshot.py: strip PG header/footer, unwrap paragraphs, drop paragraphs with @/URLs/'gutenberg', skip first 20 paragraphs, split paragraphs > 1500 chars at sentence ends, consecutive chunks of >= 1800 words (<= 40 per book)"
+ }
+]

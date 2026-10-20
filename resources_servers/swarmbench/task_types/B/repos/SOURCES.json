@@ -1,0 +1,162 @@
+{
+ "markdown-3.6.tar.gz": {
+  "url": "https://github.com/Python-Markdown/markdown/archive/refs/tags/3.6.tar.gz",
+  "tag": "3.6",
+  "commit": "e524b8fe938738cb4492411a34cce89051cb9695",
+  "sha256": "f65f3867f967b4b0ea4acd951bb7f0d9cb4d033c6fc28847a7eeb4d9fe242844",
+  "license": "BSD-3-Clause",
+  "used_by_types": [
+   "11",
+   "18"
+  ]
+ },
+ "markdown337-3.3.7.tar.gz": {
+  "url": "https://github.com/Python-Markdown/markdown/archive/refs/tags/3.3.7.tar.gz",
+  "tag": "3.3.7",
+  "commit": "db98a2632447387cd5c965b324904ee780809b81",
+  "sha256": "a1b7a818ca2dc6b34b9ec0bb73e3f4325e4ee949a8390a91a4df48c311069f65",
+  "license": "BSD-3-Clause",
+  "used_by_types": [
+   "11 (build-time legacy-API reference only)"
+  ]
+ },
+ "pymdownx-10.8.1.tar.gz": {
+  "url": "https://github.com/facelessuser/pymdown-extensions/archive/refs/tags/10.8.1.tar.gz",
+  "tag": "10.8.1",
+  "commit": "8ed2fcb8ac688452ae1f5b29ab403e1e1d97e4e5",
+  "sha256": "bada823efb9660a2ecb4036d77e053a0353d0adcbe6e175a497afd67a97c3a1d",
+  "license": "MIT",
+  "used_by_types": [
+   "11",
+   "18"
+  ]
+ },
+ "click-8.1.7.tar.gz": {
+  "url": "https://github.com/pallets/click/archive/refs/tags/8.1.7.tar.gz",
+  "tag": "8.1.7",
+  "commit": "874ca2bc1c30d93a4ac6e36a15ed685eafe89097",
+  "sha256": "89251974dba8552b4e22990ca34adfb93a47ba7deb27fe7358a6661a09ca8793",
+  "license": "BSD-3-Clause",
+  "used_by_types": [
+   "13",
+   "19",
+   "14 (dropped)"
+  ]
+ },
+ "itsdangerous-2.2.0.tar.gz": {
+  "url": "https://github.com/pallets/itsdangerous/archive/refs/tags/2.2.0.tar.gz",
+  "tag": "2.2.0",
+  "commit": "096c8d42545d3b68ea21a4f890fb2b2d8979c0bd",
+  "sha256": "7b0c6d4186e963b88489b69603b7ab2bf7c8e9eb4135a7b13b5f21bd4b937f2b",
+  "license": "BSD-3-Clause",
+  "used_by_types": [
+   "13",
+   "14 (dropped)"
+  ]
+ },
+ "jinja-3.1.4.tar.gz": {
+  "url": "https://github.com/pallets/jinja/archive/refs/tags/3.1.4.tar.gz",
+  "tag": "3.1.4",
+  "commit": "dd4a8b5466d8790540c181590b14db4d4d889d57",
+  "sha256": "ed06f67abd2c8b7697dfb714f80715903ab0507e3c5acc11e92477e4ea51033b",
+  "license": "BSD-3-Clause",
+  "used_by_types": [
+   "13",
+   "18",
+   "14/17 (dropped)"
+  ]
+ },
+ "markupsafe-2.1.5.tar.gz": {
+  "url": "https://github.com/pallets/markupsafe/archive/refs/tags/2.1.5.tar.gz",
+  "tag": "2.1.5",
+  "commit": "fbba4acd0312826cec9cfe18371c7df07962cb65",
+  "sha256": "307f63295d17f178b7d3af5968fb828e34086d5d66fec505b630a1e5f5b3328b",
+  "license": "BSD-3-Clause",
+  "used_by_types": [
+   "13",
+   "18",
+   "14 (dropped)"
+  ]
+ },
+ "mistune-v3.0.2.tar.gz": {
+  "url": "https://github.com/lepture/mistune/archive/refs/tags/v3.0.2.tar.gz",
+  "tag": "v3.0.2",
+  "commit": "f997c86335d8a5d8435aac08b66ed3cba9381b51",
+  "sha256": "2afe83fd05622475b85f3b0baec36210c4248b04ff0bf1a0f8827e4c3787abf5",
+  "license": "BSD-3-Clause",
+  "used_by_types": [
+   "18"
+  ]
+ },
+ "humanize-4.9.0.tar.gz": {
+  "url": "https://github.com/python-humanize/humanize/archive/refs/tags/4.9.0.tar.gz",
+  "tag": "4.9.0",
+  "commit": "35e2d21b4b3030c03f106344cbdb851a2dbbbbb3",
+  "sha256": "20b5ecf9fed139e55f9ec5100d909d8660447d2a21d87e4d9e130768a1367946",
+  "license": "MIT",
+  "used_by_types": [
+   "19",
+   "17 (dropped)"
+  ]
+ },
+ "boltons-24.0.0.tar.gz": {
+  "url": "https://github.com/mahmoud/boltons/archive/refs/tags/24.0.0.tar.gz",
+  "tag": "24.0.0",
+  "commit": "992a58c1036fcf4d52cbf3313b6217b7c07b11d9",
+  "sha256": "f55bb241f15be5761803216ae7509e9270faf8e3e8687e744ab61a401ddd20ff",
+  "license": "BSD-3-Clause",
+  "used_by_types": [
+   "14 (dropped)"
+  ]
+ },
+ "h11-v0.14.0.tar.gz": {
+  "url": "https://github.com/python-hyper/h11/archive/refs/tags/v0.14.0.tar.gz",
+  "tag": "v0.14.0",
+  "commit": "467c5cfc5f9a1364c7da6b754d591092ee409931",
+  "sha256": "d65a85d094b76846653fa7c3b45abdaf8b4f055c643bb6eec623f1311636a474",
+  "license": "MIT",
+  "used_by_types": [
+   "14 (dropped)"
+  ]
+ },
+ "jmespath-1.0.1.tar.gz": {
+  "url": "https://github.com/jmespath/jmespath.py/archive/refs/tags/1.0.1.tar.gz",
+  "tag": "1.0.1",
+  "commit": "e600d11e5d4e90b0d7f67882756fffc90a52eb36",
+  "sha256": "6a02470b1716ec7a32abe89a873a4795c41c938468225f8a53d860980ec9e3c6",
+  "license": "MIT",
+  "used_by_types": [
+   "14 (dropped)"
+  ]
+ },
+ "sqlparse-0.5.0.tar.gz": {
+  "url": "https://github.com/andialbrecht/sqlparse/archive/refs/tags/0.5.0.tar.gz",
+  "tag": "0.5.0",
+  "commit": "ddbd0ec3592545c914fe71e47118c04582d8bfb0",
+  "sha256": "0ca6a23e6099946b3e2ad188de842650a3f35b84d9a5bca433ea5a433c2a1730",
+  "license": "BSD-3-Clause",
+  "used_by_types": [
+   "14 (dropped)"
+  ]
+ },
+ "cachetools-v5.3.3.tar.gz": {
+  "url": "https://github.com/tkem/cachetools/archive/refs/tags/v5.3.3.tar.gz",
+  "tag": "v5.3.3",
+  "commit": "1fcadea96ce67d499965b085f0b0b2253b78bb80",
+  "sha256": "d49add1f5aac63b1e47421d2d63049f2a353cb4889fd049dd1689e231ee31cfb",
+  "license": "MIT",
+  "used_by_types": [
+   "14 (dropped)"
+  ]
+ },
+ "tomli-2.0.1.tar.gz": {
+  "url": "https://github.com/hukkin/tomli/archive/refs/tags/2.0.1.tar.gz",
+  "tag": "2.0.1",
+  "commit": "36ef51d6a5a55e0eca077b58695390d041061bd4",
+  "sha256": "ad22dbc128623e0c156ffaff019f29f456eba8a5d5a05164dd34f63e560449df",
+  "license": "MIT",
+  "used_by_types": [
+   "14 (dropped)"
+  ]
+ }
+}

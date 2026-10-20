@@ -1,0 +1,89 @@
+{
+ "user": "Write the task-facing text for a schema-mapping task. A fictional city agency (\"the agency\") receives building-permit exports from partner organisations. Each export (\"source\", ids like SRC001) is a CSV table with its own column names and a short data dictionary. Agents must map every field of the agency's target schema to the source column that holds it (or to null when the source does not have it), together with one transform from a fixed menu. Code fills ids, names and values into your sentences through {placeholders}, and a parser reads the filled sentences back, so: keep every placeholder exactly as named, use each listed placeholder exactly once per template, keep every template on a single line, do not add numbers, ids or column names of your own, and make every description precise enough that two different fields can never be confused (for example the filing date versus the issue date versus the completion date versus the date the application record was created, the date the status last changed, or the date plans were approved; the estimated cost versus the revised cost; existing versus proposed storeys; existing versus proposed use; dwelling units versus storeys). Return one JSON object with these keys:\n\n\"agency\": a fictional agency name (3-6 words).\n\"target_fields\": an object with one precise definition sentence for each of these target fields (keys exactly as given): permit_id, permit_type, status, filed_date, issued_date, completed_date, street_number, street_name, zipcode, estimated_cost, revised_cost, existing_stories, proposed_stories, existing_use, proposed_use, description. Meanings: permit_id = the permit application number; permit_type = the numeric permit type code 1-8 (the code table is shown separately); status = the current permit status word; filed_date = date the application was filed; issued_date = date the permit was issued; completed_date = date the work was signed off as complete (blank while not complete); street_number = the site's street number; street_name = the site's street name followed by its street suffix abbreviation; zipcode = the site's five-digit ZIP code; estimated_cost = the cost estimated on the application, in whole US dollars; revised_cost = the revised cost after plan review, in whole US dollars; existing_stories = number of storeys of the building before the work; proposed_stories = number of storeys after the work; existing_use = current use of the building; proposed_use = use after the work; description = free-text description of the work. Dates in the target schema are YYYY-MM-DD.\n\"transforms\": an object with one sentence for each transform name (keys exactly): identity (the column already holds the field in target format), date_mdy (a month/day/year text date, converted to YYYY-MM-DD), date_dmy (a day/month/year text date, converted), date_yyyymmdd (an 8-digit YYYYMMDD date, converted), cents_to_dollars (amount in cents, divided by 100), thousands_to_dollars (amount in thousands of dollars, multiplied by 1000), decode_codelist (a letter code translated through the code list in that source's dictionary into a permit type name and then to its numeric code), type_name_to_code (a permit type name translated to its numeric code with the code table), address_number (the street number taken from a combined site-address column), address_street (the street name and suffix taken from a combined site-address column).\n\"aliases\": an object with, for each target field (same keys as target_fields), a list of 6 different snake_case column names a partner might use for it (realistic, some terse or vague like \"dt_1\" or \"amt\"; never identical to another field's alias).\n\"decoy_aliases\": an object with, for each of these non-target columns, a list of 4 snake_case column names, at least two of which deliberately resemble a target field name (e.g. contain \"date\", \"issued\", \"cost\", \"stories\", \"use\", \"status\", \"address\", \"id\"): created_date, status_date, approved_date, existing_units, proposed_units, plansets, block, lot, record_id, district, neighborhood, construction_type, mailing_address. Meanings: created_date = date the application record was created in the partner's system (not the filing date); status_date = date the status last changed (not a completion date); approved_date = date the plans were approved (not the issue date); existing_units / proposed_units = dwelling units before / after (not storeys); plansets = number of plan sets submitted; block and lot = assessor block and lot; record_id = the partner's internal row id (not the permit number); district = supervisor district number; neighborhood = neighborhood name; construction_type = construction type description; mailing_address = the owner's mailing address (not the site address).\n\"field_desc\": an object with, for each target field EXCEPT permit_type, estimated_cost and revised_cost, a list of 3 different one-sentence column descriptions as they would appear in a partner's data dictionary (no placeholders; do not mention date formats or units of measure).\n\"estimated_cost_desc\": 3 dictionary sentences for a column holding the estimated cost, each with the placeholder {unit} (a currency unit phrase such as \"cents\" filled by code).\n\"revised_cost_desc\": 3 dictionary sentences for a column holding the revised cost, each with {unit}.\n\"type_code_desc\": 2 dictionary sentences for a column holding the numeric permit type code as in the agency's code table.\n\"type_letter_desc\": 2 dictionary sentences for a column holding the permit type as a partner letter code, each ending with the placeholder {codes} (code fills a list like \"A = demolitions; B = ...\").\n\"type_name_desc\": 2 dictionary sentences for a column holding the permit type written out as a name.\n\"site_address_desc\": 2 dictionary sentences for one column holding the combined site address (street number, street name and suffix).\n\"decoy_desc\": an object with, for each non-target column (same keys as decoy_aliases), a list of 2 precise dictionary sentences.\n\"pair_col_desc\": one dictionary sentence used for a column whose exact meaning is explained in a note below the table (no placeholders).\n\"date_pair_note\": one note sentence: columns {a} and {b} hold the {f1} and the {f2}, but the partner did not document which is which. Placeholders {a}, {b}, {f1}, {f2}.\n\"errata_swap\": one erratum sentence: the dictionary descriptions of columns {a} and {b} were exchanged by mistake, so each column holds what is described under the other. Placeholders {a}, {b}.\n\"errata_unit\": one erratum sentence: since release {release}, column {col} is exported in {unit}, whatever its description above says. Placeholders {release}, {col}, {unit}.\n\"errata_rename\": one erratum sentence: column {old} is now named {new} in the export file; its description above is unchanged. Placeholders {old}, {new}.\n\"dict_header\": one line heading a source's dictionary: source {src} from partner {partner}, {ncols} columns. Placeholders {src}, {partner}, {ncols}.\n\"notes_header\": a short heading for notes below the dictionary table.\n\"errata_header\": a short heading for the errata list.\n\"partners\": 16 fictional partner organisation names (architecture firms, permit expediters, contractors' associations, software vendors).\n\"schema_header\": a short paragraph opening the target-schema document: every source must be mapped to all target fields; dates are YYYY-MM-DD; amounts in whole US dollars; the permit type code table and the transform menu follow.\n\"intro\": the opening paragraph of the task prompt. Placeholders {agency}, {n} (number of sources), {first}, {last} (first and last source id). State: each source is a partner export with its own column names, a data dictionary and sample rows; for every source and every target field, find the source column holding that field (or null if none) and the transform from the menu; dictionaries may contain notes and errata that override the table, columns can be renamed, mislabelled, or look like a target field without being one, and some questions (which date is which, the date order day/month) can only be settled by looking at the values; every source is graded separately and a source counts only if all its fields are right.\n\"answer_line\": one or two sentences: the final answer is one JSON object mapping every source id to an object with every target field as a key and either null or a two-element list [column name, transform name], for example {example}.\n\"tools\": an object with one-sentence descriptions for: read_target_schema (target fields, permit type code table, transform menu), list_sources (id | partner | columns | rows, paged with offset and limit), read_dictionary (one source's data dictionary with its notes and errata), read_rows (CSV rows of one source with the export header, offset and limit up to 15), column_profile (one column of one source: blanks, distinct values, min, max and examples).\n\"unit_prompt\": instructions for a single worker who must map only source {src} with the tools (read_target_schema, read_dictionary, read_rows, column_profile), applying notes and errata, and end with exactly one final line of the literal form: UNIT | {src2} | <JSON object mapping every target field to null or [column, transform]>. ({src2} is the same id as {src}.)",
+ "keys": [
+  "agency",
+  "target_fields",
+  "transforms",
+  "aliases",
+  "decoy_aliases",
+  "field_desc",
+  "estimated_cost_desc",
+  "revised_cost_desc",
+  "type_code_desc",
+  "type_letter_desc",
+  "type_name_desc",
+  "site_address_desc",
+  "decoy_desc",
+  "pair_col_desc",
+  "date_pair_note",
+  "errata_swap",
+  "errata_unit",
+  "errata_rename",
+  "dict_header",
+  "notes_header",
+  "errata_header",
+  "partners",
+  "schema_header",
+  "intro",
+  "answer_line",
+  "tools",
+  "unit_prompt"
+ ],
+ "placeholders": {
+  "estimated_cost_desc": [
+   "{unit}"
+  ],
+  "revised_cost_desc": [
+   "{unit}"
+  ],
+  "type_letter_desc": [
+   "{codes}"
+  ],
+  "date_pair_note": [
+   "{a}",
+   "{b}",
+   "{f1}",
+   "{f2}"
+  ],
+  "errata_swap": [
+   "{a}",
+   "{b}"
+  ],
+  "errata_unit": [
+   "{release}",
+   "{col}",
+   "{unit}"
+  ],
+  "errata_rename": [
+   "{old}",
+   "{new}"
+  ],
+  "dict_header": [
+   "{src}",
+   "{partner}",
+   "{ncols}"
+  ],
+  "intro": [
+   "{agency}",
+   "{n}",
+   "{first}",
+   "{last}"
+  ],
+  "answer_line": [
+   "{example}"
+  ],
+  "unit_prompt": [
+   "{src}",
+   "{src2}"
+  ]
+ },
+ "lists": {
+  "partners": 16,
+  "estimated_cost_desc": 3,
+  "revised_cost_desc": 3,
+  "type_code_desc": 2,
+  "type_letter_desc": 2,
+  "type_name_desc": 2,
+  "site_address_desc": 2
+ }
+}

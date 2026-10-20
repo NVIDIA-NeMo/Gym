@@ -1,0 +1,4 @@
+{
+ "rule_private_capacity": "A person listed in the officials directory who appears in an inserted passage purely as a private person, for example returning an overdue book, paying a personal fine, joining a reading circle, donating books from home, or writing off duty, and who gives a home or private phone number, is a private individual in that passage even though the passage may still mention the title and agency; in that case both the person's full name (`name`) and that home or private number (`phone`) are reported. Only passages about the official acting in the official role, such as approvals, inspections, or formal notices with the office phone, are exempt.",
+ "calculator": "A calculator tool that evaluates an arithmetic expression containing numbers, + - * / and parentheses, or sums a list, for example to add up the digits of a Luhn check."
+}

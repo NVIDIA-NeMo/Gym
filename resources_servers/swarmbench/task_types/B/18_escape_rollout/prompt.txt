@@ -1,0 +1,17 @@
+You are working in a repository that contains real open-source Python packages that generate HTML: repos/mistune and repos/markdown (Markdown parsers), repos/pymdownx (PyMdown Extensions, extensions for Python-Markdown), and repos/jinja (jinja2 templates, together with repos/markupsafe).
+
+A security review found one vulnerable pattern: text that comes from the document or template input reaches the generated HTML without being escaped, which allows HTML and script injection. This affects {n} functions, listed one per line in UNITS.txt as path::qualified.function.name. Somewhere in each listed function, a value that should be escaped is not.
+
+Your job: fix every listed function by escaping the right values with the helper the project already uses for that kind of output. Each package has its own helpers, for example for text, for attribute values, and for URLs; look at how the rest of the package does it and follow that convention. Do not escape text that is already HTML, such as the rendered content of child elements, since double escaping breaks the output. Everything else must keep working exactly as before.
+
+Your fixes are checked in two ways: the packages' real test suites run against each fixed function, and a static rule checks that the function escapes its output again.
+
+Rules: each function is scored on its own. Only that function is taken from your version of the file; the rest of the file is the original. So keep each fix strictly inside the listed function and do not change anything else. New files are ignored.
+
+Tools (paths are relative to the repository root): list_files, read_file, search, write_file, apply_edit, and run_visible_tests(unit), where unit is a line from UNITS.txt; it runs the static rule and part of the tests for that function. Several agents may edit the same working copy at once, so only edit the listed functions and leave everything else untouched.
+
+Scoring reads the final state of the repository, not your reply: score = fraction of the {n} functions that pass, minus already-passing tests elsewhere that were broken by your changes.
+
+Suggested workflow: read UNITS.txt, open each listed function, study how the surrounding package escapes similar output, apply a minimal fix inside that function, then verify with run_visible_tests(unit) before moving on.
+
+When finished, reply with "done" and a short summary of what you changed.

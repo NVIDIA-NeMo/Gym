@@ -1,0 +1,17 @@
+# SwarmBench with OpenCode, subagents disabled (task tool denied).
+config_paths:
+- resources_servers/swarmbench/configs/swarmbench.yaml
+
+swarmbench_opencode_agent:
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      opencode_config:
+        permission:
+          task: deny
+      datasets:
+      - name: swarmbench
+        type: benchmark
+        jsonl_fpath: benchmarks/swarmbench/data/swarmbench_benchmark.jsonl
+        prompt_config: benchmarks/swarmbench/prompts/solo.yaml
+        prepare_script: benchmarks/swarmbench/prepare.py
+        num_repeats: 1

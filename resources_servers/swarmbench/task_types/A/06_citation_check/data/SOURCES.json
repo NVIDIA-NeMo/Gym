@@ -1,0 +1,31 @@
+{
+ "sources": [
+  {
+   "name": "arXiv OAI-PMH metadata (set cs, datestamps 2024-03-01..2024-04-25), primary cs.CL",
+   "url": "https://oaipmh.arxiv.org/oai?verb=ListRecords&metadataPrefix=arXiv&set=cs&from=...&until=...",
+   "license": "CC0 1.0 (arXiv metadata, incl. titles and abstracts); per-paper full-text licenses do not apply to metadata",
+   "sha256": {
+    "b-0.xml": "f75abcd368ea0941e187cc1d76fe648be32724993d134d76eee52744cc594d8e",
+    "b-1.xml": "161a063c66eeb034d13c6dc8ea0f124cca0f613d09068247069f744a31f6ea2b",
+    "b-2.xml": "fa236d645342c4e2c0b769564094cead165836eb1999ff73c19ebf875f100d94",
+    "b-3.xml": "b54265d656e607e927788217f50c1008c74082fba326ce7923ffdea7aac15018",
+    "c-0.xml": "c13e887640c666839c6d1aa74e03a17b76064713d0468ca2eb0599d8c85f69af",
+    "c-1.xml": "cae487469801a8576d3dc4068e1b4785cb0458745b8d9e3f156f29ef42990a23",
+    "c-2.xml": "a8d2c85326b47435f7f97b35a0d6add4d906e9a1e12395b75ede1e317de7bb74",
+    "d-0.xml": "8afd1ef1a75c50ad0fbee690b5ce80f3714995a11bd777ee5c74b7169acfb386",
+    "d-1.xml": "d8a616f3c9f8b0c632fd910cf3d5a757e3baabe83f0e2e23fcaa5130fd03a9b9",
+    "d-2.xml": "707181641ecef43fde2bc9e1fab23e00d8a19d67ee50caa5d058c3d362fdbd67",
+    "d-3.xml": "d7567c4c63fa6f0c5f02aadebeaef68a20dab60dc8ecb3b8086cff792cbeea58",
+    "e-0.xml": "47dac3455b2e22cda486f4d10b292ccfe450cd5492b17fb42b23fe9dc8373d27",
+    "e-1.xml": "1ceaf95c8528c62bb7ce6d83f18c0450d5675c5d34b230b2ea74217562b00610",
+    "e-2.xml": "7bbb06dbbc12502a202e21050d3f7ef076b0018dfd8bdf76fd9b00600eddaa33",
+    "e-3.xml": "cb18e3b266f69bda7c9c068484d48a6a2b9507d51814545cddc5075638f7029c",
+    "page0.xml": "ecb893a1c167be9eb9314fb602328448e57389eb32f0a755756230ce6388e716",
+    "page1.xml": "44e5e4c9f99f911b40712ae32b6b2cbc932057529b17dd91f7e69ac2c9468f18"
+   },
+   "retrieved": "2026-10-14"
+  }
+ ],
+ "derived": "data/refs.jsonl (1,479 papers, tf-idf neighbours) by _build/cite_prep.py refs; data/pool.jsonl by finalize_cite.py",
+ "refs_jsonl_sha256": "1695cc4f6524e8b92de95975c6e0b5c768b7d4da5475e44a87313ddc6b162ce1"
+}

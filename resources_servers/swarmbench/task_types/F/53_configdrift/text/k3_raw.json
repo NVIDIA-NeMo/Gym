@@ -1,0 +1,58 @@
+{
+ "api": "https://inference-api.nvidia.com/v1/chat/completions",
+ "model_requested": "nvidia/moonshotai/kimi-k3",
+ "system": "You write task text for an offline evaluation of software agents. Follow the facts you are given exactly; do not add rules, numbers or names that are not in the brief. Reply with exactly one JSON object and nothing else.",
+ "request": {
+  "user": "Write the task-facing text for a configuration-drift audit of a server fleet. Each host has a role (web, api, db, cache, worker, gateway, batch, search); each role has a baseline of required key = value settings. A host's configuration is spread over several files. Approved exceptions allow specific deviations until an expiry date. The audit date is {date}. Return one JSON object with these keys:\n\n\"intro\": the opening paragraph, with the placeholders {n} (number of hosts) and {date} (the audit date). The job: for every host, find every baseline key whose effective value deviates from the role baseline and is not covered by a valid exception, and say why.\n\"rules\": a list of bullet strings stating these exact rules, one per bullet, in this order:\n 1. A host's effective configuration is built from its files whose names end in .conf, read in lexical (sorted) order of their full paths; within and across files a later line for the same key overrides an earlier one. Files with any other ending (for example .conf.disabled) are ignored.\n 2. Lines starting with # are comments and are ignored; blank lines are ignored. A setting line has the form key = value; leading and trailing spaces around the value do not count.\n 3. Only keys listed in the host's role baseline are audited. A baseline key with no setting line in any .conf file is MISSING.\n 4. A baseline key whose effective value differs from the baseline value is a deviation. An exception applies to a host if its target is that host's name or role:<the host's role>. An exception is valid if its expiry date is on or after the audit date.\n 5. A deviation is covered (not reported) if a valid exception for that key has exactly the effective value. Otherwise report it with one reason: EXPIRED if an applicable exception for that key has exactly the effective value but has expired; MISMATCH if there is no such exception but a valid applicable exception for that key names a different value; UNAPPROVED otherwise. Exceptions for other hosts or other roles never apply.\n\"file_headers\": 12 different one-line comments that could head a fleet configuration file (managed-by notes, ownership, change-control reminders). No placeholders, no key = value text.\n\"justifications\": 20 different short justifications an engineer might give for a configuration exception (performance testing, vendor requirement, incident mitigation and so on). No placeholders, no dates.\n\"tools\": an object with one-sentence descriptions for list_hosts (host name | role, paged, at most 200 per call), list_files (the configuration file paths of one host), read_file (the text of one file of one host), get_baseline (the baseline key = value list of one role), get_exceptions (all exceptions whose target is the given host or its role, with id, target, key = value, expiry date and justification).\n\"answer\": a short paragraph: the final answer is plain lines, one finding per line, in the literal form <host> | <key> | <reason>, where reason is one of UNAPPROVED, EXPIRED, MISMATCH, MISSING; for example web-use1-0007 | app.log_level | UNAPPROVED; hosts without findings are left out; lines in any other form are ignored.\n\"score\": one sentence: the score is the F1 score of the finding lines against the true findings.\n\"unit_prompt\": instructions for a single worker who audits exactly one host, {host}, with the same tools and the rules placed at {rules}, and ends with its finding lines followed by a last line UNIT DONE {host2} (only UNIT DONE {host2} if the host has no findings). ({host2} is the same name as {host}.)",
+  "keys": [
+   "intro",
+   "rules",
+   "file_headers",
+   "justifications",
+   "tools",
+   "answer",
+   "score",
+   "unit_prompt"
+  ],
+  "placeholders": {
+   "intro": [
+    "{n}",
+    "{date}"
+   ],
+   "unit_prompt": [
+    "{host}",
+    "{rules}",
+    "{host2}"
+   ]
+  },
+  "lists": {
+   "rules": 5,
+   "file_headers": 12,
+   "justifications": 20
+  }
+ },
+ "attempts": [
+  {
+   "seconds": 97.2,
+   "usage": {
+    "completion_tokens": 7764,
+    "prompt_tokens": 934,
+    "total_tokens": 8698,
+    "completion_tokens_details": {
+     "accepted_prediction_tokens": 4753,
+     "audio_tokens": 0,
+     "reasoning_tokens": 6631,
+     "rejected_prediction_tokens": 1271
+    },
+    "prompt_tokens_details": {
+     "audio_tokens": 0,
+     "cached_tokens": 64
+    }
+   },
+   "model": "nvidia/moonshotai/kimi-k3",
+   "reply": "{\n  \"intro\": \"You are auditing a fleet of {n} server hosts for configuration drift; the audit date is {date}. Each host has one of eight roles (web, api, db, cache, worker, gateway, batch, search), and each role has a baseline of required key = value settings. A host's configuration is spread over several files, and approved exceptions allow specific deviations until an expiry date. Your job: for every host, find every baseline key whose effective value deviates from the role baseline and is not covered by a valid exception, and say why.\",\n  \"rules\": [\n    \"A host's effective configuration is built from its files whose names end in .conf, read in lexical (sorted) order of their full paths; within and across files a later line for the same key overrides an earlier one. Files with any other ending (for example .conf.disabled) are ignored.\",\n    \"Lines starting with # are comments and are ignored; blank lines are ignored. A setting line has the form key = value; leading and trailing spaces around the value do not count.\",\n    \"Only keys listed in the host's role baseline are audited. A baseline key with no setting line in any .conf file is MISSING.\",\n    \"A baseline key whose effective value differs from the baseline value is a deviation. An exception applies to a host if its target is that host's name or role:<the host's role>. An exception is valid if its expiry date is on or after the audit date.\",\n    \"A deviation is covered (not reported) if a valid exception for that key has exactly the effective value. Otherwise report it with one reason: EXPIRED if an applicable exception for that key has exactly the effective value but has expired; MISMATCH if there is no such exception but a valid applicable exception for that key names a different value; UNAPPROVED otherwise. Exceptions for other hosts or other roles never apply.\"\n  ],\n  \"file_headers\": [\n    \"# This file is managed by the central configuration management system; do not edit by hand.\",\n    \"# Manual edits will be overwritten at the next configuration management run.\",\n    \"# Generated automatically from the fleet configuration repository; local changes are not preserved.\",\n    \"# Hand-made changes here are reverted without notice.\",\n    \"# Configuration owned by the team that operates this host.\",\n    \"# Direct questions about this file to the service owner on call.\",\n    \"# Changes to this file require sign-off from the owning team.\",\n    \"# The owning team reviews this file at every scheduled audit.\",\n    \"# All changes must go through the change-control process before deployment.\",\n    \"# Do not modify this file outside an approved change window.\",\n    \"# Emergency edits must be recorded in the change log afterwards.\",\n    \"# Deviations from the role baseline require an approved exception.\"\n  ],\n  \"justifications\": [\n    \"Performance testing in progress\",\n    \"Vendor requirement for continued support\",\n    \"Temporary mitigation for an active incident\",\n    \"Workaround for a known memory leak\",\n    \"Debugging an intermittent failure\",\n    \"Compatibility with a legacy client\",\n    \"Load shedding during traffic spikes\",\n    \"Canary analysis for a planned rollout\",\n    \"Storage migration in progress\",\n    \"Failover rehearsal preparation\",\n    \"Awaiting an upstream patch\",\n    \"Hotfix validation under production traffic\",\n    \"Workaround for a kernel scheduling defect\",\n    \"Certificate rollout not yet complete\",\n    \"Baseline value triggers a scanner false positive\",\n    \"Replication lag workaround during rebalancing\",\n    \"Capacity trial ahead of peak season\",\n    \"Upgrade blocked by a downstream dependency\",\n    \"Cost reduction experiment\",\n    \"Rebalancing after hardware replacement\"\n  ],\n  \"tools\": {\n    \"list_hosts\": \"Lists the hosts of the fleet as 'host name | role' lines, paged, returning at most 200 hosts per call.\",\n    \"list_files\": \"Lists the configuration file paths of one host.\",\n    \"read_file\": \"Returns the text of one file of one host.\",\n    \"get_baseline\": \"Returns the baseline key = value list of one role.\",\n    \"get_exceptions\": \"Returns all exceptions whose target is the given host or its role, each with id, target, key = value, expiry date and justification.\"\n  },\n  \"answer\": \"The final answer is plain lines, one finding per line, in the literal form <host> | <key> | <reason>, where reason is one of UNAPPROVED, EXPIRED, MISMATCH, MISSING; for example web-use1-0007 | app.log_level | UNAPPROVED. Hosts without findings are left out. Lines in any other form are ignored.\",\n  \"score\": \"The score is the F1 score of the finding lines against the true findings.\",\n  \"unit_prompt\": \"Audit exactly one host, {host}, and no other. You have the same tools as the main task. The audit date is {date}. The audit rules are:\\n\\n{rules}\\n\\nBuild the host's effective configuration, compare it against the baseline of the host's role, and check every deviation against the exceptions. End your reply with the host's finding lines, one per line in the literal form <host> | <key> | <reason> where reason is one of UNAPPROVED, EXPIRED, MISMATCH, MISSING, followed by a last line UNIT DONE {host2}. If the host has no findings, end with only the line UNIT DONE {host2}.\"\n}",
+   "problems": []
+  }
+ ],
+ "created": "2026-10-14 06:56:35 UTC"
+}

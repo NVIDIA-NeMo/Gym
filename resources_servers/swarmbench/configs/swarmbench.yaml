@@ -1,0 +1,78 @@
+config_paths:
+- responses_api_agents/opencode_sandboxed_agent/configs/benchmark.yaml
+
+swarmbench:
+  resources_servers:
+    swarmbench:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: SwarmBench v2.1, offline tasks of 64 to 4096 work units in easy/medium/hard tiers with a wall-clock budget (8 tracks, tools over MCP)
+      value: Measure how well an agent system splits work too large for one context across subagents and merges it
+      expose_tools_over_mcp: true
+      # Per-rollout worlds go here (system tmp when null). Search worlds are ~40 MB, n=1024 code repos ~60 MB.
+      worlds_dir: null
+      tool_threads: 256
+      max_concurrent_scores: 4
+
+# OpenCode in OpenSandbox, egress limited to the model and this server. The world tools reach the box over MCP,
+# and the same server verifies, because the code track is scored from the repository the agent edited.
+swarmbench_opencode_agent:
+  _inherit_from: opencode_benchmark_agent
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      resources_server:
+        type: resources_servers
+        name: swarmbench
+      tool_servers:
+      - type: resources_servers
+        name: swarmbench
+      network_access: ${oc.select:swarmbench_opencode_network_access,model_and_tools}
+      preinstalled_opencode: ${oc.select:swarmbench_opencode_preinstalled,true}
+      # SwarmBench scores a timed-out rollout on what it left behind (the edited repo, or the last answer).
+      execution_failure_reward_zero: false
+      # The hard stop: the largest tier budget plus grace (1800 + 600 s), plus OpenCode startup.
+      sandbox_timeout: 2700
+      # Below the served max-model-len (262144): OpenCode prompts crept one token over an equal setting.
+      opencode_max_context_window: 245760
+      opencode_config:
+        # Native OpenCode defaults: compaction on and no step cap, so one agent can work through n >= 256 units.
+        compaction:
+          auto: true
+          prune: true
+        agent:
+          build:
+            steps: 100000
+        # Tools-only rule: the world tools are the only task tools. No shell, file or web tools, and no subagents in
+        # this solo base config (the smoke showed models reaching for read, glob, skill and todowrite when allowed).
+        permission:
+          bash: deny
+          edit: deny
+          write: deny
+          read: deny
+          glob: deny
+          grep: deny
+          list: deny
+          skill: deny
+          todowrite: deny
+          todoread: deny
+          task: deny
+      sandbox_config:
+        ttl_s: 3600
+        # Any image works: OpenCode runs in a directory every image has.
+        workdir: /tmp
+        files:
+          /tmp/nemo-gym-environment.txt: |
+            Internet access is disabled on this machine. The task's tools are the swarmbench MCP tools.
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/swarmbench/data/example.jsonl
+
+swarmbench_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: swarmbench_opencode_agent

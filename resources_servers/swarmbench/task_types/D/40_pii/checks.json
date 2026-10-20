@@ -1,0 +1,209 @@
+{
+ "summary": {
+  "type": "40_pii",
+  "ns": [
+   8,
+   24,
+   96
+  ],
+  "seeds": "0,1",
+  "check1_oracle_min": 1.0,
+  "check2_wrong_max": {
+   "regex": 0.0,
+   "smart_regex": 0.0208,
+   "careless_no_lookups": 0.0,
+   "skip_register": 0.7917,
+   "skip_luhn": 1.0,
+   "report_officials": 0.1667,
+   "report_business": 0.5417,
+   "numbers_as_ids": 0.5
+  },
+  "check3_format_only_max": 0.0,
+  "check7_tool_errors": 0,
+  "check8_deterministic": true,
+  "canary": true,
+  "text_source": "k3"
+ },
+ "rows": [
+  {
+   "n": 8,
+   "seed": 0,
+   "tier": "easy",
+   "gen_s": 0.01,
+   "hash": "9a9cc2d5e33ebd616aeb87de48e5de27a7638656fa59e5a84ec4aaf7b23985bc",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "regex": 0.0,
+    "smart_regex": 0.0,
+    "careless_no_lookups": 0.0,
+    "skip_register": 0.5,
+    "skip_luhn": 1.0,
+    "report_officials": 0.125,
+    "report_business": 0.25,
+    "numbers_as_ids": 0.375
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 8,
+   "seed": 1,
+   "tier": "easy",
+   "gen_s": 0.01,
+   "hash": "8cc4637366b06955a4c1cdfe6bac5b207c8e7753d4a082e0b5af46c940ed7f1f",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "regex": 0.0,
+    "smart_regex": 0.0,
+    "careless_no_lookups": 0.0,
+    "skip_register": 0.75,
+    "skip_luhn": 0.875,
+    "report_officials": 0.125,
+    "report_business": 0.375,
+    "numbers_as_ids": 0.5
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 24,
+   "seed": 0,
+   "tier": "medium",
+   "gen_s": 0.01,
+   "hash": "e00b41d2ea3907ee9549e8bb0abfd190eb77a9aa799e743b80568ad655432010",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "regex": 0.0,
+    "smart_regex": 0.0,
+    "careless_no_lookups": 0.0,
+    "skip_register": 0.5,
+    "skip_luhn": 0.875,
+    "report_officials": 0.1667,
+    "report_business": 0.375,
+    "numbers_as_ids": 0.5
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 24,
+   "seed": 1,
+   "tier": "medium",
+   "gen_s": 0.0,
+   "hash": "774980b9d15d5549b476153be7ea96176c66a39a2d4f64753a682e5f74e527b9",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "regex": 0.0,
+    "smart_regex": 0.0,
+    "careless_no_lookups": 0.0,
+    "skip_register": 0.7917,
+    "skip_luhn": 0.625,
+    "report_officials": 0.125,
+    "report_business": 0.5417,
+    "numbers_as_ids": 0.2917
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 96,
+   "seed": 0,
+   "tier": "hard",
+   "gen_s": 0.01,
+   "hash": "ab38946791ecd7780e0b8d03c0f62ec8695aa68b9d9f3632c8e4d492d1937ec8",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.1,
+   "wrong": {
+    "regex": 0.0,
+    "smart_regex": 0.0208,
+    "careless_no_lookups": 0.0,
+    "skip_register": 0.6042,
+    "skip_luhn": 0.875,
+    "report_officials": 0.125,
+    "report_business": 0.4583,
+    "numbers_as_ids": 0.3854
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 96,
+   "seed": 1,
+   "tier": "hard",
+   "gen_s": 0.01,
+   "hash": "eae33d04c1689d1d47badda5031c12064b069d32b5b2af35a0ec08505824b948",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.1,
+   "wrong": {
+    "regex": 0.0,
+    "smart_regex": 0.0,
+    "careless_no_lookups": 0.0,
+    "skip_register": 0.6562,
+    "skip_luhn": 0.8438,
+    "report_officials": 0.125,
+    "report_business": 0.4479,
+    "numbers_as_ids": 0.4375
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  }
+ ]
+}

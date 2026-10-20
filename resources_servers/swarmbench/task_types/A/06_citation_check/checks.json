@@ -1,0 +1,188 @@
+{
+ "summary": {
+  "type": "06_citation_check",
+  "ns": [
+   4,
+   40,
+   150
+  ],
+  "seeds": "0,1",
+  "check1_oracle_min": 1.0,
+  "check2_wrong_max": {
+   "all_supported": 0.05,
+   "word_overlap": 0.125,
+   "word_overlap_number_check": 0.1,
+   "no_detail_check": 0.125,
+   "no_source_search": 0.5467
+  },
+  "check3_format_only_max": 0.0,
+  "check7_tool_errors": 0,
+  "check8_deterministic": true,
+  "canary": true,
+  "text_source": "k3"
+ },
+ "rows": [
+  {
+   "n": 4,
+   "seed": 0,
+   "tier": "easy",
+   "gen_s": 0.01,
+   "hash": "fb37a256ad7be4b84af210545b2bfde97963971adb2675bd1ea5d963b2d33809",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "all_supported": 0.0,
+    "word_overlap": 0.0,
+    "word_overlap_number_check": 0.0,
+    "no_detail_check": 0.0,
+    "no_source_search": 0.5
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 4,
+   "seed": 1,
+   "tier": "easy",
+   "gen_s": 0.0,
+   "hash": "f7790b62f182c356a1f4d64fede4422aaa62a4648e70af44c3f294f7a610f56b",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "all_supported": 0.0,
+    "word_overlap": 0.0,
+    "word_overlap_number_check": 0.0,
+    "no_detail_check": 0.0,
+    "no_source_search": 0.25
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 40,
+   "seed": 0,
+   "tier": "medium",
+   "gen_s": 0.0,
+   "hash": "d0caa1886de07c2c88591a85928f6d2df052f49254a9f138605482effa3e03e2",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "all_supported": 0.05,
+    "word_overlap": 0.125,
+    "word_overlap_number_check": 0.1,
+    "no_detail_check": 0.125,
+    "no_source_search": 0.525
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 40,
+   "seed": 1,
+   "tier": "medium",
+   "gen_s": 0.0,
+   "hash": "5d500f041f1b3c4c62638c454537d8b4d98eaca366629157da5fe0ef25312f72",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "all_supported": 0.025,
+    "word_overlap": 0.05,
+    "word_overlap_number_check": 0.025,
+    "no_detail_check": 0.05,
+    "no_source_search": 0.375
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 150,
+   "seed": 0,
+   "tier": "hard",
+   "gen_s": 0.01,
+   "hash": "d7814cdb57a4d97432bc1d87690c63890b6801e4b5a5b3ed90f90a0979d6c754",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "all_supported": 0.0133,
+    "word_overlap": 0.0867,
+    "word_overlap_number_check": 0.0667,
+    "no_detail_check": 0.0867,
+    "no_source_search": 0.5467
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 150,
+   "seed": 1,
+   "tier": "hard",
+   "gen_s": 0.01,
+   "hash": "697c5985673ab3b43e9f798b80476ba21d0cfb038a299efae3944bc0e69e39af",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "all_supported": 0.0267,
+    "word_overlap": 0.0667,
+    "word_overlap_number_check": 0.04,
+    "no_detail_check": 0.0667,
+    "no_source_search": 0.4933
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  }
+ ]
+}

@@ -1,0 +1,93 @@
+{
+ "intro": "You are working in the research office of a hospital that pre-screens synthetic patients for clinical trials. The office must pre-screen {n} patients, with patient ids running from {first} to {last}, and each patient is already assigned to one of {ntrials} real recruiting trials. For every trial you will see a short list of eligibility lines quoted verbatim from the trial registry: inclusion lines whose ids begin with I and exclusion lines whose ids begin with E. For each patient you must decide whether they are eligible for their assigned trial and list exactly which criterion ids they fail, where a failed criterion is an inclusion line that is not met or an exclusion line that applies. The work is large, but every patient must be answered.",
+ "rule_scope": "Judge each patient only against the eligibility lines shown for the assigned trial; never use lines from any other trial. The patient's screening date stands in for consent, enrollment, randomization, first dose and start of treatment wherever a line refers to those events. A patient is eligible only when the failed list is empty. An inclusion line fails when the chart does not show that it is met. An exclusion line fails when it applies to the patient.",
+ "rule_windows": "When a line sets a time window, count calendar days back from the screening date. A period of days, weeks (seven days each), months (thirty days each) or years (three hundred sixty-five days each) before screening includes an event dated exactly that many days earlier, so an event falling on the boundary day counts as inside the window. For a therapy or medication the date that counts is its last dose or stop date, and for radiotherapy the date that counts is the end date of the course. A medication with no stop date is ongoing and counts as received on the screening date. When the medication list says the stop date is in the notes, take that date from the notes. Age is completed years on the screening date.",
+ "rule_latest": "For laboratory values, weight, ECOG performance status, pregnancy tests and breastfeeding status, use only the most recent record dated on or before the screening date, whether it appears in the chart or in a note; older values are superseded. When a line uses a multiple of the upper limit of normal, use the limit printed with that same result. Apply comparison signs exactly: a value equal to a limit meets 'at least' and 'no more than' but not 'greater than' or 'less than'.",
+ "rule_units": "Results may be reported in different units than a line uses, and they must be converted before comparing; convert each value into the unit the line expects using only the conversions given here: {conversions}",
+ "rule_history": "Conditions in the problem list count whether they are active or resolved when a line asks about a history of something, but only active conditions count for lines about current or active disease. Conditions in relatives (family history) never count unless the line itself mentions family history. A diagnosis that a note says was ruled out or excluded does not count. Diagnostic procedures such as biopsies are not therapy. You must use the drug class of each medication or vaccine, for example whether a drug is a checkpoint inhibitor, a systemic steroid or insulin, or whether a vaccine is live, and route matters: inhaled, nasal or topical steroids are not systemic.",
+ "rule_combine": "An inclusion line that lists several requirements is met only if all of them are met, unless it offers alternatives joined by 'or', in which case one alternative is enough. An exclusion line that lists several conditions applies if any one of them applies, unless the line requires them together, for example with the word 'concurrent'. Exceptions and alternative limits written into a line, for example a higher limit for patients with liver metastases, must be honoured.",
+ "answer_line": "End your work with one JSON object mapping every patient id to an object with the key 'eligible' (true or false) and the key 'failed' (a list of criterion ids, empty when the patient is eligible), like this example: {example}",
+ "unit_prompt": "Screen patient {patient} against trial {trial}. Use the tools to read the trial's eligibility lines and the patient's whole chart and notes, decide whether the patient is eligible and which criterion ids they fail, and end with the JSON answer object for that one patient.",
+ "tools": {
+  "list_patients": "Lists patient ids with each patient's assigned trial and screening date; paged with offset and limit.",
+  "list_trials": "Lists trial ids and titles.",
+  "read_trial": "Returns the eligibility lines of one trial, selected by trial_id.",
+  "read_chart": "Returns one chart section of one patient; takes patient_id and section, one of summary, problems, oncology, medications, procedures, immunizations, labs, vitals, performance.",
+  "read_notes": "Returns the dated clinical notes of one patient, paged.",
+  "calculator": "Evaluates an arithmetic expression."
+ },
+ "n_ecog": [
+  "ECOG performance status at today's visit is {ecog}.",
+  "Performance status assessed at this visit: ECOG {ecog}.",
+  "The patient's ECOG grade was recorded as {ecog} during this visit.",
+  "At this visit, performance status was evaluated and scored ECOG {ecog}."
+ ],
+ "n_hcg": [
+  "A pregnancy test performed at this visit was {result}.",
+  "Urine pregnancy test at today's visit: {result}.",
+  "Pregnancy testing done at this visit returned a {result} result.",
+  "A serum pregnancy test collected at this visit came back {result}."
+ ],
+ "n_breastfeeding": [
+  "The patient reports that she is currently breastfeeding.",
+  "She is breastfeeding her infant at present.",
+  "The patient is currently nursing her baby.",
+  "She states that she continues to breastfeed."
+ ],
+ "n_weaned": [
+  "The patient reports that she stopped breastfeeding on {date}.",
+  "She weaned her infant and ended breastfeeding on {date}.",
+  "Breastfeeding was discontinued on {date}.",
+  "She states she is no longer breastfeeding, having stopped on {date}."
+ ],
+ "n_family": [
+  "Family history is notable for {condition} in the patient's {relative}.",
+  "The patient's {relative} has been diagnosed with {condition}.",
+  "Family history: {condition} in a {relative}.",
+  "The patient reports {condition} in their {relative}."
+ ],
+ "n_ruled_out": [
+  "Suspected {condition} was investigated at this visit and ruled out.",
+  "Workup for possible {condition} was completed today and the diagnosis was ruled out.",
+  "{condition} was considered, but evaluation at this visit excluded it.",
+  "Testing at this visit ruled out {condition}."
+ ],
+ "n_last_dose": [
+  "The last dose of {drug} was taken on {date}, and it was then stopped.",
+  "{drug} was discontinued after a final dose on {date}.",
+  "The patient took the final dose of {drug} on {date} and has not taken it since.",
+  "Last dose of {drug}: {date}; the medication was stopped afterwards."
+ ],
+ "n_vaccine": [
+  "The patient received {vaccine} at an outside pharmacy on {date}.",
+  "{vaccine} was administered at a community clinic on {date}.",
+  "Records confirm the patient got {vaccine} at an outside clinic on {date}.",
+  "The patient reports receiving {vaccine} at a retail pharmacy on {date}."
+ ],
+ "n_surgery": [
+  "The patient had {category} surgery, specifically {procedure}, at another hospital on {date}.",
+  "Outside records show {procedure}, a {category} surgery, performed at another hospital on {date}.",
+  "The patient underwent {procedure} at another hospital on {date}; this was {category} surgery.",
+  "Surgical history includes {procedure} ({category} surgery) done at another hospital on {date}."
+ ],
+ "n_weight": [
+  "Body weight measured at this visit was {weight}.",
+  "Weight at today's visit: {weight}.",
+  "The patient's weight was recorded as {weight} at this visit.",
+  "At this visit the scale showed a body weight of {weight}."
+ ],
+ "n_pad": [
+  "The next appointment was scheduled at the front desk.",
+  "A reminder call was placed to confirm the upcoming visit.",
+  "The patient asked about parking near the main entrance.",
+  "Consent paperwork was printed and filed in the chart.",
+  "The patient requested a later appointment time because of work.",
+  "Transport was arranged through the hospital shuttle service.",
+  "A parking voucher was provided at checkout.",
+  "The patient was reminded to bring identification to the next visit.",
+  "The consent form was reviewed and signed before the patient left.",
+  "The front desk confirmed the patient's ride home after the visit.",
+  "A reminder postcard was mailed to the patient's address.",
+  "The patient asked for directions to the cafeteria."
+ ]
+}

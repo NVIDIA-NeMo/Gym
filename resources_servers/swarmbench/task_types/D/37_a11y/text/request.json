@@ -1,0 +1,61 @@
+{
+ "user": "Write the task-facing text for a web accessibility audit task. Agents audit static HTML pages from an offline web archive (real encyclopedia and software-documentation pages with some edited parts). They read pages only through three tools and must report, per page, the exact elements that break each rule of an audit rulebook. Every img, input, select, textarea, button, a, h1-h6 and table element in a page carries an attribute data-ref=\"r<number>\" (unique within one page); answers name offending elements by these data-ref values. A program grades the answers, so each rule paragraph must state the rule below completely and exactly, in clear plain English, without adding, dropping or softening any condition, and without examples that contradict it. Keep every {placeholder} exactly as named and use each listed placeholder exactly once; keep each template on one line; do not invent ids or page numbers.\n\nReturn one JSON object with these keys:\n\n\"intro\": the opening paragraph. Placeholders {n}, {first}, {last}. An accessibility team must audit the {n} archived pages {first} to {last} against the rulebook that follows and report the offending elements of every page, rule by rule. Pages are only available through the tools; there are no stylesheets or scripts, only the HTML and its inline style attributes.\n\n\"rule_scope\": a paragraph: offenders are reported by their data-ref values (ids only for the duplicate-id rule); refs are only unique within one page. Definitions used by all rules: an element's text is its text content with whitespace collapsed, including the alt attribute of any img inside it and excluding the content of hidden descendants; a value is blank when it is empty after collapsing whitespace.\n\n\"rule_hidden\": a paragraph: an element is hidden when it or any of its ancestors has the hidden attribute, aria-hidden=\"true\", or an inline style that declares display: none or visibility: hidden (aria-hidden=\"false\" hides nothing). Hidden elements are exempt from the image, form-control, link/button, heading and table rules, and hidden headings are skipped in the heading sequence. Text referenced through aria-labelledby counts even when the referenced element is hidden. The duplicate-id rule covers every element, hidden or not.\n\n\"rule_img\": a paragraph for the answer key img_alt. A visible img offends unless it has at least one of: an alt attribute (any value, including an empty alt=\"\"), role=\"presentation\" or role=\"none\", a non-blank aria-label, an aria-labelledby whose listed ids include at least one id that exists on the page and the referenced text is non-blank, or a non-blank title. An img also offends when its alt is just a file name: only letters, digits, spaces, underscores, hyphens and dots, ending in .jpg, .jpeg, .png, .gif, .svg or .webp in any letter case.\n\n\"rule_control\": a paragraph for the answer key control_name. Visible input, select and textarea elements need an accessible name; input elements of type hidden, submit or reset are exempt (an input without a type attribute is a text input). A control has a name when any of these holds: a non-blank aria-label; an aria-labelledby whose referenced text is non-blank (ids that do not exist contribute nothing); a label element anywhere on the page whose for attribute equals the control's id, with non-blank text, where a for attribute only labels the first element on the page that carries that id; an enclosing label element that has no for attribute, whose text not counting the content of form controls inside it is non-blank; a non-blank title; for type=\"button\" a non-blank value; for type=\"image\" a non-blank alt. A placeholder never counts as a name.\n\n\"rule_link\": a paragraph for the answer key link_name, with placeholder {generic} (code inserts the quoted list of generic phrases). It covers visible a elements that have an href attribute and visible button elements; a elements without href are exempt. The name is the first non-blank of: the aria-label; the text referenced by aria-labelledby; the element's own text; the title. The element offends when the name is blank, or when the name, lowercased and with spaces and the characters . , : ; ! ? \u2026 \u00bb \u203a > \u2192 removed from both ends, equals one of these generic phrases: {generic}.\n\n\"rule_heading\": a paragraph for the answer key heading_skip. Go through the visible h1-h6 elements in document order, starting from level 0. A heading offends when its level is more than one greater than the level of the previous visible heading, so the first visible heading offends unless it is an h1. Every visible heading, offending or not, becomes the previous heading for the next one. Moving to a lower level by any amount is allowed.\n\n\"rule_dup\": a paragraph for the answer key duplicate_id: report every id value that appears on two or more elements of the page, hidden or not, comparing values exactly (letter case matters). Report the id values themselves, not data-ref values.\n\n\"rule_lang\": a paragraph for the answer key lang_ok: true when the html element has a lang attribute whose value is two or three ASCII letters, optionally followed by subtags that are each a hyphen plus one to eight ASCII letters or digits (for example en, en-GB, fr); only the form of the value is checked, not whether it matches the page language. A missing, empty or malformed lang gives false.\n\n\"rule_table\": a paragraph for the answer key table_header: a visible table that does not have role=\"presentation\" or role=\"none\" offends when it contains no th cell of its own; th cells inside a nested table belong to that nested table only.\n\n\"answer_line\": the closing instruction, with placeholder {example}. The final answer is one JSON object that maps every page id to an object with exactly these seven keys: img_alt, control_name, link_name, heading_skip and table_header (lists of data-ref values in any order), duplicate_id (a list of id values) and lang_ok (true or false); use an empty list when a rule has no offenders. A page counts only when all seven entries are exactly right. Show {example} as the format example.\n\n\"unit_prompt\": an instruction for auditing a single page, placeholders {page} and {example}: audit only page {page} with the tools and the rulebook that follows, and finish with one JSON object that contains only that page, in the format of {example}.\n\n\"tools\": an object with one-sentence descriptions: \"list_pages\" (lists page ids, titles and line counts; optional offset and limit), \"read_page\" (returns numbered lines of one page starting at start_line, about 7,400 characters per call, and tells the next start_line), \"search_page\" (lists the lines of one page that contain a text, case-insensitive, with line numbers; at most 40 lines, each cut to 300 characters).\n\n\"generic\": a JSON list of exactly 9 lowercase link phrases that accessibility auditors treat as non-descriptive, each one to three words without punctuation; include \"click here\", \"read more\" and \"learn more\".\n\nPhrase banks (JSON lists of plain strings without HTML, quotes or the characters < > &; none of them may be blank, look like a file name, or equal any generic phrase):\n\"labels\": 30 short form field labels (e.g. for a newsletter, search, feedback or contact form).\n\"placeholders\": 20 short placeholder hints for text fields.\n\"buttons\": 15 short descriptive button captions.\n\"links\": 30 descriptive link texts of 3-7 words.\n\"icon_names\": 15 short accessible names for icon-only buttons.\n\"alts\": 30 descriptive image alternative texts of 4-10 words.\n\"captions\": 20 one-sentence figure captions.\n\"headings\": 20 short section headings for site sidebars, footers and forms.\n\"notices\": 10 short status or notice sentences.\n\"cells\": 20 short table cell values (one to three words).\n\"col_heads\": 10 short table column headings (one or two words).",
+ "keys": [
+  "intro",
+  "rule_scope",
+  "rule_hidden",
+  "rule_img",
+  "rule_control",
+  "rule_link",
+  "rule_heading",
+  "rule_dup",
+  "rule_lang",
+  "rule_table",
+  "answer_line",
+  "unit_prompt",
+  "tools",
+  "generic",
+  "labels",
+  "placeholders",
+  "buttons",
+  "links",
+  "icon_names",
+  "alts",
+  "captions",
+  "headings",
+  "notices",
+  "cells",
+  "col_heads"
+ ],
+ "placeholders": {
+  "intro": [
+   "{n}",
+   "{first}",
+   "{last}"
+  ],
+  "rule_link": [
+   "{generic}"
+  ],
+  "answer_line": [
+   "{example}"
+  ],
+  "unit_prompt": [
+   "{page}",
+   "{example}"
+  ]
+ },
+ "lists": {
+  "generic": 9,
+  "labels": 30,
+  "placeholders": 20,
+  "buttons": 15,
+  "links": 30,
+  "icon_names": 15,
+  "alts": 30,
+  "captions": 20,
+  "headings": 20,
+  "notices": 10,
+  "cells": 20,
+  "col_heads": 10
+ }
+}

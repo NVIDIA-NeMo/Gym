@@ -1,0 +1,45 @@
+{
+ "api": "https://inference-api.nvidia.com/v1/chat/completions",
+ "model_requested": "nvidia/moonshotai/kimi-k3",
+ "system": "You write task text for an offline evaluation of software agents. Follow the facts you are given exactly; do not add rules, numbers or names that are not in the brief. Reply with exactly one JSON object and nothing else.",
+ "request": {
+  "keys": [
+   "unit_prompt"
+  ],
+  "placeholders": {
+   "unit_prompt": [
+    "{n}",
+    "{start}",
+    "{end}",
+    "{service}",
+    "{ticket}",
+    "{rules}"
+   ]
+  },
+  "user": "Write the instructions for one investigator on a postmortem team. Return a JSON object with one key, \"unit_prompt\": a prompt template using the placeholders {n} (number of services), {start} and {end} (one-week period, UTC), {service} (one service name), {ticket} (an incident ticket id) and {rules} (where code inserts the estate's exact incident rules). The investigator must decide the role of exactly one service, {service}, in ticket {ticket}, starting by reading the ticket to get the incident window, using the same read-only tools (list_services, get_service_info, query_logs, query_metrics, list_changes, read_ticket; times are YYYY-MM-DD HH:MM or YYYY-MM-DD HH:MM:SS). Then place {rules}. Then explain the three possible verdicts exactly: MEMBER: {service} logs at least one real propagation line in the window; report its upstream, the dependency named in its earliest REAL propagation line (each candidate line's target must be checked for its own ERROR lines within 15 minutes). SELF: no real propagation line, but {service} logs ERROR lines of its own (lines that are not 'call to ... failed') in the window; report the culprit change id by the rules, or none if no change explains the errors (unrelated bursts such as handler exceptions or crashed jobs have no culprit change). NO: neither (only isolated noise lines, or no ERROR lines at all). End by requiring exactly one final line, one of these literal forms:\nUNIT | MEMBER | <upstream service>\nUNIT | SELF | <change id or none>\nUNIT | NO"
+ },
+ "attempts": [
+  {
+   "seconds": 22.8,
+   "usage": {
+    "completion_tokens": 1420,
+    "prompt_tokens": 484,
+    "total_tokens": 1904,
+    "completion_tokens_details": {
+     "accepted_prediction_tokens": 843,
+     "audio_tokens": 0,
+     "reasoning_tokens": 1089,
+     "rejected_prediction_tokens": 315
+    },
+    "prompt_tokens_details": {
+     "audio_tokens": 0,
+     "cached_tokens": 64
+    }
+   },
+   "model": "nvidia/moonshotai/kimi-k3",
+   "reply": "{\"unit_prompt\": \"You are one investigator on a postmortem team. The estate has {n} services and the period under review is the one-week window {start} to {end} (UTC). Your task is to decide the role of exactly one service, {service}, in incident ticket {ticket}.\\n\\nStart by calling read_ticket on {ticket} to get the incident window. Use only these read-only tools: list_services, get_service_info, query_logs, query_metrics, list_changes, read_ticket. Times are YYYY-MM-DD HH:MM or YYYY-MM-DD HH:MM:SS.\\n\\n{rules}\\n\\nThere are three possible verdicts:\\n- MEMBER: {service} logs at least one real propagation line in the window; report its upstream, the dependency named in its earliest REAL propagation line (each candidate line's target must be checked for its own ERROR lines within 15 minutes).\\n- SELF: no real propagation line, but {service} logs ERROR lines of its own (lines that are not 'call to ... failed') in the window; report the culprit change id by the rules, or none if no change explains the errors (unrelated bursts such as handler exceptions or crashed jobs have no culprit change).\\n- NO: neither (only isolated noise lines, or no ERROR lines at all).\\n\\nFinish with exactly one final line, in one of these literal forms:\\nUNIT | MEMBER | <upstream service>\\nUNIT | SELF | <change id or none>\\nUNIT | NO\"}",
+   "problems": []
+  }
+ ],
+ "created": "2026-10-14 06:09:22 UTC"
+}

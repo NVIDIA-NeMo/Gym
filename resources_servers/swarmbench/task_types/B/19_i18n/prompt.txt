@@ -1,0 +1,19 @@
+You are working in a repository that contains two real open-source Python packages which translate their user-facing messages with gettext: repos/click (click, a command-line toolkit) and repos/humanize (humanize, number and time formatting with many real translations).
+
+In {n} functions, listed one per line in UNITS.txt as path::qualified.function.name, the translation calls were removed and the user-facing messages are hard-coded, so translators' catalogs no longer apply. Other functions still translate and show the conventions.
+
+Your job: restore translation in every listed function so that every message goes through the catalog again with exactly the catalog's message ids, while the untranslated (English) behavior stays exactly the same.
+
+Catalogs: repos/click/messages.pot lists every click message id, with plural forms where the message depends on a count. humanize keeps its real catalogs as .po files under repos/humanize/src/humanize/locale; some humanize messages have a context (msgctxt) and must use the context-aware call.
+
+How click does it: from gettext import gettext as _ and ngettext. A message with named placeholders is translated first and formatted afterwards, as in _("message with a NAME placeholder").format(NAME=value), never by translating an already formatted string. A message that depends on a count uses ngettext(singular, plural, count). humanize uses its own helpers from humanize.i18n: _gettext imported as _, _ngettext, _pgettext imported as P_ for messages with a context, and _ngettext_noop imported as NS_ to mark singular and plural pairs without translating them.
+
+Message ids must match the catalog character for character, including placeholder names, punctuation and percent-style placeholders. Only wrap messages that are in the catalog.
+
+Checks: hidden tests compare, for each listed function, the translation calls it makes with their exact message ids (statically and while the real test suites run), run humanize's real translated locales, and check that output is unchanged.
+
+Rules: each function is scored on its own. Only that function is taken from your version of the file; the rest of the file is the original. So keep each fix inside the listed function. Add a needed import only if the module lacks it (in practice it already has them). New files are ignored.
+
+Tools (paths relative to the repository root): list_files, read_file, search, write_file, apply_edit, and run_visible_tests(unit), where unit is a line from UNITS.txt; it runs the static check and part of the function's tests. Several agents may edit the same working copy at once, so only edit the listed functions.
+
+Scoring reads the final state of the repository, not your reply: score = fraction of the {n} functions that pass, minus already-passing tests elsewhere that were broken. When finished, reply with "done" and a short summary.

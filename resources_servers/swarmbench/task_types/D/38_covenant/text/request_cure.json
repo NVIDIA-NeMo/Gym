@@ -1,0 +1,14 @@
+{
+ "user": "You write task text for a loan-portfolio covenant compliance review at a fictional commercial bank. Rewrite one correspondence-file template. Code fills {placeholders} and a parser reads the filled sentence back, so keep every placeholder exactly as named, use each exactly once, keep it on a single line, never use the characters \"|\" or \"{\" or \"}\" except in placeholders, and write no digits yourself.\n\nReturn one JSON object with one key:\n\"cure_notice\": correspondence entry, placeholders {date}, {amount} (thousands of US dollars) and {end}: the Borrower states that on {date} it received a cash common equity contribution of {amount} thousand US dollars, and it elects to apply that contribution under the equity cure right to the test period ending {end}. The sentence must say unambiguously that {date} is the date the contribution was received (not merely the date of the notice).",
+ "keys": [
+  "cure_notice"
+ ],
+ "placeholders": {
+  "cure_notice": [
+   "{date}",
+   "{amount}",
+   "{end}"
+  ]
+ },
+ "lists": {}
+}

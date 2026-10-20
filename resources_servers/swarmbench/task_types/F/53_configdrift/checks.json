@@ -1,0 +1,278 @@
+{
+ "summary": {
+  "type": "configdrift",
+  "ns": [
+   64,
+   256,
+   1024
+  ],
+  "seeds": "0,1,2",
+  "check1_oracle_min": 1.0,
+  "check2_wrong_max": {
+   "hosts_shifted": 0.0536,
+   "grep_any_other_value": 0.0657,
+   "base_conf_only": 0.4608,
+   "ignore_exceptions": 0.4698,
+   "read_comments_and_disabled": 0.5671,
+   "reason_always_unapproved": 0.2203
+  },
+  "check3_format_only_max": 0.0,
+  "check7_tool_errors": 0,
+  "check8_deterministic": true,
+  "canary": true
+ },
+ "rows": [
+  {
+   "n": 64,
+   "seed": 0,
+   "tier": "easy",
+   "gen_s": 0.02,
+   "hash": "678ec2fd8c24b8a999f5de1f26134506341151a3d95fc96cc8705dd397bd34c5",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "hosts_shifted": 0.0536,
+    "grep_any_other_value": 0.0462,
+    "base_conf_only": 0.2891,
+    "ignore_exceptions": 0.4238,
+    "read_comments_and_disabled": 0.4746,
+    "reason_always_unapproved": 0.1607
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 64,
+   "seed": 1,
+   "tier": "easy",
+   "gen_s": 0.03,
+   "hash": "52cf3f53fa1e195d911ab71c3f85c46b4fda523f45d5d5f9fda3da8a906f9df0",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "hosts_shifted": 0.0,
+    "grep_any_other_value": 0.0657,
+    "base_conf_only": 0.3306,
+    "ignore_exceptions": 0.4698,
+    "read_comments_and_disabled": 0.4796,
+    "reason_always_unapproved": 0.2203
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 64,
+   "seed": 2,
+   "tier": "easy",
+   "gen_s": 0.01,
+   "hash": "d9de0b891ae612c1bd1fc5c3d24dc71b296f69a697475c021562f0b25801a6a5",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "hosts_shifted": 0.0132,
+    "grep_any_other_value": 0.0547,
+    "base_conf_only": 0.33,
+    "ignore_exceptions": 0.3842,
+    "read_comments_and_disabled": 0.5517,
+    "reason_always_unapproved": 0.1579
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 256,
+   "seed": 0,
+   "tier": "medium",
+   "gen_s": 0.02,
+   "hash": "02c91083fd08f350902dd067facc82f349b414f52813e39e6aaad79e1846e8ec",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "hosts_shifted": 0.0189,
+    "grep_any_other_value": 0.0529,
+    "base_conf_only": 0.3677,
+    "ignore_exceptions": 0.4128,
+    "read_comments_and_disabled": 0.5023,
+    "reason_always_unapproved": 0.1667
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 256,
+   "seed": 1,
+   "tier": "medium",
+   "gen_s": 0.02,
+   "hash": "68fec65e6be490233ab0bd71a6aa2549b91ff77a981902ed16d3ba88147d0af0",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "hosts_shifted": 0.0106,
+    "grep_any_other_value": 0.0535,
+    "base_conf_only": 0.3603,
+    "ignore_exceptions": 0.3618,
+    "read_comments_and_disabled": 0.5671,
+    "reason_always_unapproved": 0.1596
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 256,
+   "seed": 2,
+   "tier": "medium",
+   "gen_s": 0.02,
+   "hash": "8c6eb1f1db8bbd0a88fc1391fb7f0d7a9d242656403d44aacd928b15a4e2b703",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "hosts_shifted": 0.0187,
+    "grep_any_other_value": 0.0389,
+    "base_conf_only": 0.3617,
+    "ignore_exceptions": 0.3711,
+    "read_comments_and_disabled": 0.5472,
+    "reason_always_unapproved": 0.1231
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 1024,
+   "seed": 0,
+   "tier": "hard",
+   "gen_s": 0.18,
+   "hash": "76a48d487a55017b3e4b363b1cda980bcaa557b4357b3d3b97b7212f27c819e9",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.4,
+   "wrong": {
+    "hosts_shifted": 0.0155,
+    "grep_any_other_value": 0.0122,
+    "base_conf_only": 0.4473,
+    "ignore_exceptions": 0.3585,
+    "read_comments_and_disabled": 0.5525,
+    "reason_always_unapproved": 0.0492
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 1024,
+   "seed": 1,
+   "tier": "hard",
+   "gen_s": 0.18,
+   "hash": "7b00b2104a6d70c407210b60edada85c142663d727a8586fe9cc2eb527f2ad3a",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.4,
+   "wrong": {
+    "hosts_shifted": 0.0227,
+    "grep_any_other_value": 0.0045,
+    "base_conf_only": 0.4608,
+    "ignore_exceptions": 0.3275,
+    "read_comments_and_disabled": 0.5558,
+    "reason_always_unapproved": 0.0199
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 1024,
+   "seed": 2,
+   "tier": "hard",
+   "gen_s": 0.17,
+   "hash": "b0dc5babc9dbf0112c15a2026a5c418b375804bf7a4237e4b844e5aba9e3e695",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.4,
+   "wrong": {
+    "hosts_shifted": 0.011,
+    "grep_any_other_value": 0.0109,
+    "base_conf_only": 0.4541,
+    "ignore_exceptions": 0.3619,
+    "read_comments_and_disabled": 0.5363,
+    "reason_always_unapproved": 0.0466
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  }
+ ]
+}

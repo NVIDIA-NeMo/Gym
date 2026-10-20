@@ -1,0 +1,56 @@
+{
+ "intro": "You are auditing a fleet of {n} server hosts for configuration drift; the audit date is {date}. Each host has one of eight roles (web, api, db, cache, worker, gateway, batch, search), and each role has a baseline of required key = value settings. A host's configuration is spread over several files, and approved exceptions allow specific deviations until an expiry date. Your job: for every host, find every baseline key whose effective value deviates from the role baseline and is not covered by a valid exception, and say why.",
+ "rules": [
+  "A host's effective configuration is built from its files whose names end in .conf, read in lexical (sorted) order of their full paths; within and across files a later line for the same key overrides an earlier one. Files with any other ending (for example .conf.disabled) are ignored.",
+  "Lines starting with # are comments and are ignored; blank lines are ignored. A setting line has the form key = value; leading and trailing spaces around the value do not count.",
+  "Only keys listed in the host's role baseline are audited. A baseline key with no setting line in any .conf file is MISSING.",
+  "A baseline key whose effective value differs from the baseline value is a deviation. An exception applies to a host if its target is that host's name or role:<the host's role>. An exception is valid if its expiry date is on or after the audit date.",
+  "A deviation is covered (not reported) if a valid exception for that key has exactly the effective value. Otherwise report it with one reason: EXPIRED if an applicable exception for that key has exactly the effective value but has expired; MISMATCH if there is no such exception but a valid applicable exception for that key names a different value; UNAPPROVED otherwise. Exceptions for other hosts or other roles never apply."
+ ],
+ "file_headers": [
+  "# This file is managed by the central configuration management system; do not edit by hand.",
+  "# Manual edits will be overwritten at the next configuration management run.",
+  "# Generated automatically from the fleet configuration repository; local changes are not preserved.",
+  "# Hand-made changes here are reverted without notice.",
+  "# Configuration owned by the team that operates this host.",
+  "# Direct questions about this file to the service owner on call.",
+  "# Changes to this file require sign-off from the owning team.",
+  "# The owning team reviews this file at every scheduled audit.",
+  "# All changes must go through the change-control process before deployment.",
+  "# Do not modify this file outside an approved change window.",
+  "# Emergency edits must be recorded in the change log afterwards.",
+  "# Deviations from the role baseline require an approved exception."
+ ],
+ "justifications": [
+  "Performance testing in progress",
+  "Vendor requirement for continued support",
+  "Temporary mitigation for an active incident",
+  "Workaround for a known memory leak",
+  "Debugging an intermittent failure",
+  "Compatibility with a legacy client",
+  "Load shedding during traffic spikes",
+  "Canary analysis for a planned rollout",
+  "Storage migration in progress",
+  "Failover rehearsal preparation",
+  "Awaiting an upstream patch",
+  "Hotfix validation under production traffic",
+  "Workaround for a kernel scheduling defect",
+  "Certificate rollout not yet complete",
+  "Baseline value triggers a scanner false positive",
+  "Replication lag workaround during rebalancing",
+  "Capacity trial ahead of peak season",
+  "Upgrade blocked by a downstream dependency",
+  "Cost reduction experiment",
+  "Rebalancing after hardware replacement"
+ ],
+ "tools": {
+  "list_hosts": "Lists the hosts of the fleet as 'host name | role' lines, paged, returning at most 200 hosts per call.",
+  "list_files": "Lists the configuration file paths of one host.",
+  "read_file": "Returns the text of one file of one host.",
+  "get_baseline": "Returns the baseline key = value list of one role.",
+  "get_exceptions": "Returns all exceptions whose target is the given host or its role, each with id, target, key = value, expiry date and justification."
+ },
+ "answer": "The final answer is plain lines, one finding per line, in the literal form <host> | <key> | <reason>, where reason is one of UNAPPROVED, EXPIRED, MISMATCH, MISSING; for example web-use1-0007 | app.log_level | UNAPPROVED. Hosts without findings are left out. Lines in any other form are ignored.",
+ "score": "The score is the F1 score of the finding lines against the true findings.",
+ "unit_prompt": "Audit exactly one host, {host}, and no other. You have the same tools as the main task. The audit date is {date}. The audit rules are:\n\n{rules}\n\nBuild the host's effective configuration, compare it against the baseline of the host's role, and check every deviation against the exceptions. End your reply with the host's finding lines, one per line in the literal form <host> | <key> | <reason> where reason is one of UNAPPROVED, EXPIRED, MISMATCH, MISSING, followed by a last line UNIT DONE {host2}. If the host has no findings, end with only the line UNIT DONE {host2}."
+}

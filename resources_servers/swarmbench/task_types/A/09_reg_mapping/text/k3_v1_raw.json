@@ -1,0 +1,44 @@
+{
+ "api": "http://10.49.67.62:8000/v1",
+ "model_requested": "policy_model",
+ "system": "You write task text for an offline evaluation of software agents. Follow the facts you are given exactly; do not add rules, numbers or names that are not in the brief. Reply with exactly one JSON object and nothing else.",
+ "request": {
+  "user": "Write the task-facing text for an offline evaluation task called 'regulation mapping'. Facts (use exactly these, add nothing else):\n- The agent is given {n_clauses} clauses from a US consumer-finance company's internal compliance policy manual, each with a clause id (like K0001). Each clause was written to implement exactly one paragraph of the federal regulations in an offline library of {n_parts} parts of the Code of Federal Regulations (consumer credit, electronic fund transfers, privacy notices, credit reporting, mortgage servicing, deposit accounts, children's online privacy, information security, identity theft and anti-money-laundering rules). The clauses never name the regulation or its numbers.\n- For each clause the agent must cite the regulation paragraph it implements: the section number and the first-level paragraph letter, written like \"12 CFR 1024.35(e)\". A more specific citation inside that paragraph, like \"12 CFR 1024.35(e)(1)\", is also accepted. A citation without a paragraph letter, or to the wrong paragraph of the right section, is wrong.\n- Several regulations contain parallel provisions with similar wording (for example, different notices, different kinds of disputes or requests, different account types). They differ in details such as deadlines, dollar amounts, who must act and under what conditions, so the clause's details must be checked against the regulation text.\n- The library is the only source; there is no internet access.\n- Final answer: one JSON object mapping every clause id to its citation, for example {\"K0001\": \"12 CFR 1024.35(e)\", \"K0002\": \"16 CFR 314.4(c)\"}. Clauses that are missing count as wrong.\n- Tools: list_clauses (page through the clauses, with offset and limit), list_sections (table of contents: every section's citation and heading, optionally for one part), read_section (read a section's paragraphs with their designations, from a start paragraph), search (keyword search over all paragraphs; returns paragraph citations with the start of their text).\n\nReturn one JSON object with these keys:\n\"prompt\": the task description addressed to the agent, 250-400 words, containing the literal placeholders {n_clauses} and {n_parts} (each at least once), with the rules above and the exact final answer format with a short example.\n\"tool_list_clauses\", \"tool_list_sections\", \"tool_read_section\", \"tool_search\": one or two sentences each describing the tool for the agent.\n\"unit_prompt\": a shorter version of the task (100-180 words) for a single clause, containing the literal placeholder {clause_id}, with the same citation rules and final answer format (one JSON object with that one clause id).",
+  "keys": [
+   "prompt",
+   "tool_list_clauses",
+   "tool_list_sections",
+   "tool_read_section",
+   "tool_search",
+   "unit_prompt"
+  ],
+  "placeholders": {
+   "prompt": [
+    "{n_clauses}",
+    "{n_parts}"
+   ],
+   "unit_prompt": [
+    "{clause_id}"
+   ]
+  },
+  "lists": {}
+ },
+ "attempts": [
+  {
+   "seconds": 367.0,
+   "usage": {
+    "prompt_tokens": 702,
+    "total_tokens": 9639,
+    "completion_tokens": 8937,
+    "prompt_tokens_details": null,
+    "completion_tokens_details": {
+     "reasoning_tokens": 0
+    }
+   },
+   "model": "policy_model",
+   "reply": "```json\n{\n  \"prompt\": \"You are given {n_clauses} clauses from a US consumer-finance company's internal compliance policy manual. Each clause has a clause id (like K0001) and was written to implement exactly one paragraph of the federal regulations in an offline library of {n_parts} parts of the Code of Federal Regulations, covering consumer credit, electronic fund transfers, privacy notices, credit reporting, mortgage servicing, deposit accounts, children's online privacy, information security, identity theft and anti-money-laundering rules. The clauses never name the regulation or its numbers.\\n\\nFor each clause, cite the regulation paragraph it implements: the section number and the first-level paragraph letter, written like \\\"12 CFR 1024.35(e)\\\". A more specific citation inside that paragraph, like \\\"12 CFR 1024.35(e)(1)\\\", is also accepted. A citation without a paragraph letter, or to the wrong paragraph of the right section, is wrong.\\n\\nBe careful: several regulations contain parallel provisions with similar wording \u2014 for example, different notices, different kinds of disputes or requests, or different account types. They differ in details such as deadlines, dollar amounts, who must act and under what conditions, so check each clause's details against the regulation text before deciding.\\n\\nThe library is the only source; there is no internet access.\\n\\nTools: list_clauses pages through the clauses with offset and limit; list_sections shows the table of contents (every section's citation and heading, optionally for one part); read_section reads a section's paragraphs with their designations, from a start paragraph; search runs a keyword search over all paragraphs and returns paragraph citations with the start of their text. A good approach is to scan the table of contents, use keyword search to find candidate paragraphs, then read the candidate sections to confirm the details.\\n\\nFinal answer: one JSON object mapping every clause id to its citation, for example {\\\"K0001\\\": \\\"12 CFR 1024.35(e)\\\", \\\"K0002\\\": \\\"16 CFR 314.4(c)\\\"}. Clauses that are missing count as wrong.\",\n  \"tool_list_clauses\": \"Page through the policy clauses using offset and limit parameters. Returns a batch of clauses with their clause ids and text.\",\n  \"tool_list_sections\": \"Show the regulation library's table of contents: every section's citation and heading. Can optionally be restricted to one part.\",\n  \"tool_read_section\": \"Read a section's paragraphs with their designations, starting from a given start paragraph. Use it to verify the full text of candidate paragraphs.\",\n  \"tool_search\": \"Keyword search over all paragraphs in the library. Returns paragraph citations with the start of their text.\",\n  \"unit_prompt\": \"Clause {clause_id} comes from a US consumer-finance company's internal compliance policy manual. It was written to implement exactly one paragraph of the federal regulations in the offline library of {n_parts} parts of the Code of Federal Regulations (consumer credit, electronic fund transfers, privacy notices, credit reporting, mortgage servicing, deposit accounts, children's online privacy, information security, identity theft and anti-money-laundering rules). The clause never names the regulation or its numbers.\\n\\nCite the regulation paragraph it implements: section number and first-level paragraph letter, like \\\"12 CFR 1024.35(e)\\\". A more specific citation inside that paragraph, like \\\"12 CFR 1024.35(e)(1)\\\", is also accepted. A citation without a paragraph letter, or to the wrong paragraph of the right section, is wrong.\\n\\nSeveral regulations contain parallel provisions with similar wording that differ in details such as deadlines, dollar amounts, who must act and under what conditions; check the clause's details against the regulation text. The library is the only source; there is no internet access.\\n\\nFinal answer: one JSON object mapping this clause id to its citation, e.g. {\\\"K0001\\\": \\\"12 CFR 1024.35(e)\\\"}.\"\n}\n```",
+   "problems": []
+  }
+ ],
+ "created": "2026-10-14 16:43:52 UTC"
+}

@@ -1,0 +1,134 @@
+[
+ {
+  "name": "SEC EDGAR XBRL frames API (us-gaap, USD): annual CY2022-CY2024 duration facts and CY2022Q4I-CY2024Q4I instant facts",
+  "url": "https://data.sec.gov/api/xbrl/frames/us-gaap/{tag}/USD/{CY2022..CY2024 | CY2022Q4I..CY2024Q4I}.json",
+  "tags": {
+   "revenue": [
+    "RevenueFromContractWithCustomerExcludingAssessedTax",
+    "Revenues"
+   ],
+   "op_income": [
+    "OperatingIncomeLoss"
+   ],
+   "da": [
+    "DepreciationDepletionAndAmortization",
+    "DepreciationAndAmortization"
+   ],
+   "sbc": [
+    "ShareBasedCompensation"
+   ],
+   "restructuring": [
+    "RestructuringCharges"
+   ],
+   "impairment": [
+    "AssetImpairmentCharges",
+    "GoodwillImpairmentLoss"
+   ],
+   "interest": [
+    "InterestExpense",
+    "InterestExpenseNonoperating"
+   ],
+   "net_income": [
+    "NetIncomeLoss"
+   ],
+   "cash": [
+    "CashAndCashEquivalentsAtCarryingValue"
+   ],
+   "ltd_nc": [
+    "LongTermDebtNoncurrent"
+   ],
+   "ltd_c": [
+    "LongTermDebtCurrent"
+   ],
+   "stb": [
+    "ShortTermBorrowings"
+   ],
+   "fl_nc": [
+    "FinanceLeaseLiabilityNoncurrent"
+   ],
+   "fl_c": [
+    "FinanceLeaseLiabilityCurrent"
+   ],
+   "ca": [
+    "AssetsCurrent"
+   ],
+   "cl": [
+    "LiabilitiesCurrent"
+   ],
+   "ol_nc": [
+    "OperatingLeaseLiabilityNoncurrent"
+   ]
+  },
+  "license": "U.S. government work (SEC EDGAR data), public domain in the United States; SEC fair-access policy followed (descriptive User-Agent, < 5 requests/s)",
+  "retrieved": "2026-10-14",
+  "raw_files": {
+   "data/raw/f_AssetImpairmentCharges_CY2022.json": "2c7586ec6a3d5e3b2ca2c2111e2aec9819bdb485e465b4c2c37bde506967344f",
+   "data/raw/f_AssetImpairmentCharges_CY2023.json": "007e176a99f1516aebf3ad4779a2e594abb6a444ef7184279d78d1132c12dcba",
+   "data/raw/f_AssetImpairmentCharges_CY2024.json": "1fa0926470b58066be29da9fe5ded2577c8f95be86994f035ed3e2a7415fbdfa",
+   "data/raw/f_AssetsCurrent_CY2022Q4I.json": "684c8362f3c5c7890dd60481ea7e1a9429fff4951471f7474761ce6b46f7ae2a",
+   "data/raw/f_AssetsCurrent_CY2023Q4I.json": "84be55915c34977092080ba8c05a98e264ad3a3e1d82424c9e079c6be1757fab",
+   "data/raw/f_AssetsCurrent_CY2024Q4I.json": "f12484f8eee8dbcadf462100875a70655aed891afe67f5a4bf6cd39e297ef04c",
+   "data/raw/f_CashAndCashEquivalentsAtCarryingValue_CY2022Q4I.json": "aeeddc93114a30f46417b08918a695a7631378b6405684a06837089dbd5e0215",
+   "data/raw/f_CashAndCashEquivalentsAtCarryingValue_CY2023Q4I.json": "019583b804c12876b0833c7b42e03a1d5dfacab1b1906912f52328d34c02a627",
+   "data/raw/f_CashAndCashEquivalentsAtCarryingValue_CY2024Q4I.json": "fa9464b34bafa8e99f69b9c7779f2b3932f1e286c95acf27090e4f490ffa90b8",
+   "data/raw/f_DepreciationAndAmortization_CY2022.json": "f2b72e8beed1263eebb6f2c73fefa6c7a4ad680d8e3798449c7f9e5c89451702",
+   "data/raw/f_DepreciationAndAmortization_CY2023.json": "fbf735d30dff5309418450fb5b74842c4ac01d4f056d098e1ca19646ccf52cc8",
+   "data/raw/f_DepreciationAndAmortization_CY2024.json": "a7701aaf1bd1354e108be2ac53d49b2afe37205cd01534535a7e6a0967cdcb43",
+   "data/raw/f_DepreciationDepletionAndAmortization_CY2022.json": "d88611729a0d18575504917e4a577c7bb1f778f367eef5690f9a7bd27f076a03",
+   "data/raw/f_DepreciationDepletionAndAmortization_CY2023.json": "be2dbbc5da24a2b378671f4ce1ad4f688bd60bd6b56960810785482814441788",
+   "data/raw/f_DepreciationDepletionAndAmortization_CY2024.json": "0e6fb1df170630362949900d8d3775b3b935eb515d4a50a3449713d4018ab1db",
+   "data/raw/f_FinanceLeaseLiabilityCurrent_CY2022Q4I.json": "ebcfd7afe8a76a9df82c61670888f44d6c9c865b4a91c6637746aeb2ff8fb3c4",
+   "data/raw/f_FinanceLeaseLiabilityCurrent_CY2023Q4I.json": "f948111289199801a778f55998b8f3d0bb58961e2355ebb7cbe8a8a413bedba5",
+   "data/raw/f_FinanceLeaseLiabilityCurrent_CY2024Q4I.json": "50538c04803ab651ccaeea2b957403b87e34712280d7d042d8efccf3f243b2a8",
+   "data/raw/f_FinanceLeaseLiabilityNoncurrent_CY2022Q4I.json": "5d8fffad15f55af3043ea57fcc5278c34f4d86630a3831f518837152ebf05aaa",
+   "data/raw/f_FinanceLeaseLiabilityNoncurrent_CY2023Q4I.json": "d4fb8eb43b619c0ab7f71533d243cf9a45af9f9c50343a56d8d275a442cbc14e",
+   "data/raw/f_FinanceLeaseLiabilityNoncurrent_CY2024Q4I.json": "47dc720bbdc248d7f756efba97da0d828ffd40861209994ac1630ae154677514",
+   "data/raw/f_GoodwillImpairmentLoss_CY2022.json": "31f57ab51814fc875cf717cd63e7a811aa3c9776323987ea6f00a79ec59f32e5",
+   "data/raw/f_GoodwillImpairmentLoss_CY2023.json": "9e20b99db8965aeebcbb542414caa981858ac37b463910d75bee9834bf576ae7",
+   "data/raw/f_GoodwillImpairmentLoss_CY2024.json": "5848a93e532fb6bfe54630768d3d61554215c9905b10edc5b4caba283ccbeb30",
+   "data/raw/f_InterestExpenseNonoperating_CY2022.json": "efc9c23fbbd42144d76098fe6d5a623bc674879880eb20b8d565c0ccfeb88666",
+   "data/raw/f_InterestExpenseNonoperating_CY2023.json": "ece96e196c9dcb09da13e0c9768e0d605185df6bcb8183b0b1ed7e6e4d024d84",
+   "data/raw/f_InterestExpenseNonoperating_CY2024.json": "46c6130b0bfa6eb20ffc02b0a5a030d8ccd623239a9363bbab19b19f95365d91",
+   "data/raw/f_InterestExpense_CY2022.json": "805721063279e04c2c37bf1ca666dbd0657213440372cdc2c60cf18bd46c883e",
+   "data/raw/f_InterestExpense_CY2023.json": "3d356a60f624ac1d905adc822c37e0936de72f8fefc0c3fc9baaf935de70cd59",
+   "data/raw/f_InterestExpense_CY2024.json": "e710b02eadb4e63ec102567300d51fdb202646b3827c2695b32b570ac39f1675",
+   "data/raw/f_LiabilitiesCurrent_CY2022Q4I.json": "52746aba6bf10b2664dcb72d08af18a9e5bf7193cf908eaf57601d4f912b0c82",
+   "data/raw/f_LiabilitiesCurrent_CY2023Q4I.json": "0d099181e59b6e4351e9fedf8a43ef6256ec128a94c48fa6c3972c3916a5876e",
+   "data/raw/f_LiabilitiesCurrent_CY2024Q4I.json": "99e60f1f7d62f039a9c431ecb58aa52713a00abf8bbf6b5348ecc12610164377",
+   "data/raw/f_LongTermDebtCurrent_CY2022Q4I.json": "9fa300361f7b3af61e2429ee720b045b953d17e6b7f4c605cf07fd8b3d2c6bb2",
+   "data/raw/f_LongTermDebtCurrent_CY2023Q4I.json": "ea10cced052872ad7e3a0f76b4c74349af791f4662760c24ab8a5c99695aaba5",
+   "data/raw/f_LongTermDebtCurrent_CY2024Q4I.json": "1acd914e0cc5c7494f7d45b0dcb5c2225c5e33c3eb683e9976fa23c5082dce32",
+   "data/raw/f_LongTermDebtNoncurrent_CY2022Q4I.json": "11af098f30fde0828beda0ca8b840c90b4a836ae85d7a6c35e3723d926cc118b",
+   "data/raw/f_LongTermDebtNoncurrent_CY2023Q4I.json": "91d8a1014b4a8a8005832adf7f19875fdaa42028c5242209ae597646a1b98a11",
+   "data/raw/f_LongTermDebtNoncurrent_CY2024Q4I.json": "dbc7b139c26ed586c23be69e406f07e73179821a9aa67a0a17e40dd0976b9c12",
+   "data/raw/f_NetIncomeLoss_CY2022.json": "ad3ec998162e6ae0f2de310877ee5055c39839f3672f5547f4f2dfebfefd1d9e",
+   "data/raw/f_NetIncomeLoss_CY2023.json": "d29abdb716d0c78f6d7b067b371d726a269a2f80fbed608f54c07bd960b9d883",
+   "data/raw/f_NetIncomeLoss_CY2024.json": "d4e03155ce97b26a10d6b753595507c27348564f237fac47f532f7e4853e4250",
+   "data/raw/f_OperatingIncomeLoss_CY2022.json": "99f94f53b796124401c2086dcbd1ae81badf8e7aa934c87c36f8a3d4b179ea2a",
+   "data/raw/f_OperatingIncomeLoss_CY2023.json": "829468f510bb1e52229e53da48b90ea492b5413f50d32ce84dc829ac0a577893",
+   "data/raw/f_OperatingIncomeLoss_CY2024.json": "f82d4e4406504e335c78a31054216b68166f312e90859f43070b5dd50c721893",
+   "data/raw/f_OperatingLeaseLiabilityNoncurrent_CY2022Q4I.json": "fc379cb1ecfe61ab32f30ab315f7ac3da7643b9755ef67718742521b0a2b063a",
+   "data/raw/f_OperatingLeaseLiabilityNoncurrent_CY2023Q4I.json": "39056a8994dfa0c16dca35125892b9fb67816cc7fd6c799ee31680495e3972b3",
+   "data/raw/f_OperatingLeaseLiabilityNoncurrent_CY2024Q4I.json": "c92272e8f96e3a82fcab6f9933ed86e5b7f9e6f260b3b6f53954453621935133",
+   "data/raw/f_RestructuringCharges_CY2022.json": "327337c141c03a125eea67efe7106004d0fef9eb05290555ed467d3def044df5",
+   "data/raw/f_RestructuringCharges_CY2023.json": "43416af47a1377d17f4d20be644b2b9a1111100a35796eb6302beffe04f746ed",
+   "data/raw/f_RestructuringCharges_CY2024.json": "d4c141041e31a1933b6eb5a8e4a1f46f89b2ff0184b641937d4ca12cd239d826",
+   "data/raw/f_RevenueFromContractWithCustomerExcludingAssessedTax_CY2022.json": "dfd3857b8388aa8bc630e0396ab8c4829ee3b06b113e836c2f8ff006618d1d0a",
+   "data/raw/f_RevenueFromContractWithCustomerExcludingAssessedTax_CY2023.json": "13d3dd083fe1a96d5b96857e5ca1dfcdd233fc2e63a7847c65df64b46ea5114b",
+   "data/raw/f_RevenueFromContractWithCustomerExcludingAssessedTax_CY2024.json": "4856169fb591eca8d0ffe4e2d5b5af96f772b4f4941c03a9fc09cd0f5a7b6fcb",
+   "data/raw/f_Revenues_CY2022.json": "59d0a95dbdaf4e1faea1f9cdd4415fe325b39932e71a7d77bba7cda4b176afbd",
+   "data/raw/f_Revenues_CY2023.json": "edd3eb422b485ebf9e2213e09b96bd544e8b6e54c9020e03a52b3e4c07ae5d7e",
+   "data/raw/f_Revenues_CY2024.json": "20771897bf8ba318e026b5ecd41127fe36a1fab3ffe021dab6d49381867e9150",
+   "data/raw/f_ShareBasedCompensation_CY2022.json": "7265ed59f98bce9133643156e6f4df884b5a182490806c8e1a5fa25b1bdb1bb5",
+   "data/raw/f_ShareBasedCompensation_CY2023.json": "4880fb696f573ab11cda270ca8eb2633e7c3b35ac8802946175e4b1cbeabf125",
+   "data/raw/f_ShareBasedCompensation_CY2024.json": "1648b9242fe927a2b0471b213cdb7bb4e0d93fd634c8259fdc96be2f20392c32",
+   "data/raw/f_ShortTermBorrowings_CY2022Q4I.json": "24d03ef7f7dd1c5cb8b0798ca44d74ded25e765313ca6a78d8e091787ccf46f4",
+   "data/raw/f_ShortTermBorrowings_CY2023Q4I.json": "91f1d4567e4a23672495389935ee9f262a6491d8c02068d8a2b330cda9f39504",
+   "data/raw/f_ShortTermBorrowings_CY2024Q4I.json": "978fe1fa0bd8d54e72821a0ad01e3b80bee3f69f99d56a24238ace24fca9a0b1"
+  },
+  "snapshot_file": "data/companies.json",
+  "snapshot_sha256": "030c04c95d49205ce005a92885eba6ca54a869289855ada89515271a43564587",
+  "snapshot_companies": 103,
+  "derivation": "build_snapshot.py: calendar fiscal years 2022-2024, every required line reported, values in USD thousands"
+ }
+]

@@ -1,0 +1,1 @@
+{"prompt": "DEV STUB {n_paragraphs} {n_sentences} {n_refs}", "tool_read_report": "stub", "tool_list_refs": "stub", "tool_read_refs": "stub", "tool_search_refs": "stub", "unit_prompt": "DEV STUB {paragraph_id} {n_sentences}"}

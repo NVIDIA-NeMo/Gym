@@ -1,0 +1,70 @@
+{
+ "program": "Stub Archive Program",
+ "intro": "STUB {program}: scan {n} documents {first} to {last}.",
+ "rule_report": "STUB report `name` `phone` `email` `address` `dob` `gov_id` `card` of private persons once per document.",
+ "rule_officials": "STUB officials in the directory are not reported.",
+ "rule_business": "STUB business lines, shared mailboxes and business addresses are not reported.",
+ "rule_numbers": "STUB docket, part numbers and ISBNs are not reported.",
+ "rule_luhn": "STUB card numbers failing Luhn are not reported.",
+ "rule_consent": "STUB granted consent means nothing reported; withdrawn means report.",
+ "rule_source": "STUB literary characters are not reported.",
+ "rule_format": "STUB copy values; dob as YYYY-MM-DD.",
+ "answer_line": "STUB end with JSON like {example}",
+ "unit_prompt": "STUB audit {doc} only; end with JSON like {example}",
+ "directory_header": "STUB officials directory",
+ "register_header": "STUB consent register",
+ "tools": {
+  "list_documents": "stub list_documents",
+  "read_document": "stub read_document",
+  "search_document": "stub search_document",
+  "read_directory": "stub read_directory",
+  "search_directory": "stub search_directory",
+  "read_register": "stub read_register",
+  "search_register": "stub search_register"
+ },
+ "p_contact": [
+  "Margin note: {name} can be reached at {phone} or {email}.",
+  "Loan slip: {name}, tel {phone}, mail {email}."
+ ],
+ "p_home": [
+  "Registration: {name}, living at {address}, born {dob}.",
+  "Card: {name} of {address}, birthday {dob}."
+ ],
+ "p_id": [
+  "Old card: {name}, ID number {id}.",
+  "Form: {name} gave identity number {id}."
+ ],
+ "p_card": [
+  "Fee note: {name} paid with card {card}.",
+  "Receipt: card {card} used by {name}."
+ ],
+ "d_official": [
+  "Approved by {title} {name} of {agency}, office {phone}.",
+  "Inspection: {title} {name} ({agency}), call {phone}."
+ ],
+ "d_business": [
+  "{company} main line {phone}, write to {email}, at {address}.",
+  "Supplier {company}: {address}; {phone}; {email}."
+ ],
+ "d_case": [
+  "Donated from the court library, docket {case}."
+ ],
+ "d_part": [
+  "Replace bracket part {part}."
+ ],
+ "d_isbn": [
+  "Modern reprint ISBN {isbn}."
+ ],
+ "rule_samples": "STUB specimen entries are not reported.",
+ "p_via_business": [
+  "Volunteer {name} asks to be called only via the {company} main line {phone}."
+ ],
+ "p_official_private": [
+  "Overdue: {title} {name} of {agency}, returning a novel privately, home phone {phone}."
+ ],
+ "d_sample": [
+  "Blank form specimen: example name {name}, example number {id}."
+ ],
+ "rule_private_capacity": "STUB an official acting privately with a home phone: report name and phone.",
+ "calculator": "STUB calculator."
+}

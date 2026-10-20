@@ -1,0 +1,100 @@
+{
+ "company": "Nimbus Ridge Cloud",
+ "intro": "The service-assurance team of {company} must audit the {n} customer contracts {first} to {last} for the reporting month {month}: for every customer decide whether the availability commitment and the support response commitment were breached, compute the customer's measured availability for the month, and determine the service credit owed.",
+ "rule_scope": "Each customer has the instances listed in its subscriptions. An incident affects a customer when its scope lists one of the customer's instance ids, or when its scope is region-wide and it is on a service in a region where the customer has an instance of that service. Incidents on other instances never affect the customer, even on the same service and region.",
+ "rule_measure": "All times are UTC. The reporting month runs from the first day at midnight to the first day of the next month at midnight. Availability equals one hundred times (minutes in the month minus downtime minutes) divided by minutes in the month. Only the part of an incident inside the month counts, but any minimum-length rule looks at the incident's whole logged duration from start to end. Outage minutes count in full and degraded minutes count by the contract's degradation weight. When incidents overlap, each minute counts once, with the heaviest weight that applies to it. Which causes are excluded is set by the customer's contract. For maintenance that meets the contract's notice and window conditions only the minutes between the notice's planned start and planned end are excluded, and any minutes of that incident outside the planned period count as downtime; maintenance that does not meet the conditions counts in full. Report availability as a percentage rounded to three decimals.",
+ "rule_support": "Only tickets opened inside the reporting month count, even when they are answered after it, and tickets opened before the month do not count. P1 response time is measured in calendar minutes from opening to first response. P2 and P3 response times are measured in business hours, Monday to Friday from nine in the morning to five in the afternoon in the customer's timezone shown in the contract (a fixed UTC offset with no daylight saving), and the clock does not run outside business hours. A ticket misses its target only when its response time is strictly greater than the target. The support commitment is breached when at least one counted ticket misses its target.",
+ "rule_credit": "The availability commitment is breached when the availability is strictly below the committed target. The availability credit is the credit of the lowest threshold that the availability falls below. If the support commitment is breached the contract's support credit is added once. The total is limited by the contract's cap. A credit is owed only if the customer filed a claim for this reporting month on or before the claim deadline, counted in days after the last day of the month (filing on the deadline day is in time), and a claim for a different month does not count. Without a valid claim the credit is zero, but the breaches are still reported.",
+ "answer_line": "The final answer must be one JSON object keyed by customer id; each value has \"breaches\" (a list containing \"availability\" and/or \"support\", empty if neither was breached), \"availability\" (the percentage with three decimals) and \"credit\" (the credit owed as a percentage of the monthly fee, a number). Format example: {example}",
+ "unit_prompt": "Audit only customer {customer} for the reporting month {month} using the same rules and tools, and answer with a JSON object that has only that customer's key.",
+ "c_target": [
+  "The Provider commits to a monthly availability of at least {target}% for the Customer's subscribed instances.",
+  "The Provider guarantees that the Customer's subscribed instances will achieve a monthly availability of no less than {target}%.",
+  "For each reporting month, the Provider warrants an availability level of at least {target}% across the Customer's subscribed instances."
+ ],
+ "c_deg_full": [
+  "Minutes of degraded service shall count in full as downtime, equivalent to an outage.",
+  "For the purposes of availability measurement, each minute of degraded service is treated as a full minute of downtime, as if it were an outage.",
+  "Degraded service time is deemed downtime in its entirety and carries the same weight as outage time."
+ ],
+ "c_deg_half": [
+  "Each minute of degraded service shall count as half a minute of downtime.",
+  "For the availability calculation, each minute of degraded service is weighted as one half of a minute of downtime.",
+  "Degraded service minutes accrue as downtime at half the elapsed rate."
+ ],
+ "c_deg_none": [
+  "Degraded service shall not constitute downtime; only outages are counted.",
+  "For the purposes of availability measurement, periods of degraded service are disregarded and solely outage minutes count as downtime.",
+  "Degradation of service does not reduce measured availability; downtime accrues only during outages."
+ ],
+ "c_minlen": [
+  "An incident whose logged duration is shorter than {minutes} minutes shall not be counted as downtime; an incident lasting exactly that long or longer shall be counted.",
+  "Incidents with a logged duration below {minutes} minutes are disregarded for downtime purposes, while incidents of that duration or greater are counted.",
+  "No downtime is recorded for an incident lasting less than {minutes} minutes from start to end; an incident reaching or exceeding that length is counted as downtime."
+ ],
+ "c_minlen_none": [
+  "Every incident shall count as downtime regardless of its duration, however short.",
+  "No minimum incident length applies; each incident is counted as downtime irrespective of how brief it may be.",
+  "All incidents, including those of momentary duration, are counted as downtime without exception."
+ ],
+ "c_maint": [
+  "Scheduled maintenance is excluded from downtime only when its notice was sent at least {hours} hours before the planned start and the whole planned period lies within the weekly maintenance window {window}; any other maintenance counts as downtime.",
+  "Maintenance is excluded from downtime solely if the corresponding notice was dispatched no less than {hours} hours prior to the planned start and the entire planned period falls inside the weekly maintenance window {window}; maintenance failing these conditions counts as downtime.",
+  "Provided that notice was given at least {hours} hours before the planned start and that the planned period is wholly contained within the weekly maintenance window {window}, scheduled maintenance is not counted as downtime; otherwise it counts as downtime."
+ ],
+ "c_upstream_counts": [
+  "Failures of upstream providers shall count as downtime.",
+  "Downtime includes incidents caused by the failure of upstream providers.",
+  "For availability purposes, outages and degradation attributable to upstream providers are counted as downtime."
+ ],
+ "c_upstream_excluded": [
+  "Failures of upstream providers are excluded from downtime.",
+  "Incidents caused by the failure of upstream providers shall not count as downtime.",
+  "Downtime does not include any outage or degradation attributable to upstream providers."
+ ],
+ "c_force_majeure": [
+  "Incidents caused by force majeure are excluded from downtime.",
+  "No incident attributable to force majeure shall be counted as downtime.",
+  "Downtime measurement excludes any incident whose cause is force majeure."
+ ],
+ "c_customer_action": [
+  "Incidents caused by the Customer's own actions are excluded from downtime; incidents caused by other tenants are not excluded.",
+  "Downtime excludes incidents resulting from the Customer's own actions; incidents caused by other tenants are not so excluded and count as downtime.",
+  "Any incident arising from the Customer's own actions shall be disregarded for downtime purposes, while incidents caused by other tenants shall be counted."
+ ],
+ "c_support": [
+  "The Provider commits to a first response within {p1} minutes for P1 tickets around the clock, within {p2} business hours for P2 tickets and within {p3} business hours for P3 tickets.",
+  "First-response targets are as follows: P1 tickets receive a first response within {p1} minutes at any hour, P2 tickets within {p2} business hours and P3 tickets within {p3} business hours.",
+  "Support requests shall receive a first response no later than {p1} minutes after opening for P1 priority around the clock, {p2} business hours after opening for P2 priority and {p3} business hours after opening for P3 priority."
+ ],
+ "c_support_credit": [
+  "If any ticket misses its response target in the month, the Customer receives an additional credit of {support_credit}% of the monthly fee.",
+  "Should one or more tickets fail to meet their response targets during a month, the Customer is entitled to a further credit equal to {support_credit}% of the monthly fee.",
+  "A missed response target on any ticket in the month entitles the Customer to an additional service credit of {support_credit}% of the monthly fee."
+ ],
+ "c_tiers": [
+  "Availability below {t1}% earns a credit of {c1}% of the monthly fee, availability below {t2}% earns a credit of {c2}% and availability below {t3}% earns a credit of {c3}%.",
+  "If monthly availability falls below {t1}% the Customer earns a credit of {c1}% of the monthly fee, if it falls below {t2}% the credit is {c2}% and if it falls below {t3}% the credit is {c3}%.",
+  "Service credits for availability are tiered: below {t1}% availability the credit equals {c1}% of the monthly fee, below {t2}% it equals {c2}% and below {t3}% it equals {c3}%."
+ ],
+ "c_cap": [
+  "Total service credits for a month shall never exceed {cap}% of the monthly fee.",
+  "The aggregate of all service credits granted for any month is capped at {cap}% of the monthly fee.",
+  "In no event will the combined service credits for a reporting month surpass {cap}% of the monthly fee."
+ ],
+ "c_claim": [
+  "Credits must be claimed in writing within {days} days after the end of the month to which they apply, otherwise they are forfeited.",
+  "The Customer must submit a written claim for any credit no later than {days} days following the end of the applicable month, failing which the credit is forfeited.",
+  "Any credit not claimed in writing within {days} days after the close of the month to which it relates is forfeited."
+ ],
+ "tools": {
+  "list_customers": "Lists customers with their customer id, name and contract id. Results are paged with offset and limit.",
+  "read_contract": "Reads the full contract of one customer, including its timezone.",
+  "get_subscriptions": "Lists a customer's instances with their service and region.",
+  "search_incidents": "Searches the incident log, filtering by any of service, region, instance_id, start_date and end_date given as YYYY-MM-DD. instance_id matches only incidents whose scope lists that instance, so region-wide incidents are found by service and region. Results are paged with offset, forty rows per page.",
+  "read_notice": "Reads one maintenance notice by its id.",
+  "list_tickets": "Lists a customer's support tickets, including any opened outside the month.",
+  "list_claims": "Lists a customer's service-credit claims.",
+  "calculator": "Evaluates an arithmetic expression."
+ }
+}

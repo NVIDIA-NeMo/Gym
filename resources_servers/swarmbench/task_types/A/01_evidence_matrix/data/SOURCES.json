@@ -1,0 +1,5 @@
+{"sources": [
+ {"name": "Evidence Inference 2.0 (annotations + PubMed Central open-access full texts as txt)", "url": "http://evidence-inference.ebm-nlp.com/v2.0.tar.gz",
+  "homepage": "https://github.com/jayded/evidence-inference", "license": "MIT (dataset/code); articles are from the PMC open-access subset",
+  "sha256": "6abe0d4ec0d331834981c0171c3c79d47515761867f82f1dc6066e43863a1586", "retrieved": "2026-10-14"}],
+ "derived": "data/pool.jsonl: articles with >=3 prompts whose >=2 annotators agreed (verifier-accepted, not on the README's flagged lists) and >=2 distinct labels, after the K3 full-text filter (_build/build_ei_pool.py, ei_prep.py, finalize_ei_pool.py)"}

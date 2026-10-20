@@ -1,0 +1,209 @@
+{
+ "summary": {
+  "type": "39_trials",
+  "ns": [
+   8,
+   24,
+   80
+  ],
+  "seeds": "0,1",
+  "check1_oracle_min": 1.0,
+  "check2_wrong_max": {
+   "regex": 0.125,
+   "all_eligible": 0.125,
+   "first_values": 0.375,
+   "no_unit_conversion": 0.875,
+   "partial_history_any": 0.5833,
+   "partial_skip_notes": 0.75,
+   "partial_any_drug": 0.7917,
+   "careless_reader": 0.125
+  },
+  "check3_format_only_max": 0.0,
+  "check7_tool_errors": 0,
+  "check8_deterministic": true,
+  "canary": true,
+  "text_source": "k3"
+ },
+ "rows": [
+  {
+   "n": 8,
+   "seed": 0,
+   "tier": "easy",
+   "gen_s": 0.01,
+   "hash": "e011cee335f087dd319aa4ced3292657618066cc97e386e15019ec23de01169c",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "regex": 0.0,
+    "all_eligible": 0.0,
+    "first_values": 0.25,
+    "no_unit_conversion": 0.875,
+    "partial_history_any": 0.5,
+    "partial_skip_notes": 0.75,
+    "partial_any_drug": 0.75,
+    "careless_reader": 0.0
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 8,
+   "seed": 1,
+   "tier": "easy",
+   "gen_s": 0.0,
+   "hash": "015d1f9e4d9211323593aa29a14fd644e6c0a94e106656fadaa9a912402e7220",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "regex": 0.125,
+    "all_eligible": 0.0,
+    "first_values": 0.375,
+    "no_unit_conversion": 0.75,
+    "partial_history_any": 0.5,
+    "partial_skip_notes": 0.625,
+    "partial_any_drug": 0.5,
+    "careless_reader": 0.125
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 24,
+   "seed": 0,
+   "tier": "medium",
+   "gen_s": 0.01,
+   "hash": "ee0e6cd14ece1a1a84c5ad09a700867c0c70fe828d79495bec00931a739514ca",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "regex": 0.0833,
+    "all_eligible": 0.0,
+    "first_values": 0.2083,
+    "no_unit_conversion": 0.75,
+    "partial_history_any": 0.5833,
+    "partial_skip_notes": 0.4167,
+    "partial_any_drug": 0.7917,
+    "careless_reader": 0.0417
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 24,
+   "seed": 1,
+   "tier": "medium",
+   "gen_s": 0.01,
+   "hash": "01b4a71db41bbdfcdaa273ccb8b83eb088e5138760d0a43816b91e27b15678b6",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "regex": 0.0833,
+    "all_eligible": 0.125,
+    "first_values": 0.2917,
+    "no_unit_conversion": 0.6667,
+    "partial_history_any": 0.3333,
+    "partial_skip_notes": 0.5417,
+    "partial_any_drug": 0.5,
+    "careless_reader": 0.0833
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 80,
+   "seed": 0,
+   "tier": "hard",
+   "gen_s": 0.01,
+   "hash": "b7dc33c3f0db309495aa932c454ad11047e507f7e05d46df2dc572f6720893cb",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "regex": 0.1,
+    "all_eligible": 0.05,
+    "first_values": 0.3,
+    "no_unit_conversion": 0.65,
+    "partial_history_any": 0.5625,
+    "partial_skip_notes": 0.55,
+    "partial_any_drug": 0.7625,
+    "careless_reader": 0.05
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 80,
+   "seed": 1,
+   "tier": "hard",
+   "gen_s": 0.01,
+   "hash": "17c0eceaf1f13677b3c6b3b8e413683de13d8835de9b59a5060a91c30642cabc",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "regex": 0.025,
+    "all_eligible": 0.075,
+    "first_values": 0.2375,
+    "no_unit_conversion": 0.6,
+    "partial_history_any": 0.475,
+    "partial_skip_notes": 0.55,
+    "partial_any_drug": 0.7625,
+    "careless_reader": 0.075
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  }
+ ]
+}

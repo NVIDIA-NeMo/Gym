@@ -1,0 +1,13 @@
+You are working in a repository containing four real open-source Python packages that are normally fully type-checked with mypy in strict mode: repos/click (click), repos/itsdangerous (itsdangerous), repos/jinja (jinja2) and repos/markupsafe (markupsafe), each under src/.
+
+In {n} modules, listed one path per line in UNITS.txt, the type annotations of some functions and methods were lost: their parameter and return annotations and the annotations of variables inside them are missing. The rest of each module is still annotated.
+
+Your job: restore precise annotations in every listed module so that mypy --strict (Python 3.12) reports no new errors for that package. Code behavior must not change; the packages' own test suites must keep passing.
+
+Not allowed, and checked automatically: using Any more often than the original module did, adding "type: ignore" comments or casts beyond the original count, and inline "# mypy:" configuration comments. Rewriting logic to dodge the checker is not the goal: write the annotations the code actually needs, consistent with how the rest of the package is annotated.
+
+Rules: only edit files listed in UNITS.txt. Edits to other files are ignored when a module is scored (each module is checked against the original versions of all other files) and may break other tests, which costs points. New files are ignored. Keep every existing function and class.
+
+Tools (paths are relative to the repository root): list_files, read_file, search, write_file, apply_edit, and run_visible_tests(unit) where unit is a path from UNITS.txt; it runs mypy --strict on that module's package and part of its tests and lists the errors that are new. Several agents may edit the same working copy at once, so only edit the listed modules.
+
+Scoring reads the final state of the repository, not your reply: score = fraction of the {n} modules that pass mypy with no new errors, keep their tests passing and respect the limits above, minus already-passing tests elsewhere that were broken. When finished, reply with "done" and a short summary.

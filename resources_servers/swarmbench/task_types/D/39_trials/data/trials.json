@@ -1,0 +1,1771 @@
+[
+ {
+  "nct": "NCT05654454",
+  "disease": "nsclc",
+  "title": "A Safety and Efficacy Study of Bevacizumab, Paclitaxel, Carboplatin Compared to Avastin® in Non-Small Cell Lung Cancer",
+  "criteria": [
+   {
+    "id": "I1",
+    "kind": "inc",
+    "text": "Male and female patients at least 18 years of age",
+    "pred": [
+     "age",
+     18,
+     null
+    ],
+    "line": 3
+   },
+   {
+    "id": "I2",
+    "kind": "inc",
+    "text": "Newly diagnosed Stage IIIB/C or IV non-small cell lung cancer (according to Revised Cancer Staging by American Joint Committee on Cancer (AJCC) and the International Union Against Cancer (UICC) 8th edition) or recurrent non-small cell lung cancer (NSCLC)",
+    "pred": [
+     "stage",
+     [
+      "IIIB",
+      "IIIC",
+      "IVA",
+      "IVB"
+     ]
+    ],
+    "line": 4
+   },
+   {
+    "id": "I3",
+    "kind": "inc",
+    "text": "Histologically or cytologically confirmed diagnosis of predominately non-squamous NSCLC",
+    "pred": [
+     "hist",
+     [
+      "adenocarcinoma",
+      "large cell carcinoma"
+     ]
+    ],
+    "line": 5
+   },
+   {
+    "id": "I4",
+    "kind": "inc",
+    "text": "Eastern Cooperative Oncology Group (ECOG) performance status 0 or 1",
+    "pred": [
+     "ecog",
+     1
+    ],
+    "line": 6
+   },
+   {
+    "id": "I5",
+    "kind": "inc",
+    "text": "Neutrophils ≥ 1,5 × 10^9/L",
+    "pred": [
+     "lab",
+     "anc",
+     1.5,
+     null,
+     true,
+     null
+    ],
+    "line": 9
+   },
+   {
+    "id": "I6",
+    "kind": "inc",
+    "text": "Platelets ≥ 100 × 10^9/L",
+    "pred": [
+     "lab",
+     "plt",
+     100,
+     null,
+     true,
+     null
+    ],
+    "line": 10
+   },
+   {
+    "id": "I7",
+    "kind": "inc",
+    "text": "Haemoglobin ≥ 90 g/L",
+    "pred": [
+     "lab",
+     "hgb",
+     90,
+     null,
+     true,
+     null
+    ],
+    "line": 11
+   },
+   {
+    "id": "I8",
+    "kind": "inc",
+    "text": "Bilirubin level ≤ 1.5 × upper limit of normal (ULN)",
+    "pred": [
+     "uln",
+     "bili",
+     "<=",
+     1.5,
+     null,
+     null
+    ],
+    "line": 12
+   },
+   {
+    "id": "I9",
+    "kind": "inc",
+    "text": "Aspartate-aminotransferase (AST) and alanine-aminotransferase (ALT) levels < 3 × ULN (< 5 × ULN for patients with liver metastases)",
+    "pred": [
+     "all",
+     [
+      "uln",
+      "ast",
+      "<",
+      3,
+      5,
+      "liver_mets"
+     ],
+     [
+      "uln",
+      "alt",
+      "<",
+      3,
+      5,
+      "liver_mets"
+     ]
+    ],
+    "line": 13
+   },
+   {
+    "id": "I10",
+    "kind": "inc",
+    "text": "Alkaline phosphatase level < 3 × ULN (< 5 × ULN for patients with liver or bone metastases)",
+    "pred": [
+     "uln",
+     "alp",
+     "<",
+     3,
+     5,
+     "liver_or_bone_mets"
+    ],
+    "line": 14
+   },
+   {
+    "id": "E1",
+    "kind": "exc",
+    "text": "Known sensitizing EGFR mutations or ALK translocation positive mutations",
+    "pred": [
+     "any",
+     [
+      "marker",
+      "EGFR",
+      "sensitizing"
+     ],
+     [
+      "marker",
+      "ALK",
+      "positive"
+     ]
+    ],
+    "line": 18
+   },
+   {
+    "id": "E2",
+    "kind": "exc",
+    "text": "Major surgery 28 days before inclusion into the study",
+    "pred": [
+     "within",
+     "major_surgery",
+     28,
+     {}
+    ],
+    "line": 20
+   },
+   {
+    "id": "E3",
+    "kind": "exc",
+    "text": "Minor surgery 7 days before inclusion into the study",
+    "pred": [
+     "within",
+     "minor_surgery",
+     7,
+     {}
+    ],
+    "line": 21
+   },
+   {
+    "id": "E4",
+    "kind": "exc",
+    "text": "Metastases to central nervous system or carcinomatous meningitis",
+    "pred": [
+     "cond",
+     "cns_mets",
+     "ever"
+    ],
+    "line": 24
+   },
+   {
+    "id": "E5",
+    "kind": "exc",
+    "text": "Pregnancy or lactation",
+    "pred": [
+     "any",
+     [
+      "preg"
+     ],
+     [
+      "lact"
+     ]
+    ],
+    "line": 25
+   }
+  ]
+ },
+ {
+  "nct": "NCT06225284",
+  "disease": "breast",
+  "title": "Neoadjuvant Chemotherapy With or Without GnRH Agonist for Premenopausal Triple-negative Early Breast Cancer Patients",
+  "criteria": [
+   {
+    "id": "I1",
+    "kind": "inc",
+    "text": "Sex: Female",
+    "pred": [
+     "sex",
+     "F"
+    ],
+    "line": "reg:sex"
+   },
+   {
+    "id": "I2",
+    "kind": "inc",
+    "text": "6. ECOG 0-1.",
+    "pred": [
+     "ecog",
+     1
+    ],
+    "line": 9
+   },
+   {
+    "id": "I3",
+    "kind": "inc",
+    "text": "Hemoglobin ≥ 9.0 g/dL;",
+    "pred": [
+     "lab",
+     "hgb",
+     90,
+     null,
+     true,
+     null
+    ],
+    "line": 12
+   },
+   {
+    "id": "I4",
+    "kind": "inc",
+    "text": "Absolute neutrophil count ≥ 1,500 /μL;",
+    "pred": [
+     "lab",
+     "anc",
+     1.5,
+     null,
+     true,
+     null
+    ],
+    "line": 13
+   },
+   {
+    "id": "I5",
+    "kind": "inc",
+    "text": "Platelets ≥ 100,000/μL;",
+    "pred": [
+     "lab",
+     "plt",
+     100,
+     null,
+     true,
+     null
+    ],
+    "line": 14
+   },
+   {
+    "id": "I6",
+    "kind": "inc",
+    "text": "Total bilirubin ≤1.5 x upper normal limit;",
+    "pred": [
+     "uln",
+     "bili",
+     "<=",
+     1.5,
+     null,
+     null
+    ],
+    "line": 15
+   },
+   {
+    "id": "I7",
+    "kind": "inc",
+    "text": "AST(SGOT)/ALT(SGPT) ≤ 2.5 x upper normal limit;",
+    "pred": [
+     "all",
+     [
+      "uln",
+      "ast",
+      "<=",
+      2.5,
+      null,
+      null
+     ],
+     [
+      "uln",
+      "alt",
+      "<=",
+      2.5,
+      null,
+      null
+     ]
+    ],
+    "line": 16
+   },
+   {
+    "id": "I8",
+    "kind": "inc",
+    "text": "Serum creatinine ≤ 1.5mg/dL or creatinine clearance ≧50ml/min;",
+    "pred": [
+     "any",
+     [
+      "lab",
+      "creat",
+      null,
+      1.5,
+      null,
+      true
+     ],
+     [
+      "lab",
+      "crcl",
+      50,
+      null,
+      true,
+      null
+     ]
+    ],
+    "line": 17
+   },
+   {
+    "id": "E1",
+    "kind": "exc",
+    "text": "1. Patients have received any prior therapy (including surgery, radiotherapy, chemotherapy, immunotherapy, or hormone therapy) for breast cancer.",
+    "pred": [
+     "ever_for",
+     "breast"
+    ],
+    "line": 26
+   },
+   {
+    "id": "E2",
+    "kind": "exc",
+    "text": "2. Evidence of systemic metastasis.",
+    "pred": [
+     "stage",
+     [
+      "IV"
+     ]
+    ],
+    "line": 27
+   },
+   {
+    "id": "E3",
+    "kind": "exc",
+    "text": "3. Pregnancy or lactation.",
+    "pred": [
+     "any",
+     [
+      "preg"
+     ],
+     [
+      "lact"
+     ]
+    ],
+    "line": 28
+   },
+   {
+    "id": "E4",
+    "kind": "exc",
+    "text": "10. Major surgical procedure, open biopsy, or significant traumatic injury within 28 days prior to enrolment.",
+    "pred": [
+     "within",
+     "major_surgery",
+     28,
+     {}
+    ],
+    "line": 35
+   }
+  ]
+ },
+ {
+  "nct": "NCT07647263",
+  "disease": "breast",
+  "title": "Trastuzumab Rezetecan Neoadjuvant Therapy in THP-Insensitive HER2-Positive Early Breast Cancer",
+  "criteria": [
+   {
+    "id": "I1",
+    "kind": "inc",
+    "text": "Sex: Female",
+    "pred": [
+     "sex",
+     "F"
+    ],
+    "line": "reg:sex"
+   },
+   {
+    "id": "I2",
+    "kind": "inc",
+    "text": "4.No prior chemotherapy, immunotherapy, endocrine therapy, radical surgery, or radiotherapy for breast cancer.",
+    "pred": [
+     "not",
+     [
+      "ever_for",
+      "breast"
+     ]
+    ],
+    "line": 5
+   },
+   {
+    "id": "I3",
+    "kind": "inc",
+    "text": "5.Eastern Cooperative Oncology Group (ECOG) performance status 0 or 1.",
+    "pred": [
+     "ecog",
+     1
+    ],
+    "line": 6
+   },
+   {
+    "id": "I4",
+    "kind": "inc",
+    "text": "Hemoglobin ≥90 g/L",
+    "pred": [
+     "lab",
+     "hgb",
+     90,
+     null,
+     true,
+     null
+    ],
+    "line": 9
+   },
+   {
+    "id": "I5",
+    "kind": "inc",
+    "text": "Platelet count ≥100×10⁹/L",
+    "pred": [
+     "lab",
+     "plt",
+     100,
+     null,
+     true,
+     null
+    ],
+    "line": 11
+   },
+   {
+    "id": "I6",
+    "kind": "inc",
+    "text": "Neutrophil count ≥1.5×10⁹/L",
+    "pred": [
+     "lab",
+     "anc",
+     1.5,
+     null,
+     true,
+     null
+    ],
+    "line": 12
+   },
+   {
+    "id": "I7",
+    "kind": "inc",
+    "text": "Total bilirubin ≤1.5×ULN",
+    "pred": [
+     "uln",
+     "bili",
+     "<=",
+     1.5,
+     null,
+     null
+    ],
+    "line": 14
+   },
+   {
+    "id": "I8",
+    "kind": "inc",
+    "text": "Serum creatinine ≤1.5×ULN",
+    "pred": [
+     "uln",
+     "creat",
+     "<=",
+     1.5,
+     null,
+     null
+    ],
+    "line": 15
+   },
+   {
+    "id": "E1",
+    "kind": "exc",
+    "text": "2.Metastatic breast cancer (Stage IV).",
+    "pred": [
+     "stage",
+     [
+      "IV"
+     ]
+    ],
+    "line": 24
+   },
+   {
+    "id": "E2",
+    "kind": "exc",
+    "text": "3.Presence of other concurrent malignancies or history of malignancy other than breast cancer within the past 5 years, except for adequately treated basal cell carcinoma, squamous cell carcinoma of the skin, or carcinoma in situ of the cervix.",
+    "pred": [
+     "malig",
+     1825,
+     [
+      "basal cell carcinoma of the skin",
+      "squamous cell carcinoma of the skin",
+      "carcinoma in situ of the cervix"
+     ]
+    ],
+    "line": 25
+   },
+   {
+    "id": "E3",
+    "kind": "exc",
+    "text": "6.Major surgical procedure within 4 weeks prior to initiation of study treatment, or anticipated need for major surgery during the study period.",
+    "pred": [
+     "within",
+     "major_surgery",
+     28,
+     {}
+    ],
+    "line": 28
+   }
+  ]
+ },
+ {
+  "nct": "NCT06611813",
+  "disease": "breast",
+  "title": "Neoadjuvant Chemotherapy in Combination With Toripalimab for HR+/HER2- Breast Cancer (NEOTORCH-BREAST01)",
+  "criteria": [
+   {
+    "id": "I1",
+    "kind": "inc",
+    "text": "1. Female patients aged 18-75 years old;",
+    "pred": [
+     "all",
+     [
+      "sex",
+      "F"
+     ],
+     [
+      "age",
+      18,
+      75
+     ]
+    ],
+    "line": 2
+   },
+   {
+    "id": "I2",
+    "kind": "inc",
+    "text": "2. ECOG score is 0-1 points;",
+    "pred": [
+     "ecog",
+     1
+    ],
+    "line": 3
+   },
+   {
+    "id": "I3",
+    "kind": "inc",
+    "text": "1. Blood routine: Absolute neutrophil count (ANC) greater than 1.5 × 109/L; platelet count (PLT) greater than 75 × 109/L; Hemoglobin (Hb) is greater than 90g/L; Lymphocyte count ≥ 1.5 × 109/L",
+    "pred": [
+     "all",
+     [
+      "lab",
+      "anc",
+      1.5,
+      null,
+      false,
+      null
+     ],
+     [
+      "lab",
+      "plt",
+      75,
+      null,
+      false,
+      null
+     ],
+     [
+      "lab",
+      "hgb",
+      90,
+      null,
+      false,
+      null
+     ],
+     [
+      "lab",
+      "lym",
+      1.5,
+      null,
+      true,
+      null
+     ]
+    ],
+    "line": 13
+   },
+   {
+    "id": "I4",
+    "kind": "inc",
+    "text": "3. Cardiac ultrasound: Left ventricular ejection fraction (LVEF) greater than 55%.",
+    "pred": [
+     "lab",
+     "lvef",
+     55,
+     null,
+     false,
+     null
+    ],
+    "line": 15
+   },
+   {
+    "id": "E1",
+    "kind": "exc",
+    "text": "1. Stage IV breast cancer.",
+    "pred": [
+     "stage",
+     [
+      "IV"
+     ]
+    ],
+    "line": 22
+   },
+   {
+    "id": "E2",
+    "kind": "exc",
+    "text": "5. The patient had undergone major surgical procedures unrelated to breast cancer within 4 weeks before the first administration of the study drug, or the patient has not fully recovered from such surgical procedures.",
+    "pred": [
+     "within",
+     "major_surgery",
+     28,
+     {
+      "not_for": "breast"
+     }
+    ],
+    "line": 26
+   }
+  ]
+ },
+ {
+  "nct": "NCT07590531",
+  "disease": "nsclc",
+  "title": "AMT-116 in Combination With AK112 in Patients With Lung Cancer",
+  "criteria": [
+   {
+    "id": "I1",
+    "kind": "inc",
+    "text": "2. At the time of screening, aged ≥18 years and ≤75 years.",
+    "pred": [
+     "age",
+     18,
+     75
+    ],
+    "line": 3
+   },
+   {
+    "id": "I2",
+    "kind": "inc",
+    "text": "6. Eastern Cooperative Oncology Group (ECOG) performance status of 0 or 1.",
+    "pred": [
+     "ecog",
+     1
+    ],
+    "line": 15
+   },
+   {
+    "id": "E1",
+    "kind": "exc",
+    "text": "1. Histopathological evidence of small cell lung cancer.",
+    "pred": [
+     "hist",
+     [
+      "small cell carcinoma",
+      "combined small cell carcinoma"
+     ]
+    ],
+    "line": 25
+   },
+   {
+    "id": "E2",
+    "kind": "exc",
+    "text": "ii. Received a live or attenuated vaccine within 4 weeks prior to the first dose.",
+    "pred": [
+     "within",
+     "live_vaccine",
+     28,
+     {}
+    ],
+    "line": 32
+   },
+   {
+    "id": "E3",
+    "kind": "exc",
+    "text": "iii. Received radiation therapy within 3 weeks prior to the first dose. Palliative radiation therapy administered for symptom control at least 2 weeks prior to the first dose is permitted.",
+    "pred": [
+     "within",
+     "radiotherapy",
+     21,
+     {
+      "palliative_ok_after": 14
+     }
+    ],
+    "line": 34
+   },
+   {
+    "id": "E4",
+    "kind": "exc",
+    "text": "5. Received systemic immunosuppressive therapy (including but not limited to corticosteroids, cyclophosphamide, azathioprine, methotrexate, thalidomide, and anti-tumor necrosis factor [anti-TNF] agents) within 2 weeks prior to the first dose.",
+    "pred": [
+     "within",
+     "immunosuppressive",
+     14,
+     {}
+    ],
+    "line": 35
+   },
+   {
+    "id": "E5",
+    "kind": "exc",
+    "text": "9. History of malignancy other than the enrollment diagnosis within 5 years prior to the first administration of the study drug.",
+    "pred": [
+     "malig",
+     1825,
+     []
+    ],
+    "line": 39
+   },
+   {
+    "id": "E6",
+    "kind": "exc",
+    "text": "13. Current or past history of inflammatory bowel disease (e.g., Crohn's disease, ulcerative colitis, or chronic diarrhea).",
+    "pred": [
+     "cond",
+     "ibd",
+     "ever"
+    ],
+    "line": 43
+   },
+   {
+    "id": "E7",
+    "kind": "exc",
+    "text": "20. Known immunosuppressive disease or human immunodeficiency virus (HIV) infection.",
+    "pred": [
+     "cond",
+     "hiv",
+     "ever"
+    ],
+    "line": 50
+   },
+   {
+    "id": "E8",
+    "kind": "exc",
+    "text": "25. Pregnancy (positive β-human chorionic gonadotropin [β-hCG] test) and lactating women.",
+    "pred": [
+     "any",
+     [
+      "preg"
+     ],
+     [
+      "lact"
+     ]
+    ],
+    "line": 55
+   }
+  ]
+ },
+ {
+  "nct": "NCT06170788",
+  "disease": "nsclc",
+  "title": "Sacituzumab Tirumotecan (MK-2870) in Combination With Pembrolizumab Versus Pembrolizumab Alone in Metastatic Non-small Cell Lung Cancer (NSCLC) With Programmed Cell Death Ligand 1 (PD-L1) Tumor Proportion Score (TPS) ≥ 50% (MK-2870-007)",
+  "criteria": [
+   {
+    "id": "I1",
+    "kind": "inc",
+    "text": "An Eastern Cooperative Oncology Group (ECOG) performance status of 0 to 1 assessed within 7 days before randomization.",
+    "pred": [
+     "ecog",
+     1
+    ],
+    "line": 6
+   },
+   {
+    "id": "E1",
+    "kind": "exc",
+    "text": "Diagnosis of small cell lung cancer or, for mixed tumors, presence of small cell elements.",
+    "pred": [
+     "hist",
+     [
+      "small cell carcinoma",
+      "combined small cell carcinoma"
+     ]
+    ],
+    "line": 12
+   },
+   {
+    "id": "E2",
+    "kind": "exc",
+    "text": "Received prior systemic anticancer therapy including investigational agents within 4 weeks before randomization.",
+    "pred": [
+     "within",
+     "anticancer",
+     28,
+     {}
+    ],
+    "line": 19
+   },
+   {
+    "id": "E3",
+    "kind": "exc",
+    "text": "Received prior radiotherapy within 2 weeks of start of study intervention, or radiation-related toxicities, requiring corticosteroids.",
+    "pred": [
+     "within",
+     "radiotherapy",
+     14,
+     {}
+    ],
+    "line": 21
+   },
+   {
+    "id": "E4",
+    "kind": "exc",
+    "text": "Received a live or live-attenuated vaccine within 30 days before the first dose of study intervention. Administration of killed vaccines are allowed.",
+    "pred": [
+     "within",
+     "live_vaccine",
+     30,
+     {}
+    ],
+    "line": 22
+   },
+   {
+    "id": "E5",
+    "kind": "exc",
+    "text": "Known active central nervous system (CNS) metastases and/or carcinomatous meningitis.",
+    "pred": [
+     "cond",
+     "cns_mets",
+     "ever"
+    ],
+    "line": 25
+   },
+   {
+    "id": "E6",
+    "kind": "exc",
+    "text": "Concurrent active Hepatitis B and Hepatitis C virus infection.",
+    "pred": [
+     "all",
+     [
+      "cond",
+      "hbv",
+      "active"
+     ],
+     [
+      "cond",
+      "hcv",
+      "active"
+     ]
+    ],
+    "line": 31
+   },
+   {
+    "id": "E7",
+    "kind": "exc",
+    "text": "History of allogeneic tissue/solid organ transplant.",
+    "pred": [
+     "cond",
+     "allo_transplant",
+     "ever"
+    ],
+    "line": 33
+   }
+  ]
+ },
+ {
+  "nct": "NCT06623422",
+  "disease": "nsclc",
+  "title": "A Study of Pembrolizumab (MK-3475) With or Without Intismeran Autogene (V940) in Participants With Non-small Cell Lung Cancer (V940-009/INTerpath-009)",
+  "criteria": [
+   {
+    "id": "I1",
+    "kind": "inc",
+    "text": "Has an Eastern Cooperative Oncology Group (ECOG) performance status of 0 or 1 within 7 days before the first dose of study intervention",
+    "pred": [
+     "ecog",
+     1
+    ],
+    "line": 5
+   },
+   {
+    "id": "E1",
+    "kind": "exc",
+    "text": "Diagnosis of small cell lung cancer (SCLC) or, for mixed tumors, presence of small cell elements, or has a neuroendocrine tumor with large-cell components, or a sarcomatoid carcinoma, or a pancoast tumor",
+    "pred": [
+     "hist",
+     [
+      "small cell carcinoma",
+      "combined small cell carcinoma"
+     ]
+    ],
+    "line": 16
+   },
+   {
+    "id": "E2",
+    "kind": "exc",
+    "text": "Documentation by local test report indicating presence of anaplastic lymphoma kinase (ALK) gene rearrangements",
+    "pred": [
+     "marker",
+     "ALK",
+     "positive"
+    ],
+    "line": 17
+   },
+   {
+    "id": "E3",
+    "kind": "exc",
+    "text": "Received prior therapy with an anti-programmed cell death 1 (PD-1), anti-programmed cell death ligand 1 (PD-L1), or anti-programmed cell-death ligand 2 (PD-L2) agent, or with an agent directed to another stimulatory or coinhibitory T-cell receptor (eg, cytotoxic T-lymphocyte-associated protein [CTLA-4], OX-40, CD137)",
+    "pred": [
+     "ever_cat",
+     "checkpoint"
+    ],
+    "line": 19
+   },
+   {
+    "id": "E4",
+    "kind": "exc",
+    "text": "Received prior radiotherapy within 2 weeks of start of study intervention, or has radiation-related toxicities, requiring corticosteroids",
+    "pred": [
+     "within",
+     "radiotherapy",
+     14,
+     {}
+    ],
+    "line": 22
+   },
+   {
+    "id": "E5",
+    "kind": "exc",
+    "text": "Received a live or live-attenuated vaccine within 30 days before the first dose of study intervention",
+    "pred": [
+     "within",
+     "live_vaccine",
+     30,
+     {}
+    ],
+    "line": 23
+   }
+  ]
+ },
+ {
+  "nct": "NCT07365319",
+  "disease": "nsclc",
+  "title": "A Safety and Efficacy Study of EIK1001 in Combination With Pembrolizumab and Chemotherapy in Participants With Stage 4 Non-Small Cell Lung Cancer.",
+  "criteria": [
+   {
+    "id": "I1",
+    "kind": "inc",
+    "text": "1. Participant must be ≥ 18 years old at the time of signing the informed consent.",
+    "pred": [
+     "age",
+     18,
+     null
+    ],
+    "line": 2
+   },
+   {
+    "id": "I2",
+    "kind": "inc",
+    "text": "3. Participant has histologically or cytologically confirmed Stage 4 NSCLC predominately squamous or non-squamous) and is considered a candidate for standard therapy with pembrolizumab and chemotherapy. Participants with NSCLC-NOS (not otherwise specified) will be considered as non-squamous NSCLC.",
+    "pred": [
+     "all",
+     [
+      "stage",
+      [
+       "IVA",
+       "IVB"
+      ]
+     ],
+     [
+      "not",
+      [
+       "hist",
+       [
+        "small cell carcinoma",
+        "combined small cell carcinoma"
+       ]
+      ]
+     ]
+    ],
+    "line": 4
+   },
+   {
+    "id": "I3",
+    "kind": "inc",
+    "text": "7. Participant has an ECOG Performance Status of 0 to 1 assessed no more than 10 days before start of the treatment.",
+    "pred": [
+     "ecog",
+     1
+    ],
+    "line": 10
+   },
+   {
+    "id": "E1",
+    "kind": "exc",
+    "text": "1. has small cell elements present histologically and/or the tumors are not predominantly non-squamous or squamous NSCLC.",
+    "pred": [
+     "hist",
+     [
+      "small cell carcinoma",
+      "combined small cell carcinoma"
+     ]
+    ],
+    "line": 15
+   },
+   {
+    "id": "E2",
+    "kind": "exc",
+    "text": "3. has had major surgery (< 3 weeks prior to the first dose of study intervention administration).",
+    "pred": [
+     "within",
+     "major_surgery",
+     21,
+     {}
+    ],
+    "line": 17
+   },
+   {
+    "id": "E3",
+    "kind": "exc",
+    "text": "4. has received a live-virus vaccination within 30 days of the start of study intervention initiation.",
+    "pred": [
+     "within",
+     "live_vaccine",
+     30,
+     {}
+    ],
+    "line": 18
+   },
+   {
+    "id": "E4",
+    "kind": "exc",
+    "text": "5. has received radiation therapy within 7 days of the first dose of study intervention administration.",
+    "pred": [
+     "within",
+     "radiotherapy",
+     7,
+     {}
+    ],
+    "line": 19
+   }
+  ]
+ },
+ {
+  "nct": "NCT05722795",
+  "disease": "breast",
+  "title": "Use of Imatinib to Convert Triple Negative Breast Cancer Into ER-positive Breast Cancer (I-CONIC)",
+  "criteria": [
+   {
+    "id": "I1",
+    "kind": "inc",
+    "text": "2. Age ≥18 years",
+    "pred": [
+     "age",
+     18,
+     null
+    ],
+    "line": 3
+   },
+   {
+    "id": "I2",
+    "kind": "inc",
+    "text": "5. Eastern Cooperative Oncology Group (ECOG) performance status 0-1",
+    "pred": [
+     "ecog",
+     1
+    ],
+    "line": 10
+   },
+   {
+    "id": "I3",
+    "kind": "inc",
+    "text": "2. platelets ≥100 x 109/L",
+    "pred": [
+     "lab",
+     "plt",
+     100,
+     null,
+     true,
+     null
+    ],
+    "line": 14
+   },
+   {
+    "id": "I4",
+    "kind": "inc",
+    "text": "4. total bilirubin ≤1.5 x institutional upper normal limit (UNL)/dL (≤ 3 x UNL for patients with Gilbert´s syndrome)",
+    "pred": [
+     "uln",
+     "bili",
+     "<=",
+     1.5,
+     3,
+     "gilbert"
+    ],
+    "line": 16
+   },
+   {
+    "id": "I5",
+    "kind": "inc",
+    "text": "7. Creatinine < 110 μmol/L",
+    "pred": [
+     "lab",
+     "creat",
+     null,
+     1.244343891402715,
+     null,
+     false
+    ],
+    "line": 19
+   },
+   {
+    "id": "E1",
+    "kind": "exc",
+    "text": "5. Pregnancy and breast-feeding.",
+    "pred": [
+     "any",
+     [
+      "preg"
+     ],
+     [
+      "lact"
+     ]
+    ],
+    "line": 33
+   },
+   {
+    "id": "E2",
+    "kind": "exc",
+    "text": "7. Known human immunodeficiency virus (HIV) positivity.",
+    "pred": [
+     "cond",
+     "hiv",
+     "ever"
+    ],
+    "line": 35
+   },
+   {
+    "id": "E3",
+    "kind": "exc",
+    "text": "8. Known active Hepatitis B or Hepatitis C",
+    "pred": [
+     "any",
+     [
+      "cond",
+      "hbv",
+      "active"
+     ],
+     [
+      "cond",
+      "hcv",
+      "active"
+     ]
+    ],
+    "line": 36
+   }
+  ]
+ },
+ {
+  "nct": "NCT07053306",
+  "disease": "t2d",
+  "title": "SGLT2i, Ketoacidosis, Volume Contraction, and Insulinopenia",
+  "criteria": [
+   {
+    "id": "I1",
+    "kind": "inc",
+    "text": "Ages 30-75",
+    "pred": [
+     "age",
+     30,
+     75
+    ],
+    "line": 4
+   },
+   {
+    "id": "I2",
+    "kind": "inc",
+    "text": "BMI (Body Mass Index) 21-45 kg/m2",
+    "pred": [
+     "bmi",
+     21,
+     45,
+     true,
+     true
+    ],
+    "line": 5
+   },
+   {
+    "id": "I3",
+    "kind": "inc",
+    "text": "HbA1c = 7.0-11%",
+    "pred": [
+     "lab",
+     "hba1c",
+     7.0,
+     11.0,
+     true,
+     true
+    ],
+    "line": 6
+   },
+   {
+    "id": "I4",
+    "kind": "inc",
+    "text": "eGFR (estimated glomerular filtration rate)> 60 ml/min/1.73m2",
+    "pred": [
+     "lab",
+     "egfr",
+     60,
+     null,
+     false,
+     null
+    ],
+    "line": 7
+   },
+   {
+    "id": "I5",
+    "kind": "inc",
+    "text": "SGLT2 inhibitors must be discontinued at least two months prior to study enrollment.",
+    "pred": [
+     "not",
+     [
+      "within",
+      "sglt2",
+      60,
+      {}
+     ]
+    ],
+    "line": 14
+   },
+   {
+    "id": "E1",
+    "kind": "exc",
+    "text": "Patients treated with Thiazolidinediones (TZDs), or Insulin are excluded.",
+    "pred": [
+     "any",
+     [
+      "current",
+      "tzd"
+     ],
+     [
+      "current",
+      "insulin"
+     ]
+    ],
+    "line": 21
+   }
+  ]
+ },
+ {
+  "nct": "NCT07307235",
+  "disease": "t2d",
+  "title": "Efficacy and Safety of iGlarLixi Versus Standard of Care in a Real-world Adult China Population With Uncontrolled Type 2 Diabetes on Oral Agents",
+  "criteria": [
+   {
+    "id": "I1",
+    "kind": "inc",
+    "text": "1. Participant must be at least 18 of age inclusive, at the time of signing the informed consent.",
+    "pred": [
+     "age",
+     18,
+     null
+    ],
+    "line": 2
+   },
+   {
+    "id": "I2",
+    "kind": "inc",
+    "text": "4. HbA1c 7.5-11%",
+    "pred": [
+     "lab",
+     "hba1c",
+     7.5,
+     11.0,
+     true,
+     true
+    ],
+    "line": 5
+   },
+   {
+    "id": "E1",
+    "kind": "exc",
+    "text": "2. BMI <20 kg/m2 or BMI ≥40 kg/m2",
+    "pred": [
+     "not",
+     [
+      "bmi",
+      20,
+      40,
+      true,
+      false
+     ]
+    ],
+    "line": 13
+   },
+   {
+    "id": "E2",
+    "kind": "exc",
+    "text": "7. Participant who has a severe renal function impairment with an estimated glomerular filtration rate (eGFR) <30 mL/min/1.73m2",
+    "pred": [
+     "lab",
+     "egfr",
+     null,
+     30,
+     null,
+     false
+    ],
+    "line": 18
+   },
+   {
+    "id": "E3",
+    "kind": "exc",
+    "text": "8. Pregnant or breast-feeding woman.",
+    "pred": [
+     "any",
+     [
+      "preg"
+     ],
+     [
+      "lact"
+     ]
+    ],
+    "line": 19
+   }
+  ]
+ },
+ {
+  "nct": "NCT06838416",
+  "disease": "t2d",
+  "title": "Evaluation of the Effect of Finerenone on Renal Function in Patients With Type 2 Diabetes and Chronic Kidney Disease",
+  "criteria": [
+   {
+    "id": "I1",
+    "kind": "inc",
+    "text": "Aged ≥18 years",
+    "pred": [
+     "age",
+     18,
+     null
+    ],
+    "line": 3
+   },
+   {
+    "id": "E1",
+    "kind": "exc",
+    "text": "Serum potassium >4.8 mmol/L",
+    "pred": [
+     "lab",
+     "k",
+     4.8,
+     null,
+     false,
+     null
+    ],
+    "line": 11
+   },
+   {
+    "id": "E2",
+    "kind": "exc",
+    "text": "HbA1c >9%",
+    "pred": [
+     "lab",
+     "hba1c",
+     9.0,
+     null,
+     false,
+     null
+    ],
+    "line": 13
+   },
+   {
+    "id": "E3",
+    "kind": "exc",
+    "text": "ALT or AST >2.5 × ULN, total bilirubin (TBIL) >2 × ULN",
+    "pred": [
+     "any",
+     [
+      "uln",
+      "alt",
+      ">",
+      2.5,
+      null,
+      null
+     ],
+     [
+      "uln",
+      "ast",
+      ">",
+      2.5,
+      null,
+      null
+     ],
+     [
+      "uln",
+      "bili",
+      ">",
+      2,
+      null,
+      null
+     ]
+    ],
+    "line": 19
+   },
+   {
+    "id": "E4",
+    "kind": "exc",
+    "text": "Any organ system cancer within the past 5 years, whether treated or untreated",
+    "pred": [
+     "malig",
+     1825,
+     []
+    ],
+    "line": 21
+   }
+  ]
+ },
+ {
+  "nct": "NCT07664553",
+  "disease": "t2d",
+  "title": "A Phase III Study to Investigate the Efficacy and Safety of Elecoglipron Compared With Placebo in Adults With Type 2 Diabetes Mellitus on Background Insulin",
+  "criteria": [
+   {
+    "id": "I1",
+    "kind": "inc",
+    "text": "Diagnosed with T2DM for at least 90 days prior to screening",
+    "pred": [
+     "dx_days",
+     90
+    ],
+    "line": 2
+   },
+   {
+    "id": "I2",
+    "kind": "inc",
+    "text": "HbA1c value of ≥ 7% to ≤ 10.5%",
+    "pred": [
+     "lab",
+     "hba1c",
+     7.0,
+     10.5,
+     true,
+     true
+    ],
+    "line": 4
+   },
+   {
+    "id": "I3",
+    "kind": "inc",
+    "text": "Body mass index (BMI) of ≥ 23 kg/m2 at screening",
+    "pred": [
+     "bmi",
+     23,
+     null,
+     true,
+     null
+    ],
+    "line": 5
+   },
+   {
+    "id": "E1",
+    "kind": "exc",
+    "text": "History of acute or chronic pancreatitis.",
+    "pred": [
+     "cond",
+     "pancreatitis",
+     "ever"
+    ],
+    "line": 14
+   },
+   {
+    "id": "E2",
+    "kind": "exc",
+    "text": "Severe congestive heart failure (NYHA IV)",
+    "pred": [
+     "cond",
+     "nyha4",
+     "active"
+    ],
+    "line": 15
+   },
+   {
+    "id": "E3",
+    "kind": "exc",
+    "text": "History/family history of medullary thyroid cancer or multiple endocrine neoplasia type 2",
+    "pred": [
+     "cond",
+     "mtc_men2",
+     "ever_or_family"
+    ],
+    "line": 16
+   }
+  ]
+ },
+ {
+  "nct": "NCT07613307",
+  "disease": "t2d",
+  "title": "A Study of Orforglipron (LY3502970) in Participants With Type 2 Diabetes Who Observe Ramadan Fasting",
+  "criteria": [
+   {
+    "id": "I1",
+    "kind": "inc",
+    "text": "Ages eligible: 18 Years to 65 Years",
+    "pred": [
+     "age",
+     18,
+     65
+    ],
+    "line": "reg:ages"
+   },
+   {
+    "id": "I2",
+    "kind": "inc",
+    "text": "Have an HbA1c value of at least 7.0% (53 millimoles per mole (mmol/mol)) to less than 9.5% (91 mmol/mol) at screening.",
+    "pred": [
+     "lab",
+     "hba1c",
+     7.0,
+     9.5,
+     true,
+     false
+    ],
+    "line": 3
+   },
+   {
+    "id": "I3",
+    "kind": "inc",
+    "text": "Have body mass index (BMI) of 25 kilograms per meter square (kg/m2) or higher at screening.",
+    "pred": [
+     "bmi",
+     25,
+     null,
+     true,
+     null
+    ],
+    "line": 6
+   },
+   {
+    "id": "E1",
+    "kind": "exc",
+    "text": "Have a history of chronic or acute pancreatitis any time prior to screening",
+    "pred": [
+     "cond",
+     "pancreatitis",
+     "ever"
+    ],
+    "line": 12
+   },
+   {
+    "id": "E2",
+    "kind": "exc",
+    "text": "Have a history of cholecystectomy (surgically removed gallbladder)",
+    "pred": [
+     "proc_ever",
+     "cholecystectomy"
+    ],
+    "line": 15
+   },
+   {
+    "id": "E3",
+    "kind": "exc",
+    "text": "Have New York Heart Association Functional Classification IV congestive heart-failure.",
+    "pred": [
+     "cond",
+     "nyha4",
+     "active"
+    ],
+    "line": 16
+   }
+  ]
+ },
+ {
+  "nct": "NCT06884059",
+  "disease": "t2d",
+  "title": "Time Restricted Eating in Patients With Microalbuminuria",
+  "criteria": [
+   {
+    "id": "I1",
+    "kind": "inc",
+    "text": "1. Age: 18-75 years old",
+    "pred": [
+     "age",
+     18,
+     75
+    ],
+    "line": 2
+   },
+   {
+    "id": "I2",
+    "kind": "inc",
+    "text": "8. Estimated Glomerular Filtration Rate (EGFR) > 45",
+    "pred": [
+     "lab",
+     "egfr",
+     45,
+     null,
+     false,
+     null
+    ],
+    "line": 9
+   },
+   {
+    "id": "E1",
+    "kind": "exc",
+    "text": "1. Participants with Type1DM and T2DM who are taking insulin, sulfonylureas, or have an HbA1c > 9 %.",
+    "pred": [
+     "any",
+     [
+      "current",
+      "insulin"
+     ],
+     [
+      "current",
+      "sulfonylurea"
+     ],
+     [
+      "lab",
+      "hba1c",
+      9.0,
+      null,
+      false,
+      null
+     ]
+    ],
+    "line": 15
+   },
+   {
+    "id": "E2",
+    "kind": "exc",
+    "text": "7. Pregnant or breastfeeding individuals.",
+    "pred": [
+     "any",
+     [
+      "preg"
+     ],
+     [
+      "lact"
+     ]
+    ],
+    "line": 21
+   },
+   {
+    "id": "E3",
+    "kind": "exc",
+    "text": "25. History of stage 4 or 5 chronic kidney disease or requiring dialysis.",
+    "pred": [
+     "cond",
+     "ckd45",
+     "ever"
+    ],
+    "line": 39
+   },
+   {
+    "id": "E4",
+    "kind": "exc",
+    "text": "26. History of HIV/AIDS.",
+    "pred": [
+     "cond",
+     "hiv",
+     "ever"
+    ],
+    "line": 40
+   }
+  ]
+ },
+ {
+  "nct": "NCT06463483",
+  "disease": "t2d",
+  "title": "Automated Insulin Delivery in Adults With Advanced Kidney Disease",
+  "criteria": [
+   {
+    "id": "I1",
+    "kind": "inc",
+    "text": "1. Age 18-70 years inclusive",
+    "pred": [
+     "age",
+     18,
+     70
+    ],
+    "line": 2
+   },
+   {
+    "id": "I2",
+    "kind": "inc",
+    "text": "3. The HbA1c <10.5% (<91 mmol/mol)",
+    "pred": [
+     "lab",
+     "hba1c",
+     null,
+     10.5,
+     null,
+     false
+    ],
+    "line": 4
+   },
+   {
+    "id": "E1",
+    "kind": "exc",
+    "text": "3. The participant has a recent history of diabetic ketoacidosis (<6 months)",
+    "pred": [
+     "cond",
+     "dka",
+     [
+      "within",
+      180
+     ]
+    ],
+    "line": 15
+   },
+   {
+    "id": "E2",
+    "kind": "exc",
+    "text": "4. The use of systemic steroid therapy within the past four weeks (stable doses of steroids for >8 weeks permitted)",
+    "pred": [
+     "within",
+     "steroid_systemic",
+     28,
+     {
+      "stable_ok_over": 56
+     }
+    ],
+    "line": 16
+   },
+   {
+    "id": "E3",
+    "kind": "exc",
+    "text": "7. Women who are pregnant or planning pregnancy",
+    "pred": [
+     "preg"
+    ],
+    "line": 19
+   }
+  ]
+ }
+]

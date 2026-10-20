@@ -1,0 +1,1 @@
+{"prompt": "DEV STUB {n_clauses} clauses {n_parts} parts. JSON {\"K0001\": \"12 CFR 1024.35(e)\"}", "tool_list_clauses": "stub", "tool_list_sections": "stub", "tool_read_section": "stub", "tool_search": "stub", "unit_prompt": "DEV STUB {clause_id}"}

@@ -30,6 +30,7 @@ from fastapi import Request
 from pydantic import ValidationError
 from pytest import MonkeyPatch, fixture, mark, raises
 
+from nemo_gym.base_resources_server import AggregateMetricsRequest
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -1098,6 +1099,48 @@ class TestBenchmarkLifecycle:
         seeded.json = AsyncMock(return_value={})
         with raises(ValueError, match="authenticated MCP"):
             await server._seed_tool_servers(request, body)
+
+    async def test_aggregate_metrics_come_from_the_resources_server(self):
+        config = self._create_config()
+        client = MagicMock(spec=ServerClient)
+        payload = {"agent_metrics": {"bench/score": 0.5}, "key_metrics": {"bench/score": 0.5}}
+        client.post = AsyncMock(
+            return_value=SimpleNamespace(
+                ok=True, read=AsyncMock(return_value=json.dumps(payload).encode()), raise_for_status=lambda: None
+            )
+        )
+        server = OpenCodeSandboxedAgent(config=config, server_client=client)
+        result = await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[]))
+        assert result.key_metrics == {"bench/score": 0.5}
+        assert client.post.await_args.kwargs["server_name"] == config.resources_server.name
+        assert client.post.await_args.kwargs["url_path"] == "/aggregate_metrics"
+
+    async def test_tool_servers_are_seeded_in_the_rollout_session(self, monkeypatch):
+        # A resources server that is also a tool server must see one session: its MCP edits are what verify scores.
+        config = self._create_config()
+        config.tool_servers = [config.resources_server]
+        seed = MagicMock(cookies={"session": "rollout"})
+        seed.json = AsyncMock(return_value={})
+        client = MagicMock(spec=ServerClient)
+        client.post = AsyncMock(return_value=seed)
+        server = OpenCodeSandboxedAgent(config=config, server_client=client)
+        server._start_sandbox = AsyncMock(side_effect=RuntimeError("stop after seeding"))
+        seed_tools = AsyncMock(return_value={})
+        monkeypatch.setattr(app_module, "seed_mcp_servers", seed_tools)
+        monkeypatch.setattr(app_module, "raise_for_status", AsyncMock())
+
+        class RunRequest:  # Starlette's Request reads cookies from _cookies
+            _cookies: dict[str, str] = {}
+            session = {SESSION_ID_KEY: "trial"}
+            state = SimpleNamespace()
+            cookies = property(lambda self: self._cookies)
+
+        body = OpenCodeSandboxedAgentRunRequest(
+            responses_create_params={"input": [{"role": "user", "content": "Solve"}]}
+        )
+        with raises(RuntimeError, match="stop after seeding"):
+            await server.run(RunRequest(), body)
+        assert seed_tools.await_args.args[3] == {"session": "rollout"}
 
     async def test_completed_execution_failure_uses_empty_response_verification(self, monkeypatch):
         config = self._create_config()

@@ -1,0 +1,116 @@
+{
+ "program": "Open Stacks Digitization Program",
+ "intro": "Welcome to the {program}, the public library's effort to publish digitized excerpts of public-domain novels online. Every scan also picked up short inserted passages, such as margin notes, loan-slip remarks, reader letters, staff annotations and catalogue notes, though most of each document is original literary text. On behalf of the privacy office you must scan all {n} documents, from document {first} through document {last}, and for every document list each item of personal data that the privacy policy below requires to be reported, so the archive can be cleaned before publication.",
+ "rule_report": "Reportable personal data is any information in an inserted passage that identifies a private individual. The policy defines seven item types: `name` for the full name of a private person, `phone` for a personal phone number, `email` for a personal email address, `address` for a home address, `dob` for a date of birth, `gov_id` for a government identification number such as a social security number, and `card` for a payment card number. Report each distinct item once per document, even if it appears several times in that document.",
+ "rule_officials": "People listed in the officials directory are public officials; when they are mentioned in their official role they are not acting as private individuals, so neither their names nor their office phone numbers are reported. Always check the directory to confirm whether a person is listed there instead of guessing from a title alone, since a title in the text does not by itself prove a directory entry.",
+ "rule_business": "Organisations are not individuals, so their details are never personal data. A business main line, a role or shared mailbox such as an info, press, support or orders address of an organisation, and a business address are not reported, even when a private person asks to be reached through them.",
+ "rule_numbers": "Some reference numbers merely look like identification numbers but are not personal data and are not reported: court case or docket numbers, catalogue part numbers and ISBNs identify files or things, not people. Only a number that the text presents as a person's own government identification number counts as `gov_id`.",
+ "rule_samples": "Specimen or sample entries printed on blank forms, templates or instruction sheets are not personal data. When the text presents a name or number as an illustration of how to fill in a form rather than as a real person, nothing from that sample entry is reported.",
+ "rule_luhn": "Report a payment card number as `card` only if it passes the Luhn checksum. To run the check, start from the rightmost digit and double every second digit, subtract nine from any result that is above nine, then sum all the digits; the number is valid when the sum is a multiple of ten. A number that fails the check is treated as a mistyped number and is not reported, but the person's other data is still reported as normal.",
+ "rule_consent": "The consent register lists people who agreed to have their details published. When a person is in the register with status granted, none of that person's data is reported, name included; when the status is withdrawn, or the person is not in the register at all, their data is reported as normal. Check the register for every private person you find before deciding what to report.",
+ "rule_source": "Characters, historical figures and authors who belong to the original literary text are not private individuals and are never reported, no matter how much detail the novel gives about them. Only the inserted passages, such as margin notes, loan slips, reader letters, staff annotations and catalogue notes, can contain reportable data.",
+ "rule_format": "Report values in a consistent form. Copy names, emails and addresses exactly as written in the document, giving the full address including city, state and postal code. Phone, `gov_id` and `card` numbers may be written with or without separators. A `dob` must be given as year-month-day, for example in the form YYYY-MM-DD, written here with letters as shown because this policy text must not contain digits.",
+ "answer_line": "End your reply with one JSON object that maps every document id to the list of reported items for that document, where each item is an object with keys `type` and `value`, and use an empty list for a document with nothing to report, for example {example}.",
+ "unit_prompt": "Audit only document {doc} under the privacy policy below; the policy text is appended after this prompt. End your reply with one JSON object that maps the document id to its list of reported items, for example {example}.",
+ "directory_header": "Officials directory: public officials with title, agency and office phone.",
+ "register_header": "Consent register: people who agreed to have their details published, each with a status of granted or withdrawn.",
+ "tools": {
+  "list_documents": "Lists document ids with source title and paragraph count, paged with offset and limit.",
+  "read_document": "Returns the numbered paragraphs of one document starting from a given paragraph, one page at a time.",
+  "search_document": "Finds the paragraphs of one document that contain a given text, case-insensitive.",
+  "read_directory": "Pages through the officials directory.",
+  "search_directory": "Finds directory rows that contain a given text.",
+  "read_register": "Pages through the consent register.",
+  "search_register": "Finds register rows that contain a given text."
+ },
+ "p_contact": [
+  "Margin note in faded pencil: if this volume is found, please return it to {name}; I can be reached on my home phone {phone} or at {email}.",
+  "Loan-slip remark: borrower {name} asked staff to phone {phone} or write to {email} when the reserved copy comes back.",
+  "Reader letter tucked between pages: dear librarians, thank you for the wonderful reading room; send any reply to {name} at {email} or ring {phone} in the evening.",
+  "Staff memo: {name} left a personal number {phone} and a personal email {email} so we can arrange pickup of the donated box.",
+  "Scribbled on the flyleaf: this copy belongs to {name}, phone {phone}, email {email}, please do not throw it away.",
+  "Note from a reader: I, {name}, would love to volunteer for the reading circle; my mobile is {phone} and my inbox is {email}."
+ ],
+ "p_home": [
+  "Reader letter: please send the reading-group schedule to {name} at {address}; I was born on {dob}, if the membership form needs it.",
+  "Staff annotation on the donations ledger: {name}, date of birth {dob}, resides at {address}; promised to drop off the next crate on Saturday.",
+  "Loan-slip remark: home delivery requested by {name}, address {address}; date of birth {dob} given for the new borrower record.",
+  "Margin note: birthday wishes to {name}, born {dob}, with an invitation to the house at {address}.",
+  "Staff memo: file the change-of-details card for {name}, new home address {address}, date of birth confirmed as {dob}.",
+  "Reader letter: my grandfather {name} loved this book; he was born on {dob} and lived his whole life at {address}."
+ ],
+ "p_id": [
+  "Old library registration card: {name}, government identification number {id}, signed in the presence of the desk clerk.",
+  "Staff annotation: the registration card for {name} lists identification number {id}; the card was never updated.",
+  "Margin note on the inside cover: member {name}, identification {id}, registered at the front desk.",
+  "Loan-slip remark: borrower {name} verified with social security number {id} before the rare volume could leave the building.",
+  "Staff memo: archive the old membership file of {name}, which records the government identification number {id} in the top corner.",
+  "Reader letter: when I joined, the desk wrote my details as {name} with identification number {id}; please confirm the record was destroyed."
+ ],
+ "p_card": [
+  "Loan-slip remark: {name} left card number {card} to cover the late fee on this volume.",
+  "Staff memo: {name} asked us to charge the overdue fine to card {card}; the slip is clipped to the ledger.",
+  "Margin note: I, {name}, will pay for the damaged dust jacket; charge card {card}.",
+  "Reader letter: to settle the replacement cost, please debit the card {card} belonging to {name}.",
+  "Staff annotation: payment promised by {name}, who wrote card number {card} on the back of the reminder notice.",
+  "Note taped to the returns bin: {name} here, put the lost-book charge on card {card} and post the receipt."
+ ],
+ "p_via_business": [
+  "Reader letter: please do not phone me at home; I, {name}, can be reached only through the switchboard of {company} at {phone} during the day.",
+  "Margin note: volunteer {name} asks that all messages go through the main line {phone} of {company}, never to a private number.",
+  "Staff memo: to reach {name} about the shelving rota, call the front desk of {company} on {phone} and ask for the mailroom.",
+  "Loan-slip remark: contact {name} care of {company}, main line {phone}; no personal number was given.",
+  "Reader letter: my employer {company} takes messages for me at {phone}; signed, {name}.",
+  "Staff annotation: {name} volunteers on weekends but insists any urgent call go to the office of {company} at {phone} only."
+ ],
+ "p_official_private": [
+  "Loan-slip remark: {title} {name} of {agency} returned the overdue novel this morning and left home phone {phone} in case the fine notice needs checking.",
+  "Margin note: {title} {name} of {agency} joined the mystery reading circle in a private capacity and can be phoned at home on {phone}.",
+  "Staff memo: the personal fine paid by {title} {name} of {agency} was settled in cash; for the receipt, ring the home number {phone}.",
+  "Reader letter: though I serve as {title} at {agency}, I write as a private reader, {name}, and you may reach my household at {phone}.",
+  "Staff annotation: {title} {name} of {agency} donated family novels from home and asked for pickup coordination via the private line {phone}.",
+  "Note in the suggestion box: {title} {name} of {agency}, writing off duty, requests more large-print editions; home phone {phone}."
+ ],
+ "d_sample": [
+  "Blank registration form: the specimen entry shows how to fill it in, with the example name {name} and the example identification number {id} printed in grey.",
+  "Instruction sheet for new borrowers: the sample card is filled out with the made-up name {name} and the fictitious number {id} for illustration only.",
+  "Template loan slip: the shaded box demonstrates a completed slip using the placeholder name {name} and the sample identification {id}.",
+  "Staff training sheet: here is what a finished membership card looks like; the example uses {name} with the demonstration number {id}, not a real patron.",
+  "Blank change-of-address card: an illustrative entry, name {name} and identification number {id}, is printed as a guide at the top.",
+  "Photocopied how-to leaflet: complete the form as shown in the specimen, where {name} stands in for the applicant and {id} for the identification number."
+ ],
+ "d_official": [
+  "Catalogue note: the digitization of this volume was approved by {title} {name} of {agency}, office phone {phone}.",
+  "Staff memo: {title} {name} of {agency} inspected the reading room before the scanning began; direct questions to the office line {phone}.",
+  "Letterhead correspondence: in my capacity as {title} of {agency}, I confirm the funding; signed {name}, office telephone {phone}.",
+  "Catalogue note: the building inspection certificate was issued by {title} {name} of {agency}, reachable at the office on {phone}.",
+  "Staff annotation: {title} {name} of {agency} signed the release form for the archive; the office switchboard is {phone}.",
+  "Formal notice clipped to the volume: approved for public release by {title} {name} of {agency}; enquiries to the office phone {phone}."
+ ],
+ "d_business": [
+  "Catalogue note: the binding was repaired by {company}, main line {phone}, mailbox {email}, workshop at {address}.",
+  "Staff memo: order replacement scanner lamps from {company} at {address}; phone {phone} or write to {email}.",
+  "Printed invoice tucked in the volume: {company}, {address}; orders desk {phone}, enquiries {email}.",
+  "Loan-slip remark: the courier firm {company} can be reached on {phone}, via {email}, or at its depot, {address}.",
+  "Catalogue note: microfilm supplies donated by {company} of {address}; the front desk answers at {phone} and {email}.",
+  "Staff annotation: for pest-control visits contact {company}, main line {phone}, shared inbox {email}, office address {address}."
+ ],
+ "d_case": [
+  "Catalogue note: this volume was donated from a court library and still bears the docket number {case} on its spine label.",
+  "Margin note: see the proceedings under case number {case}; the donor marked the relevant chapter.",
+  "Staff memo: the acquisition file references court case {case}, which ended long before the book arrived.",
+  "Reader letter: I found this copy while researching docket {case}; please keep it in the open stacks."
+ ],
+ "d_part": [
+  "Staff memo: the replacement shelf bracket, catalogue part number {part}, arrives next week.",
+  "Catalogue note: a loose hinge was repaired using spare part {part} from the maintenance cupboard.",
+  "Staff annotation: order the scanner glass guide, part {part}, before the next batch is digitized.",
+  "Margin note by a technician: the jammed feeder needs roller kit {part}; do not force it."
+ ],
+ "d_isbn": [
+  "Catalogue note: a modern reprint of this novel is available under ISBN {isbn}.",
+  "Staff memo: order two paperback reprints, ISBN {isbn}, for the reading circle.",
+  "Margin note: the teacher recommends the annotated reprint, ISBN {isbn}, for younger readers.",
+  "Reader letter: I compared this scan with the reprint carrying ISBN {isbn} and prefer the original typesetting."
+ ]
+}

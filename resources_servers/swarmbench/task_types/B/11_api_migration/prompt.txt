@@ -1,0 +1,17 @@
+You are working in a repository containing two real open-source Python projects: repos/markdown (Python-Markdown 3.6, the dependency, including its bundled extensions and docs/changelog.md) and repos/pymdownx (PyMdown Extensions, a package of Markdown extensions).
+
+The dependency was just upgraded to Markdown 3.6. Version 3.4 removed the APIs that had been deprecated since 3.0. {n} extension modules, listed one path per line in UNITS.txt, were written against that removed API and now fail. Other extension modules are already migrated and can serve as examples.
+
+Your job: migrate every module listed in UNITS.txt to the Markdown 3.6 API with exactly the same behavior. The file repos/markdown/docs/changelog.md (the 3.4 section "Previously deprecated objects have been removed" and the 3.0 release notes) lists the replacements.
+
+The removed API includes: Registry.add(name, item, location) with location strings such as '<name', '>name', '_begin', '_end'; reg[name] = item; del reg[name]; the md_globals parameter of extendMarkdown; markdown.util.etree; markdown.util.isBlockLevel; and the .markdown attribute of processors and patterns (now .md).
+
+The hard part: the new Registry.register(item, name, priority) takes a numeric priority (higher runs first). Each old location must become a priority that puts the item at exactly the same position in the registry as the old location did. Look up the priorities already registered (for example in repos/markdown/markdown/inlinepatterns.py, treeprocessors.py, blockprocessors.py, preprocessors.py, postprocessors.py, core.py, and in the module itself) to choose a value. An item assigned with reg[name] = item for a name that already exists keeps that existing item's priority.
+
+Hidden tests check each module's rendered output and the exact order of every registry after the extension is loaded.
+
+Rules: only edit the files listed in UNITS.txt. Edits to any other file are ignored when a module is scored (it is tested against the original Markdown 3.6), and they may break other tests, which costs points. New files are ignored. Keep every existing function and class.
+
+Tools (paths are relative to the repository root): list_files, read_file, search, write_file, apply_edit, and run_visible_tests(unit) where unit is a path from UNITS.txt; it runs part of that module's tests. Several agents may edit the same working copy at once, so only edit the listed modules.
+
+Scoring reads the final state of the repository, not your reply: score = fraction of the {n} modules whose hidden tests all pass, minus already-passing tests elsewhere that were broken. When finished, reply with "done" and a short summary.

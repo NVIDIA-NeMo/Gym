@@ -33,6 +33,8 @@ from openai.types.responses import ResponseInputTextParam
 from pydantic import ConfigDict, Field, FilePath
 
 from nemo_gym.base_resources_server import (
+    AggregateMetrics,
+    AggregateMetricsRequest,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
@@ -80,6 +82,7 @@ from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_me
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import (
     SESSION_ID_KEY,
+    get_response_json,
     is_nemo_gym_fastapi_entrypoint,
     raise_for_status,
 )
@@ -1116,6 +1119,14 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         async with self._sem:
             return await self._run(request, body)
 
+    async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
+        """Proxy aggregate_metrics to the resources server, so its benchmark metrics are reported."""
+        response = await self.server_client.post(
+            server_name=self.config.resources_server.name, url_path="/aggregate_metrics", json=body
+        )
+        await raise_for_status(response)
+        return AggregateMetrics.model_validate(await get_response_json(response))
+
     async def _run(
         self, request: Request, body: OpenCodeSandboxedAgentRunRequest
     ) -> OpenCodeSandboxedAgentVerifyResponse:
@@ -1131,6 +1142,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         )
         await raise_for_status(seed_session_response)
         cookies = cookies | seed_session_response.cookies
+        # Tool servers are seeded in the rollout's own session, so a resources server that is also a tool server
+        # (its MCP tools edit what verify scores) sees one session.
+        request._cookies = cookies
 
         request.state._ng_opencode_mcp = await self._seed_tool_servers(request, body)
 

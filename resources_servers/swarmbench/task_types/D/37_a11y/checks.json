@@ -1,0 +1,209 @@
+{
+ "summary": {
+  "type": "37_a11y",
+  "ns": [
+   4,
+   16,
+   56
+  ],
+  "seeds": "0,1",
+  "check1_oracle_min": 1.0,
+  "check2_wrong_max": {
+   "regex": 0.0,
+   "shifted_pages": 0.0,
+   "ignore_hidden": 0.0893,
+   "placeholder_is_label": 1.0,
+   "no_wrapping_labels": 0.75,
+   "labelledby_unchecked": 0.75,
+   "filename_alt_ok": 1.0,
+   "link_content_first": 0.5
+  },
+  "check3_format_only_max": 0.0,
+  "check7_tool_errors": 0,
+  "check8_deterministic": true,
+  "canary": true,
+  "text_source": "k3"
+ },
+ "rows": [
+  {
+   "n": 4,
+   "seed": 0,
+   "tier": "easy",
+   "gen_s": 0.02,
+   "hash": "fa0bffe71418a36566e33ee00a9fffe05984ee1069be9fa8dd00d692eaaeda81",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "regex": 0.0,
+    "shifted_pages": 0.0,
+    "ignore_hidden": 0.0,
+    "placeholder_is_label": 1.0,
+    "no_wrapping_labels": 0.5,
+    "labelledby_unchecked": 0.5,
+    "filename_alt_ok": 0.5,
+    "link_content_first": 0.5
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 4,
+   "seed": 1,
+   "tier": "easy",
+   "gen_s": 0.01,
+   "hash": "ea09d1199cf98d31351af0b02ed3c852caf5d0e70e877e8b364a9ee09361fb6b",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "regex": 0.0,
+    "shifted_pages": 0.0,
+    "ignore_hidden": 0.0,
+    "placeholder_is_label": 0.5,
+    "no_wrapping_labels": 0.75,
+    "labelledby_unchecked": 0.25,
+    "filename_alt_ok": 1.0,
+    "link_content_first": 0.25
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 16,
+   "seed": 0,
+   "tier": "medium",
+   "gen_s": 0.04,
+   "hash": "f7dc8471a6e994d274f02f2950d0f4ffcb0cfaad5e1fbcd18de0c20150576262",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "regex": 0.0,
+    "shifted_pages": 0.0,
+    "ignore_hidden": 0.0625,
+    "placeholder_is_label": 0.75,
+    "no_wrapping_labels": 0.4375,
+    "labelledby_unchecked": 0.75,
+    "filename_alt_ok": 0.5625,
+    "link_content_first": 0.5
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 16,
+   "seed": 1,
+   "tier": "medium",
+   "gen_s": 0.04,
+   "hash": "b9c5e98f5ab11b1e6e4d27a1d6ef7e249c664000c75839df1641793a6ea3f641",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.0,
+   "wrong": {
+    "regex": 0.0,
+    "shifted_pages": 0.0,
+    "ignore_hidden": 0.0,
+    "placeholder_is_label": 0.6875,
+    "no_wrapping_labels": 0.5625,
+    "labelledby_unchecked": 0.5625,
+    "filename_alt_ok": 0.75,
+    "link_content_first": 0.25
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 56,
+   "seed": 0,
+   "tier": "hard",
+   "gen_s": 0.15,
+   "hash": "c7e03bc13a065ac7df9f1bb0ed9a3e62387a5fdf723c3bfdd9ab14db968322f4",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.1,
+   "wrong": {
+    "regex": 0.0,
+    "shifted_pages": 0.0,
+    "ignore_hidden": 0.0893,
+    "placeholder_is_label": 0.75,
+    "no_wrapping_labels": 0.4464,
+    "labelledby_unchecked": 0.5893,
+    "filename_alt_ok": 0.75,
+    "link_content_first": 0.3571
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  },
+  {
+   "n": 56,
+   "seed": 1,
+   "tier": "hard",
+   "gen_s": 0.15,
+   "hash": "6d4b952b2fa9f5ce0dd4b8eb10870e375b2355ed972bf8f1481323a9f39899d9",
+   "deterministic": true,
+   "canary_prompt": true,
+   "canary_world": true,
+   "oracle": 1.0,
+   "oracle_s": 0.1,
+   "wrong": {
+    "regex": 0.0,
+    "shifted_pages": 0.0,
+    "ignore_hidden": 0.0357,
+    "placeholder_is_label": 0.5893,
+    "no_wrapping_labels": 0.5536,
+    "labelledby_unchecked": 0.5179,
+    "filename_alt_ok": 0.7857,
+    "link_content_first": 0.3571
+   },
+   "format_only": {
+    "empty": 0.0,
+    "prose": 0.0,
+    "empty_json": 0.0,
+    "empty_list": 0.0,
+    "final_answer_word": 0.0
+   },
+   "tool_errors": []
+  }
+ ]
+}

@@ -1,0 +1,136 @@
+{
+ "_note": "DEV STUB written by Claude for local tests only. Never ships; replaced by k3.json from self-hosted K3.",
+ "company": "Stub Works",
+ "title": "Stub Energy Report",
+ "headings": {
+  "overview": "Overview",
+  "meters": "Meters",
+  "monthly": "Monthly meter data",
+  "notes": "Notes",
+  "adjustments": "Prior-period adjustments",
+  "background": "Background"
+ },
+ "columns": {
+  "meter": "Meter",
+  "description": "Description",
+  "unit": "Unit",
+  "month": "Month",
+  "consumption": "Consumption",
+  "read_type": "Read type",
+  "cost": "Cost",
+  "budget": "Budget cost",
+  "prior": "Prior-year consumption"
+ },
+ "period": "Covers {start} to {end}.",
+ "currency_line": "Costs in {cur}.",
+ "meter_desc": {
+  "electricity": [
+   "electricity meter a",
+   "electricity meter b",
+   "electricity meter c",
+   "electricity meter d",
+   "electricity meter e"
+  ],
+  "gas": [
+   "gas meter a",
+   "gas meter b",
+   "gas meter c",
+   "gas meter d",
+   "gas meter e"
+  ],
+  "diesel": [
+   "diesel meter a",
+   "diesel meter b",
+   "diesel meter c",
+   "diesel meter d",
+   "diesel meter e"
+  ],
+  "coal": [
+   "coal meter a",
+   "coal meter b",
+   "coal meter c",
+   "coal meter d",
+   "coal meter e"
+  ],
+  "steam": [
+   "steam meter a",
+   "steam meter b",
+   "steam meter c",
+   "steam meter d",
+   "steam meter e"
+  ]
+ },
+ "scale_note": "Consumption columns below are in thousands of {unit}.",
+ "mult_note": "Meter {meter} replaced in {month}; from {month2} onward multiply shown figures by {mult}.",
+ "corr_note": "Meter {meter} {month} misreported; corrected consumption {value} {unit}, cost unchanged.",
+ "sub_note": "Meter {sub} is a sub-meter of {main}; already included in {main2}.",
+ "est_note": "Estimate for meter {meter} in {month} replaced by actual {value} {unit}, cost {cost} {cur}.",
+ "no_adjustments": "No prior-period adjustments.",
+ "decoy_budget": "Budget for meter {meter} in {month} revised to {value} {cur}.",
+ "decoy_prior": "In {month} of the prior year meter {meter} recorded {value} {unit}.",
+ "benign_notes": [
+  "Benign stub note a.",
+  "Benign stub note b.",
+  "Benign stub note c.",
+  "Benign stub note d.",
+  "Benign stub note e.",
+  "Benign stub note f.",
+  "Benign stub note g.",
+  "Benign stub note h."
+ ],
+ "pad": [
+  "Stub background sentence a about {name} in {site}, unlike {other}.",
+  "Stub background sentence b about {name} in {site}, unlike {other}.",
+  "Stub background sentence c about {name} in {site}, unlike {other}.",
+  "Stub background sentence d about {name} in {site}, unlike {other}.",
+  "Stub background sentence e about {name} in {site}, unlike {other}.",
+  "Stub background sentence f about {name} in {site}, unlike {other}.",
+  "Stub background sentence g about {name} in {site}, unlike {other}.",
+  "Stub background sentence h about {name} in {site}, unlike {other}.",
+  "Stub background sentence i about {name} in {site}, unlike {other}.",
+  "Stub background sentence j about {name} in {site}, unlike {other}.",
+  "Stub background sentence k about {name} in {site}, unlike {other}.",
+  "Stub background sentence l about {name} in {site}, unlike {other}.",
+  "Stub background sentence m about {name} in {site}, unlike {other}.",
+  "Stub background sentence n about {name} in {site}, unlike {other}.",
+  "Stub background sentence o about {name} in {site}, unlike {other}.",
+  "Stub background sentence p about {name} in {site}, unlike {other}.",
+  "Stub background sentence q about {name} in {site}, unlike {other}.",
+  "Stub background sentence r about {name} in {site}, unlike {other}.",
+  "Stub background sentence s about {name} in {site}, unlike {other}.",
+  "Stub background sentence t about {name} in {site}, unlike {other}.",
+  "Stub background sentence u about {name} in {site}, unlike {other}.",
+  "Stub background sentence v about {name} in {site}, unlike {other}.",
+  "Stub background sentence w about {name} in {site}, unlike {other}.",
+  "Stub background sentence x about {name} in {site}, unlike {other}.",
+  "Stub background sentence y about {name} in {site}, unlike {other}.",
+  "Stub background sentence z about {name} in {site}, unlike {other}.",
+  "Stub background sentence A about {name} in {site}, unlike {other}.",
+  "Stub background sentence B about {name} in {site}, unlike {other}.",
+  "Stub background sentence C about {name} in {site}, unlike {other}.",
+  "Stub background sentence D about {name} in {site}, unlike {other}."
+ ],
+ "conventions_intro": "Stub conventions intro.",
+ "conventions_rules": [
+  "Totals are for calendar year {year}; exclude months outside {year2}.",
+  "Use the factor table.",
+  "Convert each month's cost at that month's rate.",
+  "E estimates stand unless replaced.",
+  "Thousands notes apply to both consumption columns.",
+  "Apply multiplier, sub-meter and correction notes.",
+  "Budget and prior-year columns are not used.",
+  "3 and 2 decimals; 0.1% accepted."
+ ],
+ "fx_note": "USD per one {cur}, monthly, with an annual average.",
+ "intro": "{company}: compute {year} energy MWh and cost USD for {n} facilities {first} to {last}.",
+ "answer_line": "Answer one JSON object like {example}.",
+ "tools": {
+  "list_facilities": "List facilities.",
+  "read_report": "Read a report.",
+  "read_conventions": "Read conventions.",
+  "read_fx": "Read FX rates.",
+  "search_report": "Search a facility's reports.",
+  "calculator": "Arithmetic."
+ },
+ "unit_prompt": "Compute {year} energy and cost for {fid}. End with: UNIT | {fid2} | <energy_mwh> | <cost_usd>"
+}

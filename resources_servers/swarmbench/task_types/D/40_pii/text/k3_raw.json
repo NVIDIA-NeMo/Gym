@@ -1,0 +1,139 @@
+{
+ "api": "http://10.49.69.30:8000/v1",
+ "model_requested": "policy_model",
+ "system": "You write task text for an offline evaluation of software agents. Follow the facts you are given exactly; do not add rules, numbers or names that are not in the brief. Reply with exactly one JSON object and nothing else.",
+ "request": {
+  "user": "Write the task-facing text for a privacy-scan task at a fictional public library's digitization program. Agents audit digitized documents: each document is an excerpt of a public-domain novel whose scan also picked up short inserted passages (margin notes, loan-slip remarks, reader letters, staff annotations, catalogue notes). Before the archive is published, every item of personal data of a private individual must be found and reported, following a written privacy policy. Two reference lists exist: an officials directory (public officials with title, agency and office phone) and a consent register (people who agreed to have their details published, each with a status that is either granted or withdrawn). Code fills names, numbers, emails, addresses and dates into your sentences through {placeholders}, and a parser reads the filled sentences back, so: keep every placeholder exactly as named, use each listed placeholder exactly once, keep each template on a single line, never use the character \"|\", and do not write any digits, names of people, phone numbers, emails or addresses yourself. Return one JSON object with these keys:\n\n\"program\": a fictional name for the library digitization program (2-4 words).\n\"intro\": the opening paragraph of the task prompt. Placeholders {program}, {n} (number of documents), {first} and {last} (first and last document id). Say that the privacy office must scan all {n} documents and, for every document, list each item of personal data that the policy requires to be reported, and that most of each document is original literary text.\n\"rule_report\": a paragraph defining reportable personal data of a private individual and the seven item types, written with these exact type keys in backticks: `name` (full name of a private person), `phone` (a personal phone number), `email` (a personal email address), `address` (a home address), `dob` (a date of birth), `gov_id` (a government identification number such as a social security number), `card` (a payment card number). Say each distinct item is reported once per document even if it appears several times.\n\"rule_officials\": a paragraph: people listed in the officials directory, mentioned in their official role, are not private individuals; neither their names nor their office phone numbers are reported. Tell the agent to check the directory rather than guess from titles.\n\"rule_business\": a paragraph: organisations are not individuals; business main lines, role or shared mailboxes (such as info, press, support or orders addresses of an organisation) and business addresses are not reported.\n\"rule_numbers\": a paragraph: reference numbers that merely look like identification numbers are not personal data and are not reported: court case or docket numbers, catalogue part numbers and ISBNs; only a number the text presents as a person's government identification number counts as `gov_id`.\n\"rule_samples\": a paragraph: specimen or sample entries printed on blank forms, templates or instructions, which the text presents as illustrations rather than real people, are not personal data and are not reported.\n\"rule_luhn\": a paragraph: a payment card number is reported as `card` only if it passes the Luhn checksum (explain the Luhn check in one or two plain sentences: from the rightmost digit, double every second digit, subtract nine from any result above nine, sum all digits, valid when the sum is a multiple of ten); a number that fails is a mistyped number and is not reported, but the person's other data is still reported.\n\"rule_consent\": a paragraph: when a person is in the consent register with status granted, none of that person's data (name included) is reported; when the status is withdrawn, or the person is not in the register, their data is reported as normal. Tell the agent to check the register for every private person.\n\"rule_source\": a paragraph: characters, historical figures and authors that belong to the original literary text are not private individuals and are not reported; only the inserted passages can contain reportable data.\n\"rule_format\": a paragraph on values: copy names, emails and addresses exactly as written (full address including city, state and postal code), phone, gov_id and card numbers may be written with or without separators, and `dob` must be given as year-month-day (for example the form YYYY-MM-DD, written with letters as shown, since you must not write digits).\n\"answer_line\": the final instruction on the answer format, with placeholder {example}: end the reply with one JSON object that maps every document id to the list of reported items, each item an object with keys type and value, using an empty list for a document with nothing to report, for example {example}.\n\"unit_prompt\": a short task prompt for auditing a single document, with placeholders {doc} (the document id) and {example}: audit only document {doc} under the policy below (the policy text is appended after your text) and end with one JSON object mapping {doc} to its list of items, for example {example}.\n\"directory_header\": one line introducing the officials directory listing.\n\"register_header\": one line introducing the consent register listing.\n\"tools\": an object with one short description (one sentence each) for these tools: \"list_documents\" (lists document ids with source title and paragraph count, paged with offset and limit), \"read_document\" (returns numbered paragraphs of one document from paragraph start, a page at a time), \"search_document\" (finds paragraphs of one document containing a text, case-insensitive), \"read_directory\" (pages through the officials directory), \"search_directory\" (finds directory rows containing a text), \"read_register\" (pages through the consent register), \"search_register\" (finds register rows containing a text).\n\"p_contact\": a list of 6 different inserted passages (one or two sentences each, varied styles: margin note, loan slip, reader letter, staff memo) in which a private person {name} gives a personal phone number {phone} and personal email address {email}.\n\"p_home\": a list of 6 different inserted passages in which a private person {name} is recorded with home address {address} and date of birth {dob}.\n\"p_id\": a list of 6 different inserted passages in which a private person {name} is recorded with a government identification number {id} (for example on an old library registration card).\n\"p_card\": a list of 6 different inserted passages in which a private person {name} wrote down a payment card number {card} (for example to pay a late fee).\n\"p_via_business\": a list of 6 different inserted passages in which a private person {name} (for example a reader or volunteer) asks to be contacted only through the main line {phone} of the organisation {company} where they work, so the number is a business line.\n\"p_official_private\": a list of 6 different inserted passages in which {title} {name} of {agency} appears purely as a private person (for example returning an overdue novel, paying a personal fine or joining a reading circle) and leaves a home phone number {phone}.\n\"d_sample\": a list of 6 different inserted passages describing a specimen or sample entry printed on a blank form or instruction sheet, showing the made-up example name {name} and example identification number {id}.\n\"d_official\": a list of 6 different inserted passages in which an official, {title} {name} of {agency}, acting in that official role (e.g. approving the digitization, inspecting the building), gives an office phone {phone}.\n\"d_business\": a list of 6 different inserted passages in which an organisation {company} gives its main line {phone}, a shared mailbox {email} and its business address {address}.\n\"d_case\": a list of 4 different inserted passages that mention a court docket or case number {case} (e.g. a donated volume from a court library).\n\"d_part\": a list of 4 different inserted passages that mention a catalogue part number {part} (e.g. a replacement shelf bracket or scanner part).\n\"d_isbn\": a list of 4 different inserted passages that mention the ISBN {isbn} of a modern reprint.",
+  "keys": [
+   "program",
+   "intro",
+   "rule_report",
+   "rule_officials",
+   "rule_business",
+   "rule_numbers",
+   "rule_luhn",
+   "rule_consent",
+   "rule_source",
+   "rule_format",
+   "answer_line",
+   "unit_prompt",
+   "directory_header",
+   "register_header",
+   "tools",
+   "p_contact",
+   "p_home",
+   "p_id",
+   "p_card",
+   "d_official",
+   "d_business",
+   "d_case",
+   "d_part",
+   "d_isbn",
+   "rule_samples",
+   "p_via_business",
+   "p_official_private",
+   "d_sample"
+  ],
+  "placeholders": {
+   "intro": [
+    "{program}",
+    "{n}",
+    "{first}",
+    "{last}"
+   ],
+   "answer_line": [
+    "{example}"
+   ],
+   "unit_prompt": [
+    "{doc}",
+    "{example}"
+   ],
+   "p_contact": [
+    "{name}",
+    "{phone}",
+    "{email}"
+   ],
+   "p_home": [
+    "{name}",
+    "{address}",
+    "{dob}"
+   ],
+   "p_id": [
+    "{name}",
+    "{id}"
+   ],
+   "p_card": [
+    "{name}",
+    "{card}"
+   ],
+   "d_official": [
+    "{title}",
+    "{name}",
+    "{agency}",
+    "{phone}"
+   ],
+   "d_business": [
+    "{company}",
+    "{phone}",
+    "{email}",
+    "{address}"
+   ],
+   "d_case": [
+    "{case}"
+   ],
+   "d_part": [
+    "{part}"
+   ],
+   "d_isbn": [
+    "{isbn}"
+   ],
+   "p_via_business": [
+    "{name}",
+    "{phone}",
+    "{company}"
+   ],
+   "p_official_private": [
+    "{title}",
+    "{name}",
+    "{agency}",
+    "{phone}"
+   ],
+   "d_sample": [
+    "{name}",
+    "{id}"
+   ]
+  },
+  "lists": {
+   "p_contact": 6,
+   "p_home": 6,
+   "p_id": 6,
+   "p_card": 6,
+   "d_official": 6,
+   "d_business": 6,
+   "d_case": 4,
+   "d_part": 4,
+   "d_isbn": 4,
+   "p_via_business": 6,
+   "p_official_private": 6,
+   "d_sample": 6
+  }
+ },
+ "attempts": [
+  {
+   "seconds": 334.3,
+   "usage": {
+    "prompt_tokens": 1843,
+    "total_tokens": 12445,
+    "completion_tokens": 10602,
+    "prompt_tokens_details": null,
+    "completion_tokens_details": {
+     "reasoning_tokens": 0
+    }
+   },
+   "model": "policy_model",
+   "reply": "{\n  \"program\": \"Open Stacks Digitization Program\",\n  \"intro\": \"Welcome to the {program}, the public library's effort to publish digitized excerpts of public-domain novels online. Every scan also picked up short inserted passages, such as margin notes, loan-slip remarks, reader letters, staff annotations and catalogue notes, though most of each document is original literary text. On behalf of the privacy office you must scan all {n} documents, from document {first} through document {last}, and for every document list each item of personal data that the privacy policy below requires to be reported, so the archive can be cleaned before publication.\",\n  \"rule_report\": \"Reportable personal data is any information in an inserted passage that identifies a private individual. The policy defines seven item types: `name` for the full name of a private person, `phone` for a personal phone number, `email` for a personal email address, `address` for a home address, `dob` for a date of birth, `gov_id` for a government identification number such as a social security number, and `card` for a payment card number. Report each distinct item once per document, even if it appears several times in that document.\",\n  \"rule_officials\": \"People listed in the officials directory are public officials; when they are mentioned in their official role they are not acting as private individuals, so neither their names nor their office phone numbers are reported. Always check the directory to confirm whether a person is listed there instead of guessing from a title alone, since a title in the text does not by itself prove a directory entry.\",\n  \"rule_business\": \"Organisations are not individuals, so their details are never personal data. A business main line, a role or shared mailbox such as an info, press, support or orders address of an organisation, and a business address are not reported, even when a private person asks to be reached through them.\",\n  \"rule_numbers\": \"Some reference numbers merely look like identification numbers but are not personal data and are not reported: court case or docket numbers, catalogue part numbers and ISBNs identify files or things, not people. Only a number that the text presents as a person's own government identification number counts as `gov_id`.\",\n  \"rule_samples\": \"Specimen or sample entries printed on blank forms, templates or instruction sheets are not personal data. When the text presents a name or number as an illustration of how to fill in a form rather than as a real person, nothing from that sample entry is reported.\",\n  \"rule_luhn\": \"Report a payment card number as `card` only if it passes the Luhn checksum. To run the check, start from the rightmost digit and double every second digit, subtract nine from any result that is above nine, then sum all the digits; the number is valid when the sum is a multiple of ten. A number that fails the check is treated as a mistyped number and is not reported, but the person's other data is still reported as normal.\",\n  \"rule_consent\": \"The consent register lists people who agreed to have their details published. When a person is in the register with status granted, none of that person's data is reported, name included; when the status is withdrawn, or the person is not in the register at all, their data is reported as normal. Check the register for every private person you find before deciding what to report.\",\n  \"rule_source\": \"Characters, historical figures and authors who belong to the original literary text are not private individuals and are never reported, no matter how much detail the novel gives about them. Only the inserted passages, such as margin notes, loan slips, reader letters, staff annotations and catalogue notes, can contain reportable data.\",\n  \"rule_format\": \"Report values in a consistent form. Copy names, emails and addresses exactly as written in the document, giving the full address including city, state and postal code. Phone, `gov_id` and `card` numbers may be written with or without separators. A `dob` must be given as year-month-day, for example in the form YYYY-MM-DD, written here with letters as shown because this policy text must not contain digits.\",\n  \"answer_line\": \"End your reply with one JSON object that maps every document id to the list of reported items for that document, where each item is an object with keys `type` and `value`, and use an empty list for a document with nothing to report, for example {example}.\",\n  \"unit_prompt\": \"Audit only document {doc} under the privacy policy below; the policy text is appended after this prompt. End your reply with one JSON object that maps the document id to its list of reported items, for example {example}.\",\n  \"directory_header\": \"Officials directory: public officials with title, agency and office phone.\",\n  \"register_header\": \"Consent register: people who agreed to have their details published, each with a status of granted or withdrawn.\",\n  \"tools\": {\n    \"list_documents\": \"Lists document ids with source title and paragraph count, paged with offset and limit.\",\n    \"read_document\": \"Returns the numbered paragraphs of one document starting from a given paragraph, one page at a time.\",\n    \"search_document\": \"Finds the paragraphs of one document that contain a given text, case-insensitive.\",\n    \"read_directory\": \"Pages through the officials directory.\",\n    \"search_directory\": \"Finds directory rows that contain a given text.\",\n    \"read_register\": \"Pages through the consent register.\",\n    \"search_register\": \"Finds register rows that contain a given text.\"\n  },\n  \"p_contact\": [\n    \"Margin note in faded pencil: if this volume is found, please return it to {name}; I can be reached on my home phone {phone} or at {email}.\",\n    \"Loan-slip remark: borrower {name} asked staff to phone {phone} or write to {email} when the reserved copy comes back.\",\n    \"Reader letter tucked between pages: dear librarians, thank you for the wonderful reading room; send any reply to {name} at {email} or ring {phone} in the evening.\",\n    \"Staff memo: {name} left a personal number {phone} and a personal email {email} so we can arrange pickup of the donated box.\",\n    \"Scribbled on the flyleaf: this copy belongs to {name}, phone {phone}, email {email}, please do not throw it away.\",\n    \"Note from a reader: I, {name}, would love to volunteer for the reading circle; my mobile is {phone} and my inbox is {email}.\"\n  ],\n  \"p_home\": [\n    \"Reader letter: please send the reading-group schedule to {name} at {address}; I was born on {dob}, if the membership form needs it.\",\n    \"Staff annotation on the donations ledger: {name}, date of birth {dob}, resides at {address}; promised to drop off the next crate on Saturday.\",\n    \"Loan-slip remark: home delivery requested by {name}, address {address}; date of birth {dob} given for the new borrower record.\",\n    \"Margin note: birthday wishes to {name}, born {dob}, with an invitation to the house at {address}.\",\n    \"Staff memo: file the change-of-details card for {name}, new home address {address}, date of birth confirmed as {dob}.\",\n    \"Reader letter: my grandfather {name} loved this book; he was born on {dob} and lived his whole life at {address}.\"\n  ],\n  \"p_id\": [\n    \"Old library registration card: {name}, government identification number {id}, signed in the presence of the desk clerk.\",\n    \"Staff annotation: the registration card for {name} lists identification number {id}; the card was never updated.\",\n    \"Margin note on the inside cover: member {name}, identification {id}, registered at the front desk.\",\n    \"Loan-slip remark: borrower {name} verified with social security number {id} before the rare volume could leave the building.\",\n    \"Staff memo: archive the old membership file of {name}, which records the government identification number {id} in the top corner.\",\n    \"Reader letter: when I joined, the desk wrote my details as {name} with identification number {id}; please confirm the record was destroyed.\"\n  ],\n  \"p_card\": [\n    \"Loan-slip remark: {name} left card number {card} to cover the late fee on this volume.\",\n    \"Staff memo: {name} asked us to charge the overdue fine to card {card}; the slip is clipped to the ledger.\",\n    \"Margin note: I, {name}, will pay for the damaged dust jacket; charge card {card}.\",\n    \"Reader letter: to settle the replacement cost, please debit the card {card} belonging to {name}.\",\n    \"Staff annotation: payment promised by {name}, who wrote card number {card} on the back of the reminder notice.\",\n    \"Note taped to the returns bin: {name} here, put the lost-book charge on card {card} and post the receipt.\"\n  ],\n  \"p_via_business\": [\n    \"Reader letter: please do not phone me at home; I, {name}, can be reached only through the switchboard of {company} at {phone} during the day.\",\n    \"Margin note: volunteer {name} asks that all messages go through the main line {phone} of {company}, never to a private number.\",\n    \"Staff memo: to reach {name} about the shelving rota, call the front desk of {company} on {phone} and ask for the mailroom.\",\n    \"Loan-slip remark: contact {name} care of {company}, main line {phone}; no personal number was given.\",\n    \"Reader letter: my employer {company} takes messages for me at {phone}; signed, {name}.\",\n    \"Staff annotation: {name} volunteers on weekends but insists any urgent call go to the office of {company} at {phone} only.\"\n  ],\n  \"p_official_private\": [\n    \"Loan-slip remark: {title} {name} of {agency} returned the overdue novel this morning and left home phone {phone} in case the fine notice needs checking.\",\n    \"Margin note: {title} {name} of {agency} joined the mystery reading circle in a private capacity and can be phoned at home on {phone}.\",\n    \"Staff memo: the personal fine paid by {title} {name} of {agency} was settled in cash; for the receipt, ring the home number {phone}.\",\n    \"Reader letter: though I serve as {title} at {agency}, I write as a private reader, {name}, and you may reach my household at {phone}.\",\n    \"Staff annotation: {title} {name} of {agency} donated family novels from home and asked for pickup coordination via the private line {phone}.\",\n    \"Note in the suggestion box: {title} {name} of {agency}, writing off duty, requests more large-print editions; home phone {phone}.\"\n  ],\n  \"d_sample\": [\n    \"Blank registration form: the specimen entry shows how to fill it in, with the example name {name} and the example identification number {id} printed in grey.\",\n    \"Instruction sheet for new borrowers: the sample card is filled out with the made-up name {name} and the fictitious number {id} for illustration only.\",\n    \"Template loan slip: the shaded box demonstrates a completed slip using the placeholder name {name} and the sample identification {id}.\",\n    \"Staff training sheet: here is what a finished membership card looks like; the example uses {name} with the demonstration number {id}, not a real patron.\",\n    \"Blank change-of-address card: an illustrative entry, name {name} and identification number {id}, is printed as a guide at the top.\",\n    \"Photocopied how-to leaflet: complete the form as shown in the specimen, where {name} stands in for the applicant and {id} for the identification number.\"\n  ],\n  \"d_official\": [\n    \"Catalogue note: the digitization of this volume was approved by {title} {name} of {agency}, office phone {phone}.\",\n    \"Staff memo: {title} {name} of {agency} inspected the reading room before the scanning began; direct questions to the office line {phone}.\",\n    \"Letterhead correspondence: in my capacity as {title} of {agency}, I confirm the funding; signed {name}, office telephone {phone}.\",\n    \"Catalogue note: the building inspection certificate was issued by {title} {name} of {agency}, reachable at the office on {phone}.\",\n    \"Staff annotation: {title} {name} of {agency} signed the release form for the archive; the office switchboard is {phone}.\",\n    \"Formal notice clipped to the volume: approved for public release by {title} {name} of {agency}; enquiries to the office phone {phone}.\"\n  ],\n  \"d_business\": [\n    \"Catalogue note: the binding was repaired by {company}, main line {phone}, mailbox {email}, workshop at {address}.\",\n    \"Staff memo: order replacement scanner lamps from {company} at {address}; phone {phone} or write to {email}.\",\n    \"Printed invoice tucked in the volume: {company}, {address}; orders desk {phone}, enquiries {email}.\",\n    \"Loan-slip remark: the courier firm {company} can be reached on {phone}, via {email}, or at its depot, {address}.\",\n    \"Catalogue note: microfilm supplies donated by {company} of {address}; the front desk answers at {phone} and {email}.\",\n    \"Staff annotation: for pest-control visits contact {company}, main line {phone}, shared inbox {email}, office address {address}.\"\n  ],\n  \"d_case\": [\n    \"Catalogue note: this volume was donated from a court library and still bears the docket number {case} on its spine label.\",\n    \"Margin note: see the proceedings under case number {case}; the donor marked the relevant chapter.\",\n    \"Staff memo: the acquisition file references court case {case}, which ended long before the book arrived.\",\n    \"Reader letter: I found this copy while researching docket {case}; please keep it in the open stacks.\"\n  ],\n  \"d_part\": [\n    \"Staff memo: the replacement shelf bracket, catalogue part number {part}, arrives next week.\",\n    \"Catalogue note: a loose hinge was repaired using spare part {part} from the maintenance cupboard.\",\n    \"Staff annotation: order the scanner glass guide, part {part}, before the next batch is digitized.\",\n    \"Margin note by a technician: the jammed feeder needs roller kit {part}; do not force it.\"\n  ],\n  \"d_isbn\": [\n    \"Catalogue note: a modern reprint of this novel is available under ISBN {isbn}.\",\n    \"Staff memo: order two paperback reprints, ISBN {isbn}, for the reading circle.\",\n    \"Margin note: the teacher recommends the annotated reprint, ISBN {isbn}, for younger readers.\",\n    \"Reader letter: I compared this scan with the reprint carrying ISBN {isbn} and prefer the original typesetting.\"\n  ]\n}",
+   "problems": []
+  }
+ ],
+ "created": "2026-10-14 16:24:59 UTC"
+}
