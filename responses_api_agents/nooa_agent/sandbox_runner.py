@@ -120,7 +120,7 @@ class SandboxNOOARunner:
                 raise error
             return self.artifact.run_result()
         except (Exception, asyncio.CancelledError) as error:
-            self._record_capture_error()
+            self._record_capture_error(error)
             evidence = self.artifact or self.checkpoint
             if evidence is not None:
                 request.model_cookies.update(evidence.model_cookies)
@@ -200,8 +200,11 @@ class SandboxNOOARunner:
         )
         self.observations = observations
 
-    def _record_capture_error(self) -> None:
-        error = self.session.capture_error or self.session.termination_error
+    def _record_capture_error(self, failure: BaseException | None = None) -> None:
+        error: BaseException | None = self.session.capture_error or self.session.termination_error
+        if error is None and self.session.launch_started and self.session.cleanup is None:
+            # Unknown cleanup blocks capture but remains retryable in the shared session.
+            error = failure
         if error is None:
             return
         observations = (self.observations or AgentObservationBundle(source="nooa")).model_copy(deep=True)
@@ -213,5 +216,8 @@ class SandboxNOOARunner:
         """Join shared finalization and retain captured evidence after releasing the client."""
         try:
             await self.session.close(timeout=self.close_timeout)
-        finally:
+        except (Exception, asyncio.CancelledError) as error:
+            self._record_capture_error(error)
+            raise
+        else:
             self._record_capture_error()

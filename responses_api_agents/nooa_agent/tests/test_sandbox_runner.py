@@ -210,6 +210,7 @@ async def test_independent_execution_failure_overrides_gradable_artifact(receipt
     assert caught.value.result.episode.response.status == "failed"
     assert caught.value.result.episode.response.output == final.response.output
     assert r.artifact.termination_reason is reason
+    assert r.observations == final.observations
     assert request.resource_cookies == {"resource": "new"}
     await r.close()
     assert r.artifact == final
@@ -285,16 +286,36 @@ async def test_interrupted_run_preserves_evidence_and_original_failure(kind: str
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("receipt", [None, '{"cleanup_confirmed":false}'])
-async def test_missing_or_malformed_receipt_retains_handle_for_close_retry(receipt: str | None) -> None:
+@pytest.mark.parametrize("first_call", ["run", "close"])
+async def test_missing_or_malformed_receipt_retains_handle_for_close_retry(
+    receipt: str | None, first_call: str
+) -> None:
     r, s = runner()
     if receipt is not None:
         s.files[r.directory + "/cleanup.json"] = receipt
     s.files[r.directory + "/checkpoint.json"] = checkpoint_artifact().model_dump_json()
-    with pytest.raises(RuntimeError, match="unknown|not confirmed"):
-        await r.run(payload().request)
+    download = AsyncMock(wraps=s.download)
+    s.download = download
+    if first_call == "close":
+        r.session.launch_started = True
+        r.session._collect = r._collect_artifacts
+    with pytest.raises(RuntimeError, match="unknown|not confirmed") as caught:
+        if first_call == "run":
+            await r.run(payload().request)
+        else:
+            await r.close()
+    assert r.observations is not None
+    assert [gap.code for gap in r.observations.gaps] == ["sandbox_capture_failed"]
+    assert str(caught.value) in r.observations.gaps[0].detail
+    observations = r.observations.model_copy(deep=True)
     with pytest.raises(RuntimeError, match="unknown|not confirmed"):
         await r.close()
+    assert r.observations == observations
+    assert r.session.capture_error is None
+    assert r.session.termination_error is None
     assert r.checkpoint is None
+    assert not any(call.args[0].endswith(("/checkpoint.json", "/result.json")) for call in download.await_args_list)
+    assert not any("rm -rf" in call.args[0] for call in s.exec.await_args_list)
     assert not r.session.closed
     s.disconnect.assert_not_awaited()
     s.files[r.directory + "/cleanup.json"] = json.dumps(cleanup_receipt())
@@ -302,6 +323,8 @@ async def test_missing_or_malformed_receipt_retains_handle_for_close_retry(recei
     assert r.session.closed
     assert r.checkpoint is not None
     assert r.checkpoint.termination_reason is NOOATerminationReason.INFRASTRUCTURE_ERROR
+    assert r.checkpoint.response.status == "failed"
+    assert {gap.code for gap in r.observations.gaps} == {"test", "partial_checkpoint", "sandbox_result_unavailable"}
     s.disconnect.assert_awaited_once()
     s.stop.assert_not_awaited()
 
@@ -347,6 +370,7 @@ async def test_failed_staging_can_release_borrowed_connection() -> None:
     await r.close()
     assert not r.session.launch_started
     assert r.artifact is None
+    assert r.observations is None
     s.disconnect.assert_awaited_once()
     s.stop.assert_not_awaited()
 
