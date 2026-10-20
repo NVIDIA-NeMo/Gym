@@ -473,8 +473,15 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
                 termination = HarnessOutcome(reason="infrastructure_error", detail="Invalid model response")
                 break
         history = history[: len(responses)]
+        # The scored transcript ends at the reply declared as the terminal call (the last one mini-SWE kept). Rejected
+        # replies after it were never replayed, and a transcript ending in them would contradict the declaration, so
+        # token capture would drop the rollout. They stay in the native trajectory.
+        terminal_response_id = last_kept_response_id(result)
+        kept = len(responses)
+        if terminal_response_id:
+            kept = next((i for i in range(len(responses), 0, -1) if responses[i - 1].id == terminal_response_id), kept)
         output_items = []
-        for index, model_response in enumerate(responses, start=1):
+        for index, model_response in enumerate(responses[:kept], start=1):
             output_items.extend(model_response.output)
             for tool in tool_history:
                 if tool["model_index"] == index and tool.get("message") is not None:
@@ -499,7 +506,6 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
             extra["mini_swe_trajectory"] = native_trajectory
             # Name the call token capture should train on: rejected replies are side branches that mini-SWE never
             # replays, and without this a run ending in several of them has no unambiguous terminal call.
-            terminal_response_id = last_kept_response_id(native_trajectory)
             if terminal_response_id:
                 extra[TERMINAL_RESPONSE_ID_KEY] = terminal_response_id
             termination.artifacts = [str(self.directory / "trajectory.json")]

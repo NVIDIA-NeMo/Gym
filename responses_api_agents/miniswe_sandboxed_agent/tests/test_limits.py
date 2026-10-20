@@ -169,16 +169,9 @@ def usage(input_tokens, output_tokens):
 def model_response(index, *, command=None, cut_at=None):
     """A kept bash call (``command``), or a reply the server cut so that input + output == ``cut_at``."""
     cut = command is None
-    output = []
-    if not cut:
-        output = [
-            {
-                "type": "function_call",
-                "call_id": f"call-{index}",
-                "name": "bash",
-                "arguments": json.dumps({"command": command}),
-            }
-        ]
+    # A reply cut mid tool call carries the call with empty arguments, which mini-SWE rejects.
+    arguments = "{}" if cut else json.dumps({"command": command})
+    output = [{"type": "function_call", "call_id": f"call-{index}", "name": "bash", "arguments": arguments}]
     input_tokens = 392_000 + 58 * index
     return NeMoGymResponse(
         id=f"response-{index}",
@@ -210,8 +203,8 @@ async def run_scripted(tmp_path, runner_factory, script, *, window):
         model_name="model",
         directory=tmp_path,
     )
-    _, outcome, extra = await harness.execute(15)
-    return requests, outcome, extra
+    response, outcome, extra = await harness.execute(15)
+    return requests, outcome, extra, response
 
 
 @pytest.mark.parametrize(
@@ -225,7 +218,7 @@ async def run_scripted(tmp_path, runner_factory, script, *, window):
 async def test_format_errors_cut_at_the_context_window_are_a_context_overflow(
     tmp_path, runner_factory, window, cut_at, expected
 ):
-    requests, outcome, extra = await run_scripted(
+    requests, outcome, extra, _ = await run_scripted(
         tmp_path, runner_factory, lambda n: model_response(n, cut_at=cut_at), window=window
     )
     assert len(requests) == 3
@@ -244,13 +237,25 @@ def cut_then_submit(n):
 
 
 @pytest.mark.parametrize(
-    "script,declared",
+    "script,declared,scored_calls,rejected",
     [
-        (kept_then_cut, "response-1"),  # three cut replies after a kept call: train on the kept call
-        (cut_then_submit, "response-2"),  # the submission is the last kept call
-        (lambda n: model_response(n, cut_at=WINDOW), None),  # nothing kept: declare nothing
+        # Three cut replies after a kept call: train on the kept call; the transcript ends with it and its output.
+        (kept_then_cut, "response-1", ["call-1"], 3),
+        # A cut reply, then a kept submission: the earlier rejected reply stays in the transcript.
+        (cut_then_submit, "response-2", ["call-1", "call-2"], 1),
+        # Nothing kept: declare nothing and keep the whole transcript.
+        (lambda n: model_response(n, cut_at=WINDOW), None, ["call-1", "call-2", "call-3"], 3),
     ],
 )
-async def test_harness_declares_its_last_kept_reply_as_the_terminal_call(tmp_path, runner_factory, script, declared):
-    _, _, extra = await run_scripted(tmp_path, runner_factory, script, window=WINDOW)
+async def test_harness_declares_its_last_kept_reply_as_the_terminal_call(
+    tmp_path, runner_factory, script, declared, scored_calls, rejected
+):
+    _, _, extra, response = await run_scripted(tmp_path, runner_factory, script, window=WINDOW)
     assert extra.get(TERMINAL_RESPONSE_ID_KEY) == declared
+    calls = [item.call_id for item in response.output if item.type == "function_call"]
+    assert calls == scored_calls
+    if declared == "response-1":
+        assert response.output[-1].type == "function_call_output" and response.output[-1].call_id == "call-1"
+    # The native trajectory still holds every rejected reply.
+    messages = extra["mini_swe_trajectory"]["messages"]
+    assert sum(1 for m in messages if (m.get("extra") or {}).get("response") is not None) == rejected
