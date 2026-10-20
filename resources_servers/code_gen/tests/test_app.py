@@ -51,8 +51,12 @@ class TestApp:
             server_client=MagicMock(spec=ServerClient),
         )
         app = server.setup_webserver()
-        with TestClient(app) as client:
-            yield client
+        try:
+            with TestClient(app) as client:
+                yield client
+        finally:
+            # Stop the local Ray cluster this fixture started instead of leaving it to interpreter exit.
+            ray.shutdown()
 
     async def test_verify_pass_via_response(self, code_gen_resources_server_client: TestClient) -> None:
         # Assistant returns a python code block that squares the input

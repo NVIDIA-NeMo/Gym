@@ -2,21 +2,26 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import contextlib
 import runpy
+import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Literal
+from typing import Any, Literal
+from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import orjson
 import pytest
 from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError
 from omegaconf import OmegaConf
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 import nemo_gym.server_utils
 from environment_servers.single_agent_turn.app import (
     SingleAgentTurnEnvironmentServer,
     SingleAgentTurnEnvironmentServerConfig,
+    SingleAgentTurnResult,
     _is_retryable_dependency_error,
 )
 from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
@@ -56,8 +61,9 @@ class _Response:
     ok = True
     cookies = {"session": _Cookie()}
 
-    def __init__(self, body: dict) -> None:
+    def __init__(self, body: dict, headers: dict | None = None) -> None:
         self.body = orjson.dumps(body)
+        self.headers = headers or {}
 
     async def read(self) -> bytes:
         return self.body
@@ -125,7 +131,7 @@ class _Client(ServerClient):
             payload["agent_session_id"] = body["agent_session_id"]
         elif url_path == "/close_session":
             payload["resources_session_id"] = body["resources_session_id"]
-        return _Response(payload)
+        return _Response(payload, response.headers)
 
     def _resolve_base_url(self, server_name: str) -> str:
         return f"http://{server_name}:8000"
@@ -135,6 +141,7 @@ def _environment_server(
     *,
     token_capture: bool = False,
     resources_tool_transports: list[Literal["direct_http", "mcp"]] | None = None,
+    client_type: type[_Client] = _Client,
 ) -> tuple[SingleAgentTurnEnvironmentServer, _Client]:
     global_config = OmegaConf.create(
         {
@@ -153,7 +160,7 @@ def _environment_server(
         }
     )
     response = _agent_response()
-    client = _Client(
+    client = client_type(
         head_server_config=BaseServerConfig(host="head", port=1),
         global_config_dict=global_config,
         calls=[],
@@ -329,6 +336,27 @@ async def test_lost_agent_close_response_is_a_retryable_failure_before_verificat
     assert "/verify" not in [path for _, path, _ in client.calls]
 
 
+async def test_hung_agent_close_still_closes_resources_without_verifying() -> None:
+    environment_server, client = _environment_server()
+    environment_server.config.cleanup_timeout_seconds = 0.02
+    client.slow_path = "/v1/agent_sessions/close"
+    # Neither timed-out agent close consumes a response; Resources closes next.
+    client.responses[3:] = [_Response({"resources_session_id": "resources-session"})]
+
+    result = await environment_server.run_request(_request())
+
+    assert result.failure is not None
+    assert result.failure.stage == "cleanup"
+    assert [path for _, path, _ in client.calls] == [
+        "/seed_session",
+        "/v1/agent_sessions",
+        "/ng-rollout/rollout-a2/v1/responses",
+        "/v1/agent_sessions/close",
+        "/v1/agent_sessions/close",
+        "/close_session",
+    ]
+
+
 async def test_resources_close_failure_after_verification_keeps_result() -> None:
     environment_server, client = _environment_server()
     client.fail_path = "/close_session"
@@ -386,6 +414,27 @@ async def test_verifier_only_episode_does_not_expose_resource_tools() -> None:
     assert result.result.reward == 1.0
     assert client.calls[1][2]["json"]["tool_accesses"] == []
     assert client.calls[1][2]["json"]["sandbox_access"] is not None
+
+
+@pytest.mark.parametrize("close_cookies", [{}, None])
+async def test_agent_without_a_resources_cookie_jar_keeps_the_seed_cookie_for_verify(
+    close_cookies: dict[str, str] | None,
+) -> None:
+    # An agent with no direct HTTP grant never sees the Resources cookie, so it closes with no jar or an empty jar.
+    # Verify and close must still carry the seed's cookie, which is how a stateful Resources Server finds the episode.
+    environment, client = _environment_server()
+    close = {"agent_session_id": "agent-session"}
+    if close_cookies is not None:
+        close["resources_cookies"] = close_cookies
+    client.responses[3] = _Response(close)
+
+    result = await environment.run_request(_request())
+
+    assert result.result.reward == 1.0
+    verify_call, resources_close_call = client.calls[4], client.calls[5]
+    assert (verify_call[1], resources_close_call[1]) == ("/verify", "/close_session")
+    assert verify_call[2]["cookies"] == {"session": "cookie-value"}
+    assert resources_close_call[2]["cookies"] == {"session": "cookie-value"}
 
 
 @pytest.mark.parametrize("reward", [0.0, 1.0])
@@ -480,6 +529,13 @@ async def test_results_preserve_verification_and_observations(mask_sample: bool,
 )
 async def test_dependency_failure_closes_sessions(stage: str, error: Exception) -> None:
     environment, client = _environment_server()
+    observations = {
+        "source": "hermes",
+        "records": [{"kind": "agent_invocation", "invocation_id": "root", "status": "failed", "model_calls": []}],
+    }
+    close_body = orjson.loads(client.responses[3].body)
+    close_body["agent_observations"] = observations
+    client.responses[3] = _Response(close_body)
     responses = client.responses
     if stage == "agent":
         client.responses = [*responses[:2], error, responses[3], responses[5]]
@@ -493,6 +549,14 @@ async def test_dependency_failure_closes_sessions(stage: str, error: Exception) 
     assert result.failure.failure_reason == str(error)
     assert result.failure.terminal is isinstance(error, ValueError)
     assert result.failure.partial_response == (_agent_response() if stage == "verification" else None)
+    # The closed agent session's evidence survives the failure, including in the legacy flat reply.
+    assert result.failure.agent_observations == AgentObservationBundle.model_validate(observations)
+    legacy = SingleAgentTurnLegacyEnvironmentServer(config=environment.config, server_client=client)._legacy_result(
+        result
+    )
+    assert legacy["ng_agent_observations"] == AgentObservationBundle.model_validate(observations).model_dump(
+        mode="json"
+    )
     paths = [path for _, path, _ in client.calls]
     assert paths == [
         "/seed_session",
@@ -560,3 +624,442 @@ async def test_interrupted_activation_closes_agent_before_resources(
         "/close_session",
     ]
     assert not client.responses
+
+
+def test_checkpointing_refuses_more_than_one_worker() -> None:
+    environment_server, client = _environment_server()
+    client.global_config_dict["checkpoint"] = {"enabled": True, "control_auth_token": "t"}
+    config = environment_server.config.model_copy(update={"num_workers": 2})
+    server = SingleAgentTurnEnvironmentServer(config=config, server_client=client)
+
+    with pytest.raises(ValueError, match="num_workers=1"):
+        server.setup_webserver()
+
+
+@pytest.mark.parametrize("reported, expected", [({"x-ng-checkpoint-verify": "replay"}, "replay"), ({}, "wait")])
+async def test_verify_step_mode_comes_from_the_resources_seed_reply(reported: dict, expected: str) -> None:
+    environment_server, client = _environment_server()
+    client.responses[0] = _Response({"resources_session_id": "resources-session"}, reported)
+    modes: list[str] = []
+
+    def record_step(request: object, mode: str) -> contextlib.AbstractAsyncContextManager[None]:
+        modes.append(mode)
+        return contextlib.nullcontext()
+
+    object.__setattr__(environment_server, "checkpoint_step", record_step)
+    await environment_server.run_request(_request())
+
+    # Seeding and the agent invocation replay; closing the agent waits; verification follows the seed reply.
+    assert modes == ["replay", "replay", "wait", expected]
+
+
+@pytest.mark.parametrize("restarting_seed", [None, 0, 1], ids=["neither", "resources", "agent"])
+async def test_a_seed_reply_that_cannot_be_captured_makes_the_episode_a_restart(restarting_seed: int | None) -> None:
+    environment_server, client = _environment_server()
+    if restarting_seed is not None:
+        # Response 0 answers the resources seed, response 1 the agent seed.
+        reply = client.responses[restarting_seed]
+        client.responses[restarting_seed] = _Response(orjson.loads(reply.body), {"x-ng-checkpoint-restart": "1"})
+    restarts: list[object] = []
+
+    async def record_restart(request: object) -> None:
+        restarts.append(request)
+
+    object.__setattr__(environment_server, "checkpoint_restart", record_restart)
+    await environment_server.run_request(_request())
+
+    assert len(restarts) == (0 if restarting_seed is None else 1)
+
+
+@pytest.mark.parametrize("transports", [["direct_http"], ["mcp"], ["direct_http", "mcp"]])
+async def test_an_episode_that_grants_mcp_access_is_a_restart(transports: list[Literal["direct_http", "mcp"]]) -> None:
+    environment_server, client = _environment_server(resources_tool_transports=transports)
+    client.responses[0] = _Response(
+        {
+            "resources_session_id": "resources-session",
+            "resources_tools": {"server_name": "resources", "headers": {"X-NeMo-Gym-Session-Token": "token"}},
+        }
+    )
+    restarts: list[list[str]] = []
+
+    async def record_restart(request: object) -> None:
+        restarts.append([path for _, path, _ in client.calls])
+
+    object.__setattr__(environment_server, "checkpoint_restart", record_restart)
+    await environment_server.run_request(_request())
+
+    # Marked before the agent receives the token, so no checkpoint ever records the episode past its seed.
+    assert restarts == ([["/seed_session"]] if "mcp" in transports else [])
+
+
+async def test_an_agent_that_returns_during_a_checkpoint_parks_at_close_agent_and_stays_ready() -> None:
+    from nemo_gym._checkpoint.control import CheckpointRequest, ParticipantControlPlane
+    from nemo_gym._checkpoint.environment import EnvironmentParticipant
+
+    environment_server, client = _environment_server()
+    participant = EnvironmentParticipant()
+    environment_server._checkpoint = participant
+    controller = ParticipantControlPlane(participant, instance_name="environment", lease_grace_seconds=60)
+    client.slow_path = environment_server._agent_responses_path(_request())
+    running = asyncio.create_task(environment_server.run_request(_request()))
+    # The agent call is under way before the checkpoint opens.
+    async with asyncio.timeout(5):
+        while not any(path == client.slow_path for _, path, _ in client.calls):
+            await asyncio.sleep(0.01)
+    checkpoint = {"checkpoint_id": "c1", "deadline_ts": time.time() + 5}
+    prepared = await controller.prepare(CheckpointRequest(**checkpoint))
+
+    def parked_at_close_agent() -> bool:
+        records = participant.export_records(None)
+        return len(records) == 1 and (records[0].boundary or {}).get("next") == "close_agent"
+
+    # The agent returns while the checkpoint is open, and the episode parks at its next boundary.
+    async with asyncio.timeout(5):
+        while not parked_at_close_agent():
+            await asyncio.sleep(0.01)
+    report = participant.readiness()
+    [record] = participant.export_records(None)
+    await controller.resume(CheckpointRequest(**checkpoint))
+    response = await running
+
+    assert prepared["phase"] == "prepared"
+    assert report.ready, report.blockers
+    assert record.boundary["next"] == "close_agent"
+    assert response.result.reward == 1.0
+
+
+async def test_an_episode_restored_at_close_agent_closes_and_verifies_without_invoking_the_agent() -> None:
+    from nemo_gym._checkpoint.environment import EnvironmentParticipant, EpisodeRecord, task_digest
+
+    environment_server, client = _environment_server()
+    participant = EnvironmentParticipant()
+    environment_server._checkpoint = participant
+    request = _request()
+    handles = {"resources_session_id": "resources-session", "agent_session_id": "agent-session"}
+    participant.restore_records(
+        [
+            EpisodeRecord(
+                episode_id=request.episode_id.model_copy(update={"attempt": request.episode_id.attempt - 1}),
+                task_digest=task_digest(request.task.model_dump(mode="json")),
+                boundary={
+                    "next": "close_agent",
+                    "handles": handles,
+                    "response": _agent_response().model_dump(mode="json"),
+                },
+            )
+        ]
+    )
+    # Only the close, the verification, and the final resources close remain.
+    del client.responses[:3]
+    response = await environment_server.run_request(request)
+
+    assert [path for _, path, _ in client.calls] == ["/v1/agent_sessions/close", "/verify", "/close_session"]
+    assert response.result.reward == 1.0
+
+
+class _HoldingClient(_Client):
+    """Holds every call until ``released`` is set, and records which calls started before then."""
+
+    released: asyncio.Event = Field(default_factory=asyncio.Event)
+    started: list[str] = []
+
+    async def post(self, server_name: str, url_path: str, **kwargs) -> _Response:
+        self.started.append(url_path)
+        await self.released.wait()
+        return await super().post(server_name, url_path, **kwargs)
+
+
+@pytest.mark.parametrize("stage", ["close_agent", "return"])
+async def test_a_restored_replacement_admitted_during_a_second_checkpoint_parks_before_its_stage(
+    stage: str, tmp_path: Path
+) -> None:
+    from environment_servers.single_agent_turn.app import SessionHandles
+    from nemo_gym._checkpoint.control import CheckpointRequest, CommitRequest, ParticipantControlPlane, RestoreRequest
+    from nemo_gym._checkpoint.environment import EnvironmentParticipant, EpisodeRecord, task_digest
+    from nemo_gym._checkpoint.store import write_participant_state
+
+    environment_server, client = _environment_server(client_type=_HoldingClient)
+    participant = EnvironmentParticipant()
+    environment_server._checkpoint = participant
+    controller = ParticipantControlPlane(participant, instance_name="environment", lease_grace_seconds=60)
+    request = _request()
+    first_attempt = request.episode_id.model_copy(update={"attempt": request.episode_id.attempt - 1})
+    handles = SessionHandles(resources_session_id="resources-session", agent_session_id="agent-session").model_dump()
+    response = _agent_response().model_dump(mode="json")
+    result = SingleAgentTurnResult.model_validate(
+        {"responses_create_params": {"input": "task"}, "response": response, "reward": 1.0}
+    ).model_dump(mode="json")
+    if stage == "close_agent":
+        boundary = {"next": "close_agent", "handles": handles, "response": response}
+        remaining = ["/v1/agent_sessions/close", "/verify", "/close_session"]
+    else:
+        boundary = {"next": "return", "handles": handles, "result": result, "observations": None}
+        remaining = ["/close_session"]
+    record = EpisodeRecord(
+        episode_id=first_attempt, task_digest=task_digest(request.task.model_dump(mode="json")), boundary=boundary
+    )
+    write_participant_state(
+        tmp_path / "c0",
+        kind="environment",
+        instance="environment",
+        checkpoint_id="c0",
+        records=[record.to_json_record()],
+    )
+    deadline = time.time() + 30
+    await controller.restore(
+        RestoreRequest(
+            checkpoint_id="r1", deadline_ts=deadline, checkpoint_dir=str(tmp_path / "c0"), episode_ids=[first_attempt]
+        )
+    )
+    await controller.resume(CheckpointRequest(checkpoint_id="r1", deadline_ts=deadline))
+    # A second checkpoint prepares before the replacement arrives.
+    second = CheckpointRequest(checkpoint_id="c2", deadline_ts=deadline)
+    prepared = await controller.prepare(second)
+    del client.responses[: len(client.responses) - len(remaining)]
+    running = asyncio.create_task(environment_server.run_request(request))
+
+    def parked() -> bool:
+        live = request.episode_id.capture_key in participant.steps.keys()
+        return live and len(participant.export_records(None)) == 1
+
+    async with asyncio.timeout(5):
+        while not (parked() or client.started or running.done()):
+            await asyncio.sleep(0.01)
+    ready = participant.readiness().ready
+    started_before_resume = list(client.started)
+    replied_before_resume = running.done()
+
+    assert prepared["phase"] == "prepared"
+    # The replacement parks at its restored boundary before it closes anything or ends.
+    assert (ready, started_before_resume, replied_before_resume) == (True, [], False)
+    committed = await controller.commit(
+        CommitRequest(**second.model_dump(), checkpoint_dir=str(tmp_path / "c2"), episode_ids=[request.episode_id])
+    )
+    [exported] = participant.export_records([request.episode_id])
+    await controller.resume(second)
+    client.released.set()
+    reply = await running
+
+    assert committed["episode_ids"] == [request.episode_id.capture_key]
+    assert exported.boundary == boundary
+    assert [path for _, path, _ in client.calls] == remaining
+    assert reply.result.reward == 1.0
+
+
+class _AgentGateClient(_Client):
+    """Holds the agent call until ``released`` is set."""
+
+    released: asyncio.Event = Field(default_factory=asyncio.Event)
+
+    async def post(self, server_name: str, url_path: str, **kwargs) -> _Response:
+        if url_path.endswith("/v1/responses"):
+            self.calls.append((server_name, url_path, kwargs))
+            await self.released.wait()
+            raise ClientConnectionError("agent connection lost")
+        return await super().post(server_name, url_path, **kwargs)
+
+
+async def test_an_agent_failure_during_a_checkpoint_closes_the_agent_only_after_resume() -> None:
+    from nemo_gym._checkpoint.control import CheckpointRequest, ParticipantControlPlane
+    from nemo_gym._checkpoint.environment import EnvironmentParticipant
+
+    environment_server, client = _environment_server(client_type=_AgentGateClient)
+    participant = EnvironmentParticipant()
+    environment_server._checkpoint = participant
+    controller = ParticipantControlPlane(participant, instance_name="environment", lease_grace_seconds=60)
+    observations = {
+        "source": "hermes",
+        "records": [{"kind": "agent_invocation", "invocation_id": "root", "status": "failed", "model_calls": []}],
+    }
+    close_body = orjson.loads(client.responses[3].body)
+    close_body["agent_observations"] = observations
+    # The agent call takes no scripted reply; the close and the final resources close follow it.
+    client.responses = [*client.responses[:2], _Response(close_body), client.responses[5]]
+    running = asyncio.create_task(environment_server.run_request(_request()))
+    agent_path = environment_server._agent_responses_path(_request())
+    async with asyncio.timeout(5):
+        while not any(path == agent_path for _, path, _ in client.calls):
+            await asyncio.sleep(0.01)
+    checkpoint = CheckpointRequest(checkpoint_id="c1", deadline_ts=time.time() + 30)
+    prepared = await controller.prepare(checkpoint)
+    client.released.set()
+    # The failed activation leaves the episode with no boundary, parked until resume.
+    async with asyncio.timeout(5):
+        while [record.boundary for record in participant.export_records(None)] != [None]:
+            await asyncio.sleep(0.01)
+    ready = participant.readiness().ready
+    paths_before_resume = [path for _, path, _ in client.calls]
+    replied_before_resume = running.done()
+    await controller.resume(checkpoint)
+    result = await running
+
+    assert prepared["phase"] == "prepared" and ready and not replied_before_resume
+    assert "/v1/agent_sessions/close" not in paths_before_resume
+    # After resume the agent is closed at once, and its evidence travels with the failure.
+    assert [path for _, path, _ in client.calls][-2:] == ["/v1/agent_sessions/close", "/close_session"]
+    assert result.failure.stage == "agent"
+    assert result.failure.agent_observations == AgentObservationBundle.model_validate(observations)
+
+
+async def test_boundary_payloads_are_not_built_without_checkpointing(monkeypatch: pytest.MonkeyPatch) -> None:
+    environment_server, _ = _environment_server()
+    dumps: list[str] = []
+    original = SingleAgentTurnResult.model_dump
+
+    def counting(self: SingleAgentTurnResult, *args: Any, **kwargs: Any) -> dict:
+        dumps.append("result")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(SingleAgentTurnResult, "model_dump", counting)
+    await environment_server.run_request(_request())
+
+    # The return boundary's payload is the only dump of the verification result, and nothing records it here.
+    assert dumps == []
+
+
+class _ForwardedResponse:
+    """An agent server's reply, as the environment server's HTTP client presents it."""
+
+    def __init__(self, reply: httpx.Response) -> None:
+        self.ok = reply.is_success
+        self.status = reply.status_code
+        self.headers = reply.headers
+        self.cookies = {name: SimpleNamespace(value=value) for name, value in reply.cookies.items()}
+        self.body = reply.content
+
+    async def read(self) -> bytes:
+        return self.body
+
+
+class _AgentForwardingClient(_Client):
+    """Sends the environment server's agent calls to a real agent server; scripts every other call."""
+
+    agent: Any = None
+
+    async def post(self, server_name: str, url_path: str, **kwargs) -> Any:
+        if server_name != "agent":
+            return await super().post(server_name, url_path, **kwargs)
+        self.calls.append((server_name, url_path, kwargs))
+        body = kwargs.get("json")
+        if isinstance(body, BaseModel):
+            body = body.model_dump(mode="json", exclude_unset=True)
+        headers = dict(kwargs.get("headers") or {})
+        cookies = kwargs.get("cookies") or {}
+        if cookies:
+            headers["cookie"] = "; ".join(f"{name}={value}" for name, value in cookies.items())
+        reply = await self.agent.post(url_path, json=body, headers=headers)
+        # The environment server keeps the agent's cookies in its handles, as a checkpoint records them.
+        self.agent.cookies.clear()
+        return _ForwardedResponse(reply)
+
+
+def _checkpointed_agent(model_calls: list[str]) -> tuple[Any, httpx.AsyncClient]:
+    """A Simple Agent with checkpointing on, whose model replies at once and records each call."""
+    from responses_api_agents.simple_agent.app import ModelServerRef, SimpleAgent, SimpleAgentConfig
+
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = {
+        "observability_enabled": True,
+        "checkpoint": {"enabled": True, "control_auth_token": "t"},
+    }
+
+    async def model(*, url_path: str, **kwargs: Any) -> Any:
+        model_calls.append(url_path)
+        reply = MagicMock(status=200, cookies={}, ok=True)
+        reply.read = AsyncMock(return_value=orjson.dumps(_agent_response().model_dump(mode="json")))
+        return reply
+
+    client.post = AsyncMock(side_effect=model)
+    agent = SimpleAgent(
+        config=SimpleAgentConfig(
+            host="agent",
+            port=8001,
+            entrypoint="app.py",
+            name="agent",
+            model_server=ModelServerRef(type="responses_api_models", name="model"),
+        ),
+        server_client=client,
+    )
+    return agent, httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=agent.setup_webserver()), base_url="http://agent"
+    )
+
+
+async def test_an_agent_reply_lost_to_a_restore_is_given_again_without_running_the_activation() -> None:
+    from environment_servers.single_agent_turn.app import SessionHandles
+    from nemo_gym._checkpoint.environment import EnvironmentParticipant, EpisodeRecord, task_digest
+    from nemo_gym.base_resources_server import ResourcesSeedSessionResponse
+
+    request = _request()
+    first_attempt = request.model_copy(update={"episode_id": request.episode_id.model_copy(update={"attempt": 1})})
+    model_calls: list[str] = []
+    handles = SessionHandles(resources_session_id="resources-session", agent_session_id="agent-session")
+
+    # Before the crash, the agent finishes the activation and its checkpoint follows the reply,
+    # while the environment server's checkpoint precedes the reply: its episode is still at invoke_agent.
+    agent, agent_http = _checkpointed_agent(model_calls)
+    environment, client = _environment_server(client_type=_AgentForwardingClient)
+    client.agent = agent_http
+    async with agent_http:
+        await environment._seed_agent(
+            first_attempt, handles, ResourcesSeedSessionResponse(resources_session_id="resources-session")
+        )
+        environment_boundary = {"next": "invoke_agent", "handles": handles.model_dump()}
+        await environment._invoke_agent(first_attempt, handles)
+        agent_records = await agent.checkpoint_participant.export(None)
+    observations = agent._session_state("agent-session").observations
+
+    # Both are restored, and the environment server invokes the activation again.
+    restored_agent, restored_http = _checkpointed_agent(model_calls)
+    await restored_agent.checkpoint_participant.install(agent_records, [first_attempt.episode_id])
+    environment, client = _environment_server(client_type=_AgentForwardingClient)
+    client.agent = restored_http
+    # Only the verification and the resources close are scripted; the agent answers the rest.
+    del client.responses[:4]
+    participant = EnvironmentParticipant()
+    environment._checkpoint = participant
+    participant.restore_records(
+        [
+            EpisodeRecord(
+                episode_id=first_attempt.episode_id,
+                task_digest=task_digest(request.task.model_dump(mode="json")),
+                boundary=environment_boundary,
+            )
+        ]
+    )
+    async with restored_http:
+        response = await environment.run_request(request)
+
+    assert [path for _, path, _ in client.calls] == [
+        "/ng-rollout/rollout-a2/v1/responses",
+        "/v1/agent_sessions/close",
+        "/verify",
+        "/close_session",
+    ]
+    # The agent gave the reply it already gave, without calling the model again.
+    assert model_calls == ["/ng-rollout/rollout-a1/v1/responses"]
+    assert response.result.reward == 1.0
+    assert response.result.ng_agent_observations == observations
+
+
+async def test_with_checkpointing_on_a_direct_http_grant_names_the_seeding_attempt() -> None:
+    from nemo_gym._checkpoint.environment import EnvironmentParticipant
+
+    environment_server, client = _environment_server(resources_tool_transports=["direct_http"])
+    environment_server._checkpoint = EnvironmentParticipant()
+    await environment_server.run_request(_request())
+
+    [tool_access] = AgentSeedSessionRequest.model_validate(client.calls[1][2]["json"]).tool_accesses
+    # The Resources Server refuses a tool call that names no attempt, so the grant carries the rollout prefix.
+    assert str(tool_access.base_url) == "http://resources:8000/ng-rollout/rollout-a2"
+
+
+async def test_verify_says_that_the_resources_session_is_closed_afterwards() -> None:
+    environment_server, client = _environment_server()
+    await environment_server.run_request(_request())
+
+    [verify_call] = [call for _, path, call in client.calls if path == "/verify"]
+    paths = [path for _, path, _ in client.calls]
+    # So the Resources Server keeps the session tracked until the close, which then runs its close handler.
+    assert verify_call["headers"] == {"x-ng-checkpoint-close-follows": "1"}
+    assert paths.index("/close_session") > paths.index("/verify")

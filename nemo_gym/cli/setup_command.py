@@ -16,6 +16,7 @@ import hashlib
 import importlib.metadata
 import json
 import os
+import re
 import shlex
 import sys
 from os import environ
@@ -28,6 +29,7 @@ from omegaconf import DictConfig
 
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, PARENT_DIR
 from nemo_gym.global_config import (
+    HEAD_SERVER_CONSTRAINTS_KEY_NAME,
     HEAD_SERVER_DEPS_KEY_NAME,
     NEMO_GYM_LOG_DIR_KEY_NAME,
     PIP_INSTALL_VERBOSE_KEY_NAME,
@@ -124,6 +126,30 @@ def _get_nemo_gym_install_flags() -> str:
     return flags
 
 
+# A requirements line that installs Gym from the checkout root, e.g. `-e nemo-gym[dev,sandbox] @ ../../`.
+_LOCAL_NEMO_GYM_REQUIREMENT_RE = re.compile(
+    r"^\s*(?:-e\s+)?nemo[-_]gym\s*(?:\[(?P<extras>[^\]]*)\])?\s*@\s*\.\./\.\./?\s*(?:#.*)?$"
+)
+
+
+def _local_nemo_gym_extras(requirements_fpath: Path) -> str:
+    """The extras a server requests on its local Gym requirement, formatted as `[a,b]`, or "" for none.
+
+    Installs from PyPI replace the server's `nemo-gym[...] @ ../../` line with a `nemo-gym` requirement, so
+    its extras must be carried over or their dependencies are never installed.
+    """
+    extras: list[str] = []
+    for line in requirements_fpath.read_text().splitlines():
+        match = _LOCAL_NEMO_GYM_REQUIREMENT_RE.match(line)
+        if match is None or not match.group("extras"):
+            continue
+        for extra in match.group("extras").split(","):
+            extra = extra.strip()
+            if extra and extra not in extras:
+                extras.append(extra)
+    return f"[{','.join(extras)}]" if extras else ""
+
+
 def _get_nemo_gym_version_spec(is_editable_install: bool) -> str:
     """
     Detect nemo-gym version from parent venv and return version specifier.
@@ -166,6 +192,7 @@ def _server_environment_identity(
     *,
     python_request: str,
     head_server_deps: list[str],
+    head_server_constraints: list[str],
     is_editable_install: bool,
     nemo_gym_version_spec: str,
 ) -> str:
@@ -185,6 +212,7 @@ def _server_environment_identity(
     payload = {
         "schema_version": 1,
         "component_dir": str(component_dir),
+        "head_server_constraints": head_server_constraints,
         "head_server_deps": head_server_deps,
         "input_files": input_files,
         "is_editable_install": is_editable_install,
@@ -198,6 +226,15 @@ def _server_environment_identity(
 def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: str) -> str:
     head_server_deps = [str(dependency) for dependency in global_config_dict[HEAD_SERVER_DEPS_KEY_NAME]]
     head_server_dep_args = shlex.join(head_server_deps)
+    # Pins applied only to packages a server installs anyway, e.g. the parent's exact Ray version.
+    head_server_constraints = [
+        str(constraint) for constraint in global_config_dict.get(HEAD_SERVER_CONSTRAINTS_KEY_NAME) or []
+    ]
+    constraint_flag = (
+        f"-c <(printf '%s\\n' {' '.join(shlex.quote(c) for c in head_server_constraints)}) "
+        if head_server_constraints
+        else ""
+    )
 
     venv_path = get_venv_path(dir_path, global_config_dict)
     venv_python_fpath = venv_path / "bin/python"
@@ -212,8 +249,9 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
 
     parent_runtime_overrides_path = venv_path / PARENT_RUNTIME_OVERRIDES_FILENAME
     environment_identity_path = venv_path / ENVIRONMENT_IDENTITY_FILENAME
+    parent_runtime_override_args = shlex.join([*head_server_deps, *head_server_constraints])
     parent_runtime_overrides_cmd = (
-        f"printf '%s\\n' {head_server_dep_args} > {shlex.quote(str(parent_runtime_overrides_path))}"
+        f"printf '%s\\n' {parent_runtime_override_args} > {shlex.quote(str(parent_runtime_overrides_path))}"
     )
 
     python_request = str(global_config_dict[PYTHON_VERSION_KEY_NAME])
@@ -234,6 +272,7 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
         dir_path,
         python_request=python_request,
         head_server_deps=head_server_deps,
+        head_server_constraints=head_server_constraints,
         is_editable_install=is_editable_install,
         nemo_gym_version_spec=nemo_gym_version_spec,
     )
@@ -264,10 +303,12 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
     # A server is a separate process with its own venv. Allow standard uv
     # configuration in pyproject.toml or uv.toml without leaking those choices
     # into sibling server venvs through process-wide UV_* variables.
-    # Parent-sensitive packages such as Ray are both direct requirements and
-    # resolver overrides. A direct requirement alone cannot replace an exact
-    # stale transitive pin in a server dependency, which can either make the
-    # solve impossible or split one Ray cluster across incompatible versions.
+    # Parent-sensitive packages are resolver overrides as well as direct
+    # requirements (head_server_deps) or constraints (head_server_constraints,
+    # such as Ray). Neither can replace an exact stale transitive pin in a server
+    # dependency, which can either make the solve impossible or split one Ray
+    # cluster across incompatible versions. An override replaces that pin and,
+    # like a constraint, never adds a package the server does not require.
     # Materialize the dynamic authority inside the writable venv rather than
     # baking the current parent version into every server's source tree.
     server_uv_flags = f"{uv_config_flag}--overrides {shlex.quote(str(parent_runtime_overrides_path))} "
@@ -281,29 +322,30 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
             )
         elif has_pyproject_toml:
             if is_editable_install:
-                install_cmd = f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}'-e .' {head_server_dep_args}"""
+                install_cmd = f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{constraint_flag}'-e .' {head_server_dep_args}"""
             else:
                 # install nemo-gym from pypi instead of relative path in pyproject.toml
                 # with support for pre-releases, custom indexes, and version pinning
                 install_flags = _get_nemo_gym_install_flags()
                 version_spec = nemo_gym_version_spec
                 install_cmd = (
-                    f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{install_flags}nemo-gym{version_spec} && """
-                    f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}--no-sources '-e .' {head_server_dep_args}"""
+                    f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{install_flags}{constraint_flag}nemo-gym{version_spec} && """
+                    f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{constraint_flag}--no-sources '-e .' {head_server_dep_args}"""
                 )
         elif has_requirements_txt:
             has_overrides_txt = (dir_path / "overrides.txt").exists()
             override_flag = "--override overrides.txt " if has_overrides_txt else ""
             if is_editable_install:
-                install_cmd = f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{override_flag}-r requirements.txt {head_server_dep_args}"""
+                install_cmd = f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{constraint_flag}{override_flag}-r requirements.txt {head_server_dep_args}"""
             else:
                 # install nemo-gym from pypi instead of relative path in requirements.txt
                 # with support for pre-releases, custom indexes, and version pinning
                 install_flags = _get_nemo_gym_install_flags()
                 version_spec = nemo_gym_version_spec
+                extras = _local_nemo_gym_extras(dir_path / "requirements.txt")
                 install_cmd = (
-                    f"""(echo 'nemo-gym{version_spec}' && grep -v -F '../..' requirements.txt) | """
-                    f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{install_flags}{override_flag}-r /dev/stdin {head_server_dep_args}"""
+                    f"""(echo 'nemo-gym{extras}{version_spec}' && grep -v -F '../..' requirements.txt) | """
+                    f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{install_flags}{constraint_flag}{override_flag}-r /dev/stdin {head_server_dep_args}"""
                 )
         else:
             raise RuntimeError(

@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import getpass
+import os
 import re
 import shlex
 import tempfile
@@ -148,6 +149,14 @@ def _validate_mounts(config: SubmitConfig, conn: Connection) -> None:
         raise ValueError(f"Mount src paths do not exist:\n{details}")
 
 
+def _submission_env_exports(compute: SlurmComputeConfig) -> list[str]:
+    """Forward explicitly selected values over SSH stdin, never into artifacts."""
+    missing = [name for name in compute.forward_env if name not in os.environ]
+    if missing:
+        raise ValueError(f"compute.forward_env variables are unset: {', '.join(missing)}")
+    return [f"export {name}={shlex.quote(os.environ[name])}" for name in sorted(set(compute.forward_env))]
+
+
 class SlurmExecutor(BaseExecutor):
     """Slurm executor for Pyxis-enabled clusters (https://github.com/NVIDIA/pyxis).
 
@@ -161,6 +170,7 @@ class SlurmExecutor(BaseExecutor):
     def run(self, config: SubmitConfig, *, dry_run: bool = False) -> SubmissionRecord | None:
         compute = next(iter(config.compute.values()))
         cluster = next(iter(config.compute))
+        submission_env = _submission_env_exports(compute) if not dry_run else []
         benchmark_names = list(config.driver.benchmarks)
         _validate_benchmark_names(benchmark_names)
         # The remote lookup overlaps the other validation, staging, the SSH connect and the mount
@@ -190,7 +200,8 @@ class SlurmExecutor(BaseExecutor):
                 conn.copy(staging, remote_run_dir)
                 token_export = [f"export {config.otel.token_env}={shlex.quote(token)}"] if token is not None else []
                 output = conn.run(
-                    token_export
+                    submission_env
+                    + token_export
                     + [_sbatch_command(name, remote_run_dir / name / "job.sh") for name in benchmark_names]
                 )
                 record = self._build_record(cluster, compute, gym_job_id, now, remote_run_dir, benchmark_names, output)

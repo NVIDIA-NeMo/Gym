@@ -16,7 +16,7 @@ import nemo_gym.cli.main as cli_main
 import nemo_gym.health.checks as health_checks
 import nemo_gym.rollout_collection as rollout_collection
 import nemo_gym.rollout_health as health
-from nemo_gym.base_responses_api_model import build_model_call_record
+from nemo_gym.observability.model_calls import build_model_call_record
 from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper, _CompletedRollout
 from nemo_gym.rollout_health import CHECK_REGISTRY, run_health_checks
 from nemo_gym.rollout_observability import TrajectoryRecord
@@ -1401,12 +1401,16 @@ def test_a_failed_attempt_followed_by_a_successful_call_is_healthy(tmp_path, fai
     retried = _call(model_call_id="retry", started_at=2.0)
     rollout_path = _write_fixture(tmp_path, [(_owned_attempts(failed, retried), [failed, retried])])
 
-    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+    result = run_health_checks(rollout_path, workers=1)
+    [digest] = result.rollouts
 
     assert digest.verdict == "healthy"
     assert not digest.findings
     assert not digest.unobserved
     assert digest.model_call_errors == 1
+    # The skipped attempt's tokens are counted nowhere else, so the run reports it as unknown usage.
+    assert digest.model_call_errors_usage_unknown == 1
+    assert result.summary["run"]["stats"]["model_call_errors"]["usage_unknown"] == 1
 
 
 @pytest.mark.parametrize("failure", FAILED_ATTEMPTS.values(), ids=FAILED_ATTEMPTS.keys())
@@ -1431,6 +1435,7 @@ def test_a_body_capture_could_not_parse_still_needs_token_counts(tmp_path: Path)
     [digest] = run_health_checks(rollout_path, workers=1).rollouts
 
     assert "model_call_missing_token_counts" in {finding.check for finding in digest.findings}
+    assert digest.model_call_errors_usage_unknown == 0
 
 
 def test_the_check_is_unobserved_when_no_calls_were_captured(tmp_path: Path) -> None:

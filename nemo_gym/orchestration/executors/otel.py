@@ -57,9 +57,28 @@ def driver_telemetry_env(gym_job_id: str, span_groups: str, *, logs: bool = True
         "NEMO_GYM_OTEL_LOGS_ENABLED": "1" if logs else "0",
         "OTEL_EXPORTER_OTLP_ENDPOINT": f"http://localhost:{OTLP_HTTP_PORT}",
         "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
-        # No per-signal logs endpoint: logs follow the protocol above to the collector's HTTP
-        # port. Gym installs nemo-lens[sdk] and never the gRPC exporter, so the log exporter is
-        # the HTTP one; pointing it at the gRPC port made every batch time out.
+    }
+
+
+VLLM_TRACES_FLAG = "--otlp-traces-endpoint"
+
+
+def vllm_traces_flag(host: str = "localhost") -> str:
+    """The `vllm serve` flag that sends one span per request to the collector's OTLP/HTTP receiver."""
+    return f"{VLLM_TRACES_FLAG} http://{host}:{OTLP_HTTP_PORT}/v1/traces"
+
+
+def vllm_traces_env(component: str, service_name: str) -> dict[str, str]:
+    """Environment for a traced vLLM service.
+
+    vLLM picks the exporter by `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` and defaults to gRPC, so the
+    protocol has to match the HTTP endpoint in the flag. vLLM sets no `service.name` of its own; the
+    collector copies the one given here into `service.name.override`, so the spans carry the same
+    display identity as the service's scraped metrics (`<component>/<service>`).
+    """
+    return {
+        "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "http/protobuf",
+        "OTEL_SERVICE_NAME": f"{component}/{service_name}",
     }
 
 

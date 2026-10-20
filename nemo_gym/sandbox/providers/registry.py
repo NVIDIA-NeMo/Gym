@@ -84,6 +84,11 @@ def _entry_point_loaders() -> dict[str, ProviderLoader]:
     return _ENTRY_POINT_LOADERS
 
 
+def plugin_distributions() -> list[str]:
+    """Names of the installed distributions that publish providers as entry points."""
+    return sorted({ep.dist.name for ep in entry_points(group=ENTRY_POINT_GROUP) if getattr(ep, "dist", None)})
+
+
 def register_provider(name: str, provider_class: ProviderClass, *, override: bool = False) -> None:
     """Register a sandbox provider class."""
     if not name:
