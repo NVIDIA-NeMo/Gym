@@ -37,7 +37,9 @@ from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint
 from nemo_gym.token_id_capture.lineage import stamp_continuation
 from nemo_gym.token_id_capture.protocols import CaptureLedger, LineageResolution, LineageResolver, TokenSink
 from nemo_gym.token_id_capture.records import (
+    PARENT_RECORDS_LOST_REASON,
     UNRESOLVED_PARENT_REASON,
+    ParentRecordsLostError,
     ParentResolutionStatus,
     TokenEntry,
     extract_token_fields,
@@ -431,6 +433,7 @@ async def commit_entry(
         # Delta storage changes representation, not lineage identity.
         # The parent decision is persisted with the same sink write.
         cumulative = None
+        full_prompt: list[int] | None = None
         if (
             context.delta_records
             and not entry.prompt_is_delta
@@ -440,6 +443,7 @@ async def commit_entry(
         ):
             parent_cum = list(resolution.match.cumulative_token_ids)
             prompt = list(entry.prompt_token_ids)
+            full_prompt = prompt
             # Store a suffix only when the prompt extends the exact parent tokens.
             # Otherwise retain the full prompt and preserve a safe reconstruction anchor.
             if len(prompt) >= len(parent_cum) and prompt[: len(parent_cum)] == parent_cum:
@@ -453,7 +457,27 @@ async def commit_entry(
             cumulative=cumulative,
         )
         entry.parent_resolution_reason = resolution.reason or ""
-        await context.token_sink.put(entry)
+        try:
+            await context.token_sink.put(entry)
+        except ParentRecordsLostError:
+            # The parent resolved before dispatch is gone from the rollout's records
+            # (deleted under a live rollout). The generation-time prompt still holds
+            # the exact tokens, so store the call as a new root instead of an orphan
+            # delta: the next continuation resolves to it and stays token-contiguous.
+            if full_prompt is None or not entry.prompt_is_delta:
+                raise
+            logger.warning(
+                "Parent %s of model call %s (rollout %s) vanished before commit; re-rooting the call "
+                "from its full prompt.",
+                entry.parent_call_id,
+                context.model_call_id,
+                context.rollout_id,
+            )
+            entry.prompt_token_ids = full_prompt
+            entry.prompt_is_delta = False
+            stamp_lineage(entry, None, parent_resolution=ParentResolutionStatus.UNRESOLVED)
+            entry.parent_resolution_reason = PARENT_RECORDS_LOST_REASON
+            await context.token_sink.put(entry)
         context.committed = True
     except Exception:
         await _capture_failed(context, "write")

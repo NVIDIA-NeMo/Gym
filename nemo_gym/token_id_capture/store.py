@@ -41,7 +41,7 @@ from uuid import uuid4
 import orjson
 
 from nemo_gym.token_id_capture.protocols import TokenCaptureSnapshot
-from nemo_gym.token_id_capture.records import TokenEntry
+from nemo_gym.token_id_capture.records import ParentRecordsLostError, TokenEntry
 
 
 logger = logging.getLogger(__name__)
@@ -256,6 +256,18 @@ class TokenCaptureStore:
                     f"Model call id {entry.model_call_id!r} was reused with a different payload "
                     f"for rollout {rollout_id!r}"
                 )
+            if entry.prompt_is_delta and entry.parent_call_id not in entry_digests:
+                # The parent was resolved from this file before dispatch, but the file
+                # no longer holds it: the records were deleted (and possibly recreated)
+                # under a live rollout. An orphan delta can never be materialized, and
+                # every later continuation of it would fail resolution, so refuse it
+                # and let the caller re-root the call from its full prompt instead.
+                if index_changed:
+                    self._write_state(rollout_id, state)
+                raise ParentRecordsLostError(
+                    f"delta record {entry.model_call_id!r} for rollout {rollout_id!r} continues "
+                    f"{entry.parent_call_id!r}, which is no longer among the rollout's records"
+                )
             with self.path_for(rollout_id).open("ab") as handle:
                 handle.write(line)
                 handle.flush()
@@ -364,6 +376,62 @@ class TokenCaptureStore:
 
     async def close(self) -> None:
         """The file store owns no persistent handles."""
+
+    def _last_response_id(self, rollout_id: str) -> str | None:
+        """``response_id`` of the last durable entry, or ``None`` without entries."""
+        path = self.path_for(rollout_id)
+        if not path.exists():
+            return None
+        size = path.stat().st_size
+        with path.open("rb") as handle:
+            window = min(size, 1 << 20)
+            while True:
+                handle.seek(size - window)
+                tail = handle.read(window)
+                lines = [line for line in tail.split(b"\n") if line.strip()]
+                # The window holds a whole line once it starts at the file head or
+                # contains more than one line (the first may be torn).
+                if window == size or len(lines) > 1:
+                    break
+                window = min(size, window * 4)
+        if not lines:
+            return None
+        try:
+            return orjson.loads(lines[-1]).get("response_id")
+        except (orjson.JSONDecodeError, AttributeError):
+            return None
+
+    def delete_unless_foreign(self, rollout_id: str, last_response_id: str | None) -> bool:
+        """``delete`` only when the records end with the caller's own last model call.
+
+        Two handlers can serve one rollout id (a re-sent ``/run`` after a dropped
+        connection keeps the body, and with it ``_ng_rollout_id``). When the first one
+        to finish deletes the shared records, the other's next continuation loses its
+        parent. The caller passes the served id of its own last policy call: records
+        ending in a different call belong to a handler that is still appending, and
+        are kept. ``None`` means the caller cannot tell and deletes unconditionally.
+        Returns whether the records were removed.
+        """
+        if last_response_id is None:
+            self.delete(rollout_id)
+            return True
+        with self._locked(rollout_id):
+            tail = self._last_response_id(rollout_id)
+            if tail is not None and tail != last_response_id:
+                logger.warning(
+                    "Keeping token records of rollout %s: they end with model call %s, not this handler's %s "
+                    "(another /run for the same rollout id is still appending).",
+                    rollout_id,
+                    tail,
+                    last_response_id,
+                )
+                return False
+            self.path_for(rollout_id).unlink(missing_ok=True)
+            self.incomplete_path_for(rollout_id).unlink(missing_ok=True)
+            self.intents_path_for(rollout_id).unlink(missing_ok=True)
+            self.state_path_for(rollout_id).unlink(missing_ok=True)
+            self._fsync_root()
+            return True
 
     def delete(self, rollout_id: str) -> None:
         """Unconditionally remove a rollout's records.

@@ -1,0 +1,8 @@
+gdpval_train:
+  responses_api_agents:
+    gdpval_stirrup_agent:
+      entrypoint: app.py
+gdpval_val:
+  responses_api_agents:
+    gdpval_stirrup_agent:
+      entrypoint: app.py

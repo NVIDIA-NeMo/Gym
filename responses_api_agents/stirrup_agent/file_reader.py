@@ -728,10 +728,67 @@ def _enforce_text_block_budget(blocks: list[dict[str, Any]], cap: int) -> list[d
     return result
 
 
+MAX_DELIVERABLE_FILES = 200          # a node_modules dump reached 9,400 files (2026-10-12)
+MAX_ARCHIVE_RENDER_DEPTH = 1         # members of members are listed, not rendered
+MAX_ARCHIVE_RENDER_MEMBERS = 100
+MAX_ARCHIVE_RENDER_BYTES = 200 * 1024 * 1024
+RENDERABLE_MEMBER_EXTS = OFFICE_EXTS | IMAGE_EXTS | {".pdf"}
+
+
+def _safe_member_path(name: str) -> bool:
+    path = Path(name)
+    return bool(name) and not path.is_absolute() and ".." not in path.parts and not name.startswith(("/", "\\"))
+
+
+def _extract_renderable_members(archive_path: Path, dest: Path) -> int:
+    """Extract PDF/Office/image members of a zip into *dest*; returns how many.
+
+    Text members are already shown by ``_archive_manifest``. Guards: zip-slip-safe
+    member paths, member count and aggregate size caps, nested archives skipped.
+    """
+    import zipfile
+
+    if not zipfile.is_zipfile(archive_path):
+        return 0
+    count = 0
+    total = 0
+    with zipfile.ZipFile(archive_path) as zf:
+        for info in zf.infolist():
+            if info.is_dir() or not _safe_member_path(info.filename):
+                continue
+            if Path(info.filename).suffix.lower() not in RENDERABLE_MEMBER_EXTS:
+                continue
+            if count >= MAX_ARCHIVE_RENDER_MEMBERS or total + info.file_size > MAX_ARCHIVE_RENDER_BYTES:
+                break
+            zf.extract(info, dest)
+            count += 1
+            total += info.file_size
+    return count
+
+
+_NOTE_PREFIXES = ("[present but EMPTY", "[deliverable present", "[archive, ", "[AUDIO deliverable", "[VIDEO deliverable",
+                  "[Error:", "[video file", "[audio file")
+
+
+def _has_gradable_content(blocks: list[dict[str, Any]]) -> bool:
+    """True if at least one block carries content the judge can actually read."""
+    for block in blocks:
+        if block.get("type") != "text":
+            return True            # rendered page, image, video or audio payload
+        text = block.get("text", "").strip()
+        parts = text.split("\n", 1)
+        body = parts[1].strip() if len(parts) > 1 else ""
+        if body and not body.startswith(_NOTE_PREFIXES) and not text.startswith("["):
+            return True            # a file body (text deliverable or archive text member)
+    return False
+
+
 def convert_deliverables_to_content_blocks(
     output_dir: str,
     *,
     media_mode: str = "native_pdf",
+    _label_prefix: str = "",
+    _depth: int = 0,
     render_dpi: int = 150,
     max_pages: int = 50,
     include_text: bool = True,
@@ -778,7 +835,34 @@ def convert_deliverables_to_content_blocks(
         MAX_TOTAL_ENCODED_ATTACHMENT_CHARS,
     )
 
-    entries = sorted(output_path.iterdir())
+    # 2026-10-13: walk subdirectories too. Agents regularly save under
+    # deliverables/<folder>/..., and a top-level-only walk graded those rollouts as
+    # "nothing produced" (same task, same model: 0.0 with a subfolder, 1.0 without).
+    # Shallow files first so a cap bites the vendored tree, not the deliverables.
+    def _under_deliverable_dirs(p: Path) -> bool:
+        # No ancestor folder below the root may be an ignored name (reference_files,
+        # run-state dirs), so those trees stay invisible to the judge like upstream's
+        # top-level-only walk kept them.
+        return all(parent.name not in IGNORE_FILES for parent in p.relative_to(output_path).parents if parent != Path("."))
+
+    all_files = sorted(
+        (p for p in output_path.rglob("*") if p.is_file() and not p.is_symlink() and _under_deliverable_dirs(p)),
+        key=lambda p: (len(p.relative_to(output_path).parts), p.relative_to(output_path).as_posix()),
+    )
+    overflow_note = None
+    if len(all_files) > MAX_DELIVERABLE_FILES:
+        overflow_note = (f"\n[{len(all_files) - MAX_DELIVERABLE_FILES:,} more files not shown; "
+                         f"{len(all_files):,} files in total, cap {MAX_DELIVERABLE_FILES}]")
+        all_files = all_files[:MAX_DELIVERABLE_FILES]
+    entries = all_files
+
+    def _rel(p: Path) -> str:
+        """Judge-facing label: path relative to the deliverables dir (archive members get a prefix)."""
+        try:
+            return _label_prefix + p.relative_to(output_path).as_posix()
+        except ValueError:
+            return _label_prefix + p.name
+
     # Shared provenance rules keep the comparison and rubric paths in lockstep:
     # prefer source.ext.pdf, consume derived renders, and quarantine an old
     # source.pdf when multiple Office files share the stem.
@@ -799,7 +883,7 @@ def convert_deliverables_to_content_blocks(
     body_budget = max(0, MAX_TOTAL_TEXT_BLOCK_CHARS - len(text_files) * TEXT_BLOCK_OVERHEAD_CHARS)
     allowance_by_name = dict(
         zip(
-            (p.name for p in text_files),
+            (_rel(p) for p in text_files),
             _fair_text_allowances([p.stat().st_size for p in text_files], body_budget, MAX_TEXT_BLOCK_CHARS),
         )
     )
@@ -867,30 +951,31 @@ def convert_deliverables_to_content_blocks(
     for fpath in entries:
         if not is_deliverable(fpath) or fpath in consumed_pdfs:
             continue
+        member_blocks: list[dict[str, Any]] = []   # rendered archive members, emitted after the listing
 
         ext = fpath.suffix.lower()
 
         try:
             if fpath in texty:
-                allowance = allowance_by_name.get(fpath.name, 0)
+                allowance = allowance_by_name.get(_rel(fpath), 0)
                 if fpath.stat().st_size == 0:
-                    block = _text_block(f"{fpath.name}:", "[present but EMPTY (0 bytes of content)]", 200)
-                    blocks.append(block) if block else omitted_names.append(fpath.name)
+                    block = _text_block(f"{_rel(fpath)}:", "[present but EMPTY (0 bytes of content)]", 200)
+                    blocks.append(block) if block else omitted_names.append(_rel(fpath))
                     continue
                 if allowance <= 0:
-                    omitted_names.append(fpath.name)
+                    omitted_names.append(_rel(fpath))
                     continue
                 text = _read_text(fpath, allowance)
                 if text:
-                    block = _text_block(f"{fpath.name}:", text, allowance)
+                    block = _text_block(f"{_rel(fpath)}:", text, allowance)
                 else:
-                    block = _text_block(f"{fpath.name}:", "[present but EMPTY (0 bytes of content)]", 200)
-                blocks.append(block) if block else omitted_names.append(fpath.name)
+                    block = _text_block(f"{_rel(fpath)}:", "[present but EMPTY (0 bytes of content)]", 200)
+                blocks.append(block) if block else omitted_names.append(_rel(fpath))
 
             elif ext in OFFICE_EXTS:
                 source_size = fpath.stat().st_size
                 if source_size > MAX_FILE_ATTACHMENT_BYTES:
-                    blocks.append(_attachment_omission(fpath.name, source_size, "per-file judge payload limit"))
+                    blocks.append(_attachment_omission(_rel(fpath), source_size, "per-file judge payload limit"))
                     continue
                 # Prefer a PDF preconvert already rendered. Reconverting is
                 # wasteful, needs LibreOffice on the judge host, and the cleanup
@@ -902,34 +987,42 @@ def convert_deliverables_to_content_blocks(
                     pdf_path = _convert_office_to_pdf(fpath, out_dir=scratch)
                 if pdf_path and pdf_path.exists():
                     header_kind = "rendered from PDF" if images_and_text else "converted to PDF"
-                    blocks.extend(_pdf_blocks(pdf_path, f"\n{fpath.name} ({header_kind}):"))
+                    blocks.extend(_pdf_blocks(pdf_path, f"\n{_rel(fpath)} ({header_kind}):"))
                     if ext == ".xlsx":
                         sheet_text = extract_xlsx_structured_text(fpath, max_chars=MAX_TEXT_BLOCK_CHARS)
                         block = _text_block(
-                            f"{fpath.name} (structured spreadsheet cells):",
+                            f"{_rel(fpath)} (structured spreadsheet cells):",
                             sheet_text,
                             MAX_TEXT_BLOCK_CHARS,
                         )
-                        blocks.append(block) if block else omitted_names.append(fpath.name)
+                        blocks.append(block) if block else omitted_names.append(_rel(fpath))
                 else:
                     # Fallback to text extraction
                     text = _extract_text(fpath, ext, max_chars=MAX_TEXT_BLOCK_CHARS)
                     if text:
-                        block = _text_block(f"{fpath.name} (text fallback):", text, MAX_TEXT_BLOCK_CHARS)
-                        blocks.append(block) if block else omitted_names.append(fpath.name)
+                        block = _text_block(f"{_rel(fpath)} (text fallback):", text, MAX_TEXT_BLOCK_CHARS)
+                        blocks.append(block) if block else omitted_names.append(_rel(fpath))
 
             elif ext == ".pdf":
-                blocks.extend(_pdf_blocks(fpath, f"\n{fpath.name}:"))
+                blocks.extend(_pdf_blocks(fpath, f"\n{_rel(fpath)}:"))
 
             elif ext in IMAGE_EXTS:
                 mime = MIME_TYPES.get(ext, "image/png")
+                with fpath.open("rb") as fh:
+                    magic = fh.read(5)
+                if magic == b"%PDF-":
+                    # Generated artifacts occasionally carry an image suffix but PDF
+                    # contents; rasterize them like any other PDF instead of failing
+                    # image decoding.
+                    blocks.extend(_pdf_blocks(fpath, f"\n{_rel(fpath)} (PDF content):"))
+                    continue
                 _size, omitted = _reserve_attachment(fpath, attachment_budget)
                 if omitted is not None:
                     blocks.append(omitted)
                     continue
                 data = fpath.read_bytes()
                 b64 = base64.b64encode(data).decode("ascii")
-                blocks.append({"type": "text", "text": f"\n{fpath.name}:"})
+                blocks.append({"type": "text", "text": f"\n{_rel(fpath)}:"})
                 blocks.append(
                     {
                         "type": "image_url",
@@ -954,7 +1047,7 @@ def convert_deliverables_to_content_blocks(
                         blocks.append(omitted)
                         continue
                     data = fpath.read_bytes()
-                    blocks.append({"type": "text", "text": f"\n{fpath.name}:"})
+                    blocks.append({"type": "text", "text": f"\n{_rel(fpath)}:"})
                     blocks.append(_av_block(mime, data, ext=ext, file_type=file_type, openai_native=images_and_text))
                 else:
                     # Gating is correct; emitting nothing is not -- the judge
@@ -964,7 +1057,7 @@ def convert_deliverables_to_content_blocks(
                         {
                             "type": "text",
                             "text": (
-                                f"\n{fpath.name}: [{file_type} deliverable, {_human_size(size)} "
+                                f"\n{_rel(fpath)}: [{file_type} deliverable, {_human_size(size)} "
                                 f"({size:,} bytes) — present on disk, but this judge cannot decode "
                                 f"{file_type.lower()}. Do NOT treat it as missing or unproduced. Grade the "
                                 f"criteria that do not require {'viewing' if is_video else 'listening'}; "
@@ -989,16 +1082,38 @@ def convert_deliverables_to_content_blocks(
                     manifest = _archive_manifest(fpath)
                     if manifest is not None:
                         body = f"[archive, {_human_size(size)} — NOT missing] {manifest}"
+                        # The manifest shows text members only; rubrics also ask about the
+                        # PDFs, Office documents and images inside the bundle. Extract those
+                        # (bounded, zip-slip-safe) and run them through this same converter.
+                        if _depth < MAX_ARCHIVE_RENDER_DEPTH:
+                            scratch = Path(tempfile.mkdtemp(prefix="gdpval-archive-"))
+                            scratch_dirs.append(scratch)
+                            extracted = _extract_renderable_members(fpath, scratch)
+                            if extracted:
+                                member_blocks.extend(
+                                    convert_deliverables_to_content_blocks(
+                                        str(scratch),
+                                        media_mode=media_mode,
+                                        render_dpi=render_dpi,
+                                        max_pages=max_pages,
+                                        include_text=include_text,
+                                        audio_capable=audio_capable,
+                                        video_capable=video_capable,
+                                        _label_prefix=f"{_rel(fpath)}/",
+                                        _depth=_depth + 1,
+                                    )
+                                )
                     else:
                         body = (
                             f"[deliverable present, {_human_size(size)} ({size:,} bytes) — NOT missing; "
                             f"content not extractable in this format. Statements in other files about "
                             f"its contents are unverified assertions, not evidence.]"
                         )
-                block = _text_block(f"{fpath.name}:", body, MAX_TEXT_BLOCK_CHARS)
-                blocks.append(block) if block else omitted_names.append(fpath.name)
+                block = _text_block(f"{_rel(fpath)}:", body, MAX_TEXT_BLOCK_CHARS)
+                blocks.append(block) if block else omitted_names.append(_rel(fpath))
+                blocks.extend(member_blocks)
         except Exception as exc:
-            blocks.append({"type": "text", "text": f"\n{fpath.name}: [Error: {exc}]"})
+            blocks.append({"type": "text", "text": f"\n{_rel(fpath)}: [Error: {exc}]"})
 
     if omitted_names:
         shown = ", ".join(omitted_names[:20])
@@ -1010,6 +1125,16 @@ def convert_deliverables_to_content_blocks(
                 "text": f"\n[{len(omitted_names)} text deliverable(s) omitted, budget exhausted: {shown}]",
             }
         )
+
+    if overflow_note:
+        blocks.append({"type": "text", "text": overflow_note})
+
+    if _depth == 0 and entries and not _has_gradable_content(blocks):
+        # Every file is audio this judge cannot hear, or an unreadable binary. The
+        # local judge adapter refuses "name: [Error: ...]" blocks and the GDPval
+        # verifier masks the sample; a guessed verdict is worse than no verdict.
+        blocks.append({"type": "text", "text": "\ndeliverables: [Error: no gradable deliverable content; "
+                                                "every file is audio or an unreadable binary]"})
 
     # Clean up only what this pass created; it all lives in tempdirs.
     for scratch in scratch_dirs:

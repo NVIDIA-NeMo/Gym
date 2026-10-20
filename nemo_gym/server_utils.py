@@ -612,13 +612,16 @@ async def _request_with_retries(
                     raise
 
                 await asyncio.sleep(0.5)
-            except ClientOSError:
+            except ClientOSError as os_error:
                 global _NUM_CLIENT_OS_ERROR
                 _NUM_CLIENT_OS_ERROR += 1
                 retries += 1
                 if _NUM_CLIENT_OS_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL == 0:
                     print(
-                        f"[request_retry url={url} error=ClientOSError retry={retries} elapsed_s={time.monotonic() - retry_start:.1f}] "
+                        # errno/text included: "reset by peer" (server dropped it), "refused"
+                        # (server not listening) and "cannot assign requested address" (client
+                        # port exhaustion) need different fixes.
+                        f"[request_retry url={url} error=ClientOSError({os_error!s}) retry={retries} elapsed_s={time.monotonic() - retry_start:.1f}] "
                         f"Hit {_NUM_CLIENT_OS_ERROR} global `ClientOSError` while querying {url}.\n{DISCONNECTED_CLIENT_OS_HELP_TEXT}",
                         flush=True,
                     )

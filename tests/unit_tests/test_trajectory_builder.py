@@ -17,6 +17,7 @@
 import asyncio
 import threading
 
+import orjson
 import pytest
 
 from nemo_gym.token_id_capture import (
@@ -38,7 +39,7 @@ from nemo_gym.token_id_capture import (
     trajectories_for_rollout,
     trajectories_from_source,
 )
-from nemo_gym.token_id_capture.records import TokenEntry
+from nemo_gym.token_id_capture.records import ParentRecordsLostError, TokenEntry
 from nemo_gym.token_id_capture.sink import commit_entry, resolve_parent
 from nemo_gym.token_id_capture.store import TokenCaptureStore
 
@@ -908,7 +909,11 @@ def test_broken_delta_chain_masks_instead_of_guessing(tmp_path):
         parent_resolution=ParentResolutionStatus.RESOLVED,
         cumulative=[1, 2, 9, 10],
     )
-    store.append(orphan)
+    # The store refuses to append an orphan delta (its parent is not among the rollout's
+    # records); an older store could, so write the line directly to exercise the builder.
+    with pytest.raises(ParentRecordsLostError):
+        store.append(orphan)
+    store.path_for("orphan").write_bytes(orjson.dumps(orphan.model_dump(mode="json")) + b"\n")
 
     built = asyncio.run(trajectories_from_source("orphan", store))
     out = prefix_merging(store.read_entries("orphan"))

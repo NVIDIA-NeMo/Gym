@@ -171,6 +171,12 @@ class TokenIDLogProbMixin(BaseModel):
     generation_token_ids: List[int]
     generation_log_probs: List[float]
     routed_experts: Optional[RoutedExperts] = None
+    # Sampler top-k head per generated token (ids and log-probs, each
+    # ``[generated_len][k]``), echoed only when the model server is configured with
+    # ``return_top_logprobs`` > 0. NeMo RL's score centering consumes them on the
+    # token-echo path; the capture ledger stages the same data in capture mode.
+    generation_topk_ids: Optional[List[List[int]]] = None
+    generation_topk_logprobs: Optional[List[List[float]]] = None
 
 
 class TokenIDLogProbTypedDictMixin(TypedDict):
@@ -178,6 +184,8 @@ class TokenIDLogProbTypedDictMixin(TypedDict):
     generation_token_ids: List[int]
     generation_log_probs: List[float]
     routed_experts: NotRequired[RoutedExperts]
+    generation_topk_ids: NotRequired[List[List[int]]]
+    generation_topk_logprobs: NotRequired[List[List[float]]]
 
 
 REQUIRED_TOKEN_METADATA_FIELDS = frozenset(
@@ -187,7 +195,8 @@ REQUIRED_TOKEN_METADATA_FIELDS = frozenset(
         "generation_log_probs",
     }
 )
-TOKEN_METADATA_FIELDS = REQUIRED_TOKEN_METADATA_FIELDS | {"routed_experts"}
+TOPK_TOKEN_METADATA_FIELDS = frozenset({"generation_topk_ids", "generation_topk_logprobs"})
+TOKEN_METADATA_FIELDS = REQUIRED_TOKEN_METADATA_FIELDS | {"routed_experts"} | TOPK_TOKEN_METADATA_FIELDS
 
 
 def _validate_atomic_token_metadata(value: Any) -> Any:

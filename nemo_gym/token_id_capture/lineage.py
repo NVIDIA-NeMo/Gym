@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -59,11 +60,20 @@ from nemo_gym.token_id_capture.fingerprint import (
     canonicalize_tool_arguments as canonicalize_tool_arguments,
 )
 from nemo_gym.token_id_capture.protocols import LineageMatch, LineageResolution
-from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry, cumulative_tokens
+from nemo_gym.token_id_capture.records import (
+    PARENT_RECORDS_LOST_REASON,
+    ParentRecordsLostError,
+    ParentResolutionStatus,
+    TokenEntry,
+    cumulative_tokens,
+)
 
 
 if TYPE_CHECKING:
     from nemo_gym.token_id_capture.staging.records import CallRecord, CaptureLedgerCommit
+
+
+logger = logging.getLogger(__name__)
 
 
 # Names of the token-free CallRecord custody columns a ledger row carries.
@@ -656,10 +666,10 @@ class IncrementalLineageStore:
             if not current.prompt_is_delta:
                 break
             if not current.parent_call_id:
-                raise ValueError(f"delta record {current.call_id} has no parent call id")
+                raise ParentRecordsLostError(f"delta record {current.call_id} has no parent call id")
             parent = lineage.by_call_id.get(current.parent_call_id)
             if parent is None:
-                raise ValueError(f"delta record {current.call_id} has no indexed parent")
+                raise ParentRecordsLostError(f"delta record {current.call_id} has no indexed parent")
             current = parent
 
         ordered_nodes = list(reversed(chain))
@@ -693,9 +703,18 @@ class IncrementalLineageStore:
             status, node, reason = lineage.resolve_node(request_items)
             if status != ParentResolutionStatus.RESOLVED:
                 return LineageResolution(status, reason=reason)
-            tokens = (
-                node.cum_tokens if node.cum_tokens is not None else self._materialize(rollout_id, node, refs, lineage)
-            )
+            try:
+                tokens = (
+                    node.cum_tokens
+                    if node.cum_tokens is not None
+                    else self._materialize(rollout_id, node, refs, lineage)
+                )
+            except ParentRecordsLostError as error:
+                # An orphan delta (its ancestors were deleted under a live rollout) has no
+                # reconstructible tokens. Report the continuation as unresolved instead of
+                # failing the lookup: the caller records a root and the row is masked.
+                logger.warning("Rollout %s: %s; continuation left unresolved.", rollout_id, error)
+                return LineageResolution(ParentResolutionStatus.UNRESOLVED, reason=PARENT_RECORDS_LOST_REASON)
             return LineageResolution(
                 ParentResolutionStatus.RESOLVED,
                 match=LineageMatch(
@@ -744,6 +763,11 @@ class FileLineageStore(IncrementalLineageStore):
     def _read_locked(self, rollout_id: str):
         return self._store._locked(rollout_id, shared=True)
 
+    # Bytes of the first line that identify one incarnation of a rollout's file.
+    # Sorted keys put ``continuation_context_digest`` and ``created_at`` first,
+    # so a deleted-and-recreated file (which can reuse the inode number) differs here.
+    _HEAD_SIGNATURE_BYTES = 512
+
     def _fetch_new_entries(self, rollout_id: str, cursor: Any) -> tuple[list[tuple[TokenEntry, Any]], Any]:
         path = self._store.path_for(rollout_id)
         if not path.exists():
@@ -751,8 +775,15 @@ class FileLineageStore(IncrementalLineageStore):
                 raise IncrementalLineageStore.CursorReset
             return [], None
         file_stat = path.stat()
-        inode, offset = cursor if cursor is not None else (file_stat.st_ino, 0)
-        if inode != file_stat.st_ino or offset < 0 or offset > file_stat.st_size:
+        with path.open("rb") as handle:
+            head = handle.read(self._HEAD_SIGNATURE_BYTES)
+        inode, offset, known_head = cursor if cursor is not None else (file_stat.st_ino, 0, head)
+        if (
+            inode != file_stat.st_ino
+            or offset < 0
+            or offset > file_stat.st_size
+            or (offset > 0 and known_head != head[: len(known_head)])
+        ):
             raise IncrementalLineageStore.CursorReset
         items: list[tuple[TokenEntry, Any]] = []
         if offset < file_stat.st_size:
@@ -768,7 +799,7 @@ class FileLineageStore(IncrementalLineageStore):
                         continue
                     items.append((TokenEntry.model_validate(orjson.loads(payload)), line_offset))
                 offset = handle.tell()
-        return items, (inode, offset)
+        return items, (inode, offset, head if offset > 0 else known_head)
 
     def _load_entry(self, rollout_id: str, ref: Any) -> TokenEntry:
         with self._store.path_for(rollout_id).open("rb") as handle:

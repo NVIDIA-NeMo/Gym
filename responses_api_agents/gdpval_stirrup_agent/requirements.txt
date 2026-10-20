@@ -1,0 +1,7 @@
+-e nemo-gym[dev,sandbox] @ ../../
+# Stirrup agent framework (same pin as responses_api_agents/stirrup_agent, whose
+# nemo_agent / finish_tool_coercing / stirrup_utils modules this server imports).
+stirrup>=0.1.12,<0.2
+# moviepy (transitive from stirrup) imports PIL at module load; its metadata caps
+# pillow<12 but 12+ works. overrides.txt lifts the stale constraint.
+Pillow>=12

@@ -34,6 +34,7 @@ from nemo_gym.base_responses_api_model import (
     start_model_execution,
 )
 from nemo_gym.openai_utils import (
+    TOPK_TOKEN_METADATA_FIELDS,
     REQUIRED_TOKEN_METADATA_FIELDS,
     TOKEN_METADATA_FIELDS,
     NeMoGymAsyncOpenAI,
@@ -187,6 +188,12 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # Request inline prompt and generation token IDs from compatible vLLM endpoints.
     request_prompt_and_generation_token_ids: bool = False
     propagate_context_overflow_errors: bool = False
+    # Echo the sampler's top-k log-probs for every generated token as
+    # ``generation_topk_ids`` / ``generation_topk_logprobs`` on the assistant message
+    # (0 = off). Needs return_token_id_information=true and vLLM max_logprobs >= k + 1:
+    # the request asks for k + 1 candidates because vLLM lists the sampled token next to
+    # the top-k, and the k highest log-probs of that set are the sampler's head.
+    return_top_logprobs: int = 0
 
     uses_reasoning_parser: bool
     uses_interleaved_reasoning: bool = True
@@ -285,6 +292,12 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
             raise ValueError("supply_prefix_token_ids requires return_token_id_information=true")
         if self.supply_prefix_token_ids and self.use_completions_api:
             raise ValueError("supply_prefix_token_ids is not supported with use_completions_api=true")
+        if self.return_top_logprobs < 0:
+            raise ValueError("return_top_logprobs must be >= 0")
+        if self.return_top_logprobs > 0 and not self.return_token_id_information:
+            raise ValueError("return_top_logprobs requires return_token_id_information=true")
+        if self.return_top_logprobs > 0 and self.use_completions_api:
+            raise ValueError("return_top_logprobs is not supported with use_completions_api=true")
         if self.supply_prefix_token_ids and self.is_responses_native:
             raise ValueError("supply_prefix_token_ids is not supported with is_responses_native=true")
         return self
@@ -668,11 +681,12 @@ class VLLMModel(SimpleResponsesAPIModel):
         if self.config.return_token_id_information:
             body_dict |= dict(
                 logprobs=True,
-                # Pin top_logprobs=0: capture only needs the chosen token's logprob and id.
+                # Pin top_logprobs: capture only needs the chosen token's logprob and id (0);
+                # the top-k echo needs k + 1 candidates (see return_top_logprobs).
                 # vLLM computes `logprobs = top_logprobs if logprobs else None`.
                 # So an inbound top_logprobs=null yields no logprobs and empties the token ids.
                 # Overriding it here makes capture independent of the request.
-                top_logprobs=0,
+                top_logprobs=(self.config.return_top_logprobs + 1 if self.config.return_top_logprobs > 0 else 0),
                 # Typically passed via OpenAI client extra_body.
                 return_tokens_as_token_ids=True,
             )
@@ -1079,6 +1093,11 @@ class VLLMModel(SimpleResponsesAPIModel):
             response_token_ids = self._extract_vllm_response_token_ids(chat_completion_dict, choice_dict)
 
             if message_bundle is not None:
+                if self.config.return_top_logprobs > 0 and "generation_topk_ids" not in message_bundle:
+                    message_bundle.update(
+                        self._extract_choice_topk_logprobs(choice_dict, self.config.return_top_logprobs)
+                    )
+                    choice_dict.pop("logprobs", None)
                 if response_token_ids is not None:
                     response_prompt_token_ids, response_generation_token_ids = response_token_ids
                     if (
@@ -1089,6 +1108,11 @@ class VLLMModel(SimpleResponsesAPIModel):
                 message_dict.update(message_bundle)
             else:
                 logprob_token_ids, generation_log_probs = self._extract_choice_logprobs(choice_dict)
+                topk_bundle = (
+                    self._extract_choice_topk_logprobs(choice_dict, self.config.return_top_logprobs)
+                    if self.config.return_top_logprobs > 0
+                    else {}
+                )
                 if response_token_ids is not None:
                     prompt_token_ids, generation_token_ids = response_token_ids
                     if generation_token_ids != logprob_token_ids:
@@ -1109,6 +1133,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                             "prompt_token_ids": prompt_token_ids,
                             "generation_token_ids": generation_token_ids,
                             "generation_log_probs": generation_log_probs,
+                            **topk_bundle,
                             **(
                                 {"routed_experts": message_dict["routed_experts"]}
                                 if message_dict.get("routed_experts") is not None
@@ -1167,6 +1192,20 @@ class VLLMModel(SimpleResponsesAPIModel):
         }
         if "routed_experts" in bundle:
             normalized["routed_experts"] = bundle["routed_experts"]
+        topk_present = TOPK_TOKEN_METADATA_FIELDS.intersection(bundle)
+        if topk_present:
+            if topk_present != TOPK_TOKEN_METADATA_FIELDS:
+                raise RuntimeError(f"{source} returned partial top-k metadata: {sorted(topk_present)}.")
+            ids, logprobs = bundle["generation_topk_ids"], bundle["generation_topk_logprobs"]
+            if not isinstance(ids, list) or not isinstance(logprobs, list):
+                raise RuntimeError(f"{source} top-k metadata must be lists of per-token lists.")
+            if len(ids) != len(bundle["generation_token_ids"]) or len(logprobs) != len(ids):
+                raise RuntimeError(
+                    f"{source} returned top-k metadata for {len(ids)} positions but "
+                    f"{len(bundle['generation_token_ids'])} generated tokens."
+                )
+            normalized["generation_topk_ids"] = ids
+            normalized["generation_topk_logprobs"] = logprobs
 
         if len(normalized["generation_token_ids"]) != len(normalized["generation_log_probs"]):
             raise RuntimeError(
@@ -1241,6 +1280,47 @@ class VLLMModel(SimpleResponsesAPIModel):
             generation_log_probs.append(float(log_prob))
 
         return generation_token_ids, generation_log_probs
+
+    def _extract_choice_topk_logprobs(self, choice_dict: Dict[str, Any], top_k: int) -> Dict[str, Any]:
+        """Per generated position, the ``top_k`` highest sampler log-probs and their token ids.
+
+        The request asked vLLM for ``top_k + 1`` candidates: vLLM's per-position list is
+        the sampled token plus the top candidates, so after de-duplicating ids the
+        ``top_k`` largest log-probs are exactly the sampler's head, whether or not the
+        sampled token is in it. Fewer than ``top_k`` distinct candidates is an error.
+        """
+        logprobs_block = choice_dict.get("logprobs")
+        if not isinstance(logprobs_block, dict) or not isinstance(logprobs_block.get("content"), list):
+            raise RuntimeError(
+                f"`{self.config.name}` requested top-{top_k} logprobs from vLLM (return_top_logprobs) "
+                f"but the response had none (choice.logprobs={logprobs_block!r})."
+            )
+        topk_ids: List[List[int]] = []
+        topk_logprobs: List[List[float]] = []
+        for index, entry in enumerate(logprobs_block["content"]):
+            candidates = entry.get("top_logprobs") if isinstance(entry, dict) else None
+            if not isinstance(candidates, list):
+                raise RuntimeError(f"choice.logprobs.content[{index}].top_logprobs must be a list.")
+            by_id: Dict[int, float] = {}
+            for candidate in [entry, *candidates]:
+                token = candidate.get("token") if isinstance(candidate, dict) else None
+                log_prob = candidate.get("logprob") if isinstance(candidate, dict) else None
+                if not isinstance(token, str) or not token.startswith("token_id:"):
+                    raise RuntimeError(
+                        f"choice.logprobs.content[{index}] top_logprobs tokens must use the `token_id:<int>` format."
+                    )
+                if not isinstance(log_prob, (int, float)) or isinstance(log_prob, bool):
+                    raise RuntimeError(f"choice.logprobs.content[{index}] top_logprobs logprob must be numeric.")
+                token_id = int(token.removeprefix("token_id:"))
+                by_id[token_id] = max(float(log_prob), by_id.get(token_id, float("-inf")))
+            if len(by_id) < top_k:
+                raise RuntimeError(
+                    f"choice.logprobs.content[{index}] has {len(by_id)} distinct candidates, fewer than top_k={top_k}."
+                )
+            head = sorted(by_id.items(), key=lambda item: item[1], reverse=True)[:top_k]
+            topk_ids.append([token_id for token_id, _ in head])
+            topk_logprobs.append([log_prob for _, log_prob in head])
+        return {"generation_topk_ids": topk_ids, "generation_topk_logprobs": topk_logprobs}
 
     @classmethod
     def _get_tokenize_chat_body(cls, body_dict: Dict[str, Any]) -> Dict[str, Any]:

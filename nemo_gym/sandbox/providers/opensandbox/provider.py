@@ -2005,13 +2005,26 @@ class OpenSandboxProvider:
             error_type = "sandbox" if execution.error is not None else None
         return SandboxExecResult(stdout, "\n".join(stderr_parts) or None, return_code, error_type)
 
-    def _pty_http_client(self) -> Any:
-        """Return the aiohttp client for one PTY session (same ``tls_verify`` as the SDK transport)."""
+    @staticmethod
+    def _aiohttp_client_session(*, limit: int | None = None, **connector_kwargs: Any) -> Any:
+        """aiohttp session on the provider's cancellation-safe TCP connector.
+
+        Every aiohttp connection the provider opens goes through
+        ``FdSafeTCPConnector`` (see ``aiohttp_connector``); ``limit=None`` keeps
+        aiohttp's default cap, matching ``httpx_aiohttp``'s own session."""
         import aiohttp
 
+        from nemo_gym.sandbox.providers.opensandbox.aiohttp_connector import FdSafeTCPConnector
+
+        if limit is not None:
+            connector_kwargs["limit"] = limit
+        return aiohttp.ClientSession(connector=FdSafeTCPConnector(**connector_kwargs))
+
+    def _pty_http_client(self) -> Any:
+        """Return the aiohttp client for one PTY session (same ``tls_verify`` as the SDK transport)."""
         if not self._connection.tls_verify:
-            return aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False))
-        return aiohttp.ClientSession()
+            return self._aiohttp_client_session(ssl=False)
+        return self._aiohttp_client_session()
 
     async def _pty_session_missing(
         self, base_url: str, headers: dict[str, str], session_id: str, request_timeout_s: float | None

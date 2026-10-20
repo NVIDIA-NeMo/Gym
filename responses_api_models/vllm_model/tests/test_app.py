@@ -5113,6 +5113,7 @@ def _make_top_logprobs_model(
     *,
     extra_body: dict[str, Any] | None = None,
     request_prompt_and_generation_token_ids: bool = False,
+    return_top_logprobs: int = 0,
 ) -> VLLMModel:
     """A VLLMModel with the minimum config needed to exercise top_logprobs handling."""
     config = VLLMModelConfig(
@@ -5125,6 +5126,7 @@ def _make_top_logprobs_model(
         model="dummy_model",
         return_token_id_information=return_token_id_information,
         request_prompt_and_generation_token_ids=request_prompt_and_generation_token_ids,
+        return_top_logprobs=return_top_logprobs,
         uses_reasoning_parser=False,
         uses_interleaved_reasoning=False,
         extra_body=extra_body,
@@ -6392,3 +6394,74 @@ class TestPreserveEnvelopeIdFollowsCaptureContext:
             assert model._preserve_envelope_id() is False
         finally:
             reset_token_sink(token)
+
+
+class TestTopKEcho:
+    """return_top_logprobs=k echoes the sampler's top-k head per generated token (score centering)."""
+
+    @staticmethod
+    def _entry(sampled: int, sampled_lp: float, candidates: list[tuple[int, float]]) -> dict[str, Any]:
+        return {
+            "token": f"token_id:{sampled}",
+            "logprob": sampled_lp,
+            "top_logprobs": [{"token": f"token_id:{tid}", "logprob": lp} for tid, lp in candidates],
+        }
+
+    def test_request_asks_for_k_plus_one_candidates(self) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=True, return_top_logprobs=3)
+        result = model._preprocess_chat_completion_create_params(
+            MagicMock(),
+            {"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}], "top_logprobs": None},
+        )
+        assert result["logprobs"] is True and result["top_logprobs"] == 4
+
+    def test_head_is_the_k_largest_distinct_candidates(self) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=True, return_top_logprobs=2)
+        choice = {
+            "logprobs": {
+                "content": [
+                    # sampled token outside the head: vLLM lists it first, then the top candidates
+                    self._entry(9, -4.0, [(9, -4.0), (1, -0.5), (2, -1.5)]),
+                    # sampled token inside the head
+                    self._entry(1, -0.2, [(1, -0.2), (3, -2.0), (4, -3.0)]),
+                ]
+            }
+        }
+        bundle = model._extract_choice_topk_logprobs(choice, 2)
+        assert bundle["generation_topk_ids"] == [[1, 2], [1, 3]]
+        assert bundle["generation_topk_logprobs"] == [[-0.5, -1.5], [-0.2, -2.0]]
+
+    def test_too_few_candidates_is_an_error(self) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=True, return_top_logprobs=3)
+        choice = {"logprobs": {"content": [self._entry(1, -0.1, [(1, -0.1), (2, -1.0)])]}}
+        with raises(RuntimeError, match="fewer than top_k"):
+            model._extract_choice_topk_logprobs(choice, 3)
+
+    def test_bundle_validation_keeps_and_checks_topk(self) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=True, return_top_logprobs=2)
+        bundle = model._validate_token_bundle(
+            {
+                "prompt_token_ids": [1, 2],
+                "generation_token_ids": [3, 4],
+                "generation_log_probs": [-0.1, -0.2],
+                "generation_topk_ids": [[3, 5], [4, 6]],
+                "generation_topk_logprobs": [[-0.1, -2.0], [-0.2, -3.0]],
+            },
+            "test",
+        )
+        assert bundle["generation_topk_ids"] == [[3, 5], [4, 6]]
+        with raises(RuntimeError, match="top-k metadata for 1 positions"):
+            model._validate_token_bundle(
+                {
+                    "prompt_token_ids": [1, 2],
+                    "generation_token_ids": [3, 4],
+                    "generation_log_probs": [-0.1, -0.2],
+                    "generation_topk_ids": [[3, 5]],
+                    "generation_topk_logprobs": [[-0.1, -2.0]],
+                },
+                "test",
+            )
+
+    def test_config_requires_token_id_information(self) -> None:
+        with raises(ValueError, match="return_top_logprobs requires return_token_id_information"):
+            _make_top_logprobs_model(return_token_id_information=False, return_top_logprobs=2)

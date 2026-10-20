@@ -76,6 +76,21 @@ class ParentResolutionStatus(StrEnum):
     UNRESOLVED = "unresolved"
 
 
+# ``parent_resolution_reason`` of a continuation whose resolved parent records
+# vanished between parent resolution and commit (or before a later resolution):
+# the rollout's token file was deleted and recreated underneath a live rollout.
+PARENT_RECORDS_LOST_REASON = "parent_records_lost"
+
+
+class ParentRecordsLostError(ValueError):
+    """A delta record points at a parent that is no longer in the rollout's records.
+
+    Raised by the file store instead of appending an orphan delta, and by the
+    lineage store instead of materializing one. Callers re-root the call from
+    its full prompt or report the continuation as unresolved.
+    """
+
+
 def encode_token_ids(token_ids: list[int]) -> bytes:
     """Stable, length-delimited, big-endian encoding of a token sequence.
 

@@ -1,0 +1,12 @@
+gdpval_train_resources:
+  resources_servers:
+    gdpval_disaggregated:
+      entrypoint: app.py
+      domain: other
+      verified: false
+gdpval_val_resources:
+  resources_servers:
+    gdpval_disaggregated:
+      entrypoint: app.py
+      domain: other
+      verified: false
