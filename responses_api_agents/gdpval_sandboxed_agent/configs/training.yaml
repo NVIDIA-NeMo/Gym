@@ -7,3 +7,19 @@ gdpval_val:
     gdpval_sandboxed_agent:
       entrypoint: app.py
 
+
+# Gym requires an environment server per agent instance (AgentWithoutEnvironmentServerError otherwise).
+gdpval_train_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: gdpval_train
+gdpval_val_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: gdpval_val

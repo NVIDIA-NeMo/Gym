@@ -91,3 +91,14 @@ def test_file_cap_trims_deep_vendored_tree_not_top_level(tmp_path: Path):
     labels = _labels(blocks)
     assert "answer.sql:" in labels
     assert labels[-1].startswith("[51 more files not shown")   # 250 vendored + answer.sql - cap 200
+
+
+def test_zip_of_text_members_is_gradable_not_refused(tmp_path: Path):
+    # The manifest carries the members' contents, so the judge can grade it.
+    with zipfile.ZipFile(tmp_path / "code.zip", "w") as zf:
+        zf.writestr("src/query.sql", "SELECT 1;")
+        zf.writestr("README.md", "how to run")
+    blocks = fr.convert_deliverables_to_content_blocks(str(tmp_path))
+    texts = "\n".join(b["text"] for b in blocks if b["type"] == "text")
+    assert "no gradable deliverable content" not in texts
+    assert "SELECT 1;" in texts

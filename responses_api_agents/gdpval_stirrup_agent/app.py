@@ -465,6 +465,8 @@ _disable_stirrup_disk_cache()
 
 class GDPValStirrupAgent(SimpleResponsesAPIAgent):
     config: GDPValStirrupAgentConfig
+    # No Ray inside this server (Gym would otherwise initialize it in every worker).
+    ray_enabled = False
     _sem: asyncio.Semaphore = PrivateAttr()
     _resource_load: dict[str, int] = PrivateAttr(default_factory=dict)
 

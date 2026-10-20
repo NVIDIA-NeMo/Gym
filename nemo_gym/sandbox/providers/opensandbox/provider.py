@@ -2007,11 +2007,12 @@ class OpenSandboxProvider:
 
     @staticmethod
     def _aiohttp_client_session(*, limit: int | None = None, **connector_kwargs: Any) -> Any:
-        """aiohttp session on the provider's cancellation-safe TCP connector.
+        """aiohttp session on the cancellation-safe TCP connector (PTY sessions).
 
-        Every aiohttp connection the provider opens goes through
-        ``FdSafeTCPConnector`` (see ``aiohttp_connector``); ``limit=None`` keeps
-        aiohttp's default cap, matching ``httpx_aiohttp``'s own session."""
+        PTY connections go through ``FdSafeTCPConnector`` (see ``aiohttp_connector``);
+        ``limit=None`` keeps aiohttp's default cap. SDK calls on
+        ``transport_backend=aiohttp`` use Gym's global client (``GymAiohttpTransport``),
+        whose connector is not FD-safe."""
         import aiohttp
 
         from nemo_gym.sandbox.providers.opensandbox.aiohttp_connector import FdSafeTCPConnector

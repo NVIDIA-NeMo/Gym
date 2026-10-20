@@ -211,45 +211,6 @@ def test_fd_safe_connector_completes_normal_requests() -> None:
 
 
 @pytest.mark.asyncio
-async def test_provider_bridge_transport_uses_fd_safe_connector() -> None:
-    import ssl
-
-    from nemo_gym.sandbox.providers.opensandbox import provider as opensandbox_provider
-
-    httpx_aiohttp = pytest.importorskip("httpx_aiohttp", reason="optional httpx-aiohttp is not installed")
-    provider = opensandbox_provider.OpenSandboxProvider(
-        connection={
-            "transport_backend": "aiohttp",
-            "keepalive_expiry_s": 3.0,
-            "max_keepalive_connections": 20,
-            "max_connections": None,
-        }
-    )
-    transport = provider._build_transport()
-    assert isinstance(transport, httpx_aiohttp.AiohttpTransport)
-    session = transport.get_client()
-    try:
-        assert isinstance(session.connector, FdSafeTCPConnector)
-        assert session.connector._ssl is transport.ssl_context
-        assert session.connector._ssl.verify_mode == ssl.CERT_NONE
-        assert session.connector._keepalive_timeout == 3.0
-        assert session.connector.limit == aiohttp.TCPConnector().limit  # None keeps aiohttp's default cap
-    finally:
-        await session.close()
-
-    capped = opensandbox_provider.OpenSandboxProvider(
-        connection={"transport_backend": "aiohttp", "max_connections": 7, "tls_verify": True}
-    )
-    session = capped._build_transport().get_client()
-    try:
-        assert isinstance(session.connector, FdSafeTCPConnector)
-        assert session.connector.limit == 7
-        assert session.connector._ssl.verify_mode == ssl.CERT_REQUIRED
-    finally:
-        await session.close()
-
-
-@pytest.mark.asyncio
 async def test_provider_pty_client_uses_fd_safe_connector() -> None:
     from nemo_gym.sandbox.providers.opensandbox import provider as opensandbox_provider
 

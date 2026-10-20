@@ -94,7 +94,8 @@ class SandboxCodeExecToolProvider(CodeExecToolProvider):
                 exit_code=result.return_code if isinstance(result.return_code, int) else 1,
                 stdout=stdout,
                 stderr=stderr or str(result.error_type),
-                error_kind="execution_error",
+                # Our provider reports a deadline kill as error_type "timeout" (exit 124).
+                error_kind="timeout" if result.error_type == "timeout" else "execution_error",
             )
         return CommandResult(exit_code=result.return_code, stdout=stdout, stderr=stderr)
 

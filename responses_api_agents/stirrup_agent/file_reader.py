@@ -780,6 +780,8 @@ def _has_gradable_content(blocks: list[dict[str, Any]]) -> bool:
         body = parts[1].strip() if len(parts) > 1 else ""
         if body and not body.startswith(_NOTE_PREFIXES) and not text.startswith("["):
             return True            # a file body (text deliverable or archive text member)
+        if body.startswith("[archive, ") and "\n--- " in body:
+            return True            # an archive whose manifest carries text-member contents
     return False
 
 
@@ -789,6 +791,7 @@ def convert_deliverables_to_content_blocks(
     media_mode: str = "native_pdf",
     _label_prefix: str = "",
     _depth: int = 0,
+    _attachment_budget: "AttachmentBudget | None" = None,
     render_dpi: int = 150,
     max_pages: int = 50,
     include_text: bool = True,
@@ -830,7 +833,8 @@ def convert_deliverables_to_content_blocks(
 
     blocks: list[dict[str, Any]] = []
     scratch_dirs: list[Path] = []  # tempdirs holding PDFs this pass converted
-    attachment_budget = AttachmentBudget(
+    # Archive members (recursive calls) draw on the same request-wide budget as top-level files.
+    attachment_budget = _attachment_budget or AttachmentBudget(
         MAX_TOTAL_RAW_ATTACHMENT_BYTES,
         MAX_TOTAL_ENCODED_ATTACHMENT_CHARS,
     )
@@ -1101,6 +1105,7 @@ def convert_deliverables_to_content_blocks(
                                         video_capable=video_capable,
                                         _label_prefix=f"{_rel(fpath)}/",
                                         _depth=_depth + 1,
+                                        _attachment_budget=attachment_budget,
                                     )
                                 )
                     else:
@@ -1129,15 +1134,18 @@ def convert_deliverables_to_content_blocks(
     if overflow_note:
         blocks.append({"type": "text", "text": overflow_note})
 
-    if _depth == 0 and entries and not _has_gradable_content(blocks):
-        # Every file is audio this judge cannot hear, or an unreadable binary. The
-        # local judge adapter refuses "name: [Error: ...]" blocks and the GDPval
-        # verifier masks the sample; a guessed verdict is worse than no verdict.
-        blocks.append({"type": "text", "text": "\ndeliverables: [Error: no gradable deliverable content; "
-                                                "every file is audio or an unreadable binary]"})
+    nothing_gradable = _depth == 0 and entries and not _has_gradable_content(blocks)
 
     # Clean up only what this pass created; it all lives in tempdirs.
     for scratch in scratch_dirs:
         shutil.rmtree(scratch, ignore_errors=True)
 
-    return _enforce_text_block_budget(blocks, MAX_TOTAL_TEXT_BLOCK_CHARS)
+    blocks = _enforce_text_block_budget(blocks, MAX_TOTAL_TEXT_BLOCK_CHARS)
+    if nothing_gradable:
+        # Every file is audio this judge cannot hear, or an unreadable binary. The
+        # local judge adapter refuses "name: [Error: ...]" blocks and the GDPval
+        # verifier masks the sample; a guessed verdict is worse than no verdict.
+        # Appended after the text budget so the budget can never drop it.
+        blocks.append({"type": "text", "text": "\ndeliverables: [Error: no gradable deliverable content; "
+                                                "every file is audio or an unreadable binary]"})
+    return blocks

@@ -114,6 +114,8 @@ def _incomplete_response(model: str, tag: str) -> NeMoGymResponse:
 
 class GDPValSandboxedAgent(SimpleResponsesAPIAgent):
     config: GDPValSandboxedAgentConfig
+    # No Ray inside this server (Gym would otherwise initialize it in every worker).
+    ray_enabled = False
     _sem: asyncio.Semaphore = PrivateAttr()
     _resource_load: dict[str, int] = PrivateAttr(default_factory=dict)
 
@@ -290,8 +292,12 @@ with zipfile.ZipFile('/tmp/gdpval-trace.zip', 'w', zipfile.ZIP_DEFLATED) as z:
                     }:
                         failure_reason = "agent_stuck_in_loop"
                 if failure_reason is None:
-                    if result.return_code == -1:
-                        incomplete_reason = "agent_exec_timeout" if exec_timed_out else "agent_exec_incomplete"
+                    # Our provider reports a deadline kill as exit 124 with error_type "timeout".
+                    deadline_killed = result.return_code == 124 and getattr(result, "error_type", None) == "timeout"
+                    if result.return_code == -1 or deadline_killed:
+                        incomplete_reason = (
+                            "agent_exec_timeout" if exec_timed_out or deadline_killed else "agent_exec_incomplete"
+                        )
                     elif "SocketTimeoutError" in error or "APITimeoutError" in error:
                         incomplete_reason = "model_response_timeout"
                     else:

@@ -98,6 +98,8 @@ class TaskSession:
 
 class GDPValResourcesServer(SimpleResourcesServer, ArtifactIO):
     config: GDPValResourcesConfig
+    # No Ray inside this server (Gym would otherwise initialize it in every worker).
+    ray_enabled = False
     _rows: dict[str, dict[str, Any]] = PrivateAttr(default_factory=dict)
     _sessions: dict[str, TaskSession] = PrivateAttr(default_factory=dict)
     _manifest: str = PrivateAttr(default="")
