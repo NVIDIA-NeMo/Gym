@@ -74,10 +74,17 @@ _IMAGE_OUTPUT_PLACEHOLDER = "[image omitted from tool output]"
 # Responses reasoning fields that only select what the provider reports back (a reasoning
 # summary, under its current and its deprecated name), so a Chat Completions backend answers the
 # request faithfully without them. With `drop_unrepresentable_request_fields` these are removed
-# from the request rather than refused. `reasoning.context` is not among them: it tells the
-# provider which earlier reasoning items to render back to the model, which the conversion cannot
-# honor (it renders every item and leaves the rest to the chat template), so it stays refused.
+# from the request rather than refused.
 _REPORTING_ONLY_REASONING_FIELDS = ("summary", "generate_summary")
+
+# The `reasoning.context` values the conversion already behaves as. The field tells the provider
+# which earlier reasoning items to render back to the model. The conversion passes every reasoning
+# item the request carries to the backend and leaves what is rendered to its chat template, which
+# is what `all_turns` (render them all) and `auto` (the provider's choice) ask for, so with
+# `drop_unrepresentable_request_fields` these values are dropped. `current_turn` asks for the
+# earlier turns' reasoning to be left out, which the conversion does not do, so it stays refused.
+# The Codex CLI sends `all_turns` when its model catalog enables reasoning context.
+_DROPPABLE_REASONING_CONTEXTS = ("auto", "all_turns")
 
 
 def message_content_to_text(content: Any) -> str:
@@ -238,10 +245,11 @@ class ResponsesConverter(BaseModel):
         ``drop_unrepresentable_request_fields`` the reporting-only fields are removed from the
         request instead and the conversion proceeds: a non-empty ``include`` (every value; an
         empty one is already treated as absent), ``reasoning.summary`` and
-        ``reasoning.generate_summary``, and a message ``phase``. An image part in a tool's output
+        ``reasoning.generate_summary``, a ``reasoning.context`` of ``auto`` or ``all_turns`` (see
+        ``_DROPPABLE_REASONING_CONTEXTS``), and a message ``phase``. An image part in a tool's output
         becomes the text placeholder ``_IMAGE_OUTPUT_PLACEHOLDER``, which does replace that part
-        of the prompt. Every other unrepresentable field, ``reasoning.context`` included, is still
-        refused.
+        of the prompt. Every other unrepresentable field, a ``current_turn`` reasoning context
+        included, is still refused.
         """
         responses_create_params = responses_create_params.model_dump(exclude_none=True, exclude_unset=True)
         if responses_create_params.get("include") == []:
@@ -363,13 +371,17 @@ class ResponsesConverter(BaseModel):
         reasoning = responses_create_params.pop("reasoning", None)
         if reasoning is not None:
             # A chat completion carries only the effort. The summary fields select what the provider
-            # reports back and are dropped when configured; `context` is an instruction about the
-            # prompt and is refused like every other unrepresentable field.
+            # reports back and are dropped when configured. `context` is an instruction about the
+            # prompt, dropped when configured only for the values the conversion already behaves as.
             representable_fields = {"effort"}
             if drop_unrepresentable_request_fields:
                 representable_fields.update(_REPORTING_ONLY_REASONING_FIELDS)
+                if reasoning.get("context") in _DROPPABLE_REASONING_CONTEXTS:
+                    representable_fields.add("context")
                 dropped_reasoning_fields = [
-                    field for field in _REPORTING_ONLY_REASONING_FIELDS if reasoning.get(field) is not None
+                    field
+                    for field in (*_REPORTING_ONLY_REASONING_FIELDS, "context")
+                    if field in representable_fields and reasoning.get(field) is not None
                 ]
                 if dropped_reasoning_fields:
                     logger.debug(

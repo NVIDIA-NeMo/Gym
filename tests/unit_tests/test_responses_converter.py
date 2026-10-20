@@ -1996,11 +1996,49 @@ def test_downconverting_drops_reporting_only_reasoning_fields_when_configured(
 
 
 @pytest.mark.parametrize("context", ["auto", "current_turn", "all_turns"])
-def test_downconverting_still_rejects_a_reasoning_context_when_configured(converter: ResponsesConverter, context: str):
-    """`reasoning.context` tells the provider which earlier reasoning items to render back to the
-    model. The conversion renders every item and leaves the rest to the chat template, so it honors
-    no value of the field and refuses it even with the switch on."""
+def test_downconverting_rejects_a_reasoning_context_by_default(converter: ResponsesConverter, context: str):
     params = NeMoGymResponseCreateParamsNonStreaming(input="hi", reasoning={"effort": "high", "context": context})
+
+    with pytest.raises(NotImplementedError, match="context"):
+        converter.responses_to_chat_completion_create_params(params)
+
+
+@pytest.mark.parametrize("context", ["auto", "all_turns"])
+def test_downconverting_drops_a_reasoning_context_the_conversion_behaves_as_when_configured(
+    converter: ResponsesConverter, context: str, caplog: pytest.LogCaptureFixture
+):
+    """The conversion passes every replayed reasoning item to the backend and leaves what is rendered
+    to its chat template: what `all_turns` and `auto` ask for. The Codex CLI sends `all_turns` with
+    a model catalog that enables reasoning context."""
+    params = NeMoGymResponseCreateParamsNonStreaming(
+        input=[
+            {"role": "user", "content": "fix the test"},
+            {"type": "reasoning", "id": "rs_1", "summary": [{"type": "summary_text", "text": "Look first."}]},
+            {"type": "function_call", "call_id": "call_1", "name": "shell", "arguments": '{"command":"ls"}'},
+            {"type": "function_call_output", "call_id": "call_1", "output": "a.py"},
+        ],
+        reasoning={"effort": "high", "summary": "auto", "context": context},
+    )
+
+    with caplog.at_level("DEBUG", logger="nemo_gym.responses_converter"):
+        converted = converter.responses_to_chat_completion_create_params(
+            params, drop_unrepresentable_request_fields=True
+        )
+
+    assert converted.reasoning_effort == "high"
+    # The earlier turn's reasoning still reaches the backend with the call it led to.
+    assert converted.messages[1]["content"] == "<think>Look first.</think>"
+    assert "['summary', 'context']" in caplog.text
+
+
+def test_downconverting_still_rejects_a_current_turn_reasoning_context_when_configured(
+    converter: ResponsesConverter,
+):
+    """`current_turn` asks the provider to leave the earlier turns' reasoning out of the prompt. The
+    conversion passes every reasoning item on, so it refuses the value even with the switch on."""
+    params = NeMoGymResponseCreateParamsNonStreaming(
+        input="hi", reasoning={"effort": "high", "context": "current_turn"}
+    )
 
     with pytest.raises(NotImplementedError, match="context"):
         converter.responses_to_chat_completion_create_params(params, drop_unrepresentable_request_fields=True)
