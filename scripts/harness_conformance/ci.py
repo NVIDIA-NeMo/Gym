@@ -18,17 +18,60 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def select_harnesses(paths: list[str]) -> list[str]:
-    """Narrow adapter-only changes; conservatively cover shared/dynamic dependencies."""
+    """Select adapters and shared probe dependencies, skipping unrelated components."""
     selected = set()
     for path in paths:
         adapter = next((name for name in HARNESSES if path.startswith(f"responses_api_agents/{name}_agent/")), None)
         if adapter:
             selected.add(adapter)
-        elif path.startswith(("fern/", "docs/")) or ("/" not in path and path.endswith(".md")) or path == "LICENSE":
+        elif path.startswith(("nemo_gym/cli/", "nemo_gym/tasks/")) and path not in (
+            "nemo_gym/cli/__init__.py",
+            "nemo_gym/cli/_compat.py",
+            "nemo_gym/cli/utils.py",
+        ):
+            # Probes construct their own rows and call the collector directly.
+            # Core modules still import the shared CLI compatibility helpers.
+            continue
+        elif path.startswith(
+            (
+                "nemo_gym/",
+                "responses_api_agents/shared/",
+                "environment_servers/legacy_agent/",
+                "environment_servers/single_agent_turn/",
+                "environment_servers/single_agent_turn_legacy/",
+                "scripts/harness_conformance/",
+                "tests/unit_tests/harness_capabilities/",
+                "tests/unit_tests/test_harness_conformance",
+            )
+        ):
+            return list(HARNESSES)
+        elif path in (
+            "tests/__init__.py",
+            "tests/conftest.py",
+            "tests/unit_tests/__init__.py",
+            "tests/unit_tests/conftest.py",
+        ):
+            # Checker tests inherit these fixtures and import through these packages.
+            return list(HARNESSES)
+        elif (
+            path.startswith(
+                (
+                    "resources_servers/",
+                    "responses_api_agents/",
+                    "responses_api_models/",
+                    "environment_servers/",
+                    "tests/",
+                    "benchmarks/",
+                    "fern/",
+                    "docs/",
+                )
+            )
+            or ("/" not in path and path.endswith(".md"))
+            or path in ("LICENSE", ".gitignore")
+        ):
             continue
         else:
-            # Includes other servers: adapters/tests can import them dynamically.
-            # Unknown code and dependency/configuration changes must not be skipped.
+            # Keep unknown code, dependency files, and CI setup conservative.
             return list(HARNESSES)
     return [name for name in HARNESSES if name in selected]
 
@@ -55,9 +98,10 @@ def install_runtime(harness: str) -> None:
     import yaml
 
     adapter = ROOT / "responses_api_agents" / f"{harness}_agent"
-    subprocess.run(["uv", "pip", "install", "-r", "requirements.txt"], cwd=adapter, check=True)
-    if harness == "hermes":
-        return  # The Python requirements contain its pinned runtime.
+    override_flag = ["--override", "overrides.txt"] if (adapter / "overrides.txt").exists() else []
+    subprocess.run(["uv", "pip", "install", *override_flag, "-r", "requirements.txt"], cwd=adapter, check=True)
+    if harness in ("hermes", "stirrup"):
+        return  # Hermes' pinned runtime is in its requirements; Stirrup installs its runtime in the task sandbox.
     defaults = yaml.safe_load((adapter / "configs" / f"{harness}_agent.yaml").read_text())
     config = defaults[f"{harness}_agent"]["responses_api_agents"][f"{harness}_agent"]
     if harness == "opencode":

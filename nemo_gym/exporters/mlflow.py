@@ -134,9 +134,15 @@ class MLflowExporter(BaseExporter):
         tags = dict(self.config.mlflow_run_tags)
         if self.config.mlflow_run_description:
             tags["mlflow.note.content"] = self.config.mlflow_run_description
+        # A resumed or resubmitted run reopens the MLflow run recorded next to its output.
+        self.run_id = self._recorded_run_id()
+        if self.run_id is not None:
+            self.client.update_run(self.run_id, status="RUNNING")
+            return
         self.run_id = self.client.create_run(
             experiment_id, run_name=self.config.mlflow_run_name, tags=tags or None
         ).info.run_id
+        self._record_run_id(self.run_id)
 
     def teardown(self) -> None:
         if self.client is not None and self.run_id is not None:

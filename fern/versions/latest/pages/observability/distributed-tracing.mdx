@@ -78,6 +78,14 @@ jq -r 'select(.attributes."nemo.gym.rollout.id") | .attributes."nemo.gym.rollout
 ls <capture_dir>/<rollout_id>.capture.jsonl
 ```
 
+### Engine Request Ids
+
+Inside a rollout, every call a Gym model server makes to its inference backend carries
+`X-Request-Id: <rollout id>-<8 hex chars>`. vLLM uses that header as its request id and records it
+as `gen_ai.request.id` on its request span and in its request log, so an engine span or log line
+can be matched to a rollout directly, without walking the trace. A caller's own `X-Request-Id`
+header is kept.
+
 ## Span Kinds
 
 Span kind is what tells a backend that a call left one service and arrived at another.
