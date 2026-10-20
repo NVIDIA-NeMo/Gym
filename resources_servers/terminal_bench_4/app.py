@@ -67,6 +67,12 @@ class TerminalBench4Config(BaseResourcesServerConfig):
     # the attempt left behind. ``zero``: reward 0 without running the verifier, reported as a completed evaluation, so
     # training treats it as a valid failed attempt rather than an incomplete one. Setup timeouts stay errors.
     agent_timeout_reward: Literal["graded", "zero"] = "graded"
+    # How an attempt whose agent stopped because the context window was full is scored: termination ``nonzero_exit``
+    # with detail ``ContextWindowExceededError`` (the mini-SWE harness sets it when the model server refuses a request
+    # that no longer fits, and when its last rejected reply was cut at the window). ``graded`` (TB4's rule): the
+    # verifier checks what the attempt left behind. ``zero``: reward 0 without running the verifier, reported as a
+    # completed evaluation, as ``agent_timeout_reward: zero`` does for timeouts.
+    context_overflow_reward: Literal["graded", "zero"] = "graded"
     # Cap on the official verifier's run time, the task's ``[verifier] timeout_sec``: the smaller applies. A verifier the
     # cap cuts fails like one its own budget cuts (VerifierTimeoutError, an incomplete evaluation). None keeps TB4's rule.
     verifier_max_timeout_sec: float | None = Field(default=None, gt=0)
@@ -399,15 +405,25 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                     )
                 except Exception as exc:
                     session.diagnostics.append({"operation": "opencode_quiesce_user", "error": str(exc)})
-            zero_timeout = (
-                self.config.agent_timeout_reward == "zero"
-                and body.agent_started
+            reward_rule = None
+            if (
+                body.agent_started
+                and self.config.agent_timeout_reward == "zero"
                 and session.termination.reason == "timeout"
-            )
-            if zero_timeout:
-                session.result["reward_rule"] = "agent_timeout_zero"
+            ):
+                reward_rule = "agent_timeout_zero"
+            elif (
+                body.agent_started
+                and self.config.context_overflow_reward == "zero"
+                and session.termination.reason == "nonzero_exit"
+                and session.termination.detail == "ContextWindowExceededError"
+            ):
+                reward_rule = "context_overflow_zero"
+            if reward_rule:
+                session.result["reward_rule"] = reward_rule
             await lifecycle.finalize_session(
-                session, grade=body.agent_started and session.seed_response.termination is None and not zero_timeout
+                session,
+                grade=body.agent_started and session.seed_response.termination is None and reward_rule is None,
             )
             session.verified_response = self._verified_response(session, body.harness_metadata)
             session.persist()
@@ -415,7 +431,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
     def _verified_response(self, session, extra):
         result = session.result or {}
         rewards = (result.get("verifier_result") or {}).get("rewards") or {}
-        if result.get("reward_rule") == "agent_timeout_zero":
+        if result.get("reward_rule") in ("agent_timeout_zero", "context_overflow_zero"):
             rewards = {"reward": 0.0}
         completed = "reward" in rewards
         failure = None

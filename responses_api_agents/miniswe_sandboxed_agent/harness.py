@@ -35,6 +35,7 @@ from nemo_gym.rollout_observability import (
     TrajectoryTurn,
 )
 from nemo_gym.sandbox import AsyncSandbox
+from nemo_gym.token_id_capture.delivery import TERMINAL_RESPONSE_ID_KEY
 from responses_api_agents.miniswe_sandboxed_agent.bootstrap import bootstrap_assets, offline_assets
 
 
@@ -66,6 +67,29 @@ def original_response_id(response_id: str) -> str:
         except (ValueError, UnicodeDecodeError, binascii.Error):
             pass
     return response_id
+
+
+def last_rejection_filled_window(trajectory: dict, window: int | None) -> bool:
+    """Whether the reply rejected last, after the last kept reply, used the whole context window."""
+    if not window:
+        return False
+    for message in reversed(trajectory.get("messages") or []):
+        if message.get("object") == "response":
+            return False
+        response = (message.get("extra") or {}).get("response")
+        if isinstance(response, dict) and response.get("object") == "response":
+            usage = response.get("usage") or {}
+            total = usage.get("total_tokens") or (usage.get("input_tokens") or 0) + (usage.get("output_tokens") or 0)
+            return total >= window
+    return False
+
+
+def last_kept_response_id(trajectory: dict) -> str | None:
+    """Served ID of the last reply mini-SWE kept, i.e. the last call whose output the next request replays."""
+    for message in reversed(trajectory.get("messages") or []):
+        if message.get("object") == "response" and message.get("id"):
+            return original_response_id(message["id"])
+    return None
 
 
 def project_native_trajectory(trajectory: dict) -> tuple[list[dict], list[dict]]:
@@ -115,6 +139,11 @@ def project_native_trajectory(trajectory: dict) -> tuple[list[dict], list[dict]]
 class MiniSWEConfig(BaseModel):
     step_limit: int = Field(default=0, ge=0)
     step_timeout_sec: int = Field(default=600, gt=0)
+    # The model server's context window in tokens. A server that fits each reply into the room left in the window
+    # cuts the last replies of a long run short, mini-SWE rejects them as format errors, and the run ends with
+    # RepeatedFormatError. When this is set and the last rejected reply filled the window (input + output tokens),
+    # the run is reported as ContextWindowExceededError instead: it ran out of context.
+    context_window_tokens: int | None = Field(default=None, gt=0)
 
 
 class HarnessOutcome(BaseModel):
@@ -421,6 +450,10 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
             )
             if context_overflow:
                 termination = HarnessOutcome(reason="nonzero_exit", detail="ContextWindowExceededError")
+            elif status == "RepeatedFormatError" and last_rejection_filled_window(
+                result, self.config.context_window_tokens
+            ):
+                termination = HarnessOutcome(reason="nonzero_exit", detail="ContextWindowExceededError")
             elif status == "Submitted":
                 termination = HarnessOutcome(reason="completed")
             elif status in {"LimitsExceeded", "RepeatedFormatError", "ContextWindowExceededError", "TimeExceeded"}:
@@ -464,6 +497,11 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
         extra = {"harness_version": info.get("mini_version")}
         if native_trajectory is not None:
             extra["mini_swe_trajectory"] = native_trajectory
+            # Name the call token capture should train on: rejected replies are side branches that mini-SWE never
+            # replays, and without this a run ending in several of them has no unambiguous terminal call.
+            terminal_response_id = last_kept_response_id(native_trajectory)
+            if terminal_response_id:
+                extra[TERMINAL_RESPONSE_ID_KEY] = terminal_response_id
             termination.artifacts = [str(self.directory / "trajectory.json")]
         if (self.directory / "agent.log").exists():
             termination.artifacts.append(str(self.directory / "agent.log"))

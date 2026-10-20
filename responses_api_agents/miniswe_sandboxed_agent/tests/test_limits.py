@@ -8,6 +8,7 @@ import pytest
 from aiohttp import ClientResponseError
 
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.token_id_capture.delivery import TERMINAL_RESPONSE_ID_KEY
 from responses_api_agents.miniswe_sandboxed_agent.harness import HarnessContext, MiniSWEConfig
 
 
@@ -150,3 +151,106 @@ async def test_context_overflow_stops_without_format_retries(
     assert json.loads((tmp_path / "trajectory.json").read_text())["info"]["exit_status"] == expected
     if is_context_overflow:
         assert outcome.detail == "ContextWindowExceededError"
+
+
+WINDOW = 393216
+
+
+def usage(input_tokens, output_tokens):
+    return {
+        "input_tokens": input_tokens,
+        "input_tokens_details": {"cached_tokens": 0},
+        "output_tokens": output_tokens,
+        "output_tokens_details": {"reasoning_tokens": output_tokens},
+        "total_tokens": input_tokens + output_tokens,
+    }
+
+
+def model_response(index, *, command=None, cut_at=None):
+    """A kept bash call (``command``), or a reply the server cut so that input + output == ``cut_at``."""
+    cut = command is None
+    output = []
+    if not cut:
+        output = [
+            {
+                "type": "function_call",
+                "call_id": f"call-{index}",
+                "name": "bash",
+                "arguments": json.dumps({"command": command}),
+            }
+        ]
+    input_tokens = 392_000 + 58 * index
+    return NeMoGymResponse(
+        id=f"response-{index}",
+        created_at=0,
+        object="response",
+        model="model",
+        tools=[],
+        tool_choice="auto",
+        parallel_tool_calls=False,
+        status="incomplete" if cut else "completed",
+        incomplete_details={"reason": "max_output_tokens"} if cut else None,
+        output=output,
+        usage=usage(input_tokens, (cut_at - input_tokens) if cut else 40),
+    )
+
+
+async def run_scripted(tmp_path, runner_factory, script, *, window):
+    requests = []
+
+    async def query(params):
+        requests.append(params)
+        return script(len(requests))
+
+    harness = await runner_factory(
+        context=HarnessContext(session_id="window-test", instruction="Inspect and submit"),
+        config=MiniSWEConfig(context_window_tokens=window),
+        params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        query=query,
+        model_name="model",
+        directory=tmp_path,
+    )
+    _, outcome, extra = await harness.execute(15)
+    return requests, outcome, extra
+
+
+@pytest.mark.parametrize(
+    "window,cut_at,expected",
+    [
+        (WINDOW, WINDOW, "ContextWindowExceededError"),  # every retry was cut at the window
+        (None, WINDOW, "RepeatedFormatError"),  # no window configured: the plain label
+        (WINDOW, WINDOW - 1_000, "RepeatedFormatError"),  # cut below the window: a format-error quit
+    ],
+)
+async def test_format_errors_cut_at_the_context_window_are_a_context_overflow(
+    tmp_path, runner_factory, window, cut_at, expected
+):
+    requests, outcome, extra = await run_scripted(
+        tmp_path, runner_factory, lambda n: model_response(n, cut_at=cut_at), window=window
+    )
+    assert len(requests) == 3
+    assert extra["mini_swe_trajectory"]["info"]["exit_status"] == "RepeatedFormatError"
+    assert outcome.reason == "nonzero_exit" and outcome.detail == expected
+
+
+def kept_then_cut(n):
+    return model_response(n, command="echo kept") if n == 1 else model_response(n, cut_at=WINDOW)
+
+
+def cut_then_submit(n):
+    if n == 1:
+        return model_response(n, cut_at=WINDOW)
+    return model_response(n, command="echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT")
+
+
+@pytest.mark.parametrize(
+    "script,declared",
+    [
+        (kept_then_cut, "response-1"),  # three cut replies after a kept call: train on the kept call
+        (cut_then_submit, "response-2"),  # the submission is the last kept call
+        (lambda n: model_response(n, cut_at=WINDOW), None),  # nothing kept: declare nothing
+    ],
+)
+async def test_harness_declares_its_last_kept_reply_as_the_terminal_call(tmp_path, runner_factory, script, declared):
+    _, _, extra = await run_scripted(tmp_path, runner_factory, script, window=WINDOW)
+    assert extra.get(TERMINAL_RESPONSE_ID_KEY) == declared

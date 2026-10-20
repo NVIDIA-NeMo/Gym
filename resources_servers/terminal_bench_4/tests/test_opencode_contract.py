@@ -952,10 +952,22 @@ async def test_cleanup_records_a_failed_discard_and_still_closes(tmp_path, monke
 # --- agent timeout reward (agent_timeout_reward) --------------------------------------------------------------------
 
 
-async def finalized_miniswe_session(tmp_path, monkeypatch, *, rule, reason, agent_started=True, verified_reward=1.0):
+async def finalized_miniswe_session(
+    tmp_path,
+    monkeypatch,
+    *,
+    rule,
+    reason,
+    agent_started=True,
+    verified_reward=1.0,
+    detail="budget",
+    overflow_rule="graded",
+):
     manifest, ref = local_manifest(tmp_path)
     server = TerminalBench4ResourcesServer(
-        config=config(tmp_path, manifest, harness="miniswe", agent_timeout_reward=rule),
+        config=config(
+            tmp_path, manifest, harness="miniswe", agent_timeout_reward=rule, context_overflow_reward=overflow_rule
+        ),
         server_client=MagicMock(spec=ServerClient),
     )
     session = server._new_session("identity", "owner", TerminalBench4RunRequest.model_validate(row(ref)), "tb4-x")
@@ -967,7 +979,7 @@ async def finalized_miniswe_session(tmp_path, monkeypatch, *, rule, reason, agen
         | {
             "response": RESPONSE,
             "session_id": "tb4-x",
-            "termination": {"reason": reason, "detail": "budget"},
+            "termination": {"reason": reason, "detail": detail},
             "agent_started": agent_started,
         }
     )
@@ -1006,3 +1018,56 @@ async def test_zero_rule_leaves_finished_attempts_and_setup_timeouts_alone(tmp_p
     )
     assert graded == [False] and not response.evaluation_completed and response.infrastructure_error
     assert "reward_rule" not in response.model_extra
+
+
+# --- context overflow reward (context_overflow_reward) --------------------------------------------------------------
+
+
+async def test_zero_overflow_rule_scores_a_context_overflow_zero_without_the_verifier(tmp_path, monkeypatch):
+    response, graded = await finalized_miniswe_session(
+        tmp_path,
+        monkeypatch,
+        rule="graded",
+        overflow_rule="zero",
+        reason="nonzero_exit",
+        detail="ContextWindowExceededError",
+    )
+    assert graded == [False]  # the verifier sandbox is never started
+    assert response.reward == 0.0 and response.evaluation_completed and response.infrastructure_error is None
+    assert response.termination.reason == "nonzero_exit"
+    assert response.termination.detail == "ContextWindowExceededError"
+    assert response.model_extra["reward_rule"] == "context_overflow_zero"
+    assert "_ng_failure_class" not in response.model_extra
+
+
+async def test_graded_overflow_rule_keeps_tb4_grading_of_a_context_overflow(tmp_path, monkeypatch):
+    response, graded = await finalized_miniswe_session(
+        tmp_path, monkeypatch, rule="zero", reason="nonzero_exit", detail="ContextWindowExceededError"
+    )
+    assert graded == [True] and response.reward == 1.0 and response.evaluation_completed
+    assert "reward_rule" not in response.model_extra
+
+
+@pytest.mark.parametrize(
+    "reason,detail",
+    [
+        ("nonzero_exit", "RepeatedFormatError"),
+        ("nonzero_exit", "LimitsExceeded"),
+        ("completed", None),
+        # The harness keeps the overflow detail when the agent deadline also passed; the timeout rule owns that try.
+        ("timeout", "ContextWindowExceededError"),
+    ],
+)
+async def test_zero_overflow_rule_leaves_other_endings_to_their_own_rules(tmp_path, monkeypatch, reason, detail):
+    response, graded = await finalized_miniswe_session(
+        tmp_path, monkeypatch, rule="graded", overflow_rule="zero", reason=reason, detail=detail
+    )
+    assert graded == [True] and response.reward == 1.0 and "reward_rule" not in response.model_extra
+
+
+async def test_timeout_rule_wins_over_overflow_rule_when_both_apply(tmp_path, monkeypatch):
+    response, graded = await finalized_miniswe_session(
+        tmp_path, monkeypatch, rule="zero", overflow_rule="zero", reason="timeout", detail="ContextWindowExceededError"
+    )
+    assert graded == [False] and response.reward == 0.0
+    assert response.model_extra["reward_rule"] == "agent_timeout_zero"
