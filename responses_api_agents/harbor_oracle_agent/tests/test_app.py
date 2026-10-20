@@ -358,11 +358,11 @@ def test_task_hashing_runs_outside_the_request_event_loop(tmp_path, monkeypatch)
     original_load = module.load_task
     loads = []
 
-    def load_without_event_loop(path):
+    def load_without_event_loop(path, **kwargs):
         with pytest.raises(RuntimeError, match="no running event loop"):
             asyncio.get_running_loop()
         loads.append(path)
-        return original_load(path)
+        return original_load(path, **kwargs)
 
     monkeypatch.setattr(module, "load_task", load_without_event_loop)
     client = TestClient(agent.setup_webserver())
@@ -447,3 +447,12 @@ def test_provider_error_in_the_log_dir_setup_is_not_scored_either(tmp_path, monk
     response = client.post("/v1/responses", json=RESPONSES_BODY)
     assert response.status_code == 500, response.text
     assert not any("solve.sh" in call["command"] for call in sandbox.execs)
+
+
+def test_load_task_applies_the_runs_timeout_multiplier(tmp_path, monkeypatch):
+    agent, task, _, _ = make_agent(tmp_path, monkeypatch)
+    taskset = module.get_global_config_dict()["harbor_env"]["environment_servers"]["harbor"]["tasksets"]["ds"]
+    taskset["timeout_multiplier"] = 3.0
+    # The mapping carries the digest the rows were materialized under, with the run's setting applied.
+    taskset["tasks"]["hello"] = load_task(task.path, timeout_multiplier=3.0).digest
+    assert agent._load_task("ds", "hello").config.agent.timeout_sec == task.config.agent.timeout_sec * 3

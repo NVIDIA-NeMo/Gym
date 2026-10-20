@@ -29,7 +29,12 @@ from nemo_gym import component_search_roots
 from nemo_gym.cli.utils import exit_cleanly_on_config_error
 from nemo_gym.config_types import ConfigError
 from nemo_gym.path_utils import materialized_path_for
-from nemo_gym.tasks.harbor.build_options import BuildOptions, build_options_from_overrides
+from nemo_gym.tasks.harbor.build_options import (
+    BUILDS_KEY,
+    BuildOptions,
+    build_options_from_overrides,
+    command_line_settings,
+)
 from nemo_gym.tasks.harbor.build_plan import (
     BuildError,
 )
@@ -90,6 +95,10 @@ AGENT_OVERRIDES: dict[str, dict[str, Any]] = {
 }
 
 
+# The top-level run setting that replaces each dataset's `[gym.defaults] timeout_multiplier`.
+TIMEOUT_MULTIPLIER_KEY = "timeout_multiplier"
+
+
 @dataclass(frozen=True)
 class PreparedTaskset:
     taskset: str
@@ -100,6 +109,8 @@ class PreparedTaskset:
     skipped: dict[str, str] = field(default_factory=dict)
     # Every distinct image the prepared tasks start from, for pre-pulling.
     images: tuple[str, ...] = ()
+    # The run's `timeout_multiplier` the tasks were loaded with; None kept each dataset's own.
+    timeout_multiplier: float | None = None
 
 
 @dataclass(frozen=True)
@@ -126,6 +137,7 @@ def prepare_target(
     only: list[str] | None = None,
     build: BuildOptions | None = None,
     rows_name: str = "tasks.jsonl",
+    timeout_multiplier: float | None = None,
 ) -> PreparedTaskset:
     """Fetch (for hub references) and load the tasks, then write the rows file.
 
@@ -140,7 +152,8 @@ def prepare_target(
     default builds locally with docker, and pushes with the first tool on PATH when a repository
     is named. ``rows_name`` names the rows file inside the taskset's output folder: a run scopes
     it to its agent, so two agents prepared with different selections on one taskset keep their
-    own rows.
+    own rows. ``timeout_multiplier``, the run's setting, replaces each dataset's
+    ``[gym.defaults] timeout_multiplier`` when the tasks load.
     """
     build = build or BuildOptions()
     if is_hub_ref(target):
@@ -171,7 +184,7 @@ def prepare_target(
     output_dir.mkdir(parents=True, exist_ok=True)
     errors: dict[str, HarborTaskError] = {}
     try:
-        loaded = discover_tasks(folder, skipped=errors)
+        loaded = discover_tasks(folder, skipped=errors, timeout_multiplier=timeout_multiplier)
     except HarborTaskError:
         if not unbuilt:
             # Keep the omitted IDs and reasons even when no task in the dataset loads.
@@ -242,6 +255,7 @@ def prepare_target(
         output_dir=output_dir,
         skipped={task_id: str(error) for task_id, error in errors.items()},
         images=distinct,
+        timeout_multiplier=timeout_multiplier,
     )
 
 
@@ -429,6 +443,7 @@ def build_run(
         agent_instance_name=agent.instance_name,
         agent_impl=agent.impl_name,
         agent_overrides=AGENT_OVERRIDES.get(agent.impl_name),
+        timeout_multiplier=prepared.timeout_multiplier,
     )
     # Defaults belong below explicit config files and command-line overrides.
     config["output_jsonl_fpath"] = str(prepared.output_dir / "rollouts.jsonl")
@@ -474,14 +489,15 @@ def run_target(args: argparse.Namespace, overrides: list[str]) -> None:
         validate_target(args, overrides, agent=agent)
         return
     try:
-        # The `builds:` block comes from the configuration the command names; the run config does not exist yet.
-        build = build_options_from_overrides(overrides)
+        # Preparation settings come from the configuration the command names; the run config does not exist yet.
+        settings = command_line_settings(overrides, BUILDS_KEY, TIMEOUT_MULTIPLIER_KEY)
         prepared = prepare_target(
             args.target,
             exclude=_patterns(args, "exclude_tasks"),
             only=_patterns(args, "only_tasks"),
-            build=build,
+            build=BuildOptions.from_config(settings),
             rows_name=_rows_name(agent),
+            timeout_multiplier=settings[TIMEOUT_MULTIPLIER_KEY],
         )
     except (HarborTaskError, HubError, BuildError, ImageConfigError, ConfigError, ValueError, OSError) as exc:
         args._parser.error(str(exc))
