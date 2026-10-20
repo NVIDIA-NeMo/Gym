@@ -130,9 +130,11 @@ Check separately for harness conformance on the actual target branch. Where
 runs independently of the unit-test classification above. Read
 `scripts/harness_conformance/ci.py` for its selection of harnesses from the full
 PR diff; a Markdown-only unit-test classification does not imply no harness
-probes. Report the resulting `Harness conformance P0` check separately:
-`Nemo_CICD_Test` does not aggregate it. Whether P0 is a required check is a
-repository-rules decision, not something to infer from a green umbrella check.
+probes. Report the resulting conformance check separately, using the name in
+`scripts/harness_conformance/checks.py` on the actual target branch (currently
+`Harness conformance (non-blocking)` on main). `Nemo_CICD_Test` does not aggregate
+it. Whether conformance is required is a repository-rules decision, not something
+to infer from a green umbrella check.
 Conformance evidence does not replace representative model/verifier smoke.
 
 Additional evidence is required by behavior, not just path:
