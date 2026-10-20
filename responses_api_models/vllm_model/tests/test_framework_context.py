@@ -998,7 +998,17 @@ async def test_streaming_chat_continuation_commits_before_answer(monkeypatch, tm
 
 
 async def test_cancelled_chat_keepalive_retains_uncertain_capture(monkeypatch, tmp_path):
+    import threading
+
     harness = make_capture_harness(monkeypatch, tmp_path)
+    failure_written = threading.Event()
+    record_failure = harness.ledger._record_failure
+
+    def persist_failure(*args):
+        record_failure(*args)
+        failure_written.set()
+
+    monkeypatch.setattr(harness.ledger, "_record_failure", persist_failure)
     worker = NeMoGymAsyncOpenAI.create_chat_completion
     live, staged, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
     sent = []
@@ -1032,6 +1042,8 @@ async def test_cancelled_chat_keepalive_retains_uncertain_capture(monkeypatch, t
         call.cancel()
         await asyncio.gather(call, return_exceptions=True)
     assert cancelled.is_set()
+    # Cancellation can stop awaiting the ledger write while its worker thread finishes it.
+    assert await asyncio.to_thread(failure_written.wait, 5)
     manifest = RolloutManifest.model_validate(await harness.ledger.manifest("attempt"))
     assert len(harness.worker_calls) == len(harness.sink.records) == len(manifest.pending_call_ids) == 1
     assert not manifest.records and manifest.failures
