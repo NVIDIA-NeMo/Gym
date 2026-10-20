@@ -25,7 +25,7 @@ from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path
 from typing import Any, TypeVar
 
-from nemo_gym.sandbox.observability import span_attributes as _span_attributes
+from nemo_gym.sandbox.observability import span_attributes as default_span_attributes
 from nemo_gym.sandbox.providers import (
     ConnectableProvider,
     SandboxEndpoint,
@@ -445,7 +445,7 @@ class AsyncSandbox:
             with managed_span(
                 GymSpanGroup.SANDBOX,
                 "gym.sandbox.start",
-                **{"nemo.gym.sandbox.provider": provider_name, **_span_attributes(span_attributes)},
+                **{"nemo.gym.sandbox.provider": provider_name, **default_span_attributes(span_attributes)},
             ) as span:
                 handle = await self._provider.create(requested_spec)
                 if span is not None:
@@ -528,7 +528,7 @@ class AsyncSandbox:
         with managed_span(
             GymSpanGroup.SANDBOX,
             "gym.sandbox.exec",
-            **{"nemo.gym.sandbox.provider": provider_name, **_span_attributes(span_attributes)},
+            **{"nemo.gym.sandbox.provider": provider_name, **default_span_attributes(span_attributes)},
         ) as span:
             result = await self._exec_uninstrumented(
                 command,
@@ -658,7 +658,7 @@ class AsyncSandbox:
                     **{
                         "nemo.gym.sandbox.provider": self._telemetry_provider_name(),
                         "nemo.gym.sandbox.id": _sandbox_id(self._handle),
-                        **_span_attributes(),
+                        **default_span_attributes(),
                     },
                 ):
                     await self._provider.close(self._handle)
