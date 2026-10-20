@@ -25,6 +25,7 @@ from statistics import mean
 
 
 MARKER = re.compile(r"MAMBA_CACHE_TRACE\s+(?=\{)")
+MOONCAKE_GROUP = re.compile(r"@group:(\d+)@")
 COUNTERS = (
     "lookup_hit_count",
     "successful_load_count",
@@ -42,9 +43,13 @@ THRESHOLDS = {
 
 
 def normalize_record(record: dict[str, object]) -> dict[str, object]:
-    """Convert legacy hash lists to counts without inventing direct-child data."""
+    """Extract Mooncake groups and normalize legacy trace fields."""
     record = record.copy()
     record.pop("instance_id", None)
+    object_key = record.get("object_key")
+    if "group_id" not in record and isinstance(object_key, str):
+        if match := MOONCAKE_GROUP.search(object_key):
+            record["group_id"] = int(match[1])
     descendants = record.pop("computed_hashes", None)
     if isinstance(descendants, list):
         record.setdefault("computed_hash_count_descendants", len(set(descendants)))
