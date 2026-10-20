@@ -2130,25 +2130,29 @@ class OpenSandboxProvider:
             else None,
         )
 
-    async def _read_file(self, handle: SandboxHandle, source_path: str) -> bytes:
-        """Read one file from an OpenSandbox sandbox."""
-        return await self._await_sdk_operation(
-            lambda: handle.raw.files.read_bytes(source_path),
-            operation=f"read_file({source_path})",
-            sandbox_id=handle.sandbox_id,
-            timeout_s=float(self._connection.request_timeout_s)
-            if self._connection.request_timeout_s is not None
-            else None,
-        )
-
     async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
         """Upload one local file into an OpenSandbox sandbox."""
         await self._write_file(handle, target_path, source_path.read_bytes())
 
     async def download_file(self, handle: SandboxHandle, source_path: str, target_path: Path) -> None:
-        """Download one file from an OpenSandbox sandbox."""
+        """Download one file from an OpenSandbox sandbox, streamed to disk in chunks."""
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        target_path.write_bytes(await self._read_file(handle, source_path))
+
+        async def stream() -> None:
+            # A retry starts the file again, so every attempt truncates it. The writes run in a thread so a
+            # large file does not block the event loop.
+            with target_path.open("wb") as out:
+                async for chunk in await handle.raw.files.read_bytes_stream(source_path):
+                    await asyncio.to_thread(out.write, chunk)
+
+        await self._await_sdk_operation(
+            stream,
+            operation=f"download_file({source_path})",
+            sandbox_id=handle.sandbox_id,
+            # No overall deadline: the transfer time grows with the file, and the SDK client's request timeout
+            # still applies to every read, so a stalled stream fails.
+            timeout_s=None,
+        )
 
     async def close(self, handle: SandboxHandle) -> None:
         """Terminate the sandbox and close local SDK resources."""
