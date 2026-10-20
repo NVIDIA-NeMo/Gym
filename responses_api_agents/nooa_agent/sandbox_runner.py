@@ -2,14 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """Borrow a task sandbox and supervise one whole NOOA activation."""
 
-import json
-import tempfile
-from pathlib import Path
+import asyncio
+from dataclasses import replace
 from shlex import quote
 from uuid import uuid4
 
+from nemo_gym.agent_utils.sandbox_session import SandboxCommand, SandboxSession
+from nemo_gym.agent_utils.task_timeout import resolve_agent_timeout
 from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap
 from nemo_gym.sandbox import AsyncSandbox
+from nemo_gym.sandbox.utils import read_text, upload_text
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig
 from responses_api_agents.nooa_agent.result import set_response_lifecycle
 from responses_api_agents.nooa_agent.runner import NOOARunFailure, NOOARunRequest, NOOARunResult
@@ -18,7 +20,7 @@ from responses_api_agents.nooa_agent.termination import NOOATerminationReason
 
 
 class SandboxNOOARunner:
-    """Keep provider access outside the worker and require a stop receipt before close."""
+    """Translate NOOA artifacts while the shared session owns process lifecycle."""
 
     def __init__(
         self,
@@ -30,35 +32,42 @@ class SandboxNOOARunner:
         model_base_url: str,
         model_server_name: str,
         max_policy_calls: int | None,
+        timeout: float = 21600,
+        close_timeout: float = 30,
     ) -> None:
         self.sandbox = sandbox
-        self.workdir = workdir
         self.python = python
         self.invocation = invocation
         self.model_base_url = model_base_url
         self.model_server_name = model_server_name
         self.max_policy_calls = max_policy_calls
-        self.directory = f"/tmp/nemo-gym-nooa/{uuid4().hex}"
-        self.launched = False
-        self.stopped = False
+        self.timeout = timeout
+        self.close_timeout = close_timeout
+        # Construct before prepare so failed setup can release the borrowed client.
+        self.session = SandboxSession[None](
+            sandbox=sandbox,
+            session_dir=f"/tmp/nemo-gym-nooa/{uuid4().hex}",
+            workdir=workdir,
+            harness="NOOA",
+            owns_sandbox=False,
+        )
         self.artifact: SandboxResult | None = None
         self.checkpoint: SandboxCheckpoint | None = None
         self.observations: AgentObservationBundle | None = None
         self.diagnostics = ""
 
+    @property
+    def directory(self) -> str:
+        """Location of activation files outside the graded repository."""
+        return self.session.session_dir
+
     async def prepare(self) -> None:
         """Create session files outside the graded repository."""
         result = await self.sandbox.exec(f"mkdir -p {quote(self.directory)}", cwd="/", timeout_s=30)
-        if result.return_code != 0:
+        if result.return_code != 0 or result.error_type:
             raise RuntimeError("Could not prepare NOOA session directory")
 
-    async def _read(self, name: str) -> str:
-        with tempfile.TemporaryDirectory(prefix="nooa-result-") as directory:
-            path = Path(directory) / name
-            await self.sandbox.download(f"{self.directory}/{name}", path)
-            return path.read_text()
-
-    async def run(self, request: NOOARunRequest) -> NOOARunResult:
+    async def _stage_activation(self, request: NOOARunRequest) -> SandboxCommand:
         payload = SandboxInput(
             invocation=self.invocation,
             request=request,
@@ -66,69 +75,84 @@ class SandboxNOOARunner:
             model_server_name=self.model_server_name,
             max_policy_calls=self.max_policy_calls,
         )
-        with tempfile.TemporaryDirectory(prefix="nooa-input-") as directory:
-            path = Path(directory) / "input.json"
-            path.write_text(payload.model_dump_json())
-            await self.sandbox.upload(path, f"{self.directory}/input.json")
-        d, python = quote(self.directory), quote(self.python)
-        # The atomic claim also fences an exec whose response is lost or delayed until after close.
-        command = (
-            f"trap '' TERM; ln -s launch {d}/launch.claim 2>/dev/null || exit 0; "
-            f"exec {python} -I -m responses_api_agents.nooa_agent.sandbox_supervisor "
-            f"{d} >{d}/stdout.log 2>{d}/stderr.log"
+        await upload_text(self.sandbox, path=f"{self.directory}/input.json", text=payload.model_dump_json())
+        return SandboxCommand(
+            python=self.python,
+            argv=[
+                self.python,
+                "-I",
+                "-m",
+                "responses_api_agents.nooa_agent.sandbox_entrypoint",
+                f"{self.directory}/input.json",
+                f"{self.directory}/result.json",
+                self.session.stop_request_path,
+                f"{self.directory}/completion.json",
+            ],
         )
-        self.launched = True
-        # Episode cancellation comes from nooa_single_agent_turn; no second episode clock.
-        await self.sandbox.exec(command, cwd=self.workdir, timeout_s=None)
-        await self.stop()
-        await self.collect()
-        if self.artifact is None:
-            error = RuntimeError(f"NOOA sandbox result is missing or malformed: {self.diagnostics}")
-            if self.checkpoint is not None and self.checkpoint.response is not None:
-                raise NOOARunFailure(error, self.checkpoint.run_result()) from error
-            raise error
-        request.model_cookies.update(self.artifact.model_cookies)
-        request.resource_cookies.update(self.artifact.resource_cookies)
-        if self.artifact.error is not None:
-            detail = self.artifact.error.message
-            error = ConnectionError(detail) if self.artifact.error.kind == "transient" else RuntimeError(detail)
-            if self.artifact.response is not None:
-                raise NOOARunFailure(error, self.artifact.run_result()) from error
-            raise error
-        return self.artifact.run_result()
 
-    async def stop(self) -> None:
-        """Fence a pending launch or wait for the shared supervisor to reap descendants."""
-        if not self.launched or self.stopped:
-            return
-        d = quote(self.directory)
-        script = (
-            f"touch {d}/runner.stop || exit 1; "
-            f"ln -s stop {d}/launch.claim 2>/dev/null || true; "
-            f'if [ "$(readlink {d}/launch.claim)" = stop ]; then '
-            f"printf '%s' '{{\"cleanup_confirmed\":true}}' > {d}/cleanup.tmp && "
-            f"mv {d}/cleanup.tmp {d}/cleanup.json; exit $?; fi; "
-            f'if [ -s {d}/runner.pid ]; then kill -TERM "$(cat {d}/runner.pid)" 2>/dev/null || true; fi; '
-            f"for _ in $(seq 1 20); do [ -f {d}/cleanup.json ] && exit 0; sleep 1; done; exit 1"
-        )
-        # A completed supervisor already wrote its receipt. Avoid signaling a reused PID.
+    async def run(self, request: NOOARunRequest) -> NOOARunResult:
+        """Execute once, preserving evidence without allowing it to override failure."""
         try:
-            receipt = json.loads(await self._read("cleanup.json"))
-        except Exception:
-            receipt = {}
-        if receipt.get("cleanup_confirmed") is not True:
-            await self.sandbox.exec(script, cwd="/", timeout_s=25)
-            receipt = json.loads(await self._read("cleanup.json"))
-        if receipt.get("cleanup_confirmed") is not True:
-            raise RuntimeError("NOOA descendant cleanup is unconfirmed; close must retry")
-        self.stopped = True
+            await self.session.execute(
+                stage_activation=lambda: self._stage_activation(request),
+                collect=self._collect_artifacts,
+                timeout=resolve_agent_timeout(request.responses_create_params.metadata, ceiling=self.timeout),
+                close_timeout=self.close_timeout,
+            )
+            if self.session.closing:
+                raise asyncio.CancelledError("NOOA sandbox session closed during execution")
+            cleanup = self.session.cleanup
+            if cleanup is None:
+                raise RuntimeError("NOOA worker termination is unconfirmed")
+            if cleanup["timed_out"]:
+                raise TimeoutError("NOOA sandbox worker exceeded its execution deadline")
+            if cleanup["error"]:
+                raise RuntimeError(f"NOOA sandbox supervisor failed: {cleanup['error']}")
+            if cleanup["return_code"] != 0:
+                raise RuntimeError(f"NOOA sandbox worker did not exit successfully (exit {cleanup['return_code']})")
+            if self.artifact is None:
+                raise RuntimeError(f"NOOA sandbox result is missing or malformed: {self.diagnostics}")
+            request.model_cookies.update(self.artifact.model_cookies)
+            request.resource_cookies.update(self.artifact.resource_cookies)
+            if self.artifact.error is not None:
+                detail = self.artifact.error.message
+                error = ConnectionError(detail) if self.artifact.error.kind == "transient" else RuntimeError(detail)
+                raise error
+            return self.artifact.run_result()
+        except (Exception, asyncio.CancelledError) as error:
+            self._record_capture_error()
+            evidence = self.artifact or self.checkpoint
+            if evidence is not None:
+                request.model_cookies.update(evidence.model_cookies)
+                request.resource_cookies.update(evidence.resource_cookies)
+                if evidence.response is not None:
+                    result = evidence.run_result()
+                    reason = (
+                        NOOATerminationReason.CANCELLED
+                        if isinstance(error, asyncio.CancelledError)
+                        else NOOATerminationReason.INFRASTRUCTURE_ERROR
+                    )
+                    detail = str(error) or "NOOA execution was cancelled"
+                    result.termination_reason = reason
+                    result.termination_error = detail
+                    result.episode = replace(
+                        result.episode,
+                        response=set_response_lifecycle(result.episode.response, reason, detail),
+                        observations=self.observations or result.episode.observations,
+                    )
+                    self.observations = result.episode.observations
+                    if isinstance(error, asyncio.CancelledError):
+                        error.nooa_result = result
+                    else:
+                        raise NOOARunFailure(error, result) from error
+            raise
 
-    async def collect(self) -> None:
-        """Prefer terminal evidence; recover a checkpoint without claiming task completion."""
-        if not self.launched or self.artifact is not None:
-            return
+    async def _collect_artifacts(self) -> None:
+        """Prefer terminal evidence; recovered checkpoints can never establish completion."""
         try:
-            artifact = SandboxResult.model_validate_json(await self._read("result.json"))
+            artifact = SandboxResult.model_validate_json(
+                await read_text(self.sandbox, path=f"{self.directory}/result.json")
+            )
             if artifact.response is None and artifact.error is None:
                 raise ValueError("NOOA terminal result has neither a response nor an error")
         except Exception:
@@ -136,22 +160,19 @@ class SandboxNOOARunner:
         else:
             self.artifact = artifact
             self.checkpoint = None
-            self.observations = self.artifact.observations
+            self.observations = artifact.observations
             return
 
-        try:
-            self.diagnostics = (await self._read("stderr.log"))[-2000:]
-        except Exception:
-            self.diagnostics = "Runner diagnostics unavailable"
+        self.diagnostics = (await self.session.read_output_log())[-2000:]
         gap = ObservationGap(
             code="sandbox_result_unavailable",
             detail="NOOA terminal result is missing or malformed; recovered evidence cannot establish completion.",
         )
         try:
-            checkpoint = SandboxCheckpoint.model_validate_json(await self._read("checkpoint.json"))
+            checkpoint = SandboxCheckpoint.model_validate_json(
+                await read_text(self.sandbox, path=f"{self.directory}/checkpoint.json")
+            )
         except Exception:
-            # A failed retry must not discard an earlier valid snapshot. Temporary
-            # files from interrupted writes are never candidates for recovery.
             checkpoint = self.checkpoint
         if checkpoint is None:
             self.observations = AgentObservationBundle(source="nooa", gaps=[gap])
@@ -165,8 +186,6 @@ class SandboxNOOARunner:
                 for item in [*observations.gaps, gap, ObservationGap(code="partial_checkpoint", detail=detail)]
             }.values()
         )
-        # The controller determines failure from the absent terminal result, never
-        # from a checkpoint's claimed response status or termination reason.
         self.checkpoint = checkpoint.model_copy(
             update={
                 "response": set_response_lifecycle(
@@ -181,14 +200,18 @@ class SandboxNOOARunner:
         )
         self.observations = observations
 
+    def _record_capture_error(self) -> None:
+        error = self.session.capture_error or self.session.termination_error
+        if error is None:
+            return
+        observations = (self.observations or AgentObservationBundle(source="nooa")).model_copy(deep=True)
+        gap = ObservationGap(code="sandbox_capture_failed", detail=f"NOOA artifact capture unavailable: {error}")
+        observations.gaps = list({item.model_dump_json(): item for item in [*observations.gaps, gap]}.values())
+        self.observations = observations
+
     async def close(self) -> None:
-        """Stop before disconnecting; a failed cleanup leaves this handle available for retry."""
-        await self.stop()
-        await self.collect()
-        d, retired = quote(self.directory), quote(self.directory + ".closed")
-        result = await self.sandbox.exec(
-            f"if [ -d {d} ]; then mv {d} {retired} || exit 1; fi; rm -rf {retired}", cwd="/", timeout_s=30
-        )
-        if result.return_code != 0:
-            raise RuntimeError("Could not remove NOOA session files")
-        await self.sandbox.disconnect()
+        """Join shared finalization and retain captured evidence after releasing the client."""
+        try:
+            await self.session.close(timeout=self.close_timeout)
+        finally:
+            self._record_capture_error()

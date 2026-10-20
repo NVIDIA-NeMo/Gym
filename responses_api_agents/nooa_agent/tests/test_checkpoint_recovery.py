@@ -10,12 +10,12 @@ import shutil
 import signal
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from aiohttp import web
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseFunctionToolCall
+from nemo_gym.sandbox.providers.base import SandboxExecResult
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig
 from responses_api_agents.nooa_agent.runner import NOOARunFailure, NOOARunRequest
 from responses_api_agents.nooa_agent.sandbox_entrypoint import SandboxCheckpoint, write_checkpoint
@@ -52,11 +52,11 @@ class LocalWorkerSandbox:
 
     async def exec(
         self, command: str, *, cwd: str, timeout_s: float | None, preserve_background_services: bool = False
-    ) -> SimpleNamespace:
-        if "sandbox_supervisor" in command:
+    ) -> SandboxExecResult:
+        if "process_supervisor.py" in command:
             # Run the actual entrypoint from this checkout. The installed sandbox's
             # isolated interpreter and Linux descendant reaper are not under test.
-            with (self.directory / "stdout.log").open("wb") as stdout:
+            with (self.directory / "output.log").open("wb") as stdout:
                 with (self.directory / "stderr.log").open("wb") as stderr:
                     self.process = await asyncio.create_subprocess_exec(
                         sys.executable,
@@ -64,7 +64,7 @@ class LocalWorkerSandbox:
                         "responses_api_agents.nooa_agent.sandbox_entrypoint",
                         str(self.directory / "input.json"),
                         str(self.directory / "result.json"),
-                        str(self.directory / "runner.stop"),
+                        str(self.directory / "stop.request"),
                         str(self.directory / "completion.json"),
                         cwd=cwd,
                         env=worker_environment(),
@@ -72,26 +72,23 @@ class LocalWorkerSandbox:
                         stderr=stderr,
                     )
             self.reaper = asyncio.create_task(self.reap())
-            code = 0 if preserve_background_services else await asyncio.shield(self.reaper)
-            return SimpleNamespace(return_code=code)
-        if command.startswith("test -f "):
-            completed = any(
-                (self.directory / name).exists() for name in ("completion.json", "cleanup.json", "runner.exit")
-            )
-            return SimpleNamespace(return_code=0 if completed else 1)
+            code = await asyncio.shield(self.reaper)
+            return SandboxExecResult(stdout="", stderr="", return_code=code)
         if "rm -rf" in command:
             self.events.append(("remove", ""))
             shutil.rmtree(self.directory)
         else:
             assert command.startswith("mkdir -p "), command
             self.directory.mkdir(parents=True, exist_ok=True)
-        return SimpleNamespace(return_code=0)
+        return SandboxExecResult(stdout="", stderr="", return_code=0)
 
     async def reap(self) -> int:
         assert self.process is not None
         code = await self.process.wait()
         # Only confirm cleanup after the child has actually exited and been reaped.
-        (self.directory / "cleanup.json").write_text('{"cleanup_confirmed":true}')
+        (self.directory / "cleanup.json").write_text(
+            json.dumps({"cleanup_confirmed": True, "return_code": code, "timed_out": False, "error": None})
+        )
         return code
 
     async def disconnect(self) -> None:
@@ -174,7 +171,7 @@ async def test_sigkill_recovers_model_and_tool_checkpoints_before_cleanup(tmp_pa
         model_server_name="policy",
         max_policy_calls=3,
     )
-    runner.directory = str(sandbox.directory)
+    runner.session.session_dir = str(sandbox.directory)
     execution: asyncio.Task | None = None
     try:
         await runner.prepare()
@@ -202,7 +199,7 @@ async def test_sigkill_recovers_model_and_tool_checkpoints_before_cleanup(tmp_pa
         assert "completed-tool-evidence" in json.dumps(tool.output)
         assert sandbox.process is not None
         sandbox.process.send_signal(signal.SIGKILL)
-        with pytest.raises(NOOARunFailure, match="missing or malformed") as caught:
+        with pytest.raises(NOOARunFailure, match="did not exit successfully") as caught:
             await asyncio.wait_for(execution, timeout=10)
         assert sandbox.process.returncode == -signal.SIGKILL
         assert not (sandbox.directory / "result.json").exists()
@@ -216,7 +213,7 @@ async def test_sigkill_recovers_model_and_tool_checkpoints_before_cleanup(tmp_pa
         assert result.trajectory == second.trajectory
         assert runner.artifact is None
         assert runner.checkpoint is not None
-        assert runner.stopped
+        assert runner.session.cleanup["cleanup_confirmed"]
         assert ("remove", "") not in sandbox.events
         assert ("disconnect", "") not in sandbox.events
         await runner.close()
@@ -305,10 +302,9 @@ entrypoint.write_checkpoint(path, result)
             model_server_name="policy",
             max_policy_calls=3,
         )
-        runner.directory = str(sandbox.directory)
-        runner.launched = True
-        runner.stopped = True  # The actual writer process has been reaped above.
-        await runner.collect()
+        runner.session.session_dir = str(sandbox.directory)
+        # The actual writer process has been reaped above.
+        await runner._collect_artifacts()
         assert runner.artifact is None
         assert runner.checkpoint is not None
         assert runner.checkpoint.response.id == "published-before-interruption"

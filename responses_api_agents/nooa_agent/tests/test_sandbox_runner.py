@@ -1,13 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import json
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
+from nemo_gym.agent_utils.process_supervisor import CleanupReceipt
+from nemo_gym.agent_utils.supervisor_client import HarnessTerminationError
+from nemo_gym.sandbox.providers.base import SandboxExecResult
 from responses_api_agents.nooa_agent.result import finalize_run_result
 from responses_api_agents.nooa_agent.runner import NOOARunFailure
 from responses_api_agents.nooa_agent.sandbox_entrypoint import (
@@ -24,7 +27,7 @@ from responses_api_agents.nooa_agent.tests.test_sandbox_entrypoint import payloa
 class MemorySandbox:
     def __init__(self) -> None:
         self.files: dict[str, str] = {}
-        self.exec = AsyncMock(return_value=SimpleNamespace(return_code=0))
+        self.exec = AsyncMock(return_value=SandboxExecResult(stdout="", stderr="", return_code=0))
         self.disconnect = AsyncMock()
         self.stop = AsyncMock()
 
@@ -62,8 +65,12 @@ def artifact(error: RunnerError | None = None) -> SandboxResult:
     )
 
 
+def cleanup_receipt(**updates) -> CleanupReceipt:
+    return {"cleanup_confirmed": True, "return_code": 0, "timed_out": False, "error": None, **updates}
+
+
 def complete_files(r: SandboxNOOARunner, s: MemorySandbox, error: RunnerError | None = None) -> None:
-    s.files[r.directory + "/cleanup.json"] = json.dumps({"cleanup_confirmed": True})
+    s.files[r.directory + "/cleanup.json"] = json.dumps(cleanup_receipt())
     s.files[r.directory + "/result.json"] = artifact(error).model_dump_json()
 
 
@@ -74,23 +81,78 @@ async def test_launch_quotes_paths_runs_in_task_and_preserves_cookies(limit: int
     r.max_policy_calls = limit
     await r.prepare()
     assert r.directory.startswith("/tmp/nemo-gym-nooa/")
-    assert not s.files  # The isolated runtime already contains the NOOA supervisor module.
     complete_files(r, s)
     request = payload().request
     result = await r.run(request)
-    command = s.exec.await_args.args[0]
+    command = s.exec.await_args_list[1].args[0]
     assert "'/opt/nooa env/bin/python'" in command
-    assert "-I -m responses_api_agents.nooa_agent.sandbox_supervisor" in command
-    assert "launch.claim" in command
-    assert "stdout.log" in command and "stderr.log" in command
-    assert s.exec.await_args.kwargs == {"cwd": "/app", "timeout_s": None}
+    assert "-I -m responses_api_agents.nooa_agent.sandbox_entrypoint" in command
+    assert "sandbox_supervisor" not in command
+    assert "/process_supervisor.py" in command
+    assert r.directory + "/process_supervisor.py" in s.files
+    assert r.session.stop_request_path in command
+    assert "--timeout 21600.0" in command
+    assert s.exec.await_args_list[1].kwargs == {"cwd": "/app", "timeout_s": 21660}
     launch = SandboxInput.model_validate_json(s.files[r.directory + "/input.json"])
     assert launch.max_policy_calls == limit
     assert launch.request.rollout_id == request.rollout_id
     assert launch.request.model_url_path == request.model_url_path
     assert request.resource_cookies == result.resource_cookies == {"resource": "new"}
     assert request.model_cookies == {"model": "new"}
-    assert r.stopped
+    assert r.session.cleanup == cleanup_receipt()
+    assert not r.session.owns_sandbox
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "metadata,budget",
+    [
+        (None, 21600),
+        ({"agent_timeout_sec": "12.5"}, 12.5),
+        ({"agent_timeout_sec": "90000"}, 21600),
+        ({"agent_timeout_sec": "nan"}, 21600),
+        ({"agent_timeout_sec": "-1"}, 21600),
+        ({"agent_timeout_sec": "bad"}, 21600),
+    ],
+)
+async def test_task_metadata_caps_execution_budget(metadata, budget: float) -> None:
+    r, s = runner()
+    complete_files(r, s)
+    request = payload().request
+    request.responses_create_params.metadata = metadata
+    await r.run(request)
+    assert f"--timeout {float(budget)} " in s.exec.await_args.args[0]
+    assert s.exec.await_args.kwargs["timeout_s"] == budget + 60
+
+
+@pytest.mark.asyncio
+async def test_terminal_result_waits_for_cleanup_before_capture_and_return() -> None:
+    r, s = runner()
+    complete_files(r, s)
+    del s.files[r.directory + "/cleanup.json"]
+    events = []
+    original_download = s.download
+
+    async def download(source: str, destination: Path) -> None:
+        if source.endswith("/result.json"):
+            assert r.session.cleanup == cleanup_receipt()
+            events.append("capture")
+        await original_download(source, destination)
+
+    async def execute(command: str, **kwargs) -> SandboxExecResult:
+        if command.startswith("[ -f "):
+            events.append("stop")
+            s.files[r.directory + "/cleanup.json"] = json.dumps(cleanup_receipt())
+        return SandboxExecResult(stdout="", stderr="", return_code=0)
+
+    s.download = download
+    s.exec.side_effect = execute
+    result = await r.run(payload().request)
+    assert events == ["stop", "capture"]
+    assert result.episode.response == artifact().response
+    assert result.episode.observations.gaps[0].detail == "evidence"
+    s.disconnect.assert_not_awaited()
+    s.stop.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -120,35 +182,44 @@ async def test_limit_result_survives_worker_boundary_and_cleanup(reason: NOOATer
     assert result.episode.response.output[-1].content[0].text == "answer"
     assert reason in {gap.code for gap in result.episode.observations.gaps}
     await r.close()
-    assert r.stopped
     s.disconnect.assert_awaited_once()
     s.stop.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_close_requires_confirmed_stop_and_keeps_handle_for_retry() -> None:
+@pytest.mark.parametrize(
+    "receipt",
+    [
+        cleanup_receipt(return_code=7),
+        cleanup_receipt(return_code=None),
+        cleanup_receipt(timed_out=True),
+        cleanup_receipt(error="supervisor failed"),
+    ],
+)
+@pytest.mark.parametrize("reason", [None, NOOATerminationReason.MAX_OUTPUT_TOKENS_EXCEEDED])
+async def test_independent_execution_failure_overrides_gradable_artifact(receipt, reason) -> None:
     r, s = runner()
-    r.launched = True
-    s.files[r.directory + "/cleanup.json"] = '{"cleanup_confirmed":false}'
-    with pytest.raises(RuntimeError, match="unconfirmed"):
-        await r.close()
-    assert not r.stopped
-    s.disconnect.assert_not_awaited()
-    s.stop.assert_not_awaited()
     complete_files(r, s)
+    final = artifact().model_copy(update={"termination_reason": reason})
+    s.files[r.directory + "/result.json"] = final.model_dump_json()
+    s.files[r.directory + "/cleanup.json"] = json.dumps(receipt)
+    request = payload().request
+    with pytest.raises(NOOARunFailure) as caught:
+        await r.run(request)
+    assert caught.value.result.termination_reason is NOOATerminationReason.INFRASTRUCTURE_ERROR
+    assert caught.value.result.episode.response.status == "failed"
+    assert caught.value.result.episode.response.output == final.response.output
+    assert r.artifact.termination_reason is reason
+    assert request.resource_cookies == {"resource": "new"}
     await r.close()
-    assert r.stopped
-    s.disconnect.assert_awaited_once()
-    s.stop.assert_not_awaited()
-    assert "rm -rf" in s.exec.await_args.args[0]
-    assert "/app" not in s.exec.await_args.args[0]
+    assert r.artifact == final
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("contents", [None, "invalid-json", '{"response":{}}'])
 async def test_missing_or_malformed_result_records_gap_not_success(contents: str | None) -> None:
     r, s = runner()
-    s.files[r.directory + "/cleanup.json"] = '{"cleanup_confirmed":true}'
+    s.files[r.directory + "/cleanup.json"] = json.dumps(cleanup_receipt())
     if contents is not None:
         s.files[r.directory + "/result.json"] = contents
     with pytest.raises(RuntimeError, match="missing or malformed"):
@@ -168,17 +239,136 @@ async def test_child_error_preserves_evidence_and_failure_class(kind: str, excep
         await r.run(payload().request)
     assert isinstance(caught.value.__cause__, exception)
     assert caught.value.result.episode.observations.gaps[0].code == "test"
-    assert r.stopped
+    assert caught.value.result.termination_reason is NOOATerminationReason.INFRASTRUCTURE_ERROR
 
 
 @pytest.mark.asyncio
-async def test_stop_with_receipt_does_not_signal_reused_pid() -> None:
+@pytest.mark.parametrize("kind", ["transport", "provider-timeout", "cancel"])
+async def test_interrupted_run_preserves_evidence_and_original_failure(kind: str) -> None:
     r, s = runner()
-    r.launched = True
     complete_files(r, s)
-    await r.stop()
-    await r.stop()
-    s.exec.assert_not_awaited()
+    terminal = (
+        asyncio.CancelledError("cancelled request") if kind == "cancel" else ConnectionError("provider disconnected")
+    )
+    if kind == "cancel":
+        # Assert the adapter preserves the cancellation it receives from the session.
+        await r._collect_artifacts()
+        r.session.execute = AsyncMock(side_effect=terminal)
+    elif kind == "provider-timeout":
+        s.exec.return_value = SandboxExecResult(stdout="", stderr="timeout", return_code=-1, error_type="timeout")
+    else:
+        s.exec.side_effect = terminal
+    request = payload().request
+    if kind == "cancel":
+        with pytest.raises(asyncio.CancelledError) as caught:
+            await r.run(request)
+        assert caught.value is terminal
+        result = caught.value.nooa_result
+        assert result.termination_reason is NOOATerminationReason.CANCELLED
+    else:
+        with pytest.raises(NOOARunFailure) as caught:
+            await r.run(request)
+        assert (
+            isinstance(caught.value.__cause__, TimeoutError)
+            if kind == "provider-timeout"
+            else caught.value.__cause__ is terminal
+        )
+        result = caught.value.result
+        assert result.termination_reason is NOOATerminationReason.INFRASTRUCTURE_ERROR
+    assert result.episode.response.output == artifact().response.output
+    assert request.model_cookies == {"model": "new"}
+    s.disconnect.assert_not_awaited()
+    s.exec.side_effect = None
+    s.exec.return_value = SandboxExecResult(stdout="", stderr="", return_code=0)
+    await r.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("receipt", [None, '{"cleanup_confirmed":false}'])
+async def test_missing_or_malformed_receipt_retains_handle_for_close_retry(receipt: str | None) -> None:
+    r, s = runner()
+    if receipt is not None:
+        s.files[r.directory + "/cleanup.json"] = receipt
+    s.files[r.directory + "/checkpoint.json"] = checkpoint_artifact().model_dump_json()
+    with pytest.raises(RuntimeError, match="unknown|not confirmed"):
+        await r.run(payload().request)
+    with pytest.raises(RuntimeError, match="unknown|not confirmed"):
+        await r.close()
+    assert r.checkpoint is None
+    assert not r.session.closed
+    s.disconnect.assert_not_awaited()
+    s.files[r.directory + "/cleanup.json"] = json.dumps(cleanup_receipt())
+    await r.close()
+    assert r.session.closed
+    assert r.checkpoint is not None
+    assert r.checkpoint.termination_reason is NOOATerminationReason.INFRASTRUCTURE_ERROR
+    s.disconnect.assert_awaited_once()
+    s.stop.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_definitive_negative_receipt_skips_capture_and_releases_for_resources_teardown() -> None:
+    r, s = runner()
+    complete_files(r, s)
+    s.files[r.directory + "/cleanup.json"] = json.dumps(
+        cleanup_receipt(cleanup_confirmed=False, error="child remains")
+    )
+    download = AsyncMock(wraps=s.download)
+    s.download = download
+    with pytest.raises(HarnessTerminationError):
+        await r.run(payload().request)
+    await r.close()
+    assert r.artifact is None
+    assert not any(call.args[0].endswith("/result.json") for call in download.await_args_list)
+    assert {gap.code for gap in r.observations.gaps} == {"sandbox_capture_failed"}
+    s.disconnect.assert_awaited_once()
+    s.stop.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_capture_failure_records_gap_and_does_not_block_release() -> None:
+    r, s = runner()
+    complete_files(r, s)
+    r._collect_artifacts = AsyncMock(side_effect=RuntimeError("download unavailable"))
+    with pytest.raises(RuntimeError, match="download unavailable"):
+        await r.run(payload().request)
+    await asyncio.gather(r.close(), r.close())
+    assert "sandbox_capture_failed" in {gap.code for gap in r.observations.gaps}
+    r._collect_artifacts.assert_awaited_once()
+    s.disconnect.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_failed_staging_can_release_borrowed_connection() -> None:
+    r, s = runner()
+    s.upload = AsyncMock(side_effect=ConnectionError("upload failed"))
+    with pytest.raises(ConnectionError, match="upload failed"):
+        await r.run(payload().request)
+    await r.close()
+    assert not r.session.launch_started
+    assert r.artifact is None
+    s.disconnect.assert_awaited_once()
+    s.stop.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_close_fences_inflight_staging_without_launch() -> None:
+    r, s = runner()
+    started = asyncio.Event()
+
+    async def upload(source: Path, destination: str) -> None:
+        started.set()
+        await asyncio.Event().wait()
+
+    s.upload = upload
+    execution = asyncio.create_task(r.run(payload().request))
+    await asyncio.wait_for(started.wait(), timeout=1)
+    await asyncio.wait_for(asyncio.gather(r.close(), r.close()), timeout=1)
+    with pytest.raises(asyncio.CancelledError):
+        await execution
+    assert not r.session.launch_started
+    assert all("process_supervisor.py" not in call.args[0] for call in s.exec.await_args_list)
+    s.disconnect.assert_awaited_once()
 
 
 def checkpoint_artifact() -> SandboxCheckpoint:
@@ -195,7 +385,7 @@ def checkpoint_artifact() -> SandboxCheckpoint:
 @pytest.mark.parametrize("final", [None, "broken", '{"response":{}}', "empty-terminal"])
 async def test_checkpoint_recovery_preserves_evidence_but_always_fails(final: str | None) -> None:
     r, s = runner()
-    s.files[r.directory + "/cleanup.json"] = '{"cleanup_confirmed":true}'
+    s.files[r.directory + "/cleanup.json"] = json.dumps(cleanup_receipt())
     s.files[r.directory + "/checkpoint.json"] = checkpoint_artifact().model_dump_json()
     if final == "empty-terminal":
         final = SandboxResult(
@@ -224,15 +414,16 @@ async def test_checkpoint_recovery_preserves_evidence_but_always_fails(final: st
 @pytest.mark.parametrize("final_error", [None, RunnerError(kind="fatal", message="worker setup failed")])
 async def test_valid_final_always_takes_precedence_over_checkpoint(final_error: RunnerError | None) -> None:
     r, s = runner()
-    r.launched = True
+    r.session.launch_started = True
+    r.session._collect = r._collect_artifacts
     s.files[r.directory + "/checkpoint.json"] = checkpoint_artifact().model_dump_json()
-    await r.collect()
+    await r._collect_artifacts()
     assert r.checkpoint is not None
     final = artifact(final_error)
     if final_error is not None:
         final.response = None
     s.files[r.directory + "/result.json"] = final.model_dump_json()
-    await r.collect()
+    await r._collect_artifacts()
     assert r.artifact == final
     assert r.checkpoint is None
     assert r.observations == final.observations
@@ -242,12 +433,13 @@ async def test_valid_final_always_takes_precedence_over_checkpoint(final_error: 
 @pytest.mark.parametrize("checkpoint", ["broken", "{}", "unmarked"])
 async def test_invalid_checkpoint_and_interrupted_temporary_are_not_recovered(checkpoint: str) -> None:
     r, s = runner()
-    r.launched = True
+    r.session.launch_started = True
+    r.session._collect = r._collect_artifacts
     s.files[r.directory + "/checkpoint.json"] = (
         artifact().model_dump_json() if checkpoint == "unmarked" else checkpoint
     )
     s.files[r.directory + "/checkpoint.tmp"] = checkpoint_artifact().model_dump_json()
-    await r.collect()
+    await r._collect_artifacts()
     assert r.artifact is None
     assert r.checkpoint is None
     assert [gap.code for gap in r.observations.gaps] == ["sandbox_result_unavailable"]
@@ -256,37 +448,39 @@ async def test_invalid_checkpoint_and_interrupted_temporary_are_not_recovered(ch
 @pytest.mark.asyncio
 async def test_failed_recollection_retains_last_valid_checkpoint() -> None:
     r, s = runner()
-    r.launched = True
+    r.session.launch_started = True
+    r.session._collect = r._collect_artifacts
     s.files[r.directory + "/checkpoint.json"] = checkpoint_artifact().model_dump_json()
-    await r.collect()
+    await r._collect_artifacts()
     recovered = r.checkpoint.model_copy(deep=True)
     s.files[r.directory + "/checkpoint.json"] = "interrupted transfer"
-    await r.collect()
+    await r._collect_artifacts()
     assert r.checkpoint == recovered
 
 
 @pytest.mark.asyncio
 async def test_checkpoint_is_retrieved_before_session_files_and_handle_are_released() -> None:
     r, s = runner()
-    r.launched = True
-    s.files[r.directory + "/cleanup.json"] = '{"cleanup_confirmed":true}'
+    r.session.launch_started = True
+    r.session._collect = r._collect_artifacts
+    s.files[r.directory + "/cleanup.json"] = json.dumps(cleanup_receipt())
     s.files[r.directory + "/checkpoint.json"] = checkpoint_artifact().model_dump_json()
     events = []
     original_download = s.download
 
     async def download(source: str, destination: Path) -> None:
         if source.endswith("/checkpoint.json"):
-            assert r.stopped
+            assert r.session.cleanup is not None
             events.append("checkpoint")
         await original_download(source, destination)
 
-    async def execute(command: str, **kwargs) -> SimpleNamespace:
+    async def execute(command: str, **kwargs) -> SandboxExecResult:
         assert "rm -rf" in command
         assert r.checkpoint is not None
         assert events == ["checkpoint"]
         events.append("remove")
         s.files.clear()
-        return SimpleNamespace(return_code=0)
+        return SandboxExecResult(stdout="", stderr="", return_code=0)
 
     async def disconnect() -> None:
         assert events == ["checkpoint", "remove"]
@@ -308,7 +502,7 @@ async def test_recovered_checkpoint_skips_environment_verification(monkeypatch, 
     from responses_api_agents.nooa_agent.tests.test_environment import _environment, _paths, _request
 
     r, s = runner()
-    s.files[r.directory + "/cleanup.json"] = '{"cleanup_confirmed":true}'
+    s.files[r.directory + "/cleanup.json"] = json.dumps(cleanup_receipt())
     s.files[r.directory + "/checkpoint.json"] = checkpoint_artifact().model_dump_json()
     if final is not None:
         s.files[r.directory + "/result.json"] = final
@@ -325,3 +519,86 @@ async def test_recovered_checkpoint_skips_environment_verification(monkeypatch, 
         gap.code for gap in receipt.agent_observations.gaps
     }
     await r.close()
+
+
+@pytest.mark.asyncio
+async def test_terminal_error_without_response_cannot_recover_a_gradable_checkpoint() -> None:
+    r, s = runner()
+    final = artifact(RunnerError(kind="fatal", message="worker setup failed")).model_copy(update={"response": None})
+    complete_files(r, s)
+    s.files[r.directory + "/result.json"] = final.model_dump_json()
+    s.files[r.directory + "/checkpoint.json"] = checkpoint_artifact().model_dump_json()
+    request = payload().request
+    with pytest.raises(RuntimeError, match="worker setup failed") as caught:
+        await r.run(request)
+    assert not isinstance(caught.value, NOOARunFailure)
+    assert r.artifact == final
+    assert r.checkpoint is None
+    assert request.resource_cookies == final.resource_cookies
+
+
+@pytest.mark.asyncio
+async def test_cancelling_active_worker_captures_checkpoint_before_release() -> None:
+    r, s = runner()
+    active = asyncio.Event()
+    execution_stopped = asyncio.Event()
+
+    async def execute(command: str, **kwargs) -> SandboxExecResult:
+        if "process_supervisor.py" in command:
+            active.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                assert r.session.cleanup == cleanup_receipt()
+                assert r.checkpoint is not None
+                execution_stopped.set()
+        elif command.startswith("[ -f "):
+            s.files[r.directory + "/cleanup.json"] = json.dumps(cleanup_receipt())
+            s.files[r.directory + "/checkpoint.json"] = checkpoint_artifact().model_dump_json()
+        return SandboxExecResult(stdout="", stderr="", return_code=0)
+
+    s.exec.side_effect = execute
+    task = asyncio.create_task(r.run(payload().request))
+    await asyncio.wait_for(active.wait(), timeout=1)
+    task.cancel("request cancelled")
+    with pytest.raises(asyncio.CancelledError) as caught:
+        await asyncio.wait_for(task, timeout=1)
+    assert str(caught.value) == "request cancelled"
+    assert caught.value.nooa_result.termination_reason is NOOATerminationReason.CANCELLED
+    assert caught.value.nooa_result.episode.response.status == "cancelled"
+    assert "partial_checkpoint" in {gap.code for gap in r.observations.gaps}
+    assert execution_stopped.is_set()
+    s.disconnect.assert_not_awaited()
+    await r.close()
+    s.disconnect.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_close_during_capture_cannot_turn_final_evidence_into_success() -> None:
+    r, s = runner()
+    complete_files(r, s)
+    capturing = asyncio.Event()
+    release = asyncio.Event()
+    collect = r._collect_artifacts
+
+    async def collect_artifacts() -> None:
+        capturing.set()
+        await release.wait()
+        await collect()
+
+    r._collect_artifacts = collect_artifacts
+    task = asyncio.create_task(r.run(payload().request))
+    await asyncio.wait_for(capturing.wait(), timeout=1)
+    closing = asyncio.create_task(r.close())
+    async with asyncio.timeout(1):
+        while not r.session.closing:
+            await asyncio.sleep(0)
+    release.set()
+    with pytest.raises(asyncio.CancelledError, match="session closed") as caught:
+        await asyncio.wait_for(task, timeout=1)
+    await asyncio.wait_for(closing, timeout=1)
+    assert caught.value.nooa_result.termination_reason is NOOATerminationReason.CANCELLED
+    assert caught.value.nooa_result.episode.response.status == "cancelled"
+    assert r.artifact == artifact()
+    assert r.session.closed
+    s.disconnect.assert_awaited_once()
