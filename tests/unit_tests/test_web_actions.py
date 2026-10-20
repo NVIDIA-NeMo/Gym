@@ -6,6 +6,60 @@ import json
 import pytest
 
 from nemo_gym.web.actions import ActionParseError, parse_nano_omni_tool_calls
+from nemo_gym.web.models import WebActionLimits
+
+
+def test_runtime_wait_limits_accept_sixty_seconds_without_rewriting_arguments() -> None:
+    call = {"type": "function_call", "name": "computer", "arguments": '{"actions":[{"action":"wait","duration":60}]}'}
+    with pytest.raises(ActionParseError, match=r"\[0, 30\]"):
+        parse_nano_omni_tool_calls([call])
+    limits = WebActionLimits(max_wait_seconds=120, max_step_wait_seconds=120)
+    action = parse_nano_omni_tool_calls([call], limits=limits)
+    assert action.arguments["calls"][0]["arguments"]["actions"] == [{"action": "wait", "duration": 60}]
+    assert call["arguments"] == '{"actions":[{"action":"wait","duration":60}]}'
+
+
+def test_step_wait_budget_rejects_entire_batch_before_execution() -> None:
+    call = {
+        "type": "function_call",
+        "name": "computer",
+        "arguments": {"actions": [{"action": "wait", "duration": 60}]},
+    }
+    with pytest.raises(ActionParseError, match="requested 180s") as error:
+        parse_nano_omni_tool_calls(
+            [call, call, call], limits=WebActionLimits(max_wait_seconds=120, max_step_wait_seconds=120)
+        )
+    assert error.value.reason == "step_wait_budget_exceeded"
+    assert error.value.validated_prefix is None
+
+
+def test_no_tools_and_batch_overflow_have_distinct_termination_reasons() -> None:
+    with pytest.raises(ActionParseError) as empty:
+        parse_nano_omni_tool_calls([])
+    assert empty.value.reason == "no_tool_calls"
+    call = {"type": "function_call", "name": "computer", "arguments": {"actions": [{"action": "wait", "duration": 0}]}}
+    with pytest.raises(ActionParseError) as overflow:
+        parse_nano_omni_tool_calls([call] * 9)
+    assert overflow.value.reason == "tool_call_limit_exceeded"
+
+
+def test_invalid_later_call_cannot_expose_a_prefix_exceeding_wait_budget() -> None:
+    calls = [
+        {
+            "type": "function_call",
+            "name": "computer",
+            "arguments": {
+                "actions": [
+                    {"action": "wait", "duration": 120},
+                    {"action": "wait", "duration": 120},
+                ]
+            },
+        },
+        {"type": "function_call", "name": "navigate", "arguments": {"url": "javascript:alert(1)"}},
+    ]
+    with pytest.raises(ActionParseError) as error:
+        parse_nano_omni_tool_calls(calls, limits=WebActionLimits(max_wait_seconds=120, max_step_wait_seconds=120))
+    assert error.value.validated_prefix is None
 
 
 def test_parses_native_computer_and_terminal_tool_calls() -> None:

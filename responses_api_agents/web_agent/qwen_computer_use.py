@@ -515,6 +515,7 @@ def parse_qwen_action(
     coordinate_type: str,
     original_size: tuple[int, int],
     processed_size: tuple[int, int],
+    max_wait_seconds: float = 30.0,
 ) -> WebAction:
     """Normalize one Qwen XML response into the visual-browser action contract."""
 
@@ -581,7 +582,7 @@ def parse_qwen_action(
             status = "action"
         elif name == "wait":
             computer_actions.append(
-                {"action": "wait", "duration": max(0.0, min(_number(params.get("time"), 5), 30.0))}
+                {"action": "wait", "duration": max(0.0, min(_number(params.get("time"), 5), max_wait_seconds))}
             )
             status = "action"
         elif name == "call_user":

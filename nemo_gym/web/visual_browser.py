@@ -8,6 +8,7 @@ import logging
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import time
 from collections import deque
@@ -22,7 +23,9 @@ from nemo_gym.web.actions import MAX_SCROLL_AMOUNT, parse_nano_omni_tool_calls
 from nemo_gym.web.artifacts import WebArtifactStore
 from nemo_gym.web.browser_session import BrowserSessionError, BrowserSessionHandle
 from nemo_gym.web.models import (
+    BROWSER_TARGET_CLOSED_STATUS,
     WebAction,
+    WebActionLimits,
     WebArtifactRef,
     WebObservation,
     WebStepResult,
@@ -48,6 +51,7 @@ class VisualBrowserDriverConfig(WebResourcesServerConfig):
     terminate_on_action_error: bool = True
     max_tool_calls: int | None = Field(default=8, ge=1)
     max_computer_actions: int = Field(default=20, ge=1, le=100)
+    action_limits: WebActionLimits = Field(default_factory=WebActionLimits)
     record_video: bool = False
     browser_channel: str | None = None
     task_image_root: str | None = None
@@ -233,6 +237,9 @@ class VisualBrowserDriver:
         self._started_at = 0.0
         self._last_action = ""
         self._last_error = ""
+        self._browser_target_closed = False
+        self._site_access_status: str | None = None
+        self._proxy_origin = "none"
         self._evidence: deque[WebArtifactRef] = deque(maxlen=config.max_evidence_screenshots)
 
     def reset(self, task: WebTask) -> tuple[WebObservation, dict[str, Any]]:
@@ -265,6 +272,7 @@ class VisualBrowserDriver:
         if self.config.browser_channel:
             launch["channel"] = self.config.browser_channel
         proxy = self._proxy_for_task(task)
+        self._proxy_origin = _url_origin(proxy) if proxy else "direct_unverified"
         LOG.info(
             "event=visual_browser_launch session=%s task=%s proxy_enabled=%s proxy_origin=%s "
             "access_helpers_enabled=%s browser_channel=%s",
@@ -301,6 +309,8 @@ class VisualBrowserDriver:
         self._started_at = time.monotonic()
         self._last_action = ""
         self._last_error = ""
+        self._browser_target_closed = False
+        self._site_access_status = None
         self._evidence.clear()
         self._reset_task_state(task)
         start_urls = self._prepare_task(task)
@@ -329,6 +339,7 @@ class VisualBrowserDriver:
             "viewport": [self.config.viewport_width, self.config.viewport_height],
             "proxy_enabled": bool(proxy),
             "site_login_enabled": False,
+            "action_limits": self.config.action_limits.model_dump(mode="json"),
         }
         metadata.update(self._reset_metadata())
         return self._observation, metadata
@@ -371,6 +382,7 @@ class VisualBrowserDriver:
                 ],
                 max_calls=self.config.max_tool_calls,
                 max_computer_actions=self.config.max_computer_actions,
+                limits=self.config.action_limits,
             )
             if validated_action.terminal != action.terminal:
                 raise ValueError("computer-use action terminal flag does not match its tool calls")
@@ -378,6 +390,8 @@ class VisualBrowserDriver:
             for call in calls:
                 call_started = time.monotonic()
                 self._execute_call(call["name"], call.get("arguments") or {})
+                if call["name"] != "terminate":
+                    self._sync_active_page()
                 LOG.info(
                     "event=visual_browser_tool_complete session=%s task=%s step=%d tool=%s elapsed_seconds=%.3f",
                     self.session_id,
@@ -386,8 +400,10 @@ class VisualBrowserDriver:
                     call["name"],
                     time.monotonic() - call_started,
                 )
-                if call["name"] != "terminate":
+                if call["name"] != "terminate" and not self._runtime_target_closed():
                     self._after_tool_call(call["name"], failure_step=lifecycle_failure_step)
+                if self._runtime_target_closed():
+                    break
         except Exception as exc:  # A malformed/failed UI operation is policy-visible.
             execution_ok = False
             self._last_error = f"{type(exc).__name__}: {exc}"
@@ -451,6 +467,7 @@ class VisualBrowserDriver:
     def evaluation_context(self) -> VisualBrowserEvaluationContext:
         if self._task is None or self._page is None or self._context is None:
             raise RuntimeError("visual browser has not been reset")
+        self._sync_active_page()
         return VisualBrowserEvaluationContext(
             page=self._page,
             browser_context=self._context,
@@ -563,12 +580,14 @@ class VisualBrowserDriver:
         del failure_step
 
     def _runtime_target_closed(self) -> bool:
-        return False
+        return self._browser_target_closed
 
     def _runtime_should_terminate(self) -> bool:
-        return False
+        return self._browser_target_closed
 
     def _step_info(self, action: WebAction) -> dict[str, Any]:
+        if self._browser_target_closed:
+            return {"action_error": self._last_error, "runtime_status": BROWSER_TARGET_CLOSED_STATUS}
         if self._last_error:
             return {"action_error": self._last_error, "runtime_status": "error"}
         return {"runtime_status": "done" if action.terminal else "running"}
@@ -591,16 +610,35 @@ class VisualBrowserDriver:
     def _capture(self) -> WebObservation:
         from PIL import ImageGrab
 
+        if not self._sync_active_page():
+            if self._observation is not None:
+                return self._observation
+            raise RuntimeError("browser closed before its first observation")
         image = ImageGrab.grab(xdisplay=os.environ.get("DISPLAY"))
         screenshot = self.artifacts.save_screenshot(self.session_id, self._step, image)
         if screenshot.artifact is not None:
             self._evidence.append(screenshot.artifact)
-        pages = list(self._context.pages)
+        pages = [page for page in self._context.pages if not page.is_closed()]
         active = pages.index(self._page) if self._page in pages else 0
         tabs = [
             WebTab(index=index, url=page.url, title=self._safe_title(page), active=index == active)
             for index, page in enumerate(pages)
         ]
+        title = tabs[active].title.lower() if tabs else ""
+        status = "site_rate_limited" if "too many requests" in title or "rate limit exceeded" in title else None
+        if status and status != self._site_access_status:
+            LOG.warning(
+                "event=visual_browser_site_access_restricted session=%s task=%s step=%d "
+                "origin=%s status=%s proxy_origin=%s runtime_host=%s",
+                self.session_id,
+                self._task.task_id if self._task else "unknown",
+                self._step,
+                _url_origin(self._page.url),
+                status,
+                self._proxy_origin,
+                socket.gethostname(),
+            )
+        self._site_access_status = status
         if screenshot.artifact is not None:
             LOG.info(
                 "event=visual_browser_screenshot session=%s task=%s step=%d origin=%s bytes=%d sha256=%s",
@@ -620,7 +658,7 @@ class VisualBrowserDriver:
             last_action=self._last_action,
             last_action_error=self._last_error,
             elapsed_time=max(0.0, time.monotonic() - self._started_at),
-            metadata={"step": self._step, "runtime": "visual_browser"},
+            metadata={"step": self._step, "runtime": "visual_browser", "site_access_status": self._site_access_status},
         )
 
     @staticmethod
@@ -629,6 +667,76 @@ class VisualBrowserDriver:
             return page.title()
         except Exception:
             return ""
+
+    def _sync_active_page(self) -> bool:
+        """Follow GUI tab changes without bringing any page to the foreground.
+
+        Playwright's context page order is creation order, not the active tab.
+        A visible document also identifies the selected tab when the address
+        bar owns focus. A closed tab is terminal only when no live page remains
+        or the browser is disconnected.
+        """
+
+        if self._context is None:
+            return self._page is not None
+        connected = self._browser is None or self._browser.is_connected()
+        pages = [page for page in self._context.pages if not page.is_closed()] if connected else []
+        if not pages:
+            self._browser_target_closed = True
+            LOG.warning(
+                "event=visual_browser_target_closed session=%s task=%s step=%d browser_connected=%s live_pages=0",
+                self.session_id,
+                self._task.task_id if self._task else "unknown",
+                self._step,
+                connected,
+            )
+            return False
+        visible: list[Any] = []
+        focused: list[Any] = []
+        for page in pages:
+            try:
+                state = page.evaluate(
+                    "() => ({visible: document.visibilityState === 'visible', focused: document.hasFocus()})"
+                )
+                if state.get("visible"):
+                    visible.append(page)
+                    if state.get("focused"):
+                        focused.append(page)
+            except Exception as exc:
+                # A tab may close or navigate during inspection. Do not treat
+                # an evaluation error on one document as a lost browser.
+                LOG.debug(
+                    "event=visual_browser_page_probe_failed session=%s step=%d error_type=%s",
+                    self.session_id,
+                    self._step,
+                    type(exc).__name__,
+                )
+        pages = [page for page in pages if not page.is_closed()]
+        if not pages:
+            # Refresh context pages as a replacement tab may have opened while
+            # the previous one closed during the probe.
+            pages = [page for page in self._context.pages if not page.is_closed()]
+        if not pages:
+            self._browser_target_closed = True
+            return False
+        candidates = [page for page in focused if page in pages] or [page for page in visible if page in pages]
+        current = self._page
+        selected = current if current in (candidates or pages) else (candidates or pages)[-1]
+        if selected is not current:
+            self._page = selected
+            LOG.info(
+                "event=visual_browser_active_page_changed session=%s task=%s step=%d "
+                "origin=%s live_pages=%d focused_pages=%d visible_pages=%d",
+                self.session_id,
+                self._task.task_id if self._task else "unknown",
+                self._step,
+                _url_origin(selected.url),
+                len(pages),
+                len(focused),
+                len(visible),
+            )
+        self._browser_target_closed = False
+        return True
 
     @staticmethod
     def _configure_page(page: Any) -> None:
@@ -676,6 +784,8 @@ class VisualBrowserDriver:
         return self._goto(page, url, wait_until=RESET_WAIT_UNTIL)
 
     def _execute_call(self, name: str, arguments: dict[str, Any]) -> None:
+        if name != "terminate" and not self._sync_active_page():
+            raise RuntimeError("browser has no live page")
         if name == "computer":
             for action in arguments["actions"]:
                 self._execute_computer(action)
@@ -762,7 +872,31 @@ class VisualBrowserDriver:
             operation(button="left")
         elif name == "wait":
             duration = spec.get("duration")
-            time.sleep(float(self.config.action_delay_seconds if duration is None else duration))
+            requested = float(self.config.action_delay_seconds if duration is None else duration)
+            started = time.monotonic()
+            LOG.info(
+                "event=visual_browser_wait_start session=%s task=%s step=%d requested_seconds=%g",
+                self.session_id,
+                self._task.task_id if self._task else "unknown",
+                self._step,
+                requested,
+            )
+            remaining = requested
+            if remaining == 0:
+                time.sleep(0)
+            while remaining > 0:
+                interval = min(1.0, remaining)
+                time.sleep(interval)
+                remaining -= interval
+                if self._context is not None and not self._sync_active_page():
+                    raise RuntimeError("browser closed during requested wait")
+            LOG.info(
+                "event=visual_browser_wait_complete session=%s step=%d requested_seconds=%g elapsed_seconds=%.3f",
+                self.session_id,
+                self._step,
+                requested,
+                time.monotonic() - started,
+            )
         elif name == "scroll":
             params = spec.get("scroll_parameters") or {}
             amount = int(params.get("scroll_amount", 1))

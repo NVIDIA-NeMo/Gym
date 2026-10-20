@@ -50,6 +50,7 @@ from nemo_gym.web.judge_evidence import compact_webvoyager_judge_evidence
 from nemo_gym.web.models import (
     BROWSER_TARGET_CLOSED_STATUS,
     CAPTCHA_BUDGET_EXHAUSTED_STATUS,
+    WebActionLimits,
     WebActionProfile,
     WebArtifactRef,
     WebBenchmark,
@@ -204,6 +205,7 @@ def _parse_response_action(
     qwen_state: QwenPolicyState | None = None,
     nano_omni_max_tool_calls: int | None = 8,
     nano_omni_max_computer_actions: int = 20,
+    action_limits: WebActionLimits | None = None,
 ):
     if profile != WebActionProfile.COMPUTER_USE:
         raise ActionParseError(f"unsupported visual-browser action profile: {profile.value!r}")
@@ -212,6 +214,7 @@ def _parse_response_action(
             response.output,
             max_calls=nano_omni_max_tool_calls,
             max_computer_actions=nano_omni_max_computer_actions,
+            limits=action_limits,
         )
     if qwen_state is None:
         raise ActionParseError("Qwen policy state is required for qwen_xml_computer_use")
@@ -220,6 +223,7 @@ def _parse_response_action(
         coordinate_type=qwen_state.coordinate_type,
         original_size=qwen_state.original_size,
         processed_size=qwen_state.processed_size,
+        max_wait_seconds=(action_limits or WebActionLimits()).max_wait_seconds,
     )
 
 
@@ -604,8 +608,10 @@ class WebAgent(SimpleResponsesAPIAgent):
         environment_failure_kind: str | None = None
         recent_action_signatures: deque[str] = deque(maxlen=self.config.repeated_action_window)
         qwen_state: QwenPolicyState | None = None
+        action_limits = WebActionLimits()
 
         base_body = body.responses_create_params.model_copy(deep=True)
+        use_default_tools = not base_body.tools
         if isinstance(base_body.input, str):
             base_body.input = [NeMoGymEasyInputMessage(role="user", content=base_body.input)]
         if self.config.policy_protocol == "nano_omni_toolcall":
@@ -625,6 +631,14 @@ class WebAgent(SimpleResponsesAPIAgent):
                 identity=identity,
             )
             seed_data = WebSeedSessionResponse.model_validate(seed_payload)
+            action_limits = WebActionLimits.model_validate(seed_data.info.get("action_limits") or {})
+            if (
+                action_limits.max_step_wait_seconds is not None
+                and action_limits.max_step_wait_seconds >= self.config.resources_request_timeout_secs
+            ):
+                raise ValueError("browser step wait budget must be shorter than resources_request_timeout_secs")
+            if self.config.policy_protocol == "nano_omni_toolcall" and use_default_tools:
+                base_body.tools = nano_omni_tools(limits=action_limits)
             artifacts.session_id = seed_data.session_id
             env_cookies = seed_response.cookies
             artifacts.seed_completed = True
@@ -673,6 +687,7 @@ class WebAgent(SimpleResponsesAPIAgent):
             rollout_finished = False
             for step_index in range(self.config.max_steps):
                 action = None
+                last_parse_failure_reason: str | None = None
                 invalid_tool_call_terminal = False
                 parse_feedback: list[Any] = []
                 for parse_attempt in range(self.config.max_parse_retries + 1):
@@ -811,6 +826,7 @@ class WebAgent(SimpleResponsesAPIAgent):
                             qwen_state=qwen_state,
                             nano_omni_max_tool_calls=self.config.nano_omni_max_tool_calls,
                             nano_omni_max_computer_actions=self.config.nano_omni_max_computer_actions,
+                            action_limits=action_limits,
                         )
                         # Both maintained policy adapters add only a
                         # successfully parsed assistant turn to trajectory.
@@ -830,6 +846,19 @@ class WebAgent(SimpleResponsesAPIAgent):
                         )
                         break
                     except ActionParseError as exc:
+                        last_parse_failure_reason = exc.reason
+                        function_calls = [item for item in model_response.output if item.type == "function_call"]
+                        LOG.warning(
+                            "event=web_action_parse_diagnostics task=%s step=%d parse_attempt=%d reason=%s "
+                            "function_calls=%d unique_function_calls=%d output_tokens=%s",
+                            task.task_id,
+                            step_index,
+                            parse_attempt,
+                            exc.reason,
+                            len(function_calls),
+                            len({(item.name, item.arguments) for item in function_calls}),
+                            getattr(model_response.usage, "output_tokens", "unknown"),
+                        )
                         LOG.warning(
                             "event=web_action_parse_failed benchmark=%s task=%s step=%d parse_attempt=%d "
                             "error_type=%s error=%r terminal_attempt=%s",
@@ -879,6 +908,7 @@ class WebAgent(SimpleResponsesAPIAgent):
                     break
 
                 if action is None:
+                    truncation_reason = last_parse_failure_reason or "no_executable_action"
                     LOG.warning(
                         "event=web_rollout_no_action benchmark=%s task=%s step=%d model_turns=%d",
                         task.benchmark.value,

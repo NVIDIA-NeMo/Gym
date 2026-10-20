@@ -66,6 +66,15 @@ class _Page:
         self.calls: list[tuple[Any, ...]] = []
         self.goto_results: list[Any] = []
         self.raise_title = False
+        self.closed = False
+        self.visible = True
+        self.focused = False
+
+    def is_closed(self) -> bool:
+        return self.closed
+
+    def evaluate(self, _script: str) -> dict[str, bool]:
+        return {"visible": self.visible, "focused": self.focused}
 
     def on(self, event: str, callback: Any) -> None:
         self.calls.append(("on", event, callback))
@@ -92,6 +101,9 @@ class _Page:
 
     def bring_to_front(self) -> None:
         self.calls.append(("front",))
+        if self.context is not None:
+            for page in self.context.pages:
+                page.visible = page.focused = page is self
 
 
 class _Context:
@@ -131,6 +143,9 @@ class _Browser:
 
     def close(self) -> None:
         self.closed = True
+
+    def is_connected(self) -> bool:
+        return not self.closed
 
 
 class _Playwright:
@@ -342,7 +357,8 @@ def test_capture_handles_inactive_tab_and_title_failure(monkeypatch: pytest.Monk
 
     assert observation.active_tab_index == 0
     assert observation.tabs[0].title == ""
-    assert observation.url == "https://detached.example"
+    # Screenshot metadata must describe a live context page, not a stale handle.
+    assert observation.url == "https://first.example"
     assert observation.screenshot is not None
     assert len(driver._evidence) == 1
 
@@ -763,3 +779,108 @@ def test_paste_unicode_success_and_failures(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr("nemo_gym.web.visual_browser.subprocess.Popen", lambda *_args, **_kwargs: early)
     with pytest.raises(RuntimeError, match="exited before paste"):
         _paste_unicode(pyautogui, "雪")
+
+
+@pytest.mark.parametrize("focused", [False, True])
+def test_gui_tab_switch_updates_page_without_changing_focus(tmp_path: Path, focused: bool) -> None:
+    driver = _driver(tmp_path)
+    context = _Context()
+    old = context.new_page()
+    selected = context.new_page()
+    old.visible = False
+    selected.focused = focused
+    driver._context, driver._page = context, old
+
+    assert driver._sync_active_page()
+    assert driver._page is selected
+    assert not any(call[0] == "front" for page in context.pages for call in page.calls)
+
+
+def test_close_one_tab_preserves_live_browser_and_capture_metadata(monkeypatch, tmp_path: Path) -> None:
+    driver = _driver(tmp_path)
+    context = _Context()
+    old, selected = context.new_page(), context.new_page()
+    old.closed = True
+    selected.url = "https://parkwhiz.com/example"
+    driver._context, driver._page, driver._task = context, old, _task()
+    monkeypatch.setattr("PIL.ImageGrab.grab", lambda **_kwargs: b"png")
+
+    observation = driver._capture()
+
+    assert driver._page is selected
+    assert not driver._runtime_target_closed()
+    assert observation.url == selected.url
+    assert len(observation.tabs) == 1 and observation.tabs[0].active
+
+
+def test_closing_last_page_preserves_last_good_observation(tmp_path: Path) -> None:
+    driver = _driver(tmp_path)
+    context = _Context()
+    page = context.new_page()
+    page.closed = True
+    driver._context, driver._page = context, page
+    previous = WebObservation(url="https://last-good.example")
+    driver._observation = previous
+
+    assert driver._capture() is previous
+    assert driver._runtime_target_closed()
+    assert driver._runtime_should_terminate()
+
+
+def test_browser_disconnect_is_not_mistaken_for_a_live_tab(tmp_path: Path) -> None:
+    driver = _driver(tmp_path)
+    context = _Context()
+    driver._context, driver._page = context, context.new_page()
+    driver._browser = _Browser(context)
+    driver._browser.closed = True
+    assert not driver._sync_active_page()
+    assert driver._runtime_target_closed()
+
+
+def test_rate_limit_diagnostics_do_not_log_page_contents_or_query(monkeypatch, tmp_path: Path, caplog) -> None:
+    import logging
+
+    driver = _driver(tmp_path)
+    context = _Context()
+    page = context.new_page()
+    page.url = "https://github.com/private-path?private-query"
+    page.title = lambda: "Too many requests · GitHub"
+    driver._context, driver._page, driver._task = context, page, _task()
+    monkeypatch.setattr("PIL.ImageGrab.grab", lambda **_kwargs: b"png")
+    with caplog.at_level(logging.WARNING, logger="nemo_gym.web.visual_browser"):
+        observation = driver._capture()
+    assert observation.metadata["site_access_status"] == "site_rate_limited"
+    assert "visual_browser_site_access_restricted" in caplog.text
+    assert "origin=https://github.com" in caplog.text
+    assert "private-path" not in caplog.text and "private-query" not in caplog.text
+
+
+def test_sixty_second_wait_is_executed_without_clamping(monkeypatch, tmp_path: Path) -> None:
+    _install_pyautogui(monkeypatch)
+    driver = _driver(tmp_path, action_limits={"max_wait_seconds": 120, "max_step_wait_seconds": 120})
+    sleeps: list[float] = []
+    monkeypatch.setattr("nemo_gym.web.visual_browser.time.sleep", sleeps.append)
+
+    driver._execute_computer({"action": "wait", "duration": 60})
+
+    # The final 0.3s is the existing post-action settle delay, not part of wait.
+    assert sum(sleeps[:-1]) == 60
+    assert max(sleeps[:-1]) <= 1
+
+
+def test_wait_detects_browser_closure_without_sleeping_entire_duration(monkeypatch, tmp_path: Path) -> None:
+    _install_pyautogui(monkeypatch)
+    driver = _driver(tmp_path)
+    context = _Context()
+    page = context.new_page()
+    driver._context, driver._page = context, page
+    sleeps = []
+
+    def close_during_sleep(seconds):
+        sleeps.append(seconds)
+        page.closed = True
+
+    monkeypatch.setattr("nemo_gym.web.visual_browser.time.sleep", close_during_sleep)
+    with pytest.raises(RuntimeError, match="browser closed during requested wait"):
+        driver._execute_computer({"action": "wait", "duration": 60})
+    assert sleeps == [1.0]

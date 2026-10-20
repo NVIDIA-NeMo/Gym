@@ -183,9 +183,21 @@ class WebVoyagerDriver(VisualBrowserDriver):
             )
             raise RuntimeError(f"captcha solver is required but {self.config.captcha_solver_env} is unset")
         try:
+            if not self._sync_active_page():
+                raise BrowserTargetClosedDuringCaptcha("no live browser page remains")
             solved = self._captcha_solver.maybe_solve(self._page, phase=phase)
         except Exception as exc:
-            if _is_playwright_target_closed_error(exc):
+            if _is_playwright_target_closed_error(exc) or isinstance(exc, BrowserTargetClosedDuringCaptcha):
+                if self._context is not None and self._sync_active_page():
+                    LOG.warning(
+                        "event=captcha_page_closed_browser_alive session=%s task=%s step=%d phase=%s "
+                        "failure_budget_counted=false",
+                        self.session_id,
+                        self._task.task_id if self._task is not None else "unknown",
+                        self._step,
+                        phase,
+                    )
+                    return False
                 self._browser_target_closed = True
                 LOG.error(
                     "event=captcha_browser_target_closed session=%s task=%s step=%d phase=%s "

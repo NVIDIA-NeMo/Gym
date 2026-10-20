@@ -401,6 +401,72 @@ def _seed(task_id="0"):
     }
 
 
+@pytest.mark.asyncio
+async def test_seeded_wait_limits_control_schema_and_validation_without_parse_retry() -> None:
+    agent = _agent(judge=True, max_steps=2)
+    seed = _seed("Allrecipes--0")
+    seed["info"]["action_limits"] = {"max_wait_seconds": 120, "max_step_wait_seconds": 120}
+    calls = _wire(
+        agent,
+        {
+            "/seed_session": [seed],
+            "/v1/responses": [
+                _native_model_response("computer", '{"actions":[{"action":"wait","duration":60}]}'),
+                _native_model_response("terminate", '{"status":"success","answer":"done"}'),
+            ],
+            "/step": [
+                {"operation_id": "step-0", "observation": _observation(), "execution_ok": True, "terminated": False},
+                {"operation_id": "step-1", "observation": _observation(), "execution_ok": True, "terminated": True},
+            ],
+            "/evaluate": [{"result": {"valid_sample": False, "failure_kind": "web:external_judge_required"}}],
+            "/verify": [{"reward": 1.0, "task_success": True, "mask_sample": False}],
+            "/close": [{"closed": True}],
+        },
+    )
+    request = MagicMock(cookies={})
+    body = WebAgentRunRequest(
+        responses_create_params={"input": []},
+        web_task=WebTask(
+            benchmark="webvoyager",
+            task_id="Allrecipes--0",
+            intent="Wait for the page",
+            action_profile="computer_use",
+        ),
+    )
+    result = await agent.run(request, body)
+    assert result.reward == 1 and result.model_turns == 2
+    model_body = next(value for _, path, value in calls if path == "/v1/responses")
+    computer = next(tool for tool in model_body.tools if tool["name"] == "computer")
+    duration = computer["parameters"]["properties"]["actions"]["items"]["properties"]["duration"]
+    assert duration["anyOf"][0]["maximum"] == 120
+    step = next(value for _, path, value in calls if path == "/step")
+    assert step["action"]["arguments"]["calls"][0]["arguments"]["actions"][0]["duration"] == 60
+
+
+@pytest.mark.asyncio
+async def test_no_action_retains_specific_reason_and_remains_a_judged_policy_outcome() -> None:
+    agent = _agent(judge=True, parse_retries=0)
+    _wire(
+        agent,
+        {
+            "/seed_session": [_seed("Allrecipes--0")],
+            "/v1/responses": [_model_response("reasoning without an executable tool call")],
+            "/evaluate": [{"result": {"valid_sample": False, "failure_kind": "web:external_judge_required"}}],
+            "/verify": [{"reward": 0.0, "task_success": False, "mask_sample": False}],
+            "/close": [{"closed": True}],
+        },
+    )
+    result = await agent.run(
+        MagicMock(cookies={}),
+        WebAgentRunRequest(
+            responses_create_params={"input": []},
+            web_task=WebTask(benchmark="webvoyager", task_id="Allrecipes--0"),
+        ),
+    )
+    assert result.truncated and result.truncation_reason == "no_tool_calls"
+    assert result.reward == 0 and not result.mask_sample
+
+
 def _recording():
     return {
         "uri": "file:///artifacts/session-a/video/task.webm",

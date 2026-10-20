@@ -47,6 +47,23 @@ class WebActionProfile(StrEnum):
     COMPUTER_USE = "computer_use"
 
 
+class WebActionLimits(BaseModel):
+    """Runtime-owned waiting limits advertised when a browser session starts.
+
+    The default retains the historical tool contract. A benchmark profile may
+    permit longer waits without rewriting the model's requested duration.
+    """
+
+    max_wait_seconds: float = Field(default=30, ge=0, le=600, allow_inf_nan=False)
+    max_step_wait_seconds: float | None = Field(default=None, ge=0, le=3600, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def validate_wait_budget(self) -> "WebActionLimits":
+        if self.max_step_wait_seconds is not None and self.max_step_wait_seconds < self.max_wait_seconds:
+            raise ValueError("step wait budget must cover one maximum-duration wait")
+        return self
+
+
 class WebArtifactRef(BaseModel):
     """Stable reference to an artifact retained outside a model request."""
 

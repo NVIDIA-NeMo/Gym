@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Configuration for the WebVoyager LLM-as-a-judge server."""
 
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 from pydantic import Field
 
@@ -20,3 +20,8 @@ class WebVoyagerJudgeConfig(BaseResourcesServerConfig):
     require_screenshot: bool = True
     verifier_version: str = "webvoyager-gemini-v1"
     judge_call_timeout_secs: float = Field(default=270.0, gt=0.0)
+    judge_parse_max_retries: int = Field(default=0, ge=0, le=3)
+    # Keep the reference benchmark's historical default. Training or a new
+    # evaluation recipe can explicitly mask judge failures instead of treating
+    # them as measurements of the policy.
+    unparseable_verdict_policy: Literal["zero", "mask"] = "zero"

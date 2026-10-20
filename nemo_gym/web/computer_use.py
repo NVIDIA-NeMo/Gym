@@ -14,6 +14,7 @@ from copy import deepcopy
 from typing import Any
 
 from nemo_gym.web.actions import MAX_SCROLL_AMOUNT
+from nemo_gym.web.models import WebActionLimits
 
 
 NANO_OMNI_SYSTEM_PROMPT = """You are a GUI agent controlling a web browser. You are given a task instruction, a screenshot of the browser, and your previous interactions. You need to perform a series of actions to complete the task. The browser is already open and logged into the required websites.
@@ -227,10 +228,24 @@ NANO_OMNI_TOOLS: list[dict[str, Any]] = [
 ]
 
 
-def nano_omni_tools() -> list[dict[str, Any]]:
+def nano_omni_tools(*, limits: WebActionLimits | None = None) -> list[dict[str, Any]]:
     """Return a mutation-safe copy of Nano Omni's Responses tool schema."""
 
-    return deepcopy(NANO_OMNI_TOOLS)
+    tools = deepcopy(NANO_OMNI_TOOLS)
+    if limits is None:
+        return tools
+    computer = next(tool for tool in tools if tool["name"] == "computer")
+    duration = computer["parameters"]["properties"]["actions"]["items"]["properties"]["duration"]
+    if limits.max_wait_seconds != 30:
+        duration["anyOf"][0]["maximum"] = limits.max_wait_seconds
+        duration["description"] = (
+            f"The number of seconds to wait. Required for `wait`. Maximum {limits.max_wait_seconds:g} seconds."
+        )
+    if limits.max_step_wait_seconds is not None:
+        computer["description"] += (
+            f" Combined waiting across all calls in one step must not exceed {limits.max_step_wait_seconds:g} seconds."
+        )
+    return tools
 
 
 __all__ = ["NANO_OMNI_SYSTEM_PROMPT", "NANO_OMNI_TOOLS", "nano_omni_tools"]

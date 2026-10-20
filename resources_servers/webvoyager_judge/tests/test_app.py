@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import json
 import logging
 from unittest.mock import AsyncMock, MagicMock
@@ -312,6 +313,55 @@ async def test_received_unparseable_verdict_is_a_valid_zero_reward():
     assert response.result.valid_sample is True
     assert response.result.reward == 0.0
     assert response.result.failure_kind == "judge_unparseable"
+
+
+@pytest.mark.asyncio
+async def test_judge_parse_retry_keeps_evidence_and_preserves_first_bad_verdict():
+    server = _server()
+    server.config.judge_parse_max_retries = 1
+    server.server_client.post = AsyncMock(
+        side_effect=[
+            _FakeHttpResponse(_model_response("unclear")),
+            _FakeHttpResponse(_model_response('{"thought":"evidence proves success","verdict":"SUCCESS"}')),
+        ]
+    )
+    response = await server._judge_evidence(_request())
+    assert response.result.task_success
+    assert response.result.metadata["judge_attempts"][0] == "unclear"
+    assert len(response.result.metadata["judge_attempts"]) == 2
+    first, second = server.server_client.post.call_args_list
+    assert first.kwargs["json"].model_dump() == second.kwargs["json"].model_dump()
+    assert len(response.result.metadata["judge_evidence_sha256"]) == 64
+
+
+@pytest.mark.asyncio
+async def test_unparseable_judge_can_be_masked_without_changing_legacy_default():
+    server = _server()
+    server.config.unparseable_verdict_policy = "mask"
+    server.config.judge_parse_max_retries = 1
+    server.server_client.post = AsyncMock(return_value=_FakeHttpResponse(_model_response("unclear")))
+    response = await server._judge_evidence(_request())
+    assert not response.result.valid_sample
+    assert response.result.failure_kind == "judge_unparseable"
+    assert server.server_client.post.await_count == 2
+    assert response.result.metadata["judge_attempts"] == ["unclear", "unclear"]
+    assert _server().config.unparseable_verdict_policy == "zero"
+
+
+@pytest.mark.asyncio
+async def test_judge_parse_retries_share_one_overall_deadline():
+    server = _server()
+    server.config.judge_parse_max_retries = 1
+    server.config.judge_call_timeout_secs = 0.05
+
+    async def slow_judge(*_args, **_kwargs):
+        await asyncio.sleep(0.03)
+        return _FakeHttpResponse(_model_response("unclear"))
+
+    server.server_client.post = AsyncMock(side_effect=slow_judge)
+    with pytest.raises(TimeoutError):
+        await server._judge_evidence(_request())
+    assert server.server_client.post.await_count == 2
 
 
 @pytest.mark.asyncio
