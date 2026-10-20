@@ -2703,11 +2703,13 @@ def test_a_service_named_driver_is_watched_apart_from_the_driver(tmp_path):
 
 def test_one_task_exiting_ends_its_service_step_and_the_driver_step_is_unchanged(tmp_path):
     # A multi-task service (a vllm_pd tier, a Ray worker pool) must not outlive one of its tasks, whatever the cluster's
-    # KillOnBadExit and WaitTime defaults; the driver step keeps Slurm's defaults.
+    # KillOnBadExit and WaitTime defaults; the driver and OTel collector steps keep Slurm's defaults.
     script = _driver_on_aux(tmp_path, {"ray": _RAY_WITH_PROBE})
-    service_steps = [line for line in script.splitlines() if "srun --overlap" in line and "logs/driver-" not in line]
-    driver_steps = [line for line in script.splitlines() if "srun --overlap" in line and "logs/driver-" in line]
+    steps = [line for line in script.splitlines() if "srun --overlap" in line]
+    driver_steps = [line for line in steps if "logs/driver-" in line]
+    collector_steps = [line for line in steps if "logs/otel_collector-" in line]
+    service_steps = [line for line in steps if line not in driver_steps and line not in collector_steps]
 
     assert service_steps and driver_steps
     assert all(" --kill-on-bad-exit=1 --wait=1 " in line for line in service_steps)
-    assert not any("--kill-on-bad-exit" in line or " --wait=" in line for line in driver_steps)
+    assert not any("--kill-on-bad-exit" in line or " --wait=" in line for line in driver_steps + collector_steps)

@@ -180,6 +180,7 @@ def _render_service_command(
     workdir: str | None = None,
     single_node: bool = False,
     nodelist: str | None = None,
+    end_step_on_task_exit: bool = True,
 ) -> str:
     var = bash_var(name)
     env_prefix = _resolve_env(env) if env else ""
@@ -210,12 +211,13 @@ def _render_service_command(
         if container is not None
         else ""
     )
+    # --kill-on-bad-exit and --wait end the whole step within a second when any one of its tasks exits, whatever the
+    # cluster's KillOnBadExit and WaitTime defaults, so a multi-task service (vllm_pd tiers, Ray workers) cannot
+    # lose a task while its srun stays alive and the driver's watch sees nothing.
+    step_flags = " --kill-on-bad-exit=1 --wait=1" if end_step_on_task_exit else ""
     return (
         f"# service: {name}\n"
-        # --kill-on-bad-exit and --wait end the whole step within a second when any one of its tasks exits, whatever the
-        # cluster's KillOnBadExit and WaitTime defaults, so a multi-task service (vllm_pd tiers, Ray workers) cannot
-        # lose a task while its srun stays alive and the driver's watch sees nothing.
-        f"{env_prefix}srun --overlap{node_flags}{container_flags} --kill-on-bad-exit=1 --wait=1"
+        f"{env_prefix}srun --overlap{node_flags}{container_flags}{step_flags}"
         f" --output=logs/{name}-$SLURM_JOB_ID.log {command} &\n"
         f"{var}_PID=$!"
     )
@@ -729,6 +731,8 @@ def _render_collector_service(
         nodelist=f"gym_nodes[{driver_node}]" if driver_node is not None else None,
         nodes=1 if driver_node is not None else None,
         ntasks=1 if driver_node is not None else None,
+        # Not watched: losing the collector costs telemetry, not the run, so its step keeps Slurm's defaults.
+        end_step_on_task_exit=False,
         **container_kwargs,
     )
 
