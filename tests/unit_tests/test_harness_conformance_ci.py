@@ -22,13 +22,27 @@ def test_adapter_changes_select_only_that_harness(harness):
     "path",
     [
         "nemo_gym/rollout_collection.py",
+        "nemo_gym/telemetry/gym_metrics.py",
+        "nemo_gym/agent_utils/sandbox_session.py",
+        "nemo_gym/sandbox/local.py",
+        "nemo_gym/cli/__init__.py",
+        "nemo_gym/cli/_compat.py",
+        "nemo_gym/cli/utils.py",
         "nemo_gym/prompts/system.md",
         "responses_api_agents/shared/prompts.md",
         "environment_servers/legacy_agent/app.py",
-        "responses_api_agents/opencode_sandboxed_agent/app.py",
-        "resources_servers/example_mcp_weather/app.py",
+        "environment_servers/single_agent_turn/app.py",
+        "environment_servers/single_agent_turn_legacy/app.py",
         "scripts/harness_conformance/registry.py",
+        "scripts/run_harness_conformance.py",
+        "scripts/inspect_harness_conformance.py",
+        "scripts/ci/setup_dev.sh",
+        "tests/__init__.py",
+        "tests/conftest.py",
+        "tests/unit_tests/__init__.py",
+        "tests/unit_tests/conftest.py",
         "tests/unit_tests/harness_capabilities/test_checker.py",
+        "tests/unit_tests/test_harness_conformance_checks.py",
         "pyproject.toml",
         "uv.lock",
         ".python-version",
@@ -37,7 +51,33 @@ def test_adapter_changes_select_only_that_harness(harness):
     ],
 )
 def test_shared_or_unknown_dependencies_run_all(path):
+    assert select_harnesses([path]) == list(HARNESSES)
     assert select_harnesses(["responses_api_agents/pi_agent/app.py", path]) == list(HARNESSES)
+    assert select_harnesses([path, "responses_api_agents/pi_agent/app.py"]) == list(HARNESSES)
+
+
+@pytest.mark.parametrize(
+    "paths",
+    [
+        ["resources_servers/ether0/.gitignore", "tests/unit_tests/test_global_config.py"],
+        ["resources_servers/sav_tracks/app.py", "resources_servers/sav_tracks/README.md"],
+        ["resources_servers/aviary/hypotest_app.py", "responses_api_agents/aviary_agent/app.py"],
+        [
+            ".gitignore",
+            "nemo_gym/cli/main.py",
+            "nemo_gym/tasks/harbor/hub.py",
+            "tests/unit_tests/test_harbor_tasks.py",
+        ],
+        ["responses_api_agents/opencode_sandboxed_agent/app.py"],
+        ["responses_api_models/vllm_model/app.py"],
+        ["environment_servers/unrelated/app.py"],
+        ["benchmarks/example/config.yaml"],
+    ],
+)
+def test_unrelated_components_do_not_expand_adapter_selection(paths):
+    assert select_harnesses(paths) == []
+    assert select_harnesses([*paths, "responses_api_agents/pi_agent/app.py"]) == ["pi"]
+    assert select_harnesses(["responses_api_agents/pi_agent/app.py", *paths]) == ["pi"]
 
 
 def test_documentation_only_and_multiple_adapters():
@@ -128,6 +168,7 @@ def test_custom_check_is_separate_from_required_ci_and_probe_permissions():
     main = yaml.safe_load((root / ".github/workflows/cicd-main.yml").read_text())["jobs"]
     workflow = yaml.safe_load((root / ".github/workflows/harness-conformance.yml").read_text())
     assert main["harness_conformance"]["needs"] == ["pre-flight"]
+    assert main["harness_conformance"]["name"] == "Harness conformance (non-blocking)"
     assert "harness_conformance" not in main["Nemo_CICD_Test"]["needs"]
     assert "harness_conformance" not in main["notify-failure"]["needs"]
     assert workflow["permissions"] == {"contents": "read"}
@@ -141,4 +182,5 @@ def test_custom_check_is_separate_from_required_ci_and_probe_permissions():
         == {"contents": "read", "actions": "read", "checks": "write"}
     )
     assert workflow["jobs"]["report"]["if"] == "always()"
+    assert workflow["jobs"]["report"]["name"] == "Publish check"
     assert set(workflow["jobs"]["report"]["needs"]) == {"select", "probe"}
