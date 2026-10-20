@@ -160,7 +160,7 @@ class TestTypedSessionsOverHttp:
         assert browsers.created[0].closed == 1
 
     def test_a_tool_call_without_a_browser_is_a_lost_session(self, browsers) -> None:
-        """Told in-band that its browser is gone, the model would keep acting on nothing; a 404 ends the turn."""
+        """A tool call with no browser gets 404 session_lost, so the trajectory records it as a failed call."""
         client = TestClient(_server().setup_webserver())
         client.post("/seed_session", json=_seed_json())
         client.post("/close_session", json=_close_json())

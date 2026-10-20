@@ -283,14 +283,15 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
 
     @staticmethod
     def _no_session() -> ResourcesSessionLostError:
-        # A 404, not an observation: told in-band that its browser is gone, the model would keep acting on nothing.
+        # A 404 marks the call failed in the trajectory. simple_agent still shows the body to the model and keeps
+        # going; verify then masks the sample, which is what keeps a lost browser out of the score.
         return ResourcesSessionLostError("no active browser session; seed_session must be called first")
 
     async def _render(self, st: _SessionState) -> str:
         obs = await st.backend.observe(max_elements=self.config.max_elements)
         return obs.render(max_elements=self.config.max_elements)
 
-    # ----- tools (errors returned to model, never raised) ----------------- #
+    # ----- tools (no browser: 404 session_lost; other errors returned to model) ----- #
     async def browser_navigate(self, request: Request, body: NavigateRequest) -> ToolResponse:
         st = self._state(request)
         if st is None:
