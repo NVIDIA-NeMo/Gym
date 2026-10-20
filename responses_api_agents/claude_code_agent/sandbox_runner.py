@@ -7,13 +7,20 @@ import os
 import signal
 import subprocess
 import sys
+from contextlib import ExitStack
 from pathlib import Path
 
 
 def run(params: dict) -> int:
-    """Keep raw stream-json and partial output; the shared supervisor owns process cleanup."""
+    """Keep raw stream-json and partial output; the shared supervisor owns process cleanup.
+
+    An optional ``prompt`` reaches the CLI on stdin; otherwise stdin is empty.
+    """
     directory = Path(params["directory"])
     (directory / "runtime.json").write_text(json.dumps({"hostname": os.uname().nodename, "pid": os.getpid()}))
+    prompt = params.get("prompt")
+    if prompt is not None:
+        (directory / "prompt.txt").write_text(prompt)
     stopping = False
 
     def interrupt(*_):
@@ -21,12 +28,15 @@ def run(params: dict) -> int:
         stopping = True
 
     signal.signal(signal.SIGTERM, interrupt)
-    with (directory / "events.jsonl").open("wb") as events, (directory / "stderr.log").open("wb") as stderr:
+    with ExitStack() as stack:
+        events = stack.enter_context((directory / "events.jsonl").open("wb"))
+        stderr = stack.enter_context((directory / "stderr.log").open("wb"))
+        stdin = stack.enter_context((directory / "prompt.txt").open("rb")) if prompt is not None else None
         process = subprocess.Popen(
             params["command"],
             cwd=params["cwd"],
             env={**os.environ, **params["env"]},
-            stdin=subprocess.DEVNULL,
+            stdin=stdin if stdin is not None else subprocess.DEVNULL,
             stdout=events,
             stderr=stderr,
         )

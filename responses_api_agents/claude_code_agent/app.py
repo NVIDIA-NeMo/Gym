@@ -113,6 +113,10 @@ class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_executable_sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
     session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
+    # Sandbox sessions: pass the instruction on the CLI's stdin, as Harbor 0.24's claude-code agent pipes
+    # it, instead of as an argument. It then never appears on a command line that an agent's
+    # `pkill -f <word from its task>` could match.
+    instruction_on_stdin: bool = False
 
 
 class ClaudeCodeAgentRunRequest(BaseRunRequest):
@@ -227,7 +231,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
     def _build_command(
         self,
         model: str,
-        instruction: str,
+        instruction: Optional[str],
         system_prompt: Optional[str] = None,
         mcp_config: Optional[str] = None,
         skills_active: bool = False,
@@ -274,7 +278,9 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             cmd += ["--max-thinking-tokens", str(self.config.max_thinking_tokens)]
         if self.config.max_turns is not None:
             cmd += ["--max-turns", str(self.config.max_turns)]
-        cmd += ["--", instruction]
+        # Without an instruction argument, `claude -p` reads the instruction from stdin.
+        if instruction is not None:
+            cmd += ["--", instruction]
         return cmd
 
     async def _run_claude_code(
@@ -710,8 +716,9 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             async with self.sem:
                 mcp_config = directory + "/mcp.json" if self.config.mcp_config else None
                 skills_path = self._configured_skills_path()
+                stdin = self.config.instruction_on_stdin
                 command = self._build_command(
-                    model, prompt, system, mcp_config=mcp_config, skills_active=bool(skills_path)
+                    model, None if stdin else prompt, system, mcp_config=mcp_config, skills_active=bool(skills_path)
                 )
                 command[0] = state.runtime + "/claude"
                 artifacts = await state.execute(
@@ -723,6 +730,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                         "settings": self._build_settings(),
                         "mcp_config": self._get_static_mcp_config() if mcp_config else None,
                         "skills_path": skills_path,
+                        **({"prompt": prompt} if stdin else {}),
                     },
                     timeout=resolve_agent_timeout(body.metadata, ceiling=self.config.timeout),
                     close_timeout=self.config.session_close_timeout_seconds,

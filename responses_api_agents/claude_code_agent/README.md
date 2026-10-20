@@ -303,3 +303,14 @@ dedicated stdout stream and native transcripts. The runner keeps `events.jsonl`,
 borrowed sandboxes, and stops agent-owned sandboxes. The task directory remains
 available to the borrowed sandbox's owner for verification. `timeout` bounds
 harness execution; setup and close use the limits above.
+
+### Task-container settings
+
+These settings are off by default. They run Claude Code the way a harness started in the task
+container runs it, for benchmarks that grade such a harness (the
+[Terminal-Bench-Science profile](../../benchmarks/terminal_bench_science/README.md#claude-code-in-the-task-sandbox)
+uses all of them).
+
+- `instruction_on_stdin` (sandbox sessions): pass the instruction on the CLI's stdin, as Harbor 0.24's
+  claude-code agent pipes it, instead of as an argument. It then never appears on a command line that an
+  agent's `pkill -f <word from its task>` could match.
