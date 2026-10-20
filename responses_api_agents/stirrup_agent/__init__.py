@@ -13,18 +13,15 @@
 # limitations under the License.
 from typing import TYPE_CHECKING
 
-from .task_strategy import TaskStrategy
-
 
 if TYPE_CHECKING:
-    from .app import StirrupAgentWrapper, StirrupAgentWrapperConfig, StirrupRunRequest
+    from .app import StirrupAgentWrapper, StirrupAgentWrapperConfig
 
-_APP_EXPORTS = {"StirrupAgentWrapper", "StirrupAgentWrapperConfig", "StirrupRunRequest"}
+_APP_EXPORTS = {"StirrupAgentWrapper", "StirrupAgentWrapperConfig"}
 
 
 def __getattr__(name: str) -> object:
-    # Load the agent (and Ray) only when its classes are used. Other servers, such as gdpval, import helper modules
-    # like `file_reader` and `task_distribution`, and must not need Ray for that.
+    # Load the agent (and Ray) only when its classes are used, so importing a helper module does not need Ray.
     if name in _APP_EXPORTS:
         from . import app
 
@@ -32,4 +29,4 @@ def __getattr__(name: str) -> object:
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-__all__ = ["StirrupAgentWrapper", "StirrupAgentWrapperConfig", "StirrupRunRequest", "TaskStrategy"]
+__all__ = ["StirrupAgentWrapper", "StirrupAgentWrapperConfig"]

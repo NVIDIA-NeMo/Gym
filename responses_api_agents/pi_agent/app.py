@@ -736,7 +736,7 @@ class PiAgent(SimpleResponsesAPIAgent):
             # Common finalization captures before close removes the session directory.
             raw = state.session.artifacts if state.session.artifacts is not None else ""
             events, output = [], []
-            for line in raw.splitlines():
+            for line in (part for part in raw.split("\n") if part.strip()):
                 try:
                     observed_at, event = json.loads(line)
                     if not isinstance(event, dict):
@@ -770,7 +770,8 @@ class PiAgent(SimpleResponsesAPIAgent):
                 if isinstance(record, AgentInvocation):
                     record.status = "incomplete"
             raise
-        events = [tuple(json.loads(line)) for line in raw.splitlines() if line.strip()]
+        # JSONL: split on "\n" only; str.splitlines() would also split inside strings on U+2028/U+0085.
+        events = [tuple(json.loads(line)) for line in raw.split("\n") if line.strip()]
         output = []
         usage = {"input_tokens": 0, "output_tokens": 0}
         cached_tokens: int | None = 0

@@ -540,6 +540,18 @@ async def test_download_json_requires_exactly_one_row():
         await agent._download_json(MagicMock(), "/work/rollouts.jsonl")
 
 
+async def test_download_json_keeps_unicode_line_separators():
+    # A response quoting document text carries U+2028 / U+0085 inside strings; model_dump_json()
+    # leaves them unescaped, and they must not split the single JSONL row.
+    row = {"output": [{"type": "message", "content": "line\u2028break and\u0085next"}]}
+    agent = _make_agent()
+    agent._provider.download_file = AsyncMock(
+        side_effect=lambda _, __, path: path.write_text(json.dumps(row, ensure_ascii=False) + "\n")
+    )
+
+    assert await agent._download_json(MagicMock(), "/work/response.json") == row
+
+
 def test_gym_source_prebuilt_path_and_url():
     server_client = MagicMock(spec=ServerClient)
     server_client.global_config_dict = {}

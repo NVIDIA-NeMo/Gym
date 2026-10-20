@@ -249,8 +249,11 @@ def test_cicd_main_wires_preflight_cpu_and_gpu_workflows() -> None:
     assert "uses: ./.github/workflows/unit-tests.yml" in workflow
     jobs = _cicd_main_jobs()
     base_ref = "${{ needs.pre-flight.outputs.base_ref }}"
-    for job in ("unit_tests", "harness_conformance"):
-        assert jobs[job]["with"]["base-ref"] == base_ref
+    assert jobs["unit_tests"]["with"]["base-ref"] == base_ref
+    assert jobs["harness_conformance"]["with"]["base-ref"] == (
+        "${{ github.event.merge_group.base_sha || "
+        "(github.ref == 'refs/heads/main' && github.event.before) || needs.pre-flight.outputs.base_ref }}"
+    )
     assert [
         step["with"]["base-ref"]
         for step in jobs["classify_changes"]["steps"]
@@ -475,7 +478,7 @@ def test_notification_workflows_use_pinned_shared_summary_without_checkout() -> 
         assert notify_step["uses"] == expected_action, workflow_file
         assert notify_step["with"] == {
             "needs-json": "${{ toJSON(needs) }}",
-            "webhook": "${{ secrets.SLACK_WEBHOOK }}",
+            "webhook": "${{ secrets.SLACK_TEAM_CHANNEL_WEBHOOK }}",
         }
         assert notify["environment"] == "main"
         assert notify["permissions"] == {}
