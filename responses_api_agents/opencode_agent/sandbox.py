@@ -16,7 +16,7 @@ from nemo_gym.agent_utils.sandbox_session import SandboxCommand, SandboxSession
 from nemo_gym.base_responses_api_agent import AgentSessionState
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap, TrajectoryRecord
+from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, ObservationGap, TrajectoryRecord
 from nemo_gym.sandbox.utils import read_text, upload_text
 from responses_api_agents.opencode_agent.artifacts import parse_opencode_observations
 from responses_api_agents.opencode_agent.observability import scope_opencode_activation
@@ -84,6 +84,9 @@ class OpenCodeSandboxSession(AgentSessionState):
     trajectory: TrajectoryRecord | None = None
     activation_trajectory: TrajectoryRecord | None = None
     activation_id: int | None = None
+    _retained_activations: dict[int, tuple[AgentObservationBundle, TrajectoryRecord | None]] = field(
+        default_factory=dict, init=False, repr=False
+    )
 
     @property
     def is_continuation(self) -> bool:
@@ -120,20 +123,45 @@ class OpenCodeSandboxSession(AgentSessionState):
             raise RuntimeError(f"Cannot prepare OpenCode activation directory: {result.stderr}")
 
     def retain_activation(self) -> None:
-        """Accumulate completed launch evidence once; retries replay above the adapter."""
+        """Upsert activation evidence without changing an outcome already returned to its caller."""
         if self.activation_observations is None:
             return
-        if self.observations is None:
-            self.observations = AgentObservationBundle(source="opencode")
-        self.observations.records.extend(self.activation_observations.records)
-        self.observations.gaps.extend(self.activation_observations.gaps)
-        if self.activation_trajectory is not None:
-            if self.trajectory is None:
-                self.trajectory = TrajectoryRecord(
-                    task_id=self.request.task_id.task_id, rollout_id=self.request.episode_id.capture_key
-                )
-            for field in ("invocations", "turns", "tool_calls", "gaps"):
-                getattr(self.trajectory, field).extend(getattr(self.activation_trajectory, field))
+        assert self.activation_id is not None
+        previous = self._retained_activations.get(self.activation_id)
+        if previous is not None and previous[0] is not self.activation_observations:
+            original = next(
+                (r for r in previous[0].records if isinstance(r, AgentInvocation) and r.parent_invocation_id is None),
+                None,
+            )
+            if original is not None:
+                # A close retry can discover the native ID and transcript after
+                # a failed activation retained only a synthetic root invocation.
+                recovered = list(self.activation_observations.records)
+                if self.activation_trajectory is not None:
+                    recovered.extend(self.activation_trajectory.invocations)
+                for record in recovered:
+                    if isinstance(record, AgentInvocation) and record.parent_invocation_id is None:
+                        record.status = original.status
+                        record.error_type = original.error_type
+                        record.stop_reason = original.stop_reason
+                        record.duration_ms = original.duration_ms
+        self._retained_activations[self.activation_id] = (self.activation_observations, self.activation_trajectory)
+        bundles = [bundle for bundle, _ in self._retained_activations.values()]
+        self.observations = AgentObservationBundle(
+            source="opencode",
+            records=[record for bundle in bundles for record in bundle.records],
+            gaps=[gap for bundle in bundles for gap in bundle.gaps],
+        )
+        trajectories = [trajectory for _, trajectory in self._retained_activations.values() if trajectory is not None]
+        if trajectories:
+            self.trajectory = TrajectoryRecord(
+                task_id=self.request.task_id.task_id,
+                rollout_id=self.request.episode_id.capture_key,
+                **{
+                    name: [record for trajectory in trajectories for record in getattr(trajectory, name)]
+                    for name in ("invocations", "turns", "model_calls", "tool_calls", "gaps")
+                },
+            )
 
     async def upload_json(self, name: str, payload: JsonValue) -> None:
         """Stage adapter input using the shared text-transfer utility."""
@@ -158,6 +186,8 @@ class OpenCodeSandboxSession(AgentSessionState):
                 if not self.task.done():
                     raise
                 # The agent base replays the activation error independently of close.
+        if self.is_continuation:
+            self.retain_activation()
 
     async def execute(
         self,

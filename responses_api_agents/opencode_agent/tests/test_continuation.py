@@ -7,6 +7,7 @@ import json
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import Request
@@ -193,6 +194,91 @@ def test_negative_cleanup_releases_borrowed_session_and_replays_receipt(
     sandbox.stop.assert_not_awaited()
 
 
+@pytest.mark.parametrize("prior_success", [False, True])
+@pytest.mark.parametrize("disconnect_failure", [False, True])
+def test_close_retains_recovered_activation_once(setup, tmp_path, monkeypatch, prior_success, disconnect_failure):
+    agent, sandbox = setup
+    install_artifact_runner(sandbox, tmp_path)
+    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
+        request = start(client)
+        state = agent._require_agent_session(request.agent_session_id)
+        earlier = None
+        if prior_success:
+            assert activate(client, 1).status_code == 200
+            earlier = roots(state.observations.model_dump(mode="json"))[0]
+        index = 2 if prior_success else 1
+        stop = AsyncMock(side_effect=[RuntimeError("temporary receipt unavailable"), dict(sandbox.result)])
+        monkeypatch.setattr("nemo_gym.agent_utils.sandbox_session.stop_and_confirm_cleanup", stop)
+        capture = AsyncMock(wraps=state.collect_artifacts)
+        state.collect_artifacts = capture
+        assert activate(client, index).status_code == 500
+        stop.assert_awaited_once()
+        capture.assert_not_awaited()
+        [failed] = [r for r in roots(state.observations.model_dump(mode="json")) if r["activation_id"] == index]
+        assert failed["status"] == "failed" and failed["conversation"] == []
+        if disconnect_failure:
+            sandbox.disconnect.side_effect = [RuntimeError("provider unavailable"), None]
+            response = client.post(
+                "/v1/agent_sessions/close",
+                json={"agent_session_id": request.agent_session_id, "episode_id": request.episode_id.model_dump()},
+            )
+            assert response.status_code == 500
+        receipt = close(client, request)
+        assert receipt["cleanup_confirmed"] is True
+        assert close(client, request) == receipt
+        assert stop.await_count == 2
+        capture.assert_awaited_once()
+        invocations = roots(receipt["agent_observations"])
+        assert [r["activation_id"] for r in invocations] == list(range(1, index + 1))
+        if earlier is not None:
+            assert invocations[0] == earlier
+        recovered = invocations[-1]
+        assert recovered["invocation_id"] == f"{state.invocation_prefix}:native-session"
+        assert recovered["native_session_id"] == "native-session"
+        for field in ("status", "error_type", "stop_reason", "duration_ms"):
+            assert recovered[field] == failed[field]
+        assert any(
+            message.get("role") == "assistant" and message["content"][0]["text"] == f"Answer {index - 1}"
+            for message in recovered["conversation"]
+        )
+        trajectory = receipt["trajectory"]
+        assert [turn["activation_id"] for turn in trajectory["turns"]] == list(range(1, index + 1))
+        assert trajectory["turns"][-1]["invocation_id"] == recovered["invocation_id"]
+        assert (
+            len(
+                {
+                    r["invocation_id"]
+                    for r in receipt["agent_observations"]["records"]
+                    if r["kind"] == "agent_invocation"
+                }
+            )
+            == index
+        )
+
+
+async def test_close_recovery_preserves_cancelled_activation(setup, tmp_path, monkeypatch):
+    agent, sandbox = setup
+    install_artifact_runner(sandbox, tmp_path)
+    request = Request(
+        {"type": "http", "session": {}, "headers": [(AGENT_ACTIVATION_HEADER.encode(), b"1")], "path_params": {}}
+    )
+    body = seed().model_copy(update={"continuation": AgentContinuationRequirements()})
+    await agent.seed_agent_session(request, body)
+    stop = AsyncMock(side_effect=[asyncio.CancelledError(), dict(sandbox.result)])
+    monkeypatch.setattr("nemo_gym.agent_utils.sandbox_session.stop_and_confirm_cleanup", stop)
+    with pytest.raises(asyncio.CancelledError):
+        await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+    stop.assert_awaited_once()
+    close_body = AgentCloseSessionRequest(agent_session_id=body.agent_session_id, episode_id=body.episode_id)
+    receipt = await agent.close_agent_session(request, close_body)
+    [invocation] = roots(receipt.agent_observations.model_dump(mode="json"))
+    assert invocation["status"] == "incomplete" and invocation["error_type"] == "cancelled"
+    assert invocation["native_session_id"] == "native-session" and invocation["conversation"]
+    assert [turn.activation_id for turn in receipt.trajectory.turns] == [1]
+    assert await agent.close_agent_session(request, close_body) == receipt
+    assert stop.await_count == 2
+
+
 def test_plain_http_delta_replay_and_cumulative_close(setup, tmp_path):
     agent, sandbox = setup
     payloads = install_artifact_runner(sandbox, tmp_path)
@@ -362,6 +448,67 @@ def test_interrupted_checkpoint_does_not_hide_native_error(session_id, previous,
         continuation=True,
     )
     assert outcome.status == expected
+
+
+@pytest.mark.parametrize("previous", [None, "native"])
+@pytest.mark.parametrize("assistant", [False, True])
+@pytest.mark.parametrize("error_event", [False, True])
+def test_timeout_native_error_overrides_partial_assistant(previous, assistant, error_event):
+    outcome = classify_native_outcome(
+        {"messages": [{"info": {"role": "assistant"}, "parts": []}] if assistant else []},
+        cleanup={"return_code": -9, "error": None, "timed_out": True, "cleanup_confirmed": True},
+        previous_session_id=previous,
+        session_id="native",
+        stdout=json.dumps({"type": "error"}) if error_event else "",
+        continuation=True,
+    )
+    if error_event:
+        assert outcome.status == "failed" and outcome.error_type == "server_error" and outcome.error
+    else:
+        assert outcome.status == "incomplete" and outcome.error_type == "timeout"
+
+
+def test_single_turn_timeout_keeps_existing_native_error_classification():
+    outcome = classify_native_outcome(
+        {"messages": [{"info": {"role": "assistant"}, "parts": []}]},
+        cleanup={"return_code": -9, "error": None, "timed_out": True, "cleanup_confirmed": True},
+        previous_session_id=None,
+        session_id="native",
+        stdout=json.dumps({"type": "error"}),
+        continuation=False,
+    )
+    assert outcome.status == "incomplete" and outcome.error_type == "timeout"
+
+
+@pytest.mark.parametrize("prior_success", [False, True])
+@pytest.mark.parametrize("error_event", [False, True])
+def test_native_error_during_timeout_fails_http_activation(setup, tmp_path, prior_success, error_event):
+    agent, sandbox = setup
+    payloads = install_artifact_runner(sandbox, tmp_path)
+    launch = sandbox.launch.side_effect
+
+    async def interrupted(**kwargs):
+        result = await launch(**kwargs)
+        sandbox.files[f"{payloads[-1]['directory']}/stdout.jsonl"] = (
+            json.dumps({"type": "error"}) if error_event else ""
+        )
+        return result
+
+    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
+        request = start(client)
+        if prior_success:
+            assert activate(client, 1).status_code == 200
+        sandbox.launch.side_effect = interrupted
+        sandbox.result.update(timed_out=True, return_code=-9)
+        response = activate(client, 2 if prior_success else 1)
+        if error_event:
+            assert response.status_code == 502
+            assert "native error event" in response.json()["detail"]
+        else:
+            assert response.status_code == 200 and response.json()["status"] == "incomplete"
+        invocation = roots(close(client, request)["agent_observations"])[-1]
+        assert invocation["status"] == ("failed" if error_event else "incomplete")
+        assert invocation["error_type"] == ("server_error" if error_event else "timeout")
 
 
 def test_collector_and_existing_conformance_keep_two_activation_owners(setup, tmp_path):

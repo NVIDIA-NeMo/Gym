@@ -37,6 +37,8 @@ def classify_native_outcome(
     for message in assistants:
         if message["info"].get("error"):
             error = error or json.dumps(message["info"]["error"])
+    if continuation and timed_out and has_native_error(stdout):
+        error = error or "OpenCode emitted a native error event"
     resumable_checkpoint = bool(
         continuation
         and session_id
@@ -44,7 +46,7 @@ def classify_native_outcome(
         and timed_out
         and cleanup is not None
         and cleanup["cleanup_confirmed"]
-        and not has_native_error(stdout)
+        and error is None
     )
     if not assistants and not resumable_checkpoint:
         error = error or "OpenCode produced no assistant result"
