@@ -2,15 +2,19 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException
 
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest
+from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.nooa_agent import app as app_module
 from responses_api_agents.nooa_agent.app import NOOAAgent
+from responses_api_agents.nooa_agent.termination import NOOATerminationReason
 from responses_api_agents.nooa_agent.tests.test_app import request, seed
 from responses_api_agents.nooa_agent.tests.test_config import agent_config, invocation_config
 from responses_api_agents.nooa_agent.tests.test_sandbox_runner import MemorySandbox, complete_files
@@ -112,8 +116,8 @@ async def test_close_returns_sandbox_evidence_cookies_and_replays_receipt(setup,
         ),
     )
     state = instance._require_agent_session("session")
-    state.runner.launched = True
     complete_files(state.runner, sandbox)
+    await instance.responses(request(session_id="session"), NeMoGymResponseCreateParamsNonStreaming(input="task"))
     receipt = await close(instance)
     assert receipt.agent_observations.gaps[0].code == "test"
     assert receipt.resources_cookies == ({"resource": "new"} if grant else None)
@@ -124,13 +128,12 @@ async def test_close_returns_sandbox_evidence_cookies_and_replays_receipt(setup,
     instance.server_client.post.assert_not_called()
 
 
-async def test_cleanup_failure_requires_retry_before_disconnect(setup) -> None:
+async def test_missing_cleanup_receipt_requires_retry_before_disconnect(setup) -> None:
     instance, sandbox, _, _ = setup
     await instance.seed_agent_session(request(), seed(sandbox_access=access()))
     state = instance._require_agent_session("session")
-    state.runner.launched = True
-    sandbox.files[state.runner.directory + "/cleanup.json"] = '{"cleanup_confirmed":false}'
-    with pytest.raises(RuntimeError, match="unconfirmed"):
+    state.runner.session.launch_started = True
+    with pytest.raises(RuntimeError, match="cannot confirm termination"):
         await close(instance)
     sandbox.disconnect.assert_not_awaited()
     instance.server_client.post.assert_not_called()
@@ -174,3 +177,82 @@ async def test_distinct_sessions_keep_connections_cookies_and_state_separate(set
     second_sandbox.disconnect.assert_not_awaited()
     await close(instance, "second")
     second_sandbox.disconnect.assert_awaited_once()
+
+
+async def test_negative_cleanup_receipt_releases_borrowed_connection_with_capture_gap(setup) -> None:
+    instance, sandbox, _, _ = setup
+    await instance.seed_agent_session(request(), seed(sandbox_access=access()))
+    state = instance._require_agent_session("session")
+    state.runner.session.launch_started = True
+    sandbox.files[state.runner.directory + "/cleanup.json"] = (
+        '{"cleanup_confirmed":false,"return_code":null,"timed_out":false,"error":"children still running"}'
+    )
+    receipt = await close(instance)
+    assert "sandbox_capture_failed" in {gap.code for gap in receipt.agent_observations.gaps}
+    assert await close(instance) == receipt
+    sandbox.disconnect.assert_awaited_once()
+    sandbox.stop.assert_not_awaited()
+
+
+async def test_active_shared_session_retries_unknown_cleanup_before_cancelling_provider_exec(setup) -> None:
+    instance, sandbox, _, _ = setup
+    await instance.seed_agent_session(
+        request(),
+        seed(
+            sandbox_access=access(),
+            tool_accesses=[
+                {"kind": "direct_http", "name": "resources", "required": True, "base_url": "http://resources"}
+            ],
+        ),
+    )
+    state = instance._require_agent_session("session")
+    launched = asyncio.Event()
+    confirmed = False
+    events = []
+    original_download = sandbox.download
+
+    async def execute(command: str, **kwargs) -> SandboxExecResult:
+        if "/process_supervisor.py" in command:
+            launched.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                events.append("provider_cancel")
+        if "touch " in command:
+            events.append("stop")
+            if confirmed:
+                complete_files(state.runner, sandbox)
+        return SandboxExecResult(stdout="", stderr="", return_code=0)
+
+    async def download(source: str, destination: Path) -> None:
+        if source.endswith("/result.json"):
+            assert state.runner.session.cleanup["cleanup_confirmed"] is True
+            events.append("capture")
+        await original_download(source, destination)
+
+    async def disconnect() -> None:
+        events.append("disconnect")
+
+    sandbox.exec.side_effect = execute
+    sandbox.download = download
+    sandbox.disconnect.side_effect = disconnect
+    activation = asyncio.create_task(
+        instance.responses(request(session_id="session"), NeMoGymResponseCreateParamsNonStreaming(input="task"))
+    )
+    await asyncio.wait_for(launched.wait(), timeout=1)
+    with pytest.raises(RuntimeError, match="cannot confirm termination"):
+        await close(instance)
+    assert events == ["stop"]
+    assert not state.execution.done()
+    assert instance._session_records["session"].state is state
+    sandbox.disconnect.assert_not_awaited()
+    confirmed = True
+    receipt = await asyncio.wait_for(close(instance), timeout=1)
+    with pytest.raises(asyncio.CancelledError):
+        await activation
+    assert events == ["stop", "stop", "capture", "provider_cancel", "disconnect"]
+    assert NOOATerminationReason.CANCELLED in {gap.code for gap in receipt.agent_observations.gaps}
+    assert receipt.resources_cookies == {"resource": "new"}
+    assert state.execution.done()
+    assert await close(instance) == receipt
+    sandbox.stop.assert_not_awaited()

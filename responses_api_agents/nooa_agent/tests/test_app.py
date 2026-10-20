@@ -132,9 +132,10 @@ async def test_agent_session_activation_and_close_preserve_identity_cookies_and_
             }
         ],
     )
-    body = NeMoGymResponseCreateParamsNonStreaming(input="task")
+    body = NeMoGymResponseCreateParamsNonStreaming(input="task", metadata={"agent_timeout_sec": "45"})
     response = await instance.responses(req, body)
     run_request = runner_run.call_args.args[0]
+    assert run_request.responses_create_params.metadata == {"agent_timeout_sec": "45"}
     assert run_request.task_id == "task"
     assert run_request.rollout_id == "rollout-a2"
     assert run_request.model_url_path == "/ng-rollout/rollout-a2/v1/responses"

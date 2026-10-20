@@ -91,6 +91,19 @@ class NOOAAgentConfig(BaseResponsesAPIAgentConfig):
         default=None, gt=0, description="Optional shared model-call limit per rollout; null disables the limit."
     )
 
+    sandbox_runner_timeout_seconds: float = Field(
+        default=21600,
+        gt=0,
+        allow_inf_nan=False,
+        description="Finite sandbox worker ceiling in seconds; separate from the environment's episode timeout.",
+    )
+    session_close_timeout_seconds: float = Field(
+        default=30,
+        gt=0,
+        allow_inf_nan=False,
+        description="Budget in seconds for each sandbox close phase and for joining the remaining activation.",
+    )
+
     @field_validator("num_workers")
     @classmethod
     def require_single_worker(cls, value: int | None) -> int | None:

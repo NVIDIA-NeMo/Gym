@@ -173,3 +173,19 @@ def test_agent_sessions_require_one_worker() -> None:
     assert agent_config(num_workers=1).num_workers == 1
     with pytest.raises(ValidationError, match="num_workers=1"):
         agent_config(num_workers=2)
+
+
+@pytest.mark.parametrize("field", ["sandbox_runner_timeout_seconds", "session_close_timeout_seconds"])
+@pytest.mark.parametrize("value", [0, -1, float("nan"), float("inf"), float("-inf")])
+def test_session_timeouts_must_be_positive_and_finite(field: str, value: float) -> None:
+    with pytest.raises(ValidationError, match=field):
+        agent_config(**{field: value})
+
+
+def test_session_timeout_defaults_and_fractional_budgets() -> None:
+    default = agent_config()
+    assert default.sandbox_runner_timeout_seconds == 21600
+    assert default.session_close_timeout_seconds == 30
+    configured = agent_config(sandbox_runner_timeout_seconds=0.5, session_close_timeout_seconds=0.25)
+    assert configured.sandbox_runner_timeout_seconds == 0.5
+    assert configured.session_close_timeout_seconds == 0.25
