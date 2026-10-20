@@ -55,7 +55,7 @@ filesystem paths. Keep GDP's canonical flat input for later judging.
 
 BenchAgent is the default NOOA harness. The agent's `requirements.txt` pins
 `nooa`, `nooa-cli`, and `nooa-bench` to
-`19caab169b018476ac433d040f6ae3f06aeff101`. The controller bootstrap uses the same
+`051472343211914222e24ce36d8752f4e86bbe43`. The controller bootstrap uses the same
 pins from `responses_api_agents/nooa_agent/runtime/benchagent-requirements.txt`.
 Standard serial `gym env prefetch` installs the complete server dependencies;
 use `--prefetch` on the first canary as shown below.

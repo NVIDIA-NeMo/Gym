@@ -3,8 +3,6 @@ title: "NOOA sessions and SWE-bench Pro"
 description: "Run NOOA through single_agent_turn and a Resources-owned sandbox."
 ---
 
-# NOOA sessions and SWE-bench Pro
-
 NOOA uses Gym's agent sessions and existing `single_agent_turn` Environment Server. It seeds Resources,
 opens and invokes NOOA, closes the agent to collect evidence and final Resources cookies, asks Resources to
 verify, and closes Resources. Call the Environment Server's `/run`; NOOA
@@ -42,35 +40,11 @@ are copied into the runner.
 Direct HTTP tool grants arrive through the agent session's `tool_accesses`. Generated `self.*` resource methods, `GymResponsesLLM`,
 and `GymTraceHooks` execute alongside NOOA. Model and resource cookies remain separate; final resource cookies
 return on close for verification. Model/resource infrastructure failures fail the episode instead of becoming a
-reward-zero response. Policy-budget exhaustion remains a gradable partial response unless an unrecovered infrastructure failure also occurred.
+reward-zero response. Policy-budget exhaustion remains a gradable partial response.
 
 Hooks capture Python execution and nested resource calls. Sandbox results are exported on completion or handled
 errors; a hard kill can lose in-memory events. Sandbox-written results are agent-reported evidence, not trusted
 training records. Resources remains responsible for rewards.
-
-Successful episodes return NOOA observations and trajectories. Failed episodes use the unchanged Gym collector's
-existing `partial_response` contract: it does not persist failed observation bundles, producer trajectories, or
-secondary cleanup errors. This NOOA-only integration does not extend shared failure persistence.
-
-## Session cleanup and verification
-
-The NOOA recipes select `single_agent_turn`, following the shared agent session lifecycle used by the
-Hermes and Simple Agent integrations. In sandboxed mode, agent close stops NOOA-owned task processes,
-returns the final Resources cookies and agent evidence, and disconnects from the borrowed sandbox before
-verification. In embedded mode, session close returns evidence and cookies after the invocation adapter
-has completed its own cleanup.
-Resources retains ownership of the sandbox and closes it after verification. Timeouts and cancellation
-use the same bounded cleanup path.
-
-The sandboxed BenchAgent recipes use NOOA's invocation-scoped `preserve_background_services()` while the agent is active;
-the external supervisor stops those services during agent close. The default BenchAgent requirements
-pin `nooa`, `nooa-cli`, and `nooa-bench` to `19caab169b018476ac433d040f6ae3f06aeff101`, which provides this scope and
-summary-fork isolation. Rebuild existing agent runtimes for the new dependency; keep earlier benchmark
-results associated with their original pins.
-
-A successful main-model call clears a recovered transport failure. Optional summarization failures do not
-set or clear the parent invocation's failure state. Required resource failures and unrecovered main-model
-failures remain fatal, and secondary cleanup failures do not replace the original terminal exception.
 
 ## Stateful resource example
 

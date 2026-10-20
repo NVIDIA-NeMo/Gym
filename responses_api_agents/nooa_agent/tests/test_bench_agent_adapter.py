@@ -63,14 +63,14 @@ async def test_cleanup_failure_preserves_the_original_invocation_exception(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_delegated_fresh_shell_service_survives_invocation_cleanup(tmp_path, monkeypatch):
+async def test_delegated_fresh_shell_service_is_usable_during_parent_task(tmp_path, monkeypatch):
     pytest.importorskip("nooa_bench.bench_agent")
     from responses_api_agents.nooa_agent.invocation import NOOAInvocationConfig
     from responses_api_agents.nooa_agent.runner import InProcessNOOARunner, NOOARunRequest
     from responses_api_agents.nooa_agent.tests.test_gym_llm import FakeHTTPResponse, model_response
 
     monkeypatch.chdir(tmp_path)
-    (tmp_path / "marker.txt").write_text("ready for verification")
+    (tmp_path / "marker.txt").write_text("ready during parent task")
     (tmp_path / "service.py").write_text(
         "import signal\n"
         "from http.server import HTTPServer, SimpleHTTPRequestHandler\n"
@@ -83,8 +83,25 @@ async def test_delegated_fresh_shell_service_survives_invocation_cleanup(tmp_pat
     command = f"{shlex.quote(sys.executable)} service.py > service.log 2>&1 & echo $! > service.pid"
     code = iter(
         [
+            "import asyncio\n"
+            "from pathlib import Path\n"
             "child = await self.delegate('start the fixture service')\n"
-            "return_result(TaskResult(solution_description='parent', evidence=child.evidence, how_to_verify='HTTP'))",
+            "assert child.evidence == 'service started'\n"
+            "async with asyncio.timeout(5):\n"
+            "    while not Path('service.port').exists():\n"
+            "        await asyncio.sleep(0.01)\n"
+            "    port = int(Path('service.port').read_text())\n"
+            "    reader, writer = await asyncio.open_connection('127.0.0.1', port)\n"
+            "    try:\n"
+            "        writer.write(b'GET /marker.txt HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n')\n"
+            "        await writer.drain()\n"
+            "        response = await reader.read()\n"
+            "    finally:\n"
+            "        writer.close()\n"
+            "        await writer.wait_closed()\n"
+            "assert b'200 OK' in response and response.endswith(b'ready during parent task')\n"
+            "return_result(TaskResult(solution_description='parent', "
+            "evidence='service used during parent task', how_to_verify='HTTP'))",
             "from nooa.tools.shell_tools import ShellTools\n"
             "fresh_shell = ShellTools(cwd=str(self.shell.cwd))\n"
             f"await fresh_shell.run({command!r})\n"
@@ -120,21 +137,8 @@ async def test_delegated_fresh_shell_service_survives_invocation_cleanup(tmp_pat
                 model_url_path="/v1/responses",
             )
         )
-        assert result.return_value.evidence == "service started"
+        assert result.return_value.evidence == "service used during parent task"
         assert len(calls) == len(result.trajectory.turns) == 2
-        async with asyncio.timeout(5):
-            while not (tmp_path / "service.port").exists():
-                await asyncio.sleep(0.01)
-            port = int((tmp_path / "service.port").read_text())
-            reader, writer = await asyncio.open_connection("127.0.0.1", port)
-            try:
-                writer.write(b"GET /marker.txt HTTP/1.0\r\nHost: localhost\r\n\r\n")
-                await writer.drain()
-                response = await reader.read()
-            finally:
-                writer.close()
-                await writer.wait_closed()
-        assert b"200 OK" in response and response.endswith(b"ready for verification")
     finally:
         pid_path = tmp_path / "service.pid"
         if pid_path.exists():
