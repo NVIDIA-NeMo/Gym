@@ -43,7 +43,7 @@ from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple
 
 from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, PrivateAttr, field_validator, model_validator
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -59,6 +59,7 @@ from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.rollout_correlation import current_episode_id
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from resources_servers.genrm_compare.utils import (
     GenRMOutputParseError,
@@ -145,6 +146,20 @@ class _CohortState:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     collection_timeout_task: Optional[asyncio.Task[None]] = None
     evaluation_task: Optional[asyncio.Task[None]] = None
+
+
+class _CompletedMemberState(BaseModel):
+    """One session's checkpointed share of a completed cohort: the reward its member was given."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    cohort_key: str
+    prompt_digest: str
+    group_id: str
+    group_attempt: int = Field(ge=0)
+    rollout_index: int = Field(ge=0)
+    response_digest: str
+    result: Dict[str, Any]
 
 
 @dataclass
@@ -364,19 +379,24 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
     - Batch /compare: Direct comparison of N response_objs (e.g. for rollout_collection or tests).
     """
 
-    # Cohorts are keyed by prompt, not by session, so there is no session state to export.
     # Verification must replay: a member waits for its siblings,
     # so waiting on it would deadlock a checkpoint while siblings are still generating.
-    # After a crash, every member that had not recorded its reward re-verifies and rebuilds the cohort.
-    # A crash between a cohort's result and all of its members recording it leaves the rest waiting for siblings
-    # that will not re-verify; they fail after cohort_collection_timeout_s and are retried from input.
-    checkpoint_mode = "stateless"
+    # After a crash, every member that had not recorded its reward re-verifies.
+    # A cohort's rewards reach its members one reply at a time, so a checkpoint can land after one member recorded
+    # its reward but before the others did. Those others replay verification, and their sibling never will:
+    # rebuilding the cohort from them alone would wait forever. So each session still open on a completed cohort
+    # exports its member's reward, and a restore installs the completed cohort that answers those replays.
+    # While a checkpoint is open, rewards are held until resume, so no member records one after this export.
+    checkpoint_mode = "exported"
     checkpoint_verify = "replay"
 
     config: GenRMCompareConfig
     _verify_cohorts: Dict[str, _CohortState] = PrivateAttr(default_factory=dict)
     _latest_group_attempts: Dict[str, _GroupAttemptWatermark] = PrivateAttr(default_factory=dict)
     _cohort_registry_lock: asyncio.Lock = PrivateAttr(default_factory=asyncio.Lock)
+    # With checkpointing on, the cohort member each attempt verified as, by capture key,
+    # so a session export can find its member's reward.
+    _episode_members: Dict[str, Tuple[str, int]] = PrivateAttr(default_factory=dict)
 
     _cohort_tasks: set[asyncio.Task] = PrivateAttr(default_factory=set)
     _closed: bool = PrivateAttr(default=False)
@@ -463,6 +483,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                             f"rollout_index={rollout_index}"
                         ),
                     )
+                self._remember_member(prompt_key, rollout_index)
                 if cohort.phase == "completed":
                     return self._verify_response(body, cohort.results[rollout_index])
                 member.waiters.append(future)
@@ -480,6 +501,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                     response_digest=response_digest,
                     waiters=[future],
                 )
+                self._remember_member(prompt_key, rollout_index)
                 if cohort.collection_timeout_task is None:
                     cohort.collection_timeout_task = self._own_task(
                         self._expire_collecting_cohort(
@@ -797,32 +819,51 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         results_by_index: Dict[int, VerifyResult],
     ) -> None:
         """Publish rewards, retiring legacy cohorts and compacting explicit-ID tombstones."""
-        async with cohort.lock:
-            if cohort.phase == "failed":
-                logger.debug("Discarding late GenRM completion for key=%r", cohort.key[:160])
-                return
-            if cohort.phase != "evaluating":
-                raise RuntimeError(f"cannot publish GenRM rewards while cohort is {cohort.phase}")
-            cohort.results = results_by_index
-            cohort.phase = "completed"
-            cohort.terminal_at = time.monotonic()
-            cohort.evaluation_task = None
-            for index, member in cohort.members.items():
-                for waiter in member.waiters:
-                    if not waiter.done():
-                        waiter.set_result(results_by_index[index])
-                # A tombstone only needs the digest and result. Do not retain
-                # full response payloads for every completed training cohort.
-                member.body = None
-                member.waiters.clear()
-            if cohort.group_id is None and self._verify_cohorts.get(prompt_key) is cohort:
-                self._verify_cohorts.pop(prompt_key, None)
-            logger.info(
-                "GenRM cohort disposition=completed key=%r attempt=%s members=%s",
-                cohort.key[:160],
-                cohort.group_attempt,
-                len(cohort.members),
-            )
+        participant = self.checkpoint_participant
+        # While a checkpoint is open, hold the rewards until resume. A member that recorded one after this server
+        # exported would leave a cut where it has its reward and this server does not, so its siblings would replay
+        # verification against a cohort that never completes. Checked again under the lock, where publication is
+        # atomic, since a new checkpoint can close admission while this waits for it.
+        while True:
+            while participant is not None and not participant.accepting:
+                await participant.wait_open()
+            async with cohort.lock:
+                if participant is None or participant.accepting:
+                    self._publish_verify_cohort_locked(prompt_key, cohort, results_by_index)
+                    return
+
+    def _publish_verify_cohort_locked(
+        self,
+        prompt_key: str,
+        cohort: _CohortState,
+        results_by_index: Dict[int, VerifyResult],
+    ) -> None:
+        """Publish under ``cohort.lock``, with no await, so every member gets its reward at once."""
+        if cohort.phase == "failed":
+            logger.debug("Discarding late GenRM completion for key=%r", cohort.key[:160])
+            return
+        if cohort.phase != "evaluating":
+            raise RuntimeError(f"cannot publish GenRM rewards while cohort is {cohort.phase}")
+        cohort.results = results_by_index
+        cohort.phase = "completed"
+        cohort.terminal_at = time.monotonic()
+        cohort.evaluation_task = None
+        for index, member in cohort.members.items():
+            for waiter in member.waiters:
+                if not waiter.done():
+                    waiter.set_result(results_by_index[index])
+            # A tombstone only needs the digest and result. Do not retain
+            # full response payloads for every completed training cohort.
+            member.body = None
+            member.waiters.clear()
+        if cohort.group_id is None and self._verify_cohorts.get(prompt_key) is cohort:
+            self._verify_cohorts.pop(prompt_key, None)
+        logger.info(
+            "GenRM cohort disposition=completed key=%r attempt=%s members=%s",
+            cohort.key[:160],
+            cohort.group_attempt,
+            len(cohort.members),
+        )
 
     async def _fail_verify_cohort(
         self,
@@ -866,6 +907,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
     def _prune_terminal_cohorts(self) -> None:
         """Bound process-local cohort tombstones and attempt watermarks."""
         now = time.monotonic()
+        cohorts_before = len(self._verify_cohorts)
         terminal = [(key, cohort) for key, cohort in self._verify_cohorts.items() if cohort.terminal_at is not None]
         terminal_ttl_s = self.config.cohort_result_ttl_s
         if terminal_ttl_s is not None:
@@ -902,6 +944,99 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         for group_id, _ in prunable_watermarks[: max(0, excess)]:
             self._latest_group_attempts.pop(group_id, None)
 
+        if len(self._verify_cohorts) < cohorts_before:
+            self._episode_members = {
+                capture_key: member
+                for capture_key, member in self._episode_members.items()
+                if member[0] in self._verify_cohorts
+            }
+
+    def _remember_member(self, prompt_key: str, rollout_index: int) -> None:
+        """Record which cohort member the requesting attempt verified as; only checkpointing needs it."""
+        episode_id = current_episode_id()
+        if episode_id is not None and self.checkpoint_participant is not None:
+            self._episode_members[episode_id.capture_key] = (prompt_key, rollout_index)
+
+    def _completed_member_state(self, session_id: str) -> Dict[str, Any]:
+        """The reward a session's member was given, or an empty state while its cohort has none to give."""
+        participant = self.checkpoint_participant
+        episode_id = participant.session_episode(session_id) if participant is not None else None
+        member = self._episode_members.get(episode_id.capture_key) if episode_id is not None else None
+        if member is None:
+            return {}
+        prompt_key, rollout_index = member
+        cohort = self._verify_cohorts.get(prompt_key)
+        # Only an explicit-ID cohort can replay into the same cohort after a restore.
+        if cohort is None or cohort.phase != "completed" or cohort.group_id is None:
+            return {}
+        return _CompletedMemberState(
+            cohort_key=prompt_key,
+            prompt_digest=cohort.prompt_digest,
+            group_id=cohort.group_id,
+            group_attempt=cohort.group_attempt,
+            rollout_index=rollout_index,
+            response_digest=cohort.members[rollout_index].response_digest,
+            result=cohort.results[rollout_index],
+        ).model_dump(mode="json")
+
+    async def export_session_states(self, session_ids: list[str]) -> dict[str, JsonValue]:
+        """Export the reward of each session's member whose cohort has completed; an empty state otherwise."""
+        return {session_id: self._completed_member_state(session_id) for session_id in session_ids}
+
+    async def restore_session_states(self, states: dict[str, JsonValue]) -> None:
+        """Rebuild every completed cohort the sessions name, so a replayed verification gets its saved reward."""
+        cohorts: Dict[str, _CohortState] = {}
+        for session_id, raw in states.items():
+            if not raw:
+                continue
+            state = _CompletedMemberState.model_validate(raw)
+            cohort = cohorts.get(state.cohort_key)
+            if cohort is None:
+                cohort = _CohortState(
+                    prompt_digest=state.prompt_digest,
+                    key=state.cohort_key,
+                    group_id=state.group_id,
+                    group_attempt=state.group_attempt,
+                    phase="completed",
+                )
+                cohorts[state.cohort_key] = cohort
+            elif (cohort.prompt_digest, cohort.group_id, cohort.group_attempt) != (
+                state.prompt_digest,
+                state.group_id,
+                state.group_attempt,
+            ):
+                raise ValueError(f"session {session_id!r} names cohort {state.cohort_key!r} inconsistently")
+            existing = cohort.members.get(state.rollout_index)
+            if existing is not None and (
+                existing.response_digest != state.response_digest
+                or cohort.results[state.rollout_index] != state.result
+            ):
+                raise ValueError(
+                    f"sessions disagree on rollout_index={state.rollout_index} of cohort {state.cohort_key!r}"
+                )
+            cohort.members[state.rollout_index] = _CohortMember(body=None, response_digest=state.response_digest)
+            cohort.results[state.rollout_index] = state.result
+        # Validated in full before anything is installed.
+        now = time.monotonic()
+        for key, cohort in cohorts.items():
+            cohort.terminal_at = now
+            self._verify_cohorts[key] = cohort
+            assert cohort.group_id is not None
+            watermark = self._latest_group_attempts.get(cohort.group_id)
+            if watermark is None or watermark.latest_attempt < cohort.group_attempt:
+                self._latest_group_attempts[cohort.group_id] = _GroupAttemptWatermark(
+                    latest_attempt=cohort.group_attempt,
+                    prompt_digest=cohort.prompt_digest,
+                    updated_at=now,
+                )
+
+    async def retire_session_state(self, session_id: str) -> None:
+        """Forget which member a retired attempt verified as; the cohort itself stays for its siblings."""
+        participant = self.checkpoint_participant
+        episode_id = participant.session_episode(session_id) if participant is not None else None
+        if episode_id is not None:
+            self._episode_members.pop(episode_id.capture_key, None)
+
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
         app.post("/compare")(self.compare)
@@ -933,6 +1068,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         await asyncio.gather(*tasks, return_exceptions=True)
         self._verify_cohorts.clear()
         self._latest_group_attempts.clear()
+        self._episode_members.clear()
 
     def _get_verify_cohort_key(
         self,

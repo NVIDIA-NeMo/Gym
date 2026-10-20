@@ -20,7 +20,6 @@ DECLARED = {
     "competitive_coding_challenges": "CompetitiveCodingChallengesResourcesServer",
     "equivalence_llm_judge": "LLMJudgeResourcesServer",
     "math_with_judge": "LibraryJudgeMathResourcesServer",
-    "genrm_compare": "GenRMCompareResourcesServer",
     "abstention": "AbstentionServer",
     "calendar": "CalendarResourcesServer",
     "equivalence_rule": "EquivalenceRuleResourcesServer",
@@ -55,5 +54,13 @@ def class_attributes(server: str, class_name: str) -> dict[str, object]:
 def test_server_is_stateless_with_a_replayable_verification(server: str) -> None:
     assert class_attributes(server, DECLARED[server]) == {
         "checkpoint_mode": "stateless",
+        "checkpoint_verify": "replay",
+    }
+
+
+def test_genrm_exports_completed_cohorts_and_replays_verification() -> None:
+    """GenRM's cohorts span sessions, so it exports each session's share of a completed cohort."""
+    assert class_attributes("genrm_compare", "GenRMCompareResourcesServer") == {
+        "checkpoint_mode": "exported",
         "checkpoint_verify": "replay",
     }
