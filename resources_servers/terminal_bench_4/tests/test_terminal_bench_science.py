@@ -163,6 +163,27 @@ def test_profile_defaults_follow_the_official_protocol():
     }
 
 
+@pytest.mark.parametrize(
+    "overrides,from_agent,timeouts",
+    [
+        ({}, True, {"finite-free-stam": 1800, "gen-turan-paths": 1800, "certified-sparse-regression": 7200}),
+        (
+            {"tbsci_verifier_resources_from_agent": False, "tbsci_verifier_timeout_overrides": {}},
+            False,
+            {},
+        ),
+    ],
+)
+def test_verifier_resources_and_timeouts_are_adapted_and_overridable(overrides, from_agent, timeouts):
+    config = benchmark_config(**overrides)
+    resources = OmegaConf.to_container(config.terminal_bench_science.resources_servers.terminal_bench_4, resolve=True)
+    environment = TerminalBench4Config.model_validate(resources | {"host": "", "port": 0, "name": "tbsci"}).environment
+    assert environment.verifier_resources_from_agent is from_agent
+    assert environment.verifier_timeout_overrides == timeouts
+    names = {task["name"] for task in preparation.load_manifest()["tasks"]}
+    assert set(timeouts) <= names
+
+
 def test_image_overrides_reach_the_validated_resources_config(tmp_path):
     images = {"mendota-ice-phenology": {"agent": "mirror.invalid/ice@sha256:1"}}
     config = benchmark_config(

@@ -17,6 +17,17 @@ terminal_bench_science:
           agent: ${oc.select:tbsci_agent_image,null}
           verifier: ${oc.select:tbsci_verifier_image,null}
           by_task: ${oc.select:tbsci_task_images,{}}
+        # 58 packages declare a separate [verifier.environment] without cpus or
+        # memory, which Harbor leaves unlimited on Docker. Give those verifiers
+        # the agent's allocation rather than the 1-CPU/2-GiB provider default,
+        # which loses e.g. highdim-mediation-debiasing's verifier sandbox.
+        verifier_resources_from_agent: ${oc.select:tbsci_verifier_resources_from_agent,true}
+        # The Lean verifiers rebuild the submission against a prebuilt Mathlib
+        # (~6 GB of .olean files). On lazily pulled sandbox images reading them
+        # alone can exceed the packages' 600 s, so allow 1800 s.
+        # certified-sparse-regression's CPU-bound verifier took 4002 s of its
+        # 3600 s on the agent's 4 CPUs (Docker verifiers get every host core).
+        verifier_timeout_overrides: ${oc.select:tbsci_verifier_timeout_overrides,{finite-free-stam:1800,gen-turan-paths:1800,certified-sparse-regression:7200}}
         sandbox_env: {}
         image_rewrites: []
         workdir: null

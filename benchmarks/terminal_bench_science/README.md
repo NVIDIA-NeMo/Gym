@@ -31,6 +31,8 @@ it keeps these fixed:
 - **Scoring.** A trial passes only when the verifier's official reward is 1, and `mean/reward`
   averages that over every trial: three per task, 210 in all, as the leaderboard does. Partial
   credit is reported separately and never replaces the reward ([Scoring](#scoring)).
+- **Deviations.** A few deployment settings differ from the packages. Each is listed with its
+  reason and its override in [Deviations from the packages](#deviations-from-the-packages).
 
 ## Dataset pin
 
@@ -132,8 +134,8 @@ The resources server reads each task's budgets and resources from its pinned `ta
 The longest verifiers are `linked-cell-suppression` (12000 seconds) and `leaky-bloch-meep`
 (10800 seconds).
 
-The verifier sandbox denies all egress. As in Harbor, it receives only the resources declared
-in `[verifier.environment]`; when a task declares none, the provider default applies.
+The verifier sandbox denies all egress. Some verifier settings deliberately differ from the
+packages; see [Deviations from the packages](#deviations-from-the-packages).
 
 `resources.yaml` keeps the Terminal-Bench 4 deployment settings:
 
@@ -143,6 +145,19 @@ in `[verifier.environment]`; when a task declares none, the provider default app
 - TTL renewal.
 - A 10-hour seeded-session deadline, which covers harness setup and the 8-hour agent budget.
 - An 18-hour per-command ceiling.
+
+### Deviations from the packages
+
+Gym reads every pinned `task.toml` unchanged. The settings below differ from what a package
+declares, or from what Harbor does with it on Docker. Each is set in `resources.yaml` and
+reported: an applied verifier timeout is recorded in the trial's diagnostics as
+`verifier_timeout_override`.
+
+| Setting | Tasks | Package or Harbor | This profile | Why | Override |
+|---|---|---|---|---|---|
+| Verifier CPUs and memory | The 58 tasks whose `[verifier.environment]` declares neither | Unset, which is unlimited on Harbor's Docker backend | The agent environment's CPUs and memory | OpenSandbox would apply its default of 1 CPU and 2 GiB. With it, the `highdim-mediation-debiasing` reference solution loses its verifier sandbox mid-run. | `++tbsci_verifier_resources_from_agent=false` |
+| Verifier timeout | `finite-free-stam`, `gen-turan-paths` | 600 seconds | 1800 seconds | These verifiers rebuild the submission against a prebuilt Mathlib of about 6 GB of `.olean` files. On sandbox images that are pulled lazily, reading them alone can exceed 600 seconds. | `++tbsci_verifier_timeout_overrides={}` |
+| Verifier timeout | `certified-sparse-regression` | 3600 seconds | 7200 seconds | The verifier is CPU-bound. On the agent's 4 CPUs, its check of the reference solution took 4002 seconds; Docker verifiers can use every host core. | `++tbsci_verifier_timeout_overrides={}` |
 
 ### Compose tasks
 
