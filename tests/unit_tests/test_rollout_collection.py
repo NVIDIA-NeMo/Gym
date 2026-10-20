@@ -4676,7 +4676,13 @@ class TestRolloutCollection:
         assert returned == []
         assert [result["case"] for result in aggregated["results"]] == ["success"]
         assert aggregated["rows"] == aggregated["results"]
-        run_health_checks.assert_called_once_with(output_fpath, workers=None, ignored_checks=[])
+        run_health_checks.assert_called_once_with(
+            output_fpath,
+            workers=None,
+            ignored_checks=[],
+            max_infra_failure_fraction=0.02,
+            max_final_failure_fraction=0.02,
+        )
         format_health_report.assert_called_once_with(health_result)
 
     async def test_run_from_config_non_retaining_reads_artifacts_off_the_event_loop(
@@ -7952,6 +7958,26 @@ class TestRolloutAggregationHelper:
             disable_health_check=True,
         )
         await RolloutAggregationHelper().run_from_config(config)
+
+    async def test_the_health_summary_counts_the_failures_the_shards_recorded(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        """The merged file has no sidecar or inventory of its own; the shards' are next to the shards."""
+        shard = tmp_path / "shards" / "rollouts.jsonl"
+        self._write_rows(materialized_path_for(shard), self._rollout(0, "agent_a"), self._rollout(1, "agent_a"))
+        self._write_rows(shard, self._rollout(1, "agent_a", reward=1.0))
+        self._write_rows(
+            _failures_path_for(shard), self._rollout(0, "agent_a", **{NG_FAILURE_CLASS_KEY: "agent_run_error"})
+        )
+        self._serve(monkeypatch, {}, {"env_a": "agent_a"})
+        config = RolloutAggregationConfig(
+            input_glob=str(shard), output_jsonl_fpath=str(tmp_path / "rollouts.jsonl"), merge_shards=True
+        )
+
+        await RolloutAggregationHelper().run_from_config(config)
+
+        artifacts = orjson.loads((tmp_path / "quality_summary.json").read_bytes())["run"]["artifacts"]
+        assert (artifacts["expected"], artifacts["failed"]["total"], artifacts["healthy"]) == (2, 1, False)
 
     @pytest.mark.parametrize("run1_has", ["a row", "a failure"])
     async def test_runs_that_reuse_task_indices_do_not_hide_each_others_lost_rollouts(

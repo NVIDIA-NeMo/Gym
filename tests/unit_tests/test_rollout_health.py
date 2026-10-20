@@ -1758,3 +1758,279 @@ def test_usage_still_reports_incorrect_invocation_total(tmp_path: Path) -> None:
         "capture_prompt": 8,
         "capture_completion": 5,
     }
+
+
+def test_summary_counts_expected_failed_and_missing_rollouts(tmp_path: Path) -> None:
+    rollout_path = _write_fixture(tmp_path, [(_record(task, 0), [_call()]) for task in range(4)])
+    (tmp_path / "rollouts_materialized_inputs.jsonl").write_bytes(
+        b"".join(orjson.dumps({"_ng_task_index": task, "_ng_rollout_index": 0}) + b"\n" for task in range(8))
+    )
+    # Task 0 failed and then landed, so it is not failed; task 4's last attempt is the one that stands.
+    failures = [(0, "agent_run_error"), (4, "agent_run_error"), (4, "agent_timeout"), (5, "agent_run_error")]
+    failures += [(6, "judge_failed")]
+    (tmp_path / "rollouts_failures.jsonl").write_bytes(
+        b"".join(
+            orjson.dumps({"_ng_task_index": task, "_ng_rollout_index": 0, "_ng_failure_class": kind}) + b"\n"
+            for task, kind in failures
+        )
+        + b'{"_ng_task_index": 7'  # A killed writer's truncated tail is not a failure.
+    )
+
+    result = run_health_checks(rollout_path, workers=1)
+
+    artifacts = json.loads(result.summary_path.read_text())["run"]["artifacts"]
+    assert artifacts["records"] == 4
+    assert artifacts["expected"] == 8
+    assert artifacts["failed"] == {
+        "total": 3,
+        "final": 0,
+        "not_final": 3,
+        "by_class": {"agent_run_error": 1, "agent_timeout": 1, "judge_failed": 1},
+    }
+    assert artifacts["missing"] == 1
+
+
+def _run_with_outcomes(
+    root: Path, *, landed: int, infra: int = 0, final: int = 0, missing: int = 0, **limits: float
+) -> dict:
+    """Run health on a run of 100 tasks: `landed` scored, then infra and final failures, the rest owed with no row."""
+    assert landed + infra + final + missing == 100
+    rollout_path = _write_fixture(root, [(_record(task, 0), [_call()]) for task in range(landed)])
+    (root / "rollouts_materialized_inputs.jsonl").write_bytes(
+        b"".join(orjson.dumps({"_ng_task_index": task, "_ng_rollout_index": 0}) + b"\n" for task in range(100))
+    )
+    failures = [(task, False) for task in range(landed, landed + infra)]
+    failures += [(task, True) for task in range(landed + infra, landed + infra + final)]
+    (root / "rollouts_failures.jsonl").write_bytes(
+        b"".join(
+            orjson.dumps(
+                {
+                    "_ng_task_index": task,
+                    "_ng_rollout_index": 0,
+                    "_ng_failure_class": "agent_run_error",
+                    "_ng_failure_terminal": terminal,
+                }
+            )
+            + b"\n"
+            for task, terminal in failures
+        )
+    )
+    result = run_health_checks(rollout_path, workers=1, **limits)
+    return json.loads(result.summary_path.read_text())["run"]["artifacts"]
+
+
+def test_run_is_healthy_when_nothing_is_missing_and_failures_stay_below_the_limits(tmp_path: Path) -> None:
+    artifacts = _run_with_outcomes(tmp_path, landed=98, infra=1, final=1)
+
+    assert (artifacts["failed"]["not_final"], artifacts["failed"]["final"]) == (1, 1)
+    assert artifacts["healthy"] is True
+    assert artifacts["unhealthy_reasons"] == []
+
+
+@pytest.mark.parametrize(
+    ("outcomes", "reason"),
+    [
+        ({"landed": 99, "missing": 1}, "missing 1 of 100"),
+        ({"landed": 98, "infra": 2}, "infra failures 2 of 100 (2.0%), limit 2%"),
+        ({"landed": 97, "final": 3}, "final failures 3 of 100 (3.0%), limit 2%"),
+        (
+            {"landed": 99, "infra": 1, "max_infra_failure_fraction": 0.005},
+            "infra failures 1 of 100 (1.0%), limit 0.5%",
+        ),
+    ],
+)
+def test_run_is_unhealthy_with_one_reason_per_crossed_limit(tmp_path: Path, outcomes: dict, reason: str) -> None:
+    artifacts = _run_with_outcomes(tmp_path, **outcomes)
+
+    assert artifacts["healthy"] is False
+    assert artifacts["unhealthy_reasons"] == [reason]
+
+
+def test_summary_leaves_expected_missing_and_healthy_unknown_without_materialized_inputs(tmp_path: Path) -> None:
+    rollout_path = _write_fixture(tmp_path, [(_record(0, 0), [_call()])])
+
+    artifacts = run_health_checks(rollout_path, workers=1).summary["run"]["artifacts"]
+
+    assert (artifacts["expected"], artifacts["missing"], artifacts["healthy"]) == (None, None, None)
+    assert artifacts["unhealthy_reasons"] == []
+    # No sidecar: nothing was measured, so not a count of 0.
+    assert artifacts["failed"] is None
+
+
+def test_failed_collection_still_writes_quality_summary_with_counts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output_path = tmp_path / "rollouts.jsonl"
+    (tmp_path / "rollouts_materialized_inputs.jsonl").write_bytes(
+        b"".join(orjson.dumps({"_ng_task_index": task, "_ng_rollout_index": 0}) + b"\n" for task in range(3))
+    )
+    seen = {}
+
+    async def failing_collection(self, config):
+        seen["disable_health_check"] = config.disable_health_check
+        _write_fixture(tmp_path, [(_record(0, 0), [_call()])])
+        (tmp_path / "rollouts_failures.jsonl").write_bytes(
+            orjson.dumps({"_ng_task_index": 1, "_ng_rollout_index": 0, "_ng_failure_class": "agent_run_error"}) + b"\n"
+        )
+        raise RuntimeError("EVAL FAILED: 1/3 samples completed.")
+
+    monkeypatch.setattr(RolloutCollectionHelper, "run_from_config", failing_collection)
+    monkeypatch.setattr(
+        cli_eval,
+        "get_global_config_dict",
+        lambda: {"input_jsonl_fpath": str(tmp_path / "input.jsonl"), "output_jsonl_fpath": str(output_path)},
+    )
+    monkeypatch.setattr("nemo_gym.telemetry.setup.init_telemetry", lambda **kwargs: None)
+
+    with pytest.raises(RuntimeError, match="EVAL FAILED"):
+        cli_eval.collect_rollouts()
+
+    artifacts = json.loads((tmp_path / "quality_summary.json").read_text())["run"]["artifacts"]
+    assert seen["disable_health_check"] is True
+    assert (artifacts["records"], artifacts["expected"], artifacts["missing"]) == (1, 3, 1)
+    assert "partial" not in artifacts  # A Python error keeps the full check.
+    assert artifacts["failed"] == {"total": 1, "final": 0, "not_final": 1, "by_class": {"agent_run_error": 1}}
+    assert artifacts["healthy"] is False
+    assert artifacts["unhealthy_reasons"] == ["missing 1 of 3", "infra failures 1 of 3 (33.3%), limit 2%"]
+
+
+def _inventory(root: Path, tasks: int) -> None:
+    (root / "rollouts_materialized_inputs.jsonl").write_bytes(
+        b"".join(orjson.dumps({"_ng_task_index": task, "_ng_rollout_index": 0}) + b"\n" for task in range(tasks))
+    )
+
+
+def test_sigterm_during_collection_writes_a_provisional_summary_without_reading_rollouts(tmp_path: Path) -> None:
+    """Slurm's scancel, time limit and preemption send SIGTERM; the run accounting is written within KillWait.
+
+    The rollouts file is made unreadable before the signal, so the summary can only come from the keys collection
+    holds in memory.
+    """
+    import signal
+    import subprocess
+    import time
+
+    _inventory(tmp_path, 3)
+    child = f"""
+import asyncio
+from pathlib import Path
+import nemo_gym.cli.eval as cli_eval
+from nemo_gym.rollout_collection import RolloutCollectionHelper
+
+root = Path({str(tmp_path)!r})
+
+async def collection(self, config):
+    (root / "rollouts.jsonl").write_bytes((root / "landed.jsonl").read_bytes())
+    self._landed_keys.add((0, 0))
+    (root / "rollouts.jsonl").chmod(0)
+    (root / "collecting").touch()
+    await asyncio.sleep(600)
+
+RolloutCollectionHelper.run_from_config = collection
+cli_eval.get_global_config_dict = lambda: {{
+    "input_jsonl_fpath": str(root / "input.jsonl"),
+    "output_jsonl_fpath": str(root / "rollouts.jsonl"),
+}}
+import nemo_gym.telemetry.setup as telemetry
+telemetry.init_telemetry = lambda **kwargs: None
+cli_eval.collect_rollouts()
+"""
+    (tmp_path / "landed.jsonl").write_bytes(_write_fixture(tmp_path, [(_record(0, 0), [_call()])]).read_bytes())
+    (tmp_path / "rollouts.jsonl").unlink()
+    process = subprocess.Popen([sys.executable, "-c", child], cwd=Path(__file__).parents[2])
+    try:
+        deadline = time.monotonic() + 60
+        while not (tmp_path / "collecting").exists():
+            assert process.poll() is None and time.monotonic() < deadline, "collection never started"
+            time.sleep(0.1)
+        sent = time.monotonic()
+        process.send_signal(signal.SIGTERM)
+        process.wait(timeout=30)
+        elapsed = time.monotonic() - sent
+    finally:
+        process.kill()
+
+    summary = json.loads((tmp_path / "quality_summary.json").read_text())
+    artifacts = summary["run"]["artifacts"]
+    assert (artifacts["partial"], artifacts["expected"], artifacts["missing"]) == (True, 3, 2)
+    assert artifacts["healthy"] is False
+    assert artifacts["unhealthy_reasons"] == ["missing 2 of 3"]
+    assert "verdicts" not in summary["run"]
+    assert process.returncode == 143
+    assert elapsed < 30
+
+
+def test_a_new_run_removes_the_previous_jobs_health_reports(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ("quality_summary.json", "rollout_verdicts.jsonl"):
+        (tmp_path / name).write_text('{"run": {"artifacts": {"healthy": true}}}')
+    seen = {}
+
+    async def collection(self, config):
+        seen["reports"] = sorted(path.name for path in tmp_path.iterdir())
+
+    monkeypatch.setattr(RolloutCollectionHelper, "run_from_config", collection)
+    monkeypatch.setattr(
+        cli_eval,
+        "get_global_config_dict",
+        lambda: {
+            "input_jsonl_fpath": str(tmp_path / "input.jsonl"),
+            "output_jsonl_fpath": str(tmp_path / "out.jsonl"),
+        },
+    )
+    monkeypatch.setattr("nemo_gym.telemetry.setup.init_telemetry", lambda **kwargs: None)
+
+    cli_eval.collect_rollouts()
+
+    assert seen["reports"] == []
+
+
+def test_duplicated_rollout_rows_make_the_run_unhealthy(tmp_path: Path) -> None:
+    rollout_path = _write_fixture(tmp_path, [(_record(task, 0), [_call()]) for task in (0, 0, 1)])
+    _inventory(tmp_path, 2)
+
+    artifacts = run_health_checks(rollout_path, workers=1).summary["run"]["artifacts"]
+
+    assert artifacts["healthy"] is False
+    assert artifacts["unhealthy_reasons"] == ["2 records share a rollout identity"]
+
+
+def test_a_limit_of_zero_with_no_failures_is_healthy(tmp_path: Path) -> None:
+    artifacts = _run_with_outcomes(tmp_path, landed=100, max_infra_failure_fraction=0, max_final_failure_fraction=0)
+
+    assert artifacts["healthy"] is True
+
+
+def test_only_inventory_rows_count_and_non_object_sidecar_lines_are_skipped(tmp_path: Path) -> None:
+    rollout_path = _write_fixture(tmp_path, [(_record(task, 0), [_call()]) for task in range(3)])
+    with rollout_path.open("ab") as rollouts:
+        rollouts.write(b'{"_ng_task_index": 3')  # A killed writer's truncated record.
+    _inventory(tmp_path, 4)
+    (tmp_path / "rollouts_failures.jsonl").write_bytes(
+        b'"x"\n[1]\n'
+        + orjson.dumps({"_ng_task_index": 9, "_ng_rollout_index": 0, "_ng_failure_class": "agent_run_error"})
+        + b"\n"
+    )
+
+    artifacts = run_health_checks(rollout_path, workers=1).summary["run"]["artifacts"]
+
+    assert (artifacts["expected"], artifacts["missing"]) == (4, 1)
+    assert artifacts["failed"]["total"] == 0
+
+
+def test_a_provisional_summary_without_a_reason_leaves_healthy_unknown(tmp_path: Path) -> None:
+    """Duplicates are found only by the per-record pass, so clean accounting does not prove the run healthy."""
+    rollout_path = tmp_path / "rollouts.jsonl"
+    rollout_path.write_bytes(b"")
+    _inventory(tmp_path, 2)
+    (tmp_path / "rollout_verdicts.jsonl").write_text("{}\n")
+
+    summary_path = health.write_provisional_summary(rollout_path, {(0, 0), (1, 0)})
+
+    artifacts = json.loads(summary_path.read_text())["run"]["artifacts"]
+    assert (artifacts["partial"], artifacts["expected"], artifacts["missing"], artifacts["healthy"]) == (
+        True,
+        2,
+        0,
+        None,
+    )
+    assert not (tmp_path / "rollout_verdicts.jsonl").exists()

@@ -1137,6 +1137,16 @@ COMMANDS = {
                 "health_check_ignored_checks",
                 "Comma-separated rollout-health check IDs to exclude from verdict derivation.",
             ),
+            _value_flag(
+                "health-max-infra-failure-fraction",
+                "health_check_max_infra_failure_fraction",
+                "Run health limit for non-final (infra) failures, as a share of expected rollouts (default 0.02).",
+            ),
+            _value_flag(
+                "health-max-final-failure-fraction",
+                "health_check_max_final_failure_fraction",
+                "Run health limit for final (model-caused) failures, as a share of expected rollouts (default 0.02).",
+            ),
         ),
     ),
     "eval aggregate": Command(
@@ -1162,6 +1172,16 @@ COMMANDS = {
                 "health-check-ignore",
                 "health_check_ignored_checks",
                 "Comma-separated rollout-health check IDs to exclude from verdict derivation.",
+            ),
+            _value_flag(
+                "health-max-infra-failure-fraction",
+                "health_check_max_infra_failure_fraction",
+                "Run health limit for non-final (infra) failures, as a share of expected rollouts (default 0.02).",
+            ),
+            _value_flag(
+                "health-max-final-failure-fraction",
+                "health_check_max_final_failure_fraction",
+                "Run health limit for final (model-caused) failures, as a share of expected rollouts (default 0.02).",
             ),
         ),
     ),

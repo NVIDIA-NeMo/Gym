@@ -278,6 +278,17 @@ auxiliary calls. Checks with a policy-model subject evaluate only exactly bound 
 token checks skip these calls, so any tokens the server spent on them before a cancellation or timeout are counted only here,
 as a number of calls.
 
+`run.artifacts` also counts the run against its `<output stem>_materialized_inputs.jsonl` inventory:
+
+- `expected`: rollouts in the inventory.
+- `failed`: the last failure row of each owed rollout in the `<output stem>_failures.jsonl` sidecar that did not later land, as `total`, `final`, `not_final` and `by_class`. Null when there is no sidecar.
+- `missing`: owed rollouts with neither a record nor a failure row.
+- `healthy`: false when a rollout is missing, two records share a rollout identity, or the final or non-final failures reach their limit as a share of `expected` (2% each by default). `unhealthy_reasons` names each cause.
+
+`expected`, `missing` and `healthy` are null without an inventory. The summary is also written when collection fails or Slurm stops the job with SIGTERM.
+
+A run stopped by SIGTERM gets a provisional summary that only `run.artifacts` holds: the run accounting, with `partial: true`, and no `run.verdicts` or `rollout_verdicts.jsonl`. Its `healthy` is false when the accounting already has a reason and null otherwise. Run `gym eval health-check` on the run directory for the full summary. A stopped run exits with status 143, or with status 1 (`EVAL FAILED`) when `require_complete` is on, which is the default under `gym eval submit`.
+
 ### `rollout_verdicts.jsonl`
 
 The per-rollout report contains one row for every non-empty input line and is sorted by `_ng_task_index` and

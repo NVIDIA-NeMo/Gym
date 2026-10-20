@@ -786,6 +786,7 @@ Collate data, start the servers, and collect rollouts. This is the main evaluati
 | `--no-health-check` | Skip the automatic post-run health check. |
 | `--health-check-workers` | Number of rollout-health worker processes. Defaults to the smaller of the CPU count and 8. |
 | `--health-check-ignore` | Comma-separated health-check IDs to exclude from execution and verdict derivation. |
+| `--health-max-infra-failure-fraction`, `--health-max-final-failure-fraction` | Share of expected rollouts at which non-final or final failures make the run unhealthy. Default `0.02`. |
 
 ```bash
 # End-to-end: spin up servers, then collect rollouts for a benchmark
@@ -893,6 +894,7 @@ Merge sharded rollout results into a single rollouts file with aggregate metrics
 | `--no-health-check` | Skip the automatic post-aggregation health check. |
 | `--health-check-workers` | Number of rollout-health worker processes. Defaults to the smaller of the CPU count and 8. |
 | `--health-check-ignore` | Comma-separated health-check IDs to exclude from execution and verdict derivation. |
+| `--health-max-infra-failure-fraction`, `--health-max-final-failure-fraction` | Share of expected rollouts at which non-final or final failures make the run unhealthy. Default `0.02`. |
 
 ```bash
 gym eval aggregate \

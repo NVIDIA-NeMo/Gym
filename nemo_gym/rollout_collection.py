@@ -40,7 +40,7 @@ import aiohttp
 import orjson
 from aiohttp import ClientError
 from omegaconf import DictConfig, OmegaConf
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 from tqdm.asyncio import tqdm
 
 from nemo_gym import _resolve_under_cwd_or_install
@@ -81,6 +81,7 @@ from nemo_gym.global_config import (
     pairing_override_enabled,
     resolve_dataset_agent,
 )
+from nemo_gym.health.types import DEFAULT_MAX_FAILURE_FRACTION
 from nemo_gym.observability.model_calls import (
     await_model_call_capture_quiescence,
     clear_model_call_captures_for_rollouts,
@@ -1082,6 +1083,18 @@ class SharedRolloutCollectionConfig(RemovedRolloutOptionsMixin, UploadRolloutsCo
     health_check_ignored_checks: List[str] = Field(
         default_factory=list,
         description="Health-check IDs to exclude from execution and verdict derivation.",
+    )
+    health_check_max_infra_failure_fraction: float = Field(
+        default=DEFAULT_MAX_FAILURE_FRACTION,
+        ge=0,
+        le=1,
+        description="Run health is unhealthy when non-final (infra) failures reach this share of expected rollouts.",
+    )
+    health_check_max_final_failure_fraction: float = Field(
+        default=DEFAULT_MAX_FAILURE_FRACTION,
+        ge=0,
+        le=1,
+        description="Run health is unhealthy when final (model-caused) failures reach this share of expected rollouts.",
     )
 
     @field_validator("health_check_ignored_checks", mode="before")
@@ -2553,6 +2566,10 @@ class _BoundedCompletionIterator:
 
 
 class RolloutCollectionHelper(BaseModel):
+    # (task index, rollout index) of every record persisted to the rollouts jsonl, kept current as rows land,
+    # so a run stopped by SIGTERM can be accounted for without re-reading that file.
+    _landed_keys: set = PrivateAttr(default_factory=set)
+
     def _preprocess_rows_from_config(self, config: RolloutCollectionConfig) -> List[Dict]:
         range_iterator = repeat(0)
         if config.limit:
@@ -3005,7 +3022,8 @@ class RolloutCollectionHelper(BaseModel):
         # outside a git clone.
         output_fpath.parent.mkdir(parents=True, exist_ok=True)
 
-        persisted_success_keys: set = set()
+        persisted_success_keys = self._landed_keys
+        persisted_success_keys.clear()
         if config.resume_from_cache and config.materialized_jsonl_fpath.exists() and output_fpath.exists():
             should_clear_outputs = False
             _drop_truncated_tail(output_fpath)
@@ -3716,6 +3734,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     output_fpath,
                     workers=config.health_check_workers,
                     ignored_checks=config.health_check_ignored_checks,
+                    max_infra_failure_fraction=config.health_check_max_infra_failure_fraction,
+                    max_final_failure_fraction=config.health_check_max_final_failure_fraction,
                 )
             except Exception:
                 logger.exception(
@@ -4481,6 +4501,18 @@ class RolloutAggregationConfig(BaseNeMoGymCLIConfig):
         default_factory=list,
         description="Health-check IDs to exclude from execution and verdict derivation.",
     )
+    health_check_max_infra_failure_fraction: float = Field(
+        default=DEFAULT_MAX_FAILURE_FRACTION,
+        ge=0,
+        le=1,
+        description="Run health is unhealthy when non-final (infra) failures reach this share of expected rollouts.",
+    )
+    health_check_max_final_failure_fraction: float = Field(
+        default=DEFAULT_MAX_FAILURE_FRACTION,
+        ge=0,
+        le=1,
+        description="Run health is unhealthy when final (model-caused) failures reach this share of expected rollouts.",
+    )
 
     @field_validator("health_check_ignored_checks", mode="before")
     @classmethod
@@ -4679,10 +4711,13 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             try:
                 health_result = await asyncio.to_thread(
                     run_health_checks,
-                    output_fpath if config.merge_shards else [Path(path) for path in input_paths],
+                    # The shards, not the merged file: their sidecars and inventories sit next to them.
+                    [Path(path) for path in input_paths],
                     output_dir=output_fpath.parent,
                     workers=config.health_check_workers,
                     ignored_checks=config.health_check_ignored_checks,
+                    max_infra_failure_fraction=config.health_check_max_infra_failure_fraction,
+                    max_final_failure_fraction=config.health_check_max_final_failure_fraction,
                 )
             except Exception:
                 logger.exception(

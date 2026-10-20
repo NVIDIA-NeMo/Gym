@@ -13,7 +13,7 @@ from __future__ import annotations
 import os
 import warnings
 from collections import Counter, defaultdict
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
@@ -47,6 +47,7 @@ from nemo_gym.health.checks import (
 )
 from nemo_gym.health.types import (
     CALL_BINDING_INPUTS,
+    DEFAULT_MAX_FAILURE_FRACTION,
     QUALITY_SUMMARY_FILENAME,
     ROLLOUT_ID_KEY,
     ROLLOUT_INDEX_KEY,
@@ -64,6 +65,7 @@ from nemo_gym.health.types import (
     _TaskRepeat,
     _WorkerInput,
 )
+from nemo_gym.path_utils import failures_path_for, materialized_path_for
 
 
 _PROCESS_POOL_CHUNKS_PER_WORKER = 4
@@ -463,6 +465,95 @@ def _reduce(digests: list[RolloutDigest], ignored_checks: frozenset[str]) -> dic
     }
 
 
+def _jsonl_rows(path: Path) -> Iterator[dict[str, Any]]:
+    """Stream a JSONL file's objects; an inventory can be hundreds of MB."""
+    with path.open("rb") as handle:
+        for line in handle:
+            try:
+                row = orjson.loads(line)
+            except orjson.JSONDecodeError:
+                continue  # Blank lines, and the truncated last line a killed writer can leave.
+            if isinstance(row, dict):
+                yield row
+
+
+def _rollout_accounting(
+    landed: set[tuple[Any, ...]],
+    paths: Sequence[Path],
+    *,
+    max_infra_failure_fraction: float,
+    max_final_failure_fraction: float,
+    duplicated: int,
+) -> dict[str, Any]:
+    """Count the rollouts each input owed against those that landed, failed or left no row, and judge the run.
+
+    ``landed`` holds ``(input index, task index, rollout index)`` of every persisted record. Failures come
+    from each input's ``_failures.jsonl`` sidecar, where the last attempt of a rollout stands; one that
+    later landed is not failed. ``is_terminal_failure`` splits them into
+    final ones and infra ones left after retries. ``failed`` is null when no input has a sidecar.
+    ``expected``, ``missing`` and ``healthy`` need the ``_materialized_inputs.jsonl`` inventory and
+    are null when an input has none. A run is healthy when nothing is missing, no rollout is
+    recorded twice, and each kind of failure stays below its limit as a share of expected.
+    """
+    # Lazy: rollout_collection imports this module, and health workers need none of its dependencies.
+    from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, is_terminal_failure
+
+    failed: dict[tuple[Any, ...], dict[str, Any]] = {}
+    any_sidecar = False
+    owed: set[tuple[Any, ...]] | None = set()
+    for source_index, path in enumerate(paths):
+        if failures_path_for(path).is_file():
+            any_sidecar = True
+            for row in _jsonl_rows(failures_path_for(path)):
+                failed[(source_index, row.get(TASK_INDEX_KEY), row.get(ROLLOUT_INDEX_KEY))] = row
+        if not materialized_path_for(path).is_file():
+            owed = None
+        elif owed is not None:
+            owed.update(
+                (source_index, row.get(TASK_INDEX_KEY), row.get(ROLLOUT_INDEX_KEY))
+                for row in _jsonl_rows(materialized_path_for(path))
+            )
+    for key in landed:
+        failed.pop(key, None)
+    if owed is not None:
+        # Only owed rollouts count: an unreadable record or a sidecar row outside the inventory is not one.
+        failed = {key: row for key, row in failed.items() if key in owed}
+    expected = None if owed is None else len(owed)
+    missing = None if owed is None else len(owed - landed - failed.keys())
+    final = sum(is_terminal_failure(row) for row in failed.values())
+    infra = len(failed) - final
+    reasons = []
+    if expected == 0:
+        reasons.append("no rollouts expected")
+    elif expected is not None:
+        if missing:
+            reasons.append(f"missing {missing} of {expected}")
+        if duplicated:
+            reasons.append(f"{duplicated} records share a rollout identity")
+        for name, count, limit in (
+            ("infra failures", infra, max_infra_failure_fraction),
+            ("final failures", final, max_final_failure_fraction),
+        ):
+            if count and count / expected >= limit:
+                reasons.append(f"{name} {count} of {expected} ({count / expected:.1%}), limit {limit * 100:g}%")
+    return {
+        "expected": expected,
+        "failed": {
+            "total": len(failed),
+            "final": final,
+            "not_final": infra,
+            "by_class": dict(
+                sorted(Counter(row.get(NG_FAILURE_CLASS_KEY) or "unknown" for row in failed.values()).items())
+            ),
+        }
+        if any_sidecar
+        else None,
+        "missing": missing,
+        "healthy": None if expected is None else not reasons,
+        "unhealthy_reasons": reasons,
+    }
+
+
 def _sort_key(digest: RolloutDigest) -> tuple[tuple[int, Any], ...]:
     def part(value: int | str | None) -> tuple[int, Any]:
         return (0, value) if isinstance(value, int) else (1, str(value))
@@ -500,6 +591,8 @@ def run_health_checks(
     output_dir: Path | None = None,
     workers: int | None = None,
     ignored_checks: Sequence[str] = (),
+    max_infra_failure_fraction: float = DEFAULT_MAX_FAILURE_FRACTION,
+    max_final_failure_fraction: float = DEFAULT_MAX_FAILURE_FRACTION,
 ) -> HealthCheckResult:
     """Run the RFC's map/group/reduce pipeline and write both reports."""
     ignored = frozenset(normalize_ignored_checks(ignored_checks))
@@ -555,6 +648,15 @@ def run_health_checks(
     digests = worker_results
     _mark_duplicate_identities(digests, ignored)
     summary = _reduce(digests, ignored)
+    summary["run"]["artifacts"].update(
+        _rollout_accounting(
+            {(line.source_index, d.task_index, d.rollout_index) for d, line in zip(digests, lines, strict=True)},
+            paths,
+            max_infra_failure_fraction=max_infra_failure_fraction,
+            max_final_failure_fraction=max_final_failure_fraction,
+            duplicated=summary["run"]["issues"]["rollout_duplicate_identity"],
+        )
+    )
     report_dir = output_dir or paths[0].parent
     summary_path, verdicts_path = _write_reports(summary, digests, report_dir)
     return HealthCheckResult(
@@ -563,6 +665,36 @@ def run_health_checks(
         summary_path=summary_path,
         verdicts_path=verdicts_path,
     )
+
+
+def write_provisional_summary(
+    rollout_path: Path,
+    landed: set[tuple[Any, Any]],
+    *,
+    max_infra_failure_fraction: float = DEFAULT_MAX_FAILURE_FRACTION,
+    max_final_failure_fraction: float = DEFAULT_MAX_FAILURE_FRACTION,
+) -> Path:
+    """Write the run accounting of a stopped run fast: ``rollouts.jsonl`` is not read, and the per-record checks
+    are skipped.
+
+    ``landed`` is the ``(task index, rollout index)`` of every persisted record, as rollout collection holds it.
+    Duplicates come from the per-record pass, so ``healthy`` is false when the accounting already has a reason
+    and null otherwise. ``gym eval health-check`` on the run dir writes the full summary.
+    """
+    artifacts = _rollout_accounting(
+        {(0, task, rollout) for task, rollout in landed},
+        [rollout_path],
+        max_infra_failure_fraction=max_infra_failure_fraction,
+        max_final_failure_fraction=max_final_failure_fraction,
+        duplicated=0,
+    )
+    artifacts["partial"] = True
+    if artifacts["healthy"]:
+        artifacts["healthy"] = None
+    summary_path = rollout_path.parent / QUALITY_SUMMARY_FILENAME
+    summary_path.write_bytes(orjson.dumps({"run": {"artifacts": artifacts}}, option=orjson.OPT_INDENT_2))
+    (rollout_path.parent / ROLLOUT_VERDICTS_FILENAME).unlink(missing_ok=True)
+    return summary_path
 
 
 def _resolve_rollout_path(run_dir: Path, rollout_file: str | Path | None) -> Path:
