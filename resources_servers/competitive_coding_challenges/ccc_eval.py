@@ -765,6 +765,7 @@ class CCCEvaluator(BaseEvaluator):
             all_test_items = [(name, data) for name, data in all_test_items if name in target_tests]
         batch_size = self.eval_cfg.test_batch_size
         all_run_times: list[float] = []
+        run_infra_errors: list[str] = []
         for i in range(0, len(all_test_items), batch_size):
             candidate_batch = all_test_items[i : i + batch_size]
             batch = []
@@ -792,6 +793,8 @@ class CCCEvaluator(BaseEvaluator):
             for (test_name, _), result in zip(batch, results):
                 if "run_time_s" in result:
                     all_run_times.append(result["run_time_s"])
+                if result.get("infra_error"):
+                    run_infra_errors.append(result["infra_error"])
                 result["test_name"] = test_name
                 test_group = problem_metadata["all_tests"][test_name].get("group")
                 if test_group is not None:
@@ -823,11 +826,11 @@ class CCCEvaluator(BaseEvaluator):
         }
         # No solution code runs before the compile result, so its infra error always counts. Tests run
         # concurrently, so one test's solution could crash the sandbox for the others: a run-stage infra error
-        # counts only when no test of this solution was measured at all.
+        # counts only when no test of this solution was measured. Count from all results, not `outputs`, which
+        # `min` aggregation trims after the first failure.
         infra_error = sandbox_infra_error(compile_result)
-        run_outputs = [out for state in subtask_state.values() for out in state["outputs"]]
-        if not infra_error and run_outputs and all(out.get("infra_error") for out in run_outputs):
-            infra_error = run_outputs[0]["infra_error"]
+        if not infra_error and num_tests_run == 0 and run_infra_errors:
+            infra_error = run_infra_errors[0]
         if infra_error:
             details["infra_error"] = infra_error
         return details

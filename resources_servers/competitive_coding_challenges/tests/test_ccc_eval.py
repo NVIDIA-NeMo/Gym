@@ -397,3 +397,22 @@ async def test_a_run_stage_infra_error_masks_only_when_no_test_was_measured(monk
 
     assert all_unreachable["infra_error"] == unreachable["infra_error"]
     assert "infra_error" not in one_measured
+
+
+async def test_a_measured_test_is_not_hidden_by_min_aggregation(monkeypatch):
+    # With `min`, results after the first failure in a batch are dropped from `outputs`, but those tests still ran.
+    # Here the unreachable result sorts first and the measured failure second (review on #4770).
+    problem = _two_test_problem()
+    problem["subtasks"]["s1"]["aggregation"] = "min"
+    evaluator = ccc_eval.CCCEvaluator(config={"test_batch_size": 2})
+    unreachable = {"score": 0.0, "infra_error": "NeMo Skills sandbox unreachable: ConnectError"}
+    monkeypatch.setattr(
+        ccc_eval, "run_test_case", lambda _task, idx: {"score": 0.0, "run_time_s": 0.1} if idx else dict(unreachable)
+    )
+
+    details = await evaluator._evaluate_compiled_solution(
+        {"name": "toy", "subtask": "s1"}, problem, "/unused", {"process_status": "completed"}, 1.0
+    )
+
+    assert details["num_tests_run"] == 1
+    assert "infra_error" not in details
