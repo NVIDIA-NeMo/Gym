@@ -61,6 +61,7 @@ from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.sandbox.providers import create_provider
 from nemo_gym.tool_access import DirectHTTPToolAccess, MCPToolAccess
 from responses_api_agents.stirrup_agent.sandbox import StirrupSessionState
+from responses_api_agents.stirrup_agent.stirrup_utils import messages_from_input
 
 
 def _usage(usages: list[dict[str, Any]]) -> Optional[NeMoGymResponseUsage]:
@@ -329,11 +330,20 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         if body.tools and state.tool_access is None:
             raise HTTPException(422, "The request has tools, but the session grants no tool access to call them")
+        params = body.model_dump(mode="json")
+        # Checked here, before the runner starts, so a request that can never run is a terminal 422 and not a
+        # retryable 500 that re-seeds a sandbox and installs the runtime again.
+        try:
+            messages_from_input(params["input"], params["instructions"])
+        except (ValueError, NotImplementedError) as error:
+            raise HTTPException(422, str(error)) from error
+        missing = set(self.config.finish_tool_names or []) - {tool["name"] for tool in params["tools"] or []}
+        if missing:
+            raise HTTPException(422, f"Finish tools {sorted(missing)} are not among the request's tools")
         max_completion_tokens_cap = self.config.max_completion_tokens_cap
         if body.max_output_tokens is not None:
             max_completion_tokens_cap = min(max_completion_tokens_cap, body.max_output_tokens)
         model_name = body.model or "default"
-        params = body.model_dump(mode="json")
         payload = {
             "input": params["input"],
             "instructions": params["instructions"],

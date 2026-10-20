@@ -354,9 +354,6 @@ async def run(payload: dict[str, Any], scratch: Path, observer: Observer) -> dic
     ) as http:
         finish_names = payload["finish_tool_names"]
         task_tools = [remote_tool(spec, http) for spec in payload["tools"]]
-        missing = set(finish_names or []) - {tool.name for tool in task_tools}
-        if missing:
-            raise ValueError(f"Finish tools {sorted(missing)} are not among the request's tools")
         client = DynamicMaxTokensChatCompletionsClient(api_key="gym", **payload["client"])
         shell = LocalShell(payload["workdir"], scratch)
         observer.watch_model_calls(client)
