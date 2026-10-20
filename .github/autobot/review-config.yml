@@ -1,0 +1,7 @@
+# .github/autobot/approve-policy.yaml
+# Enables /review-approve for NVIDIA-NeMo/Gym.
+# Members of any listed team may trigger a policy-gated formal review.
+approve: true
+eligible_teams:
+  - gym_team
+  - nemo-autobot-admins
