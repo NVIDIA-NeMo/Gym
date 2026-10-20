@@ -21,6 +21,12 @@ function describe(error) {
   return `${error?.name ?? "Error"}${code ? ` (${code})` : ""}`;
 }
 
+// A name from a server, quoted for an error message: printable ASCII, at most 100 characters.
+function quoted(name) {
+  const json = JSON.stringify(String(name).slice(0, 100));
+  return json.replace(/[^\x20-\x7e]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}
+
 // Scheme, host and port only: enough to tell an unreachable address, without the path or query.
 function originOf(url) {
   try {
@@ -33,9 +39,10 @@ function originOf(url) {
 // Gym's MCP server uses stateless Streamable HTTP with JSON responses. This
 // adapter deliberately does not implement arbitrary MCP transports or SSE.
 // A server marked `required: false` is skipped when its discovery fails; any other
-// failure registers no tools. A successful call of a tool listed in any server's
-// `terminal_tools` ends the run, as a finish tool does, and each listed tool must be offered.
-export async function registerGymTools(pi, servers, emit = emitEvent) {
+// failure registers no tools. A tool listed in any server's `terminal_tools` is a finish
+// tool: Pi ends the run after a turn whose calls were all successful finish calls. Each
+// listed tool must be offered. `lastStopReason` reports why the model's latest reply stopped.
+export async function registerGymTools(pi, servers, emit = emitEvent, lastStopReason = () => undefined) {
   const names = new Set(pi.getAllTools().map((tool) => tool.name));
   const pending = [];
   const offered = new Set();
@@ -45,7 +52,7 @@ export async function registerGymTools(pi, servers, emit = emitEvent) {
   for (const [serverName, server] of enabled) {
     let tools, toolNames;
     try {
-      ({ tools, toolNames } = await discoverTools(serverName, server, names, terminal));
+      ({ tools, toolNames } = await discoverTools(serverName, server, names, terminal, lastStopReason));
     } catch (error) {
       const cause = `${describe(error)} at ${originOf(server.url)}`;
       if (server.required !== false) throw new GymMcpError(`${serverName}: ${cause}`);
@@ -71,7 +78,7 @@ export async function registerGymTools(pi, servers, emit = emitEvent) {
   for (const tool of pending) pi.registerTool(tool);
 }
 
-async function discoverTools(serverName, server, registered, terminal) {
+async function discoverTools(serverName, server, registered, terminal, lastStopReason) {
   if (!/^[A-Za-z0-9_-]+$/.test(serverName)) {
     throw new GymMcpError("Invalid Gym MCP server name");
   }
@@ -136,9 +143,9 @@ async function discoverTools(serverName, server, registered, terminal) {
     const result = await rpc("tools/list", cursor ? { cursor } : {});
     for (const tool of result.tools) {
       const name = `${serverName}_${tool.name}`;
-      if (!/^[A-Za-z0-9_-]{1,64}$/.test(name)) {
+      if (typeof tool.name !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(name)) {
         throw new GymMcpError(
-          `Gym MCP tool name ${JSON.stringify(String(name).slice(0, 100))} is not a Pi tool name ` +
+          `Gym MCP tool name ${quoted(name)} is not usable ` +
             "(letters, digits, '-' and '_', at most 64 characters with the server prefix)",
         );
       }
@@ -151,6 +158,13 @@ async function discoverTools(serverName, server, registered, terminal) {
         description: tool.description || tool.name,
         parameters: tool.inputSchema,
         async execute(_callId, params, signal) {
+          if (terminal.has(tool.name) && lastStopReason() === "length") {
+            // Pi runs the calls of a reply cut at the output limit with whatever arguments it could parse,
+            // and a finish call gives the model no turn to correct them.
+            throw new Error(
+              "Not run: the reply with this call hit the output limit, so its arguments may be cut off. Call it again.",
+            );
+          }
           const result = await rpc("tools/call", { name: tool.name, arguments: params }, signal);
           const content = result.content.map((item) =>
             item.type === "text" || item.type === "image"
@@ -175,6 +189,11 @@ async function discoverTools(serverName, server, registered, terminal) {
 }
 
 export default function (pi) {
+  // Pi delivers each reply's message_end to extensions before it runs that reply's tool calls.
+  let stopReason;
+  pi.on("message_end", (event) => {
+    if (event.message?.role === "assistant") stopReason = event.message.stopReason;
+  });
   // getAllTools() needs a bound runtime; session_start runs before inference.
   pi.on("session_start", async () => {
     try {
@@ -185,10 +204,10 @@ export default function (pi) {
         // A parse error would quote the file, which holds the session tokens.
         throw new GymMcpError("unreadable Gym MCP configuration");
       }
-      await registerGymTools(pi, servers);
+      await registerGymTools(pi, servers, emitEvent, () => stopReason);
     } catch (error) {
       // Pi normally tolerates extension errors. Required Gym tools must instead
-      // fail the rollout, rather than silently run without search.
+      // fail the rollout, rather than silently run without them.
       const cause = describe(error);
       process.stderr.write(`Required Gym MCP tools could not be initialized: ${cause}\n`);
       // Pi waits for this handler, so no model call starts before the exit. Exit once the

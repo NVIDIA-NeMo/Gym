@@ -9,6 +9,7 @@ import re
 import shlex
 import shutil
 import signal
+import socket
 import sys
 import threading
 from contextlib import contextmanager
@@ -364,16 +365,17 @@ def test_direct_run_without_resources_rejected_before_execution(setup):
     agent.server_client.post.assert_not_called()
 
 
-# gym_mcp.mjs builds tool names from the grant name, and Pi accepts at most 64 characters.
-_UNUSABLE_MCP_NAME = "Pi MCP grant names may contain only letters, digits, '-' and '_', at most 62 characters: "
+# gym_mcp.mjs builds tool names from the grant name and allows at most 64 characters.
+_UNUSABLE_NAME = "its name is not 1 to 62 letters, digits, '-' and '_'"
 _SEED_REFUSALS = {
     "no-sandbox": "Pi requires sandbox_access or a configured sandbox_provider",
     "required-tool": "Pi supports only MCP tool grants; required grants it cannot use: tools",
-    "unusable-mcp-name": _UNUSABLE_MCP_NAME + "resources.mcp",
-    "long-mcp-name": _UNUSABLE_MCP_NAME + "r" * 63,
+    "unusable-mcp-name": f"Pi cannot use these required MCP grants: resources.mcp ({_UNUSABLE_NAME})",
+    "long-mcp-name": f"Pi cannot use these required MCP grants: {'r' * 63} ({_UNUSABLE_NAME})",
     "overlapping-mcp-names": (
-        "Pi cannot tell apart the tools of MCP grants whose names start with another grant's name and '_': "
-        "resources_v2"
+        "Pi cannot use these required MCP grants: "
+        "resources (its tools could not be told apart from those of grant resources_v2); "
+        "resources_v2 (its tools could not be told apart from those of grant resources)"
     ),
     "no-model": "Pi requires a sandbox-reachable Gym model_server",
     "unpinned": "Pi requires an exact pi_version, for example 0.80.2",
@@ -396,7 +398,7 @@ def test_unsupported_seed_rejected_before_connection(setup, option):
         body["tool_accesses"] = [mcp_grant("r" * 63)]
     elif option == "overlapping-mcp-names":
         # `resources_v2_finish` could be either grant's tool.
-        body["tool_accesses"] = [mcp_grant("resources"), mcp_grant("resources_v2", required=False)]
+        body["tool_accesses"] = [mcp_grant("resources"), mcp_grant("resources_v2")]
     else:
         body["tool_accesses"] = [
             {"kind": "direct_http", "name": "tools", "base_url": "http://resources", "required": True}
@@ -573,15 +575,22 @@ async def test_mcp_grants_reach_pi_through_the_gym_extension(setup):
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
 
 
-async def test_optional_mcp_grant_with_an_unusable_name_is_left_out(setup):
+@pytest.mark.parametrize(
+    "name,problem",
+    [
+        ("resources.mcp", _UNUSABLE_NAME),
+        ("resources_v2", "its tools could not be told apart from those of grant resources"),
+    ],
+)
+async def test_optional_mcp_grant_that_pi_cannot_use_is_left_out(setup, name, problem):
     agent, sandbox = setup
-    body = seed_with_tools(mcp_grant("resources"), mcp_grant("resources.mcp", required=False))
+    body = seed_with_tools(mcp_grant("resources"), mcp_grant(name, required=False))
     request, session_id, task = await activate(agent, sandbox, body)
     assert (await task).status == "completed"
     assert list(json.loads(sandbox.files[f"{sandbox.directory}/mcp-servers.json"])) == ["resources"]
     close = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
     gaps = [(gap.code, gap.detail) for gap in close.agent_observations.gaps]
-    assert ("mcp_server_skipped", "resources.mcp: Pi cannot use this grant name") in gaps
+    assert ("mcp_server_skipped", f"{name}: {problem}") in gaps
 
 
 async def test_no_mcp_grant_stages_no_tool_extension(setup):
@@ -614,18 +623,22 @@ async def test_mcp_setup_exit_fails_the_episode_with_its_cause(setup, granted):
         assert ("mcp_setup_failed", cause) in [(gap.code, gap.detail) for gap in close.agent_observations.gaps]
 
 
-def finish_events(*, details, is_error=False, tool="resources_finish", with_bash=False, last_stop="toolUse"):
-    """A run whose last assistant turn calls a granted MCP tool, as when gym_mcp.mjs ends the run."""
-    last_calls = [{"type": "toolCall", "id": "tool-2", "name": tool, "arguments": {"paths": ["/r.docx"]}}]
+def finish_events(*, details, is_error=False, tool="resources_finish", with_bash=False, last_stop="toolUse", calls=1):
+    """A run whose last assistant turn calls a granted MCP tool `calls` times, as when gym_mcp.mjs ends the run."""
+    last_calls = [
+        {"type": "toolCall", "id": f"tool-2-{i}", "name": tool, "arguments": {"paths": ["/r.docx"]}}
+        for i in range(calls)
+    ]
     last_results = [
         {
             "role": "toolResult",
-            "toolCallId": "tool-2",
+            "toolCallId": f"tool-2-{i}",
             "toolName": tool,
             "content": [{"type": "text", "text": "done"}],
             "details": details,
             "isError": is_error,
         }
+        for i in range(calls)
     ]
     if with_bash:
         last_calls.append({"type": "toolCall", "id": "tool-3", "name": "bash", "arguments": {"command": "ls"}})
@@ -669,9 +682,10 @@ def finish_events(*, details, is_error=False, tool="resources_finish", with_bash
     return "\n".join(json.dumps([float(i), event]) for i, event in enumerate(recorded))
 
 
-async def test_finish_tool_ends_the_run_and_output_uses_gym_mcp_names(setup):
+@pytest.mark.parametrize("calls", [1, 2])
+async def test_finish_tool_ends_the_run_and_output_uses_gym_mcp_names(setup, calls):
     agent, sandbox = setup
-    sandbox.events = finish_events(details={"terminal": True})
+    sandbox.events = finish_events(details={"terminal": True}, calls=calls)
     grants = seed_with_tools(mcp_grant("web"), mcp_grant("resources"))
     request, session_id, task = await activate(agent, sandbox, grants)
     response = await task
@@ -680,7 +694,7 @@ async def test_finish_tool_ends_the_run_and_output_uses_gym_mcp_names(setup):
     # The granted prefix becomes Gym's MCP naming, and Pi's own tools keep their names.
     assert [item.name for item in response.output if item.type == "function_call"] == [
         "bash",
-        "mcp__resources__finish",
+        *["mcp__resources__finish"] * calls,
     ]
     close = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
     # Observations keep the names the model saw and record the run as completed.
@@ -691,16 +705,15 @@ async def test_finish_tool_ends_the_run_and_output_uses_gym_mcp_names(setup):
     assert "invocation_outcome_unavailable" not in [gap.code for gap in close.agent_observations.gaps]
 
 
-@pytest.mark.parametrize("details,expected", [({"terminal": True}, "completed"), ({}, "incomplete")])
-async def test_finish_call_in_a_reply_cut_at_the_output_limit(setup, details, expected):
-    # Pi runs the complete tool calls of a reply that stopped at the output limit, so the finish call ends the run.
+async def test_reply_cut_at_the_output_limit_stays_incomplete_after_a_finish_result(setup):
+    # gym_mcp.mjs does not run a finish call from such a reply, whose arguments may be cut off.
     agent, sandbox = setup
-    sandbox.events = finish_events(details=details, last_stop="length")
+    sandbox.events = finish_events(details={"terminal": True}, last_stop="length")
     request, session_id, task = await activate(agent, sandbox, seed_with_tools(mcp_grant("resources")))
-    assert (await task).status == expected
+    assert (await task).status == "incomplete"
     close = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
     assert [record.status for record in close.agent_observations.records if record.kind == "agent_invocation"] == [
-        expected
+        "incomplete"
     ]
 
 
@@ -734,17 +747,29 @@ async def test_skipped_optional_mcp_server_is_an_observation_gap(setup):
     assert ("mcp_server_skipped", "extra: TypeError (ECONNREFUSED)") in gaps
 
 
-async def test_interrupted_run_keeps_the_skipped_mcp_server_gap(setup):
+async def test_interrupted_run_keeps_the_skipped_mcp_server_gaps(setup):
     agent, sandbox = setup
     sandbox.blocked = True
     skipped = {"type": "ng_gym_mcp_server_skipped", "server": "extra", "error": "TypeError (ECONNREFUSED)"}
     sandbox.events = json.dumps([0.0, skipped])
-    request, session_id, task = await activate(agent, sandbox, seed_with_tools(mcp_grant("extra", required=False)))
+    grants = seed_with_tools(mcp_grant("extra", required=False), mcp_grant("extra.mcp", required=False))
+    request, session_id, task = await activate(agent, sandbox, grants)
     close = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
     with pytest.raises(asyncio.CancelledError):
         await task
     gaps = [(gap.code, gap.detail) for gap in close.agent_observations.gaps]
     assert ("mcp_server_skipped", "extra: TypeError (ECONNREFUSED)") in gaps
+    assert ("mcp_server_skipped", f"extra.mcp: {_UNUSABLE_NAME}") in gaps
+
+
+async def test_grant_names_that_only_look_alike_are_used(setup):
+    # Overlap needs the `_` that gym_mcp.mjs puts between grant and tool names; 62 characters still fit.
+    agent, sandbox = setup
+    names = ["web", "web-extra", "r" * 62]
+    request, session_id, task = await activate(agent, sandbox, seed_with_tools(*map(mcp_grant, names)))
+    assert (await task).status == "completed"
+    assert sorted(json.loads(sandbox.files[f"{sandbox.directory}/mcp-servers.json"])) == sorted(names)
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
 
 
 @pytest.mark.parametrize("value", [0, 0.0004, 2_147_484])
@@ -1655,13 +1680,16 @@ async def test_receipt_read_failure_does_not_signal_reused_pid(local_session):
 
 
 def _pinned_pi_package() -> tuple[str, Path]:
+    """Node and the installed Pi package, when it is the version the shipped config pins (as CI installs)."""
+    config = OmegaConf.load(Path(__file__).parents[1] / "configs/pi_agent.yaml")
+    pinned = config.pi_agent.responses_api_agents.pi_agent.pi_version
     node, pi = shutil.which("node"), shutil.which("pi")
     if not node or not pi:
         pytest.skip("Installed Pi and Node are required for the real Pi contract")
     package = Path(pi).resolve().parents[1]
     manifest = package / "package.json"
-    if not manifest.exists() or json.loads(manifest.read_text()).get("version") != "0.80.2":
-        pytest.skip("This integration targets pinned Pi 0.80.2")
+    if not manifest.exists() or json.loads(manifest.read_text()).get("version") != pinned:
+        pytest.skip(f"This integration targets the pinned Pi {pinned}")
     return node, package
 
 
@@ -1690,25 +1718,31 @@ def _http_server(handle):
         server.server_close()
 
 
-def _finish_tool_server(body):
-    """A stateless JSON MCP endpoint, as Gym's Resources servers expose, that offers a `finish` tool."""
-    if body["method"] == "notifications/initialized":
-        return 202, "application/json", b""
+def _finish_tool_server(calls):
+    """A stateless JSON MCP endpoint, as Gym's Resources servers expose, that records `finish` calls."""
     finish = {
         "name": "finish",
         "description": "Submit the deliverables",
         "inputSchema": {"type": "object", "properties": {"paths": {"type": "array"}}, "required": ["paths"]},
     }
-    result = {
-        "initialize": {"protocolVersion": "2025-03-26", "capabilities": {}},
-        "tools/list": {"tools": [finish]},
-        "tools/call": {"content": [{"type": "text", "text": "Submitted"}]},
-    }[body["method"]]
-    return 200, "application/json", json.dumps({"jsonrpc": "2.0", "id": body["id"], "result": result}).encode()
+
+    def handle(body):
+        if body["method"] == "notifications/initialized":
+            return 202, "application/json", b""
+        if body["method"] == "tools/call":
+            calls.append(body["params"]["arguments"])
+        result = {
+            "initialize": {"protocolVersion": "2025-03-26", "capabilities": {}},
+            "tools/list": {"tools": [finish]},
+            "tools/call": {"content": [{"type": "text", "text": "Submitted"}]},
+        }[body["method"]]
+        return 200, "application/json", json.dumps({"jsonrpc": "2.0", "id": body["id"], "result": result}).encode()
+
+    return handle
 
 
-def _finishing_model(requests, finish_reason):
-    """A streaming chat model that calls `resources_finish`, then answers in text if it is called again."""
+def _finishing_model(requests, replies):
+    """A streaming chat model that calls `resources_finish` with each (arguments, finish_reason) reply in turn."""
 
     def handle(body):
         requests.append(body)
@@ -1719,9 +1753,9 @@ def _finishing_model(requests, finish_reason):
             data |= {"model": body.get("model"), "choices": [choice]}
             return f"data: {json.dumps(data)}\n\n"
 
-        if len(requests) == 1:
-            arguments = json.dumps({"paths": ["/app/report.docx"]})
-            call = {"index": 0, "id": "call-1", "type": "function"}
+        if len(requests) <= len(replies):
+            arguments, finish_reason = replies[len(requests) - 1]
+            call = {"index": 0, "id": f"call-{len(requests)}", "type": "function"}
             call["function"] = {"name": "resources_finish", "arguments": arguments}
             stream = chunk({"role": "assistant", "tool_calls": [call]}) + chunk({}, finish_reason)
         else:
@@ -1732,11 +1766,14 @@ def _finishing_model(requests, finish_reason):
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux sandbox contract")
-@pytest.mark.parametrize("case", ["finish", "finish-at-output-limit", "required-down", "optional-down"])
-async def test_pinned_pi_uses_mcp_grants_end_to_end(setup, tmp_path, case):
+@pytest.mark.parametrize("case", ["finish", "finish-cut-at-output-limit", "required-down", "optional-down"])
+async def test_pinned_pi_uses_mcp_grants_end_to_end(setup, tmp_path, monkeypatch, case):
     """Real Pi, gym_mcp.mjs, runner and supervisor, against local MCP and model servers."""
     agent, sandbox = setup
     node, package = _pinned_pi_package()
+    # Pi sends fetch, including gym_mcp.mjs's, through proxies set in the environment.
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+        monkeypatch.delenv(name, raising=False)
     runtime = tmp_path / "runtime"
     (runtime / "node/bin").mkdir(parents=True)
     (runtime / "node/bin/node").symlink_to(node)
@@ -1745,14 +1782,19 @@ async def test_pinned_pi_uses_mcp_grants_end_to_end(setup, tmp_path, case):
     agent.config.finish_tool_names = ["finish"]
     workdir = tmp_path / "work"
     workdir.mkdir()
-    requests = []
-    with _http_server(_finish_tool_server) as down:
-        pass  # Closed now, so connections are refused.
-    finish_reason = "length" if case == "finish-at-output-limit" else "tool_calls"
+    requests, calls = [], []
+    paths = ["/app/report.docx", "/app/data.xlsx"]
+    replies = [(json.dumps({"paths": paths}), "tool_calls")]
+    if case == "finish-cut-at-output-limit":
+        # Pi parses the cut-off arguments as `{"paths": ["/app/report.docx"]}`; the call must not run.
+        replies.insert(0, ('{"paths": ["/app/report.docx", ', "length"))
     with (
-        _http_server(_finish_tool_server) as up,
-        _http_server(_finishing_model(requests, finish_reason)) as model,
+        socket.socket() as refused,
+        _http_server(_finish_tool_server(calls)) as up,
+        _http_server(_finishing_model(requests, replies)) as model,
     ):
+        refused.bind(("127.0.0.1", 0))  # Bound but not listening, so connections to it are refused.
+        down = f"http://127.0.0.1:{refused.getsockname()[1]}"
         agent.server_client._build_server_base_url.return_value = model
         grants = [{**mcp_grant("resources"), "connection": {"url": f"{down if case == 'required-down' else up}/mcp"}}]
         if case == "optional-down":
@@ -1765,31 +1807,40 @@ async def test_pinned_pi_uses_mcp_grants_end_to_end(setup, tmp_path, case):
         state.runtime = str(runtime)
         directory = tmp_path / "session"
         (directory / "home/.pi/agent").mkdir(parents=True)
+        # A hung run outlasts the activation wait before the local exec limit, so close can stop it through
+        # its supervisor (whose stop handshake polls once a second) and leave no processes behind.
+        agent.config.session_close_timeout_seconds = 10
         _run_session_locally(sandbox, state, directory, limit=60)
         activation = agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="Write the report."))
         cause = f"resources: TypeError (ECONNREFUSED) at {down}"
         try:
             if case == "required-down":
                 with pytest.raises(RuntimeError, match=re.escape(f"MCP tools could not be initialized: {cause}")):
-                    await asyncio.wait_for(activation, 60)
+                    await asyncio.wait_for(activation, 30)
             else:
-                response = await asyncio.wait_for(activation, 60)
+                response = await asyncio.wait_for(activation, 30)
         finally:
             close_request = AgentCloseSessionRequest(**close_body(body.agent_session_id))
             close = await agent.close_agent_session(request, close_request)
     gaps = [(gap.code, gap.detail) for gap in close.agent_observations.gaps]
     if case == "required-down":
         # Setup fails before the first model call.
-        assert requests == []
+        assert requests == calls == []
         assert ("mcp_setup_failed", cause) in gaps
         return
     assert response.status == "completed", response.error
-    # Pi runs the finish call and stops: no model call follows it.
-    assert len(requests) == 1
     assert "resources_finish" in [tool["function"]["name"] for tool in requests[0]["tools"]]
-    assert [item.name for item in response.output if item.type == "function_call"] == ["mcp__resources__finish"]
+    # The server records only the complete finish call, and no model call follows it.
+    assert calls == [{"paths": paths}]
+    assert len(requests) == len(replies)
+    names = [item.name for item in response.output if item.type == "function_call"]
+    assert names == ["mcp__resources__finish"] * len(replies)
     skipped = ("mcp_server_skipped", f"extra: TypeError (ECONNREFUSED) at {down}")
     assert (skipped in gaps) == (case == "optional-down")
+    # Pi's agent_end carries the terminal tool result, so the invocation record agrees with the response.
+    assert [record.status for record in close.agent_observations.records if record.kind == "agent_invocation"] == [
+        "completed"
+    ]
 
 
 @pytest.mark.parametrize("field", ["timeout", "sandbox_install_timeout_seconds", "session_close_timeout_seconds"])

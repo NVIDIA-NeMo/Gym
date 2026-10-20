@@ -112,8 +112,22 @@ test("names a tool whose name Pi cannot use", async (t) => {
     return true;
   });
   await assert.rejects(registerGymTools(agent(), { tavily: f.config }), (error) =>
-    error.message.startsWith(`tavily: Gym MCP tool name "tavily_${long}" is not a Pi tool name`) &&
+    error.message.startsWith(`tavily: Gym MCP tool name "tavily_${long}" is not usable`) &&
     error.message.includes("at most 64 characters"));
+});
+
+test("quotes a hostile or missing tool name as short printable ASCII", async (t) => {
+  for (const tool of [{ name: "evil\u202e\n" + "x".repeat(200) }, {}]) {
+    const f = await fixture(t, (body, _req, res) => {
+      if (body.method !== "tools/list") return false;
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: {
+        tools: [{ ...tool, inputSchema: { type: "object" } }],
+      } }));
+      return true;
+    });
+    await assert.rejects(registerGymTools(agent(), { tavily: f.config }), (error) =>
+      /^[\x20-\x7e]+$/.test(error.message) && error.message.includes("is not usable") && error.message.length < 300);
+  }
 });
 
 test("propagates MCP tool failures into Pi tool errors", async (t) => {
@@ -191,6 +205,21 @@ test("a terminal tool ends the run after a successful call", async (t) => {
   const continued = await b.tools[0].execute("b", { query: "x" });
   assert.equal(continued.terminate, undefined);
   assert.deepEqual(continued.details, {});
+});
+
+test("a finish call from a reply cut at the output limit is not run", async (t) => {
+  const f = await fixture(t);
+  let stopReason = "length";
+  const a = agent();
+  await registerGymTools(a, { tavily: { ...f.config, terminal_tools: ["web_search"] } }, () => {}, () => stopReason);
+  await assert.rejects(a.tools[0].execute("a", { query: "x" }), /output limit/);
+  assert.equal(f.calls.filter((c) => c.body.method === "tools/call").length, 0);
+  stopReason = "toolUse";
+  assert.equal((await a.tools[0].execute("b", { query: "x" })).terminate, true);
+  // Other tools still run, as Pi's own do.
+  const b = agent();
+  await registerGymTools(b, { tavily: f.config }, () => {}, () => "length");
+  assert.equal((await b.tools[0].execute("c", { query: "x" })).content[0].text, "one:x");
 });
 
 test("a failed terminal tool call does not end the run", async (t) => {
