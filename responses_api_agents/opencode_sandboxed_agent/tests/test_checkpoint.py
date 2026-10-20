@@ -11,6 +11,7 @@ the HTTP seam.
 import asyncio
 import json
 import re
+import shlex
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -30,6 +31,7 @@ from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBund
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from responses_api_agents.opencode_sandboxed_agent.app import (
     _REMOTE_RESUME_HELPER,
+    _SELECT_RESUME_PYTHON,
     OpenCodeSandboxedAgent,
     OpenCodeSandboxedAgentConfig,
     OpenCodeSandboxedAgentRunRequest,
@@ -399,6 +401,10 @@ async def test_a_checkpoint_interrupts_opencode_and_the_resume_continues_the_ses
     assert "interrupted" not in second, "the resume adds no user turn"
     assert data_home_of(first) == data_home_of(second) == record.episode["state"]["data_home"]
     assert 'test -x "$HOME/.opencode/bin/opencode"' in second, "the install is skipped when the binary is present"
+    script = shlex.split(second)[-1]  # the launch wraps its script in bash -c '...'
+    assert _SELECT_RESUME_PYTHON in script and f'"$NEMO_GYM_RESUME_PYTHON" {_REMOTE_RESUME_HELPER}' in script, (
+        "the helper runs on a Python 3.8+ interpreter, not the task environment's python3"
+    )
     # SIGINT ended the launch; the kill that follows stops whatever it left running before the sandbox is parked.
     assert [signal_of(c) for c in interrupt_commands(sandbox)] == ["INT", "KILL"]
     assert {launch_id(c) for c in interrupt_commands(sandbox)} == {launch_id(first)}, "they stop the first launch"
@@ -419,6 +425,34 @@ async def test_a_checkpoint_interrupts_opencode_and_the_resume_continues_the_ses
         (True, "finished"),
     ]
     assert launches[1]["reason"] == "OpenCode's session ses_1 has completed model responses"
+
+
+def test_the_resume_python_selection_skips_a_task_python_older_than_3_8(tmp_path: Path) -> None:
+    """A task environment first on PATH whose python3 is too old for the helper is passed over."""
+    import shutil
+    import subprocess
+
+    fallbacks = [
+        p for p in ("/usr/bin/python3", "/opt/miniconda3/bin/python3", "/usr/local/bin/python3") if Path(p).exists()
+    ]
+    usable = [
+        p
+        for p in fallbacks
+        if subprocess.run([p, "-c", "import sys; sys.exit(sys.version_info < (3, 8))"]).returncode == 0
+    ]
+    if not usable or shutil.which("bash") is None:
+        pytest.skip("no Python 3.8+ at a fallback path in this environment")
+    old = tmp_path / "python3"
+    old.write_text('#!/bin/sh\nif [ "$1" = --version ]; then echo Python 3.6.15; else exit 1; fi\n')
+    old.chmod(0o755)
+    chosen = subprocess.run(
+        ["bash", "-c", f'{_SELECT_RESUME_PYTHON} && echo "$NEMO_GYM_RESUME_PYTHON"'],
+        env={"PATH": f"{tmp_path}:/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+    )
+    assert chosen.returncode == 0, chosen.stderr
+    assert chosen.stdout.strip() == usable[0] != str(old)
 
 
 async def test_a_session_stopped_before_its_first_model_response_starts_over_with_the_task(tmp_path: Path) -> None:
