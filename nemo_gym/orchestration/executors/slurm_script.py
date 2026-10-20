@@ -58,6 +58,7 @@ from nemo_gym.orchestration.executors.script_templates import (
     render_write_file_from_base64,
 )
 from nemo_gym.orchestration.executors.utils import flatten_run_args
+from nemo_gym.path_utils import resubmit_offset_path_for
 
 
 _SCRIPT_TEMPLATE = """\
@@ -990,6 +991,9 @@ def build_sbatch_script(
         run_args.setdefault("require_complete", True)
         run_args = _with_resume_flag(run_args, resume is not None)
         gym_cmd = render_gym_cmd("eval run", "GYM_CMD", [output_path] + extra_flags + flatten_run_args(run_args))
+        # After `gym eval resubmit` the run resumes whatever the config says: a fresh start would delete its rollouts.
+        offset = shlex.quote(str(resubmit_offset_path_for(remote_bench_dir / "artifacts" / "rollouts.jsonl")))
+        gym_cmd += f"\nif [ -f {offset} ]; then GYM_CMD+=(++resume_from_cache=True); fi"
     else:
         # A command replaces `gym eval run`, so the run args it would have carried
         # have nowhere to go. What the script still needs is where to write and how

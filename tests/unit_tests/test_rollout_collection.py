@@ -5233,6 +5233,39 @@ class TestRolloutCollection:
         assert failures_fpath.read_bytes() == b""
         assert not metrics_fpath.exists()
 
+    async def test_fresh_run_clears_a_stale_resubmit_offset(
+        self, tmp_path: Path, empty_global_config: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "2")
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_bytes(
+            orjson.dumps({"responses_create_params": {"input": []}, AGENT_REF_KEY_NAME: {"name": "agent"}}) + b"\n"
+        )
+        output_fpath = tmp_path / "output.jsonl"
+        # An offset left by a resubmit of an older run on this output path.
+        offset_fpath = tmp_path / "output_resubmit_offset"
+        offset_fpath.write_text("5\n")
+
+        class Helper(RolloutCollectionHelper):
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                future = Future()
+                future.set_result(_CompletedRollout(row=examples[0], result={"reward": 0.0}, rollout_latency_ms=None))
+                return [future]
+
+        base = dict(input_jsonl_fpath=str(input_fpath), output_jsonl_fpath=str(output_fpath), disable_aggregation=True)
+        await Helper().run_from_config(RolloutCollectionConfig(**base, resume_from_cache=False))
+        assert not offset_fpath.exists()
+
+        # Two failures of one row on the new run reach the cap of 2. With the stale offset of 5 they would count
+        # for nothing and the row would be dispatched without end.
+        output_fpath.write_bytes(b"")
+        failure = {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, NG_FAILURE_CLASS_KEY: "agent_run_error"}
+        _failures_path_for(output_fpath).write_bytes((orjson.dumps(failure) + b"\n") * 2)
+        input_rows, *_ = RolloutCollectionHelper()._load_from_cache(
+            RolloutCollectionConfig(**base, resume_from_cache=True)
+        )
+        assert input_rows == []
+
     @pytest.mark.parametrize("resume_from_cache", [False, True])
     async def test_run_from_config_creates_missing_output_dir(
         self, tmp_path: Path, empty_global_config: MagicMock, resume_from_cache: bool

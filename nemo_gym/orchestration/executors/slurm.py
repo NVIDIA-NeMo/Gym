@@ -21,8 +21,10 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
+import yaml
+
 from nemo_gym import __version__
-from nemo_gym.orchestration.api import SlurmComputeConfig, SubmitConfig, VllmPDServiceConfig
+from nemo_gym.orchestration.api import OtelConfig, SlurmComputeConfig, SubmitConfig, VllmPDServiceConfig
 from nemo_gym.orchestration.executors.base import BaseExecutor
 from nemo_gym.orchestration.executors.connection import Connection, get_connection
 from nemo_gym.orchestration.executors.git_ref import validate_gym_install_ref
@@ -32,12 +34,14 @@ from nemo_gym.orchestration.executors.otel import (
     otel_active,
     render_collector_config,
     resolve_token,
+    token_from_env,
     validate_destination,
     validate_gym_telemetry,
 )
 from nemo_gym.orchestration.executors.resume_script import JOB_CHAIN_NAME, PROLOGUE_MARKER, RETRY_FILE_NAME
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
 from nemo_gym.orchestration.jobs import (
+    RESOLVED_CONFIG_NAME,
     BenchmarkJob,
     SubmissionRecord,
     installed_gym_commit,
@@ -62,6 +66,9 @@ _VALID_BENCHMARK_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 # adjustments are routine on production Slurm) — so only the payload's last
 # whitespace-delimited token is checked against this, not the whole line.
 _JOB_ID_RE = re.compile(r"^\d+(;\S+)?$")
+
+# Held by `gym eval resubmit` from its scheduler check to its sbatch, so two resubmits cannot both queue a job.
+_RESUBMIT_LOCK = ".gym_resubmit.lock"
 
 
 def _validate_benchmark_names(benchmarks: list[str]) -> None:
@@ -206,23 +213,38 @@ class SlurmExecutor(BaseExecutor):
     def resubmit(self, record: SubmissionRecord, benchmark: BenchmarkJob) -> str:
         """Queue `benchmark`'s job.sh again from its job dir and append the new id to its job chain.
 
-        Refuses while any of the caller's jobs runs in that job dir, so two jobs never write one run.
+        Refuses while any of the caller's jobs runs in that job dir, so two jobs never write one run, and
+        refuses a run with rollouts whose job.sh would start it fresh, which would delete them.
         """
         job_dir = Path(benchmark.job_dir)
+        # Relative to the job dir, which the script enters first, so messages can name them without quoting paths.
+        rollouts = Path("artifacts") / "rollouts.jsonl"
+        failures = failures_path_for(rollouts)
+        offset = resubmit_offset_path_for(rollouts)
         with get_connection(record.hostname) as conn:
-            workdirs = conn.run(["squeue --me --noheader --format=%Z"]).split()
-            if str(job_dir) in workdirs:
-                raise RuntimeError(f"A job of this run is still pending or running in {job_dir}.")
-            rollouts = job_dir / "artifacts" / "rollouts.jsonl"
-            failures = shlex.quote(str(failures_path_for(rollouts)))
-            offset = shlex.quote(str(resubmit_offset_path_for(rollouts)))
+            token_export = self._resubmit_token_export(conn, Path(record.run_dir))
+            # One script, so the lock spans the scheduler check, the resets and sbatch; any failed step stops it.
             results = _parse_sbatch_results(
                 conn.run(
-                    [
-                        f"cd {shlex.quote(str(job_dir))}",
+                    token_export
+                    + [
+                        'fail() { echo "Error: $*" >&2; exit 1; }',
+                        f"cd {shlex.quote(str(job_dir))} || fail 'cannot enter the job dir'",
+                        # mkdir, not flock: it is atomic on shared filesystems that do not support flock.
+                        f'mkdir {_RESUBMIT_LOCK} 2>/dev/null || fail "another resubmit holds $PWD/{_RESUBMIT_LOCK}; '
+                        'remove it if no resubmit is running"',
+                        f"trap 'rmdir {_RESUBMIT_LOCK}' EXIT",
+                        "workdirs=$(squeue --me --noheader --format=%Z) || fail 'squeue failed'",
+                        'for d in $workdirs; do [ "$d" != "$PWD" ] || '
+                        'fail "A job of this run is still pending or running in $PWD."; done',
+                        f"if [ -s {rollouts} ] && ! grep -qF -- +resume_from_cache=True job.sh; then "
+                        'fail "job.sh in $PWD does not resume from cache, so a resubmit would delete its '
+                        'rollouts; submit the run again instead"; fi',
                         # A fresh attempt budget for failed rollouts, and fresh auto-resume retries.
-                        f"if [ -f {failures} ]; then wc -l < {failures}; else echo 0; fi > {offset}",
-                        f"rm -f {RETRY_FILE_NAME}",
+                        f"mkdir -p {offset.parent} && "
+                        f"if [ -f {failures} ]; then wc -l < {failures}; else echo 0; fi > {offset}.tmp "
+                        f'&& mv {offset}.tmp {offset} || fail "cannot write $PWD/{offset}"',
+                        f"rm -f {RETRY_FILE_NAME} || fail 'cannot remove {RETRY_FILE_NAME}'",
                         _sbatch_command(benchmark.benchmark, job_dir / "job.sh"),
                     ]
                 )
@@ -235,6 +257,19 @@ class SlurmExecutor(BaseExecutor):
             job_sh = shlex.quote(str(job_dir / "job.sh"))
             conn.run([f"grep -qF -- {shlex.quote(PROLOGUE_MARKER)} {job_sh} || echo {job_id} >> {chain}"])
         return job_id
+
+    @staticmethod
+    def _resubmit_token_export(conn: Connection, run_dir: Path) -> list[str]:
+        """The token export `run` sends with sbatch, so a resubmitted job's collector can still authenticate."""
+        resolved = shlex.quote(str(run_dir / RESOLVED_CONFIG_NAME))
+        saved = yaml.safe_load(conn.run([f"if [ -f {resolved} ]; then cat {resolved}; fi"])) or {}
+        if not saved:
+            return []
+        otel = saved.get("otel") or {}
+        if not otel.get("enabled", OtelConfig().enabled):
+            return []
+        name = otel.get("token_env", OtelConfig().token_env)
+        return [f"export {name}={shlex.quote(token_from_env(name))}"]
 
     def _build_record(
         self,

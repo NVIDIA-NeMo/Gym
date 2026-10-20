@@ -1017,6 +1017,12 @@ def get_max_rollout_attempts() -> int:
 _get_max_rollout_attempts = get_max_rollout_attempts  # Backwards-compatible alias
 
 
+def load_resubmit_offset(output_fpath: str | Path) -> int:
+    """Failures-sidecar lines before this index predate the last `gym eval resubmit` and do not count to the cap."""
+    offset_fpath = resubmit_offset_path_for(Path(output_fpath))
+    return int(offset_fpath.read_text()) if offset_fpath.exists() else 0
+
+
 def _normalize_health_check_ignored_checks(value) -> List[str]:
     from nemo_gym.rollout_health import normalize_ignored_checks
 
@@ -2909,8 +2915,7 @@ class RolloutCollectionHelper(BaseModel):
         attempts_by_key: Counter = Counter()
         # Attempts since the last `gym eval resubmit`: a resubmit gives every non-terminal failure a fresh budget.
         # If the sidecar is later rewritten shorter (a GDPval stage restart), the offset only gives extra attempts.
-        offset_fpath = resubmit_offset_path_for(Path(config.output_jsonl_fpath))
-        resubmit_offset = int(offset_fpath.read_text()) if offset_fpath.exists() else 0
+        resubmit_offset = load_resubmit_offset(config.output_jsonl_fpath)
         budget_used: Counter = Counter()
         terminal_keys: set = set()
         elapsed_by_key: Dict[Tuple, float] = {}
@@ -3099,6 +3104,7 @@ class RolloutCollectionHelper(BaseModel):
             # A fresh run must not inherit retry attempts or published metrics
             # from an older run that used the same output path.
             failures_fpath.unlink(missing_ok=True)
+            resubmit_offset_path_for(output_fpath).unlink(missing_ok=True)
             aggregate_metrics_path_for(output_fpath).unlink(missing_ok=True)
 
         batch_completed_rows: List[Dict] = []
