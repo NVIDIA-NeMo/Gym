@@ -382,7 +382,10 @@ class HarnessAgent(SimpleResponsesAPIAgent):
         with tempfile.TemporaryDirectory() as td:
             local = Path(td) / "out"
             await self._provider.download_file(handle, path, local)
-            lines = local.read_text().splitlines()
+            # Split on "\n" only: str.splitlines() also breaks on U+2028, U+2029, U+0085 and
+            # other separators that model_dump_json() leaves unescaped inside strings, so a
+            # response quoting such text would look like several rows.
+            lines = [line for line in local.read_text().split("\n") if line.strip()]
             if len(lines) != 1:
                 raise RuntimeError(f"expected one JSON row in {path}, got {len(lines)}")
             return json.loads(lines[0])
