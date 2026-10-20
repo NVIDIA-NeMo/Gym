@@ -393,6 +393,45 @@ def test_shared_venv_waits_for_installer_even_if_wrapper_dies(setup_component, i
     assert marker.is_file()
 
 
+@pytest.mark.parametrize("symlink_root", [False, True])
+def test_generated_setup_waits_for_active_installer(setup_component, tmp_path: Path, symlink_root: bool) -> None:
+    server_dir, config, venv = setup_component
+    if symlink_root:
+        alias = tmp_path / "venv root alias"
+        alias.symlink_to(Path(config["uv_venv_dir"]), target_is_directory=True)
+        config["uv_venv_dir"] = str(alias)
+    marker = venv / SETUP_COMPLETE_MARKER
+    install = _install_command(venv)
+    with _setup_process(_runner_command(venv, f"echo INSTALLING; read -r release; {install}")) as first:
+        _expect_output(first, "INSTALLING")
+        assert not marker.exists()
+        # Generate this command after uv has created the interpreter/activate
+        # files, while the first server is still installing dependencies.
+        command = setup_env_command(server_dir, config, "sibling") + " && echo STARTED"
+        with _setup_process(command) as second:
+            _expect_output(second, "Waiting for virtual environment setup:")
+            assert second.poll() is None
+            assert not marker.exists()
+            first.stdin.write("continue\n")
+            first.stdin.flush()
+            _expect_success(first)
+            _expect_success(second)
+    assert (venv / "attempts").read_text() == "install\n"
+    assert marker.is_file()
+
+
+def test_generated_setup_retries_unfinished_managed_venv(setup_component) -> None:
+    server_dir, config, venv = setup_component
+    venv.with_name(f"{venv.name}.setup.lock").touch()
+    assert not (venv / SETUP_COMPLETE_MARKER).exists()
+    uv = f'uv() {{ if [[ "$1" == pip ]]; then {_install_command(venv)}; fi; }}; export -f uv; '
+    command = uv + setup_env_command(server_dir, config, "retry")
+    with _setup_process(command) as process:
+        _expect_success(process)
+    assert (venv / "attempts").read_text() == "install\n"
+    assert (venv / SETUP_COMPLETE_MARKER).is_file()
+
+
 @pytest.mark.parametrize("command,code", [("exit 7", 7), ("kill -TERM $$", 128 + signal.SIGTERM)])
 def test_failed_forced_setup_invalidates_marker_and_can_retry(setup_component, command: str, code: int) -> None:
     _, _, venv = setup_component

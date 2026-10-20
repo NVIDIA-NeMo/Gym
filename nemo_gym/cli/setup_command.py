@@ -162,11 +162,19 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
     venv_python_fpath = venv_path / "bin/python"
     venv_activate_fpath = venv_path / "bin/activate"
     skip_venv_if_present = global_config_dict[SKIP_VENV_IF_PRESENT_KEY_NAME]
-    should_skip_venv_setup = bool(skip_venv_if_present) and venv_python_fpath.exists() and venv_activate_fpath.exists()
+    resolved_venv_path = venv_path.resolve()
+    setup_lock_path = resolved_venv_path.with_name(f"{resolved_venv_path.name}.setup.lock")
+    should_skip_venv_setup = (
+        bool(skip_venv_if_present)
+        and venv_python_fpath.exists()
+        and venv_activate_fpath.exists()
+        and not setup_lock_path.exists()
+    )
     activate_cmd = f"source {shlex.quote(str(venv_activate_fpath))}"
     if should_skip_venv_setup:
-        # Reuse existing environments, including prebuilt venvs without Gym's
-        # completion marker or writable setup-lock directories.
+        # Prebuilt environments need neither a completion marker nor a writable
+        # lock directory. Runtime-managed environments retain their setup lock:
+        # wait for installation and check readiness through the helper below.
         return f"cd {shlex.quote(str(dir_path))} && {activate_cmd}"
 
     # explicitly set python path if specified. In Google colab, gym env start fails due to uv pip install falls back to system python (/usr) without this and errors.
