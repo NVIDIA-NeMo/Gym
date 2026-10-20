@@ -121,7 +121,6 @@ VLLM_DECODE_ARGS=(
             ]
         }
     }'
-    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
     --compilation-config '{
         "cudagraph_mode": "FULL_DECODE_ONLY",
         "cudagraph_capture_sizes": [
