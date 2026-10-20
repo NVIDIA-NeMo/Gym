@@ -907,3 +907,76 @@ async def test_slow_inventory_does_not_block_scrapes_and_is_cancelled(monkeypatc
     assert samples == 3
     assert started.is_set() and cancelled.is_set()
     assert collector._inventory_task is None
+
+
+def prefill_counter_payload(values: dict[str, int]) -> str:
+    registry = CollectorRegistry()
+    for name, value in values.items():
+        Counter(f"vllm:prefill_{name}_total", "Batching interval inputs", registry=registry).inc(value)
+    reasons = Counter(
+        "vllm:prefill_underfilled_batches_by_reason_total", "Overlapping constraints", ["reason"], registry=registry
+    )
+    reasons.labels(reason="mamba_alignment").inc(values.get("underfilled_batches", 0))
+    return generate_latest(registry).decode()
+
+
+def test_prefill_interval_averages_use_deltas_and_omit_idle_or_reset_intervals():
+    collector = InferenceMetricsCollector(config())
+    values = dict(
+        completed_requests=2,
+        request_forwards=6,
+        request_tokens=620,
+        request_forward_observations=6,
+        batch_tokens=640,
+        batch_requests=7,
+        batches=4,
+        unused_token_slots=384,
+        underfilled_batches=2,
+    )
+    prefix = "vllm/replica0/"
+    first = collector.parse("replica0", prefill_counter_payload(dict.fromkeys(values, 0)), 10)
+    assert prefix + "prefill_forwards_per_request" not in first
+    result = collector.parse("replica0", prefill_counter_payload(values), 20)
+    assert result[prefix + "prefill_forwards_per_request"] == pytest.approx(3)
+    assert result[prefix + "prefill_tokens_per_request_forward"] == pytest.approx(620 / 6)
+    assert result[prefix + "prefill_tokens_per_forward"] == 160
+    assert result[prefix + "prefill_requests_per_forward"] == pytest.approx(1.75)
+    assert result[prefix + "prefill_batch_token_fill_ratio"] == 0.625
+    assert result[prefix + "prefill_underfilled_batch_fraction"] == 0.5
+    assert result[prefix + "prefill_underfill_reason_fraction/reason/mamba_alignment"] == 0.5
+    assert not any("bucket" in key for key in result)
+    idle = collector.parse("replica0", prefill_counter_payload(values), 30)
+    assert prefix + "prefill_tokens_per_forward" not in idle
+    reset = collector.parse("replica0", prefill_counter_payload(dict.fromkeys(values, 0)), 40)
+    assert prefix + "prefill_tokens_per_forward" not in reset
+
+
+async def test_prefill_global_average_pools_counts_instead_of_averaging_engine_means(monkeypatch):
+    cfg = InferenceMetricsConfig(
+        enabled=True,
+        endpoints={
+            "a": "http://localhost:8000/metrics",
+            "b": "http://localhost:8001/metrics",
+        },
+    )
+    collector = InferenceMetricsCollector(cfg)
+    stop = asyncio.Event()
+    published = {}
+
+    async def scrape(replica, url):
+        tokens, batches = (100, 1) if replica == "a" else (1800, 9)
+        return {
+            f"vllm/{replica}/prefill_batch_tokens_per_second": tokens,
+            f"vllm/{replica}/prefill_batches_per_second": batches,
+            f"vllm/{replica}/prefill_tokens_per_forward": tokens / batches,
+        }
+
+    def publish(metrics):
+        published.update(metrics)
+        stop.set()
+
+    monkeypatch.setattr(collector, "scrape", scrape)
+    monkeypatch.setattr(metrics_module, "export_metrics", publish)
+    await collector.run(stop)
+    assert published["vllm/total/prefill_tokens_per_forward"] == 190
+    assert "vllm/mean/prefill_tokens_per_forward" not in published

@@ -32,6 +32,17 @@ from nemo_gym.server_utils import request
 
 
 logger = logging.getLogger(__name__)
+PREFILL_INTERVAL_RATIOS = {
+    "prefill_forwards_per_request": ("request_forwards", "completed_requests"),
+    "prefill_tokens_per_request_forward": ("request_tokens", "request_forward_observations"),
+    "prefill_tokens_per_forward": ("batch_tokens", "batches"),
+    "prefill_requests_per_forward": ("batch_requests", "batches"),
+    "prefill_underfilled_batch_fraction": ("underfilled_batches", "batches"),
+}
+PREFILL_DERIVED_METRICS = set(PREFILL_INTERVAL_RATIOS) | {
+    "prefill_batch_token_fill_ratio",
+    "prefill_underfill_reason_fraction",
+}
 MOONCAKE_STORAGE_GAUGES = {"master_allocated_bytes", "master_total_capacity_bytes"}
 MOONCAKE_EVICTION_GAUGES = {
     "master_eviction_memory_bytes",
@@ -211,7 +222,23 @@ class InferenceMetricsCollector:
 
     @staticmethod
     def add_derived_metrics(metrics: dict[str, float], prefix: str) -> None:
-        """Derive interval cache hit percentages."""
+        """Derive interval cache percentages and observation-weighted prefill averages."""
+        for name, (numerator, denominator) in PREFILL_INTERVAL_RATIOS.items():
+            total = metrics.get(f"{prefix}prefill_{numerator}_per_second")
+            count = metrics.get(f"{prefix}prefill_{denominator}_per_second")
+            if total is not None and count is not None and count > 0:
+                metrics[f"{prefix}{name}"] = total / count
+        tokens = metrics.get(f"{prefix}prefill_batch_tokens_per_second")
+        unused = metrics.get(f"{prefix}prefill_unused_token_slots_per_second")
+        if tokens is not None and unused is not None and tokens + unused > 0:
+            metrics[f"{prefix}prefill_batch_token_fill_ratio"] = tokens / (tokens + unused)
+        batches = metrics.get(f"{prefix}prefill_batches_per_second")
+        if batches is not None and batches > 0:
+            reason_prefix = f"{prefix}prefill_underfilled_batches_by_reason_per_second/reason/"
+            for key, value in list(metrics.items()):
+                if key.startswith(reason_prefix):
+                    reason = key.removeprefix(reason_prefix)
+                    metrics[f"{prefix}prefill_underfill_reason_fraction/reason/{reason}"] = value / batches
         for key, value in list(metrics.items()):
             query_prefix = f"{prefix}prefix_cache_queries_per_second"
             if key == query_prefix or key.startswith(query_prefix + "/"):
@@ -344,6 +371,8 @@ class InferenceMetricsCollector:
                     values = [metrics[metric] for metrics in replica_metrics]
                     total = sum(values)
                     name = metric.split("/", 1)[0]
+                    if namespace == "vllm" and name in PREFILL_DERIVED_METRICS:
+                        continue  # Recompute from pooled sums/counts; never sum or average ratios.
                     if name == "cache_inventory":
                         continue  # Keep per-engine inventories; hashes are not globally additive.
                     nonadditive = namespace == "sglang" and name in SGLANG_MEAN_GAUGES
