@@ -96,7 +96,4 @@ sandbox:
       # team: my-team
       # user: my-user
       # workload: my-benchmark
-      # Cluster that creates the sandboxes. null defaults to SLURM_CLUSTER_NAME; set it for
-      # runs outside Slurm (for example, a Kubernetes driver pod).
-      cluster: null
       # run: my-run-id
