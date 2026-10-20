@@ -131,7 +131,7 @@ class _Client(ServerClient):
             payload["agent_session_id"] = body["agent_session_id"]
         elif url_path == "/close_session":
             payload["resources_session_id"] = body["resources_session_id"]
-        return _Response(payload, response.headers)
+        return type(response)(payload, response.headers)
 
     def _resolve_base_url(self, server_name: str) -> str:
         return f"http://{server_name}:8000"
@@ -1063,3 +1063,88 @@ async def test_verify_says_that_the_resources_session_is_closed_afterwards() -> 
     # So the Resources Server keeps the session tracked until the close, which then runs its close handler.
     assert verify_call["headers"] == {"x-ng-checkpoint-close-follows": "1"}
     assert paths.index("/close_session") > paths.index("/verify")
+
+
+@pytest.mark.parametrize("outcome", ["completed", "judge_failure", "exception", "timeout"])
+async def test_verifier_evidence_reaches_collector_through_result_or_failure(outcome, tmp_path):
+    from fastapi.testclient import TestClient
+
+    from nemo_gym.base_resources_server import BaseResourcesServerConfig, BaseVerifyResponse, SimpleResourcesServer
+    from nemo_gym.judge import JudgeError
+    from nemo_gym.rollout_collection import _attach_trajectory_record, _episode_record
+
+    class Resources(SimpleResourcesServer):
+        async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+            if outcome == "judge_failure":
+                raise JudgeError("judge unavailable")
+            if outcome == "exception":
+                raise RuntimeError("scoring broke")
+            if outcome == "timeout":
+                raise TimeoutError("grading deadline")
+            return BaseVerifyResponse(**body.model_dump(), reward=0.0)
+
+    environment, client = _environment_server()
+    resources_client = MagicMock(spec=ServerClient)
+    resources_client.global_config_dict = {
+        "observability_enabled": True,
+        "model_call_capture_dir": str(tmp_path),
+    }
+    resources = Resources(
+        config=BaseResourcesServerConfig(name="resources", host="resources", port=8000, entrypoint="app.py"),
+        server_client=resources_client,
+    )
+    http_response = TestClient(resources.setup_webserver()).post(
+        "/ng-rollout/rollout-a2/verify",
+        json={"responses_create_params": {"input": "task"}, "response": _agent_response().model_dump(mode="json")},
+    )
+
+    class VerifyResponse(_Response):
+        ok = http_response.is_success
+        status = http_response.status_code
+        content = SimpleNamespace(read=AsyncMock(return_value=http_response.content))
+
+        def raise_for_status(self):
+            if not self.ok:
+                raise ClientResponseError(
+                    request_info=SimpleNamespace(
+                        url="http://resources/verify", real_url="http://resources/verify", method="POST", headers={}
+                    ),
+                    history=(),
+                    status=self.status,
+                    message="verification failed",
+                )
+
+    client.responses[4] = VerifyResponse(http_response.json())
+    episode = await environment.run_request(_request())
+    assert (episode.failure is not None) == (outcome in {"exception", "timeout"})
+    if episode.result is not None:
+        assert episode.result.reward == 0.0
+        assert episode.result.mask_sample == (outcome == "judge_failure")
+    else:
+        assert episode.failure.stage == "verification"
+        assert episode.failure.terminal is False  # HTTP 500 remains retryable.
+
+    record = _episode_record(episode.model_dump(mode="json"))
+    legacy_record = SingleAgentTurnLegacyEnvironmentServer(
+        config=environment.config, server_client=client
+    )._legacy_result(episode)
+    assert legacy_record["ng_verifier_invocations"] == record["ng_verifier_invocations"]
+    _attach_trajectory_record({"_ng_task_index": 0, "_ng_rollout_index": 0}, record)
+    (invocation,) = record["ng_trajectory"]["verifier_invocations"]
+    expected_status = {
+        "completed": "completed",
+        "judge_failure": "failed",
+        "exception": "failed",
+        "timeout": "incomplete",
+    }
+    assert invocation["status"] == expected_status[outcome]
+    expected_kind = {
+        "completed": None,
+        "judge_failure": "judge_failed",
+        "exception": "verifier_error",
+        "timeout": "transport_timeout",
+    }
+    assert invocation["failure_kind"] == expected_kind[outcome]
+    assert invocation["model_calls"] == []
+    assert "ng_verifier_invocations" not in record  # Only the canonical trajectory is persisted.
+    assert list(tmp_path.iterdir()) == []  # Resources never writes verifier sidecars.

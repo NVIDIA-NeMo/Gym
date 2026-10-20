@@ -17,7 +17,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Optional, TypeVar, get_args
 
 from fastapi import FastAPI, Request
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, PrivateAttr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, PrivateAttr, TypeAdapter, field_validator
 from starlette.middleware import Middleware
 
 
@@ -41,12 +41,14 @@ from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.failure_kinds import validate_failure_kind
 from nemo_gym.judge import judge_failsafe
+from nemo_gym.observability.verifiers import observe_verifier
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.rollout_correlation import RolloutContextMiddleware
+from nemo_gym.rollout_observability import VerifierInvocation
 from nemo_gym.sandbox.access import SandboxAccess
 from nemo_gym.server_utils import SESSION_ID_KEY, BaseRunServerInstanceConfig, BaseServer, SimpleServer
 from nemo_gym.telemetry.endpoints import traced_verify_endpoint
@@ -141,6 +143,7 @@ class BaseVerifyRequest(BaseRunRequest):
 
 class BaseVerifyResponse(BaseVerifyRequest):
     reward: float
+    ng_verifier_invocations: list[VerifierInvocation] = Field(default_factory=list, exclude_if=lambda value: not value)
 
     mask_sample: bool = Field(
         default=False,
@@ -318,10 +321,14 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         """Register the episode routes ``/seed_session``, ``/close_session`` and ``/verify``."""
         app.post("/seed_session")(self.seed_session)
         app.post("/close_session")(self.close_resources_session)
+        config = getattr(self.server_client, "global_config_dict", {})
         # Wrapped outside judge_failsafe so the span covers the failsafe's own handling too.
         app.post("/verify")(
             traced_verify_endpoint(
-                judge_failsafe(self.verify),
+                observe_verifier(
+                    judge_failsafe(self.verify),
+                    enabled=TypeAdapter(bool).validate_python(config.get("observability_enabled", False)),
+                ),
                 static_attributes={"nemo.gym.server.name": self.config.name},
             )
         )

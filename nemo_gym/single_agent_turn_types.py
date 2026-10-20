@@ -14,7 +14,7 @@ from nemo_gym.episode_types import (
     EpisodeFailure,
 )
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_observability import AgentObservationBundle
+from nemo_gym.rollout_observability import AgentObservationBundle, VerifierInvocation
 
 
 class SingleAgentTurnTaskInput(BaseModel):
@@ -63,6 +63,7 @@ class SingleAgentTurnFailure(EpisodeFailure):
 
     partial_response: NeMoGymResponse | None = None
     agent_observations: AgentObservationBundle | None = None
+    verifier_invocations: list[VerifierInvocation] | None = None
 
 
 class SingleAgentTurnRequest(BaseEpisodeRequest[SingleAgentTurnTaskInput]):

@@ -39,6 +39,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from nemo_gym.rollout_correlation import VERIFIER_INVOCATION_HEADER, current_verifier_invocation_id
 from nemo_gym.server_utils import ServerClient, get_response_json, raise_for_status
 
 
@@ -82,10 +83,18 @@ async def call_judge(
     ``/v1/chat/completions``), paired with the matching ``response_model``. The
     status check comes before parsing so an auth or server error reports the HTTP
     failure itself, not a validation error against the error body.
+    The enclosing verify execution supplies the invocation identity; all its judge
+    calls and retries share that identity. Standalone calls do not invent a verifier execution.
     """
 
     async def _call() -> ResponseT:
-        http_response = await server_client.post(server_name=server_name, url_path=url_path, json=json)
+        invocation_id = current_verifier_invocation_id()
+        http_response = await server_client.post(
+            server_name=server_name,
+            url_path=url_path,
+            json=json,
+            headers={VERIFIER_INVOCATION_HEADER: invocation_id} if invocation_id else {},
+        )
         await raise_for_status(http_response)
         return response_model.model_validate(await get_response_json(http_response))
 
