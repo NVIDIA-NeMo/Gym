@@ -99,7 +99,7 @@ class Sandbox:
         raise AssertionError("This provider supports exec only; no PTY API")
 
     async def run_exec(self, command, **kwargs):
-        if "--receipt" in command and "process_supervisor.py" in command:
+        if "--receipt" in command and "process_supervisor" in command:
             return await self.launch(command=command, **kwargs)
         if "stop.request" in command:
             await self.request_stop()
@@ -1271,11 +1271,11 @@ async def test_close_keeps_captured_events_after_sandbox_release(setup, tmp_path
         await agent.seed_agent_session(request, body)
         state = agent._session_records[body.agent_session_id].state
         directory = state.session.session_dir
-        assert f"{directory}/process_supervisor.py" not in sandbox.files
+        assert f"{directory}/process_supervisor" not in sandbox.files
         sandbox.blocked = True
         task = asyncio.create_task(agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task")))
         await asyncio.wait_for(sandbox.started.wait(), 2)
-        assert f"{directory}/process_supervisor.py" in sandbox.files
+        assert f"{directory}/process_supervisor" in sandbox.files
 
         async def release():
             assert state.session.cleanup["cleanup_confirmed"] is True

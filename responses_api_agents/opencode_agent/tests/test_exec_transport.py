@@ -49,7 +49,7 @@ class ExecOnlySandbox:
             if self.worker_pid is not None:
                 with pytest.raises(ProcessLookupError):
                     os.kill(int(self.worker_pid.read_text()), 0)
-        launch = "--receipt" in command and "process_supervisor.py" in command
+        launch = "--receipt" in command and "process_supervisor" in command
         if launch:
             self.deadline = timeout_s
             self.delayed_command = command
@@ -87,7 +87,7 @@ def make_session(tmp_path):
         runtime=str(tmp_path / "runtime"),
     )
     shutil.copyfile(sandbox_runner.__file__, directory / "sandbox_runner.py")
-    assert not (directory / "process_supervisor.py").exists()
+    assert not (directory / "process_supervisor").exists()
     database = directory / "data/opencode/opencode.db"
     database.parent.mkdir(parents=True)
     with sqlite3.connect(database) as connection:

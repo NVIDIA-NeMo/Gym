@@ -27,6 +27,9 @@ from nemo_gym.sandbox.utils import read_text
 
 
 LOG = logging.getLogger(__name__)
+# Where adapters upload a standard-library runner, relative to session_dir. Without a
+# .py suffix, a `pkill -f '\.py'` in the task cannot match the runner's command line.
+RUNNER_FILE = "sandbox_runner"
 
 
 def _reuse_or_start[T](
@@ -39,10 +42,17 @@ def _reuse_or_start[T](
 
 @dataclass(frozen=True, kw_only=True)
 class SandboxCommand:
-    """Harness argv and the installed interpreter used to launch its supervisor."""
+    """Harness argv and the installed interpreter used to launch its supervisor.
+
+    ``hide_runner`` runs an argv that starts with ``python`` under a neutral process
+    name, as the supervisor always is, so that ``pkill python3`` in the task cannot
+    stop it. Set it only for a runner that needs nothing beyond the standard library:
+    the renamed interpreter is the base interpreter, outside any virtual environment.
+    """
 
     argv: list[str]
     python: str
+    hide_runner: bool = False
 
 
 @dataclass(kw_only=True)
@@ -151,6 +161,7 @@ class SandboxSession[Artifacts]:
                 timeout=timeout,
                 cleanup_timeout=cleanup_timeout,
                 python=command.python,
+                hide_runner=command.hide_runner,
             )
             self.launch_started = True
             self._exec_task = asyncio.create_task(
