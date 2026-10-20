@@ -18,7 +18,9 @@ The integration is developed and maintained by Axolotl. Refer to Axolotl's integ
 - A compatible NeMo Gym checkout and training dataset
 
 <Warning>
-The revisions checked for this page were [Axolotl `7419d92bacc8`](https://github.com/axolotl-ai-cloud/axolotl/commit/7419d92bacc815c8e2a53bd39b56e1cb1f82f91b) and [NeMo Gym `4ba2d4f87ab6`](https://github.com/NVIDIA-NeMo/Gym/commit/4ba2d4f87ab690113a23106885a9a826fbfb4744). Axolotl's bundled examples at that revision reference `resources_servers/reasoning_gym/data/train_mini_sudoku.jsonl`, which is not present in the NeMo Gym revision. This pair is not validated end to end; confirm a supported version pair and dataset with Axolotl before training.
+The Sudoku examples require a generated dataset; `train_mini_sudoku.jsonl` is not bundled with NeMo Gym. See Gym's [Reasoning Gym dataset preparation instructions](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/reasoning_gym#dataset-prep).
+
+With [Axolotl `4a62cbcab455`](https://github.com/axolotl-ai-cloud/axolotl/commit/4a62cbcab455fab978577b14d44ff29d99df6c49) and [NeMo Gym `bedf56450097`](https://github.com/NVIDIA-NeMo/Gym/commit/bedf5645009751591a17747bcf7a3b2b172f4708), generated Mini Sudoku data passed through Axolotl's dataset loader and reward function to a running Gym verifier. A correct answer received reward 1 and an invalid answer received reward 0. This checks the single-turn verification path, not a complete GRPO training run; model training and multi-turn rollouts remain unvalidated for this revision pair.
 </Warning>
 
 ## References
