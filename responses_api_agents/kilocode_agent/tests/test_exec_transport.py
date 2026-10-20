@@ -116,8 +116,13 @@ async def test_exec_only_supervision_reaps_detached_child(tmp_path, ending):
         assert state.session.cleanup["cleanup_confirmed"] is True
         if ending == "timeout":
             assert state.session.cleanup["timed_out"] is True
-        with pytest.raises(ProcessLookupError):
-            os.kill(int((workdir / "child.pid").read_text()), 0)
+        child_pid = int((workdir / "child.pid").read_text())
+        if ending == "natural":
+            # Natural CLI exit has no adoption cutoff; the sandbox owner tears down detached tools.
+            os.kill(child_pid, 0)
+        else:
+            with pytest.raises(ProcessLookupError):
+                os.kill(child_pid, 0)
         assert provider.cancelled_launch is False
         assert provider.deadline > deadline + 3 * 1
         await state.close(timeout=3)
@@ -125,8 +130,15 @@ async def test_exec_only_supervision_reaps_detached_child(tmp_path, ending):
         assert provider.disconnected
         assert not Path(state.session.session_dir).exists()
     finally:
-        if not state.session.closed:
-            await state.close(timeout=3)
+        try:
+            if not state.session.closed:
+                await state.close(timeout=3)
+        finally:
+            if (workdir / "child.pid").exists():
+                try:
+                    os.kill(int((workdir / "child.pid").read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
 
 async def test_lost_launch_is_fenced_even_after_directory_retirement(tmp_path):
@@ -144,25 +156,24 @@ async def test_lost_launch_is_fenced_even_after_directory_retirement(tmp_path):
     assert not Path(state.session.session_dir).exists()
 
 
-async def test_failed_receipt_keeps_files_and_can_retry(tmp_path):
+async def test_terminal_failed_receipt_releases_borrowed_session(tmp_path):
     state, provider, _ = make_session(tmp_path)
     state.session.launch_started = True
     receipt = {
         "return_code": 1,
         "timed_out": False,
         "cleanup_confirmed": False,
-        "error": "descendants remain",
+        "error": "harness termination unconfirmed",
     }
     path = Path(state.session.session_dir) / "cleanup.json"
     path.write_text(json.dumps(receipt))
-    with pytest.raises(RuntimeError, match="cleanup was not confirmed"):
-        await state.close(timeout=3)
-    assert not provider.disconnected
-    assert path.exists()
-    receipt.update(cleanup_confirmed=True, error=None)
-    path.write_text(json.dumps(receipt))
     await state.close(timeout=3)
     assert provider.disconnected
+    assert state.session.closed
+    assert state.session.cleanup is None
+    assert state.session.termination_error.receipt == receipt
+    assert state.session.capture_error is state.session.termination_error
+    assert not path.exists()
 
 
 async def test_confirmed_cleanup_cancels_stuck_transport(tmp_path):
