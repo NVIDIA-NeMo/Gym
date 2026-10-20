@@ -65,7 +65,7 @@ SCENARIOS = (
     ),
     Scenario(
         "model_error",
-        "A terminal model HTTP 400 with an error body and no response ID.",
+        "A terminal model HTTP 400 is reported to the EnvironmentServer with its error and retained evidence.",
         evidence=("TE-1", "TE-2", "TE-4", "TE-7", "TE-8"),
         tool_steps=0,
         http_errors=(400,),
@@ -74,8 +74,9 @@ SCENARIOS = (
         steps=False,  # The first request fails permanently; no model decision is returned.
         health_expectations={
             "rollout_ended_on_failed_model_call": "unhealthy",
-            # No successful decision or provider usage exists to reconcile.
-            "rollout_token_count_mismatch": "unobserved",
+            # Aggregate usage counts finished responses: an initial rejection must
+            # retain a known zero total, even though the failed attempt has no usage.
+            "rollout_token_count_mismatch": "healthy",
         },
     ),
     Scenario("verifier_failure", "A completed trajectory receives a known zero reward.", expected_reward=0.0),

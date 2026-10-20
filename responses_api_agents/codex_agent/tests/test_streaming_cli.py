@@ -14,8 +14,8 @@ from fastapi.testclient import TestClient
 
 from nemo_gym.responses_streaming import synthesize_responses_sse
 from responses_api_agents.codex_agent.app import parse_exec_jsonl, toml_dumps
-from responses_api_agents.codex_agent.tests.test_native_sessions import close_body, seed
-from responses_api_agents.codex_agent.tests.test_native_sessions import setup as setup
+from responses_api_agents.codex_agent.tests.test_sandbox_sessions import close_body, seed
+from responses_api_agents.codex_agent.tests.test_sandbox_sessions import setup as setup
 
 
 @pytest.mark.parametrize("recover", [False, True])

@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+  - resources_servers/instruction_following/configs/instruction_following.yaml
+
+indic_ifeval_instruction_following:
+  # Keep the English verifier available when both benchmarks are selected.
+  _copy: instruction_following
+  resources_servers:
+    instruction_following:
+      description: IndicIFEval-Trans using the upstream language-specific checkers.
+      instruction_backend: indicifeval_trans
+
+indic_ifeval_instruction_following_simple_agent:
+  _inherit_from: instruction_following_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: indic_ifeval_instruction_following
+      datasets:
+        - name: indic_ifeval_trans
+          type: benchmark
+          jsonl_fpath: benchmarks/indic/ifeval/data/ifeval_benchmark.jsonl
+          prepare_script: benchmarks/indic/ifeval/prepare.py
+          num_repeats: 1
+          license: Creative Commons Attribution 4.0 International
+        - name: example
+          type: example
+          jsonl_fpath: benchmarks/indic/ifeval/data/example.jsonl
+          num_repeats: 1
+          license: Creative Commons Attribution 4.0 International
+
+indic_ifeval_instruction_following_environment_server:
+  _inherit_from: instruction_following_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: indic_ifeval_instruction_following_simple_agent

@@ -101,7 +101,10 @@ class StructuredOutputsVerifyResponse(BaseVerifyResponse):
 
 
 class StructuredOutputsResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
+    # Each verification validates the response against the request's schema: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     config: StructuredOutputsResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:

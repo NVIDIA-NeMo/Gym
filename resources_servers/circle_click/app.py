@@ -53,7 +53,6 @@ class CircleClickVerifyResponse(BaseVerifyResponse):
 
 
 class CircleClickResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: CircleClickConfig
 
     def setup_webserver(self) -> FastAPI:

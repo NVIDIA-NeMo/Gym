@@ -23,6 +23,7 @@ import shutil
 import signal
 import tempfile
 from asyncio import Semaphore
+from contextlib import AsyncExitStack
 from copy import deepcopy
 from pathlib import Path, PurePosixPath
 from time import time
@@ -33,6 +34,7 @@ from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field, PrivateAttr, model_validator
 
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
+from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
 from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
@@ -64,8 +66,10 @@ from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.server_utils import get_global_config_dict, get_response_json, raise_for_status
 from nemo_gym.skills import stage_skills
+from responses_api_agents.codex_agent.observability import read_codex_observations
 from responses_api_agents.codex_agent.sandbox import CodexSandboxSession
 from responses_api_agents.codex_agent.setup_codex import ensure_codex
+from responses_api_agents.codex_agent.transport import rate_limit_proxy
 
 
 LOG = logging.getLogger(__name__)
@@ -445,10 +449,11 @@ class CodexAgentVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
     turns_used: int = 0
     finished_naturally: bool = False
+    agent_timed_out: bool = False
+    ng_agent_observations: Optional[AgentObservationBundle] = None
 
 
 class CodexAgent(SimpleResponsesAPIAgent):
-    ray_enabled = False
     config: CodexAgentConfig
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -671,6 +676,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             self._resolve_call_base_url(state.request.episode_id.capture_key), developer_instructions=system
         )
         await state.upload_text("home/.codex/config.toml", toml_dumps(config))
+        timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
         command = self._build_command("-", state.session.workdir)
         command[0:1] = [
             f"{state.runtime}/node/bin/node",
@@ -682,21 +688,17 @@ class CodexAgent(SimpleResponsesAPIAgent):
             "prompt": prompt,
             "cwd": state.session.workdir,
             "env": {
-                "HOME": f"{state.session.session_dir}/home",
                 "CODEX_HOME": f"{state.session.session_dir}/home/.codex",
-                "XDG_CACHE_HOME": f"{state.session.session_dir}/home/.cache",
                 # Gym receives the calls; never copy the direct OpenAI credential into this path.
                 "OPENAI_API_KEY": "gym",  # pragma: allowlist secret
             },
-            "timeout": self.config.timeout,
-            "cleanup_timeout": self.config.session_close_timeout_seconds / 3,
         }
         raw = ""
         failure = None
         try:
             async with self.sem:
                 raw = await state.execute(
-                    payload, timeout=self.config.timeout, close_timeout=self.config.session_close_timeout_seconds
+                    payload, timeout=timeout, close_timeout=self.config.session_close_timeout_seconds
                 )
         except BaseException as exc:
             failure = exc
@@ -908,6 +910,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 "harness_execution": "sandbox",
                 **({"harness_hostname": runtime.hostname, "harness_pid": str(runtime.pid)} if runtime else {}),
                 "codex_version": self.config.codex_version,
+                AGENT_TIMEOUT_METADATA_KEY: str(timeout),
             },
         )
 
@@ -1016,7 +1019,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
     def _build_command(self, instruction: str, cwd: str) -> list[str]:
         """Construct the ``codex exec`` argv.
 
-        ``--json`` emits machine-readable JSONL events; ``--ephemeral`` skips session persistence;
+        ``--json`` emits machine-readable JSONL events; ``--ephemeral`` skips session persistence
+        unless `_run_codex` needs temporary native evidence for a correlated rollout.
         ``--skip-git-repo-check`` allows running in the per-rollout scratch dir. Sandboxing and
         approvals are pinned in the generated config.toml (``approval_policy = "never"``), not argv.
         The ``--`` separator keeps prompts from being parsed as flags or subcommands.
@@ -1040,13 +1044,16 @@ class CodexAgent(SimpleResponsesAPIAgent):
         mcp_servers: Optional[dict[str, Any]] = None,
         skills_path: Optional[str] = None,
         rollout_id: Optional[str] = None,
-    ) -> tuple[str, str]:
-        """Run ``codex exec --json`` and return (stdout, model_name).
+        *,
+        timeout: float | None = None,
+    ) -> tuple[str, str, Optional[AgentObservationBundle], bool]:
+        """Run ``codex exec --json`` and return (stdout, model_name, observations, timed_out).
 
         When ``rollout_id`` is set and a model server is configured, the per-rollout capture prefix
         is applied to the provider base_url so the CLI's streaming /v1/responses calls correlate to
         this rollout.
         """
+        timeout = self.config.timeout if timeout is None else timeout
         await self._ensure_local_runtime()
         base_url = self._resolve_call_base_url(rollout_id)
         # Report the name the config actually pins (so response.model matches what Codex was told);
@@ -1055,9 +1062,19 @@ class CodexAgent(SimpleResponsesAPIAgent):
 
         config = self._build_config(base_url, developer_instructions=system_prompt, mcp_servers=mcp_servers)
 
+        if rollout_id is not None and self.config.model_server is not None:
+            config["model_providers"]["gym"]["http_headers"] = {
+                **config["model_providers"]["gym"].get("http_headers", {}),
+                "x-session-id": rollout_id,
+            }
         codex_home: Optional[Path] = None
         scratch_cwd: Optional[str] = None
+        stack = AsyncExitStack()
         try:
+            if rollout_id is not None and self.config.model_server is not None:
+                config["model_providers"]["gym"]["base_url"] = await stack.enter_async_context(
+                    rate_limit_proxy(base_url, rollout_id)
+                )
             # Inside the try so a bad skills_path (raising in stage_skills) still cleans up the
             # partially-created home in the finally rather than leaking it per failing request.
             codex_home = self._setup_codex_home(config, skills_path=skills_path)
@@ -1073,8 +1090,11 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 "OPENAI_API_KEY": self.config.openai_api_key or "local",  # pragma: allowlist secret
             }
 
+            command = self._build_command(instruction, cwd)
+            if rollout_id is not None:
+                command.remove("--ephemeral")
             proc = await asyncio.create_subprocess_exec(
-                *self._build_command(instruction, cwd),
+                *command,
                 stdin=asyncio.subprocess.DEVNULL,  # codex appends piped stdin to the prompt and blocks on it
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -1083,20 +1103,27 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 # binary) must die with it, or it keeps the stdout pipe open past the kill below.
                 start_new_session=True,
             )
+            timed_out = False
             try:
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.config.timeout)
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             except asyncio.TimeoutError:
                 _kill_process_group(proc)
-                await proc.communicate()
-                LOG.warning("codex timed out after %ds", self.config.timeout)
-                return "", model
+                stdout, stderr = await proc.communicate()
+                timed_out = True
+                LOG.warning("codex timed out after %ss", timeout)
 
             if proc.returncode not in (0, None):
                 LOG.warning("codex exited %d: %s", proc.returncode, stderr.decode(errors="replace")[:500])
 
             LOG.debug("codex stdout (%d chars): %s", len(stdout), stdout[:2000].decode(errors="replace"))
-            return stdout.decode(errors="replace"), model
+            observations = None
+            if rollout_id is not None:
+                observations = read_codex_observations(
+                    codex_home, rollout_id, returncode=proc.returncode, timed_out=timed_out
+                )
+            return stdout.decode(errors="replace"), model, observations, timed_out
         finally:
+            await stack.aclose()
             if codex_home is not None:
                 shutil.rmtree(codex_home, ignore_errors=True)
             if scratch_cwd is not None:
@@ -1149,13 +1176,15 @@ class CodexAgent(SimpleResponsesAPIAgent):
         user_message, input_system = _extract_instruction(body.input)
         system_parts = [p for p in [self.config.system_prompt, input_system] if p]
         system_prompt = "\n\n".join(system_parts) if system_parts else None
+        timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
 
-        stdout, model_name = await self._run_codex(
+        stdout, model_name, observations, timed_out = await self._run_codex(
             user_message,
             system_prompt=system_prompt,
             mcp_servers=mcp_servers,
             skills_path=skills_path,
             rollout_id=rollout_id,
+            timeout=timeout,
         )
         output_items, usage = parse_exec_jsonl(stdout)
 
@@ -1180,7 +1209,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
         input_tokens = usage.get("input_tokens", 0)
         output_tokens = usage.get("output_tokens", 0)
 
-        return NeMoGymResponse(
+        response = NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
             model=model_name,
@@ -1200,7 +1229,14 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 ),
                 total_tokens=input_tokens + output_tokens,
             ),
+            metadata={AGENT_TIMEOUT_METADATA_KEY: str(timeout)},
         )
+
+        if observations is not None:
+            response = response.model_copy(update={"_ng_agent_observations": observations.model_dump(mode="json")})
+        if timed_out:
+            response = response.model_copy(update={"_ng_agent_timed_out": True})
+        return response
 
     async def responses(
         self,
@@ -1256,6 +1292,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 rollout_id=rollout_id,
             )
             agent_resp_json = agent_resp.model_dump(mode="json")
+            observations = agent_resp_json.pop("_ng_agent_observations", None)
+            timed_out = bool(agent_resp_json.pop("_ng_agent_timed_out", False))
 
             verify_resp = await self.server_client.post(
                 server_name=self.config.resources_server.name,
@@ -1273,10 +1311,17 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 if getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant"
             )
             last = gym_resp.output[-1] if gym_resp.output else None
-            naturally = getattr(last, "type", None) == "message" and getattr(last, "role", None) == "assistant"
+            # A timed-out run can still end in an assistant message, so the last item alone is not enough.
+            naturally = (
+                not timed_out
+                and getattr(last, "type", None) == "message"
+                and getattr(last, "role", None) == "assistant"
+            )
 
             return CodexAgentVerifyResponse.model_validate(
-                verify_json | {"turns_used": turns, "finished_naturally": naturally}
+                verify_json
+                | {"turns_used": turns, "finished_naturally": naturally, "agent_timed_out": timed_out}
+                | ({"ng_agent_observations": observations} if observations is not None else {})
             )
 
 

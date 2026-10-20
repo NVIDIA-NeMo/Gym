@@ -48,6 +48,7 @@ from nemo_gym.rollout_observability import (
     TrajectoryTurn,
 )
 from responses_api_agents.nooa_agent.gym_llm import GymModelCall, RolloutLLMState
+from responses_api_agents.nooa_agent.termination import NOOATerminationReason
 
 
 def _json_output(value: Any) -> str:
@@ -162,7 +163,10 @@ class GymTraceHooks:
 
     def after_code_execution(self, *, context: Any, result: Any, exception: BaseException | None, **_: Any) -> None:
         if isinstance(context, _ToolCall):
-            context.observation.output = result
+            # ExecutionResult retains live REPL locals, including imported modules.
+            # Snapshot its serializable evidence before locals change or projection
+            # deep-copies the observation; Pydantic excludes interpreter-only fields.
+            context.observation.output = _json_output(result)
             self._finish_tool(context, exception)
 
     def before_tool_execution(
@@ -260,7 +264,9 @@ class GymTraceHooks:
                     )
                 )
             else:
-                record = event.observation.model_copy(deep=True)
+                # NOOA execution results can retain module objects in their REPL locals.
+                # Copy the observation shell; output is replaced with serialized evidence below.
+                record = event.observation.model_copy()
                 invocation = invocations[record.invocation_id]
                 record.output = visible_outputs.get((record.invocation_id, record.tool_call_id), record.output)
                 if not any(
@@ -302,6 +308,7 @@ class GymTraceHooks:
             gaps=list(state.gaps),
         )
         usages = [call.response.usage if call.response is not None else None for call in state.calls]
+        latest_response = next((call.response for call in reversed(state.calls) if call.response is not None), None)
         episode = AgentEpisode(
             response=NeMoGymResponse(
                 id=f"nooa-{rollout_id}",
@@ -309,6 +316,7 @@ class GymTraceHooks:
                 model=create_params.model or default_model,
                 object="response",
                 output=output,
+                incomplete_details=latest_response.incomplete_details if latest_response is not None else None,
                 tools=create_params.tools,
                 tool_choice=create_params.tool_choice,
                 parallel_tool_calls=create_params.parallel_tool_calls,
@@ -375,7 +383,7 @@ def finalize_observation_gaps(
     observations: AgentObservationBundle,
     *,
     extra_gaps: list[ObservationGap] | None = None,
-    termination_reason: str | None = None,
+    termination_reason: NOOATerminationReason | None = None,
     termination_error: str | None = None,
 ) -> AgentObservationBundle:
     """Merge lifecycle-only observation gaps onto the Gym projection."""

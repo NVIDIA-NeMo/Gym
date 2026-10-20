@@ -102,6 +102,7 @@ from nemo_gym.telemetry.setup import (
     shutdown_telemetry,
     telemetry_config_from_global_config,
 )
+from nemo_gym.telemetry.startup import STARTUP_SETUP_DONE_NS_ENV, SupervisorStartup
 
 
 # Grace period after SIGINT before escalating to SIGKILL. Kept short so Ctrl-C is responsive.
@@ -434,9 +435,14 @@ def _server_launch_command(
     The interpreter is named explicitly instead of relying on the bare `python` that `source bin/activate`
     puts on PATH: a venv copied or moved after creation still names its original prefix in `bin/activate`,
     so activating it would silently run a different interpreter than `uv_venv_dir` selected.
+
+    The middle line records when venv setup finished.
+    The server uses it to separate venv setup from interpreter start and import time in its startup stages (see `nemo_gym.telemetry.startup`).
+    It reads the clock with the venv's own interpreter because `date +%s%N` does not work on macOS.
     """
     venv_python_fpath = get_venv_path(dir_path, global_config_dict) / "bin" / "python"
     return f"""{setup_env_command(dir_path, global_config_dict, server_name)} \\
+    && export {STARTUP_SETUP_DONE_NS_ENV}=$({shlex.quote(str(venv_python_fpath))} -c 'import time; print(time.time_ns())') \\
     && {shlex.quote(str(venv_python_fpath))} {shlex.quote(str(entrypoint_fpath))}"""
 
 
@@ -496,6 +502,19 @@ class TestConfig(RunConfig):
         return _resolve_server_dir(self._dir_path)
 
 
+class ServerSpinupTimeoutError(RuntimeError):
+    """Gym servers did not become ready within `server_spinup_timeout_seconds`."""
+
+
+def _startup_outcome(error: BaseException) -> str:
+    """How a startup that raised `error` ended, as the startup telemetry reports it."""
+    if isinstance(error, ServerSpinupTimeoutError):
+        return "timeout"
+    if isinstance(error, KeyboardInterrupt):
+        return "interrupted"
+    return "failed"
+
+
 class RunHelper:  # pragma: no cover
     _head_server: uvicorn.Server
     _head_server_thread: Thread
@@ -508,6 +527,8 @@ class RunHelper:  # pragma: no cover
     _memory_profiling_config: MemoryProfilingConfig
     _telemetry_metrics_enabled: bool
     _h2_ping_sidecar: H2PingSidecarManager | None
+    # Created by `_start`, so its clock starts with the startup it measures.
+    _startup: Optional[SupervisorStartup] = None
 
     def start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
         """Start the head server and every configured server, and wait until all of them are ready.
@@ -521,17 +542,22 @@ class RunHelper:  # pragma: no cover
         self._h2_ping_sidecar = None
         try:
             self._start(global_config_dict_parser_config)
-        except BaseException:
+        except BaseException as error:
+            # Before shutdown, which flushes telemetry, so the failed startup's spans are exported.
+            if self._startup is not None:
+                self._startup.abort(_startup_outcome(error), error)
             self.shutdown()
             raise
 
     def _start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
+        self._startup = SupervisorStartup()
         global_config_dict = get_global_config_dict(global_config_dict_parser_config=global_config_dict_parser_config)
 
         # Fail fast before starting Ray if nothing is configured to run (covers env run and the
         # e2e rollout-collection path, which both start servers via this method).
         GlobalConfigDictParser().raise_on_no_server_instances(global_config_dict)
         self._server_spinup_timeout_seconds = _server_spinup_timeout_seconds(global_config_dict)
+        self._startup.mark("load_config")
 
         # Translate the `telemetry:` block into NEMO_GYM_OTEL_* env vars *before* anything is
         # spawned. run_command copies os.environ into every server process, and that copy is
@@ -539,10 +565,12 @@ class RunHelper:  # pragma: no cover
         # Also mints the run id they all report, so a backend can group one run's processes.
         telemetry_config = telemetry_config_from_global_config(global_config_dict)
         configure_telemetry_env(telemetry_config)
-        init_telemetry(server_name="orchestrator", server_type="orchestrator")
+        init_telemetry(server_name="supervisor", server_type="supervisor")
         self._memory_profiler = None
         self._memory_profiling_config = memory_profiling_config_from_env(telemetry_config.memory_profiling)
         self._telemetry_metrics_enabled = is_telemetry_metrics_enabled()
+        self._startup.begin_trace()
+        self._startup.mark("init_telemetry")
 
         configured_servers = list(_configured_servers(global_config_dict))
 
@@ -553,18 +581,22 @@ class RunHelper:  # pragma: no cover
         if ray_server_names:
             print(f"Initializing Ray for servers that use it: {', '.join(ray_server_names)}")
             initialize_ray()
+            self._startup.mark("init_ray")
 
         # Start the HTTP/2 PING sidecar (if `sidecar.enabled`) and point model URLs at it. This
         # must come before the config is serialized below, which is how every server learns its URLs.
         # A dry run only builds venvs and talks to no model, so it starts nothing.
         if not global_config_dict[DRY_RUN_KEY_NAME]:
             self._h2_ping_sidecar = start_h2_ping_sidecar(global_config_dict)
+            if self._h2_ping_sidecar is not None:
+                self._startup.mark("start_h2_ping_sidecar")
 
         # Assume Nemo Gym Run is for a single agent.
         config_dict_yaml_str = OmegaConf.to_yaml(global_config_dict)
 
         # We always run the head server in this `run` command.
         self._head_server, self._head_server_thread, self._head_server_instance = HeadServer.run_webserver()
+        self._startup.mark("start_head_server")
 
         self._server_instance_display_configs: List[ServerInstanceDisplayConfig] = []
 
@@ -590,6 +622,7 @@ class RunHelper:  # pragma: no cover
                 # A server that uses Ray without declaring it then fails on its first Ray call, rather than
                 # starting a private cluster in each of its processes.
                 extra_env[RAY_ENABLE_AUTO_CONNECT_ENV_VAR_NAME] = "0"
+            extra_env |= self._startup.server_env(top_level_path, first_key)
             process = run_command(command, dir_path, server_name=top_level_path, extra_env=extra_env)
             self._processes[top_level_path] = process
             # In dry run mode, wait for each setup command to finish before starting the next.
@@ -624,9 +657,10 @@ class RunHelper:  # pragma: no cover
         )
 
         # `gym.servers.active` is a gauge, so exactly one process may write it or the
-        # exported value is just whoever wrote last. The orchestrator is the only process
+        # exported value is just whoever wrote last. The supervisor is the only process
         # that knows the fleet size, so it is the only writer (see telemetry/metrics.py).
         record_active_servers(len(self._server_instance_display_configs))
+        self._startup.mark("spawn_servers")
 
         self._server_client = ServerClient(
             head_server_config=ServerClient.load_head_server_config(),
@@ -645,6 +679,7 @@ class RunHelper:  # pragma: no cover
 
             poll_count += 1
             sleep(3)
+        self._startup.mark("wait_for_head_server")
 
         print("Waiting for servers to spin up")
         if global_config_dict[DRY_RUN_KEY_NAME]:
@@ -655,9 +690,15 @@ class RunHelper:  # pragma: no cover
     def wait_for_server_readiness(self, global_config_dict: DictConfig) -> None:
         """Mark the head ready only after every managed server and model endpoint is reachable."""
         self.wait_for_spinup()
+        if self._startup is not None:
+            self._startup.mark("wait_for_servers")
         self._start_memory_profiler()
         self.wait_for_model_endpoints(global_config_dict)
+        if self._startup is not None:
+            self._startup.mark("wait_for_model_endpoints")
         self._head_server_instance.mark_ready()
+        if self._startup is not None:
+            self._startup.finish()
 
     def display_server_instance_info(self) -> None:
         if not self._server_instance_display_configs:
@@ -749,6 +790,10 @@ Process `{process_name}` stderr:
         while True:
             self.poll()
             statuses = self.check_http_server_statuses(successful_servers, deadline=deadline)
+            if self._startup is not None:
+                for name, status in statuses:
+                    if status == "success":
+                        self._startup.server_ready(name)
             successful_servers.extend(s for s, status in statuses if status == "success")
 
             waiting = []
@@ -758,7 +803,7 @@ Process `{process_name}` stderr:
 
             if len(successful_servers) != total_servers:
                 if deadline is not None and monotonic() >= deadline:
-                    raise RuntimeError(
+                    raise ServerSpinupTimeoutError(
                         f"Timed out after {timeout_seconds:g}s waiting for Gym servers to become ready: "
                         f"{', '.join(waiting)}\n"
                         "This wait covers dependency installation and any local model download or loading "
@@ -976,7 +1021,7 @@ def prefetch(
     ```bash
     # Pre-warm venvs for a specific config
     config_paths="responses_api_models/local_vllm_model/configs/local_vllm_model.yaml,\\
-    resources_servers/math/configs/math.yaml"
+    resources_servers/math_with_judge/configs/math_with_judge.yaml"
     gym env prefetch "+config_paths=[${config_paths}]"
     ```
     """

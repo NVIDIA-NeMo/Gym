@@ -13,7 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import uuid
 from asyncio import sleep
+from collections.abc import Mapping
 from typing import (
     Annotated,
     Any,
@@ -187,12 +189,13 @@ from pydantic import (
 )
 from typing_extensions import TypedDict
 
+from nemo_gym.rollout_correlation import current_rollout_id
 from nemo_gym.server_utils import (
-    _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG,
     MAX_NUM_TRIES,
     ClientResponse,
     ClientResponseError,
     get_response_json,
+    is_global_aiohttp_client_request_debug_enabled,
     raise_for_status,
     request,
 )
@@ -1159,6 +1162,10 @@ def accumulate_response_usage(
 class NeMoGymResponse(Response):
     output: List[NeMoGymResponseOutputItem]
     usage: Optional[NeMoGymResponseUsage] = None
+    # OpenAI-compatible providers may return provider-specific service-tier names.
+    # The OpenAI SDK's Literal may not include those names.
+    # Preserve the reported value.
+    service_tier: Optional[str] = None
 
 
 ########################################
@@ -1208,6 +1215,8 @@ class NeMoGymChoice(Choice):
 
 class NeMoGymChatCompletion(ChatCompletion):
     choices: List[NeMoGymChoice]
+    # Providers can return deployment-specific tiers. Accept any string.
+    service_tier: Optional[str] = None
 
 
 ########################################
@@ -1359,8 +1368,18 @@ class NeMoGymChatCompletionAssistantMessageForTrainingParam(
 
 
 class NeMoGymChatCompletionToolMessageParam(ChatCompletionToolMessageParam):
-    # Override the iterable which is annoying to work with.
-    content: Required[Union[str, List[NeMoGymChatCompletionContentPartTextParam]]]
+    # Override the iterable which is annoying to work with. Unlike the OpenAI SDK type, the content may also hold image
+    # parts: a vision tool may return the image it loaded for a vision-capable model to see, and vLLM parses a tool
+    # message's content parts like any other message's, leaving their rendering to the chat template.
+    content: Required[
+        Union[
+            str,
+            List[Union[NeMoGymChatCompletionContentPartTextParam, NeMoGymChatCompletionContentPartImageParam]],
+        ]
+    ]
+    # Not in the OpenAI SDK type. OpenHands' Message serializer includes name
+    # alongside tool_call_id on tool-result messages.
+    name: NotRequired[str]
 
 
 class NeMoGymFunctionToolParam(FunctionToolParam):
@@ -1411,9 +1430,35 @@ NeMoGymChatCompletionToolChoiceOptionParam: TypeAlias = Union[
 # unknown keys keep failing validation while these documented contracts pass.
 CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS = frozenset({"chat_template_kwargs", "thinking", "output_config"})
 
+# Client-only fields sent by harnesses such as OpenHands. The strict chat request model
+# accepts them so the request is not rejected with a 422, but never serializes them, so
+# they are not forwarded to the backend.
+CHAT_REQUEST_IGNORED_CLIENT_FIELDS = frozenset({"aws_region_name"})
+
 
 class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="before")
+    @classmethod
+    def drop_litellm_provider_specific_fields(cls, value: Any) -> Any:
+        """Drop ``provider_specific_fields`` from replayed assistant history.
+
+        litellm's ``Message.model_dump()`` emits that key on every assistant turn
+        (holding response fields it does not model, such as ``refusal``), and
+        harnesses built on litellm replay the dump verbatim. It carries nothing
+        a model server needs, and the strict message schema would reject it.
+        """
+        if not isinstance(value, dict) or not isinstance(value.get("messages"), list):
+            return value
+        value = value.copy()
+        value["messages"] = [
+            {k: v for k, v in message.items() if k != "provider_specific_fields"}
+            if isinstance(message, dict)
+            else message
+            for message in value["messages"]
+        ]
+        return value
 
     messages: List[NeMoGymChatCompletionMessageParam]
     model: Optional[Union[str, ChatModel]] = None
@@ -1464,6 +1509,12 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
     chat_template_kwargs: Optional[Dict[str, Any]] = None
     thinking: Optional[Dict[str, Any]] = None
     output_config: Optional[Dict[str, Any]] = None
+
+    # Accepted and dropped (see ``CHAT_REQUEST_IGNORED_CLIENT_FIELDS``):
+    # - ``aws_region_name``: included (default null) in the pinned OpenHands fork's
+    #   direct NeMo Gym client kwargs, without passing through litellm.
+    # Do not type-check an ignored value: streaming ingress already dropped any value.
+    aws_region_name: object = Field(default=None, exclude=True)
 
     # Disallow deprecated args
     # function_call: FunctionCall
@@ -1529,6 +1580,25 @@ def _error_body_is_permanent_auth(content: bytes | str) -> bool:
 
 class PermanentEndpointError(ClientResponseError):
     """The upstream key is spent or unauthorized; further calls on this client skip the wire."""
+
+
+REQUEST_ID_HEADER = "X-Request-Id"
+
+
+def _rollout_request_id(headers: Mapping[str, str]) -> Optional[str]:
+    """A request id that names the rollout, for calls made inside a rollout context.
+
+    vLLM takes its request id from ``X-Request-Id`` and records it as ``gen_ai.request.id`` on
+    the request's span and in its request log, so an engine span or log line can be matched to a
+    rollout without walking the trace. The suffix keeps every call distinct, including across
+    server workers that cannot share a counter. A caller's own header wins.
+    """
+    if any(key.lower() == REQUEST_ID_HEADER.lower() for key in headers):
+        return None
+    rollout_id = current_rollout_id()
+    if not rollout_id:
+        return None
+    return f"{rollout_id}-{uuid.uuid4().hex[:8]}"
 
 
 class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
@@ -1624,12 +1694,12 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         if self._permanent_trip is not None:
             self._raise_permanent_error()
         request_headers = request_kwargs.pop("headers", {})
+        headers = self.default_headers | request_headers | {"Authorization": f"Bearer {self.api_key}"}
+        request_id = _rollout_request_id(headers)
+        if request_id is not None:
+            headers["X-Request-Id"] = request_id
         request_kwargs = request_kwargs | {
-            "headers": self.default_headers
-            | request_headers
-            | {
-                "Authorization": f"Bearer {self.api_key}",
-            },
+            "headers": headers,
             "_internal": self.internal,
             "_max_num_tries": self.max_num_tries,
             "_max_connection_retries": self.max_connection_retries,
@@ -1685,7 +1755,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         await raise_for_status(response)
 
     async def _raise_for_status(self, response: ClientResponse, request_kwargs: Dict[str, Any]) -> None:
-        if not response.ok and _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
+        if not response.ok and is_global_aiohttp_client_request_debug_enabled():
             print(f"Request kwargs: {json.dumps(request_kwargs)}")
 
         await raise_for_status(response)

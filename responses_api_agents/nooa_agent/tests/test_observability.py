@@ -15,6 +15,7 @@
 
 import asyncio
 import json
+from types import ModuleType
 
 import pytest
 from pydantic import BaseModel
@@ -30,14 +31,52 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.rollout_collection import _build_trajectory_record
 from nemo_gym.rollout_observability import AgentObservationBundle, TrajectoryRecord
-from responses_api_agents.nooa_agent.gym_llm import GymModelCall, RolloutLLMState
+from responses_api_agents.nooa_agent.gym_llm import GymModelCall, GymResponsesLLM, RolloutLLMState
 from responses_api_agents.nooa_agent.observability import (
     GymTraceHooks,
     _json_output,
     ensure_verifier_final_message,
     finalize_observation_gaps,
 )
-from responses_api_agents.nooa_agent.tests.test_gym_llm import model_response
+from responses_api_agents.nooa_agent.termination import NOOATerminationReason
+from responses_api_agents.nooa_agent.tests.test_gym_llm import FakeHTTPResponse, model_response
+
+
+@pytest.mark.asyncio
+async def test_model_transport_preserves_scoped_ownership_on_failed_and_successful_attempts() -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    trace = GymTraceHooks()
+    state = RolloutLLMState(max_policy_calls=None)
+    failure = ConnectionError("model disconnected")
+    client = MagicMock(post=AsyncMock(side_effect=[failure, FakeHTTPResponse(model_response())]))
+    llm = GymResponsesLLM(
+        server_client=client,
+        model_server_name="policy",
+        model_url_path="/v1/responses",
+        state=state,
+        cookies={},
+        on_call=trace.on_model_call,
+    )
+    root = trace.before_agent_call(call_id="parent", parent_call_id=None)
+    child = trace.before_agent_call(call_id="child", parent_call_id="parent")
+    try:
+        with pytest.raises(ConnectionError, match="disconnected"):
+            await llm.acall([{"role": "user", "content": "task"}])
+    finally:
+        trace.after_agent_call(context=child, exception=failure)
+    try:
+        await llm.acall([{"role": "user", "content": "task"}])
+    finally:
+        trace.after_agent_call(context=root, exception=None)
+    assert [call.kwargs["headers"] for call in client.post.await_args_list] == [
+        {"x-session-id": "child"},
+        {"x-session-id": "parent"},
+    ]
+    assert [call.invocation_id for call in state.calls] == ["child", "parent"]
+    assert state.calls[0].response is None
+    assert state.calls[1].response is not None
+    assert state.fatal_error is None
 
 
 def test_scoped_projection_preserves_model_ownership_and_collector_tool_output_join() -> None:
@@ -96,6 +135,32 @@ def test_no_model_call_preserves_original_responses_input_with_tool_events() -> 
     assert invocation.conversation[0].content == "original row input"
     assert [item.type for item in invocation.conversation[1:]] == ["function_call", "function_call_output"]
     assert trajectory.turns == []
+
+
+def test_code_output_snapshots_imported_modules_and_mutable_locals() -> None:
+    from nooa.events import ExecutionResult
+
+    trace = GymTraceHooks()
+    execution = trace.before_code_execution(code="import math", execution_id="exec-1", tool_call_id="call-1")
+    variables = {"math": ModuleType("math"), "values": [1]}
+    result = ExecutionResult(stdout="done", captured_locals=variables, returned_value=variables["values"])
+    trace.after_code_execution(context=execution, result=result, exception=None)
+    variables["values"].append(2)
+
+    episode, trajectory = trace.project(
+        create_params=NeMoGymResponseCreateParamsNonStreaming(input="task"),
+        state=RolloutLLMState(max_policy_calls=1),
+        task_id="task",
+        rollout_id="0-0",
+    )
+
+    output = json.loads(trajectory.tool_calls[0].output)
+    assert output["stdout"] == "done"
+    assert output["returned_value"] == [1]
+    assert "captured_locals" not in output
+    assert trajectory.tool_calls[0].status == "completed"
+    assert episode.response.output[-1].output == trajectory.tool_calls[0].output
+    TrajectoryRecord.model_validate_json(trajectory.model_dump_json())
 
 
 @pytest.mark.parametrize("error", [ValueError("bad code"), asyncio.CancelledError()])
@@ -282,7 +347,7 @@ def test_finalize_observation_gaps_appends_termination_gap() -> None:
 
     finalized = finalize_observation_gaps(
         bundle,
-        termination_reason="policy_budget_exceeded",
+        termination_reason=NOOATerminationReason.POLICY_BUDGET_EXCEEDED,
         termination_error="budget exhausted",
     )
 

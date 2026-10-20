@@ -2,7 +2,8 @@
 
 ## Overview
 
-[GDP.pdf](https://huggingface.co/datasets/surgeai/GDP.pdf) (Surge AI, MIT) measures professional
+[GDP.pdf](https://huggingface.co/datasets/surgeai/GDP.pdf) (Surge AI, MIT; data is downloaded from the
+public mirror [Oitaaa/GDP.pdf](https://huggingface.co/datasets/Oitaaa/GDP.pdf)) measures professional
 multimodal reasoning over the documents the economy actually runs on: dense reports, contracts,
 filings, and records in the messy real-world formats professionals work from. The 100 prompts were
 written by domain experts who do this work professionally — practicing physicians, attorneys,
