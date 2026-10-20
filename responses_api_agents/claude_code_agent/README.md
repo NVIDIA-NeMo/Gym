@@ -323,3 +323,8 @@ uses all of them).
   output cap) are rejected.
 - `allow_root_workdir` (sandbox sessions): accept a task working directory of `/` (images without a
   `WORKDIR`); the runtime and session files stay under `/tmp`, as a harness's own files do there.
+- `harbor_system_dependencies` (sandbox sessions): before installing Claude Code, run Harbor 0.24's
+  system-dependency step for its claude-code agent: curl, bash, nodejs, npm and procps, each installed with
+  the first package manager found (apt-get, dnf, yum, apk) when its commands are missing. Agents under
+  Harbor therefore have `node`, `npm`, `ps` and `pkill` even where the task image lacks them. A failed
+  install is logged and Claude Code runs anyway (`system_dependencies_timeout_seconds`, default 1800).

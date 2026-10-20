@@ -17,6 +17,7 @@ from pydantic import ValidationError
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.claude_code_agent import app, sandbox_runner
 from responses_api_agents.claude_code_agent import sandbox as adapter
+from responses_api_agents.claude_code_agent.system_dependencies import system_dependencies_command
 from responses_api_agents.claude_code_agent.tests.test_sandbox import agent, result, seed
 
 
@@ -170,3 +171,29 @@ async def test_root_workdir_setting_still_rejects_adapter_storage(monkeypatch, w
     with pytest.raises(HTTPException, match="separate from runtime/session storage"):
         await agent(allow_root_workdir=True)._seed_agent_session_state(seed(workdir=workdir))
     connector.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("exit_code", [0, 100])
+async def test_harbor_dependency_step_runs_first_and_never_blocks_setup(monkeypatch, enabled, exit_code):
+    script = system_dependencies_command()
+
+    async def run(command, **kwargs):
+        return result(code=exit_code) if command == script else result()
+
+    remote = SimpleNamespace(exec=AsyncMock(side_effect=run), upload=AsyncMock())
+    monkeypatch.setattr(app.AsyncSandbox, "connect", AsyncMock(return_value=remote))
+    monkeypatch.setattr(app, "create_provider", lambda config: object())
+    install = AsyncMock()
+    monkeypatch.setattr(app, "install_sandbox_runtime", install)
+    instance = agent(harbor_system_dependencies=enabled, system_dependencies_timeout_seconds=900)
+    await instance._seed_agent_session_state(seed())
+    calls = remote.exec.await_args_list
+    if enabled:
+        # Before the session directory and the Claude Code install, with its own time limit.
+        assert calls[0].args[0] == script
+        assert calls[0].kwargs["timeout_s"] == 900
+    else:
+        assert all(call.args[0] != script for call in calls)
+    install.assert_awaited_once()

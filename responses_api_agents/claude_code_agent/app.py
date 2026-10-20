@@ -75,6 +75,7 @@ from responses_api_agents.claude_code_agent.sandbox import (
     parse_artifact_observations,
 )
 from responses_api_agents.claude_code_agent.setup_claude_code import ensure_claude_code
+from responses_api_agents.claude_code_agent.system_dependencies import system_dependencies_command
 
 
 LOG = logging.getLogger(__name__)
@@ -135,6 +136,11 @@ class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # Sandbox sessions: accept a task workdir of "/" (images without a WORKDIR). The runtime and session
     # files then sit under /tmp inside it, as a harness's own files do there.
     allow_root_workdir: bool = False
+    # Sandbox sessions: run Harbor 0.24's system-dependency step for its claude-code agent (curl, bash,
+    # nodejs, npm and procps, installed when missing) before installing Claude Code. A failed install is
+    # logged and Claude Code runs anyway.
+    harbor_system_dependencies: bool = False
+    system_dependencies_timeout_seconds: float = Field(default=1800, gt=0, allow_inf_nan=False)
     # Claude Code's --effort (low, medium, high, xhigh or max), as Harbor passes its reasoning effort.
     reasoning_effort: Optional[str] = None
     # The per-call output cap, as CLAUDE_CODE_MAX_OUTPUT_TOKENS; None keeps the CLI's own default.
@@ -656,11 +662,18 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             ),
         )
         try:
-            async with asyncio.timeout(self.config.sandbox_install_timeout_seconds):
+            dependencies = self.config.harbor_system_dependencies
+            setup_limit = self.config.sandbox_install_timeout_seconds + (
+                self.config.system_dependencies_timeout_seconds if dependencies else 0
+            )
+            async with asyncio.timeout(setup_limit):
                 if owns_sandbox:
                     await sandbox.start(spec)
                     result = await sandbox.exec(f"mkdir -p -- {quote(workdir)}", cwd="/", timeout_s=30)
                     self._check_sandbox_setup(result)
+                if dependencies:
+                    # Before anything else, as Harbor's install() runs it before installing Claude Code.
+                    await self._run_system_dependencies(sandbox)
                 result = await sandbox.exec(
                     f"test -d {quote(workdir)} && umask 077 && mkdir -p {quote(directory)}/config",
                     cwd="/",
@@ -686,6 +699,26 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             except BaseException:
                 raise AgentSessionSetupError(state, error=error) from error
             raise
+
+    async def _run_system_dependencies(self, sandbox: AsyncSandbox) -> str:
+        """Harbor's ensure_system_dependencies for Claude Code, as the sandbox's default user (root for
+        Terminal-Bench task sandboxes). Harbor errors the trial when the install fails; here the failure
+        is logged and Claude Code runs without the packages, as it would without this step."""
+        started = monotonic()
+        result = await sandbox.exec(
+            system_dependencies_command(), timeout_s=self.config.system_dependencies_timeout_seconds
+        )
+        log = (result.stdout or "") + (result.stderr or "")
+        if result.return_code != 0 or result.error_type:
+            LOG.warning(
+                "Harbor's system dependency step failed (exit %s, error_type %s) after %.0fs; Claude Code runs "
+                "without it: %s",
+                result.return_code,
+                result.error_type,
+                monotonic() - started,
+                log[-2000:],
+            )
+        return log
 
     @staticmethod
     def _check_sandbox_setup(result: SandboxExecResult) -> None:
