@@ -130,7 +130,7 @@ Remove unsupported fields that older versions silently ignored.
 
 ## Runtime and model requirements
 
-Sandbox sessions live in the memory of the worker that seeded them, so seeding a session requires `num_workers: 1`. Calling the agent's `/run` directly keeps no session and still supports several workers.
+Sandbox sessions live in the memory of the worker that seeded them. With several agent workers, session routing sends each session's requests to the worker that seeded it. Calling the agent's `/run` directly keeps no session.
 
 Each sandbox session installs the Hermes version pinned in `requirements.txt`, the same one this server runs, at seed time unless it already imports from `/tmp/nemo-gym-hermes-runtime-<commit>/venv`, for example because the image bakes it in or an earlier session in the same sandbox installed it. Installing needs outbound access to GitHub and the Python package index. Hermes calls the Model Server directly from the sandbox, so the sandbox must also reach the Model Server at its configured host and port. Its image must also match the host CPU architecture and C library because the host's `uv` executable is copied into the sandbox.
 

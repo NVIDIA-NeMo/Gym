@@ -76,7 +76,7 @@ A new pairing does not need another combined preset.
 
 ## Runtime and model requirements
 
-Use one agent worker, an exact `pi_version` (default **0.80.2**), and a Gym `model_server`.
+Use an exact `pi_version` (default **0.80.2**), and a Gym `model_server`.
 For a Resources-owned task sandbox, supply direct `SandboxAccess` with an absolute
 task working directory. Without access, configure agent-owned creation as noted below.
 Session setup rejects `pi_version: latest`. Pi's `resources_server` setting is required
@@ -188,7 +188,8 @@ required; the adapter validates the captured terminal events without inventing a
 Each sandbox session supports one activation and a matching episode and rollout identity.
 Identical request retries join the running activation or replay its result; changed requests
 are rejected. A disconnected HTTP caller does not cancel Pi; session close owns cancellation.
-Use a single agent-server worker. It never falls back to a host CLI when sandbox setup
+With several agent workers, session routing sends each session's requests to the worker that seeded it.
+Pi never falls back to a host CLI when sandbox setup
 fails. Calls without an agent session retain the local Pi behavior; they do not operate
 on the Resources-owned task sandbox.
 
