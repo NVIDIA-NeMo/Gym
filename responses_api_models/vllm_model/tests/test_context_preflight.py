@@ -4,8 +4,10 @@
 """Exact native context validation precedes durable capture admission."""
 
 import json
+from unittest.mock import MagicMock
 
 import pytest
+from aiohttp import ClientResponseError
 from openai import BadRequestError, OpenAI
 
 from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
@@ -15,6 +17,72 @@ from responses_api_models.vllm_model.tests.test_framework_context import (
     assert_clean,
     make_capture_harness,
 )
+
+
+def test_preflight_media_error_preserves_400_and_disables_sdk_retries(monkeypatch, tmp_path):
+    harness = make_capture_harness(monkeypatch, tmp_path)
+    # The production server runner installs this after setup_webserver().
+    harness.model.setup_exception_middleware(harness.client.app)
+    first = assert_clean(harness.post("attempt", HISTORY))
+    before = harness.manifest("attempt")
+    measurements = []
+    error_body = {
+        "error": {
+            "message": "At most 128 image(s) may be provided in one prompt. (parameter=image)",
+            "type": "invalid_request_error",
+            "param": "image",
+            "code": 400,
+        }
+    }
+
+    async def tokenize(client, **body):
+        measurements.append(body)
+        error = ClientResponseError(MagicMock(real_url="http://worker.test/tokenize"), (), status=400)
+        error.response_content = json.dumps(error_body).encode()
+        raise error
+
+    monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_tokenize", tokenize)
+    client = OpenAI(
+        base_url="http://testserver/ng-rollout/attempt/training-token-capture/v1",
+        api_key="test-key",
+        max_retries=2,
+        http_client=harness.client,
+    )
+    images = [{"type": "image_url", "image_url": {"url": f"https://images.test/{i}.png"}} for i in range(130)]
+    with pytest.raises(BadRequestError) as caught:
+        client.chat.completions.create(model="test-model", messages=[{"role": "user", "content": images}])
+    assert caught.value.body == error_body["error"]
+    assert len(measurements) == 1  # A 500 would trigger all three SDK attempts.
+    assert measurements[0]["messages"][0]["content"] == images
+    assert harness.manifest("attempt") == before
+    assert len(harness.worker_calls) == len(harness.sink.records) == 1
+
+    async def valid_tokenize(client, **body):
+        return {"prompt_token_count": 2, "max_model_len": 100, "ng_context_measured": True}
+
+    monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_tokenize", valid_tokenize)
+    assert_clean(harness.post("attempt", HISTORY + first["output"] + [{"role": "user", "content": "next"}]))
+    after = harness.manifest("attempt")
+    assert len(after.records) == 2 and not after.pending_call_ids and not after.failures
+    client.close()
+
+
+@pytest.mark.parametrize("status", [429, 500])
+def test_preflight_transport_errors_remain_server_errors(monkeypatch, tmp_path, status):
+    harness = make_capture_harness(monkeypatch, tmp_path)
+    harness.model.setup_exception_middleware(harness.client.app)
+    before = harness.manifest("attempt")
+
+    async def tokenize(client, **body):
+        error = ClientResponseError(MagicMock(real_url="http://worker.test/tokenize"), (), status=status)
+        error.response_content = b'{"error":{"message":"backend unavailable"}}'
+        raise error
+
+    monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_tokenize", tokenize)
+    response = harness.post("attempt", HISTORY)
+    assert response.status_code == 500
+    assert harness.manifest("attempt") == before
+    assert not harness.worker_calls and not harness.sink.records
 
 
 @pytest.mark.parametrize("dialect", ["responses", "chat/completions", "messages"])

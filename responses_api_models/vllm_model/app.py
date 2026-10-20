@@ -485,7 +485,15 @@ class VLLMModel(SimpleResponsesAPIModel):
             if processed.get("truncate_prompt_tokens") is not None:
                 raise HTTPException(status_code=422, detail="measurement does not support prompt truncation")
             client = self._resolve_client(request)
-            result = await client.create_tokenize(**self._get_tokenize_chat_body(processed))
+            try:
+                result = await client.create_tokenize(**self._get_tokenize_chat_body(processed))
+            except ClientResponseError as error:
+                # Preflight has not acquired worker custody. Preserve invalid
+                # request errors (including media limits) instead of turning
+                # them into retryable 500s in the generic server middleware.
+                if error.status == 400:
+                    setattr(error, _PROPAGATE_CONTEXT_ERROR_ATTRIBUTE, True)
+                raise
             count = result.get("prompt_token_count")
             if type(count) is not int or count < 0 or result.get("ng_context_measured") is not True:
                 raise HTTPException(status_code=502, detail="worker did not acknowledge exact context measurement")
