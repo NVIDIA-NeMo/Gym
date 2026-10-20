@@ -92,9 +92,6 @@ _HOP_BY_HOP_HEADERS = frozenset({"connection", "keep-alive", "transfer-encoding"
 # Lower than the private server's keep-alive, so the forwarding side always closes an idle connection first.
 _FORWARD_KEEPALIVE_SECONDS = 15.0
 _PRIVATE_SERVER_KEEPALIVE_SECONDS = 30
-# The router reads a seed or close body to find its session ID.
-# Real bodies are a few kilobytes; a larger one is refused rather than buffered without limit.
-_CLAIMED_BODY_LIMIT_BYTES = 8 * 1024 * 1024
 _ROLLOUT_PREFIX = rf"(?:/{ROLLOUT_PATH_PREFIX}/[^/]+(?:/[^/]+)?)?"
 
 
@@ -381,14 +378,10 @@ class SessionRoutingMiddleware:
         A request that already reached its owner, by its cookie or by forwarding, is served here.
         If another worker claims the ID, it is refused, since a cookie of another session cannot move the ID.
         """
-        body = await _read_body(receive, limit=_CLAIMED_BODY_LIMIT_BYTES)
+        # The whole body is read, whatever its size, since the app would read all of it too.
+        # A seed with large task data still has to reach the worker that holds its session.
+        body = await _read_body(receive)
         if body is None:
-            return
-        if len(body) > _CLAIMED_BODY_LIMIT_BYTES:
-            await JSONResponse(
-                {"detail": f"A session seed or close body may not exceed {_CLAIMED_BODY_LIMIT_BYTES} bytes."},
-                status_code=413,
-            )(scope, receive, send)
             return
         replay = _replay_body(bytes(body), receive)
         session_id = _session_id(body, claims.routes.id_field)
@@ -535,18 +528,15 @@ class SessionRoutingMiddleware:
             await client.close()
 
 
-async def _read_body(receive: Receive, *, limit: Optional[int] = None) -> Optional[bytearray]:
-    """Read the request body, or None if the client disconnected.
-
-    With a limit, stop once the body exceeds it; the caller refuses a body longer than the limit.
-    """
+async def _read_body(receive: Receive) -> Optional[bytearray]:
+    """Read the request body, or None if the client disconnected."""
     body = bytearray()
     while True:
         message = await receive()
         if message["type"] == "http.disconnect":
             return None
         body += message.get("body", b"")
-        if not message.get("more_body", False) or (limit is not None and len(body) > limit):
+        if not message.get("more_body", False):
             return body
 
 

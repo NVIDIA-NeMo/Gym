@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import contextvars
 import logging
 from abc import abstractmethod
 from collections import OrderedDict
@@ -261,7 +262,8 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             self._failed_seed_records.pop(key)
             if self._session_records.get(key) is record and record.close_response is None:
                 # Nobody closed the failed seed within the retry window, so release what its setup left.
-                task = asyncio.create_task(self._release_failed_seed(key, record))
+                # A fresh context: the task must not run under the rollout of the request that found it expired.
+                task = asyncio.create_task(self._release_failed_seed(key, record), context=contextvars.Context())
                 self._failed_seed_releases.add(task)
                 task.add_done_callback(self._failed_seed_releases.discard)
         while True:
@@ -284,16 +286,27 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                 return
 
     async def _release_failed_seed(self, agent_session_id: str, record: _AgentSessionRecord) -> None:
-        """Run the close hook on a failed seed's state that no close reached, then drop the record."""
+        """Run the close hook on a failed seed's state that no close reached, then drop the record.
+
+        The hook runs under the session's own rollout, as it would for the caller's close.
+        If it fails, the record keeps its state for a later close, and the release is tried again a window later.
+        """
         async with self._locked_agent_session(agent_session_id) as current:
             if current is not record or record.close_response is not None or record.state is None:
                 return
+            episode_id = record.episode_id
             try:
-                await self._close_agent_session_state(record.state)
+                with rollout_context(episode_id.capture_key if episode_id is not None else None):
+                    await self._close_agent_session_state(record.state)
             except Exception:
                 LOG.exception(
-                    "Could not release agent session %r, whose seed failed and was never closed", agent_session_id
+                    "Could not release agent session %r, whose seed failed and was never closed; retrying in %s s",
+                    agent_session_id,
+                    self.config.session_close_retry_window_seconds,
                 )
+                record.expires_at = monotonic() + self.config.session_close_retry_window_seconds
+                self._failed_seed_records[agent_session_id] = record
+                return
             # The lock's exit drops the record, now that it holds no state.
             record.state = None
 

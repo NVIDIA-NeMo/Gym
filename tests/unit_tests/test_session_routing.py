@@ -592,15 +592,6 @@ class TestAgentSessionRouting:
         assert os.listdir(os.path.join(socket_dir, AGENT_SESSION_CLAIMS_DIR)) == []
         assert not a.agent._session_records and not b.agent._session_records
 
-    def test_an_oversized_body_is_refused_without_reading_it_all(self, agent_workers, socket_dir: str) -> None:
-        a, b = agent_workers
-        body = json.dumps({**_seed_body("s"), "padding": "x" * (9 * 1024 * 1024)}).encode()
-
-        response = b.client.post("/v1/agent_sessions", content=body, headers={"content-type": "application/json"})
-
-        assert response.status_code == 413
-        assert os.listdir(os.path.join(socket_dir, AGENT_SESSION_CLAIMS_DIR)) == []
-
     def test_a_rollout_prefixed_close_is_routed_too(self, agent_workers) -> None:
         a, b = agent_workers
         assert a.seed().status_code == 200
@@ -765,6 +756,36 @@ class TestTypedResourcesSessionRouting:
 
         assert held_after_close and not os.path.exists(claim)
         assert os.path.exists(_claim_path(socket_dir, "other", RESOURCES_SESSION_CLAIMS_DIR))
+
+    def test_a_typed_seed_with_large_task_data_is_routed_to_the_claimant(self, resources_workers) -> None:
+        a, b = resources_workers
+        assert a.seed().status_code == 200
+        b.client.cookies.clear()
+        # Large enough to arrive in several receive messages, as a seed with images in its task data would.
+        body = {
+            "resources_session_id": "s",
+            "episode_id": {"rollout_id": "r"},
+            "task_id": {"taskset": "t", "task_id": "0"},
+            "task_data": {"image": "x" * (9 * 1024 * 1024)},
+        }
+
+        retried = b.client.post("/ng-rollout/r/seed_session", json=body)
+
+        assert retried.status_code == 200, retried.text
+        assert a.server.seeds == ["s", "s"] and b.server.seeds == [] and not b.server.sessions
+
+    def test_a_large_seed_without_a_resources_session_id_is_served_where_it_lands(
+        self, resources_workers, socket_dir: str
+    ) -> None:
+        a, b = resources_workers
+        b.client.cookies.clear()
+        # An agent's own /run seed sends its whole run request, which a multimodal task can make this large.
+        body = json.dumps({"responses_create_params": {"input": "x" * (9 * 1024 * 1024)}}).encode()
+
+        seeded = b.client.post("/seed_session", content=body, headers={"content-type": "application/json"})
+
+        assert seeded.status_code == 200 and b.server.seeds == ["cookie session"]
+        assert os.listdir(os.path.join(socket_dir, RESOURCES_SESSION_CLAIMS_DIR)) == []
 
     def test_a_seed_without_a_resources_session_id_is_served_where_it_lands(
         self, resources_workers, socket_dir: str
