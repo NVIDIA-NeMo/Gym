@@ -237,7 +237,7 @@ def test_scheduled_token_deciles_pool_samples_and_print_below_table(
         "sample_count": 10,
         "observation_count": 10,
         "complete": True,
-        "values": {f"p{p}": p * 10 for p in range(10, 100, 10)},
+        "values": {**{f"p{p}": p * 10 for p in range(10, 100, 10)}, "p99": 1000},
     }
     timing.print_group("worker", group)
     output = capsys.readouterr().out
@@ -265,3 +265,40 @@ def test_missing_or_partial_token_samples_do_not_claim_complete_percentiles(
     timing.print_group("worker", group)
     output = capsys.readouterr().out
     assert ("partial coverage" if samples else "p10–p90 unavailable") in output
+
+
+def test_legacy_token_quantiles_show_window_statistics_not_pooled_percentiles(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "legacy.log"
+    path.write_text(
+        "".join(
+            line(
+                record(
+                    timestamp=timestamp,
+                    batch={
+                        "scheduled_tokens": {
+                            "count": count,
+                            "total": count * value,
+                            "max": value,
+                            "p50": value,
+                            "p90": value,
+                            "p99": value,
+                        }
+                    },
+                )
+            )
+            for timestamp, count, value in [(10, 1, 100), (30, 9, 900)]
+        )
+    )
+    report, _ = timing.analyze([path], focus="all")
+    group = next(iter(report["groups"].values()))
+    assert group["scheduled_tokens_percentiles"]["values"] == {}
+    assert group["scheduled_tokens_window_quantiles"] == {
+        key: {"windows": 2, "median": 500, "min": 100, "max": 900} for key in ("p50", "p90", "p99")
+    }
+    timing.print_group("worker", group)
+    output = capsys.readouterr().out
+    assert "not pooled percentiles" in output
+    for key in ("p50", "p90", "p99"):
+        assert f"{key}: median=500.000; range=100.000–900.000; windows=2" in output

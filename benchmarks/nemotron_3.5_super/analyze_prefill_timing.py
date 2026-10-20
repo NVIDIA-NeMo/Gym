@@ -32,6 +32,7 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from statistics import median
 from typing import Literal
 
 
@@ -227,6 +228,20 @@ def summarize(windows: list[Window]) -> dict[str, object]:
                 stats[section].setdefault(phase, Samples()).add(values)
     token_samples = sorted(value for window in windows for value in window.scheduled_token_samples)
     token_count = stats["batch"].get("scheduled_tokens", Samples()).count
+    window_quantiles = {}
+    for key in ("p50", "p90", "p99"):
+        values = [
+            tokens[key]
+            for window in windows
+            if key in (tokens := window.sections["batch"].get("scheduled_tokens", {}))
+        ]
+        if values:
+            window_quantiles[key] = {
+                "windows": len(values),
+                "median": median(values),
+                "min": min(values),
+                "max": max(values),
+            }
     return {
         "records": len(windows),
         "processes": len(latest),
@@ -236,11 +251,14 @@ def summarize(windows: list[Window]) -> dict[str, object]:
         "counts": dict(counts),
         "max_pending_in_one_record": max(w.pending for w in windows),
         "pending_at_last_record_per_process": {k: w.pending for k, w in latest.items()},
+        "scheduled_tokens_window_quantiles": window_quantiles,
         "scheduled_tokens_percentiles": {
             "sample_count": len(token_samples),
             "observation_count": token_count,
             "complete": len(token_samples) == token_count,
-            "values": {f"p{p}": token_samples[math.ceil(p * len(token_samples) / 100) - 1] for p in range(10, 100, 10)}
+            "values": {
+                f"p{p}": token_samples[math.ceil(p * len(token_samples) / 100) - 1] for p in (*range(10, 100, 10), 99)
+            }
             if token_samples
             else {},
         },
@@ -427,6 +445,14 @@ def print_group(label: str, group: dict[str, object]) -> None:
             )
         else:
             print("    p10–p90 unavailable: logs lack scheduled_token_samples; rerun with updated vLLM timing logs.")
+        if not percentiles["complete"] and group["scheduled_tokens_window_quantiles"]:
+            print("    Available per-window quantiles (unweighted window medians/ranges, not pooled percentiles):")
+            for key, raw in mapping(group["scheduled_tokens_window_quantiles"]).items():
+                stats = mapping(raw)
+                print(
+                    f"      {key}: median={stats['median']:,.3f}; "
+                    f"range={stats['min']:,.3f}–{stats['max']:,.3f}; windows={stats['windows']:,}"
+                )
 
 
 def main() -> None:
