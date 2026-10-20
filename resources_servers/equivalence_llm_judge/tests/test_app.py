@@ -435,6 +435,67 @@ class TestApp:
         assert result.reward == 1
         client.post.assert_awaited_once()
 
+    @mark.parametrize(
+        "question",
+        [
+            (
+                r"7 Try to select 100 numbers, such that they satisfy $$ \begin{array}{c} "
+                r"x_{1}=1,0 \leqslant x_{k} \leqslant 2 x_{k-1}, k=2,3, \cdots, 100, \\ "
+                r"\text { and make } s=x_{1}-x_{2}+x_{3}-x_{4}+\cdots+x_{99}-x_{100} "
+                r"\text { as large as possible. } \end{array} $$"
+            ),
+            (
+                r"1. Does there exist a quadratic trinomial $P(x)$ with integer coefficients, such that for any "
+                r"natural number $n$ in decimal notation consisting entirely of the digit 1, the value of the "
+                r"quadratic trinomial $P(n)$ is also a natural number consisting entirely of the digit 1."
+            ),
+        ],
+        ids=["alternating-sum", "quadratic-repunits"],
+    )
+    async def test_per_record_question_regex_preserves_math_problem(
+        self, config: LLMJudgeResourcesServerConfig, question: str
+    ) -> None:
+        instruction = (
+            r"Solve the following math problem. Make sure to put the answer (and only answer) inside \boxed{}."
+        )
+        prompt = instruction + "\n\n" + question
+        # Deliberately conflicting global extraction proves the per-record rule takes precedence.
+        config.question_extract_regex = r"\A([^\n]+)"
+        client = MagicMock(spec=ServerClient)
+        reply = MagicMock(ok=True)
+        reply.read = AsyncMock(return_value=self._create_response("judge", self._msg("[[A=B]]")))
+        client.post = AsyncMock(return_value=reply)
+        server = LLMJudgeResourcesServer(config=config, server_client=client)
+        # This checks extraction and request preservation, not the mathematical answer or judge accuracy.
+        answer = "answer fixture"
+        request = LLMJudgeVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                input=[{"role": "user", "content": prompt}]
+            ),
+            response=NeMoGymResponse.model_validate_json(
+                self._create_response("policy", self._msg(r"\boxed{" + answer + "}"))
+            ),
+            expected_answer=answer,
+            template_metadata={
+                "question_regex": (
+                    r"\ASolve the following math problem\. Make sure to put the answer \(and only answer\) "
+                    r"inside \\boxed\{\}\.\n\n(.*)\Z"
+                ),
+                "output_regex": r"\\boxed\{([^{}]*)\}",
+            },
+        )
+        before = request.model_dump()
+        result = await server.verify(request)
+        expected_prompt = server._judge_prompt_template.format(
+            question=question, expected_answer=answer, generated_answer=answer
+        )
+        assert result.judge_evaluations[0].responses_create_params.input[-1].content == expected_prompt
+        assert request.model_dump() == before
+        assert result.responses_create_params == request.responses_create_params
+        assert result.response == request.response
+        assert result.reward == 1
+        client.post.assert_awaited_once()
+
     @mark.parametrize("threshold,expected_generated", [(None, "4"), (0, "Answer: 4")])
     async def test_question_regex_independent_of_answer_threshold(
         self, config: LLMJudgeResourcesServerConfig, threshold: int | None, expected_generated: str
