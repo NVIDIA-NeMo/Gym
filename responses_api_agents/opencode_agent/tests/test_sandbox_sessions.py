@@ -116,7 +116,7 @@ class Sandbox:
         payload = json.loads(self.files[payload_path])
         assert payload["cwd"] == getattr(self, "expected_workdir", "/app")
         assert kwargs["cwd"] == getattr(self, "expected_workdir", "/app")
-        assert "sandbox_runner.py" in kwargs["command"]
+        assert "/sandbox_runner " in kwargs["command"] and "/bin/gym-runner" in kwargs["command"]
         self.directory = payload["directory"]
         self.started.set()
         if not self.blocked:

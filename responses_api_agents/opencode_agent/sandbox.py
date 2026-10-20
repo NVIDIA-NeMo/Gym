@@ -12,7 +12,7 @@ from shlex import quote
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
-from nemo_gym.agent_utils.sandbox_session import SandboxCommand, SandboxSession
+from nemo_gym.agent_utils.sandbox_session import RUNNER_FILE, SandboxCommand, SandboxSession
 from nemo_gym.base_responses_api_agent import AgentSessionState
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
@@ -117,9 +117,10 @@ class OpenCodeSandboxSession(AgentSessionState):
             argv=[
                 "python3",
                 "-I",
-                f"{self.session.session_dir}/sandbox_runner.py",
+                f"{self.session.session_dir}/{RUNNER_FILE}",
                 f"{self.session.session_dir}/input.json",
             ],
+            hide_runner=True,
         )
 
     async def collect_artifacts(self, *, timeout: float) -> str:
@@ -182,7 +183,7 @@ class OpenCodeSandboxSession(AgentSessionState):
         if self.session.cleanup is None or not self.session.cleanup["cleanup_confirmed"]:
             raise RuntimeError("OpenCode transcript capture requires confirmed cleanup")
         captured = await self.session.sandbox.exec(
-            f"python3 -I {quote(self.session.session_dir + '/sandbox_runner.py')} --snapshot {quote(self.session.session_dir)}",
+            f"python3 -I {quote(f'{self.session.session_dir}/{RUNNER_FILE}')} --snapshot {quote(self.session.session_dir)}",
             cwd=self.session.workdir,
             timeout_s=timeout,
         )

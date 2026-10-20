@@ -35,7 +35,7 @@ import psutil
 from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field, PrivateAttr
 
-from nemo_gym.agent_utils.sandbox_session import SandboxSession
+from nemo_gym.agent_utils.sandbox_session import RUNNER_FILE, SandboxSession
 from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
@@ -576,7 +576,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                     f"bash {directory}/{installer} {runtime} {self.config.openclaw_version}\n"
                     f"stderr={(installed.stderr or '')[-16000:]}; stdout={(installed.stdout or '')[-16000:]}"
                 )
-            await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/sandbox_runner.py")
+            await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/{RUNNER_FILE}")
         except BaseException as error:
             try:
                 if prepared_directory or owns_sandbox:
