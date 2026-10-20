@@ -22,8 +22,9 @@ def check_resources_session_contract(app: FastAPI, seed: ResourcesSeedSessionReq
     """Seed, re-seed, and close a session through ``app``, and raise AssertionError on a contract violation.
 
     ``seed`` must use a ``resources_session_id`` the app has not seen. With ``keeps_state``, a seed that arrives
-    after its session closed, or after a close for an ID that was never seeded, must be rejected; a server that
-    keeps no state has nothing such a seed could recreate.
+    after its session closed, or after a close for an ID that was never seeded, must be rejected while the server
+    remembers the close (``session_close_retry_window_seconds``); a server that keeps no state has nothing such a
+    seed could recreate.
     """
     from fastapi.testclient import TestClient
 
