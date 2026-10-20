@@ -203,11 +203,11 @@ To swap a component, change the imported configuration and its matching implemen
 
 For where the harness runs and who cleans up, including borrowed and agent-owned sandboxes and host execution, see [Select an execution mode](/main/agent-server/add-or-update-a-harness#select-an-execution-mode).
 
-## Native conversation activations
+## Resuming harness sessions
 
-OpenCode can retain one native conversation across multiple activations in either
+OpenCode can resume its saved session across multiple activations in either
 an owned or borrowed sandbox. Opt in during `/v1/agent_sessions` seed with
-`continuation: {mode: native_conversation}`. Existing adapters reject continuation
+`continuation: {mode: resume_harness_session}`. Existing adapters reject continuation
 requirements they cannot satisfy before preparing the sandbox.
 
 Use the existing `/v1/responses` request body and session cookie. Send
@@ -217,7 +217,7 @@ retries, skipped indices, and overlapping new activations fail. The existing
 `metadata.agent_timeout_sec` sets the per-activation budget, including preparation,
 queueing and staging. Setup and cleanup retain their separate bounds.
 
-Native continuation adapters override `_agent_continuation_capabilities()` to return
+Adapters that support continuation override `_agent_continuation_capabilities()` to return
 the supported mode and observations, implement `_validate_agent_activation()` before
 binding an index, `_activate_agent_session_state()` for execution, and
 `_continuation_close_timeout()` for their cleanup bound. The ordinary `responses()`
@@ -226,13 +226,13 @@ existing HTTP signature remains unchanged. The shared ledger protects active wor
 from a disconnected waiter and fences it during close. These guarantees are
 process-local, separate from checkpoint recovery.
 
-`SandboxSession` still launches once by default. A native adapter may call
+`SandboxSession` still launches once by default. An adapter that supports continuation may call
 `begin_activation()` with a fresh supervisor directory after the previous process
-has confirmed cleanup. Native conversation storage remains outside these launch
+has confirmed cleanup. Saved harness session storage remains outside these launch
 directories. Finalization stays private to the lifecycle; close removes the retained
 session directory tree before releasing the connection.
 
-Emit one invocation per activation, recording the native session as context, and tag
+Emit one invocation per activation, recording `harness_session_id` as context, and tag
 each trajectory turn with its activation. OpenCode's header plugin uses that
 activation-scoped invocation identity to attribute captured model calls. Responses
 carry only new output, usage and evidence; close supplies the cumulative record.

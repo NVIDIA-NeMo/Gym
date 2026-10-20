@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Native continuation uses ordinary Responses requests and per-activation evidence."""
+"""Multi-turn continuation uses ordinary Responses requests and per-activation evidence."""
 
 import asyncio
 import json
@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 from nemo_gym.agent_activation_types import AgentContinuationRequirements
 from nemo_gym.base_responses_api_agent import AGENT_ACTIVATION_HEADER, AgentCloseSessionRequest
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from responses_api_agents.opencode_agent.continuation import classify_native_outcome
+from responses_api_agents.opencode_agent.continuation import classify_opencode_run
 from responses_api_agents.opencode_agent.sandbox_runner import snapshot
 from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import seed, setup  # noqa: F401
 
@@ -29,7 +29,7 @@ def install_artifact_runner(sandbox, tmp_path):
             create table session(id text, parent_id text, time_created integer);
             create table message(id text, session_id text, data text, time_created integer);
             create table part(id text, message_id text, session_id text, data text, time_created integer);
-            insert into session values('native-session', null, 0);
+            insert into session values('opencode-session', null, 0);
         """)
     payloads = []
 
@@ -59,7 +59,7 @@ def install_artifact_runner(sandbox, tmp_path):
                     "insert into message values(?,?,?,?)",
                     (
                         message_id,
-                        "native-session",
+                        "opencode-session",
                         json.dumps(message_info),
                         len(payloads) * 10,
                     ),
@@ -69,7 +69,7 @@ def install_artifact_runner(sandbox, tmp_path):
                     (
                         "part-" + message_id,
                         message_id,
-                        "native-session",
+                        "opencode-session",
                         json.dumps(message_part),
                         len(payloads) * 10,
                     ),
@@ -80,7 +80,7 @@ def install_artifact_runner(sandbox, tmp_path):
                     (
                         step_type + assistant_id,
                         assistant_id,
-                        "native-session",
+                        "opencode-session",
                         json.dumps({"type": step_type}),
                         len(payloads) * 10,
                     ),
@@ -88,7 +88,7 @@ def install_artifact_runner(sandbox, tmp_path):
             ids = [row[0] for row in con.execute("select id from message")]
         sandbox.files[f"{directory}/export.json"] = json.dumps(
             {
-                "session_id": "native-session",
+                "session_id": "opencode-session",
                 "message_ids": ids,
                 "activation_message_ids": [user_id, assistant_id],
                 "messages": [
@@ -233,8 +233,8 @@ def test_close_retains_recovered_activation_once(setup, tmp_path, monkeypatch, p
         if earlier is not None:
             assert invocations[0] == earlier
         recovered = invocations[-1]
-        assert recovered["invocation_id"] == f"{state.invocation_prefix}:native-session"
-        assert recovered["native_session_id"] == "native-session"
+        assert recovered["invocation_id"] == f"{state.invocation_prefix}:opencode-session"
+        assert recovered["harness_session_id"] == "opencode-session"
         for field in ("status", "error_type", "stop_reason", "duration_ms"):
             assert recovered[field] == failed[field]
         assert any(
@@ -273,7 +273,7 @@ async def test_close_recovery_preserves_cancelled_activation(setup, tmp_path, mo
     receipt = await agent.close_agent_session(request, close_body)
     [invocation] = roots(receipt.agent_observations.model_dump(mode="json"))
     assert invocation["status"] == "incomplete" and invocation["error_type"] == "cancelled"
-    assert invocation["native_session_id"] == "native-session" and invocation["conversation"]
+    assert invocation["harness_session_id"] == "opencode-session" and invocation["conversation"]
     assert [turn.activation_id for turn in receipt.trajectory.turns] == [1]
     assert await agent.close_agent_session(request, close_body) == receipt
     assert stop.await_count == 2
@@ -296,16 +296,16 @@ def test_plain_http_delta_replay_and_cumulative_close(setup, tmp_path):
             assert result["object"] == "response" and "response" not in result
             assert result["output"][-1]["content"][0]["text"] == f"Answer {index - 1}"
             assert result["usage"]["total_tokens"] == 16
-            assert result["metadata"]["native_conversation_id"] == "native-session"
+            assert result["metadata"]["harness_session_id"] == "opencode-session"
             assert result["metadata"]["activation_id"] == str(index)
             invocation = roots(result["_ng_agent_observations"])[0]
             assert invocation["activation_id"] == index
-            assert invocation["native_session_id"] == "native-session"
+            assert invocation["harness_session_id"] == "opencode-session"
             assert invocation["status"] == "completed"
             assert len(invocation["conversation"]) == 2
             assert (
                 invocation["invocation_id"]
-                == payloads[-1]["env"]["NEMO_GYM_OPENCODE_ACTIVATION_ID"] + ":native-session"
+                == payloads[-1]["env"]["NEMO_GYM_OPENCODE_ACTIVATION_ID"] + ":opencode-session"
             )
             turns = result["_ng_trajectory"]["turns"]
             assert len(turns) == 1 and turns[0]["activation_id"] == index
@@ -313,7 +313,7 @@ def test_plain_http_delta_replay_and_cumulative_close(setup, tmp_path):
             assert activate(client, index, prompt).json() == result
             assert sandbox.launch.call_count == index
         assert "--session" not in payloads[0]["command"]
-        assert payloads[1]["command"][-2:] == ["--session", "native-session"]
+        assert payloads[1]["command"][-2:] == ["--session", "opencode-session"]
         assert payloads[0]["env"]["HOME"] == payloads[1]["env"]["HOME"]
         assert payloads[0]["env"]["XDG_DATA_HOME"] == payloads[1]["env"]["XDG_DATA_HOME"]
         assert set(payloads[1]["previous_message_ids"]) == {"u0", "a0"}
@@ -417,12 +417,12 @@ def test_continuation_requires_standard_header_and_keeps_plain_schema(setup):
 
 
 @pytest.mark.parametrize("finish,reason", [("length", "max_output_tokens"), ("content-filter", "content_filter")])
-def test_native_budget_uses_response_incomplete_details(finish, reason):
-    result = classify_native_outcome(
+def test_opencode_budget_uses_response_incomplete_details(finish, reason):
+    result = classify_opencode_run(
         {"messages": [{"info": {"role": "assistant", "finish": finish, "time": {"completed": 1}}}]},
         cleanup={"return_code": 0, "error": None, "timed_out": False, "cleanup_confirmed": True},
         previous_session_id=None,
-        session_id="native",
+        session_id="opencode-session",
         stdout="",
         continuation=True,
     )
@@ -432,14 +432,14 @@ def test_native_budget_uses_response_incomplete_details(finish, reason):
 @pytest.mark.parametrize(
     "session_id,previous,error_event,expected",
     [
-        ("native", "native", False, "incomplete"),
-        ("other", "native", False, "failed"),
-        ("native", None, False, "incomplete"),
-        ("native", "native", True, "failed"),
+        ("opencode-session", "opencode-session", False, "incomplete"),
+        ("other", "opencode-session", False, "failed"),
+        ("opencode-session", None, False, "incomplete"),
+        ("opencode-session", "opencode-session", True, "failed"),
     ],
 )
-def test_interrupted_checkpoint_does_not_hide_native_error(session_id, previous, error_event, expected):
-    outcome = classify_native_outcome(
+def test_interrupted_checkpoint_does_not_hide_opencode_error(session_id, previous, error_event, expected):
+    outcome = classify_opencode_run(
         {},
         cleanup={"return_code": -9, "error": None, "timed_out": True, "cleanup_confirmed": True},
         previous_session_id=previous,
@@ -450,15 +450,15 @@ def test_interrupted_checkpoint_does_not_hide_native_error(session_id, previous,
     assert outcome.status == expected
 
 
-@pytest.mark.parametrize("previous", [None, "native"])
+@pytest.mark.parametrize("previous", [None, "opencode-session"])
 @pytest.mark.parametrize("assistant", [False, True])
 @pytest.mark.parametrize("error_event", [False, True])
-def test_timeout_native_error_overrides_partial_assistant(previous, assistant, error_event):
-    outcome = classify_native_outcome(
+def test_timeout_opencode_error_overrides_partial_assistant(previous, assistant, error_event):
+    outcome = classify_opencode_run(
         {"messages": [{"info": {"role": "assistant"}, "parts": []}] if assistant else []},
         cleanup={"return_code": -9, "error": None, "timed_out": True, "cleanup_confirmed": True},
         previous_session_id=previous,
-        session_id="native",
+        session_id="opencode-session",
         stdout=json.dumps({"type": "error"}) if error_event else "",
         continuation=True,
     )
@@ -468,12 +468,12 @@ def test_timeout_native_error_overrides_partial_assistant(previous, assistant, e
         assert outcome.status == "incomplete" and outcome.error_type == "timeout"
 
 
-def test_single_turn_timeout_keeps_existing_native_error_classification():
-    outcome = classify_native_outcome(
+def test_single_turn_timeout_keeps_existing_opencode_error_classification():
+    outcome = classify_opencode_run(
         {"messages": [{"info": {"role": "assistant"}, "parts": []}]},
         cleanup={"return_code": -9, "error": None, "timed_out": True, "cleanup_confirmed": True},
         previous_session_id=None,
-        session_id="native",
+        session_id="opencode-session",
         stdout=json.dumps({"type": "error"}),
         continuation=False,
     )
@@ -482,7 +482,7 @@ def test_single_turn_timeout_keeps_existing_native_error_classification():
 
 @pytest.mark.parametrize("prior_success", [False, True])
 @pytest.mark.parametrize("error_event", [False, True])
-def test_native_error_during_timeout_fails_http_activation(setup, tmp_path, prior_success, error_event):
+def test_opencode_error_during_timeout_fails_http_activation(setup, tmp_path, prior_success, error_event):
     agent, sandbox = setup
     payloads = install_artifact_runner(sandbox, tmp_path)
     launch = sandbox.launch.side_effect
@@ -503,7 +503,7 @@ def test_native_error_during_timeout_fails_http_activation(setup, tmp_path, prio
         response = activate(client, 2 if prior_success else 1)
         if error_event:
             assert response.status_code == 502
-            assert "native error event" in response.json()["detail"]
+            assert "OpenCode emitted an error event" in response.json()["detail"]
         else:
             assert response.status_code == 200 and response.json()["status"] == "incomplete"
         invocation = roots(close(client, request)["agent_observations"])[-1]
@@ -592,7 +592,7 @@ def test_collector_and_existing_conformance_keep_two_activation_owners(setup, tm
     assert not failed, failed
 
 
-def test_permission_yield_is_native_continuation_outcome_not_a_task_policy():
+def test_permission_yield_is_opencode_continuation_outcome_not_a_task_policy():
     info = {"role": "assistant", "finish": "tool-calls", "time": {"completed": 1}}
     cleanup = {"return_code": 0, "error": None, "timed_out": False, "cleanup_confirmed": True}
     export = {
@@ -611,13 +611,13 @@ def test_permission_yield_is_native_continuation_outcome_not_a_task_policy():
             }
         ]
     }
-    result = classify_native_outcome(
-        export, cleanup=cleanup, previous_session_id=None, session_id="native", stdout="", continuation=True
+    result = classify_opencode_run(
+        export, cleanup=cleanup, previous_session_id=None, session_id="opencode-session", stdout="", continuation=True
     )
     assert result.status == "incomplete" and result.error_type == "permission_denied"
     export["messages"][0]["parts"][0]["state"]["error"] = "A different tool failure"
-    result = classify_native_outcome(
-        export, cleanup=cleanup, previous_session_id=None, session_id="native", stdout="", continuation=True
+    result = classify_opencode_run(
+        export, cleanup=cleanup, previous_session_id=None, session_id="opencode-session", stdout="", continuation=True
     )
     assert result.status == "failed"
 
@@ -774,7 +774,7 @@ def test_first_launched_timeout_without_assistant_can_resume(setup, tmp_path, re
         if len(payloads) == 1:
             directory = payloads[0]["directory"]
             sandbox.files[f"{directory}/export.json"] = json.dumps(
-                {"session_id": "native-session", "message_ids": [], "activation_message_ids": [], "messages": []}
+                {"session_id": "opencode-session", "message_ids": [], "activation_message_ids": [], "messages": []}
             )
             sandbox.files[f"{directory}/stdout.jsonl"] = ""
             if not receipt:
@@ -792,7 +792,7 @@ def test_first_launched_timeout_without_assistant_can_resume(setup, tmp_path, re
         assert first.status_code == 200 and first.json()["status"] == "incomplete", first.text
         sandbox.result.update(timed_out=False, return_code=0)
         assert activate(client, 2).status_code == 200
-        assert payloads[1]["native_session_id"] == "native-session"
+        assert payloads[1]["harness_session_id"] == "opencode-session"
         assert [r["status"] for r in roots(close(client, request)["agent_observations"])] == [
             "incomplete",
             "completed",
@@ -825,7 +825,7 @@ def test_snapshot_scopes_delta_and_keeps_cumulative_store(tmp_path):
             )
     activation = tmp_path / "activation"
     activation.mkdir()
-    (activation / "input.json").write_text(json.dumps({"native_session_id": "root", "previous_message_ids": ["m0"]}))
+    (activation / "input.json").write_text(json.dumps({"harness_session_id": "root", "previous_message_ids": ["m0"]}))
     snapshot(activation, session_directory=persistent)
     export = json.loads((activation / "export.json").read_text())
     assert export["session_id"] == "root"
@@ -834,6 +834,6 @@ def test_snapshot_scopes_delta_and_keeps_cumulative_store(tmp_path):
     assert [info["tokens"]["input"] for info in export["usage_messages"]] == [2]
     with sqlite3.connect(activation / "observations.db") as con:
         assert con.execute("select count(*) from message").fetchone()[0] == 2
-    (activation / "input.json").write_text(json.dumps({"native_session_id": "wrong"}))
+    (activation / "input.json").write_text(json.dumps({"harness_session_id": "wrong"}))
     with pytest.raises(RuntimeError, match="unexpected session"):
         snapshot(activation, session_directory=persistent)

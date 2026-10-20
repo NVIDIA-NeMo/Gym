@@ -256,7 +256,7 @@ def _parse_opencode_session(
             }.get(opencode_status, "unknown")
             if opencode_status == "completed" and part.get("tool") == "bash":
                 # Completion describes the tool lifecycle, not shell success. Timeout/abort
-                # can complete that lifecycle with a null exit code in the native artifact.
+                # can complete that lifecycle with a null exit code in the OpenCode artifact.
                 metadata = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
                 exit_code = metadata.get("exit")
                 if type(exit_code) is int:

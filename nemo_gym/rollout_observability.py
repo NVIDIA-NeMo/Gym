@@ -107,7 +107,7 @@ class TrajectoryTurn(ObservationModel):
 class AgentInvocation(ObservationModel):
     """One agent activation or subagent invocation observed by a harness.
 
-    A native conversation may span several invocations; ``native_session_id``
+    A harness's saved session may span several invocations; ``harness_session_id``
     retains that context while ``invocation_id`` owns each activation's evidence.
 
     Harness adapters should report an iteration-limit event through an
@@ -126,10 +126,10 @@ class AgentInvocation(ObservationModel):
         exclude_if=lambda value: value is None,
         description="1-based activation owning this invocation; omitted for producers without activation IDs.",
     )
-    native_session_id: Optional[str] = Field(
+    harness_session_id: Optional[str] = Field(
         default=None,
         exclude_if=lambda value: value is None,
-        description="Harness-native session retained as context across activations; omitted when not reported.",
+        description="Session ID assigned by the harness, retained as context across activations; omitted when not reported.",
     )
     parent_invocation_id: Optional[str] = None
     spawned_by_tool_call_id: Optional[str] = None

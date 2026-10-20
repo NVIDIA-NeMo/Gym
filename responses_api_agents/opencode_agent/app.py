@@ -83,7 +83,7 @@ from responses_api_agents.opencode_agent.artifacts import (
     parse_opencode_export,
     parse_opencode_session,
 )
-from responses_api_agents.opencode_agent.continuation import NativeOutcome, classify_native_outcome
+from responses_api_agents.opencode_agent.continuation import OpenCodeRunOutcome, classify_opencode_run
 from responses_api_agents.opencode_agent.observability import scope_opencode_trajectory
 from responses_api_agents.opencode_agent.runtime import (
     OBSERVABILITY_PATCH,
@@ -857,7 +857,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
 
     def _agent_continuation_capabilities(self) -> AgentContinuationCapabilities:
         return AgentContinuationCapabilities(
-            observations=["trajectory", "timing", "native_tools", "reasoning", "compaction"],
+            observations=["trajectory", "timing", "harness_tool_calls", "reasoning", "compaction"],
         )
 
     def _continuation_close_timeout(self) -> float:
@@ -904,15 +904,15 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             if state.session.launch_started:
                 failure = error
                 raise
-            # No native conversation is required until a launch persists one. A
+            # No OpenCode session is required until a launch persists one. A
             # pre-launch timeout therefore does not prevent the next activation.
             invocation_id = state.invocation_prefix
-            if state.native_session_id is not None:
-                invocation_id += f":{state.native_session_id}"
+            if state.harness_session_id is not None:
+                invocation_id += f":{state.harness_session_id}"
             invocation = AgentInvocation(
                 invocation_id=invocation_id,
                 activation_id=activation_id,
-                native_session_id=state.native_session_id,
+                harness_session_id=state.harness_session_id,
                 status="incomplete",
                 error_type="timeout",
                 stop_reason="timeout",
@@ -927,7 +927,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 state,
                 body,
                 timeout=timeout,
-                outcome=NativeOutcome(status="incomplete", error_type="timeout"),
+                outcome=OpenCodeRunOutcome(status="incomplete", error_type="timeout"),
             )
         except BaseException as error:
             failure = error
@@ -944,14 +944,14 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     isinstance(r, AgentInvocation) and r.parent_invocation_id is None for r in observations.records
                 ):
                     invocation_id = state.invocation_prefix
-                    if state.native_session_id is not None:
-                        invocation_id += f":{state.native_session_id}"
+                    if state.harness_session_id is not None:
+                        invocation_id += f":{state.harness_session_id}"
                     cancelled = isinstance(failure, asyncio.CancelledError)
                     observations.records.append(
                         AgentInvocation(
                             invocation_id=invocation_id,
                             activation_id=activation_id,
-                            native_session_id=state.native_session_id,
+                            harness_session_id=state.harness_session_id,
                             status="incomplete" if cancelled else "failed",
                             error_type="cancelled" if cancelled else "server_error",
                             duration_ms=(monotonic() - started) * 1000,
@@ -965,7 +965,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         body: NeMoGymResponseCreateParamsNonStreaming,
         *,
         timeout: float,
-        outcome: NativeOutcome,
+        outcome: OpenCodeRunOutcome,
         output: list[NeMoGymResponseOutputItem] | None = None,
         usage: NeMoGymResponseUsage | None = None,
     ) -> NeMoGymResponse:
@@ -993,8 +993,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         )
         if state.is_continuation:
             response.metadata.update({"activation_id": str(state.activation_id)})
-            if state.native_session_id is not None:
-                response.metadata["native_conversation_id"] = state.native_session_id
+            if state.harness_session_id is not None:
+                response.metadata["harness_session_id"] = state.harness_session_id
             response = response.model_copy(
                 update={
                     _INTERNAL_OBSERVATIONS_KEY: state.activation_observations.model_dump(mode="json"),
@@ -1017,7 +1017,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         timeout = timeout if timeout is not None else resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
         started = monotonic()
-        previous_session_id = state.native_session_id
+        previous_session_id = state.harness_session_id
         base_url = self.resolve_model_base_url(self.config.model_server.name, state.request.episode_id.capture_key)
         config = {
             "model": "nemo_gym/dummy_model",
@@ -1056,15 +1056,15 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         command = [f"{state.runtime}/opencode", "run", "--format", "json", "--title", "NeMo Gym"]
         if self.config.thinking:
             command.append("--thinking")
-        if state.native_session_id:
-            command.extend(["--session", state.native_session_id])
+        if state.harness_session_id:
+            command.extend(["--session", state.harness_session_id])
         payload = {
             "instructions": system,
             "directory": state.session.session_dir,
             "cwd": state.session.workdir,
             "command": command,
             "prompt": prompt,
-            "native_session_id": state.native_session_id,
+            "harness_session_id": state.harness_session_id,
             "previous_message_ids": state.message_ids,
             "activation_id": state.activation_id,
             "env": {
@@ -1149,11 +1149,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             observations.gaps.append(ObservationGap(code="runtime_info_unavailable"))
         if result is not None and result["return_code"] is None:
             observations.gaps.append(ObservationGap(code="worker_exit_code_unavailable"))
-        outcome = classify_native_outcome(
+        outcome = classify_opencode_run(
             export,
             cleanup=result,
             previous_session_id=previous_session_id,
-            session_id=state.native_session_id,
+            session_id=state.harness_session_id,
             stdout=state.activation_log,
             continuation=state.is_continuation,
         )

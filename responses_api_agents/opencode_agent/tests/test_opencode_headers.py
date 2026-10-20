@@ -9,10 +9,10 @@ import pytest
 
 
 @pytest.mark.parametrize("activation", [None, "seed:activation-1", "seed:activation-2"])
-def test_native_headers_keep_session_identity_without_guessing_reply_identity(activation) -> None:
+def test_opencode_headers_keep_session_identity_without_guessing_reply_identity(activation) -> None:
     node = shutil.which("node")
     if node is None:
-        pytest.skip("Node.js is required to execute the native OpenCode plugin")
+        pytest.skip("Node.js is required to execute the OpenCode plugin")
     plugin = Path(__file__).parents[1] / "assistant_message_header.js"
     script = (
         plugin.read_text()

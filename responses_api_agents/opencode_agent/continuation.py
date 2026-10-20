@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Classify stopped OpenCode activations from their native checkpoints."""
+"""Classify stopped OpenCode runs from their saved checkpoints and events."""
 
 import json
 from dataclasses import dataclass
@@ -10,8 +10,8 @@ from nemo_gym.agent_utils.process_supervisor import CleanupReceipt
 
 
 @dataclass(frozen=True, kw_only=True)
-class NativeOutcome:
-    """One stopped OpenCode activation classified from its native checkpoint."""
+class OpenCodeRunOutcome:
+    """One stopped OpenCode run classified from its saved checkpoint and events."""
 
     status: Literal["completed", "incomplete", "failed"]
     error_type: Literal["server_error", "timeout", "permission_denied"] | None = None
@@ -19,7 +19,7 @@ class NativeOutcome:
     incomplete_reason: Literal["max_output_tokens", "content_filter"] | None = None
 
 
-def classify_native_outcome(
+def classify_opencode_run(
     export: dict[str, Any],
     *,
     cleanup: CleanupReceipt | None,
@@ -27,8 +27,8 @@ def classify_native_outcome(
     session_id: str | None,
     stdout: str,
     continuation: bool,
-) -> NativeOutcome:
-    """Require a native terminal result or a confirmed interrupted checkpoint."""
+) -> OpenCodeRunOutcome:
+    """Require an OpenCode terminal result or a confirmed interrupted checkpoint."""
     error = cleanup["error"] if cleanup is not None else None
     timed_out = bool(cleanup is not None and cleanup["timed_out"])
     if cleanup is not None and cleanup["return_code"] not in (0, None) and not timed_out:
@@ -37,8 +37,8 @@ def classify_native_outcome(
     for message in assistants:
         if message["info"].get("error"):
             error = error or json.dumps(message["info"]["error"])
-    if continuation and timed_out and has_native_error(stdout):
-        error = error or "OpenCode emitted a native error event"
+    if continuation and timed_out and has_opencode_error_event(stdout):
+        error = error or "OpenCode emitted an error event"
     resumable_checkpoint = bool(
         continuation
         and session_id
@@ -82,13 +82,13 @@ def classify_native_outcome(
             else:
                 error = error or f"OpenCode ended without a successful terminal assistant result (finish={finish!r})"
     if error:
-        return NativeOutcome(status="failed", error_type="server_error", error=error)
+        return OpenCodeRunOutcome(status="failed", error_type="server_error", error=error)
     if timed_out:
-        return NativeOutcome(status="incomplete", error_type="timeout")
+        return OpenCodeRunOutcome(status="incomplete", error_type="timeout")
     if permission_denied:
-        return NativeOutcome(status="incomplete", error_type="permission_denied")
+        return OpenCodeRunOutcome(status="incomplete", error_type="permission_denied")
     if incomplete:
-        return NativeOutcome(
+        return OpenCodeRunOutcome(
             status="incomplete",
             incomplete_reason="max_output_tokens"
             if finish == "length"
@@ -96,11 +96,11 @@ def classify_native_outcome(
             if finish == "content-filter"
             else None,
         )
-    return NativeOutcome(status="completed")
+    return OpenCodeRunOutcome(status="completed")
 
 
-def has_native_error(stdout: str) -> bool:
-    """An interrupted checkpoint must not hide an explicit native error event."""
+def has_opencode_error_event(stdout: str) -> bool:
+    """An interrupted checkpoint must not hide an explicit OpenCode error event."""
     for line in stdout.splitlines():
         try:
             event = json.loads(line)

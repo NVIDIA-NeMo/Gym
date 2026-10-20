@@ -23,7 +23,7 @@ class RunnerInput(TypedDict):
     command: list[str]
     cwd: str
     env: dict[str, str]
-    native_session_id: str | None
+    harness_session_id: str | None
     previous_message_ids: list[str]
 
 
@@ -107,7 +107,7 @@ def snapshot(directory: Path, *, session_directory: Path | None = None) -> None:
             "select id, data from message where session_id=? order by time_created, id", (sessions[0]["id"],)
         ).fetchall()
         session_id = sessions[0]["id"]
-        expected_id = params.get("native_session_id")
+        expected_id = params.get("harness_session_id")
         if expected_id is not None and expected_id != session_id:
             raise RuntimeError(f"OpenCode resumed unexpected session {session_id!r}")
         messages = []

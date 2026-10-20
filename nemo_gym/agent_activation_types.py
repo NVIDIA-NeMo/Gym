@@ -1,22 +1,22 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Seed-time requirements for retaining a harness's native conversation."""
+"""Seed-time requirements for resuming a harness's saved session."""
 
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 
-ContinuationObservation = Literal["trajectory", "timing", "native_tools", "reasoning", "compaction"]
+ContinuationObservation = Literal["trajectory", "timing", "harness_tool_calls", "reasoning", "compaction"]
 
 
 class AgentContinuationRequirements(BaseModel):
-    """Native continuation and observation support required before session setup."""
+    """Multi-turn continuation and observation support required before session setup."""
 
     model_config = ConfigDict(extra="forbid")
-    mode: Literal["native_conversation"] = Field(
-        default="native_conversation", description="Retain the harness's native conversation across activations."
+    mode: Literal["resume_harness_session"] = Field(
+        default="resume_harness_session", description="Resume the harness's saved session across activations."
     )
     observations: list[ContinuationObservation] = Field(
         default_factory=lambda: ["trajectory", "timing"],

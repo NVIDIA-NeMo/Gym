@@ -59,7 +59,7 @@ def parse_runtime_info(payload: object) -> HarnessProcessInfo | None:
 
 @dataclass
 class OpenCodeSandboxSession(AgentSessionState):
-    """Keep native HOME/history under ``conversation_directory`` across launches.
+    """Keep OpenCode HOME/history under ``conversation_directory`` across launches.
 
     ``session.session_dir`` holds only the current supervisor and input/output
     files. ``persistent_directory`` selects that original session root for legacy
@@ -76,7 +76,7 @@ class OpenCodeSandboxSession(AgentSessionState):
     stderr: str = ""
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
     conversation_directory: str | None = None
-    native_session_id: str | None = None
+    harness_session_id: str | None = None
     message_ids: list[str] = field(default_factory=list)
     system_instructions: str | None = None
     activation_log: str = ""
@@ -90,18 +90,18 @@ class OpenCodeSandboxSession(AgentSessionState):
 
     @property
     def is_continuation(self) -> bool:
-        """Whether the seed opted into native continuation, including before its first launch."""
+        """Whether the seed opted into multi-turn continuation, including before its first launch."""
         return self.request.continuation is not None
 
     @property
     def invocation_prefix(self) -> str:
-        """Unique process-activation identity, also passed to the native header plugin."""
+        """Unique process-activation identity, also passed to the OpenCode header plugin."""
         assert self.activation_id is not None
         return f"{self.request.agent_session_id}:activation-{self.activation_id}"
 
     @property
     def persistent_directory(self) -> str:
-        """Private native conversation storage that survives process activations."""
+        """Private OpenCode session storage that survives process activations."""
         return self.conversation_directory or self.session.session_dir
 
     async def prepare_activation(self, activation_id: int, *, timeout: float) -> None:
@@ -134,7 +134,7 @@ class OpenCodeSandboxSession(AgentSessionState):
                 None,
             )
             if original is not None:
-                # A close retry can discover the native ID and transcript after
+                # A close retry can discover the OpenCode session ID and transcript after
                 # a failed activation retained only a synthetic root invocation.
                 recovered = list(self.activation_observations.records)
                 if self.activation_trajectory is not None:
@@ -232,7 +232,7 @@ class OpenCodeSandboxSession(AgentSessionState):
 
     async def collect_artifacts(self, *, timeout: float) -> str:
         """Snapshot only after cleanup; keep observations before sandbox release."""
-        previous_session_id = self.native_session_id
+        previous_session_id = self.harness_session_id
         try:
             self.stderr = (await self.read_text("stderr.log"))[-16000:]
         except Exception:
@@ -246,12 +246,12 @@ class OpenCodeSandboxSession(AgentSessionState):
         if self.is_continuation:
             export_text = await self._read_export()
             export = json.loads(export_text)
-            native_id = export.get("session_id")
-            if not isinstance(native_id, str) or not native_id:
+            harness_session_id = export.get("session_id")
+            if not isinstance(harness_session_id, str) or not harness_session_id:
                 raise RuntimeError("OpenCode did not persist a resumable session ID")
-            if self.native_session_id is not None and native_id != self.native_session_id:
-                raise RuntimeError("OpenCode resumed a different native session")
-            self.native_session_id = native_id
+            if self.harness_session_id is not None and harness_session_id != self.harness_session_id:
+                raise RuntimeError("OpenCode resumed a different OpenCode session")
+            self.harness_session_id = harness_session_id
             self.message_ids = export["message_ids"]
         try:
             self.activation_log = await self.read_text("stdout.jsonl")
@@ -313,11 +313,11 @@ class OpenCodeSandboxSession(AgentSessionState):
             await self._check_task_environment()
         except Exception as error:
             # A process can exhaust its relative budget before plugins load.
-            # Accept only an empty native checkpoint and confirmed timeout;
+            # Accept only an empty OpenCode checkpoint and confirmed timeout;
             # any newly accepted input still requires the task-environment receipt.
             if (
-                self.native_session_id is not None
-                and (previous_session_id is None or self.native_session_id == previous_session_id)
+                self.harness_session_id is not None
+                and (previous_session_id is None or self.harness_session_id == previous_session_id)
                 and self.session.cleanup is not None
                 and self.session.cleanup["cleanup_confirmed"]
                 and self.session.cleanup["timed_out"]

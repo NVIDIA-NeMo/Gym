@@ -93,8 +93,8 @@ def append_opencode_turns(
             continue
         turn_counts[session_id] += 1
         step_counts[session_id] += sum(part.get("type") == "step-finish" for _, part in message_parts)
-        native_time = message.get("time") if isinstance(message.get("time"), dict) else {}
-        timestamp = _timestamp(native_time.get("created"))
+        opencode_time = message.get("time") if isinstance(message.get("time"), dict) else {}
+        timestamp = _timestamp(opencode_time.get("created"))
         if timestamp is None:
             timestamp = _timestamp(row["time_created"])
         if timestamp is None:
@@ -182,14 +182,14 @@ def scope_opencode_activation(
     invocation_prefix: str,
     activation_id: int,
 ) -> None:
-    """Match the launch plugin's activation/native-session IDs at every evidence boundary."""
+    """Match the launch plugin's activation/harness-session IDs at every evidence boundary."""
 
-    def scoped(native_id: str) -> str:
-        return f"{invocation_prefix}:{native_id}"
+    def scoped(harness_session_id: str) -> str:
+        return f"{invocation_prefix}:{harness_session_id}"
 
     for record in observations.records:
         if isinstance(record, AgentInvocation):
-            record.native_session_id = record.invocation_id
+            record.harness_session_id = record.invocation_id
             record.activation_id = activation_id
             if record.parent_invocation_id is not None:
                 record.parent_invocation_id = scoped(record.parent_invocation_id)

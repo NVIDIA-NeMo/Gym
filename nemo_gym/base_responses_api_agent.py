@@ -98,7 +98,7 @@ AGENT_SESSIONS = SessionKind(
 # without running it again.
 # An environment server that can invoke an activation again after a restore must send it:
 # its checkpoint may precede the agent's reply while the agent's checkpoint follows it.
-# Native-continuation sessions use this same header without checkpointing.
+# Multi-turn continuation sessions use this same header without checkpointing.
 # Other adapters may treat requests without the header as new activations.
 AGENT_ACTIVATION_HEADER = "x-ng-agent-activation"
 
@@ -124,7 +124,7 @@ class AgentSeedSessionRequest(BaseModel):
         default=None,
         exclude_if=lambda value: value is None,
         description=(
-            "Opt into native conversation continuation and require these observations at seed time. "
+            "Opt into continuation by resuming the harness's saved session and require these observations at seed time. "
             "Omitted for ordinary sessions."
         ),
     )
@@ -191,7 +191,7 @@ class AgentCloseSessionResponse(BaseModel):
         default=None,
         exclude_if=lambda value: value is None,
         description=(
-            "Cumulative trajectory across this native continuation session's activations. Omitted when not reported."
+            "Cumulative trajectory across this continuation session's activations. Omitted when not reported."
         ),
     )
 
@@ -525,7 +525,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         capabilities = self._agent_continuation_capabilities() if body.continuation is not None else None
         if body.continuation is not None:
             if capabilities is None or capabilities.mode != body.continuation.mode:
-                raise HTTPException(422, "Agent does not support the required native continuation mode")
+                raise HTTPException(422, "Agent does not support the required multi-turn continuation mode")
             missing = set(body.continuation.observations) - set(capabilities.observations)
             if missing:
                 raise HTTPException(422, f"Agent lacks required continuation observations: {sorted(missing)}")
@@ -649,7 +649,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             raise StaleAttemptError(f"agent session {agent_session_id!r} was retired while it closed")
 
     def _activation_index(self, request: Request) -> Optional[int]:
-        """Read the existing 1-based header for checkpointed or native-continuation sessions."""
+        """Read the existing 1-based header for checkpointed or multi-turn continuation sessions."""
         session_id = self._agent_session_id_from_request(request)
         state = self._session_state(session_id) if session_id is not None else None
         continuation = state is not None and state.request.continuation is not None
@@ -683,20 +683,20 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             self._release_agent_session_claim(agent_session_id)
 
     def _agent_continuation_capabilities(self) -> AgentContinuationCapabilities | None:
-        """Opt into native continuation; existing one-activation adapters stay unchanged."""
+        """Opt into multi-turn continuation; existing one-activation adapters stay unchanged."""
         return None
 
     async def activate_agent_session(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming
     ) -> NeMoGymResponse:
-        """Run or replay one header-indexed delta in a seeded native conversation."""
+        """Run or replay one header-indexed delta in a seeded harness session."""
         session_id = self._agent_session_id_from_request(request)
         if session_id is None:
             raise HTTPException(409, "Activation requires the seeded agent session cookie")
         async with self._locked_agent_session(session_id) as record:
             state = self._require_agent_session(session_id)
             if state.request.continuation is None:
-                raise HTTPException(422, "Session was not seeded for native continuation")
+                raise HTTPException(422, "Session was not seeded for multi-turn continuation")
             rollout_id = request.path_params.get("rollout_id")
             if rollout_id is not None and rollout_id != state.request.episode_id.capture_key:
                 raise HTTPException(409, "Activation rollout does not match the seeded session")
@@ -705,7 +705,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             except ActivationOutOfOrderError as error:
                 raise HTTPException(409, str(error)) from error
             if index is None:
-                raise HTTPException(422, f"Native continuation requires {AGENT_ACTIVATION_HEADER}")
+                raise HTTPException(422, f"Multi-turn continuation requires {AGENT_ACTIVATION_HEADER}")
             params = body.model_copy(deep=True)
             # Reject malformed inputs before binding an activation index, including on retries.
             self._validate_agent_activation(state, params)
@@ -723,17 +723,17 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         self, state: AgentSessionState, body: NeMoGymResponseCreateParamsNonStreaming
     ) -> None:
         """Validate a delta without mutating the session or consuming its index."""
-        raise NotImplementedError("This agent does not implement native continuation")
+        raise NotImplementedError("This agent does not implement multi-turn continuation")
 
     async def _activate_agent_session_state(
         self, state: AgentSessionState, body: NeMoGymResponseCreateParamsNonStreaming, *, activation_id: int
     ) -> NeMoGymResponse:
-        """Run one input delta with the retained native conversation and sandbox."""
-        raise NotImplementedError("This agent does not implement native continuation")
+        """Run one input delta with the retained harness session and sandbox."""
+        raise NotImplementedError("This agent does not implement multi-turn continuation")
 
     def _continuation_close_timeout(self) -> float:
         """Return the adapter's configured bound for stopping an active continuation."""
-        raise NotImplementedError("This agent does not implement native continuation")
+        raise NotImplementedError("This agent does not implement multi-turn continuation")
 
     async def _close_agent_session_record(self, record: _AgentSessionRecord) -> AgentCloseSessionResponse:
         await record.activations.close(timeout=self._continuation_close_timeout())

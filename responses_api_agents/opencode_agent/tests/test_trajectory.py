@@ -270,13 +270,13 @@ def test_activation_scoping_keeps_child_ownership_and_cross_activation_compactio
         projected.append((bundle, trajectory))
     first, first_trajectory = projected[0]
     invocations = [r for r in first.records if isinstance(r, AgentInvocation)]
-    child = next(r for r in invocations if r.native_session_id == "child")
+    child = next(r for r in invocations if r.harness_session_id == "child")
     assert child.parent_invocation_id == "session:activation-1:root"
     assert child.invocation_id == "session:activation-1:child" and child.activation_id == 1
     assert child.spawned_by_tool_call_id == "spawn-child"
     assert {turn.activation_id for turn in first_trajectory.turns} == {1}
     second, second_trajectory = projected[1]
-    assert [r.native_session_id for r in second.records if isinstance(r, AgentInvocation)] == ["root"]
+    assert [r.harness_session_id for r in second.records if isinstance(r, AgentInvocation)] == ["root"]
     [compaction] = [r for r in second.records if isinstance(r, ContextCompactionObservation)]
     assert compaction.invocation_id == "session:activation-2:root"
     assert compaction.first_kept_item_id == "spawn-child"

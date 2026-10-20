@@ -195,7 +195,7 @@ async def test_cleanup_exception_retains_state_for_retry(agent, monkeypatch):
 
 
 @pytest.mark.parametrize("continuation", [False, True])
-async def test_only_native_continuation_shields_close_waiter(agent, monkeypatch, continuation):
+async def test_only_multi_turn_continuation_shields_close_waiter(agent, monkeypatch, continuation):
     request, body = await seed(agent, continuation=continuation)
     entered, release, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
@@ -223,7 +223,7 @@ async def test_requires_cookie_continuation_and_contiguous_header(agent):
     request, _ = await seed(agent, continuation=False)
     with pytest.raises(HTTPException, match="not seeded"):
         await activate(agent, request)
-    request, _ = await seed(agent, session_id="native")
+    request, _ = await seed(agent, session_id="continuation")
     with pytest.raises(HTTPException, match="out of order"):
         await activate(agent, request, 2)
     with pytest.raises(HTTPException, match="requires x-ng-agent-activation"):
