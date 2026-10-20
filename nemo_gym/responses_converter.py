@@ -80,7 +80,7 @@ _IMAGE_OUTPUT_PLACEHOLDER = "[image omitted from tool output]"
 _REPORTING_ONLY_REASONING_FIELDS = ("summary", "generate_summary")
 
 
-def _message_content_to_text(content: Any) -> str:
+def message_content_to_text(content: Any) -> str:
     """Plain text of a chat message content (a string, or a list of text parts)."""
     if isinstance(content, str):
         return content
@@ -346,7 +346,7 @@ class ResponsesConverter(BaseModel):
         if instructions:
             leading_parts = [instructions]
             while state.messages and state.messages[0]["role"] in ("system", "developer"):
-                leading_parts.append(_message_content_to_text(state.messages.pop(0)["content"]))
+                leading_parts.append(message_content_to_text(state.messages.pop(0)["content"]))
             state.messages.insert(
                 0,
                 NeMoGymChatCompletionSystemMessageParam(content="\n\n".join(leading_parts), role="system"),

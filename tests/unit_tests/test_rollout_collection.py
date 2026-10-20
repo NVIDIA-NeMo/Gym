@@ -102,9 +102,9 @@ from nemo_gym.rollout_collection import (
     get_max_rollout_attempts,
     is_terminal_failure,
     loads_jsonl_line,
-    migrate_invalid_judge_main_rows,
 )
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
+from nemo_gym.rollout_reverification import RolloutReverificationConfig
 from nemo_gym.server_utils import ClientDisconnectCancellationMiddleware, ServerClient
 from nemo_gym.telemetry.gym_metrics import ROLLOUT_COMPLETED_INSTRUMENT
 from nemo_gym.telemetry.span_groups import GymSpanGroup
@@ -283,6 +283,27 @@ class TestUploadRolloutsDeprecation:
 
         assert not config.upload_rollouts
         assert not [w for w in recwarn if issubclass(w.category, DeprecationWarning)]
+
+
+class TestRemovedRetryInvalidJudgeResponses:
+    @pytest.mark.parametrize(
+        ("config_cls", "required"),
+        [
+            (RolloutCollectionConfig, {"input_jsonl_fpath": "in.jsonl"}),
+            (E2ERolloutCollectionConfig, {"split": "benchmark"}),
+            (RolloutReverificationConfig, {"materialized_inputs_jsonl_fpath": "materialized.jsonl"}),
+        ],
+    )
+    def test_it_is_rejected(self, config_cls, required):
+        with pytest.raises(ConfigError, match="`retry_invalid_judge_responses` was removed"):
+            config_cls(output_jsonl_fpath="out.jsonl", retry_invalid_judge_responses=True, **required)
+
+    def test_reverification_without_it_is_unaffected(self):
+        config = RolloutReverificationConfig(
+            materialized_inputs_jsonl_fpath="m.jsonl", rollouts_jsonl_fpath="r.jsonl", output_jsonl_fpath="o.jsonl"
+        )
+
+        assert config.output_jsonl_fpath == "o.jsonl"
 
 
 class TestGetMaxRolloutAttempts:
@@ -7491,245 +7512,6 @@ class TestLongestFirstDispatch:
 
         assert [r[TASK_INDEX_KEY_NAME] for r in input_rows] == [0, 2, 3]
 
-    def test_retry_propagates_cached_deliverable_signal(self, tmp_path: Path) -> None:
-        failures = [
-            {
-                TASK_INDEX_KEY_NAME: 2,
-                ROLLOUT_INDEX_KEY_NAME: 0,
-                NG_FAILURE_CLASS_KEY: "judge_invalid",
-                "reuse_cached_deliverable": True,
-            }
-        ]
-        config = self._write_resume_state(tmp_path, failures)
-
-        input_rows, *_ = RolloutCollectionHelper()._load_from_cache(config)
-        by_task = {row[TASK_INDEX_KEY_NAME]: row for row in input_rows}
-
-        assert by_task[2]["reuse_cached_deliverable"] is True
-        assert "reuse_cached_deliverable" not in by_task[1]
-
-    def test_legacy_invalid_judge_main_row_migrates_to_retryable_sidecar(self, tmp_path: Path) -> None:
-        config = self._write_resume_state(tmp_path, [], retry_invalid_judge_responses=True)
-        output = Path(config.output_jsonl_fpath)
-        deliverables_dir = tmp_path / "deliverables" / "task-2"
-        deliverables_dir.mkdir(parents=True)
-        (deliverables_dir / "answer.txt").write_text("answer")
-        legacy_row = {
-            TASK_INDEX_KEY_NAME: 2,
-            ROLLOUT_INDEX_KEY_NAME: 0,
-            "invalid_judge_response": True,
-            "reward": 0.0,
-            "deliverables_dir": str(deliverables_dir),
-        }
-        output.write_bytes(orjson.dumps(legacy_row) + b"\n")
-
-        input_rows, cached_rows, cached_results, _ = RolloutCollectionHelper()._load_from_cache(config)
-
-        by_task = {row[TASK_INDEX_KEY_NAME]: row for row in input_rows}
-        assert by_task[2]["reuse_cached_deliverable"] is True
-        assert by_task[2][ATTEMPT_INDEX_KEY_NAME] == 1
-        assert cached_rows == []
-        assert cached_results == []
-        assert output.read_bytes() == b""
-        migrated = [orjson.loads(line) for line in _failures_path_for(output).read_bytes().splitlines()]
-        assert len(migrated) == 1
-        assert migrated[0][NG_FAILURE_CLASS_KEY] == "judge_invalid"
-        assert migrated[0]["reuse_cached_deliverable"] is True
-
-        # Simulate a crash after the sidecar append but before the main-file
-        # replacement: replaying the same attempt must not append it twice.
-        replayed_row = dict(legacy_row)
-        replayed_row[ATTEMPT_INDEX_KEY_NAME] = 0
-        output.write_bytes(orjson.dumps(replayed_row) + b"\n")
-        RolloutCollectionHelper()._load_from_cache(config)
-        assert len(_failures_path_for(output).read_bytes().splitlines()) == 1
-
-    def test_migration_keeps_valid_rows_byte_for_byte_and_is_idempotent(self, tmp_path: Path) -> None:
-        output = tmp_path / "output.jsonl"
-        assert migrate_invalid_judge_main_rows(output) == 0
-
-        valid = orjson.dumps({TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "z": 1, "reward": 1.0})
-        invalid = orjson.dumps(
-            {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, "invalid_judge_response": True, "reward": 0.0}
-        )
-        output.write_bytes(valid + b"\n\n" + invalid + b"\n")
-
-        assert migrate_invalid_judge_main_rows(output) == 1
-        assert output.read_bytes() == valid + b"\n"
-        sidecar = _failures_path_for(output).read_bytes()
-        assert [orjson.loads(line)[TASK_INDEX_KEY_NAME] for line in sidecar.splitlines()] == [1]
-
-        assert migrate_invalid_judge_main_rows(output) == 0
-        assert output.read_bytes() == valid + b"\n"
-        assert _failures_path_for(output).read_bytes() == sidecar
-
-    def test_interrupted_migration_keeps_the_main_file_and_resumes_idempotently(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        output = tmp_path / "output.jsonl"
-        # An unusable deliverables_dir only means the policy output is not reused.
-        legacy = orjson.dumps(
-            {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, "invalid_judge_response": True, "deliverables_dir": 1}
-        )
-        output.write_bytes(legacy + b"\n")
-
-        def interrupted_replace(src, dst) -> None:
-            raise OSError("interrupted before the main file was replaced")
-
-        with monkeypatch.context() as patch:
-            patch.setattr(nemo_gym.rollout_collection.os, "replace", interrupted_replace)
-            with pytest.raises(OSError, match="interrupted"):
-                migrate_invalid_judge_main_rows(output)
-
-        # The retry record is durable first; the main file and directory are untouched.
-        assert output.read_bytes() == legacy + b"\n"
-        assert sorted(path.name for path in tmp_path.iterdir()) == ["output.jsonl", "output_failures.jsonl"]
-        [migrated] = [orjson.loads(line) for line in _failures_path_for(output).read_bytes().splitlines()]
-        assert "reuse_cached_deliverable" not in migrated
-
-        failures_fpath = _failures_path_for(output)
-        failures_fpath.write_bytes(failures_fpath.read_bytes() + b"\n")
-        assert migrate_invalid_judge_main_rows(output) == 1
-        assert output.read_bytes() == b""
-        assert [line for line in failures_fpath.read_bytes().splitlines() if line] == [orjson.dumps(migrated)]
-
-    def test_legacy_invalid_judge_distinct_attempts_accumulate_and_gate(self, tmp_path: Path) -> None:
-        config = self._write_resume_state(tmp_path, [], retry_invalid_judge_responses=True)
-        output = Path(config.output_jsonl_fpath)
-        legacy_rows = [
-            {
-                TASK_INDEX_KEY_NAME: 2,
-                ROLLOUT_INDEX_KEY_NAME: 0,
-                ATTEMPT_INDEX_KEY_NAME: attempt,
-                "invalid_judge_response": True,
-            }
-            for attempt in range(_DEFAULT_MAX_ROLLOUT_ATTEMPTS)
-        ]
-        output.write_bytes(b"\n".join(map(orjson.dumps, legacy_rows)) + b"\n")
-
-        input_rows, *_ = RolloutCollectionHelper()._load_from_cache(config)
-
-        assert 2 not in [row[TASK_INDEX_KEY_NAME] for row in input_rows]
-        migrated = [orjson.loads(line) for line in _failures_path_for(output).read_bytes().splitlines()]
-        assert [row[ATTEMPT_INDEX_KEY_NAME] for row in migrated] == list(range(_DEFAULT_MAX_ROLLOUT_ATTEMPTS))
-
-    def test_legacy_invalid_judge_same_attempt_in_different_stages_stays_distinct(self, tmp_path: Path) -> None:
-        config = self._write_resume_state(tmp_path, [], retry_invalid_judge_responses=True)
-        output = Path(config.output_jsonl_fpath)
-        legacy_rows = [
-            {
-                TASK_INDEX_KEY_NAME: 2,
-                ROLLOUT_INDEX_KEY_NAME: 0,
-                "stage_index": stage,
-                "invalid_judge_response": True,
-            }
-            for stage in (0, 1)
-        ]
-        output.write_bytes(b"\n".join(map(orjson.dumps, legacy_rows)) + b"\n")
-
-        RolloutCollectionHelper()._load_from_cache(config)
-
-        migrated = [orjson.loads(line) for line in _failures_path_for(output).read_bytes().splitlines()]
-        assert [row["stage_index"] for row in migrated] == [0, 1]
-
-    def test_legacy_invalid_judge_without_artifact_does_not_request_reuse(self, tmp_path: Path) -> None:
-        config = self._write_resume_state(tmp_path, [], retry_invalid_judge_responses=True)
-        output = Path(config.output_jsonl_fpath)
-        output.write_bytes(
-            orjson.dumps(
-                {
-                    TASK_INDEX_KEY_NAME: 2,
-                    ROLLOUT_INDEX_KEY_NAME: 0,
-                    "invalid_judge_response": True,
-                    "reuse_cached_deliverable": True,
-                    "deliverables_dir": str(tmp_path / "missing-deliverables"),
-                }
-            )
-            + b"\n"
-        )
-
-        input_rows, *_ = RolloutCollectionHelper()._load_from_cache(config)
-
-        by_task = {row[TASK_INDEX_KEY_NAME]: row for row in input_rows}
-        assert "reuse_cached_deliverable" not in by_task[2]
-        migrated = [orjson.loads(line) for line in _failures_path_for(output).read_bytes().splitlines()]
-        assert "reuse_cached_deliverable" not in migrated[0]
-
-    def test_legacy_invalid_judge_with_only_run_state_does_not_request_reuse(self, tmp_path: Path) -> None:
-        config = self._write_resume_state(tmp_path, [], retry_invalid_judge_responses=True)
-        output = Path(config.output_jsonl_fpath)
-        deliverables_dir = tmp_path / "deliverables" / "task-2"
-        deliverables_dir.mkdir(parents=True)
-        (deliverables_dir / "finish_params.json").write_text("{}")
-        (deliverables_dir / "history.json").write_text("[]")
-        (deliverables_dir / "reference_files").mkdir()
-        output.write_bytes(
-            orjson.dumps(
-                {
-                    TASK_INDEX_KEY_NAME: 2,
-                    ROLLOUT_INDEX_KEY_NAME: 0,
-                    "invalid_judge_response": True,
-                    "reuse_cached_deliverable": True,
-                    "deliverables_dir": str(deliverables_dir),
-                }
-            )
-            + b"\n"
-        )
-
-        input_rows, *_ = RolloutCollectionHelper()._load_from_cache(config)
-
-        by_task = {row[TASK_INDEX_KEY_NAME]: row for row in input_rows}
-        assert "reuse_cached_deliverable" not in by_task[2]
-        migrated = [orjson.loads(line) for line in _failures_path_for(output).read_bytes().splitlines()]
-        assert "reuse_cached_deliverable" not in migrated[0]
-
-    def test_invalid_judge_main_rows_are_left_alone_by_default(self, tmp_path: Path) -> None:
-        """Without the opt-in, a verifier's scored invalid-judge row stays a scored row."""
-        config = self._write_resume_state(tmp_path, [])
-        output = Path(config.output_jsonl_fpath)
-        scored_row = {
-            TASK_INDEX_KEY_NAME: 2,
-            ROLLOUT_INDEX_KEY_NAME: 0,
-            "invalid_judge_response": True,
-            "reward": 0.0,
-        }
-        output.write_bytes(orjson.dumps(scored_row) + b"\n")
-
-        input_rows, cached_rows, cached_results, _ = RolloutCollectionHelper()._load_from_cache(config)
-
-        assert 2 not in [row[TASK_INDEX_KEY_NAME] for row in input_rows]
-        assert cached_results == [scored_row]
-        assert [row[TASK_INDEX_KEY_NAME] for row in cached_rows] == [2]
-        assert output.read_bytes() == orjson.dumps(scored_row) + b"\n"
-        assert not _failures_path_for(output).exists()
-
-    def test_skipped_without_terminal_flag_is_gated_only_when_opted_in(self, tmp_path: Path) -> None:
-        failures = [{TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, NG_FAILURE_CLASS_KEY: "skipped"}]
-
-        config = self._write_resume_state(tmp_path, failures)
-        input_rows, *_ = RolloutCollectionHelper()._load_from_cache(config)
-        assert 1 in [r[TASK_INDEX_KEY_NAME] for r in input_rows]
-
-        config = self._write_resume_state(tmp_path, failures, retry_terminal_timeouts=True)
-        input_rows, *_ = RolloutCollectionHelper()._load_from_cache(config)
-        assert 1 not in [r[TASK_INDEX_KEY_NAME] for r in input_rows]
-
-    def test_skipped_failures_stay_terminal(self, tmp_path: Path) -> None:
-        failures = [
-            {
-                TASK_INDEX_KEY_NAME: 1,
-                ROLLOUT_INDEX_KEY_NAME: 0,
-                NG_FAILURE_CLASS_KEY: "skipped",
-                NG_TERMINAL_KEY: True,
-            }
-        ]
-        for retry_terminal_timeouts in (False, True):
-            config = self._write_resume_state(tmp_path, failures, retry_terminal_timeouts=retry_terminal_timeouts)
-
-            input_rows, *_ = RolloutCollectionHelper()._load_from_cache(config)
-
-            assert 1 not in [r[TASK_INDEX_KEY_NAME] for r in input_rows]
-
     def test_explicitly_terminal_rows_stay_gated(self, tmp_path: Path) -> None:
         failures = [{TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, NG_TERMINAL_KEY: True}]
         for retry_terminal_timeouts in (False, True):
@@ -7748,11 +7530,6 @@ class TestIsTerminalFailure:
         [
             ("timeout_exceeded", True, True, False),
             ("timeout_exceeded", False, False, False),
-            ("reference_missing", True, True, False),
-            ("eval_missing", True, True, False),
-            ("transport_ineligible", True, True, False),
-            ("skipped", False, False, True),
-            ("skipped", True, True, True),
             ("agent_run_error", True, True, True),
             ("agent_run_error", False, False, False),
             (None, True, True, True),
@@ -7777,7 +7554,6 @@ class TestIsTerminalFailure:
         )
 
         assert config.retry_terminal_timeouts is False
-        assert config.retry_invalid_judge_responses is False
 
 
 class TestExpandInputGlob:

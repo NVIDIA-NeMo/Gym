@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import re
 from copy import deepcopy
 from types import SimpleNamespace, UnionType
 from typing import (
@@ -121,6 +122,7 @@ from nemo_gym.responses_converter import (
     _RESPONSE_NON_BOUNDARY_TYPES,
     _RESPONSE_OUTPUT_BOUNDARY_TYPES,
 )
+from nemo_gym.rollout_correlation import rollout_context
 
 
 def _response_with_output(output: list) -> dict:
@@ -188,6 +190,39 @@ class TestOpenAIUtils:
         assert isinstance(captured["timeout"], ClientTimeout)
         assert captured["timeout"].total == 300
         assert captured["timeout"].connect == 60
+
+    async def test_request_id_names_the_rollout_inside_a_rollout_context(self, monkeypatch) -> None:
+        captured = {}
+
+        async def fake_request(**kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(status=200)
+
+        monkeypatch.setattr(openai_utils_module, "request", fake_request)
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://api.openai.com/v1")
+        with rollout_context("3-0"):
+            await client._request(method="POST", url="https://example.test")
+        first = captured["headers"]["X-Request-Id"]
+        assert re.fullmatch(r"3-0-[0-9a-f]{8}", first)
+        with rollout_context("3-0"):
+            await client._request(method="POST", url="https://example.test")
+        assert captured["headers"]["X-Request-Id"] != first
+
+    async def test_request_id_is_absent_outside_a_rollout_and_never_overrides_the_callers(self, monkeypatch) -> None:
+        captured = {}
+
+        async def fake_request(**kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(status=200)
+
+        monkeypatch.setattr(openai_utils_module, "request", fake_request)
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://api.openai.com/v1")
+        await client._request(method="POST", url="https://example.test")
+        assert "X-Request-Id" not in captured["headers"]
+        with rollout_context("3-0"):
+            await client._request(method="POST", url="https://example.test", headers={"x-request-id": "mine"})
+        assert captured["headers"]["x-request-id"] == "mine"
+        assert "X-Request-Id" not in captured["headers"]
 
     @pytest.mark.parametrize("internal", [False, True])
     @pytest.mark.parametrize("status", [429, 500, 504])
