@@ -84,6 +84,9 @@ class SwemerV1ResourcesServerConfig(BaseResourcesServerConfig):
     # is not evidence about the patch.
     inconclusive_verification_retries: int = 1
     apply_anti_cheating: bool = True
+    # Write the Maven Central mirror to ~/.m2/settings.xml in the eval sandbox. Turn off for providers
+    # that mount their own read-only settings.xml (e.g. MFN, which already mirrors Central via sandbank).
+    overwrite_maven_settings: bool = True
     sandbox_provider: str
     sandbox_config: dict[str, Any]
 
@@ -304,7 +307,7 @@ class SwemerV1ResourcesServer(SimpleResourcesServer):
         inputs = self._inputs(body, patch)
         log_dir = Path(__file__).parent / "logs" / body.instance_id
 
-        files = verification_files(inputs)
+        files = verification_files(inputs, overwrite_maven_settings=self.config.overwrite_maven_settings)
         attempts = 1 + max(self.config.inconclusive_verification_retries, 0)
         start_time_taken = 0.0
         verification_time_taken = 0.0

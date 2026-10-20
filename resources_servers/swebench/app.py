@@ -53,6 +53,9 @@ from resources_servers.swebench.swebench_patches import (
 class SwebenchResourcesServerConfig(BaseResourcesServerConfig):
     is_verifying_golden_patch: bool = False
     apply_anti_cheating: bool = True
+    # Write the Maven Central mirror to ~/.m2/settings.xml in the eval sandbox. Turn off for providers
+    # that mount their own read-only settings.xml (e.g. MFN, which already mirrors Central via sandbank).
+    overwrite_maven_settings: bool = True
 
     evaluation_timeout: Optional[int] = None
 
@@ -282,7 +285,12 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         eval_sandbox = AsyncSandbox(resolved_sandbox_provider)
 
         async def _run_setup(sandbox: AsyncSandbox) -> None:
-            await patch_swebench_multilingual_sandbox(test_spec.repo, test_spec.instance_id, sandbox)
+            await patch_swebench_multilingual_sandbox(
+                test_spec.repo,
+                test_spec.instance_id,
+                sandbox,
+                overwrite_maven_settings=self.config.overwrite_maven_settings,
+            )
 
         await eval_sandbox.start_with_setup(eval_sandbox_spec, _run_setup)
 

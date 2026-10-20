@@ -191,6 +191,13 @@ class TestVerificationFiles:
         assert MAVEN_SETTINGS_PATH in files
         assert GRADLE_INIT_PATH in files
 
+    def test_skips_only_maven_settings_when_overwrite_disabled(self) -> None:
+        # Providers like MFN mount their own read-only ~/.m2/settings.xml; the Gradle script still ships.
+        files = verification_files(_inputs(), overwrite_maven_settings=False)
+        assert MAVEN_SETTINGS_PATH not in files
+        assert GRADLE_INIT_PATH in files
+        assert "/tmp/nemo_gym_eval.sh" in files
+
     def test_omits_blank_patch(self) -> None:
         files = verification_files(_inputs(patch="   "))
         assert "/tmp/nemo_gym_patch.diff" not in files
