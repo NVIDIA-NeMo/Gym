@@ -154,6 +154,14 @@ uses all of them). Local calls ignore them.
 - `argv_prompt_quoting`: send the instruction as `opencode run` builds it from one argv word, which is
   what a model sees when a launcher passes the instruction as an argument: wrapped in double quotes,
   inner quotes escaped, when it contains a space.
+- `raise_oom_score_adj`: make OpenCode and its tools the memory-cgroup OOM killer's preferred victims
+  (`oom_score_adj` 1000, or 0 when the sandbox starts below zero), not the exec daemon or the supervisor.
+- `verify_after_agent_error`: return a failed run (a nonzero exit, an error on the last assistant turn,
+  no terminal assistant result) as a gradable `failed` response (`incomplete` at the deadline; the error
+  is in `metadata.graded_agent_error`), as Harbor grades after any agent exit, when cleanup is confirmed,
+  the run's output was captured, its last error is not a transient model-endpoint failure (a retryable
+  API error, 429 or 5xx, or a lost connection) and the sandbox still runs and answers a command. Anything
+  else stays an execution error and the episode is retried.
 
 ## Configuration compatibility
 

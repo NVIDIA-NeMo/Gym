@@ -8,15 +8,23 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
 
+from nemo_gym.sandbox import SandboxStatus
+from responses_api_agents.opencode_agent import sandbox_runner
 from responses_api_agents.opencode_agent.app import _REMAINING_CONTEXT_PLUGIN as REMAINING_CONTEXT_PLUGIN
-from responses_api_agents.opencode_agent.app import _sandbox_prepare_command, argv_prompt
+from responses_api_agents.opencode_agent.app import _is_model_endpoint_failure, _sandbox_prepare_command, argv_prompt
 from responses_api_agents.opencode_agent.runtime import OBSERVABILITY_PATCH
-from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import close_body, seed, setup  # noqa: F401
+from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import (  # noqa: F401
+    capture_observations,
+    close_body,
+    seed,
+    setup,
+)
 
 
 ROLLOUT = "/ng-rollout/opencode-smoke-a2/v1/responses"
@@ -225,3 +233,129 @@ def test_prompt_is_sent_as_written_by_default(setup):
     response, payload, _ = run_session(agent, sandbox, request={"input": 'Fix "the" code'})
     assert response.status_code == 200, response.text
     assert payload["prompt"] == 'Fix "the" code'
+
+
+def failed_export(sandbox, error):
+    """The fake run's export with its last assistant turn failed (error) or cut off mid-turn (None)."""
+    export = json.loads(sandbox.events)
+    last = export["messages"][-1]["info"]
+    if error is None:
+        last.pop("finish")
+        last.pop("time")
+    else:
+        last["finish"] = "error"
+        last["error"] = error
+    return json.dumps(export)
+
+
+API_ERROR = {"name": "APIError", "data": {"message": "Bad request: invalid tool call", "statusCode": 400}}
+RETRYABLE = {"name": "APIError", "data": {"message": "Service Unavailable", "statusCode": 503, "isRetryable": True}}
+RESET = {"name": "APIError", "data": {"message": "Connection reset by server", "isRetryable": True}}
+FETCH = {"name": "UnknownError", "data": {"message": "TypeError: fetch failed"}}
+
+
+@pytest.mark.parametrize(
+    "case,status_code,expected",
+    [
+        # OpenCode killed mid-turn (an OOM kill, an agent's pkill) while its sandbox still runs.
+        ("killed", 200, "failed"),
+        # A request the endpoint rejects would fail the same way again: graded.
+        ("rejected", 200, "failed"),
+        # The budget ran out before the first model turn ended: graded as a timeout.
+        ("timeout", 200, "incomplete"),
+        # Transient endpoint failures after OpenCode's own retries, a lost sandbox, an unreadable run or
+        # the setting off: retried, never graded.
+        ("endpoint", 502, None),
+        ("reset", 502, None),
+        ("fetch", 502, None),
+        ("sandbox_gone", 502, None),
+        ("unreadable", 502, None),
+        ("disabled", 502, None),
+    ],
+)
+def test_failed_run_is_graded_only_while_its_sandbox_runs(setup, tmp_path, case, status_code, expected):
+    agent, sandbox = setup
+    agent.config.verify_after_agent_error = case != "disabled"
+    sandbox.status = AsyncMock(return_value=SandboxStatus.STOPPED if case == "sandbox_gone" else SandboxStatus.RUNNING)
+    if case in ("killed", "sandbox_gone", "disabled"):
+        sandbox.events = failed_export(sandbox, None)
+        sandbox.result["return_code"] = 137
+    elif case == "timeout":
+        export = json.loads(sandbox.events)
+        sandbox.events = json.dumps({"messages": export["messages"][:1]})
+        sandbox.result.update(return_code=-9, timed_out=True)
+    elif case == "unreadable":
+        sandbox.events = json.dumps({"messages": "not a list"})
+        sandbox.result["return_code"] = 1
+    else:
+        error = {"rejected": API_ERROR, "endpoint": RETRYABLE, "reset": RESET, "fetch": FETCH}[case]
+        sandbox.events = failed_export(sandbox, error)
+    if case != "unreadable":
+        capture_observations(sandbox, tmp_path)
+    response, _, closed = run_session(agent, sandbox)
+    assert response.status_code == status_code, response.text
+    if expected is not None:
+        body = response.json()
+        assert (body["status"], body["error"]) == (expected, None)
+        assert "graded_agent_error" in body["metadata"]
+        if case != "timeout":
+            # The partial transcript reaches the verifier with the run's state.
+            assert [item["type"] for item in body["output"]][:3] == [
+                "reasoning",
+                "function_call",
+                "function_call_output",
+            ]
+        invocation = next(
+            record for record in closed["agent_observations"]["records"] if record["kind"] == "agent_invocation"
+        )
+        assert invocation["status"] == expected
+    probes = [call for call in sandbox.exec.await_args_list if call.args[0] == "true"]
+    assert len(probes) == int(case in ("killed", "rejected", "timeout"))
+
+
+def test_model_endpoint_failures_are_recognized():
+    assert all(_is_model_endpoint_failure(error) for error in (RETRYABLE, RESET, FETCH))
+    assert _is_model_endpoint_failure({"name": "APIError", "data": {"message": "Too many", "statusCode": 429}})
+    assert not _is_model_endpoint_failure(API_ERROR)
+    assert not _is_model_endpoint_failure({"name": "ContextOverflowError", "data": {"message": "too long"}})
+    assert not _is_model_endpoint_failure(None)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_oom_score_setting_reaches_the_runner(setup, enabled):
+    agent, sandbox = setup
+    agent.config.raise_oom_score_adj = enabled
+    response, payload, _ = run_session(agent, sandbox)
+    assert response.status_code == 200, response.text
+    assert payload["raise_oom_score_adj"] is enabled
+
+
+def test_runner_raises_the_oom_score_for_opencode_and_its_tools(tmp_path):
+    score = tmp_path / "oom_score_adj"
+    score.write_text("0\n")
+    assert sandbox_runner.prefer_for_oom_kill(str(score)) == "0 -> 1000"
+    score.write_text("-997\n")
+    assert sandbox_runner.prefer_for_oom_kill(str(score)) == "-997 -> 0"
+    assert sandbox_runner.prefer_for_oom_kill(str(tmp_path / "missing")).startswith("unchanged:")
+    code = "import sys; print(open('/proc/self/oom_score_adj').read().strip(), file=sys.stderr)"
+    params = {
+        "directory": str(tmp_path),
+        "command": [sys.executable, "-c", code],
+        "cwd": str(tmp_path),
+        "env": {},
+        "prompt": "",
+        "raise_oom_score_adj": True,
+    }
+    before = Path("/proc/self/oom_score_adj").read_text().strip()
+    try:
+        assert sandbox_runner.run(params) == 0
+    finally:
+        # The test process is the runner here: restore what the runner raised (lowering may need privilege).
+        try:
+            Path("/proc/self/oom_score_adj").write_text(before)
+        except OSError:
+            pass
+    record, child = (tmp_path / "stderr.log").read_text().splitlines()
+    assert record.startswith("oom_score_adj: ")
+    if record.endswith("-> 1000"):
+        assert child == "1000"

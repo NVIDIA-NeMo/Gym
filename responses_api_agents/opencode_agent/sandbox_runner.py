@@ -15,6 +15,27 @@ from pathlib import Path
 from typing import TypedDict
 
 
+OOM_SCORE_ADJ = "/proc/self/oom_score_adj"
+
+
+def prefer_for_oom_kill(path: str = OOM_SCORE_ADJ) -> str:
+    """Make this process and its children the memory-cgroup OOM killer's preferred victims.
+
+    Raise oom_score_adj to 1000, or to 0 when the sandbox starts it below zero (a Guaranteed
+    pod's -997), so the sandbox never becomes the node's first victim in a global OOM. Raising
+    needs no privilege; a failure leaves the score unchanged. Returns what happened.
+    """
+    try:
+        with open(path) as handle:
+            before = int(handle.read())
+        after = 0 if before < 0 else 1000
+        with open(path, "w") as handle:
+            handle.write(str(after))
+    except (OSError, ValueError) as error:
+        return f"unchanged: {error}"
+    return f"{before} -> {after}"
+
+
 class RunnerInput(TypedDict):
     """Harness input, independent of supervisor cleanup and runtime metadata."""
 
@@ -61,6 +82,10 @@ def run(params: RunnerInput) -> int:
     with ExitStack() as stack:
         stdout = stack.enter_context((directory / "stdout.jsonl").open("wb"))
         stderr = stack.enter_context((directory / "stderr.log").open("wb"))
+        if params.get("raise_oom_score_adj"):
+            # OpenCode and its tools inherit the score; execd and the supervisor keep the sandbox's own.
+            stderr.write(f"oom_score_adj: {prefer_for_oom_kill()}\n".encode())
+            stderr.flush()
         stdin = stack.enter_context((directory / "prompt.txt").open("rb"))
         process = subprocess.Popen(
             params["command"],

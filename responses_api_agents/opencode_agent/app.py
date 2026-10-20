@@ -15,6 +15,7 @@
 
 import asyncio
 import copy
+import dataclasses
 import json
 import logging
 import os
@@ -70,7 +71,7 @@ from nemo_gym.rollout_observability import (
     SandboxObservation,
     TrajectoryRecord,
 )
-from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec, create_provider
+from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec, SandboxStatus, create_provider
 from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.server_utils import (
@@ -99,6 +100,31 @@ _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
 _INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
 # Sandbox-session plugin that drops max_tokens from the session provider's requests.
 _REMAINING_CONTEXT_PLUGIN = "remaining_context.mjs"
+# A lost connection in an error OpenCode could not classify itself.
+_CONNECTION_ERROR = re.compile(
+    r"ECONNREFUSED|ECONNRESET|ETIMEDOUT|EPIPE|fetch failed|socket hang up|other side closed|"
+    r"socket connection was closed|unable to connect|cannot connect to api|network error",
+    re.IGNORECASE,
+)
+_LIVENESS_TIMEOUT_S = 60.0
+
+
+def _is_model_endpoint_failure(error: object) -> bool:
+    """Whether OpenCode's terminal error is a transient model-endpoint failure, after its own retries.
+
+    OpenCode 1.17 records endpoint failures as APIError: retryable ones (429, 5xx, lost or reset
+    connections, header and stream timeouts) carry isRetryable. A request the endpoint rejects (4xx)
+    would fail the same way again, so it is not transient.
+    """
+    if not isinstance(error, Mapping):
+        return False
+    data = error.get("data") if isinstance(error.get("data"), Mapping) else {}
+    status = data.get("statusCode")
+    if error.get("name") == "APIError" and (
+        data.get("isRetryable") is True or status == 429 or (isinstance(status, int) and status >= 500)
+    ):
+        return True
+    return bool(_CONNECTION_ERROR.search(str(data.get("message") or "")))
 
 
 def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
@@ -230,6 +256,16 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # Sandbox sessions: send the instruction as `opencode run` builds it from one argv word (see
     # argv_prompt), which is what a model sees when its launcher passes the instruction as an argument.
     argv_prompt_quoting: bool = False
+    # Sandbox sessions: raise the oom_score_adj of OpenCode and everything it starts to 1000 (0 when
+    # the sandbox starts it below zero), so a memory-cgroup OOM kill picks agent work rather than the
+    # sandbox's exec daemon or the supervisor.
+    raise_oom_score_adj: bool = False
+    # Sandbox sessions: return a failed run (a nonzero exit, an error on the last assistant turn, no
+    # terminal assistant result) as a gradable `failed` response, as Harbor grades after any agent exit,
+    # when the supervisor confirmed cleanup, the run's output was captured, its last error is not a
+    # transient model-endpoint failure, and the sandbox still runs and answers a command. Anything else
+    # stays an execution error.
+    verify_after_agent_error: bool = False
 
     @property
     def command_parts(self) -> list[str]:
@@ -1010,6 +1046,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         outcome: OpenCodeRunOutcome,
         output: list[NeMoGymResponseOutputItem] | None = None,
         usage: NeMoGymResponseUsage | None = None,
+        graded_error: str | None = None,
     ) -> NeMoGymResponse:
         runtime = state.runtime_info
         response = NeMoGymResponse(
@@ -1031,6 +1068,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 "opencode_version": self.config.opencode_version,
                 **({"harness_hostname": runtime.hostname, "harness_pid": str(runtime.pid)} if runtime else {}),
                 AGENT_TIMEOUT_METADATA_KEY: str(timeout),
+                **({"graded_agent_error": graded_error[:500]} if graded_error is not None else {}),
             },
         )
         if state.is_continuation:
@@ -1142,10 +1180,13 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 "OPENCODE_DISABLE_MODELS_FETCH": "true",
                 "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": str(self.config.max_output_tokens),
             },
+            "raise_oom_score_adj": self.config.raise_oom_score_adj,
         }
         error = None
         export = {}
         failure = None
+        # A run whose output could not be read is a harness failure, never graded.
+        output_captured = True
         try:
             async with asyncio.timeout_at(deadline):
                 await self.sem.acquire()
@@ -1186,6 +1227,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 export = parsed
             except (ValueError, TypeError) as exc:
                 error = f"OpenCode output parse failed: {exc}"
+                output_captured = False
         output = []
         usage = None
         if export.get("messages"):
@@ -1205,6 +1247,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     )
             except Exception as exc:
                 error = error or f"OpenCode output parse failed: {exc}"
+                output_captured = False
         result = state.session.cleanup
         runtime = state.runtime_info
         if runtime is None:
@@ -1220,6 +1263,17 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             continuation=state.is_continuation,
         )
         error = error or outcome.error
+        graded_error = None
+        if error and failure is None and output_captured and self.config.verify_after_agent_error:
+            assistants = [m["info"] for m in export.get("messages", []) if m["info"].get("role") == "assistant"]
+            last_error = assistants[-1].get("error") if assistants else None
+            graded_error = await self._gradable_agent_error(state, error, result=result, last_error=last_error)
+            if graded_error is not None:
+                error = None
+                # A run that also hit its time limit is graded as a timeout.
+                outcome = dataclasses.replace(
+                    outcome, status="incomplete" if result["timed_out"] else "failed", error=None
+                )
         status = outcome.status
         if error or failure:
             status = "failed"
@@ -1235,6 +1289,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     record.error_type = "cancelled"
                 elif error or failure:
                     record.error_type = "server_error"
+                elif graded_error is not None:
+                    record.error_type = "timeout" if result["timed_out"] else "agent_error"
         if result is not None:
             observations.records.append(
                 SandboxObservation(
@@ -1249,7 +1305,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                         if state.session.owns_sandbox
                         else str(state.request.sandbox_access.connection.descriptor.get("sandbox_id", "unknown"))
                     ),
-                    outcome="timeout" if result["timed_out"] else "failed" if error or failure else "completed",
+                    outcome="timeout"
+                    if result["timed_out"]
+                    else "failed"
+                    if error or failure or graded_error is not None
+                    else "completed",
                     exit_code=result["return_code"],
                 )
             )
@@ -1263,7 +1323,41 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             raise failure
         if error:
             raise HTTPException(502, format_sandbox_error(error, stderr=state.stderr))
-        return self._make_session_response(state, body, timeout=timeout, outcome=outcome, output=output, usage=usage)
+        return self._make_session_response(
+            state, body, timeout=timeout, outcome=outcome, output=output, usage=usage, graded_error=graded_error
+        )
+
+    async def _gradable_agent_error(
+        self, state: OpenCodeSandboxSession, error: str, *, result: Optional[dict[str, Any]], last_error: object
+    ) -> Optional[str]:
+        """Describe a failed OpenCode run that Resources can still grade, or return None.
+
+        The supervisor's confirmed cleanup means OpenCode ended. A transient model-endpoint failure, or a
+        sandbox that no longer runs or answers, keeps the run an execution error, so the episode is
+        retried rather than graded.
+        """
+        if result is None or result["error"]:
+            return None
+        detail = f"exit {result['return_code']}: {error}"
+        if _is_model_endpoint_failure(last_error):
+            LOG.warning("OpenCode failed on a model endpoint error; not grading it: %s", detail)
+            return None
+        sandbox = state.session.sandbox
+        try:
+            async with asyncio.timeout(_LIVENESS_TIMEOUT_S):
+                sandbox_status = await sandbox.status()
+                if sandbox_status != SandboxStatus.RUNNING:
+                    LOG.warning("Sandbox is %s after OpenCode failed; not grading it: %s", sandbox_status, detail)
+                    return None
+                probe = await sandbox.exec("true", timeout_s=_LIVENESS_TIMEOUT_S)
+        except Exception as probe_error:
+            LOG.warning("Sandbox did not answer after OpenCode failed (%r); not grading it: %s", probe_error, detail)
+            return None
+        if probe.return_code or probe.error_type:
+            LOG.warning("Sandbox failed a liveness probe after OpenCode failed; not grading it: %s", detail)
+            return None
+        LOG.warning("OpenCode failed while its sandbox still runs; grading it as a nonzero agent exit: %s", detail)
+        return detail
 
 
 if __name__ == "__main__":
