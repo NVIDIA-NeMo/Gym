@@ -24,6 +24,8 @@ export VLLM_USE_V2_MODEL_RUNNER=1
 
 export VLLM_USE_RUST_FRONTEND=1
 
+export MOONCAKE_MAMBA_EVICT_ON_DIRECT_DESCENDANT=1
+
 # @bxyu-nvidia: `--skip-mm-profiling` Is needed to get Super VL checkpoint working, even with text benchmarks
 # @bxyu-nvidia: We set --prefix-match-unit 128 because the Mooncake store prefill lookup gets more expensive the smaller this number is
 # and caused prefill bottlenecks as a result when using Mooncake.
@@ -83,7 +85,8 @@ VLLM_PREFILL_ARGS=(
                     "kv_role": "kv_both",
                     "kv_connector_extra_config": {
                         "load_async": true,
-                        "lookup_async": true
+                        "lookup_async": true,
+                        "mamba_evict_on_direct_descendant": true
                     }
                 }
             ]
