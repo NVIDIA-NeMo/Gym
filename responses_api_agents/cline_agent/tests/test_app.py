@@ -54,7 +54,7 @@ def _config(**kwargs) -> ClineAgentConfig:
 
 
 def _make_agent(**kwargs) -> ClineAgent:
-    with patch("responses_api_agents.cline_agent.app.ClineAgent.model_post_init"):
+    with patch("responses_api_agents.cline_agent.app.ensure_cline"):
         agent = ClineAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
     agent.sem = asyncio.Semaphore(agent.config.concurrency)
     return agent

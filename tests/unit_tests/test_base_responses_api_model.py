@@ -14,6 +14,7 @@
 # limitations under the License.
 import importlib
 import json
+from functools import partial
 from types import MappingProxyType, SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -940,26 +941,60 @@ def test_leading_rollout_prefix_round_trips_with_server_parser():
     assert match.group("rest") == "/v1/chat/completions"
 
 
-def test_base_agent_resolve_model_base_url(monkeypatch):
-    import nemo_gym.base_responses_api_agent as base_agent
+def test_base_agent_resolve_model_base_url():
+    model_server = {"policy_model": {"responses_api_models": {"vllm_model": {"host": "h", "port": 1}}}}
+    agent = _make_base_agent(OmegaConf.create(model_server))
+    agent.server_client._build_server_base_url = partial(ServerClient._build_server_base_url, agent.server_client)
 
-    monkeypatch.setattr(base_agent, "get_first_server_config_dict", lambda _config, _name: {"host": "h", "port": 1})
-    agent = SimpleNamespace(
-        resolved_model_base_url=None,
-        server_client=SimpleNamespace(
-            global_config_dict={},
-            _build_server_base_url=lambda _config: "http://h:1",
-        ),
-        _token_id_capture_enabled=lambda: False,
+    assert agent.resolve_model_base_url("policy_model", "rid") == "http://h:1/ng-rollout/rid/v1"
+    assert agent.resolve_model_base_url("policy_model", None) == "http://h:1/v1"
+
+    opted_in = _make_base_agent(
+        OmegaConf.create(model_server | {"token_id_capture": {"enabled": True}}), token_id_capture=True
     )
-
-    assert SimpleResponsesAPIAgent.resolve_model_base_url(agent, "model", "rid") == "http://h:1/ng-rollout/rid/v1"
-    assert SimpleResponsesAPIAgent.resolve_model_base_url(agent, "model", None) == "http://h:1/v1"
-    agent._token_id_capture_enabled = lambda: True
+    opted_in.server_client._build_server_base_url = partial(
+        ServerClient._build_server_base_url, opted_in.server_client
+    )
     assert (
-        SimpleResponsesAPIAgent.resolve_model_base_url(agent, "model", "rid")
-        == "http://h:1/ng-rollout/rid/training-token-capture/v1"
+        opted_in.resolve_model_base_url("policy_model", "rid") == "http://h:1/ng-rollout/rid/training-token-capture/v1"
     )
+
+
+def test_base_agent_reads_global_config_once():
+    class _CountingConfig(dict):
+        reads = 0
+
+        def get(self, *args, **kwargs):
+            self.reads += 1
+            return super().get(*args, **kwargs)
+
+        def __getitem__(self, key):
+            self.reads += 1
+            return super().__getitem__(key)
+
+    global_config = _CountingConfig(
+        {
+            "token_id_capture": {"enabled": True},
+            "policy_model": {"responses_api_models": {"vllm_model": {"host": "h", "port": 1}}},
+        }
+    )
+    agent = _make_base_agent(global_config, token_id_capture=True)
+    agent.server_client._build_server_base_url = lambda config: f"http://{config['host']}:{config['port']}"
+    expected = "http://h:1/ng-rollout/rid/training-token-capture/v1"
+    assert agent.resolve_model_base_url("policy_model", "rid") == expected
+    reads_after_first_call = global_config.reads
+
+    # Later calls reuse the first lookups instead of reading the config again.
+    assert agent.resolve_model_base_url("policy_model", "rid") == expected
+    assert agent._token_id_capture_enabled() is True
+    assert global_config.reads == reads_after_first_call
+
+    # A client that holds a different config object is read again, so callers that swap it see the new values.
+    agent.server_client.global_config_dict = {
+        "policy_model": {"responses_api_models": {"vllm_model": {"host": "other", "port": 2}}}
+    }
+    assert agent.resolve_model_base_url("policy_model", "rid") == "http://other:2/ng-rollout/rid/v1"
+    assert agent._token_id_capture_enabled() is False
 
 
 def _make_base_agent(global_config, *, token_id_capture=False):
