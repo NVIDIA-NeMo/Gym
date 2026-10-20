@@ -1,5 +1,5 @@
 {
- "api": "https://inference-api.nvidia.com/v1/chat/completions",
+ "api": "<K3 endpoint>",
  "model_requested": "nvidia/moonshotai/kimi-k3",
  "system": "You write task text for an offline evaluation of software agents. Follow the facts you are given exactly; do not add rules, numbers or names that are not in the brief. Reply with exactly one JSON object and nothing else.",
  "request": {
