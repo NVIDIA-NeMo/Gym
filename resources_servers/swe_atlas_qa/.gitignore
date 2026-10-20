@@ -1,1 +1,4 @@
-data/
+data/*
+!data/example.jsonl
+!data/example_metrics.json
+!data/example_rollouts.jsonl

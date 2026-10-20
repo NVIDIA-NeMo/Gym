@@ -70,7 +70,6 @@ def prepare(*, source_dir: Path = PACKAGE_DIR / "data/source", output_path: Path
     output_path.parent.mkdir(parents=True, exist_ok=True)
     lines = [json.dumps(row, ensure_ascii=False) + "\n" for row in rows]
     output_path.write_text("".join(lines), encoding="utf-8")
-    output_path.with_name("example.jsonl").write_text("".join(lines[:5]), encoding="utf-8")
     return output_path
 
 

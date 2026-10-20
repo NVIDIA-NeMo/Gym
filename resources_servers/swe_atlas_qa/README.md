@@ -11,9 +11,9 @@ python -m resources_servers.swe_atlas_qa.prepare
 ```
 
 `prepare.py` fetches upstream revision `c6673fe259c3493a2f834266abf63247a5d1507c`, checks the revision,
-rejects modifications to the task assets, and generates `data/benchmark.jsonl` and `data/example.jsonl`.
-All downloaded and generated data is gitignored. Rows contain the upstream instruction, task ID, image, and
-working directory. Rubrics, evaluator prompts, and reference answers remain in the server's private source cache.
+rejects modifications to the task assets, and generates the gitignored `data/benchmark.jsonl`.
+The five checked-in smoke examples are separate and are never overwritten by preparation. Rows contain the upstream
+instruction, task ID, image, and working directory. Rubrics, evaluator prompts, and reference answers remain in the server's private source cache.
 The digest-pinned v1.1 task images come from the upstream task definitions on GHCR.
 
 These tasks, answers, rubrics, and resulting trajectories are **evaluation-only**. Follow the upstream canary's
@@ -79,8 +79,26 @@ The collected answer is retained in the rollout so the grader's exact input can 
 pytest resources_servers/swe_atlas_qa/tests
 ```
 
-No downloaded task rows or rollouts are committed. Run preparation before local data validation and retain live
-rollout evidence separately. The server starts with `verified: false` until benchmark review and baselining.
+The checked-in `data/example.jsonl`, `data/example_metrics.json`, and `data/example_rollouts.jsonl` satisfy Gym's
+example-data validation contract. The five distinct task IDs end in `998`, `999`, `99a`, `99b`, and `9ce`.
+The recorded runs used Claude Code with `azure/anthropic/claude-opus-4-6` through `harness_agent` on OpenSandbox,
+with NVIDIA inference and the upstream evaluator. These examples come from the saved baseline run and do not
+provide an unbiased benchmark score.
+They are the first five task IDs with a nonempty answer and complete judging in that saved run, using the first
+complete attempt for each task (attempt 2 for `9ce`, attempt 1 for the others).
+
+Exports retain the exact answer, score and rubric counts, request, usage, and complete recorded response,
+including intermediate assistant messages, tool calls, and tool results.
+The metrics describe the five input rows and are generated with:
+
+```bash
+gym dataset collate "+config_paths=[resources_servers/swe_atlas_qa/configs/swe_atlas_qa.yaml]" \
+  +mode=example_validation +output_dirpath=/tmp/swe-atlas-examples
+gym env test +entrypoint=resources_servers/swe_atlas_qa +should_validate_data=true
+```
+
+Supply the endpoint and harness configuration described above when collating. The full dataset, private grading assets,
+and runtime bundles remain uncommitted. The server starts with `verified: false` until benchmark review and baselining.
 
 ## Attribution
 

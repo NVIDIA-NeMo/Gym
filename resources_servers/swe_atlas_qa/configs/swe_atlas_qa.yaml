@@ -37,6 +37,9 @@ swe_atlas_qa_agent:
       concurrency: 1
       rollout_timeout: 11100
       datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/swe_atlas_qa/data/example.jsonl
         - name: swe_atlas_qa
           type: benchmark
           jsonl_fpath: resources_servers/swe_atlas_qa/data/benchmark.jsonl

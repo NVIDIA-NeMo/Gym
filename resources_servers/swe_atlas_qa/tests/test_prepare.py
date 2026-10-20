@@ -33,7 +33,9 @@ def test_benchmark_catalog_discovery_and_single_dataset_composition() -> None:
     agent = resolved.swe_atlas_qa_agent.responses_api_agents.harness_agent
     standalone = OmegaConf.load(prepare.PACKAGE_DIR / "configs/swe_atlas_qa.yaml")
     assert len(agent.datasets) == 1
-    assert agent.datasets == standalone.swe_atlas_qa_agent.responses_api_agents.harness_agent.datasets
+    standalone_datasets = standalone.swe_atlas_qa_agent.responses_api_agents.harness_agent.datasets
+    assert agent.datasets == [dataset for dataset in standalone_datasets if dataset.type == "benchmark"]
+    assert [dataset.type for dataset in standalone_datasets] == ["example", "benchmark"]
     assert agent.resources_server.name == "swe_atlas_qa_resources_server"
     assert agent.agent == "opencode"
     model, error = maybe_get_server_instance_config(name="policy_model", server_type_config_dict=resolved.policy_model)
@@ -108,17 +110,14 @@ def test_prepare_rows_preserve_instruction_and_exclude_private_assets(source: Pa
         validator.validate_row(index, row)
     assert validator.report.clean
     assert "PRIVATE_" not in output.read_text(encoding="utf-8")
-    assert output.with_name("example.jsonl").read_bytes() == output.read_bytes()
+    assert not output.with_name("example.jsonl").exists()
 
 
-@pytest.mark.parametrize("source", [7], indirect=True)
-def test_example_contains_first_five_rows(source: Path, tmp_path: Path):
-    output = prepare.prepare(source_dir=source, output_path=tmp_path / "benchmark.jsonl")
-    lines = output.read_bytes().splitlines(keepends=True)
-    assert len(lines) == 7
-    example = output.with_name("example.jsonl").read_bytes()
-    assert example == b"".join(lines[:5])
-    assert "PRIVATE_" not in example.decode("utf-8")
+def test_prepare_preserves_example_fixtures(source: Path, tmp_path: Path):
+    example = tmp_path / "example.jsonl"
+    example.write_text("existing smoke fixture\n", encoding="utf-8")
+    prepare.prepare(source_dir=source, output_path=tmp_path / "benchmark.jsonl")
+    assert example.read_text(encoding="utf-8") == "existing smoke fixture\n"
 
 
 def test_load_task_returns_toml_config(source: Path):
