@@ -435,6 +435,137 @@ async def test_checkpoint_recovery_preserves_evidence_but_always_fails(final: st
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("final", [None, "malformed"])
+@pytest.mark.parametrize("has_checkpoint", [False, True])
+@pytest.mark.parametrize("log_kind", ["slow", "error", "missing", "available"])
+async def test_optional_diagnostics_preserve_recovered_evidence(
+    final: str | None, has_checkpoint: bool, log_kind: str
+) -> None:
+    r, s = runner()
+    r.close_timeout = 0.05
+    s.files[r.directory + "/cleanup.json"] = json.dumps(cleanup_receipt())
+    if final is not None:
+        s.files[r.directory + "/result.json"] = final
+    if has_checkpoint:
+        s.files[r.directory + "/checkpoint.json"] = checkpoint_artifact().model_dump_json()
+    if log_kind == "available":
+        s.files[r.directory + "/output.log"] = "diagnostic " * 250
+    events = []
+    original_download = s.download
+
+    async def download(source: str, destination: Path) -> None:
+        events.append(Path(source).name)
+        if source.endswith("/output.log"):
+            if log_kind == "slow":
+                await asyncio.Event().wait()
+            if log_kind == "error":
+                raise ConnectionError("log download failed")
+        await original_download(source, destination)
+
+    async def execute(command: str, **kwargs) -> SandboxExecResult:
+        if "rm -rf" in command:
+            events.append("remove")
+            s.files.clear()
+        return SandboxExecResult(stdout="", stderr="", return_code=0)
+
+    s.download = download
+    s.exec.side_effect = execute
+    request = payload().request
+    with pytest.raises(RuntimeError) as caught:
+        await asyncio.wait_for(r.run(request), timeout=0.5)
+    assert events.index("checkpoint.json") < events.index("output.log")
+    assert r.session.capture_error is None
+    expected_gaps = {"sandbox_result_unavailable"}
+    if has_checkpoint:
+        assert isinstance(caught.value, NOOARunFailure)
+        assert type(caught.value.__cause__) is RuntimeError
+        recovered = caught.value.result
+        assert recovered.termination_reason is NOOATerminationReason.INFRASTRUCTURE_ERROR
+        assert recovered.episode.response.status == "failed"
+        assert recovered.episode.response.output == checkpoint_artifact().response.output
+        assert request.model_cookies == recovered.model_cookies == {"model": "new"}
+        assert request.resource_cookies == recovered.resource_cookies == {"resource": "new"}
+        assert r.checkpoint.partial
+        expected_gaps |= {"test", "partial_checkpoint"}
+    else:
+        assert type(caught.value) is RuntimeError
+        assert r.checkpoint is None
+    assert {gap.code for gap in r.observations.gaps} == expected_gaps
+    assert r.diagnostics == (("diagnostic " * 250)[-2000:] if log_kind == "available" else "")
+    observations = r.observations.model_copy(deep=True)
+    await r.close()
+    assert events.index("checkpoint.json") < events.index("remove")
+    assert r.observations == observations
+    assert (r.checkpoint is not None) is has_checkpoint
+    assert r.session.closed and not s.files
+    s.disconnect.assert_awaited_once()
+    s.stop.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cancelling_optional_diagnostics_retains_checkpoint_and_cancellation() -> None:
+    r, s = runner()
+    s.files[r.directory + "/cleanup.json"] = json.dumps(cleanup_receipt())
+    s.files[r.directory + "/checkpoint.json"] = checkpoint_artifact().model_dump_json()
+    log_started = asyncio.Event()
+    original_download = s.download
+
+    async def download(source: str, destination: Path) -> None:
+        if source.endswith("/output.log"):
+            log_started.set()
+            await asyncio.Event().wait()
+        await original_download(source, destination)
+
+    s.download = download
+    task = asyncio.create_task(r.run(payload().request))
+    await asyncio.wait_for(log_started.wait(), timeout=1)
+    assert r.checkpoint is not None
+    task.cancel("cancel diagnostics")
+    with pytest.raises(asyncio.CancelledError) as caught:
+        await asyncio.wait_for(task, timeout=1)
+    assert caught.value.nooa_result.termination_reason is NOOATerminationReason.CANCELLED
+    assert caught.value.nooa_result.episode.response.status == "cancelled"
+    assert caught.value.nooa_result.episode.response.output == checkpoint_artifact().response.output
+    assert "partial_checkpoint" in {gap.code for gap in r.observations.gaps}
+    assert r.session.capture_error is None
+    await r.close()
+    s.disconnect.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_execution_failure_retains_checkpoint_despite_slow_optional_log() -> None:
+    r, s = runner()
+    r.close_timeout = 0.05
+    s.files[r.directory + "/cleanup.json"] = json.dumps(cleanup_receipt())
+    s.files[r.directory + "/checkpoint.json"] = checkpoint_artifact().model_dump_json()
+    original_error = ConnectionError("provider disconnected")
+    original_download = s.download
+
+    async def download(source: str, destination: Path) -> None:
+        if source.endswith("/output.log"):
+            await asyncio.Event().wait()
+        await original_download(source, destination)
+
+    async def execute(command: str, **kwargs) -> SandboxExecResult:
+        if "process_supervisor.py" in command:
+            raise original_error
+        return SandboxExecResult(stdout="", stderr="", return_code=0)
+
+    s.download = download
+    s.exec.side_effect = execute
+    with pytest.raises(NOOARunFailure) as caught:
+        await asyncio.wait_for(r.run(payload().request), timeout=0.5)
+    assert caught.value.__cause__ is original_error
+    assert caught.value.result.termination_reason is NOOATerminationReason.INFRASTRUCTURE_ERROR
+    assert caught.value.result.episode.response.status == "failed"
+    assert caught.value.result.episode.response.output == checkpoint_artifact().response.output
+    assert "partial_checkpoint" in {gap.code for gap in r.observations.gaps}
+    assert r.session.capture_error is None
+    await r.close()
+    s.disconnect.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("final_error", [None, RunnerError(kind="fatal", message="worker setup failed")])
 async def test_valid_final_always_takes_precedence_over_checkpoint(final_error: RunnerError | None) -> None:
     r, s = runner()

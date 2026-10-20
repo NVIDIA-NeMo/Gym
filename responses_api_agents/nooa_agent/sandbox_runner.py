@@ -111,6 +111,12 @@ class SandboxNOOARunner:
             if cleanup["return_code"] != 0:
                 raise RuntimeError(f"NOOA sandbox worker did not exit successfully (exit {cleanup['return_code']})")
             if self.artifact is None:
+                # Optional logs must not consume the session's artifact-capture deadline.
+                try:
+                    async with asyncio.timeout(min(1.0, self.close_timeout)):
+                        self.diagnostics = (await self.session.read_output_log())[-2000:]
+                except TimeoutError:
+                    pass
                 raise RuntimeError(f"NOOA sandbox result is missing or malformed: {self.diagnostics}")
             request.model_cookies.update(self.artifact.model_cookies)
             request.resource_cookies.update(self.artifact.resource_cookies)
@@ -163,7 +169,6 @@ class SandboxNOOARunner:
             self.observations = artifact.observations
             return
 
-        self.diagnostics = (await self.session.read_output_log())[-2000:]
         gap = ObservationGap(
             code="sandbox_result_unavailable",
             detail="NOOA terminal result is missing or malformed; recovered evidence cannot establish completion.",
