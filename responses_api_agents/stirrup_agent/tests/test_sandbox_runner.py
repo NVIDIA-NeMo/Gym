@@ -186,6 +186,24 @@ def _run_main(tmp_path: Path, payload: dict) -> dict:
     return json.loads(output_path.read_text())
 
 
+def test_task_tool_calls_retry_the_connection_before_the_request_is_sent(tmp_path, resources, monkeypatch):
+    transports = []
+    real_transport = httpx.AsyncHTTPTransport
+
+    def recording_transport(**kwargs):
+        transports.append(kwargs)
+        return real_transport(**kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncHTTPTransport", recording_transport)
+    model = _ModelServer([_call("finish", json.dumps({"reason": "done", "paths": []}))])
+    try:
+        asyncio.run(run(_payload(model.base_url, resources.base_url, tmp_path), tmp_path, Observer()))
+    finally:
+        model.close()
+
+    assert transports == [{"retries": 3}]
+
+
 def test_a_failed_run_still_reports_what_it_observed(tmp_path, resources):
     model = _ModelServer(
         [_call("code_exec", json.dumps({"cmd": "true"})), _call("fetch_web_page", json.dumps({"url": "x"}))]
