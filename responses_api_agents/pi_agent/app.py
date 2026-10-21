@@ -31,6 +31,7 @@ from uuid import uuid4
 from fastapi import HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
+from nemo_gym.agent_outcome import AgentOutcome
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
 from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
@@ -41,7 +42,7 @@ from nemo_gym.base_responses_api_agent import (
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
-    SimpleResponsesAPIAgent,
+    OutcomeReportingAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
@@ -604,8 +605,20 @@ class PiAgentVerifyResponse(BaseVerifyResponse):
     )
 
 
-class PiAgent(SimpleResponsesAPIAgent):
+class PiAgent(OutcomeReportingAgent):
     """Runs the pi CLI (pi --print --mode json --no-session)"""
+
+    def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
+        """Read Pi 0.80.2's terminal assistant error; tested on that pinned version."""
+        if native_result.get("stopReason") != "error":
+            return AgentOutcome(reason="unknown")
+        message = str(native_result.get("errorMessage") or "")
+        match = re.match(r"^(?:HTTP )?([45]\d{2})(?::|\s|$)", message)
+        if match:
+            return AgentOutcome(reason="model_request_error", status_code=int(match[1]))
+        if message in {"Connection error.", "Connection error", "fetch failed"}:
+            return AgentOutcome(reason="model_transport_error")
+        return AgentOutcome(reason="unknown")
 
     config: PiAgentConfig
     # Sandbox sessions run the CLI inside the task sandbox, which calls the model server from there.
@@ -1064,8 +1077,15 @@ class PiAgent(SimpleResponsesAPIAgent):
                 )
             )
         if error:
-            # Keep the captured trajectory on session state for close, but do not invoke
-            # the benchmark verifier after a provider/runtime failure (same as Hermes).
+            terminal = next((event for _, event in reversed(events) if event.get("type") == "agent_end"), {})
+            assistant = next((m for m in reversed(terminal.get("messages") or []) if m.get("role") == "assistant"), {})
+            if (
+                cleanup["return_code"] == 0
+                and not cleanup["timed_out"]
+                and not cleanup["error"]
+                and assistant.get("stopReason") == "error"
+            ):
+                return self.report_outcome(response, assistant)
             raise RuntimeError(f"Pi agent failed: {error}")
         return response
 

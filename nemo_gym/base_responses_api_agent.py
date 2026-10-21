@@ -55,6 +55,7 @@ from nemo_gym.agent_activation_types import (
     AgentContinuationRequirements,
 )
 from nemo_gym.agent_utils.ordered_operations import ActivationConflictError, OrderedOperationLedger
+from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
     AggregateMetricsRequest,
@@ -1010,4 +1011,31 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             compute_metrics_fn=self.compute_metrics,
             get_key_metrics_fn=self.get_key_metrics,
             compute_repeat_metrics_fn=self.compute_repeat_metrics,
+        )
+
+
+class OutcomeReportingAgent(SimpleResponsesAPIAgent):
+    """Agent interface requiring native failure classification, without grading policy.
+
+    Existing adapters may remain SimpleResponsesAPIAgent implementations until
+    migrated. Adapters adopting this interface must implement classify_outcome.
+    """
+
+    @abstractmethod
+    def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
+        """Translate native failure evidence; return unknown when it cannot be classified."""
+        raise NotImplementedError
+
+    def report_outcome(self, response: NeMoGymResponse, native_result: Mapping[str, Any]) -> NeMoGymResponse:
+        """Attach validated evidence through the existing string-valued response metadata."""
+        if response.status != "failed":
+            return response
+        outcome = AgentOutcome.model_validate(self.classify_outcome(native_result))
+        return response.model_copy(
+            update={
+                "metadata": {
+                    **(response.metadata or {}),
+                    AGENT_OUTCOME_METADATA_KEY: outcome.model_dump_json(exclude_none=True),
+                }
+            }
         )

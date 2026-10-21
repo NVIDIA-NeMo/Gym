@@ -8,9 +8,10 @@ from uuid import uuid4
 
 from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError
 from fastapi import Body
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from nemo_gym._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER, StepMode, seed_restarts, seed_verify_mode
+from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
 from nemo_gym.base_environment_server import (
     BaseEnvironmentServer,
     BaseEnvironmentServerConfig,
@@ -225,6 +226,15 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             return trajectory.model_dump(mode="json") if trajectory else None
 
         if stage == "verify":
+            policy = agent_outcome_policy(agent_response)
+            if not policy.verifiable:
+                raise self._failure(
+                    stage="agent",
+                    failure_reason=agent_response.error.message if agent_response.error else "Agent reported failure",
+                    terminal=not policy.retryable,
+                    partial_response=agent_response,
+                    agent_observations=observations,
+                )
             await self.checkpoint_boundary(
                 request,
                 lambda: {
@@ -505,6 +515,36 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 trajectory=trajectory,
             )
         )
+
+
+class AgentOutcomePolicy(BaseModel):
+    """This environment's scoring and episode-retry decision, not a harness decision."""
+
+    verifiable: bool
+    retryable: bool
+
+
+def agent_outcome_policy(response: NeMoGymResponse) -> AgentOutcomePolicy:
+    """Grade model mistakes and limits; exclude provider failures from scores.
+
+    Preserve existing behavior for adapters without classified outcomes. For
+    migrated adapters, unknown failures are neither graded nor automatically retried.
+    The 400/413/422 request-rejection convention matches existing Hermes behavior.
+    """
+    raw = (response.metadata or {}).get(AGENT_OUTCOME_METADATA_KEY)
+    if response.status != "failed" or raw is None:
+        return AgentOutcomePolicy(verifiable=True, retryable=False)
+    try:
+        outcome = AgentOutcome.model_validate_json(raw)
+    except ValidationError:
+        # Keep malformed classification in the partial response for diagnosis, not scoring.
+        return AgentOutcomePolicy(verifiable=False, retryable=False)
+    return AgentOutcomePolicy(
+        verifiable=outcome.reason in {"invalid_output", "limit"} or outcome.status_code in {400, 413, 422},
+        retryable=outcome.reason == "model_transport_error"
+        or outcome.status_code in {408, 425, 429}
+        or (outcome.status_code is not None and outcome.status_code >= 500),
+    )
 
 
 def _cookies(response: Any) -> dict[str, str]:

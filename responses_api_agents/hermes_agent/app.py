@@ -31,6 +31,7 @@ from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field
 from toolsets import TOOLSETS  # pyright: ignore[reportMissingImports]
 
+from nemo_gym.agent_outcome import AgentOutcome
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
 from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
@@ -41,7 +42,7 @@ from nemo_gym.base_responses_api_agent import (
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
-    SimpleResponsesAPIAgent,
+    OutcomeReportingAgent,
     assert_model_url_reachable_from_sandbox,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
@@ -300,7 +301,23 @@ class HermesAgentVerifyResponse(BaseVerifyResponse):
     )
 
 
-class HermesAgent(SimpleResponsesAPIAgent):
+class HermesAgent(OutcomeReportingAgent):
+    def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
+        """Read Hermes 26bb847a native result flags and API errors; tested on that pin."""
+        error = str(native_result.get("error") or "")
+        if error == _TRUNCATION_ERROR or native_result.get("stop_reason") in {"wall_time", "max_turns"}:
+            return AgentOutcome(reason="limit")
+        if native_result.get("failed"):
+            match = _HTTP_STATUS.search(error)
+            if match and 400 <= int(match[1]) <= 599:
+                return AgentOutcome(reason="model_request_error", status_code=int(match[1]))
+            if error in {"Connection error.", "Connection error", "All connection attempts failed"}:
+                return AgentOutcome(reason="model_transport_error")
+            return AgentOutcome(reason="unknown")
+        if native_result.get("partial"):
+            return AgentOutcome(reason="invalid_output")
+        return AgentOutcome(reason="unknown")
+
     config: HermesAgentConfig
     # The harness runs inside the task sandbox and calls the model server from there.
     calls_model_from_sandbox: ClassVar[bool] = True
@@ -674,7 +691,9 @@ class HermesAgent(SimpleResponsesAPIAgent):
             result=result,
             model_name=self._model_name(),
             n_input=len(params["history"]) + 1,
+            retain_provider_failure=True,
         )
+        response = self.report_outcome(response, result)
         # Verifiers see Gym's MCP naming; the model's own names stay in the captured model calls.
         server_names = [access.name for access in mcp_accesses]
         for item in response.output:

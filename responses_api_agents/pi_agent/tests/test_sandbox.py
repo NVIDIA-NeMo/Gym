@@ -1871,11 +1871,11 @@ async def test_provider_failure_is_not_gradable_but_context_limit_preserves_patc
         assert response.error is None
         assert response.output[-1].content[0].text == "Fixed"
     else:
-        with pytest.raises(RuntimeError, match="Pi agent failed: model error"):
-            await task
-        # The shared activation replays the failure instead of running the harness again.
-        with pytest.raises(RuntimeError, match="Pi agent failed: model error"):
-            await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+        response = await task
+        assert response.status == "failed"
+        assert json.loads(response.metadata["ng_agent_outcome"]) == {"reason": "unknown"}
+        # Replay the report without running the harness again; the environment owns policy.
+        assert await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task")) == response
     close = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
     assert len(close.agent_observations.records[0].model_calls) == 2
     assert close.agent_observations.records[0].status == ("incomplete" if context_overflow else "failed")
@@ -2162,3 +2162,32 @@ def test_task_timeout_does_not_allow_other_metadata_or_consume_activation(
         assert accepted.status_code == 200, accepted.text
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
         assert closed.status_code == 200, closed.text
+
+
+@pytest.mark.parametrize(
+    "message,status",
+    [
+        ("400 bad request", 400),
+        ("HTTP 503: unavailable", 503),
+        ("500 status code (no body)", 500),
+        ("401 unauthorized", 401),
+    ],
+)
+def test_native_model_error_is_reported_with_classification(setup, message, status):
+    agent, sandbox = setup
+    native = {"role": "assistant", "stopReason": "error", "errorMessage": message, "content": []}
+    response, observations = sandbox_event_response(
+        agent,
+        sandbox,
+        [
+            {"type": "message_end", "message": native},
+            {"type": "agent_end", "messages": [native]},
+        ],
+    )
+    assert response["status"] == "failed"
+    assert response["error"]["message"] == message
+    assert json.loads(response["metadata"]["ng_agent_outcome"]) == {
+        "reason": "model_request_error",
+        "status_code": status,
+    }
+    assert observations["records"][0]["status"] == "failed"

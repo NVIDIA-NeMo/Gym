@@ -270,7 +270,7 @@ async def test_activation_replay_survives_disconnected_waiter(agent, state):
         )
 
 
-def test_provider_failure_is_http_500_and_replays_without_rerunning(agent, state):
+def test_provider_failure_is_reported_and_replays_without_rerunning(agent, state):
     agent._initialize_agent_session_state = AsyncMock(return_value=state)
     state.upload_json = AsyncMock()
     mock_json_download(
@@ -288,7 +288,12 @@ def test_provider_failure_is_http_500_and_replays_without_rerunning(agent, state
         path = f"/ng-rollout/{state.request.episode_id.capture_key}/v1/responses"
         for _ in range(2):
             response = client.post(path, json={"input": "task"})
-            assert response.status_code == 500
+            assert response.status_code == 200
+            assert response.json()["status"] == "failed"
+            assert json.loads(response.json()["metadata"]["ng_agent_outcome"]) == {
+                "reason": "model_request_error",
+                "status_code": 429,
+            }
         state.upload_json.assert_awaited_once()
         assert state.session.cleanup is not None and state.session.cleanup["cleanup_confirmed"] is True
         close = client.post(
