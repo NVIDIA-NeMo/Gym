@@ -28,7 +28,7 @@ The model powering the agent is external to the environment. It generates a resp
 
 ### Dataset
 
-A collection of tasks (prompts for the agent to solve), along with metadata and privileged information necessary for scoring each task attempt. Each task defines a problem for the model: e.g. a coding issue to fix, a math problem to solve, a tool-calling scenario to navigate.
+A collection of tasks (prompts for the agent to solve), along with metadata and privileged information necessary for scoring each episode. Each task defines a problem for the model: e.g. a coding issue to fix, a math problem to solve, a tool-calling scenario to navigate.
 
 Tasks can vary structurally: single-turn question answering, multi-step tool use, multi-turn dialogue, agentic workflows with sandboxed execution, and more.
 
@@ -40,7 +40,7 @@ Harnesses exist on a spectrum. A simple harness just loops model calls until the
 
 ### Verifier
 
-The verifier (sometimes referred to as a scorer or grader) scores a task attempt to calculate a reward, typically between 0 and 1. It defines what "good" means for this environment by scoring the model's output against task-specific metadata — e.g. expected answers, test cases, unit tests, ground truth, rubrics.
+The verifier (sometimes referred to as a scorer or grader) scores an episode to calculate a reward, typically between 0 and 1. It defines what "good" means for this environment by scoring the model's output against task-specific metadata — e.g. expected answers, test cases, unit tests, ground truth, rubrics.
 
 Common patterns include exact match, code execution (run tests and check if they pass), state matching, LLM-as-Judge, and reward models.
 
@@ -51,7 +51,7 @@ The verifier is used for both evaluation and training:
 
 ### State
 
-Per-task state that changes as the agent takes actions. Each task attempt starts from a clean state, this ensures attempts are independent and rewards are attributable to the agent's actions on that task.
+Per-task state that changes as the agent takes actions. Each episode starts from a clean state, so episodes are independent and rewards are attributable to the agent's actions on that task.
 
 Some environments have minimal state (e.g., math — just input and output). Others have rich state that evolves across turns: file systems being modified, databases being updated, code repositories being patched, game boards advancing.
 
