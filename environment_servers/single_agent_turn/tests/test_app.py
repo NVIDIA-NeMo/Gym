@@ -1120,8 +1120,8 @@ async def test_verify_says_that_the_resources_session_is_closed_afterwards() -> 
 @pytest.mark.parametrize(
     "outcome, verifiable, retryable",
     [
-        ({"failure_kind": "invalid_output"}, True, False),
-        ({"failure_kind": "limit"}, True, False),
+        ({"failure_kind": "agent_invalid_output"}, True, False),
+        ({"failure_kind": "agent_limit"}, True, False),
         ({"failure_kind": "model_request_error", "status_code": 400}, True, False),
         ({"failure_kind": "model_request_error", "status_code": 413}, True, False),
         ({"failure_kind": "model_request_error", "status_code": 422}, True, False),
@@ -1194,12 +1194,13 @@ async def test_nonfailed_outcomes_still_reach_verification(status: str | None) -
     assert verify["json"]["response"]["status"] == status
 
 
-async def test_invalid_outcome_is_retained_without_grading_or_retry() -> None:
+@pytest.mark.parametrize("raw", ["not valid JSON", '{"failure_kind":"unregistered_error"}'])
+async def test_invalid_outcome_is_retained_without_grading_or_retry(raw: str) -> None:
     from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY
 
     environment, client = _environment_server()
     response = _agent_response().model_dump(mode="json")
-    response.update(status="failed", metadata={AGENT_OUTCOME_METADATA_KEY: "not valid JSON"})
+    response.update(status="failed", metadata={AGENT_OUTCOME_METADATA_KEY: raw})
     client.responses[2] = _Response(response)
     del client.responses[4]
 

@@ -50,6 +50,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.failure_kinds import MODEL_REQUEST_ERROR
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -223,7 +224,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             return AgentOutcome(failure_kind="unknown")
         status = (error.get("data") or {}).get("statusCode")
         if type(status) is int and 400 <= status <= 599:
-            return AgentOutcome(failure_kind="model_request_error", status_code=status)
+            return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
         return AgentOutcome(failure_kind="unknown")
 
     config: OpenCodeAgentConfig

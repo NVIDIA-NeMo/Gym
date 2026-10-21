@@ -37,6 +37,7 @@ from nemo_gym.config_types import (
     AggregateMetricsRequest,
     ResourcesServerRef,
 )
+from nemo_gym.failure_kinds import AGENT_INVALID_OUTPUT, AGENT_LIMIT, MODEL_TRANSPORT_ERROR
 from nemo_gym.global_config import (
     TOKEN_ID_CAPTURE_BLOCK,
     get_first_server_config_dict,
@@ -540,8 +541,9 @@ def agent_outcome_policy(response: NeMoGymResponse) -> AgentOutcomePolicy:
         # Keep malformed classification in the partial response for diagnosis, not scoring.
         return AgentOutcomePolicy(verifiable=False, retryable=False)
     return AgentOutcomePolicy(
-        verifiable=outcome.failure_kind in {"invalid_output", "limit"} or outcome.status_code in {400, 413, 422},
-        retryable=outcome.failure_kind == "model_transport_error"
+        verifiable=outcome.failure_kind in {AGENT_INVALID_OUTPUT, AGENT_LIMIT}
+        or outcome.status_code in {400, 413, 422},
+        retryable=outcome.failure_kind == MODEL_TRANSPORT_ERROR
         or outcome.status_code in {408, 425, 429}
         or (outcome.status_code is not None and outcome.status_code >= 500),
     )

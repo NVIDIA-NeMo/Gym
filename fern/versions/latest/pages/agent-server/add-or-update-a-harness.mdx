@@ -601,15 +601,19 @@ before returning a failed response; inheritance alone does not attach metadata.
 Keep text parsing in the classifier and document the tested runtime version.
 Pi, Codex, OpenCode and Hermes override it in their agent-session paths.
 
+`AgentOutcome.failure_kind` accepts names registered in `nemo_gym/failure_kinds.py`
+or `unknown`; unregistered names are rejected. The shared names describe causes,
+not retry or grading policy.
+
 The helper writes JSON to `response.metadata.ng_agent_outcome`; `status_code` is the
 upstream model request's status, not the agent endpoint's HTTP status. The
 `single_agent_turn` Environment Server applies this policy after closing the agent:
 
 | Reported cause | Verify | Eligible for episode retry |
 | --- | --- | --- |
-| Invalid output, limit, or request rejection 400/413/422 | Yes | No |
-| Model transport error, 408/425/429, or 5xx | No | Yes |
-| Other request error, including 401/403/404; unknown or malformed cause | No | No |
+| `agent_invalid_output`, `agent_limit`, or model request rejection 400/413/422 | Yes | No |
+| `model_transport_error`, model request rejection 408/425/429, or 5xx | No | Yes |
+| Other registered kind or request error, including 401/403/404; unknown or malformed cause | No | No |
 
 Excluded attempts retain their partial response and observations in the existing
 failure flow. Retry eligibility does not force a retry; the collector's retry budget

@@ -73,6 +73,13 @@ AGENT_RUN_ERROR = "agent_run_error"
 AGENT_REQUEST_FAILED = "agent_request_failed"
 AGENT_TIMEOUT = "agent_timeout"
 AGENT_COMMAND_NOT_ALLOWED = "agent_command_not_allowed"
+AGENT_LIMIT = "agent_limit"
+AGENT_INVALID_OUTPUT = "agent_invalid_output"
+
+# --- model: requests made to a model endpoint ---------------------------------------- #
+# Preserve the upstream HTTP status separately; it is not a retry policy.
+MODEL_REQUEST_ERROR = "model_request_error"
+MODEL_TRANSPORT_ERROR = "model_transport_error"
 
 # --- verifier and judge --------------------------------------------------------------- #
 # ``judge_failed`` is produced today by judge_failsafe and by reverification.
@@ -112,6 +119,10 @@ FAILURE_KINDS: frozenset[str] = frozenset(
         AGENT_REQUEST_FAILED,
         AGENT_TIMEOUT,
         AGENT_COMMAND_NOT_ALLOWED,
+        AGENT_LIMIT,
+        AGENT_INVALID_OUTPUT,
+        MODEL_REQUEST_ERROR,
+        MODEL_TRANSPORT_ERROR,
         JUDGE_FAILED,
         JUDGE_UNPARSEABLE,
         VERIFIER_ERROR,

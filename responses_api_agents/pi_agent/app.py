@@ -45,6 +45,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.failure_kinds import MODEL_REQUEST_ERROR, MODEL_TRANSPORT_ERROR
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -615,9 +616,9 @@ class PiAgent(SimpleResponsesAPIAgent):
         message = str(native_result.get("errorMessage") or "")
         match = re.match(r"^(?:HTTP )?([45]\d{2})(?::|\s|$)", message)
         if match:
-            return AgentOutcome(failure_kind="model_request_error", status_code=int(match[1]))
+            return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=int(match[1]))
         if message in {"Connection error.", "Connection error", "fetch failed"}:
-            return AgentOutcome(failure_kind="model_transport_error")
+            return AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
         return AgentOutcome(failure_kind="unknown")
 
     config: PiAgentConfig

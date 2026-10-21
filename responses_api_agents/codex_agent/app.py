@@ -48,6 +48,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.failure_kinds import MODEL_REQUEST_ERROR, MODEL_TRANSPORT_ERROR
 from nemo_gym.global_config import SKILLS_REF_KEY_NAME, get_first_server_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -467,9 +468,9 @@ class CodexAgent(SimpleResponsesAPIAgent):
         message = str((native_result.get("error") or {}).get("message") or "")
         match = re.search(r"\bunexpected status ([45]\d{2})\b", message)
         if match:
-            return AgentOutcome(failure_kind="model_request_error", status_code=int(match[1]))
+            return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=int(match[1]))
         if message.startswith("stream disconnected before completion: error sending request for url"):
-            return AgentOutcome(failure_kind="model_transport_error")
+            return AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
         return AgentOutcome(failure_kind="unknown")
 
     config: CodexAgentConfig

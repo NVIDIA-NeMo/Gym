@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.failure_kinds import FAILURE_KINDS, MODEL_REQUEST_ERROR
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
 
@@ -57,3 +58,25 @@ def test_inherited_outcome_reporting_preserves_response_and_marks_unknown():
 def test_rejects_inconsistent_model_request_evidence(fields):
     with pytest.raises(ValidationError):
         AgentOutcome.model_validate(fields)
+
+
+@pytest.mark.parametrize("kind", sorted(FAILURE_KINDS | {"unknown"}))
+def test_accepts_shared_failure_vocabulary(kind):
+    fields = {"failure_kind": kind}
+    if kind == MODEL_REQUEST_ERROR:
+        fields["status_code"] = 503
+    outcome = AgentOutcome(**fields)
+    assert AgentOutcome.model_validate_json(outcome.model_dump_json()) == outcome
+
+
+@pytest.mark.parametrize(
+    "kind", ["", "typo", "model_timeout_typo", "agent:custom", "unknown ", "limit", "invalid_output"]
+)
+def test_rejects_unregistered_failure_kinds(kind):
+    import json
+
+    fields = {"failure_kind": kind}
+    with pytest.raises(ValidationError, match="Unregistered failure kind"):
+        AgentOutcome(**fields)
+    with pytest.raises(ValidationError, match="Unregistered failure kind"):
+        AgentOutcome.model_validate_json(json.dumps(fields))
