@@ -70,11 +70,9 @@ def load_runtime_wheelhouse(output: Path, *, target: str, source_fingerprint: st
     return manifest
 
 
-def validate_runtime_wheelhouse(
-    output: Path, *, target: str, requirements_path: Path | None = None
-) -> dict[str, object]:
+def validate_runtime_wheelhouse(output: Path, *, target: str) -> dict[str, object]:
     """Check an existing prepared bundle against the current checkout."""
-    _, fingerprint = _runtime_archive(Path(__file__).resolve().parents[2], requirements_path=requirements_path)
+    _, fingerprint = _runtime_archive(Path(__file__).resolve().parents[2])
     return load_runtime_wheelhouse(output, target=target, source_fingerprint=fingerprint)
 
 
@@ -101,7 +99,6 @@ async def prepare_runtime_wheelhouse(
     output: Path,
     *,
     target: str,
-    requirements_path: Path | None = None,
     builder_image: str | None = None,
 ) -> Path:
     """Build every runtime wheel on compatible Linux, using Docker outside the task.
@@ -113,7 +110,7 @@ async def prepare_runtime_wheelhouse(
     if target not in _TARGETS:
         raise ValueError(f"Unsupported offline NOOA target {target!r}; expected one of {tuple(_TARGETS)}")
     root = Path(__file__).resolve().parents[2]
-    source, fingerprint = _runtime_archive(root, requirements_path=requirements_path)
+    source, fingerprint = _runtime_archive(root)
     output = output.expanduser().resolve()
     if output.exists():
         load_runtime_wheelhouse(output, target=target, source_fingerprint=fingerprint)
@@ -179,8 +176,9 @@ tar -xzf /build/source.tar.gz -C /build/source
             # Also remove a live builder after cancellation/timeout of the Docker client.
             try:
                 await _command("docker", "rm", "--force", container, timeout=30)
-            except RuntimeError:
-                pass
+            except RuntimeError as error:
+                if "No such container" not in str(error):
+                    raise
         built_arch = (work / "architecture.txt").read_text().strip()
         libc = (work / "libc.txt").read_text().strip().split()
         if built_arch != arch or len(libc) != 2 or libc[0] != "glibc":
@@ -218,18 +216,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--target", choices=tuple(_TARGETS), default="x86_64/gnu")
-    parser.add_argument("--requirements-file", type=Path)
     parser.add_argument("--builder-image")
     parser.add_argument("--validate-only", action="store_true")
     args = parser.parse_args()
     if args.validate_only:
-        validate_runtime_wheelhouse(args.output, target=args.target, requirements_path=args.requirements_file)
+        validate_runtime_wheelhouse(args.output, target=args.target)
     else:
         asyncio.run(
             prepare_runtime_wheelhouse(
                 args.output,
                 target=args.target,
-                requirements_path=args.requirements_file,
                 builder_image=args.builder_image,
             )
         )

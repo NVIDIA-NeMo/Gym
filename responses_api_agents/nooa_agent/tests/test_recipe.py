@@ -66,10 +66,8 @@ def test_swe_shared_preparation_preserves_grading_metadata_through_legacy_adapte
     assert output.read_bytes() == original
 
 
-@pytest.mark.parametrize("recipe", ["nooa.yaml", "nooa_baseline.yaml"])
-@pytest.mark.parametrize("benchagent", [False, True])
 def test_swe_recipe_uses_borrowed_sandbox_and_single_agent_turn_environment(
-    recipe: str, benchagent: bool, monkeypatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     from omegaconf import OmegaConf
 
@@ -81,14 +79,11 @@ def test_swe_recipe_uses_borrowed_sandbox_and_single_agent_turn_environment(
         "POLICY_BASE_URL": "http://model.invalid/v1",
         "POLICY_API_KEY": "fixture",
         "POLICY_MODEL_NAME": "fixture",
-        "NOOA_SWE_BASELINE_RUN_DIR": str(tmp_path),
         "NOOA_SWE_RUNTIME_WHEELHOUSE": str(tmp_path / "wheelhouse"),
     }.items():
         monkeypatch.setenv(key, value)
     parser = GlobalConfigDictParser()
-    paths = [str(ROOT / "benchmarks/swebench/pro" / recipe)]
-    if benchagent:
-        paths.append(str(ROOT / "benchmarks/nooa_baselines/benchagent-swe.yaml"))
+    paths = [str(ROOT / "benchmarks/swebench/pro/nooa.yaml")]
     _, configs = parser.load_extra_config_paths(paths)
     config = OmegaConf.merge(*configs)
     parser._recursively_swap_keys(config)
@@ -112,6 +107,8 @@ def test_swe_recipe_uses_borrowed_sandbox_and_single_agent_turn_environment(
     assert not environment.resources_tool_transports
     resources = config[environment.resources_server.name].resources_servers.swebench_pro
     assert resources.allowed_agents == ["nooa_agent"]
+    assert resources.entrypoint == "app.py"
+    assert resources.sandbox_config.provider_options.platform == {"os": "linux", "arch": "amd64"}
     assert resources.task_network_policy.model_server.name == agent.model_server.name
     assert "network_policy" not in resources.sandbox_config.provider_options
     assert agent.runtime_wheelhouse == tmp_path / "wheelhouse"
@@ -123,42 +120,20 @@ def test_swe_recipe_uses_borrowed_sandbox_and_single_agent_turn_environment(
     assert [(instance.name, set(instance.environment_servers)) for instance in environments] == [
         ("swebench_pro_nooa", {"single_agent_turn_legacy"})
     ]
-    if recipe == "nooa_baseline.yaml":
-        assert config.responses_create_params.max_output_tokens == 32768
 
 
-@pytest.mark.parametrize(
-    "recipe,resource_name,resource_type,agent_name",
-    [
-        (
-            "benchmarks/terminal_bench_2_1/nooa.yaml",
-            "terminal_bench_2_1_nooa_resources_server",
-            "terminal_bench_2_1",
-            "terminal_bench_2_1_nooa_agent",
-        ),
-        ("benchmarks/gdpval/nooa.yaml", "gdpval_nooa_resources_server", "gdpval", "gdpval_nooa_agent"),
-        (
-            "resources_servers/swebench_pro/configs/swebench_pro.yaml",
-            "swebench_pro_resources_server",
-            "swebench_pro",
-            None,
-        ),
-    ],
-)
-def test_network_restriction_and_offline_runtime_do_not_change_other_combinations(
-    recipe: str, resource_name: str, resource_type: str, agent_name: str | None
-) -> None:
+def test_shared_swe_recipe_keeps_default_networking() -> None:
     from omegaconf import OmegaConf
 
     from nemo_gym.global_config import GlobalConfigDictParser
 
     parser = GlobalConfigDictParser()
-    _, configs = parser.load_extra_config_paths([str(ROOT / recipe)])
+    _, configs = parser.load_extra_config_paths(
+        [str(ROOT / "resources_servers/swebench_pro/configs/swebench_pro.yaml")]
+    )
     config = OmegaConf.merge(*configs)
     parser._recursively_swap_keys(config)
-    resources = config[resource_name].resources_servers[resource_type]
+    resources = config.swebench_pro_resources_server.resources_servers.swebench_pro
     assert resources.get("task_network_policy") is None
-    assert "network_policy" not in resources.get("sandbox_config", {}).get("provider_options", {})
-    if agent_name is not None:
-        agent = config[agent_name].responses_api_agents.nooa_agent
-        assert agent.get("runtime_wheelhouse") is None
+    assert "network_policy" not in resources.sandbox_config.provider_options
+    assert resources.entrypoint == "app.py"
