@@ -1884,7 +1884,7 @@ async def test_provider_failure_is_not_gradable_but_context_limit_preserves_patc
 
 
 @pytest.mark.parametrize("owned", [False, True])
-def test_sandbox_source_controls_ownership_and_native_routing(setup, owned):
+def test_sandbox_source_controls_ownership_and_session_routing(setup, owned):
     agent, sandbox = setup
     agent.config.sandbox_provider = "agent-provider"
     agent.config.sandbox_config = {"image": "test-image", "workdir": "/agent-workspace"}

@@ -49,8 +49,8 @@ An adapter supplies the knowledge that is specific to the harness or framework:
 
 1. **Install or load the agent.** For example, a framework adapter lists the framework in its `requirements.txt`, while Pi and Codex install a pinned runtime into the task sandbox at seed.
 2. **Configure and invoke it.** Build the harness configuration from the adapter configuration and the request, then call the SDK or start the CLI. For example, Hermes writes a `config.yaml`, and Pi and Codex start a `sandbox_runner.py` shim.
-3. **Map native inputs, results, and traces to Gym.** Convert the request into the harness's input, the harness's output into a `NeMoGymResponse`, and its model and tool activity into an `AgentObservationBundle`.
-4. **Map Gym connections into the harness's native configuration.** Set the rollout-prefixed Model Server URL as the harness's model base URL, add tool grants to its tool configuration, and run it in `SandboxAccess.workdir`. For example, Hermes adds each MCP grant to the `mcp_servers` section of its configuration.
+3. **Map the harness's inputs, results, and traces to Gym.** Convert the request into the harness's input, the harness's output into a `NeMoGymResponse`, and its model and tool activity into an `AgentObservationBundle`.
+4. **Map Gym connections into the harness's own configuration.** Set the rollout-prefixed Model Server URL as the harness's model base URL, add tool grants to its tool configuration, and run it in `SandboxAccess.workdir`. For example, Hermes adds each MCP grant to the `mcp_servers` section of its configuration.
 
 ### What Gym provides
 
@@ -257,12 +257,12 @@ The current adapters support the following tool sources:
 | Adapter | Built-in tools | Resources Server tool grants | Model API |
 | --- | --- | --- | --- |
 | Hermes | Hermes toolsets, selected with `enabled_toolsets` and `disabled_toolsets`, for example `[terminal]`. | `mcp` only. Each granted MCP server becomes a Hermes toolset with the same name. Required `direct_http` grants are rejected. | Chat Completions |
-| Pi | Pi's built-in sandbox tools. `sandbox_bash_timeout_seconds` limits each bash call. | None in native sessions. Required grants are rejected; keep `resources_tool_transports: []`. | Chat Completions |
-| Codex | Codex's shell and file tools. Native sessions require `sandbox_mode: danger-full-access`, because the task sandbox supplies isolation. | None in native sessions. Required grants are rejected; keep `resources_tool_transports: []`. | Responses (streaming) |
-| OpenCode | OpenCode's built-in tools. Session `opencode_config` permits only `permission` and `tools`. | None in native sessions. Required HTTP and MCP grants are rejected; keep `resources_tool_transports: []`. | Chat Completions |
-| OpenClaw | `read`, `write`, `edit`, `exec`, and `process`. | None in native sessions. Required HTTP and MCP grants are rejected; keep `resources_tool_transports: []`. | Chat Completions |
+| Pi | Pi's built-in sandbox tools. `sandbox_bash_timeout_seconds` limits each bash call. | None in agent sessions. Required grants are rejected; keep `resources_tool_transports: []`. | Chat Completions |
+| Codex | Codex's shell and file tools. Agent sessions require `sandbox_mode: danger-full-access`, because the task sandbox supplies isolation. | None in agent sessions. Required grants are rejected; keep `resources_tool_transports: []`. | Responses (streaming) |
+| OpenCode | OpenCode's built-in tools. Session `opencode_config` permits only `permission` and `tools`. | None in agent sessions. Required HTTP and MCP grants are rejected; keep `resources_tool_transports: []`. | Chat Completions |
+| OpenClaw | `read`, `write`, `edit`, `exec`, and `process`. | None in agent sessions. Required HTTP and MCP grants are rejected; keep `resources_tool_transports: []`. | Chat Completions |
 
-When a tool belongs to the task, prefer a Resources Server tool grant over a built-in harness tool. Different agents can then share one implementation, and the adapter works across environments without benchmark-specific changes. Use built-in harness tools for behavior that is native to the harness, such as its shell or file editor. See [Tools in Agent vs. Resources Server](/main/agent-server/integrate-existing-agents#tools-in-agent-vs-resources-server).
+When a tool belongs to the task, prefer a Resources Server tool grant over a built-in harness tool. Different agents can then share one implementation, and the adapter works across environments without benchmark-specific changes. Use built-in harness tools for behavior that belongs to the harness, such as its shell or file editor. See [Tools in Agent vs. Resources Server](/main/agent-server/integrate-existing-agents#tools-in-agent-vs-resources-server).
 
 Document the supported tool sources, the model API, and the rejected options in the adapter's README.
 
@@ -270,12 +270,12 @@ Document the supported tool sources, the model API, and the rejected options in 
 
 ### Adapter configuration
 
-Adapter configurations extend `BaseResponsesAPIAgentConfig`. Native session adapters use the following fields:
+Adapter configurations extend `BaseResponsesAPIAgentConfig`. Adapters that implement agent sessions use the following fields:
 
 | Field | Purpose |
 | --- | --- |
 | `entrypoint` | The adapter's server module, usually `app.py`. |
-| `resources_server` | `null` for native sessions, so that the Environment Server selects the benchmark. Set it only for the compatibility `/run` path. |
+| `resources_server` | `null` for agent sessions, so that the Environment Server selects the benchmark. Set it only for the compatibility `/run` path. |
 | `model_server` | The Gym Model Server reference, for example `{type: responses_api_models, name: policy_model}`. The sandbox must be able to reach it. |
 | `model` | The model name that the harness sends. |
 | `num_workers` | Must be `1` for agent sessions. |
@@ -323,7 +323,7 @@ Organize a new adapter under `responses_api_agents/<harness>/`. The adapter's `s
 | --- | --- |
 | `app.py` | Gym endpoints and configuration; request validation and mapping; session hooks; response and observation conversion; dispatch to host or sandbox execution. |
 | `sandbox.py` | A harness-specific session state class that composes `SandboxSession`. It installs the runtime at seed, stages input in `stage_activation()`, collects artifacts, and holds harness-specific state and diagnostics. |
-| `sandbox_runner.py` | Reads the staged input, invokes the harness SDK or CLI, writes native output and optional process diagnostics, and keeps partial output where the harness supports it. Handles `SIGTERM` by stopping the harness and writing that partial output before it exits, because the supervisor sends `SIGTERM` at the deadline and on close. |
+| `sandbox_runner.py` | Reads the staged input, invokes the harness SDK or CLI, writes the harness's output and optional process diagnostics, and keeps partial output where the harness supports it. Handles `SIGTERM` by stopping the harness and writing that partial output before it exits, because the supervisor sends `SIGTERM` at the deadline and on close. |
 | `install_<harness>_runtime.sh` or an existing harness-specific installer | Installs the pinned harness and its private dependencies, then checks that they run. Keep installation out of the activation path. |
 | `requirements.txt` | The adapter's isolated environment: `-e nemo-gym[dev,sandbox] @ ../../` plus packages that run on the Agent Server, such as a framework or SDK. Without the `sandbox` extra, an SDK-backed provider such as OpenSandbox cannot import its SDK, and the first sandbox session fails. |
 | `tests/` | Host dispatch, session setup, request semantics, output parsing, installation, and lifecycle regressions. |
@@ -575,7 +575,7 @@ Some frameworks change their behavior based on a model or runtime profile. For e
 
 Return a `NeMoGymResponse` with text, reasoning, tool calls and results, usage, and status where available. Collect [rollout evidence](/main/observability/rollout-evidence#add-evidence-to-a-custom-agent): tool timing, model-call references, aggregated usage, and explicit evidence gaps.
 
-When a native item has no exact Responses API equivalent, decide whether to convert it, drop it, or keep it only as an artifact. Record anything that is lost as an `ObservationGap` with a specific code, and never drop tool calls or their results. Keep the harness's raw output and execution artifacts, including the ones available after a failure.
+When a harness item has no exact Responses API equivalent, decide whether to convert it, drop it, or keep it only as an artifact. Record anything that is lost as an `ObservationGap` with a specific code, and never drop tool calls or their results. Keep the harness's raw output and execution artifacts, including the ones available after a failure.
 
 ### Keep execution health separate from reward
 

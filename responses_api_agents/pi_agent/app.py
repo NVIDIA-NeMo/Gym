@@ -163,14 +163,14 @@ set --
 command -v python3 >/dev/null 2>&1 || set -- "$@" python3
 command -v bash >/dev/null 2>&1 || set -- "$@" bash
 if [ "$#" -gt 0 ]; then
-    [ "$(id -u)" = 0 ] || { echo "Native Pi requires $*: preinstall these tools or use a root image." >&2; exit 1; }
+    [ "$(id -u)" = 0 ] || { echo "Pi in the task sandbox requires $*: preinstall these tools or use a root image." >&2; exit 1; }
     if command -v apk >/dev/null 2>&1; then
         apk add --no-cache "$@"
     elif command -v apt-get >/dev/null 2>&1; then
         apt-get update
         DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$@"
     else
-        echo "Native Pi requires $*: preinstall these tools (automatic installation requires apt-get or apk)." >&2
+        echo "Pi in the task sandbox requires $*: preinstall these tools (automatic installation requires apt-get or apk)." >&2
         exit 1
     fi
 fi
@@ -729,7 +729,7 @@ class PiAgent(SimpleResponsesAPIAgent):
     def _validate_request(
         self, body: NeMoGymResponseCreateParamsNonStreaming
     ) -> NeMoGymResponseCreateParamsNonStreaming:
-        """Validate the supported controls for a native sandbox activation."""
+        """Validate the supported controls for a sandbox session activation."""
         if body.model is not None and body.model != self.config.model:
             raise HTTPException(422, "Pi model must match the configured model")
         if body.max_output_tokens is not None:
@@ -1337,7 +1337,7 @@ class PiAgent(SimpleResponsesAPIAgent):
             # Session close owns cancellation. Losing an HTTP waiter must not stop the harness.
             return (await asyncio.shield(state.task)).model_copy(deep=True)
         # AnySWE, AnyTerminal and HarnessAgent pass generic Responses fields here.
-        # Preserve their local CLI contract; only native sessions enforce the new
+        # Preserve their local CLI contract; only agent sessions enforce the new
         # request boundary. Legacy model selection and caps remain config-owned.
         path_params = getattr(request, "path_params", None)
         rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
