@@ -172,7 +172,9 @@ class AgenticVBenchAgent(SimpleResponsesAPIAgent):
     async def run(self, body: AgenticVBenchRunRequest) -> AgenticVBenchVerifyResponse:
         endpoint, model = self._model_endpoint(body)
         # Gym's HTTP retries must never create a second trajectory for a completed zero score.
-        identity = {"request": body.model_dump(), "model": model, "endpoint": endpoint}
+        # The policy endpoint is left out on purpose: its host and port change when a resumed
+        # Slurm job redispatches an unfinished rollout, and the episode must still be found.
+        identity = {"request": body.model_dump(), "model": model}
         key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
         if key not in self._inflight:
             self._inflight[key] = asyncio.create_task(self._run_once(body, key, endpoint, model))
