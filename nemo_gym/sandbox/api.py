@@ -441,6 +441,11 @@ class AsyncSandbox:
             raise RuntimeError("Sandbox has not been started")
         return self._handle
 
+    @property
+    def sandbox_id(self) -> str:
+        """Return the provider-assigned identity while this sandbox is active."""
+        return self._require_handle().sandbox_id
+
     async def start(
         self,
         spec: SandboxSpec | None = None,

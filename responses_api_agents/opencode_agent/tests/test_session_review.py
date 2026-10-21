@@ -18,6 +18,7 @@ from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import (
     active_sessions,
     capture_observations,
     close_body,
+    rejected_events,
     seed,
     setup,  # noqa: F401
 )
@@ -106,8 +107,12 @@ def test_observation_parse_failure_preserves_response(setup, caplog):
 
 
 @pytest.mark.parametrize("failure", ["provider_timeout", "missing_export", "snapshot"])
-def test_execution_failure_keeps_cleanup_observations_and_diagnostics(setup, tmp_path, failure):
+@pytest.mark.parametrize("model_rejected", [False, True])
+def test_execution_failure_keeps_cleanup_observations_and_diagnostics(setup, tmp_path, failure, model_rejected):
     agent, sandbox = setup
+    if model_rejected:
+        sandbox.events = rejected_events(after_work=True)
+        sandbox.result["return_code"] = 1
     capture_observations(sandbox, tmp_path)
     execute = sandbox.run_exec
     download = sandbox.download
