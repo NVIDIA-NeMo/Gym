@@ -42,7 +42,7 @@ from nemo_gym.base_responses_api_agent import (
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
-    OutcomeReportingAgent,
+    SimpleResponsesAPIAgent,
     assert_model_url_reachable_from_sandbox,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
@@ -301,7 +301,7 @@ class HermesAgentVerifyResponse(BaseVerifyResponse):
     )
 
 
-class HermesAgent(OutcomeReportingAgent):
+class HermesAgent(SimpleResponsesAPIAgent):
     def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
         """Read Hermes 26bb847a native result flags and API errors; tested on that pin."""
         error = str(native_result.get("error") or "")

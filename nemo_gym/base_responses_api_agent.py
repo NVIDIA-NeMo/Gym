@@ -1013,18 +1013,9 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             compute_repeat_metrics_fn=self.compute_repeat_metrics,
         )
 
-
-class OutcomeReportingAgent(SimpleResponsesAPIAgent):
-    """Agent interface requiring native failure classification, without grading policy.
-
-    Existing adapters may remain SimpleResponsesAPIAgent implementations until
-    migrated. Adapters adopting this interface must implement classify_outcome.
-    """
-
-    @abstractmethod
     def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
-        """Translate native failure evidence; return unknown when it cannot be classified."""
-        raise NotImplementedError
+        """Override to classify native failures; unknown leaves grading and retries disabled."""
+        return AgentOutcome(reason="unknown")
 
     def report_outcome(self, response: NeMoGymResponse, native_result: Mapping[str, Any]) -> NeMoGymResponse:
         """Attach validated evidence through the existing string-valued response metadata."""

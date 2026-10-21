@@ -42,7 +42,7 @@ from nemo_gym.base_responses_api_agent import (
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
-    OutcomeReportingAgent,
+    SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
@@ -605,7 +605,7 @@ class PiAgentVerifyResponse(BaseVerifyResponse):
     )
 
 
-class PiAgent(OutcomeReportingAgent):
+class PiAgent(SimpleResponsesAPIAgent):
     """Runs the pi CLI (pi --print --mode json --no-session)"""
 
     def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:

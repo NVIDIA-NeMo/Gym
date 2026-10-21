@@ -45,7 +45,7 @@ from nemo_gym.base_responses_api_agent import (
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
-    OutcomeReportingAgent,
+    SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import SKILLS_REF_KEY_NAME, get_first_server_config_dict
@@ -455,7 +455,7 @@ class CodexAgentVerifyResponse(BaseVerifyResponse):
     ng_agent_observations: Optional[AgentObservationBundle] = None
 
 
-class CodexAgent(OutcomeReportingAgent):
+class CodexAgent(SimpleResponsesAPIAgent):
     def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
         """Read Codex 0.144.4's turn.failed error; tested on that pinned version.
 
