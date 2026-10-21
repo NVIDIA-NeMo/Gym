@@ -117,6 +117,7 @@ from nemo_gym.tasks.harbor.dataset_config import DATASET_FILE
 from nemo_gym.tasks.harbor.errors import HarborTaskError
 from nemo_gym.tasks.harbor.materialize import STEP_METADATA_KEY, HarborTaskInput
 from nemo_gym.tasks.harbor.models import HarborMCPServer
+from nemo_gym.tasks.harbor.python_verifier import VERIFIER_FILE
 from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE
 from nemo_gym.tasks.harbor.task import HarborTurn
 from nemo_gym.tasks.harbor.task_data import (
@@ -533,7 +534,7 @@ class HarborEnvironmentServer(
             # discovered deeper) and the loader reads them from the snapshot's parent, so the snapshot
             # gets copies there: the dataset's own settings (dataset.toml), the recorded image
             # configurations and the built images.
-            for name in (DATASET_FILE, COMPOSE_IMAGES_FILE, BUILT_IMAGES_FILE):
+            for name in (DATASET_FILE, COMPOSE_IMAGES_FILE, BUILT_IMAGES_FILE, VERIFIER_FILE):
                 sidecar = root / name
                 if sidecar.is_file():
                     shutil.copy2(sidecar, snapshot_root / name)
@@ -909,7 +910,7 @@ class HarborEnvironmentServer(
             LOGGER.error(f"{task.task_id}: could not export the agent transcript to ATIF: {error}")
             return self._masked(TRAJECTORY_EXPORT_KIND, f"Could not export the agent transcript to ATIF: {error}")
         if turn is None:
-            return await self._run_verifier(session, trajectory)
+            return await self._run_verifier(session, trajectory, response=agent_response)
         step = turn[0]
         return await self._run_shared_verifier(
             session,
