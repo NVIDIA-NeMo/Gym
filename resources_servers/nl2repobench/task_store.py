@@ -26,9 +26,21 @@ def task_id(task: Task) -> str:
     return task.name
 
 
-def task_image(task: Task) -> str:
-    """Return the pinned, immutable per-task base image."""
+def task_image(task: Task, *, registry_template: str | None = None) -> str:
+    """Return the pinned, immutable per-task base image.
 
+    registry_template: optional format string with a ``{name}`` placeholder, for task sets (e.g.
+    a custom held-out split with its own pre-built per-task images under a different registry
+    namespace) that aren't part of upstream NL2RepoBench's own 104 pinned images. Defaults to
+    upstream's registry when not provided.
+    """
+
+    if registry_template is not None:
+        # Docker/OCI image references must be lowercase; some task names are not (e.g.
+        # "LeapBeyond_scrubadub_pr54"). Scoped to the registry_template branch only - upstream's
+        # own hardcoded registry string below is left untouched since it's already
+        # working/trusted as-is and we have no evidence any of its 104 task names need this.
+        return registry_template.format(name=task.name.lower())
     return f"ghcr.io/multimodal-art-projection/nl2repobench/{task.name}:1.0"
 
 
