@@ -14,3 +14,4 @@ matplotlib
 pillow
 # Dataset preparation (prepare_rolemrc.py).
 datasets
+regex

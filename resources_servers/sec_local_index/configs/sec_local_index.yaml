@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Declares the shared library as a module so its tests run on their own.
+# There is nothing to start here: finance_sec_search and finance_agent_v2
+# import these classes, and each serves SEC search from its own process.
+sec_local_index:
+  resources_servers:
+    sec_local_index:
+      entrypoint: local_edgar_search.py
+      domain: other
+      verified: false
+      description: Local SEC EDGAR search over a downloaded filing corpus. Not a standalone server.
+      value: Shared local-mode SEC search for the finance servers

@@ -12,6 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
+
 import pytest
 from pytest import approx
 
@@ -134,11 +136,75 @@ class TestParseGenRMOutput:
         assert score_2 == approx(3.0)
         assert ranking == approx(3.5)
 
+    @pytest.mark.parametrize("key", ["score_1", "score_2", "ranking"])
+    @pytest.mark.parametrize("value", ["NaN", "Infinity", "-Infinity", 1e309])
+    def test_nonfinite_scores_are_parse_failures(self, key, value):
+        output = json.dumps({"score_1": 4, "score_2": 2, "ranking": 1} | {key: value})
+        with pytest.raises(GenRMOutputParseError):
+            parse_genrm_output(output, 3.0, 3.5, raise_on_fail=True)
+        assert parse_genrm_output(output, 3.0, 3.5) == (3.0, 3.0, 3.5)
+
     def test_raise_on_fail_raises_exception(self) -> None:
         """raise_on_fail=True raises GenRMOutputParseError."""
         output = "No JSON here"
         with pytest.raises(GenRMOutputParseError):
             parse_genrm_output(output, 3.0, 3.5, raise_on_fail=True)
+
+    @pytest.mark.parametrize("key", ["score_1", "score_2", "ranking"])
+    def test_boolean_scores_are_parse_failures(self, key: str) -> None:
+        output = json.dumps({"score_1": 4, "score_2": 2, "ranking": 1} | {key: True})
+        with pytest.raises(GenRMOutputParseError):
+            parse_genrm_output(output, 3.0, 3.5, raise_on_fail=True)
+
+    def test_rubric_mean(self) -> None:
+        output = """```json
+{"rubric_evaluations": [
+  {"rubric_id": 2, "score_1": 1, "score_2": 5, "ranking": 6},
+  {"rubric_id": 1, "score_1": 3, "score_2": 3, "ranking": 2}
+], "overall": {"score_1": 5, "score_2": 2, "ranking": 1}}
+```"""
+        assert parse_genrm_output(output, 3.0, 3.5, score_source="rubric_mean", expected_rubric_ids=(1, 2)) == approx(
+            (2.0, 4.0, 4.0)
+        )
+
+    @pytest.mark.parametrize("rubric_ids", [(1,), (1, 1), (1, 3)])
+    def test_rubric_mean_rejects_incomplete_duplicate_or_wrong_ids(self, rubric_ids) -> None:
+        output = json.dumps(
+            {
+                "rubric_evaluations": [
+                    {"rubric_id": rubric_id, "score_1": 4, "score_2": 2, "ranking": 2} for rubric_id in rubric_ids
+                ]
+            }
+        )
+        with pytest.raises(GenRMOutputParseError):
+            parse_genrm_output(
+                output,
+                3.0,
+                3.5,
+                score_source="rubric_mean",
+                expected_rubric_ids=(1, 2),
+                raise_on_fail=True,
+            )
+
+    @pytest.mark.parametrize("rubric_id", [True, 1.9])
+    def test_rubric_mean_rejects_non_integral_ids(self, rubric_id) -> None:
+        output = json.dumps(
+            {"rubric_evaluations": [{"rubric_id": rubric_id, "score_1": 4, "score_2": 2, "ranking": 2}]}
+        )
+        with pytest.raises(GenRMOutputParseError):
+            parse_genrm_output(
+                output,
+                3.0,
+                3.5,
+                score_source="rubric_mean",
+                expected_rubric_ids=(1,),
+                raise_on_fail=True,
+            )
+
+    def test_rubric_mean_does_not_fall_back_to_overall(self) -> None:
+        output = '{"overall": {"score_1": 5, "score_2": 2, "ranking": 1}}'
+        with pytest.raises(GenRMOutputParseError):
+            parse_genrm_output(output, 3.0, 3.5, score_source="rubric_mean", raise_on_fail=True)
 
 
 class TestExtractFromResponseObj:

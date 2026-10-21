@@ -14,7 +14,8 @@
 
 """Public sandbox API for NeMo Gym."""
 
-from nemo_gym.sandbox.api import AsyncSandbox, Sandbox, SandboxPty
+from nemo_gym.sandbox.adapters.docker_compose import AsyncSandboxCompose
+from nemo_gym.sandbox.api import AsyncSandbox, AsyncSandboxSidecar, Sandbox, SandboxPty
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.providers import (
     ConnectableProvider,
@@ -29,11 +30,18 @@ from nemo_gym.sandbox.providers import (
     SandboxPtySession,
     SandboxPtySpec,
     SandboxResources,
+    SandboxSidecarSpec,
     SandboxSpec,
     SandboxStatus,
     SupportsSandboxEndpoint,
+    SupportsSandboxNetwork,
+    SupportsSandboxPauseResume,
+    SupportsSandboxPortForwarding,
     SupportsSandboxPty,
     SupportsSandboxPtyAttach,
+    SupportsSandboxRuntimeRequirements,
+    SupportsSandboxSharedStorage,
+    SupportsSandboxSidecars,
     create_provider,
     get_provider_class,
     list_providers,
@@ -45,6 +53,8 @@ from nemo_gym.sandbox.utils import rewrite_image
 __all__ = [
     "Sandbox",
     "AsyncSandbox",
+    "AsyncSandboxCompose",
+    "AsyncSandboxSidecar",
     "ConnectableProvider",
     "ExecResult",
     "SandboxCreateError",
@@ -58,9 +68,16 @@ __all__ = [
     "SandboxPtySession",
     "SandboxPtySpec",
     "SandboxResources",
+    "SandboxSidecarSpec",
     "SandboxSpec",
     "SandboxStatus",
     "SupportsSandboxEndpoint",
+    "SupportsSandboxNetwork",
+    "SupportsSandboxPauseResume",
+    "SupportsSandboxPortForwarding",
+    "SupportsSandboxRuntimeRequirements",
+    "SupportsSandboxSharedStorage",
+    "SupportsSandboxSidecars",
     "SupportsSandboxPty",
     "SupportsSandboxPtyAttach",
     "create_provider",

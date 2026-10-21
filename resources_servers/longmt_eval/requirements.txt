@@ -1,4 +1,4 @@
--e nemo-gym[dev] @ ../../
+-e nemo-gym[dev,ray] @ ../../
 # SEGALE: forked from bc19b2b with numpy==1.23.5 → >=1.23.5 to resolve
 # the pandas==2.2.3 conflict (pandas requires numpy>=1.26.0) and also vecalign 2.0.0
 segale @ git+https://github.com/jeffwillette/SEGALE.git@ab5e0d722e03f1b97846b7ed057ab7558218b035

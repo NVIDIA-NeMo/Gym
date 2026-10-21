@@ -24,6 +24,7 @@ import pytest
 import yaml
 from fastapi import Request
 
+from nemo_gym.anthropic_converter import AnthropicConverter
 from nemo_gym.global_config import SKILLS_REF_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -34,6 +35,9 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.rollout_observability import AgentInvocation, ContextCompactionObservation
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.token_id_capture.lineage import stamp_continuation
+from nemo_gym.token_id_capture.records import TokenEntry
+from nemo_gym.token_id_capture.terminal import resolve_terminal
 from responses_api_agents.claude_code_agent.app import (
     ClaudeCodeAgent,
     ClaudeCodeAgentConfig,
@@ -480,7 +484,7 @@ class TestRunClaudeCode:
         leaked = home / ".claude_code_agent"
         assert not leaked.exists() or not any(leaked.iterdir())
 
-    def test_timeout_returns_empty(self, tmp_path: Path) -> None:
+    def test_timeout_keeps_the_partial_transcript(self, tmp_path: Path) -> None:
         agent = _make_agent(timeout=1)
         state = {"killed": False, "communicate_calls": 0}
 
@@ -493,7 +497,12 @@ class TestRunClaudeCode:
             async def communicate(self):
                 state["communicate_calls"] += 1
                 return (
-                    _event("system", subtype="status", status="compacting", session_id="session-1").encode(),
+                    "\n".join(
+                        [
+                            _event("system", subtype="status", status="compacting", session_id="session-1"),
+                            _event("assistant", message={"content": [{"type": "text", "text": "partial"}]}),
+                        ]
+                    ).encode(),
                     b"",
                 )
 
@@ -510,7 +519,7 @@ class TestRunClaudeCode:
         ):
             output_items, model, metadata = asyncio.run(agent._run_claude_code("hello"))
 
-        assert output_items == []
+        assert output_items == _output(_event("assistant", message={"content": [{"type": "text", "text": "partial"}]}))
         assert state == {"killed": True, "communicate_calls": 1}
         assert model == "claude-sonnet-4-6"
         assert metadata["status"] == "incomplete"
@@ -1044,3 +1053,216 @@ class TestConfigYaml:
         assert inner.get("token_id_capture", False) is False
         assert inner["concurrency"] == 32
         assert inner["max_turns"] == 30
+
+
+class TestCaptureFriendlyTranscript:
+    """Under training-token capture the transcript must hash like the captured call and name the served id."""
+
+    def _events(self) -> str:
+        return "\n".join(
+            json.dumps(e)
+            for e in [
+                {
+                    "type": "assistant",
+                    "message": {
+                        "id": "resp_served123",
+                        "content": [
+                            {"type": "thinking", "thinking": "let me look"},
+                            {"type": "text", "text": "Reading the file."},
+                        ],
+                        "usage": {"input_tokens": 5, "output_tokens": 7},
+                    },
+                },
+                {"type": "result", "subtype": "success", "is_error": False, "num_turns": 1, "usage": {}},
+            ]
+        )
+
+    def test_fold_thinking_default_prefixes_text(self) -> None:
+        items, meta = parse_stream_json(self._events())
+        messages = [i for i in items if getattr(i, "type", None) == "message"]
+        assert messages and messages[0].content[0].text.startswith("<think>")
+        assert not any(getattr(i, "type", None) == "reasoning" for i in items)
+        assert meta["terminal_response_id"] == "resp_served123"
+
+    def test_no_fold_emits_reasoning_item_and_bare_text(self) -> None:
+        items, meta = parse_stream_json(self._events(), fold_thinking=False)
+        types = [getattr(i, "type", None) for i in items]
+        assert types == ["reasoning", "message"]
+        assert items[0].summary[0].text == "let me look"
+        assert items[1].content[0].text == "Reading the file."
+        assert meta["terminal_response_id"] == "resp_served123"
+
+    @pytest.mark.parametrize("capture", [False, True])
+    def test_response_id_is_the_served_id_only_under_capture(self, capture: bool) -> None:
+        agent = _make_agent(
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+            token_id_capture=capture,
+        )
+        agent.server_client.global_config_dict = {"token_id_capture": {"enabled": capture}}
+        items, meta = parse_stream_json(self._events(), fold_thinking=not capture)
+        body = NeMoGymResponseCreateParamsNonStreaming(input="fix it")
+        with patch.object(agent, "_run_claude_code", AsyncMock(return_value=(items, "m", meta))):
+            response = asyncio.run(agent._create_response(body))
+        if capture:
+            assert response.id == "resp_served123"
+        else:
+            assert response.id != "resp_served123" and response.id.startswith("resp_")
+
+    def _run_stream(self, stdout: str, tmp_path: Path, *, capture: bool, timeout: bool):
+        agent = _make_agent(token_id_capture=capture, timeout=0 if timeout else 1)
+        agent.server_client.global_config_dict = {"token_id_capture": {"enabled": capture}}
+        proc = MagicMock()
+        proc.returncode = None if timeout else 0
+        proc.communicate = AsyncMock(return_value=(stdout.encode(), b""))
+        metadata = {}
+        with (
+            patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path),
+            patch("responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", return_value=proc),
+        ):
+            response = asyncio.run(
+                agent._create_response(
+                    NeMoGymResponseCreateParamsNonStreaming(input="fix it"),
+                    observation_collector=lambda path, run_metadata: metadata.update(run_metadata),
+                )
+            )
+        assert proc.kill.call_count == int(timeout)
+        proc.communicate.assert_awaited_once()
+        return response, metadata
+
+    @pytest.mark.parametrize("capture", [False, True])
+    @pytest.mark.parametrize("timeout", [False, True])
+    def test_real_run_wires_capture_on_success_and_timeout(self, tmp_path: Path, capture: bool, timeout: bool) -> None:
+        response, metadata = self._run_stream(self._events(), tmp_path, capture=capture, timeout=timeout)
+        assert response.output[-1].content[0].text == (
+            "Reading the file." if capture else "<think>\nlet me look\n</think>\n\nReading the file."
+        )
+        assert [item.type for item in response.output] == (["reasoning", "message"] if capture else ["message"])
+        assert (response.id == "resp_served123") is capture
+        assert metadata["status"] == ("incomplete" if timeout else "completed")
+        if timeout:
+            assert metadata["error_type"] == "timeout"
+
+    def test_thinking_only_event_is_preserved(self) -> None:
+        items, metadata = parse_stream_json(
+            _event(
+                "assistant", message={"id": "resp_thinking", "content": [{"type": "thinking", "thinking": "plan"}]}
+            ),
+            fold_thinking=False,
+        )
+        assert len(items) == 1
+        assert items[0].type == "reasoning" and items[0].summary[0].text == "plan"
+        assert metadata["terminal_response_id"] == "resp_thinking"
+
+    @pytest.mark.parametrize("fold_thinking", [False, True])
+    def test_terminal_id_is_last_nonempty_main_thread_id(self, fold_thinking: bool) -> None:
+        events = [
+            _event("assistant", message={"id": "resp_first"}),
+            _event("assistant", message={"id": "resp_last"}),
+            _event("assistant", message={"id": ""}),
+            _event("assistant", message={}),
+            _event("assistant", message={"id": None}),
+            _event("assistant", parent_tool_use_id="task", message={"id": "resp_child"}),
+        ]
+        _, metadata = parse_stream_json("\n".join(events), fold_thinking=fold_thinking)
+        assert metadata["terminal_response_id"] == "resp_last"
+
+    @pytest.mark.parametrize("served_id", [None, ""])
+    def test_capture_without_served_id_uses_generated_id(self, tmp_path: Path, served_id: str | None) -> None:
+        response, _ = self._run_stream(
+            _event("assistant", message={"id": served_id, "content": [{"type": "text", "text": "done"}]}),
+            tmp_path,
+            capture=True,
+            timeout=False,
+        )
+        assert response.id.startswith("resp_")
+        assert len(response.id.removeprefix("resp_")) == 32
+        int(response.id.removeprefix("resp_"), 16)
+
+    @pytest.mark.parametrize("capture", [False, True])
+    def test_pending_parallel_calls_preserve_model_order(self, capture: bool) -> None:
+        items, _ = parse_stream_json(
+            "\n".join(
+                [
+                    _event(
+                        "assistant",
+                        message={
+                            "content": [
+                                {"type": "tool_use", "id": name, "name": "Bash", "input": {"command": name}}
+                                for name in ["slow", "fast"]
+                            ]
+                        },
+                    ),
+                    _event(
+                        "user", message={"content": [{"type": "tool_result", "tool_use_id": "fast", "content": "ok"}]}
+                    ),
+                ]
+            ),
+            fold_thinking=not capture,
+        )
+        calls = [item for item in items if item.type == "function_call"]
+        assert [(item.call_id, item.status) for item in calls] == (
+            [("slow", "incomplete"), ("fast", "completed")] if capture else [("fast", "completed")]
+        )
+        assert sum(item.type == "function_call_output" for item in items) == 1
+
+    @pytest.mark.parametrize("subagent", [False, True])
+    @pytest.mark.parametrize("thinking", [False, True])
+    def test_timeout_attributes_pending_parent_call(self, tmp_path: Path, subagent: bool, thinking: bool) -> None:
+        converter = AnthropicConverter()
+        entries = []
+        events = []
+        request_items = []
+
+        def serve(call_id: str, content: list[dict], *, child: bool = False) -> None:
+            served = converter.anthropic_to_responses(
+                {"content": content}, NeMoGymResponseCreateParamsNonStreaming(input="fix it"), "model"
+            )
+            served.id = f"resp_{call_id}"
+            entry = TokenEntry(
+                rollout_id="rollout",
+                model_call_id=call_id,
+                response_id=served.id,
+                prompt_token_ids=[1],
+                generation_token_ids=[len(entries) + 2],
+                generation_log_probs=[-0.1],
+                output_items=[item.model_dump() for item in served.output],
+            )
+            stamp_continuation(entry, request_items)
+            entries.append(entry)
+            events.append(
+                _event(
+                    "assistant",
+                    parent_tool_use_id="task" if child else None,
+                    message=converter.responses_to_anthropic_response(served, "model"),
+                )
+            )
+            if not child:
+                request_items.extend(entry.output_items)
+
+        serve("previous", [{"type": "text", "text": "Working on it."}])
+        content = [{"type": "tool_use", "id": "task", "name": "Task", "input": {"prompt": "check it"}}]
+        if thinking:
+            content.insert(0, {"type": "thinking", "thinking": "delegate the check"})
+        serve("parent", content)
+        if subagent:
+            serve("child", [{"type": "text", "text": "Subagent work."}], child=True)
+            events.append(
+                _event(
+                    "user",
+                    parent_tool_use_id="task",
+                    message={
+                        "content": [{"type": "tool_result", "tool_use_id": "child_tool", "content": "child result"}]
+                    },
+                )
+            )
+        response, metadata = self._run_stream("\n".join(events), tmp_path, capture=True, timeout=True)
+        assert metadata["error_type"] == "timeout"
+        assert response.id == "resp_parent"
+        assert response.output[-1].type == "function_call"
+        assert response.output[-1].call_id == "task" and response.output[-1].status == "incomplete"
+        assert "Subagent work." not in response.model_dump_json()
+        assert "child result" not in response.model_dump_json()
+        attribution = resolve_terminal(entries, response.model_dump())
+        assert attribution.model_call_id == "parent", attribution.reason
+        assert attribution.method == "response_id"
+        assert "corroborated_by=item_id+content_cumulative" in attribution.reason

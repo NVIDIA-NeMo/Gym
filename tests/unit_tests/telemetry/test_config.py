@@ -19,6 +19,8 @@ has to reach a server process. These tests cover that translation and, important
 precedence: a raw env var set by the user must beat YAML, never the other way round.
 """
 
+import json
+import logging
 import os
 
 import pytest
@@ -28,6 +30,8 @@ from nemo_gym.telemetry.config import TelemetryConfig
 from nemo_gym.telemetry.setup import (
     configure_telemetry_env,
     is_telemetry_env_enabled,
+    is_telemetry_metrics_enabled,
+    memory_profiling_config_from_env,
     telemetry_config_from_global_config,
 )
 from tests.unit_tests.telemetry.conftest import no_lens
@@ -38,17 +42,35 @@ def test_defaults_are_off_and_gym_shaped():
     assert config.enabled is False
     assert config.service_name == "nemo-gym"
     assert config.span_groups == "default"
+    assert config.memory_profiling.enabled is False
+    assert config.memory_profiling.interval_seconds == 1.0
 
 
-def test_export_strategy_defaults_to_all_ranks():
-    """Every Gym server process must export.
+def test_memory_profiling_config_is_nested_under_telemetry():
+    config = TelemetryConfig.model_validate(
+        {
+            "enabled": True,
+            "memory_profiling": {
+                "enabled": True,
+                "interval_seconds": 2.5,
+            },
+        }
+    )
 
-    NeMo-RL and Megatron-LM default to `single_rank` because they run one process tree
-    where rank 0 is representative. Every Gym server is rank 0 of its own world of 1, so
-    `single_rank` would be meaningless here and any silenced process is a hole in the
-    middle of a distributed trace.
-    """
-    assert TelemetryConfig().export_strategy == "all_ranks"
+    assert config.memory_profiling.enabled is True
+    assert config.memory_profiling.interval_seconds == 2.5
+
+
+def test_memory_profiling_interval_must_be_positive():
+    with pytest.raises(ValueError, match="interval_seconds"):
+        TelemetryConfig.model_validate(
+            {
+                "memory_profiling": {
+                    "enabled": True,
+                    "interval_seconds": 0,
+                }
+            }
+        )
 
 
 def test_unknown_keys_are_preserved_not_rejected():
@@ -56,6 +78,18 @@ def test_unknown_keys_are_preserved_not_rejected():
     config = TelemetryConfig.model_validate({"enabled": True, "some_future_knob": 7})
     assert config.enabled is True
     assert config.some_future_knob == 7
+
+
+def test_removed_instrument_aiohttp_key_still_loads_and_exports_nothing(clean_otel_env):
+    """`instrument_aiohttp` was removed because nothing read it; configs that still set it keep loading."""
+    global_config = OmegaConf.create({"telemetry": {"enabled": True, "instrument_aiohttp": False}})
+    config = telemetry_config_from_global_config(global_config)
+    assert config.enabled is True
+    assert "instrument_aiohttp" not in TelemetryConfig.model_fields
+
+    configure_telemetry_env(config)
+    assert os.environ["NEMO_GYM_OTEL_ENABLED"] == "1"
+    assert "NEMO_GYM_OTEL_INSTRUMENT_AIOHTTP" not in os.environ
 
 
 def test_config_reads_the_telemetry_block_from_a_gym_config(clean_otel_env):
@@ -134,10 +168,66 @@ def test_unset_otlp_fields_write_nothing(clean_otel_env):
 
 
 def test_booleans_are_translated_as_1_and_0(clean_otel_env):
-    configure_telemetry_env(TelemetryConfig(enabled=True, logs_enabled=False, metrics_enabled=True))
+    configure_telemetry_env(
+        TelemetryConfig(
+            enabled=True,
+            logs_enabled=False,
+            metrics_enabled=True,
+            memory_profiling={"enabled": True, "interval_seconds": 2.5},
+        )
+    )
     assert os.environ["NEMO_GYM_OTEL_ENABLED"] == "1"
     assert os.environ["NEMO_GYM_OTEL_LOGS_ENABLED"] == "0"
     assert os.environ["NEMO_GYM_OTEL_METRICS_ENABLED"] == "1"
+    assert os.environ["NEMO_GYM_OTEL_MEMORY_PROFILING_ENABLED"] == "1"
+    assert os.environ["NEMO_GYM_OTEL_MEMORY_PROFILING_INTERVAL_SECONDS"] == "2.5"
+
+
+def test_memory_profiling_can_be_enabled_entirely_from_env(clean_otel_env):
+    clean_otel_env.setenv("NEMO_GYM_OTEL_ENABLED", "1")
+    clean_otel_env.setenv("NEMO_GYM_OTEL_MEMORY_PROFILING_ENABLED", "1")
+    clean_otel_env.setenv("NEMO_GYM_OTEL_MEMORY_PROFILING_INTERVAL_SECONDS", "0.25")
+
+    config = TelemetryConfig()
+    configure_telemetry_env(config)
+    resolved = memory_profiling_config_from_env(config.memory_profiling)
+
+    assert resolved.enabled is True
+    assert resolved.interval_seconds == 0.25
+
+
+def test_memory_profiling_env_overrides_yaml(clean_otel_env):
+    clean_otel_env.setenv("NEMO_GYM_OTEL_MEMORY_PROFILING_ENABLED", "0")
+    clean_otel_env.setenv("NEMO_GYM_OTEL_MEMORY_PROFILING_INTERVAL_SECONDS", "3")
+    config = TelemetryConfig.model_validate(
+        {
+            "memory_profiling": {
+                "enabled": True,
+                "interval_seconds": 1,
+            }
+        }
+    )
+
+    resolved = memory_profiling_config_from_env(config.memory_profiling)
+
+    assert resolved.enabled is False
+    assert resolved.interval_seconds == 3.0
+
+
+def test_memory_profiling_env_rejects_invalid_interval(clean_otel_env):
+    clean_otel_env.setenv("NEMO_GYM_OTEL_MEMORY_PROFILING_INTERVAL_SECONDS", "0")
+
+    with pytest.raises(ValueError, match="interval_seconds"):
+        memory_profiling_config_from_env(TelemetryConfig().memory_profiling)
+
+
+def test_effective_metrics_switch_follows_env_precedence(clean_otel_env):
+    assert is_telemetry_metrics_enabled() is True
+
+    clean_otel_env.setenv("NEMO_LENS_METRICS_ENABLED", "1")
+    clean_otel_env.setenv("NEMO_GYM_OTEL_METRICS_ENABLED", "0")
+
+    assert is_telemetry_metrics_enabled() is False
 
 
 def test_env_wins_over_yaml(clean_otel_env):
@@ -155,6 +245,88 @@ def test_env_wins_over_yaml(clean_otel_env):
     assert os.environ["NEMO_GYM_OTEL_ENABLED"] == "0", "YAML must not overwrite an explicit env var"
     assert os.environ["NEMO_GYM_OTEL_SPAN_GROUPS"] == "verify"
     assert os.environ["OTEL_SERVICE_NAME"] == "set-by-hand"
+
+
+def test_lens_fallback_env_wins_over_yaml(clean_otel_env):
+    """A `NEMO_LENS_*` setting must survive a YAML value for the same field.
+
+    Lens reads `NEMO_GYM_OTEL_*` before `NEMO_LENS_*`.
+    Exporting the YAML value under the Gym prefix would therefore override the user's fallback.
+    A job-wide `NEMO_LENS_SPAN_GROUPS` or `NEMO_LENS_EXPORTER` would then have no effect in any Gym server.
+    """
+    clean_otel_env.setenv("NEMO_LENS_EXPORTER", "otlp")
+    clean_otel_env.setenv("NEMO_LENS_SPAN_GROUPS", "per_rollout")
+    clean_otel_env.setenv("NEMO_LENS_METRICS_ENABLED", "0")
+
+    configure_telemetry_env(
+        TelemetryConfig(enabled=True, exporter="console", span_groups="all", metrics_enabled=True, logs_enabled=True)
+    )
+
+    for key in ("EXPORTER", "SPAN_GROUPS", "METRICS_ENABLED"):
+        assert f"NEMO_GYM_OTEL_{key}" not in os.environ, f"NEMO_GYM_OTEL_{key} would shadow NEMO_LENS_{key}"
+    assert is_telemetry_metrics_enabled() is False
+    # A field the user did not set through lens still carries the YAML value.
+    assert os.environ["NEMO_GYM_OTEL_LOGS_ENABLED"] == "1"
+
+
+def test_lens_fallback_env_reaches_the_resolved_lens_config(clean_otel_env):
+    """What a server process actually resolves, through lens's own prefix lookup."""
+    lens = pytest.importorskip("nemo.lens")
+    clean_otel_env.setenv("NEMO_LENS_EXPORTER", "otlp")
+    clean_otel_env.setenv("NEMO_LENS_SPAN_GROUPS", "per_rollout")
+
+    configure_telemetry_env(TelemetryConfig(enabled=True, exporter="console", span_groups="all"))
+
+    config = lens.NemoLensConfig.from_env(prefix="NEMO_GYM_OTEL", fallback_prefix="NEMO_LENS")
+    assert config.exporter == "otlp"
+    assert config.span_groups == "per_rollout"
+
+
+def test_a_config_value_overridden_by_lens_env_is_reported(clean_otel_env, caplog):
+    """A user who wrote a value in the telemetry block must learn that the environment won."""
+    clean_otel_env.setenv("NEMO_LENS_EXPORTER", "otlp")
+
+    with caplog.at_level(logging.WARNING, logger="nemo_gym.telemetry.setup"):
+        configure_telemetry_env(TelemetryConfig(enabled=True, exporter="console"))
+
+    assert "telemetry.exporter='console' from the config is ignored because NEMO_LENS_EXPORTER='otlp' is set" in (
+        caplog.text
+    )
+
+
+@pytest.mark.parametrize(
+    ("block", "env"),
+    [
+        pytest.param({"enabled": True}, "console", id="field-not-in-config"),
+        pytest.param({"enabled": True, "exporter": "otlp"}, "otlp", id="same-value"),
+    ],
+)
+def test_lens_env_that_overrides_nothing_is_not_reported(clean_otel_env, caplog, block, env):
+    """A default, or a config value the environment agrees with, is not worth a warning."""
+    clean_otel_env.setenv("NEMO_LENS_EXPORTER", env)
+
+    with caplog.at_level(logging.WARNING, logger="nemo_gym.telemetry.setup"):
+        configure_telemetry_env(TelemetryConfig.model_validate(block))
+
+    assert "is ignored because" not in caplog.text
+
+
+def test_a_boolean_lens_env_value_is_compared_by_meaning(clean_otel_env, caplog):
+    """`true` in the environment agrees with `true` in the config even though the strings differ."""
+    clean_otel_env.setenv("NEMO_LENS_METRICS_ENABLED", "true")
+
+    with caplog.at_level(logging.WARNING, logger="nemo_gym.telemetry.setup"):
+        configure_telemetry_env(TelemetryConfig(enabled=True, metrics_enabled=True))
+
+    assert "is ignored because" not in caplog.text
+
+
+def test_lens_run_id_is_shared_rather_than_replaced(clean_otel_env):
+    """A run id set through lens names the run; Gym must not mint a second one beside it."""
+    clean_otel_env.setenv("NEMO_LENS_RUN_ID", "outer-run")
+
+    assert configure_telemetry_env(TelemetryConfig(enabled=True)) == "outer-run"
+    assert "NEMO_GYM_OTEL_RUN_ID" not in os.environ
 
 
 def test_disabled_config_produces_no_run_id(clean_otel_env):
@@ -263,8 +435,9 @@ def test_server_requirements_pin_the_same_lens_this_process_runs(clean_otel_env)
 
 
 def test_server_requirements_include_the_instrumentation_packages(clean_otel_env):
-    """nemo-lens imports these lazily and raises ImportError without them, so a server
-    venv that lacks them loses inbound context extraction and every SERVER span."""
+    """nemo-lens imports the FastAPI instrumentor lazily and raises ImportError without it, so
+    a server venv that lacks it loses inbound context extraction and every SERVER span. The
+    aiohttp client instrumentor is not installed: nothing calls it."""
     pytest.importorskip("nemo.lens")
     clean_otel_env.setenv("NEMO_GYM_OTEL_ENABLED", "1")
 
@@ -272,7 +445,7 @@ def test_server_requirements_include_the_instrumentation_packages(clean_otel_env
 
     requirements = " ".join(server_venv_requirements())
     assert "opentelemetry-instrumentation-fastapi" in requirements
-    assert "opentelemetry-instrumentation-aiohttp-client" in requirements
+    assert "opentelemetry-instrumentation-aiohttp-client" not in requirements
 
 
 def test_missing_lens_yields_no_requirements_rather_than_an_unpinned_one(clean_otel_env):
@@ -282,12 +455,12 @@ def test_missing_lens_yields_no_requirements_rather_than_an_unpinned_one(clean_o
     from nemo_gym.telemetry import setup as telemetry_setup
 
     with no_lens():
-        original = telemetry_setup._installed_requirement
-        telemetry_setup._installed_requirement = lambda *args: None
+        original = telemetry_setup.installed_requirement
+        telemetry_setup.installed_requirement = lambda *args: None
         try:
             assert telemetry_setup.server_venv_requirements() == []
         finally:
-            telemetry_setup._installed_requirement = original
+            telemetry_setup.installed_requirement = original
 
 
 def test_head_server_deps_carry_telemetry_into_server_venvs(clean_otel_env):
@@ -356,3 +529,68 @@ def test_enabling_via_lens_env_still_carries_yaml_settings_to_servers(clean_otel
 
     assert os.environ["NEMO_GYM_OTEL_SPAN_GROUPS"] == "per_rollout"
     assert os.environ["NEMO_GYM_OTEL_EXPORTER"] == "console"
+
+
+class _DirectURLDistribution:
+    version = "0.1.0"
+
+    def __init__(self, direct_url: dict | None) -> None:
+        self._direct_url = direct_url
+
+    def read_text(self, filename: str) -> str | None:
+        assert filename == "direct_url.json"
+        return None if self._direct_url is None else json.dumps(self._direct_url)
+
+
+def test_installed_requirement_pins_a_local_directory_install(monkeypatch):
+    """`pip install /path` records only dir_info; a version pin would name a release no index serves."""
+    from nemo_gym.telemetry import setup as telemetry_setup
+
+    monkeypatch.setattr(
+        "importlib.metadata.distribution",
+        lambda name: _DirectURLDistribution({"url": "file:///home/u/gym-substrate", "dir_info": {}}),
+    )
+    assert telemetry_setup.installed_requirement("gym-substrate", "gym-substrate") == (
+        "gym-substrate@file:///home/u/gym-substrate"
+    )
+
+
+def test_installed_requirement_pins_an_index_install_by_version(monkeypatch):
+    from nemo_gym.telemetry import setup as telemetry_setup
+
+    monkeypatch.setattr("importlib.metadata.distribution", lambda name: _DirectURLDistribution(None))
+    assert telemetry_setup.installed_requirement("gym-substrate", "gym-substrate") == "gym-substrate==0.1.0"
+
+
+def test_installed_requirement_pins_a_wheel_install_by_its_url(monkeypatch):
+    """A wheel installed from a file records archive_info; its version is on no index."""
+    from nemo_gym.telemetry import setup as telemetry_setup
+
+    monkeypatch.setattr(
+        "importlib.metadata.distribution",
+        lambda name: _DirectURLDistribution(
+            {"url": "file:///home/u/dist/gym_substrate-0.1.0-py3-none-any.whl", "archive_info": {"hashes": {}}}
+        ),
+    )
+    assert telemetry_setup.installed_requirement("gym-substrate", "gym-substrate") == (
+        "gym-substrate@file:///home/u/dist/gym_substrate-0.1.0-py3-none-any.whl"
+    )
+
+
+def test_installed_requirement_keeps_the_git_subdirectory(monkeypatch):
+    """A plugin checked out from a repository subfolder is not the project at the root."""
+    from nemo_gym.telemetry import setup as telemetry_setup
+
+    monkeypatch.setattr(
+        "importlib.metadata.distribution",
+        lambda name: _DirectURLDistribution(
+            {
+                "url": "https://github.com/org/plugins",
+                "vcs_info": {"vcs": "git", "commit_id": "0123abc"},
+                "subdirectory": "providers/gym-substrate",
+            }
+        ),
+    )
+    assert telemetry_setup.installed_requirement("gym-substrate", "gym-substrate") == (
+        "gym-substrate@git+https://github.com/org/plugins@0123abc#subdirectory=providers/gym-substrate"
+    )

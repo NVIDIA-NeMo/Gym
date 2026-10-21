@@ -39,6 +39,10 @@ class FormatVerificationVerifyResponse(BaseVerifyResponse):
 
 
 class FormatVerificationResourcesServer(SimpleResourcesServer):
+    # Each verification checks the response format alone: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     config: FormatVerificationResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:

@@ -42,6 +42,7 @@ from nemo_gym.exporters import (
 from nemo_gym.exporters.base import BaseExporter
 from nemo_gym.exporters.mlflow import MLflowExporter, _flatten_config, _sanitize_key
 from nemo_gym.exporters.wandb import WandbExporter
+from nemo_gym.secret_utils import recursively_hide_secrets
 
 
 class RecordingConfig(ExporterConfig):
@@ -117,7 +118,9 @@ def mlflow_config() -> DictConfig:
 def _register_recording(monkeypatch: MonkeyPatch) -> MagicMock:
     """Point the registry at RecordingExporter and hand back the (spied) lazy loader."""
     loader = MagicMock(return_value=RecordingExporter)
-    monkeypatch.setattr(exporters_module, "EXPORTER_REGISTRY", {"recording": (RecordingConfig, "recording")})
+    monkeypatch.setattr(
+        exporters_module, "EXPORTER_REGISTRY", {"recording": (RecordingConfig, "recording", "recording")}
+    )
     monkeypatch.setattr(exporters_module, "_load_exporter_class", loader)
     return loader
 
@@ -175,6 +178,24 @@ class TestRegistry:
 
         assert setup_exporters(wandb_config) == []
         assert get_exporters() == []
+
+    def test_missing_sdk_is_skipped_with_an_actionable_install_hint(
+        self, monkeypatch: MonkeyPatch, wandb_config: DictConfig, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        monkeypatch.setattr(
+            exporters_module, "EXPORTER_REGISTRY", {"recording": (RecordingConfig, "recording", "recording")}
+        )
+        monkeypatch.setattr(
+            exporters_module,
+            "_load_exporter_class",
+            MagicMock(side_effect=ImportError("No module named 'recording_sdk'")),
+        )
+
+        with caplog.at_level("WARNING"):
+            assert setup_exporters(wandb_config) == []
+
+        assert get_exporters() == []
+        assert "pip install nemo-gym[recording]" in caplog.text
 
     def test_setup_replaces_previously_opened_exporters(
         self, monkeypatch: MonkeyPatch, wandb_config: DictConfig
@@ -258,6 +279,15 @@ class TestWandbConfigAvailability:
     def test_a_masked_key_does_not_count_as_configured(self) -> None:
         assert not WANDBConfig(wandb_project="proj", wandb_name="run", wandb_api_key="****").is_available
 
+    def test_a_config_masked_for_display_is_not_available(self, wandb_config: DictConfig) -> None:
+        # `gym env resolve` masks the live config before setting up exporters, so masking must switch the
+        # exporter off through the key alone and leave the run's name readable.
+        recursively_hide_secrets(wandb_config)
+        masked = WANDBConfig.model_validate(wandb_config)
+
+        assert (masked.wandb_project, masked.wandb_name) == ("proj", "run")
+        assert not masked.is_available
+
 
 class TestWandbExporter:
     def test_setup_initializes_a_run_under_the_results_dir(
@@ -272,6 +302,22 @@ class TestWandbExporter:
 
         init.assert_called_once_with(project="proj", name="run", dir=str(Path("/tmp/results") / "wandb"))
         assert wandb_module.environ["WANDB_API_KEY"] == "secret-key"  # pragma: allowlist secret
+
+    def test_a_resumed_run_resumes_the_wandb_run_recorded_next_to_its_output(
+        self, monkeypatch: MonkeyPatch, wandb_config: DictConfig, tmp_path
+    ) -> None:
+        wandb_config["output_jsonl_fpath"] = str(tmp_path / "rollouts.jsonl")
+        init = MagicMock(return_value=MagicMock(id="run-1"))
+        monkeypatch.setattr(wandb_module.wandb, "init", init)
+        monkeypatch.delenv("WANDB_API_KEY", raising=False)
+
+        WandbExporter(wandb_config).setup()
+        WandbExporter(wandb_config).setup()
+
+        assert (tmp_path / "rollouts_wandb_run_id").read_text() == "run-1"
+        first, second = init.call_args_list
+        assert "id" not in first.kwargs
+        assert (second.kwargs["id"], second.kwargs["resume"]) == ("run-1", "allow")
 
     def test_logging_before_setup_raises(self, wandb_config: DictConfig) -> None:
         with pytest.raises(RuntimeError, match="not open"):
@@ -405,6 +451,14 @@ class TestMLflowConfigAvailability:
 
         assert not masked.is_available
 
+    def test_a_config_masked_for_display_is_not_available(self, mlflow_config: DictConfig) -> None:
+        recursively_hide_secrets(mlflow_config)
+        masked = MLFlowConfig.model_validate(mlflow_config)
+
+        assert masked.mlflow_tracking_uri == "https://tracking.example"
+        assert (masked.mlflow_experiment_name, masked.mlflow_run_name) == ("gym", "run")
+        assert not masked.is_available
+
 
 class TestMLflowExporter:
     def test_setup_creates_a_run_in_the_named_experiment(
@@ -416,9 +470,22 @@ class TestMLflowExporter:
 
         mlflow_module.MlflowClient.assert_called_once_with(tracking_uri="https://tracking.example")
         client.create_experiment.assert_not_called()
-        client.create_run.assert_called_once_with("exp-1", run_name="run")
+        client.create_run.assert_called_once_with("exp-1", run_name="run", tags=None)
         assert exporter.run_id == "run-1"
         assert mlflow_module.environ["MLFLOW_TRACKING_TOKEN"] == "secret-token"  # pragma: allowlist secret
+
+    def test_a_resumed_run_reopens_the_mlflow_run_recorded_next_to_its_output(
+        self, monkeypatch: MonkeyPatch, mlflow_config: DictConfig, tmp_path
+    ) -> None:
+        mlflow_config["output_jsonl_fpath"] = str(tmp_path / "rollouts.jsonl")
+
+        first, _ = _open_mlflow_exporter(monkeypatch, mlflow_config)
+        second, client = _open_mlflow_exporter(monkeypatch, mlflow_config)
+
+        assert (tmp_path / "rollouts_mlflow_run_id").read_text() == "run-1"
+        assert (first.run_id, second.run_id) == ("run-1", "run-1")
+        client.create_run.assert_not_called()
+        client.update_run.assert_called_once_with("run-1", status="RUNNING")
 
     def test_setup_without_a_token_leaves_the_env_var_unset(
         self, monkeypatch: MonkeyPatch, mlflow_config: DictConfig
@@ -442,7 +509,20 @@ class TestMLflowExporter:
         MLflowExporter(mlflow_config).setup()
 
         client.create_experiment.assert_called_once_with("gym")
-        client.create_run.assert_called_once_with("exp-new", run_name="run")
+        client.create_run.assert_called_once_with("exp-new", run_name="run", tags=None)
+
+    def test_setup_passes_run_tags_and_description_as_one_tag_dict(
+        self, monkeypatch: MonkeyPatch, mlflow_config: DictConfig
+    ) -> None:
+        mlflow_config["mlflow_run_tags"] = {"model": "m", "benchmark": "b"}
+        mlflow_config["mlflow_run_description"] = "m on b"
+
+        _, client = _open_mlflow_exporter(monkeypatch, mlflow_config)
+
+        # create_run only accepts a dict; the description is MLflow's mlflow.note.content tag.
+        client.create_run.assert_called_once_with(
+            "exp-1", run_name="run", tags={"model": "m", "benchmark": "b", "mlflow.note.content": "m on b"}
+        )
 
     def test_logging_before_setup_raises(self, mlflow_config: DictConfig) -> None:
         with pytest.raises(RuntimeError, match="not open"):

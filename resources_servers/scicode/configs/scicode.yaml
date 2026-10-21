@@ -13,6 +13,10 @@ scicode:
       num_processes: 20
       timeout_secs: 30.0
       test_data_fpath: null
+      # Opt-in per-sub-step execution records in every rollout row (see README).
+      record_step_outputs: false
+      output_tail_chars: 2000
+      record_step_code: false
 
 scicode_agent:
   responses_api_agents:
@@ -26,3 +30,11 @@ scicode_agent:
           prompt_config: null
           num_repeats: 1
           license: Apache 2.0
+
+scicode_agent_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: scicode_agent

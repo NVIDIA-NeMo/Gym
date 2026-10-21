@@ -54,20 +54,147 @@ class TestFernDocsLinks(unittest.TestCase):
 
                 self.assertIn("The following synthetic record shows the exact persisted field shape.", guide)
 
-    def test_model_call_capture_scopes_agent_observations_to_claude_code(self):
-        for version in ("latest", "v0.5.0", "v0.5.1"):
-            with self.subTest(version=version):
-                guide = read(f"fern/versions/{version}/pages/model-server/model-call-capture.mdx")
+    def test_model_call_capture_routes_agent_observations_to_the_rollout_evidence_guide(self):
+        guide = read("fern/versions/latest/pages/model-server/model-call-capture.mdx")
 
-                self.assertIn("Currently, only `claude_code_agent`", guide)
-                self.assertIn("### Advanced: correlation, compaction, and sandbox evidence", guide)
+        self.assertNotIn("Currently, only `claude_code_agent`", guide)
+        self.assertIn("/main/observability/rollout-evidence", guide)
+
+    def test_model_call_capture_config_table_gives_the_capture_dir_no_default(self):
+        guide = read("fern/versions/latest/pages/model-server/model-call-capture.mdx")
+        row = next(line for line in guide.splitlines() if line.startswith("| `model_call_capture_dir` |"))
+        _, _, _, default, description, _ = row.split("|")
+
+        self.assertEqual("—", default.strip())
+        self.assertIn("Required when `observability_enabled` is true.", description)
+
+    def test_model_call_capture_links_global_config_fields_to_the_configuration_reference(self):
+        guide = read("fern/versions/latest/pages/model-server/model-call-capture.mdx")
+        section = guide[guide.index("## Configure capture") : guide.index("## If you build a custom agent")]
+
+        self.assertIn("](/main/reference/configuration)", section)
+
+    def test_model_call_capture_gives_each_routing_helper_a_table_row(self):
+        guide = read("fern/versions/latest/pages/model-server/model-call-capture.mdx")
+        section = guide[guide.index("## If you build a custom agent") : guide.index("## Add agent-side evidence")]
+
+        for helper in ("url_path_for_run", "url_path_for_request", "base_url_for_run", "rollout_id_from_run"):
+            with self.subTest(helper=helper):
+                self.assertRegex(section, rf"(?m)^\| `{helper}\(")
+
+    def test_model_call_capture_title_matches_every_link_that_names_the_page(self):
+        pages = REPO_ROOT / "fern/versions/latest/pages"
+        guide = read("fern/versions/latest/pages/model-server/model-call-capture.mdx")
+        labels = {
+            (path.relative_to(pages).as_posix(), label)
+            for path in pages.rglob("*.mdx")
+            for label in re.findall(r"\[([^\]]+)\]\((?:/main)?/model-server/model-call-capture[)#]", path.read_text())
+            if label.lower() == "model-call capture"
+        }
+
+        self.assertIn('title: "Model-Call Capture"', guide)
+        self.assertTrue(labels)
+        # Mid-sentence prose may use the lowercase common noun; a label that names the page uses its title.
+        self.assertEqual(
+            set(), {item for item in labels if item[1] not in ("Model-Call Capture", "model-call capture")}
+        )
+
+    def test_latest_docs_explain_kill_shaped_failures_in_plain_language(self):
+        pages = REPO_ROOT / "fern/versions/latest/pages"
+        jargon = sorted(
+            path.relative_to(pages).as_posix() for path in pages.rglob("*.mdx") if "kill-shaped" in path.read_text()
+        )
+        metrics = " ".join(read("fern/versions/latest/pages/observability/metrics.mdx").split())
+
+        self.assertEqual([], jargon)
+        self.assertIn("a Slurm SIGTERM, a dead Ray actor, or an out-of-memory kill", metrics)
+
+    def test_observability_index_routes_both_observability_families(self):
+        overview = read("fern/versions/latest/pages/observability/index.mdx")
+
+        self.assertIn("Rollout evidence", overview)
+        self.assertIn("OpenTelemetry", overview)
+        self.assertIn("`observability_enabled`", overview)
+        self.assertIn("`telemetry.enabled`", overview)
+        self.assertIn('href="/main/observability/rollout-evidence"', overview)
+        self.assertIn('href="/main/observability/opentelemetry"', overview)
+
+    def test_rollout_evidence_guide_has_a_complete_joined_example(self):
+        path = REPO_ROOT / "fern/versions/latest/pages/observability/rollout-evidence.mdx"
+        self.assertTrue(path.is_file(), "the task-oriented rollout evidence guide must exist")
+        guide = path.read_text()
+        match = re.search(
+            r"\{/\* joined-rollout-example:start \*/\}\s*```json\s*(.*?)\s*```\s*"
+            r"\{/\* joined-rollout-example:end \*/\}",
+            guide,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(match, "the joined rollout example must be marked and valid JSON")
+        example = json.loads(match.group(1))
+
+        self.assertIn("ng_model_call_capture", example)
+        self.assertIn("ng_agent_observations", example)
+        trajectory = example["ng_trajectory"]
+        self.assertEqual("1.0", trajectory["schema_version"])
+        self.assertTrue(trajectory["invocations"])
+        self.assertTrue(trajectory["model_calls"])
+        self.assertTrue(trajectory["tool_calls"])
+        self.assertTrue(trajectory["gaps"])
+        self.assertTrue(trajectory["invocations"][0]["model_calls"])
+        self.assertEqual(1.0, example["ng_perf"]["token_observability_coverage"])
+
+    def test_rollout_evidence_joined_example_preserves_call_and_tool_relationships(self):
+        page = REPO_ROOT / "fern/versions/latest/pages/observability/rollout-evidence.mdx"
+        text = page.read_text(encoding="utf-8")
+        match = re.search(
+            r"\{/\* joined-rollout-example:start \*/\}\s*```json\s*(.*?)\s*```\s*"
+            r"\{/\* joined-rollout-example:end \*/\}",
+            text,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(match)
+        example = json.loads(match.group(1))
+
+        observations = example["ng_agent_observations"]
+        invocation = next(record for record in observations["records"] if record["kind"] == "agent_invocation")
+        tool = next(record for record in observations["records"] if record["kind"] == "tool_call")
+        self.assertEqual({"source", "records", "gaps"}, set(observations))
+        self.assertIn("invocation_id", invocation)
+        self.assertNotIn("output", tool, "agent-side tool timing does not own model-visible output")
+
+        trajectory = example["ng_trajectory"]
+        self.assertEqual(invocation, trajectory["invocations"][0])
+        self.assertEqual(invocation["model_calls"][0]["model_call_id"], trajectory["model_calls"][0]["model_call_id"])
+        projected_tool = trajectory["tool_calls"][0]
+        self.assertEqual(tool, {key: value for key, value in projected_tool.items() if key != "output"})
+        output = next(item for item in invocation["conversation"] if item["type"] == "function_call_output")
+        self.assertEqual(
+            (tool["invocation_id"], tool["tool_call_id"]), (invocation["invocation_id"], output["call_id"])
+        )
+        self.assertEqual(output["output"], projected_tool["output"])
+        self.assertEqual([], trajectory["turns"])
+        self.assertIn({"code": "turns_unavailable"}, trajectory["gaps"])
+
+    def test_opentelemetry_has_an_explicit_landing_page(self):
+        path = REPO_ROOT / "fern/versions/latest/pages/observability/opentelemetry.mdx"
+        self.assertTrue(path.is_file(), "OpenTelemetry guidance must remain available from an explicit landing page")
+        guide = path.read_text()
+
+        self.assertIn("nemo-lens", guide)
+        self.assertIn("NEMO_GYM_OTEL_EXPORTER", guide)
+        self.assertIn("/main/observability/configuration", guide)
 
     def test_model_server_index_links_model_call_capture(self):
-        for version in ("latest", "v0.5.0", "v0.5.1"):
+        # Versioned folders are frozen GA snapshots and keep the title they shipped with.
+        for version, title in (
+            ("latest", "Model-Call Capture"),
+            ("v0.5.0", "Model-call capture"),
+            ("v0.5.1", "Model-call capture"),
+        ):
             with self.subTest(version=version):
                 index = read(f"fern/versions/{version}/pages/model-server/index.mdx")
 
-                self.assertIn('<Card title="Model-call capture" href="/model-server/model-call-capture">', index)
+                self.assertIn(f'<Card title="{title}" href="/model-server/model-call-capture">', index)
 
     def test_development_setup_uses_supported_cold_start_docs_command(self):
         guide = read("fern/versions/latest/pages/contribute/development-setup.mdx")
@@ -97,7 +224,7 @@ class TestFernDocsLinks(unittest.TestCase):
 
         workflows = (
             ".github/workflows/fern-docs-ci.yml",
-            ".github/workflows/fern-docs-preview-comment.yml",
+            ".github/workflows/fern-docs-preview.yml",
             ".github/workflows/publish-fern-docs.yml",
         )
         for workflow in workflows:
@@ -203,6 +330,29 @@ class TestFernDocsLinks(unittest.TestCase):
                     absolute_links.append(f"{page.relative_to(REPO_ROOT)}:{line_number}")
 
         self.assertEqual([], absolute_links)
+
+    def test_cited_resources_server_configs_exist(self):
+        """Every `resources_servers/<name>/configs/<file>.yaml` a latest page cites must exist on main.
+
+        `my_weather_tool` is skipped: the single-step environment tutorial has the reader create it.
+        Scoped to `latest`. The frozen versions cite paths that have since been renamed.
+        """
+        pages = REPO_ROOT / "fern/versions/latest/pages"
+        tutorial_created = {"my_weather_tool"}
+        cited = 0
+        missing = []
+
+        for page in pages.rglob("*.mdx"):
+            for line_number, line in enumerate(page.read_text().splitlines(), start=1):
+                for match in re.finditer(r"resources_servers/([a-z0-9_]+)/configs/[A-Za-z0-9_.-]+\.yaml", line):
+                    if match.group(1) in tutorial_created:
+                        continue
+                    cited += 1
+                    if not (REPO_ROOT / match.group(0)).is_file():
+                        missing.append(f"{page.relative_to(REPO_ROOT)}:{line_number}: {match.group(0)}")
+
+        self.assertEqual([], missing)
+        self.assertGreater(cited, 0)
 
     def test_private_cli_compat_api_link_redirects_to_the_public_cli_page(self):
         redirects = read("fern/docs.yml")

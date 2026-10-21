@@ -84,6 +84,7 @@ def _extract_last_assistant_text(body: BaseVerifyRequest) -> str:
 
 
 class SWEGenResourcesServer(SimpleResourcesServer):
+    ray_enabled = True
     config: SWEGenResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:

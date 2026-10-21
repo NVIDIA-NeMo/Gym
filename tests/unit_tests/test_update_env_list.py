@@ -25,7 +25,7 @@ def test_visit_agent_datasets_reads_huggingface_source() -> None:
                 "license": "Creative Commons Attribution 4.0 International",
                 "source": {
                     "type": "huggingface",
-                    "repo_id": "nvidia/Nemotron-RL-litmus-bench-v0.1",
+                    "repo_id": "nvidia/example-dataset",
                 },
             }
         )
@@ -33,7 +33,7 @@ def test_visit_agent_datasets_reads_huggingface_source() -> None:
 
     assert metadata.types == ["train"]
     assert metadata.license == "Creative Commons Attribution 4.0 International"
-    assert metadata.huggingface_repo_id == "nvidia/Nemotron-RL-litmus-bench-v0.1"
+    assert metadata.huggingface_repo_id == "nvidia/example-dataset"
 
 
 def test_visit_agent_datasets_retains_legacy_huggingface_fallback() -> None:

@@ -19,3 +19,10 @@ aime24_math_with_judge_simple_agent:
         prompt_config: benchmarks/prompts/generic/math.yaml
         prepare_script: benchmarks/aime24/prepare.py
         num_repeats: 32
+
+aime24_math_with_judge_environment_server:
+  _inherit_from: math_with_judge_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: aime24_math_with_judge_simple_agent

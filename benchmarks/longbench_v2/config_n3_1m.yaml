@@ -15,3 +15,10 @@ longbench_v2_n3_1m_mcqa_simple_agent:
         jsonl_fpath: benchmarks/longbench_v2/data/longbench_v2_n3_1m_benchmark.jsonl
         prompt_config: benchmarks/longbench_v2/prompts/default.yaml
         prepare_script: benchmarks/longbench_v2/prepare_n3_1m.py
+
+longbench_v2_n3_1m_mcqa_environment_server:
+  _inherit_from: mcqa_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: longbench_v2_n3_1m_mcqa_simple_agent

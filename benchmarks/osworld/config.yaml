@@ -39,3 +39,11 @@ osworld_simple_agent:
           prompt_config: null
           prepare_script: benchmarks/osworld/prepare.py
           license: Apache 2.0
+
+osworld_simple_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: osworld_simple_agent

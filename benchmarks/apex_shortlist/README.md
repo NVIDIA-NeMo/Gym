@@ -49,3 +49,13 @@ gym eval run --no-serve \
     --output results/apex_shortlist_rollouts.jsonl \
     --num-repeats 4
 ```
+
+## Sandboxed agents
+
+Use `--benchmark apex_shortlist/opencode` or `apex_shortlist/pi` for Python tools
+without search. These presets preserve the standard boxed-answer prompt and
+symbolic grading, with 16 dataset repeats per question.
+Keep collection repeats at one.
+
+See the shared [OpenCode and Pi setup guide](../../responses_api_agents/opencode_sandboxed_agent/README.md#offline-scientific-evaluation-with-opencode-or-pi)
+for images, credentials, network policies, token limits, and failure handling.

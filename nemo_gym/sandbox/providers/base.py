@@ -14,7 +14,7 @@
 
 """Provider-facing sandbox protocol."""
 
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -27,6 +27,7 @@ class SandboxStatus(str, Enum):
 
     STARTING = "starting"
     RUNNING = "running"
+    PAUSED = "paused"
     STOPPED = "stopped"
     ERROR = "error"
     UNKNOWN = "unknown"
@@ -91,6 +92,26 @@ class SandboxResources:
 
 
 @dataclass(frozen=True)
+class SandboxSidecarSpec:
+    """An extra container started with the sandbox from its own image.
+
+    The sidecar has its own filesystem. Start services in it with ``AsyncSandbox.sidecar(name).exec``.
+    How the sandbox reaches a sidecar over the network is provider-specific.
+    """
+
+    name: str
+    image: str
+    env: dict[str, str] = field(default_factory=dict)
+    resources: SandboxResources | Mapping[str, Any] = field(default_factory=SandboxResources)
+
+    def __post_init__(self) -> None:
+        if not self.name or not self.image:
+            raise ValueError("A sandbox sidecar needs a name and an image")
+        if not isinstance(self.resources, SandboxResources):
+            object.__setattr__(self, "resources", SandboxResources.from_mapping(self.resources))
+
+
+@dataclass(frozen=True)
 class SandboxSpec:
     """Sandbox creation request."""
 
@@ -105,10 +126,24 @@ class SandboxSpec:
     entrypoint: list[str] | None = None
     provider_options: dict[str, Any] = field(default_factory=dict)
     ports: tuple[int, ...] | list[int] = field(default_factory=tuple)
+    # Extra containers started with the sandbox (mappings are accepted); needs a provider that
+    # implements `SupportsSandboxSidecars`.
+    sidecars: tuple[SandboxSidecarSpec, ...] | list[SandboxSidecarSpec | Mapping[str, Any]] = field(
+        default_factory=tuple
+    )
 
     def __post_init__(self) -> None:
         if not isinstance(self.resources, SandboxResources):
             object.__setattr__(self, "resources", SandboxResources.from_mapping(self.resources))
+        if not isinstance(self.sidecars, (list, tuple)):
+            raise TypeError("Sandbox sidecars must be a list or tuple of sidecar specs or mappings")
+        sidecars = tuple(
+            sidecar if isinstance(sidecar, SandboxSidecarSpec) else SandboxSidecarSpec(**sidecar)
+            for sidecar in self.sidecars
+        )
+        if len({sidecar.name for sidecar in sidecars}) != len(sidecars):
+            raise ValueError("Sandbox sidecar names must be unique")
+        object.__setattr__(self, "sidecars", sidecars)
         if not isinstance(self.ports, (list, tuple)):
             raise TypeError("Sandbox ports must be a list or tuple of TCP port numbers")
         normalized_ports: list[int] = []
@@ -247,11 +282,121 @@ class SandboxProvider(Protocol):
 
 
 @runtime_checkable
+class SupportsSandboxBackgroundServices(Protocol):
+    """Optional execution override for services needed by a later command."""
+
+    async def exec_with_background_services(
+        self,
+        handle: SandboxHandle,
+        command: str,
+        *,
+        cwd: str | None = None,
+        timeout_s: int | float | None = None,
+    ) -> SandboxExecResult: ...
+
+
+@runtime_checkable
+class SupportsSandboxNetwork(Protocol):
+    """Optional direct networking between sandboxes, preserving service ports."""
+
+    def validate_networking(self) -> None: ...
+
+    async def network_address(self, handle: SandboxHandle) -> str: ...
+
+    async def set_hosts(self, handle: SandboxHandle, hosts: Mapping[str, str]) -> None: ...
+
+
+@runtime_checkable
+class SupportsSandboxRuntimeRequirements(Protocol):
+    """Optional validation and setup of task-declared runtime requirements."""
+
+    def validate_runtime_requirements(
+        self, *, cap_add: tuple[str, ...], shm_size: int | None
+    ) -> dict[str, str] | None:
+        """Validate support and return any required create-time metadata."""
+        ...
+
+    async def configure_runtime(
+        self, handle: SandboxHandle, *, cap_add: tuple[str, ...], shm_size: int | None
+    ) -> None: ...
+
+
+@runtime_checkable
+class SupportsSandboxPortForwarding(Protocol):
+    """Optional loopback TCP forwarding, running until cancellation."""
+
+    def validate_port_forwarding(self) -> None: ...
+
+    async def forward_ports(
+        self, handle: SandboxHandle, target_address: str, ports: tuple[int, ...], *, ready_file: str
+    ) -> None: ...
+
+
+@runtime_checkable
+class SupportsSandboxSharedStorage(Protocol):
+    """Optional shared filesystem provisioned by the operator's provider config.
+
+    ``shared_volume_options`` returns provider options containing a ``volumes``
+    list of opaque mount descriptors. Collections concatenate these lists.
+    ``source`` is relative to the configured shared root; ``None`` mounts that
+    root for initialization and cleanup. Metadata supplies placement settings.
+    """
+
+    def shared_volume_options(self, source: str | None, target: str, *, read_only: bool = False) -> dict[str, Any]: ...
+
+    def shared_volume_metadata(self) -> dict[str, str]: ...
+
+
+@runtime_checkable
 class SupportsSandboxEndpoint(Protocol):
     """Optional provider capability for resolving declared service ports."""
 
     async def endpoint(self, handle: SandboxHandle, port: int) -> SandboxEndpoint:
         """Resolve a declared service port to a caller-reachable endpoint."""
+        ...
+
+
+@runtime_checkable
+class SupportsSandboxSidecars(Protocol):
+    """Optional provider capability to run sidecar containers next to the sandbox.
+
+    The provider creates the sidecars declared in ``SandboxSpec.sidecars`` together with the sandbox, then runs
+    commands in them and reads files from them through these calls. Commands run as an argv without a shell,
+    because sidecar images can be distroless.
+    """
+
+    async def sidecar_exec(
+        self,
+        handle: SandboxHandle,
+        sidecar: str,
+        argv: list[str],
+        *,
+        timeout_s: int | float,
+        on_stdout: Callable[[str], None] | None = None,
+    ) -> SandboxExecResult:
+        """Run ``argv`` in ``sidecar``; ``on_stdout`` receives stdout text as it arrives, for long-running services."""
+        ...
+
+    async def download_sidecar_file(
+        self, handle: SandboxHandle, sidecar: str, source_path: str, target_path: Path
+    ) -> None:
+        """Download one file from ``sidecar`` to the local filesystem."""
+        ...
+
+
+@runtime_checkable
+class SupportsSandboxPauseResume(Protocol):
+    """Optional provider capability to pause and resume a sandbox.
+
+    What survives a pause beyond the filesystem is backend-specific.
+    """
+
+    async def pause(self, handle: SandboxHandle) -> None:
+        """Pause a sandbox while preserving its state."""
+        ...
+
+    async def resume(self, handle: SandboxHandle) -> None:
+        """Resume a paused sandbox and refresh its handle."""
         ...
 
 

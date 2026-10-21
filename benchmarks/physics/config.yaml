@@ -13,3 +13,10 @@ physics_physics_judge_simple_agent:
           prompt_config: benchmarks/physics/prompts/default.yaml
           prepare_script: benchmarks/physics/prepare.py
           license: Apache 2.0
+
+physics_physics_judge_environment_server:
+  _inherit_from: physics_judge_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: physics_physics_judge_simple_agent

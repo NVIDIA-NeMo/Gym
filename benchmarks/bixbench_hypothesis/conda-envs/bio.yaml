@@ -1,0 +1,54 @@
+channels:
+  - bioconda
+  - conda-forge
+dependencies:
+  - biokit
+  - gseapy
+  - blast
+  - clipkit
+  - clustalo
+  - fastqc
+  - iqtree
+  - mafft
+  - metaeuk  # [linux64]
+  - mygene
+  - perl
+  - phykit
+  - pydeseq2
+  - spades
+  - trim-galore
+  - harmonypy
+  - bioconductor-enhancedvolcano
+  - bioconductor-deseq2
+  - bioconductor-clusterprofiler
+  - bioconductor-org.hs.eg.db
+  - bioconductor-genomicranges
+  - bioconductor-summarizedexperiment
+  - bioconductor-apeglm
+  - bioconductor-flowcore
+  - bioconductor-flowmeans
+  - bioconductor-limma
+  - bioconductor-geoquery
+  - hmmer
+  - hhsuite
+  - mmseqs2
+  - samtools
+  - gatk
+  - anndata
+  - scanpy
+  - biopython
+  - muon
+  - umap-learn
+  - leidenalg
+  - python-igraph
+  - ete3
+  - fcsparser
+  - dendropy
+  - mafft
+  - goatools
+  - scikit-bio
+  - busco  # [linux64]
+  - gprofiler-official
+  - iqtree
+  - clustalw
+  - clipkit

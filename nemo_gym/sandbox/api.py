@@ -17,6 +17,7 @@
 import asyncio
 import tempfile
 import threading
+import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from concurrent.futures import Future
@@ -24,6 +25,7 @@ from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path
 from typing import Any, TypeVar
 
+from nemo_gym.sandbox.observability import span_attributes as default_span_attributes
 from nemo_gym.sandbox.providers import (
     ConnectableProvider,
     SandboxEndpoint,
@@ -35,12 +37,20 @@ from nemo_gym.sandbox.providers import (
     SandboxPtySpec,
     SandboxSpec,
     SandboxStatus,
+    SupportsSandboxBackgroundServices,
     SupportsSandboxEndpoint,
+    SupportsSandboxPauseResume,
     SupportsSandboxPty,
     SupportsSandboxPtyAttach,
+    SupportsSandboxSidecars,
     create_provider,
 )
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span, safe_set_span_attributes
+from nemo_gym.telemetry.gym_metrics import (
+    record_sandbox_active,
+    record_sandbox_exec_duration,
+    record_sandbox_startup,
+)
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 
 
@@ -372,20 +382,41 @@ class SandboxPty:
         )
 
 
+def _sandbox_id(handle: Any) -> str | None:
+    """The provider-neutral id of a handle, or None for a handle-less test double."""
+    return getattr(handle, "sandbox_id", None)
+
+
 class AsyncSandbox:
-    """Async sandbox object backed by a runtime provider."""
+    """Async sandbox object backed by a runtime provider.
+
+    With ``owns_provider=False``, the caller closes the shared provider after
+    all of its sandboxes have stopped.
+    """
 
     def __init__(
         self,
         provider: Mapping[str, Any] | SandboxProvider,
         spec: SandboxSpec | None = None,
+        *,
+        owns_provider: bool = True,
     ) -> None:
         self._provider = create_provider(provider) if isinstance(provider, Mapping) else provider
+        self._owns_provider = owns_provider
         self._spec = spec
         self._handle: SandboxHandle | None = None
         self._stopped = True
         self._closed = False
+        self._connected = False
+        # Whether this instance added itself to `gym.sandbox.active`; a `connect()`ed sandbox
+        # was counted by the process that started it and must not be subtracted here.
+        self._counted_active = False
         self.pty = SandboxPty(self)
+
+    @property
+    def sandbox_id(self) -> str | None:
+        """The provider's id for this sandbox, or None before it has started or connected."""
+        return _sandbox_id(self._handle)
 
     def _telemetry_provider_name(self) -> str:
         """Provider name for span attributes (`docker`, `daytona`, `opensandbox`, ...)."""
@@ -399,6 +430,8 @@ class AsyncSandbox:
     async def start(
         self,
         spec: SandboxSpec | None = None,
+        *,
+        span_attributes: Mapping[str, Any] | None = None,
     ) -> "AsyncSandbox":
         if self._closed:
             raise RuntimeError("Sandbox has been stopped")
@@ -407,16 +440,29 @@ class AsyncSandbox:
         requested_spec = spec if spec is not None else self._spec
         if requested_spec is None:
             raise ValueError("Sandbox.start() requires a SandboxSpec")
+        if requested_spec.sidecars and not isinstance(self._provider, SupportsSandboxSidecars):
+            provider_name = getattr(self._provider, "name", type(self._provider).__name__)
+            raise NotImplementedError(f"Sandbox provider {provider_name!r} does not support sidecars")
 
         if is_span_group_enabled(GymSpanGroup.SANDBOX):
+            provider_name = self._telemetry_provider_name()
+            started = time.perf_counter()
             with managed_span(
                 GymSpanGroup.SANDBOX,
                 "gym.sandbox.start",
-                **{"nemo.gym.sandbox.provider": self._telemetry_provider_name()},
-            ):
+                **{"nemo.gym.sandbox.provider": provider_name, **default_span_attributes(span_attributes)},
+            ) as span:
                 handle = await self._provider.create(requested_spec)
+                if span is not None:
+                    safe_set_span_attributes(span, {"nemo.gym.sandbox.id": _sandbox_id(handle)})
+            record_sandbox_startup((time.perf_counter() - started) * 1000.0, provider=provider_name)
+            record_sandbox_active(1, provider=provider_name)
+            self._counted_active = True
         else:
             handle = await self._provider.create(requested_spec)
+        self._handle = handle
+        self._spec = requested_spec
+        self._stopped = False
         try:
             if requested_spec.files:
                 with tempfile.TemporaryDirectory(prefix="nemo-gym-sandbox-upload-") as tmp_dir:
@@ -425,15 +471,28 @@ class AsyncSandbox:
                         source_path = tmp_path / f"file-{index}"
                         source_path.write_text(contents, encoding="utf-8")
                         await self._provider.upload_file(handle, source_path, target_path)
-        except Exception:
-            await self._provider.close(handle)
-            await self._provider.aclose()
-            self._closed = True
+        except BaseException:
+            await self.stop()
             raise
 
-        self._spec = requested_spec
-        self._handle = handle
-        self._stopped = False
+        return self
+
+    async def start_with_setup(
+        self,
+        spec: SandboxSpec | None,
+        setup: Callable[["AsyncSandbox"], Awaitable[None]],
+    ) -> "AsyncSandbox":
+        """Start the sandbox, then run ``setup`` against it.
+
+        If ``setup`` raises, the sandbox is stopped before the exception
+        propagates.
+        """
+        await self.start(spec)
+        try:
+            await setup(self)
+        except BaseException:
+            await self.stop()
+            raise
         return self
 
     async def exec(
@@ -444,30 +503,57 @@ class AsyncSandbox:
         env: dict[str, str] | None = None,
         timeout_s: int | float | None = 180,
         user: str | int | None = None,
+        preserve_background_services: bool = False,
+        span_attributes: Mapping[str, Any] | None = None,
     ) -> SandboxExecResult:
+        """Run a command, optionally preserving services needed by later commands.
+
+        ``preserve_background_services`` selects a provider's service-preserving
+        execution when available; other providers use ordinary exec. Services
+        must redirect stdout and stderr. This mode does not accept per-command
+        ``env`` or ``user`` overrides on providers with a service-preserving path.
+        """
         if not is_span_group_enabled(GymSpanGroup.SANDBOX):
-            return await self._exec_uninstrumented(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+            return await self._exec_uninstrumented(
+                command,
+                cwd=cwd,
+                env=env,
+                timeout_s=timeout_s,
+                user=user,
+                preserve_background_services=preserve_background_services,
+            )
 
         # The command itself is deliberately not recorded. In a code-execution environment
         # it is model output or task content, which must not land in a trace backend
         # (`safe_set_span_attributes` would redact a key named `command`, not a value that
         # happens to be one). Provider, exit code and duration are the useful,
         # content-free parts.
+        provider_name = self._telemetry_provider_name()
+        started = time.perf_counter()
         with managed_span(
             GymSpanGroup.SANDBOX,
             "gym.sandbox.exec",
-            **{"nemo.gym.sandbox.provider": self._telemetry_provider_name()},
+            **{"nemo.gym.sandbox.provider": provider_name, **default_span_attributes(span_attributes)},
         ) as span:
-            result = await self._exec_uninstrumented(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+            result = await self._exec_uninstrumented(
+                command,
+                cwd=cwd,
+                env=env,
+                timeout_s=timeout_s,
+                user=user,
+                preserve_background_services=preserve_background_services,
+            )
             if span is not None:
                 safe_set_span_attributes(
                     span,
                     {
+                        "nemo.gym.sandbox.id": _sandbox_id(self._handle),
                         "nemo.gym.sandbox.return_code": result.return_code,
                         "nemo.gym.sandbox.error_type": result.error_type,
                     },
                 )
-            return result
+        record_sandbox_exec_duration((time.perf_counter() - started) * 1000.0, provider=provider_name)
+        return result
 
     async def _exec_uninstrumented(
         self,
@@ -477,7 +563,17 @@ class AsyncSandbox:
         env: dict[str, str] | None = None,
         timeout_s: int | float | None = 180,
         user: str | int | None = None,
+        preserve_background_services: bool = False,
     ) -> SandboxExecResult:
+        if preserve_background_services and isinstance(self._provider, SupportsSandboxBackgroundServices):
+            if env is not None or user is not None:
+                raise ValueError("Service-preserving execution does not support per-command env or user overrides")
+            return await self._provider.exec_with_background_services(
+                self._require_handle(),
+                command,
+                cwd=cwd if cwd is not None else self._spec.workdir if self._spec is not None else None,
+                timeout_s=timeout_s,
+            )
         return await self._provider.exec(
             self._require_handle(),
             command,
@@ -492,6 +588,16 @@ class AsyncSandbox:
 
     async def download(self, remote_path: str, local_path: Path | str) -> None:
         await self._provider.download_file(self._require_handle(), remote_path, Path(local_path))
+
+    def sidecar(self, name: str) -> "AsyncSandboxSidecar":
+        """Return a sidecar container declared in ``SandboxSpec.sidecars``, to run commands in and read files from."""
+        if not isinstance(self._provider, SupportsSandboxSidecars):
+            provider_name = getattr(self._provider, "name", type(self._provider).__name__)
+            raise NotImplementedError(f"Sandbox provider {provider_name!r} does not support sidecars")
+        declared = [sidecar.name for sidecar in self._spec.sidecars] if self._spec is not None else []
+        if name not in declared:
+            raise ValueError(f"Sidecar {name!r} was not declared in SandboxSpec.sidecars; declared: {declared!r}")
+        return AsyncSandboxSidecar(self._provider, self._require_handle(), name)
 
     async def status(self) -> SandboxStatus:
         if self._handle is None:
@@ -518,16 +624,74 @@ class AsyncSandbox:
             raise TypeError(f"Sandbox provider endpoint() must return SandboxEndpoint, got {type(resolved).__name__}")
         return resolved
 
+    async def pause(self) -> None:
+        """Pause this sandbox while preserving its state.
+
+        Open PTY sessions are detached; whether processes survive and sessions
+        can be re-attached after ``resume()`` depends on the provider backend.
+        """
+        handle = self._require_handle()
+        provider = self._provider
+        if not isinstance(provider, SupportsSandboxPauseResume):
+            name = getattr(provider, "name", type(provider).__name__)
+            raise NotImplementedError(f"Sandbox provider {name!r} does not support pause/resume")
+        await provider.pause(handle)
+
+    async def resume(self) -> None:
+        """Resume this sandbox and wait until it is ready.
+
+        On timeout the server-side state is unknown: reconnect and check
+        ``status()`` before retrying.
+        """
+        handle = self._require_handle()
+        provider = self._provider
+        if not isinstance(provider, SupportsSandboxPauseResume):
+            name = getattr(provider, "name", type(provider).__name__)
+            raise NotImplementedError(f"Sandbox provider {name!r} does not support pause/resume")
+        await provider.resume(handle)
+
     async def stop(self) -> None:
         if self._closed:
             return
-        try:
-            if self._handle is not None and not self._stopped:
-                self._stopped = True
+        # A failed remote stop is retryable. Do not close its client or mark the
+        # wrapper closed until the provider confirms container teardown.
+        if self._handle is not None and not self._stopped:
+            if is_span_group_enabled(GymSpanGroup.SANDBOX):
+                with managed_span(
+                    GymSpanGroup.SANDBOX,
+                    "gym.sandbox.stop",
+                    **{
+                        "nemo.gym.sandbox.provider": self._telemetry_provider_name(),
+                        "nemo.gym.sandbox.id": _sandbox_id(self._handle),
+                        **default_span_attributes(),
+                    },
+                ):
+                    await self._provider.close(self._handle)
+            else:
                 await self._provider.close(self._handle)
-        finally:
+            self._stopped = True
+            if self._counted_active:
+                self._counted_active = False
+                record_sandbox_active(-1, provider=self._telemetry_provider_name())
+        if self._owns_provider:
             await self._provider.aclose()
-            self._closed = True
+        self._closed = True
+
+    async def disconnect(self) -> None:
+        """Release this client without stopping a borrowed sandbox.
+
+        Use this only for a sandbox rebuilt with :meth:`connect`.
+        The component that created the sandbox remains responsible for stopping it.
+        """
+        if self._closed:
+            return
+        if not self._connected:
+            raise RuntimeError("disconnect() is valid only for a sandbox rebuilt with connect()")
+        if self._owns_provider:
+            await self._provider.aclose()
+        self._handle = None
+        self._stopped = True
+        self._closed = True
 
     async def serialize(self, *, scope: str | None = None) -> dict[str, Any]:
         """Return a JSON descriptor another process can rebuild this box from.
@@ -546,10 +710,19 @@ class AsyncSandbox:
         # remote provider's SandboxRef already has it; e.g. OpenSandbox does not).
         if isinstance(descriptor, dict) and descriptor.get("workdir") is None and self._spec is not None:
             descriptor = {**descriptor, "workdir": self._spec.workdir}
+        if isinstance(descriptor, dict) and self._spec is not None and self._spec.ports:
+            descriptor = {**descriptor, "ports": list(self._spec.ports)}
+        # Carry the declared sidecars so a borrower that connects can use `sidecar(name)` without re-declaring them.
+        # Only name and image travel: a sidecar's environment may hold secrets, and a borrower never starts it.
+        if isinstance(descriptor, dict) and self._spec is not None and self._spec.sidecars:
+            sidecars = [{"name": sidecar.name, "image": sidecar.image} for sidecar in self._spec.sidecars]
+            descriptor = {**descriptor, "sidecars": sidecars}
         return descriptor
 
     @classmethod
-    async def connect(cls, descriptor: Mapping[str, Any] | Any, *, provider: SandboxProvider) -> "AsyncSandbox":
+    async def connect(
+        cls, descriptor: Mapping[str, Any] | Any, *, provider: SandboxProvider, owns_provider: bool = True
+    ) -> "AsyncSandbox":
         """Rebuild a sandbox in this process from a descriptor produced by
         :meth:`serialize`, using ``provider`` (which must support connect)."""
         if not isinstance(provider, ConnectableProvider):
@@ -559,9 +732,14 @@ class AsyncSandbox:
             descriptor = descriptor.to_dict()
         handle = await provider.connect(descriptor)
         workdir = descriptor.get("workdir") if isinstance(descriptor, Mapping) else None
-        sandbox = cls(provider, SandboxSpec(workdir=workdir))
+        ports = descriptor.get("ports", ()) if isinstance(descriptor, Mapping) else ()
+        sidecars = descriptor.get("sidecars", ()) if isinstance(descriptor, Mapping) else ()
+        sandbox = cls(
+            provider, SandboxSpec(workdir=workdir, ports=ports, sidecars=sidecars), owns_provider=owns_provider
+        )
         sandbox._handle = handle
         sandbox._stopped = False
+        sandbox._connected = True
         return sandbox
 
     async def __aenter__(self) -> "AsyncSandbox":
@@ -569,6 +747,30 @@ class AsyncSandbox:
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         await self.stop()
+
+
+class AsyncSandboxSidecar:
+    """A sidecar container of a started sandbox; get one with ``AsyncSandbox.sidecar(name)``."""
+
+    def __init__(self, provider: SupportsSandboxSidecars, handle: SandboxHandle, name: str) -> None:
+        self._provider = provider
+        self._handle = handle
+        self.name = name
+
+    async def exec(
+        self, *argv: str, timeout_s: int | float, on_stdout: Callable[[str], None] | None = None
+    ) -> SandboxExecResult:
+        """Run ``argv`` without a shell (sidecar images can be distroless) and wait for it to exit.
+
+        ``on_stdout`` receives stdout text as it arrives, so a caller can follow a long-running service.
+        """
+        return await self._provider.sidecar_exec(
+            self._handle, self.name, list(argv), timeout_s=timeout_s, on_stdout=on_stdout
+        )
+
+    async def download(self, remote_path: str, local_path: Path | str) -> None:
+        """Download one file from the sidecar's filesystem."""
+        await self._provider.download_sidecar_file(self._handle, self.name, remote_path, Path(local_path))
 
 
 class _AsyncLoopRunner:
@@ -692,6 +894,7 @@ class Sandbox:
         env: dict[str, str] | None = None,
         timeout_s: int | float | None = 180,
         user: str | int | None = None,
+        preserve_background_services: bool = False,
     ) -> SandboxExecResult:
         return self._runner.run(
             "exec",
@@ -701,6 +904,7 @@ class Sandbox:
                 env=env,
                 timeout_s=timeout_s,
                 user=user,
+                preserve_background_services=preserve_background_services,
             ),
         )
 
@@ -717,6 +921,12 @@ class Sandbox:
 
     def endpoint(self, port: int) -> SandboxEndpoint:
         return self._runner.run("endpoint", lambda: self._async_sandbox.endpoint(port))
+
+    def pause(self) -> None:
+        self._runner.run("pause", self._async_sandbox.pause)
+
+    def resume(self) -> None:
+        self._runner.run("resume", self._async_sandbox.resume)
 
     def stop(self) -> None:
         if self._closed:

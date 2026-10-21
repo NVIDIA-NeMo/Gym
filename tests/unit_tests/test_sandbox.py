@@ -14,6 +14,8 @@
 
 import asyncio
 import importlib.util
+import os
+import shlex
 import threading
 from datetime import timedelta
 from pathlib import Path
@@ -22,6 +24,7 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
+from pydantic import ValidationError
 
 import nemo_gym.sandbox.providers.registry as provider_registry
 from nemo_gym.sandbox import (
@@ -35,6 +38,7 @@ from nemo_gym.sandbox import (
     SandboxSpec,
     SandboxStatus,
     SupportsSandboxEndpoint,
+    SupportsSandboxPauseResume,
     create_provider,
     get_provider_class,
     list_providers,
@@ -43,11 +47,75 @@ from nemo_gym.sandbox import (
     resolve_provider_metadata,
 )
 from nemo_gym.sandbox.api import _AsyncLoopRunner
+from nemo_gym.sandbox.config import SandboxConfig
 from nemo_gym.sandbox.utils import rewrite_image
 from responses_api_agents.mini_swe_agent_2.sandbox_environment import MiniSWESandboxEnvironment
 
 
 pytestmark = pytest.mark.sandbox
+
+
+@pytest.mark.integration
+# Ordinary exec is the negative control: its server starts, but does not survive command cleanup.
+@pytest.mark.parametrize("survives", [False, True])
+@pytest.mark.skipif(
+    os.environ.get("RUN_OPENSANDBOX_TESTS") != "1", reason="Set RUN_OPENSANDBOX_TESTS=1 for live tests"
+)
+async def test_server_survival_after_command_finishes(survives: bool) -> None:
+    """Provider session execution preserves the server across OpenSandbox commands."""
+    from omegaconf import OmegaConf
+
+    config_path = Path(__file__).parents[2] / "nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml"
+    config = OmegaConf.to_container(OmegaConf.load(config_path), resolve=True)["sandbox"]
+    config["opensandbox"]["create"].update(retries=0, timeout_s=180, request_timeout_s=180)
+    config["opensandbox"]["operations"].update(retries=0, background_poll_interval_s=1)
+    sandbox = AsyncSandbox({"opensandbox": config["opensandbox"]})
+    try:
+        async with asyncio.timeout(300):
+            await sandbox.start(
+                SandboxSpec(
+                    image="python:3.11-slim",
+                    ttl_s=300,
+                    ready_timeout_s=120,
+                    env={"EXECD_API_GRACE_SHUTDOWN": "50ms"},
+                )
+            )
+            probe = "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:5000/', timeout=3).status)"
+            check = f"python3 -c {shlex.quote(probe)}"
+            start = (
+                "python3 -m http.server 5000 --bind 127.0.0.1 > /tmp/http.log 2>&1 < /dev/null & "
+                # Poll readiness before exiting to distinguish startup delay from process cleanup.
+                f"for attempt in {{1..100}}; do {check} 2>/dev/null && exit 0; sleep 0.1; done; exit 1"
+            )
+            # The first command exits after its child server accepts connections.
+            started = await sandbox.exec(
+                f"bash -c {shlex.quote(start)}", timeout_s=30, preserve_background_services=survives
+            )
+            assert started.return_code == 0, started
+            assert started.stdout.strip() == "200"
+            response = await sandbox.exec(check, timeout_s=15)
+            if survives:
+                assert response.return_code == 0, response
+                assert response.stdout.strip() == "200"
+                # A timed-out solution must stop its service while keeping the
+                # sandbox available for the verifier to inspect partial work.
+                timed_start = start.replace("5000", "5001")
+                timed_out = await sandbox.exec(
+                    f"bash -c {shlex.quote(timed_start)}; sleep 60", timeout_s=5, preserve_background_services=True
+                )
+                assert timed_out.return_code == 124, timed_out
+                assert timed_out.error_type == "timeout", timed_out
+                assert timed_out.stdout.strip() == "200", timed_out
+                stopped = await sandbox.exec(check.replace("5000", "5001"), timeout_s=15)
+                assert stopped.return_code == 1, stopped
+                assert "ConnectionRefusedError" in (stopped.stdout or "") + (stopped.stderr or "")
+                # Deleting the timed-out session must leave the earlier service alone.
+                assert (await sandbox.exec(check, timeout_s=15)).return_code == 0
+            else:
+                assert response.return_code == 1, response
+                assert "ConnectionRefusedError" in (response.stdout or "") + (response.stderr or "")
+    finally:
+        await sandbox.stop()
 
 
 def _has_module(module_name: str) -> bool:
@@ -94,6 +162,8 @@ class FakeSandboxProvider:
         self.endpoint_calls: list[tuple[SandboxHandle, int]] = []
         self.upload_calls: list[tuple[SandboxHandle, Path, str]] = []
         self.download_calls: list[tuple[SandboxHandle, str, Path]] = []
+        self.pause_calls: list[SandboxHandle] = []
+        self.resume_calls: list[SandboxHandle] = []
         self.closed: list[SandboxHandle] = []
         self.aclosed = False
         FakeSandboxProvider.last_instance = self
@@ -145,6 +215,13 @@ class FakeSandboxProvider:
     async def endpoint(self, handle: SandboxHandle, port: int) -> SandboxEndpoint:
         self.endpoint_calls.append((handle, port))
         return SandboxEndpoint(endpoint=f"http://127.0.0.1:{port}", headers={"x-route": "fake"})
+
+    async def pause(self, handle: SandboxHandle) -> None:
+        self.pause_calls.append(handle)
+
+    async def resume(self, handle: SandboxHandle) -> None:
+        self.resume_calls.append(handle)
+        handle.raw = {"resumed_from": handle.raw}
 
     async def close(self, handle: SandboxHandle) -> None:
         self.closed.append(handle)
@@ -307,6 +384,15 @@ async def _assert_sandbox_facade_uses_public_provider_api(tmp_path: Path) -> Non
     assert provider.download_calls == [(handle, "/remote/source.txt", target_path)]
     assert target_path.read_bytes() == b"downloaded"
 
+    raw_before_resume = handle.raw
+    await sandbox.pause()
+    await sandbox.resume()
+    assert provider.pause_calls == [handle]
+    assert provider.resume_calls == [handle]
+    await sandbox.exec("after resume")
+    assert provider.exec_calls[-1]["handle"] is handle
+    assert handle.raw["resumed_from"] is raw_before_resume
+
     await sandbox.stop()
     await sandbox.stop()
     assert provider.closed[-1] == handle
@@ -352,6 +438,91 @@ async def _assert_async_sandbox_initial_file_error_paths() -> None:
         await started.start(SandboxSpec(image="image:tag"))
 
 
+@pytest.mark.parametrize("timeout", [30, None])
+async def test_background_services_uses_ordinary_exec_without_provider_override(timeout: int | None) -> None:
+    provider = FakeSandboxProvider()
+    sandbox = AsyncSandbox(provider)
+    await sandbox.start(SandboxSpec(image="image:tag", workdir="/work"))
+    await sandbox.exec(
+        "bash solve.sh", env={"KEY": "value"}, user="root", timeout_s=timeout, preserve_background_services=True
+    )
+    [call] = provider.exec_calls
+    assert call["command"] == "bash solve.sh"
+    assert call["cwd"] == "/work"
+    assert call["timeout_s"] == timeout
+    assert call["env"] == {"KEY": "value"}
+    assert call["user"] == "root"
+
+
+class ServicePreservingSandboxProvider(FakeSandboxProvider):
+    async def exec_with_background_services(self, handle, command, *, cwd=None, timeout_s=None):
+        await super().exec(handle, command, cwd=cwd, timeout_s=timeout_s)
+        return SandboxExecResult(stdout="service-preserving execution", stderr=None, return_code=0)
+
+
+@pytest.mark.parametrize("telemetry", [False, True])
+@pytest.mark.parametrize("preserve", [False, True])
+async def test_exec_selects_service_preserving_execution_only_when_requested(monkeypatch, telemetry, preserve):
+    monkeypatch.setattr("nemo_gym.sandbox.api.is_span_group_enabled", lambda _: telemetry)
+    provider = ServicePreservingSandboxProvider()
+    async with AsyncSandbox(provider) as sandbox:
+        await sandbox.start(SandboxSpec(image="image:tag", workdir="/work"))
+        result = await sandbox.exec("bash solve.sh", timeout_s=None, preserve_background_services=preserve)
+    assert result.stdout == ("service-preserving execution" if preserve else "ok")
+    assert provider.exec_calls[0]["cwd"] == "/work"
+    assert provider.exec_calls[0]["timeout_s"] is None
+
+
+@pytest.mark.parametrize("overrides", [{"env": {"KEY": "value"}}, {"user": "root"}])
+async def test_service_preserving_exec_rejects_unsupported_overrides(overrides):
+    provider = ServicePreservingSandboxProvider()
+    async with AsyncSandbox(provider) as sandbox:
+        await sandbox.start(SandboxSpec(image="image:tag"))
+        with pytest.raises(ValueError, match="does not support per-command env or user"):
+            await sandbox.exec("bash solve.sh", preserve_background_services=True, **overrides)
+    assert provider.exec_calls == []
+
+
+def test_sync_exec_can_preserve_background_services():
+    with Sandbox(ServicePreservingSandboxProvider()) as sandbox:
+        sandbox.start(SandboxSpec(image="image:tag"))
+        result = sandbox.exec("bash solve.sh", preserve_background_services=True)
+    assert result.stdout == "service-preserving execution"
+
+
+async def test_start_with_setup_stops_the_sandbox_when_setup_fails() -> None:
+    provider = FakeSandboxProvider()
+    sandbox = AsyncSandbox(provider)
+
+    async def failing_setup(started: AsyncSandbox) -> None:
+        assert started is sandbox
+        await started.exec("apt-get update")
+        raise RuntimeError("setup command failed")
+
+    with pytest.raises(RuntimeError, match="setup command failed"):
+        await sandbox.start_with_setup(SandboxSpec(image="image:tag"), failing_setup)
+
+    handle = provider.created_handles[0]
+    assert provider.exec_calls[0]["command"] == "apt-get update"
+    assert provider.closed == [handle]
+    assert await sandbox.status() == SandboxStatus.STOPPED
+
+
+async def test_start_with_setup_returns_the_started_sandbox_on_success() -> None:
+    provider = FakeSandboxProvider()
+    sandbox = AsyncSandbox(provider)
+
+    async def setup(started: AsyncSandbox) -> None:
+        await started.exec("apt-get update")
+
+    result = await sandbox.start_with_setup(SandboxSpec(image="image:tag"), setup)
+
+    assert result is sandbox
+    assert provider.exec_calls[0]["command"] == "apt-get update"
+    assert provider.closed == []
+    assert await sandbox.status() == SandboxStatus.RUNNING
+
+
 def test_async_sandbox_requires_spec_and_reports_unknown_status() -> None:
     asyncio.run(_assert_async_sandbox_requires_spec_and_reports_unknown_status())
 
@@ -370,7 +541,22 @@ async def _assert_async_sandbox_requires_spec_and_reports_unknown_status() -> No
         await plain.endpoint(9000)
     with pytest.raises(ValueError, match="between 1 and 65535"):
         await plain.endpoint(0)
+    with pytest.raises(NotImplementedError, match="does not support pause/resume"):
+        await plain.pause()
+    with pytest.raises(NotImplementedError, match="does not support pause/resume"):
+        await plain.resume()
     await plain.stop()
+
+
+def test_plugin_distributions_names_each_distribution_once(monkeypatch) -> None:
+    eps = [
+        SimpleNamespace(name="a", dist=SimpleNamespace(name="plugin-b")),
+        SimpleNamespace(name="b", dist=SimpleNamespace(name="plugin-b")),
+        SimpleNamespace(name="c", dist=SimpleNamespace(name="plugin-a")),
+        SimpleNamespace(name="d", dist=None),
+    ]
+    monkeypatch.setattr(provider_registry, "entry_points", lambda group: eps)
+    assert provider_registry.plugin_distributions() == ["plugin-a", "plugin-b"]
 
 
 def test_rewrite_image_validation() -> None:
@@ -395,9 +581,13 @@ def test_sandbox_resources_validation() -> None:
         SandboxEndpoint(endpoint="/relative/path")
 
 
-def test_sandbox_endpoint_is_an_optional_provider_capability() -> None:
-    assert isinstance(FakeSandboxProvider(), SupportsSandboxEndpoint)
-    assert not isinstance(PlainSandboxProvider(), SupportsSandboxEndpoint)
+def test_sandbox_optional_provider_capabilities_are_structural() -> None:
+    capable = FakeSandboxProvider()
+    plain = PlainSandboxProvider()
+    assert isinstance(capable, SupportsSandboxEndpoint)
+    assert isinstance(capable, SupportsSandboxPauseResume)
+    assert not isinstance(plain, SupportsSandboxEndpoint)
+    assert not isinstance(plain, SupportsSandboxPauseResume)
 
 
 def test_sandbox_spec_keeps_legacy_positional_provider_options() -> None:
@@ -656,6 +846,10 @@ def test_sync_sandbox_facade_uses_public_provider_api(tmp_path: Path) -> None:
         sandbox.upload(upload_path, "/tmp/sync-upload.txt")
         sandbox.download("/tmp/sync-download.txt", download_path)
         assert download_path.read_bytes() == b"downloaded"
+        sandbox.pause()
+        sandbox.resume()
+        assert provider.pause_calls == [handle]
+        assert provider.resume_calls == [handle]
         sandbox.stop()
         assert provider.closed[-1] == handle
         assert sandbox.status() == SandboxStatus.STOPPED
@@ -806,6 +1000,12 @@ async def _assert_opensandbox_connect_after_create_preserves_request_timeout(mon
         def __init__(self, **kwargs: Any) -> None:
             self.kwargs = kwargs
 
+        def with_transport_if_missing(self) -> "FakeConnectionConfig":
+            return self
+
+        async def close_transport_if_owned(self) -> None:
+            return None
+
     class FakeSDKSandbox:
         connect_calls: list[dict[str, Any]] = []
 
@@ -894,7 +1094,7 @@ async def _assert_opensandbox_create_probe_can_require_stable_successes(monkeypa
 
     assert [call["command"] for call in calls] == ["true", "true", "true"]
     assert all(call["timeout_s"] == 30 for call in calls)
-    assert all(call["user"] == "root" for call in calls)
+    assert all(call["user"] is None for call in calls)
 
 
 @requires_tenacity
@@ -1292,6 +1492,12 @@ async def _assert_opensandbox_implements_connectable_provider(monkeypatch) -> No
         def __init__(self, **kwargs: Any) -> None:
             self.kwargs = kwargs
 
+        def with_transport_if_missing(self) -> "FakeConnectionConfig":
+            return self
+
+        async def close_transport_if_owned(self) -> None:
+            return None
+
     class FakeSDKSandbox:
         connect_calls: list[dict[str, Any]] = []
 
@@ -1311,7 +1517,7 @@ async def _assert_opensandbox_implements_connectable_provider(monkeypatch) -> No
 
     provider = OpenSandboxProvider(
         connection={"domain": "sandbox.example", "protocol": "https"},
-        create={"connect_attempt_timeout_s": 1},
+        create={"connect_attempt_timeout_s": 1, "skip_health_check": True},
         probe={"command": None},
     )
 
@@ -1330,8 +1536,7 @@ async def _assert_opensandbox_implements_connectable_provider(monkeypatch) -> No
     assert isinstance(handle.raw, FakeSDKSandbox)
     connect_call = FakeSDKSandbox.connect_calls[0]
     assert connect_call["sandbox_id"] == "sdk-sandbox-9"
-    # connect() health-checks by default so the handle it returns is usable.
-    assert connect_call["skip_health_check"] is False
+    assert connect_call["skip_health_check"] is True
     assert connect_call["connection_config"].kwargs["domain"] == "sandbox.example"
 
 
@@ -1846,3 +2051,53 @@ async def test_pty_exec_detach_requires_a_capable_session() -> None:
     with pytest.raises(NotImplementedError, match="detached execution"):
         await sandbox.pty.exec("make", session=_LiveShellSession(), detach=True)
     await sandbox.stop()
+
+
+def test_sandbox_config_builds_a_spec_with_provider_config_and_server_metadata() -> None:
+    config = SandboxConfig(
+        ttl_s=600,
+        ready_timeout_s=30,
+        resources={"cpu": 4, "memory_mib": 1024},
+        env={"A": "1"},
+        metadata={"suite": "config", "owner": "config"},
+        provider_options={"platform": {"arch": "arm64"}},
+    )
+    named = {
+        "sandbox": {"default_metadata": {"sandbox-api": "x", "suite": "provider", "owner": "provider"}, "local": {}}
+    }
+
+    spec = config.spec(
+        "sandbox",
+        image="img",
+        workdir="/root",
+        metadata={"owner": "call"},
+        files={"/root/a.txt": "a"},
+        named_configs=named,
+    )
+
+    assert (spec.image, spec.workdir, spec.ttl_s, spec.ready_timeout_s) == ("img", "/root", 600, 30)
+    assert (spec.env, spec.files) == ({"A": "1"}, {"/root/a.txt": "a"})
+    assert spec.metadata == {"sandbox-api": "x", "suite": "config", "owner": "call"}
+    assert (spec.resources.cpu, spec.resources.memory_mib) == (4.0, 1024)
+    assert spec.provider_options == {"platform": {"arch": "arm64"}}
+
+
+def test_sandbox_config_defaults_build_an_empty_spec() -> None:
+    spec = SandboxConfig().spec("sandbox", image=None, workdir=None, named_configs={"sandbox": {"local": {}}})
+
+    assert (spec.image, spec.workdir, spec.ttl_s, spec.ready_timeout_s) == (None, None, None, None)
+    assert (spec.env, spec.files, spec.metadata, spec.provider_options) == ({}, {}, {}, {})
+    assert spec.resources == SandboxResources()
+
+
+def test_sandbox_config_rejects_a_non_numeric_resource_value() -> None:
+    with pytest.raises(ValidationError, match="resources"):
+        SandboxConfig(resources={"cpu": "many"})
+
+
+@pytest.mark.parametrize(
+    "fields", [{"ttl": 600}, {"resources": {"cores": 4}}], ids=["unknown key", "unknown resource"]
+)
+def test_sandbox_config_rejects_unknown_settings(fields: dict) -> None:
+    with pytest.raises(ValidationError):
+        SandboxConfig(**fields)
