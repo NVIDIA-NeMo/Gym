@@ -1678,3 +1678,57 @@ def test_statusless_error_without_native_retry_flag_remains_unknown(setup, retry
     data = {} if retryable is None else {"isRetryable": retryable}
     outcome = agent.classify_outcome({"error": {"name": "APIError", "data": data}})
     assert outcome.failure_kind == "unknown"
+
+
+@pytest.mark.parametrize("cleanup_error", [None, "cleanup failed"])
+async def test_context_limit_preserves_partial_work_without_hiding_cleanup_failure(setup, tmp_path, cleanup_error):
+    from environment_servers.single_agent_turn.app import OutcomeAction, agent_outcome_policy
+
+    agent, sandbox = setup
+    export = json.loads(sandbox.events)
+    assistant = export["messages"][-1]["info"]
+    assistant["finish"] = "error"
+    assistant["error"] = {
+        "name": "ContextOverflowError",
+        "data": {"message": "context is too large", "responseBody": "provider detail"},
+    }
+    sandbox.events = json.dumps(export)
+    sandbox.result.update(return_code=1, error=cleanup_error)
+    capture_observations(sandbox, tmp_path)
+    request, session_id, task = await activate(agent, sandbox)
+    if cleanup_error:
+        with pytest.raises(HTTPException):
+            await task
+    else:
+        response = await task
+        assert response.status == "incomplete"
+        assert response.error is None
+        assert response.output
+        assert response.usage.total_tokens > 0
+        assert agent.classify_outcome(assistant).failure_kind == "agent_limit"
+        assert agent_outcome_policy(response) == OutcomeAction.VERIFY
+    closed = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    root = next(r for r in closed.agent_observations.records if r.kind == "agent_invocation")
+    assert root.status == ("failed" if cleanup_error else "incomplete")
+    if not cleanup_error:
+        assert root.error_type == "context_limit"
+
+
+async def test_reported_native_error_is_bounded_without_losing_classification(setup):
+    agent, sandbox = setup
+    export = json.loads(sandbox.events)
+    assistant = export["messages"][-1]["info"]
+    assistant.pop("finish")
+    assistant["error"] = {"name": "APIError", "data": {"statusCode": 429, "message": "start" + "x" * 20000 + "end"}}
+    sandbox.events = json.dumps(export)
+    sandbox.result["return_code"] = 1
+    request, session_id, task = await activate(agent, sandbox)
+    response = await task
+    assert len(response.error.message) <= 16000
+    assert "...[truncated]..." in response.error.message
+    assert "start" in response.error.message and "end" in response.error.message
+    assert json.loads(response.metadata["ng_agent_outcome"]) == {
+        "failure_kind": "model_request_error",
+        "status_code": 429,
+    }
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))

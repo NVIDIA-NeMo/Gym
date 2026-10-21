@@ -50,7 +50,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.failure_kinds import MODEL_REQUEST_ERROR, MODEL_TRANSPORT_ERROR
+from nemo_gym.failure_kinds import AGENT_LIMIT, MODEL_REQUEST_ERROR, MODEL_TRANSPORT_ERROR
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -219,17 +219,19 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
 
     @staticmethod
     def _reported_model_error(native_result: Mapping[str, Any], cleanup: dict | None) -> bool:
-        """Recognize a completed APIError, with or without HTTP status; tested on OpenCode 1.17.11.
+        """Recognize a completed API error or context limit; tested on OpenCode 1.17.11.
 
         Independent worker failures, cleanup errors and timeouts are not provider reports.
         """
+        finishes = {"APIError": None, "ContextOverflowError": "error"}
+        name = (native_result.get("error") or {}).get("name")
         return (
             cleanup is not None
             and cleanup["return_code"] == 1
             and not cleanup["timed_out"]
             and not cleanup["error"]
-            and (native_result.get("error") or {}).get("name") == "APIError"
-            and native_result.get("finish") is None
+            and name in finishes
+            and native_result.get("finish") == finishes[name]
             and bool(native_result.get("time", {}).get("completed"))
         )
 
@@ -241,6 +243,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         the Environment Server still decides whether to retry the episode.
         """
         error = native_result.get("error") or {}
+        if error.get("name") == "ContextOverflowError":
+            return AgentOutcome(failure_kind=AGENT_LIMIT)
         if error.get("name") != "APIError":
             return AgentOutcome(failure_kind="unknown")
         data = error.get("data") or {}
@@ -1188,6 +1192,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         assistants = [m["info"] for m in export.get("messages", []) if m["info"].get("role") == "assistant"]
         native_result = assistants[-1] if assistants else {}
         reported_error = error is None and failure is None and self._reported_model_error(native_result, result)
+        context_limit = reported_error and self.classify_outcome(native_result).failure_kind == AGENT_LIMIT
         runtime = state.runtime_info
         if runtime is None:
             observations.gaps.append(ObservationGap(code="runtime_info_unavailable"))
@@ -1202,8 +1207,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             continuation=state.is_continuation,
         )
         error = error or outcome.error
+        if context_limit:
+            outcome = OpenCodeRunOutcome(status="incomplete")
         status = outcome.status
-        if error or failure:
+        if (error or failure) and not context_limit:
             status = "failed"
         # Artifact message completion records a model turn, not the entire invocation.
         for record in observations.records:
@@ -1211,10 +1218,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 record.status = "incomplete" if isinstance(failure, asyncio.CancelledError) else status
                 if state.is_continuation:
                     record.duration_ms = (monotonic() - started) * 1000
-                    record.stop_reason = outcome.error_type
+                    record.stop_reason = "context_limit" if context_limit else outcome.error_type
                 record.error_type = outcome.error_type
                 if isinstance(failure, asyncio.CancelledError):
                     record.error_type = "cancelled"
+                elif context_limit:
+                    record.error_type = "context_limit"
                 elif reported_error:
                     record.error_type = "provider_error"
                 elif error or failure:
@@ -1245,7 +1254,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         if error and not reported_error:
             raise HTTPException(502, format_error_message(error, stderr=state.stderr))
         reported_message = None
-        if reported_error:
+        if reported_error and not context_limit:
             error_data = native_result["error"].get("data") or {}
             reported_message = error_data.get("message")
             if not isinstance(reported_message, str) or not reported_message:
