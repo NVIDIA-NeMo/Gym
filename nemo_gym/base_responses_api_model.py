@@ -270,6 +270,10 @@ def _orjson_dispatch_response(content: Any) -> Any:
 
 
 class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
+    forward_streaming_chat_provider_extensions: bool = Field(
+        default=False,
+        description="Preserve supported provider extensions from streaming chat requests; validate them strictly.",
+    )
     # Exact successful routes whose responses cannot contain policy-generated content.
     token_id_capture_non_generating_requests: list[NonGeneratingRequest] = Field(default_factory=list)
     drop_hosted_tools: bool = Field(
@@ -556,7 +560,9 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             await self._finalize_served_response(response)
             return dispatched
 
-        cleaned, include_usage = sanitize_streaming_chat_body(body)
+        cleaned, include_usage = sanitize_streaming_chat_body(
+            body, forward_provider_extensions=self.config.forward_streaming_chat_provider_extensions
+        )
         params = _validate_chat_params(cleaned)
 
         async def completed_stream(completion: Any) -> StreamingResponse:

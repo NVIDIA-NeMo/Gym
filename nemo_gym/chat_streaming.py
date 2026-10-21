@@ -52,9 +52,8 @@ LOG = logging.getLogger(__name__)
 # The dispatch and checkpoint gate share this exact liveness-only SSE frame.
 SSE_KEEPALIVE = b": keep-alive\n\n"
 
-# Provider extension fields are accepted on the non-streaming path only. Streaming harnesses
-# (e.g. OpenClaw's ``chat_template_kwargs``) have always had them dropped here, so they stay
-# dropped rather than reaching the backend.
+# Preserve historical filtering by default. Native harnesses can explicitly opt
+# into forwarding typed provider extensions when their evaluation profile needs them.
 _PARAM_FIELDS = (
     frozenset(NeMoGymChatCompletionCreateParamsNonStreaming.model_fields) - CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS
 )
@@ -65,7 +64,9 @@ def _wants_usage(stream_options: Any) -> bool:
     return bool(isinstance(stream_options, dict) and stream_options.get("include_usage"))
 
 
-def sanitize_streaming_chat_body(body: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+def sanitize_streaming_chat_body(
+    body: dict[str, Any], *, forward_provider_extensions: bool = False
+) -> tuple[dict[str, Any], bool]:
     """Map a streaming-dialect chat body onto the strict non-streaming params shape.
 
     Returns the cleaned body dict (ready for ``NeMoGymChatCompletionCreateParamsNonStreaming``
@@ -75,17 +76,20 @@ def sanitize_streaming_chat_body(body: dict[str, Any]) -> tuple[dict[str, Any], 
     ``stream`` and ``stream_options`` are removed: the params model's ``stream`` field is typed
     ``Literal[False]``, and ``stream_options`` is only meaningful with ``stream: true``, so it has
     no effect on the non-streaming backend call. Remaining fields are filtered to the known params
-    fields, so a harness's extra bookkeeping never reaches the backend.
+    fields, so a harness's extra bookkeeping never reaches the backend. With
+    ``forward_provider_extensions``, recognized provider options are retained and
+    subsequently validated by the same strict schema.
     """
     body = deepcopy(body)
     include_usage = _wants_usage(body.get("stream_options"))
     body.pop("stream", None)
     body.pop("stream_options", None)
 
-    dropped = sorted(set(body) - _PARAM_FIELDS)
+    fields = _PARAM_FIELDS | CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS if forward_provider_extensions else _PARAM_FIELDS
+    dropped = sorted(set(body) - fields)
     if dropped:
         LOG.debug("Dropping unsupported fields from a streaming /v1/chat/completions request: %s", dropped)
-    return {key: value for key, value in body.items() if key in _PARAM_FIELDS}, include_usage
+    return {key: value for key, value in body.items() if key in fields}, include_usage
 
 
 def _sse_data(payload: dict[str, Any]) -> str:

@@ -147,7 +147,7 @@ The driver runs the benchmarks against the services.
 
 | Field | Default | Description |
 | --- | --- | --- |
-| `container` | `python:3.12` | Image the driver runs in. |
+| `container` | `python:3.12` | Image the driver runs in. Set `null` for a Slurm host driver that launches its own scheduler steps; use host paths and an empty `mounts` list. Kubernetes requires an image. |
 | `gym_install` | `null` | `repo` (default `https://github.com/NVIDIA-NeMo/gym`) and `ref` (required; a git tag or commit). When set, the driver installs Gym from that checkout into a fresh virtual environment, with `uv`, before running. When unset, the image must already contain Gym. |
 | `policy_model` | `null` | Name of a service to use as the policy model. See [Policy wiring](#policy-wiring). |
 | `policy_host` | `localhost` | Host used in the injected `policy_base_url`. Use an address routable from elsewhere when an agent runs remotely, for example `${oc.env:HEAD_NODE_IP}`, which is resolved when the driver runs. |

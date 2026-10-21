@@ -1289,12 +1289,20 @@ class NeMoGymChatCompletionContentPartVideoUrlParam(TypedDict, total=False):
     type: Required[Literal["video_url"]]
 
 
+class NeMoGymChatCompletionContentPartAudioUrlParam(TypedDict, total=False):
+    """vLLM audio content, including inline data URLs used by native harnesses."""
+
+    audio_url: Required[Dict[str, str]]
+    type: Required[Literal["audio_url"]]
+
+
 NeMoGymChatCompletionContentPartParam = Union[
     NeMoGymChatCompletionContentPartTextParam,
     NeMoGymChatCompletionContentPartImageParam,
     NeMoGymChatCompletionContentPartInputAudioParam,
     NeMoGymChatCompletionContentPartFileParam,
     NeMoGymChatCompletionContentPartVideoUrlParam,
+    NeMoGymChatCompletionContentPartAudioUrlParam,
 ]
 
 
@@ -1434,7 +1442,9 @@ NeMoGymChatCompletionToolChoiceOptionParam: TypeAlias = Union[
 # Provider extensions accepted by the strict chat request model beyond the
 # OpenAI SDK's own field set. Tests pin the model's fields to SDK ∪ this set so
 # unknown keys keep failing validation while these documented contracts pass.
-CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS = frozenset({"chat_template_kwargs", "thinking", "output_config"})
+CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS = frozenset(
+    {"chat_template_kwargs", "thinking", "output_config", "thinking_token_budget", "mm_processor_kwargs"}
+)
 
 # Client-only fields sent by harnesses such as OpenHands. The strict chat request model
 # accepts them so the request is not rejected with a 422, but never serializes them, so
@@ -1513,6 +1523,8 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
     #   OpenAI-compatible gateways that front Claude. Kept as open mappings so they
     #   are not forced through an SDK type that requires ``budget_tokens``.
     chat_template_kwargs: Optional[Dict[str, Any]] = None
+    thinking_token_budget: Optional[int] = Field(default=None, ge=0)
+    mm_processor_kwargs: Optional[Dict[str, Any]] = None
     thinking: Optional[Dict[str, Any]] = None
     output_config: Optional[Dict[str, Any]] = None
 
