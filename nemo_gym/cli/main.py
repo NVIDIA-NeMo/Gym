@@ -743,7 +743,8 @@ TASK_TARGET = Flag(
         nargs="?",
         metavar="TARGET",
         help=(
-            "Harbor task folder, folder of task folders, or `harbor:<dataset>[@<version>]` hub reference. "
+            "Harbor task folder, folder of task folders, `harbor:<dataset>[@<version>]` hub reference, or the "
+            "name of a committed entry under environments/harbor/ (e.g. terminal_bench_4) after `gym dataset pull`. "
             "Existing folders (including expanded ~user paths) and explicit ./, ../, /, or ~/ paths "
             "take precedence over Hydra overrides. Prefix an ambiguous relative path with ./; "
             "otherwise key=value and ~key are configuration overrides."
@@ -895,6 +896,13 @@ def _dataset_validate(args: argparse.Namespace, overrides: list[str]) -> None:
     from nemo_gym.tasks.harbor.cli import validate_target
 
     validate_target(args, overrides)
+
+
+def _dataset_pull(args: argparse.Namespace, overrides: list[str]) -> None:
+    """`gym dataset pull TARGET`: fetch a Harbor dataset into environments/harbor/ without preparing or running it."""
+    from nemo_gym.tasks.harbor.cli import pull_target
+
+    pull_target(args, overrides)
 
 
 def _dataset_publish(args: argparse.Namespace, overrides: list[str]) -> None:
@@ -1117,6 +1125,22 @@ COMMANDS = {
             ),
         ),
     ),
+    "dataset pull": Command(
+        target=_dataset_pull,
+        summary="Fetch a Harbor dataset into environments/harbor/ and report its folder, task count and digest.",
+        flags=(
+            Flag(
+                register=lambda p: p.add_argument(
+                    "target",
+                    metavar="TARGET",
+                    help="`harbor:<org>/<name>[@<tag> | @sha256:<digest>]` (package store), "
+                    "`harbor:<dataset>[@<version>]` (registry), or the name of a committed entry under "
+                    "environments/harbor/ whose dataset.toml declares `[gym] source` (e.g. terminal_bench_4). "
+                    "A reference an entry declares lands in that entry's folder.",
+                )
+            ),
+        ),
+    ),
     "dataset validate": Command(
         target=_dataset_validate,
         summary="Run each Harbor task's reference solution through the verifier and report the rewards.",
@@ -1125,7 +1149,8 @@ COMMANDS = {
                 register=lambda p: p.add_argument(
                     "target",
                     metavar="TARGET",
-                    help="Harbor task folder, folder of task folders, or `harbor:<dataset>[@<version>]`.",
+                    help="Harbor task folder, folder of task folders, `harbor:<dataset>[@<version>]`, or the name "
+                    "of a committed entry under environments/harbor/ (e.g. terminal_bench_4) after `gym dataset pull`.",
                 )
             ),
             SANDBOX,

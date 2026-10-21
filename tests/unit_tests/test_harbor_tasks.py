@@ -2278,6 +2278,10 @@ def test_registry_versions_keep_distinct_rows_routes_and_outputs(tmp_path, monke
 
     for version in ("1.0", "2.0"):
         write_task(tmp_path / f"ds-{version}" / "a")
+        # A fetch always leaves the folder's manifest behind; prepare reads it back for the fetch report.
+        manifest_module.Manifest.build(tmp_path / f"ds-{version}", source="harbor-registry").write(
+            tmp_path / f"ds-{version}"
+        )
     monkeypatch.setattr(harbor_cli, "fetch_ref", lambda target, **kw: tmp_path / f"ds-{target.split('@')[1]}")
     first = prepare_target("harbor:ds@1.0", output_root=tmp_path / "out")
     first_rows = first.rows_path.read_bytes()

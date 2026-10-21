@@ -482,8 +482,16 @@ def _check_recorded_dataset(folder: Path, previous: Manifest | None, dataset: Re
         )
 
 
-def fetch_package_dataset(ref: PackageRef, root: Path, store: PackageStore | None = None) -> Path:
+def fetch_package_dataset(
+    ref: PackageRef, root: Path, store: PackageStore | None = None, *, folder: Path | None = None
+) -> Path:
     """Fetch every task of a package-store dataset into ``root/<folder>/<task>/``.
+
+    The dataset folder is ``root/<name>[-<tag | 12 digest chars>]/`` (:meth:`PackageRef.folder_name`) unless
+    ``folder`` names it: the folder of a committed entry under ``environments/harbor/`` that declares this
+    dataset as its ``[gym] source`` (:mod:`nemo_gym.tasks.harbor.entries`). The entry's own files there (README,
+    YAML overlays, ``dataset.toml``) are not task folders and are left alone; the manifest's claim and the
+    per-task checks below are the same whichever folder the tasks land in.
 
     A task folder whose digest already matches is kept, so a rerun after a partial
     fetch completes it: a folder the manifest records is compared with the digest recorded
@@ -512,7 +520,7 @@ def fetch_package_dataset(ref: PackageRef, root: Path, store: PackageStore | Non
     duplicates = sorted(name for name, count in counts.items() if count > 1)
     if duplicates:
         raise PackageStoreError(f"{ref.package}@{ref.ref} has tasks sharing a folder name: {', '.join(duplicates)}")
-    folder = Path(root) / ref.folder_name(dataset.content_hash)
+    folder = Path(folder) if folder is not None else Path(root) / ref.folder_name(dataset.content_hash)
     if folder.is_symlink():
         raise PackageStoreError(f"Dataset folder must not be a symlink: {folder}")
     folder.mkdir(parents=True, exist_ok=True)

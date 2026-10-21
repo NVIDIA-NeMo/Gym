@@ -615,15 +615,20 @@ class TestPackageStore:
 
         seen = {}
 
-        def fake_fetch(ref, root, store=None):
-            seen["ref"], seen["root"] = ref, root
-            return root / "terminal-bench-4.0.0"
+        def fake_fetch(ref, root, store=None, *, folder=None):
+            seen["ref"], seen["root"], seen["folder"] = ref, root, folder
+            return folder or root / "terminal-bench-4.0.0"
 
         monkeypatch.setattr(package_store, "fetch_package_dataset", fake_fetch)
         folder = hub.fetch_ref("harbor:terminal-bench/terminal-bench@4.0.0", tmp_path)
         assert folder == tmp_path / "terminal-bench-4.0.0"
         assert seen["ref"] == package_store.PackageRef("terminal-bench", "terminal-bench", "4.0.0")
-        assert seen["root"] == tmp_path
+        assert seen["root"] == tmp_path and seen["folder"] is None
+        # A caller that names the dataset folder (a committed entry's) passes it through to the store fetch.
+        assert hub.fetch_ref("harbor:terminal-bench/terminal-bench@4.0.0", tmp_path, folder=tmp_path / "tb4") == (
+            tmp_path / "tb4"
+        )
+        assert seen["folder"] == tmp_path / "tb4"
 
     def test_archive_is_checked_without_exclusions_but_a_noisy_folder_still_matches(self, tmp_path, monkeypatch):
         folders = {"alpha": write_task(tmp_path / "src" / "alpha")}
