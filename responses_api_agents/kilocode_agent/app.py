@@ -810,7 +810,7 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
             diagnostics=artifacts.log_tail or artifacts.stderr[-4096:],
         )
         if problem is not None:
-            # Native sessions must not hand a failed run to the verifier, where it would score as a zero.
+            # Agent sessions must not hand a failed run to the verifier, where it would score as a zero.
             raise RuntimeError(problem)
         response.metadata = {
             "harness_execution": "sandbox",

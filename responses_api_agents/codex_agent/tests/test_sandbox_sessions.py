@@ -158,7 +158,7 @@ def setup():
     )
     module = "responses_api_agents.codex_agent.app"
     with (
-        patch(f"{module}.ensure_codex", side_effect=AssertionError("native sessions must not install host Codex")),
+        patch(f"{module}.ensure_codex", side_effect=AssertionError("agent sessions must not install host Codex")),
         patch(f"{module}.resolve_provider_config"),
         patch(f"{module}.get_global_config_dict", return_value={}),
         patch(f"{module}.create_provider"),
@@ -172,7 +172,7 @@ def close_body(session_id):
     return {"agent_session_id": session_id, "episode_id": seed().episode_id.model_dump()}
 
 
-def test_http_native_flow_runs_codex_in_borrowed_sandbox(setup):
+def test_http_agent_session_flow_runs_codex_in_borrowed_sandbox(setup):
     agent, sandbox = setup
     with patch.object(agent, "_run_codex", AsyncMock(side_effect=AssertionError("host Codex must not run"))):
         with TestClient(agent.setup_webserver()) as client:
@@ -230,7 +230,7 @@ def test_http_native_flow_runs_codex_in_borrowed_sandbox(setup):
 
 
 @pytest.mark.parametrize("value", [None, 0, -1, True, 1.5, "3"])
-def test_native_usage_details_without_measured_positive_counts_are_unknown(setup, value) -> None:
+def test_sandbox_usage_details_without_measured_positive_counts_are_unknown(setup, value) -> None:
     agent, sandbox = setup
     records = [json.loads(line) for line in sandbox.events.splitlines()]
     records[-1][1]["usage"].update(cached_input_tokens=value, reasoning_output_tokens=value)
@@ -250,7 +250,7 @@ def test_native_usage_details_without_measured_positive_counts_are_unknown(setup
 
 
 @pytest.mark.parametrize("unknown_turn", [None, 0, 1])
-def test_native_usage_details_require_known_counts_from_every_completed_turn(setup, unknown_turn) -> None:
+def test_sandbox_usage_details_require_known_counts_from_every_completed_turn(setup, unknown_turn) -> None:
     agent, sandbox = setup
     records = [json.loads(line) for line in sandbox.events.splitlines()]
     records[-1][1]["usage"]["reasoning_output_tokens"] = 1
@@ -304,7 +304,7 @@ def test_recovered_stream_error_keeps_success_and_available_usage_with_coverage_
         assert "recovered retries" in gaps["partial_model_usage_unavailable"]["detail"]
 
 
-def test_native_custom_model_context_budget_reaches_sandbox_config(setup) -> None:
+def test_sandbox_custom_model_context_budget_reaches_sandbox_config(setup) -> None:
     agent, sandbox = setup
     agent.config = CodexAgentConfig(
         **(agent.config.model_dump() | {"model_context_window": 40960, "model_auto_compact_token_limit": 32768})
@@ -1720,7 +1720,7 @@ async def test_failed_setup_is_cleanup_only_and_preserves_original_exception(set
 
 
 @pytest.mark.parametrize("owned", [False, True])
-def test_sandbox_source_controls_ownership_and_native_routing(setup, owned):
+def test_sandbox_source_controls_ownership_and_session_routing(setup, owned):
     agent, sandbox = setup
     agent.config.sandbox_provider = "agent-provider"
     agent.config.sandbox_config = {"image": "test-image", "workdir": "/agent-workspace"}
