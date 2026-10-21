@@ -2250,6 +2250,8 @@ def _failure_export_metrics(
     """
     attempts: Counter = Counter()
     latest: Dict[Any, Dict[str, Any]] = {}
+    # Every class the sidecars name starts at 0: a reopened tracking run keeps a class's last value until it is sent.
+    failed: Counter = Counter()
     for fpath in failures_fpaths:
         if not fpath.exists():
             continue
@@ -2259,10 +2261,11 @@ def _failure_export_metrics(
                 if not line:
                     continue
                 row = loads_jsonl_line(line, fpath, line_no)
+                failed.setdefault(row.get(NG_FAILURE_CLASS_KEY) or "unknown", 0)
                 attempts[identity(row)] += 1
                 latest[identity(row)] = row
     max_attempts = get_max_rollout_attempts()
-    failed = Counter(row.get(NG_FAILURE_CLASS_KEY) or "unknown" for key, row in latest.items() if key not in landed)
+    failed.update(row.get(NG_FAILURE_CLASS_KEY) or "unknown" for key, row in latest.items() if key not in landed)
     return {
         "retries/attempts": sum(attempts.values()),
         # A rollout that landed after n failed attempts was dispatched n + 1 times.

@@ -90,6 +90,7 @@ from nemo_gym.rollout_collection import (
     _CompletedRollout,
     _drop_truncated_tail,
     _expand_input_glob,
+    _failure_export_metrics,
     _failure_rows_counted_as_zero,
     _failures_path_for,
     _get_max_rollout_attempts,
@@ -2730,6 +2731,8 @@ class TestRolloutCollection:
             "coverage/expected": 3,
             "coverage/scored": 2,
             "coverage/missing": 1,
+            # Task 0 failed with this class before it landed: the reopened tracking run is told it is 0 now.
+            f"coverage/failed/{AGENT_REQUEST_FAILED_FAILURE_CLASS}": 0,
             f"coverage/failed/{AGENT_RUN_ERROR_FAILURE_CLASS}": 1,
             "retries/attempts": 5,
             "retries/rollouts_retried": 2,
@@ -7888,6 +7891,7 @@ class TestRolloutAggregationHelper:
             "coverage/scored": 2,
             "coverage/missing": 1,
             "coverage/failed/timeout_exceeded": 1,
+            "coverage/failed/transient": 0,
             "retries/attempts": 4,
             "retries/rollouts_retried": 2,
             "retries/at_cap": 1,
@@ -10519,3 +10523,31 @@ class TestLiveHealthEvaluation:
         # The row was saved and the progress accounting for it had already run when the await was reached.
         assert len(Path(tmp_path / "output.jsonl").read_bytes().splitlines()) >= 1
         assert "rollouts for `my_agent`" in seen_at_await[0]
+
+
+class TestFailureExportMetrics:
+    @staticmethod
+    def _counts(tmp_path: Path, classes: list[tuple[int, str]], landed: set) -> dict:
+        sidecar = tmp_path / "rollouts_failures.jsonl"
+        sidecar.write_bytes(
+            b"".join(
+                orjson.dumps({TASK_INDEX_KEY_NAME: task, ROLLOUT_INDEX_KEY_NAME: 0, NG_FAILURE_CLASS_KEY: name})
+                + b"\n"
+                for task, name in classes
+            )
+        )
+        identity = lambda row: (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME])
+        metrics = _failure_export_metrics([sidecar], identity, landed)
+        return {k: v for k, v in metrics.items() if k.startswith("coverage/failed/")}
+
+    def test_a_class_cleared_by_a_resume_is_exported_as_zero(self, tmp_path: Path) -> None:
+        """A reopened tracking run keeps the last value it got, so a cleared class must be sent as 0."""
+        assert self._counts(tmp_path, [(0, "timeout_exceeded")], set()) == {"coverage/failed/timeout_exceeded": 1}
+        assert self._counts(tmp_path, [(0, "timeout_exceeded")], {(0, 0)}) == {"coverage/failed/timeout_exceeded": 0}
+
+    def test_a_class_replaced_by_a_later_attempt_is_exported_as_zero(self, tmp_path: Path) -> None:
+        counts = self._counts(tmp_path, [(0, "timeout_exceeded"), (0, AGENT_RUN_ERROR_FAILURE_CLASS)], set())
+        assert counts == {"coverage/failed/timeout_exceeded": 0, f"coverage/failed/{AGENT_RUN_ERROR_FAILURE_CLASS}": 1}
+
+    def test_no_sidecar_rows_export_no_class(self, tmp_path: Path) -> None:
+        assert self._counts(tmp_path, [], set()) == {}
