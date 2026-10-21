@@ -4675,6 +4675,29 @@ def test_responses_metadata_sampling_reaches_vllm() -> None:
     assert outbound["chat_template_kwargs"] == {"enable_thinking": True}
 
 
+def test_indic_ifeval_prepared_sampling_reaches_vllm() -> None:
+    from benchmarks.indic.ifeval.prepare import build_rows
+
+    row = build_rows(
+        [
+            {
+                "key": 1,
+                "prompt": "नमस्ते लिखिए।",
+                "instruction_id_list": ["keywords:existence"],
+                "kwargs": [{"keywords": ["नमस्ते"]}],
+                "tags": ["correct"],
+            }
+        ],
+        language="hi",
+    )[0]
+    request = NeMoGymResponseCreateParamsNonStreaming.model_validate(row["responses_create_params"])
+    outbound = _translate_responses_request(_make_minimal_audio_model(), request)
+    assert (outbound["temperature"], outbound["max_tokens"]) == (0.0, 1280)
+    assert outbound["messages"] == [{"role": "user", "content": "नमस्ते लिखिए।"}]
+    assert "top_k" not in outbound
+    assert "chat_template_kwargs" not in outbound
+
+
 class TestAudioDataSplice:
     def test_no_metadata_passthrough(self) -> None:
         """No audio_data in metadata → user message content stays a plain string."""
@@ -6475,6 +6498,7 @@ class TestEndpointFile:
         # against a dead host fail fast and re-enter through the rebound
         # client; sessions re-resolve onto the new host.
         assert server._clients[0].max_connection_retries == 8
+        assert server._clients[0].max_rate_limit_wait_seconds == 0
         assert not server._session_id_to_client
         # Within endpoint_check_interval_s the filesystem is left alone, so a
         # fresh publish is only seen once the window is over.
@@ -6486,7 +6510,9 @@ class TestEndpointFile:
         server._maybe_rebind_endpoint()
         assert server.config.base_url == ["http://newer-host:8712/v1"]
         # Static base_url clients without route-around keep unbounded connection retries.
-        assert self._make_server(tmp_path, endpoint_file=None)._clients[0].max_connection_retries is None
+        static = self._make_server(tmp_path, endpoint_file=None)._clients[0]
+        assert static.max_connection_retries is None
+        assert static.max_rate_limit_wait_seconds == 0
 
     def test_route_around_bounds_connection_retries_over_a_static_url_list(self, tmp_path) -> None:
         """``route_around_failing_endpoints`` needs bounded clients even without an endpoint file.

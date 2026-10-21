@@ -137,6 +137,81 @@ async def test_legacy_run_steps_block_prepare_only_when_waited_on() -> None:
     assert record.episode == {"next": "verify"}
 
 
+async def test_commit_reply_names_the_episodes_agent_runs_drive(tmp_path: Path) -> None:
+    """An agent session an environment server started belongs to that server; the agent owns only its own /run."""
+    participant = AgentSessionParticipant(Hooks())
+    controller = ParticipantControlPlane(participant, instance_name="agent", lease_grace_seconds=60)
+    run_id, session_id = EpisodeId(rollout_id="run"), EpisodeId(rollout_id="session", attempt=1)
+    participant.open_session("session", session_id)
+    verifying, session_parked, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def own_run() -> None:
+        async with participant.legacy_run("run:run", run_id) as run:
+            await run.boundary({"next": "verify"})
+            async with run.step("replay"):
+                verifying.set()
+                await release.wait()
+
+    async def environment_session() -> None:
+        async with participant.activation("session", session_id) as activation:
+            await session_parked.wait()
+            await activation.boundary(lambda: {"step": 2})
+
+    tasks = [asyncio.create_task(own_run()), asyncio.create_task(environment_session())]
+    await asyncio.wait_for(verifying.wait(), 5)
+    prepare = asyncio.create_task(controller.prepare(CheckpointRequest(**control())))
+    await asyncio.sleep(0.01)
+    session_parked.set()
+    await prepare
+    reply = await controller.commit(CommitRequest(**control(checkpoint_dir=str(tmp_path))))
+    await controller.resume(CheckpointRequest(**control()))
+    release.set()
+    await asyncio.wait_for(asyncio.gather(*tasks), 5)
+
+    assert reply["episode_ids"] == ["run", "session-a1"]
+    assert reply["run_episode_ids"] == ["run"]
+
+
+async def test_a_restored_run_episode_not_yet_reclaimed_is_still_named_in_the_commit_reply(tmp_path: Path) -> None:
+    """A checkpoint between a restore and the replacement /run must still credit the episode to its agent's own /run."""
+    source = AgentSessionParticipant(Hooks())
+    source_controller = ParticipantControlPlane(source, instance_name="agent", lease_grace_seconds=60)
+    episode_id = EpisodeId(rollout_id="run")
+    verifying, release = asyncio.Event(), asyncio.Event()
+
+    async def own_run() -> None:
+        async with source.legacy_run("run:run", episode_id) as run:
+            await run.boundary({"next": "verify"})
+            async with run.step("replay"):
+                verifying.set()
+                await release.wait()
+
+    task = asyncio.create_task(own_run())
+    await asyncio.wait_for(verifying.wait(), 5)
+    await source_controller.prepare(CheckpointRequest(**control()))
+    await source_controller.commit(CommitRequest(**control(checkpoint_dir=str(tmp_path / "first"))))
+    await source_controller.resume(CheckpointRequest(**control()))
+    release.set()
+    await asyncio.wait_for(task, 5)
+
+    restored = AgentSessionParticipant(Hooks())
+    controller = ParticipantControlPlane(restored, instance_name="agent", lease_grace_seconds=60)
+    await controller.restore(
+        RestoreRequest(**control("r1", checkpoint_dir=str(tmp_path / "first"), episode_ids=[episode_id]))
+    )
+    await controller.resume(CheckpointRequest(**control("r1")))
+    replacement = EpisodeId(rollout_id="run", attempt=1)
+    # No replacement /run has claimed the session yet.
+    assert await restored.restored_pending() == [replacement]
+    await controller.prepare(CheckpointRequest(**control("c2")))
+    reply = await controller.commit(
+        CommitRequest(**control("c2", checkpoint_dir=str(tmp_path / "second"), episode_ids=[replacement]))
+    )
+
+    assert reply["episode_ids"] == ["run-a1"]
+    assert reply["run_episode_ids"] == ["run-a1"]
+
+
 async def test_retire_stops_the_activation_before_it_replies() -> None:
     hooks = Hooks()
     participant = AgentSessionParticipant(hooks)

@@ -17,7 +17,7 @@ from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseInputItem
 
 
 if TYPE_CHECKING:
-    from nemo_gym.base_responses_api_model import ModelCallRecord
+    from nemo_gym.observability.model_calls import ModelCallRecord
 
 
 NG_AGENT_OBSERVATIONS_KEY = "ng_agent_observations"
