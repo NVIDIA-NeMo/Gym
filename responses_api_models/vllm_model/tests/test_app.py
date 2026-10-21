@@ -5317,6 +5317,17 @@ class TestCompletionsBackendBodyTranslation:
 
 
 class TestCompletionsBackendResponseTranslation:
+    def test_provider_metrics_preserved(self) -> None:
+        model = _make_completions_backend_model()
+        metrics = {"speculative_decoding": {"num_spec_steps": 4, "acceptance_histogram": [1, 0, 0, 3]}}
+        completion = model._completion_dict_to_chat_completion(
+            {
+                "choices": [{"index": 0, "text": "ok", "finish_reason": "stop"}],
+                "metrics": metrics,
+            }
+        )
+        assert completion.metrics == metrics
+
     def test_text_lifted_into_assistant_message(self) -> None:
         model = _make_completions_backend_model()
         chat_completion = model._completion_dict_to_chat_completion(

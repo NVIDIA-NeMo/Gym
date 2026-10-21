@@ -1356,11 +1356,8 @@ async def _fail_uncommitted_external_call(context: CaptureContext | None) -> Non
         )
         return
     try:
-        await ledger.record_failure(
-            context.rollout_id,
-            context.model_call_id,
-            UNCOMMITTED_CALL_REASON,
-        )
+        # A disconnected caller must not cancel the write before it reaches the ledger.
+        await asyncio.shield(ledger.record_failure(context.rollout_id, context.model_call_id, UNCOMMITTED_CALL_REASON))
     except Exception:
         logger.exception(
             "Could not poison uncommitted call %s for rollout %s.",

@@ -364,11 +364,13 @@ async def test_empty_tool_content_candidate_is_not_just_latest_call(ledger, ambi
     )
     token = set_token_sink(context)
     try:
+        await resolve_parent(echoed)
         if ambiguous:
-            with pytest.raises(ValueError, match="Ambiguous source-prefix candidate"):
-                await resolve_parent(echoed)
+            assert context.capture_admission.mode == "text"
+            assert context.capture_admission.root_reason == "ambiguous_candidate"
+            assert context.capture_admission.parent_call_id is None
+            assert context.capture_admission.staging_chain == []
         else:
-            await resolve_parent(echoed)
             assert context.capture_admission.parent_call_id == "accepted"
             assert context.capture_admission.requires_empty_tool_content_equivalence is True
     finally:

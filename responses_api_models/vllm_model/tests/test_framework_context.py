@@ -574,6 +574,32 @@ def test_invalid_metadata_is_rejected_before_capture_intent(monkeypatch, tmp_pat
 @pytest.mark.parametrize("route", ["responses", "responses-stream", "measure"])
 @pytest.mark.parametrize("prior_call", [False, True])
 @pytest.mark.parametrize(
+    "body",
+    [
+        {"input": [{"role": "user", "content": [{"type": "input_file", "file_id": "file-test"}]}]},
+        {"input": "task", "tool_choice": "required"},
+    ],
+)
+def test_conversion_error_is_rejected_before_intent(monkeypatch, tmp_path, route, prior_call, body):
+    harness = make_capture_harness(monkeypatch, tmp_path)
+    if prior_call:
+        assert_clean(harness.post("attempt", HISTORY))
+    before = harness.manifest("attempt")
+    path = "/ng-rollout/attempt/training-token-capture/v1/responses"
+    if route == "measure":
+        path = "/ng-rollout/attempt/training-token-capture/context/measure"
+    response = harness.client.post(path, json=body | {"stream": route == "responses-stream"})
+    assert response.status_code == 422, response.text
+    assert harness.manifest("attempt") == before
+    assert len(harness.worker_calls) == len(harness.sink.records) == int(prior_call)
+    assert_clean(harness.post("attempt", [{"role": "user", "content": "valid retry"}]))
+    after = harness.manifest("attempt")
+    assert not after.pending_call_ids and not after.failures
+
+
+@pytest.mark.parametrize("route", ["responses", "responses-stream", "measure"])
+@pytest.mark.parametrize("prior_call", [False, True])
+@pytest.mark.parametrize(
     "item",
     [
         {"type": "web_search_call", "id": "ws1", "status": "completed", "action": {"type": "search", "query": "q"}},
@@ -605,7 +631,8 @@ def test_unsupported_replay_item_is_rejected_before_intent(monkeypatch, tmp_path
         path = "/ng-rollout/attempt/training-token-capture/context/measure"
     response = harness.client.post(path, json=body)
     assert response.status_code == 422, response.text
-    assert f"Unsupported replay item kind: {item['type']}" in response.json()["detail"]
+    # Conversion or replay validation may reject first; both must identify the kind.
+    assert item["type"] in response.json()["detail"]
     assert harness.manifest("attempt") == before
     assert {path.name: path.read_bytes() for path in root.iterdir()} == before_files
     assert len(harness.worker_calls) == len(harness.sink.records) == int(prior_call)
@@ -997,7 +1024,8 @@ async def test_streaming_chat_continuation_commits_before_answer(monkeypatch, tm
     assert all(resend is False for _, resend in harness.worker_calls)
 
 
-async def test_cancelled_chat_keepalive_retains_uncertain_capture(monkeypatch, tmp_path):
+@pytest.mark.parametrize("delay_failure_write", [False, True])
+async def test_cancelled_chat_keepalive_retains_uncertain_capture(monkeypatch, tmp_path, delay_failure_write):
     import threading
 
     harness = make_capture_harness(monkeypatch, tmp_path)
@@ -1009,6 +1037,15 @@ async def test_cancelled_chat_keepalive_retains_uncertain_capture(monkeypatch, t
         failure_written.set()
 
     monkeypatch.setattr(harness.ledger, "_record_failure", persist_failure)
+    if delay_failure_write:
+        record_failure_async = harness.ledger.record_failure
+
+        async def delayed_failure(*args):
+            # Exercise cancellation before the ledger submits work to its executor.
+            await asyncio.sleep(0.01)
+            await record_failure_async(*args)
+
+        monkeypatch.setattr(harness.ledger, "record_failure", delayed_failure)
     worker = NeMoGymAsyncOpenAI.create_chat_completion
     live, staged, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
     sent = []
@@ -1242,7 +1279,7 @@ def test_http_calls_overlap_and_drain_after_close(monkeypatch, tmp_path, first):
 
 @pytest.mark.parametrize("route", ["responses", "responses-stream", "chat/completions", "measure"])
 @pytest.mark.parametrize("prior_failure", [False, True])
-def test_ambiguous_capture_is_refused_before_generation(monkeypatch, tmp_path, route, prior_failure):
+def test_ambiguous_capture_roots_without_choosing_a_parent(monkeypatch, tmp_path, route, prior_failure):
     harness = make_capture_harness(monkeypatch, tmp_path)
     if route == "chat/completions":
         path = "/ng-rollout/attempt/training-token-capture/v1/chat/completions"
@@ -1261,15 +1298,29 @@ def test_ambiguous_capture_is_refused_before_generation(monkeypatch, tmp_path, r
     path = f"/ng-rollout/attempt/training-token-capture/v1/{route}"
     if route == "measure":
         path = "/ng-rollout/attempt/training-token-capture/context/measure"
+        tokenize = AsyncMock(return_value={"prompt_token_count": 19, "ng_context_measured": True})
+        monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_tokenize", tokenize)
     body = {"messages" if route == "chat/completions" else "input": history}
     if route == "responses-stream":
         path = path.removesuffix("-stream")
         body["stream"] = True
     response = harness.client.post(path, json=body)
-    assert response.status_code == 409, response.text
-    assert "Ambiguous" in response.json()["detail"]
-    assert len(harness.worker_calls) == 2
-    assert harness.manifest("attempt") == before
+    assert response.status_code == 200, response.text
+    if route == "measure":
+        admission = CaptureAdmission.model_validate(tokenize.call_args.kwargs[NG_CAPTURE_FIELD])
+        assert harness.manifest("attempt") == before
+        assert len(harness.worker_calls) == 2
+    else:
+        admission = harness.worker_calls[-1][0]
+        after = harness.manifest("attempt")
+        assert len(after.records) == len(harness.sink.records) == 3
+        assert after.records[:2] == before.records
+        assert after.failures == before.failures and not after.pending_call_ids
+        assert after.records[-1].parent_call_id is None
+        assert after.records[-1].root_reason == "ambiguous_candidate"
+    assert admission.mode == "text"
+    assert admission.parent_call_id is None and admission.staging_chain == []
+    assert admission.prev_len == 0 and admission.root_reason == "ambiguous_candidate"
 
 
 @pytest.mark.parametrize("route", ["responses", "responses-stream", "chat/completions", "measure"])

@@ -675,6 +675,18 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
         sys.exit(1)
 
 
+def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
+    if overrides:
+        args._parser.error("resubmit does not accept Hydra overrides")
+    from nemo_gym.orchestration.submit import resubmit
+
+    try:
+        print(resubmit(args.gym_job_id, args.benchmark).job_id)
+    except (ValueError, RuntimeError) as error:
+        print(f"Error: {error}", file=sys.stderr)
+        sys.exit(1)
+
+
 def _eval_run(args: argparse.Namespace, overrides: list[str]) -> None:
     target = getattr(args, "target", None)
     if target:
@@ -794,6 +806,12 @@ def _dataset_download(args: argparse.Namespace, overrides: list[str]) -> None:
         "gitlab": "nemo_gym.cli.dataset:download_jsonl_dataset_cli",
     }
     dispatch(targets[args.storage], overrides)
+
+
+def _dataset_validate(args: argparse.Namespace, overrides: list[str]) -> None:
+    from nemo_gym.tasks.harbor.cli import validate_target
+
+    validate_target(args, overrides)
 
 
 # One-line help for each command group, shown in `gym --help`.
@@ -918,6 +936,25 @@ COMMANDS = {
             _value_flag("prompt-config", "prompt_config", "Prompt template YAML to apply."),
             _value_flag("output", "output_jsonl_fpath", "Output JSONL file.", aliases=("-o",)),
             SEARCH_DIR,
+        ),
+    ),
+    "dataset validate": Command(
+        target=_dataset_validate,
+        summary="Run each Harbor task's reference solution through the verifier and report the rewards.",
+        flags=(
+            Flag(
+                register=lambda p: p.add_argument(
+                    "target",
+                    metavar="TARGET",
+                    help="Harbor task folder, folder of task folders, or `harbor:<dataset>[@<version>]`.",
+                )
+            ),
+            SANDBOX,
+            CONFIG,
+            MODEL_TYPE,
+            SEARCH_DIR,
+            _value_flag("concurrency", "num_samples_in_parallel", "Maximum number of concurrent tasks."),
+            _value_flag("limit", "limit", "Maximum number of tasks to validate."),
         ),
     ),
     "dataset collate": Command(
@@ -1308,6 +1345,18 @@ COMMANDS = {
                     help="Emit the submission record (or, with --resolve-only, the resolved config) as JSON.",
                 ),
             ),
+        ),
+    ),
+    "eval resubmit": Command(
+        target=_eval_resubmit,
+        summary="Queue one benchmark of a submitted run again, in place.",
+        flags=(
+            Flag(
+                register=lambda p: p.add_argument(
+                    "gym_job_id", metavar="GYM_JOB_ID", help="The submission's id, as printed by `gym eval submit`."
+                ),
+            ),
+            Flag(register=lambda p: p.add_argument("benchmark", metavar="BENCHMARK", help="The benchmark to queue.")),
         ),
     ),
     "eval compare": Command(

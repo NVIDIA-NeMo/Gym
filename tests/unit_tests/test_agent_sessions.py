@@ -89,3 +89,13 @@ def test_base_agent_exposes_unimplemented_session_routes() -> None:
     paths = agent.setup_webserver().openapi()["paths"]
     assert "/v1/agent_sessions" in paths
     assert "/v1/agent_sessions/close" in paths
+
+
+def test_agent_session_seed_carries_the_tasks_agent_timeout() -> None:
+    """The environment server hands the task's `[agent].timeout_sec` to the harness in the seed."""
+    seed = _seed_request()
+    assert seed.agent_timeout_sec is None and "agent_timeout_sec" in seed.model_dump(mode="json")
+    timed = AgentSeedSessionRequest.model_validate({**seed.model_dump(mode="json"), "agent_timeout_sec": 900.0})
+    assert timed.agent_timeout_sec == 900.0
+    with pytest.raises(ValidationError):
+        AgentSeedSessionRequest.model_validate({**seed.model_dump(mode="json"), "agent_timeout_sec": 0})

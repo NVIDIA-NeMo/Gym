@@ -526,7 +526,9 @@ class VLLMModel(SimpleResponsesAPIModel):
             if not isinstance(options, dict):
                 raise ValueError("metadata.extra_body must encode a JSON object")
             validate_framework_context_options(options | (self.config.sampling_overrides or {}))
-        except ValueError as error:
+            if isinstance(body, NeMoGymResponseCreateParamsNonStreaming) and not self.config.is_responses_native:
+                self._responses_to_chat_request(body)
+        except (ValueError, NotImplementedError) as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
 
     def _should_propagate_upstream_http_error(self, error: ClientResponseError) -> bool:
@@ -1970,6 +1972,8 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         if completion_dict.get("usage") is not None:
             chat_completion_dict["usage"] = completion_dict["usage"]
+        if completion_dict.get("metrics") is not None:
+            chat_completion_dict["metrics"] = completion_dict["metrics"]
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
 

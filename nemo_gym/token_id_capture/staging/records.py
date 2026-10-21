@@ -51,7 +51,14 @@ from nemo_gym.token_id_capture.staging.digest import (
 CaptureDisposition = Literal["staged", "capture_failed"]
 CaptureMode = Literal["token_in", "text"]
 CompletionStatus = Literal["completed", "incomplete", "failed", "unknown"]
-RootReason = Literal["first_call", "no_prefix_match", "non_user_suffix", "render_options_changed", "worker_rooted"]
+RootReason = Literal[
+    "first_call",
+    "no_prefix_match",
+    "non_user_suffix",
+    "render_options_changed",
+    "worker_rooted",
+    "ambiguous_candidate",
+]
 Identifier = Annotated[StrictStr, Field(min_length=1)]
 NonNegativeInt = Annotated[StrictInt, Field(ge=0)]
 PositiveInt = Annotated[StrictInt, Field(ge=1)]
