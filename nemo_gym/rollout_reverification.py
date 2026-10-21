@@ -60,6 +60,7 @@ from nemo_gym.rollout_collection import (
     NG_NO_PERSIST_KEY,
     NG_RESULT_TYPE_KEY,
     _coverage_report,
+    _failure_rows_counted_as_zero,
     _get_max_rollout_attempts,
     _rollout_for_export,
     _rollout_request_debug_summary,
@@ -1125,7 +1126,20 @@ class RolloutReverificationHelper(BaseModel):
             aggregate_metrics_fpath = None
         else:
             print("Computing aggregate metrics")
-            aggregate_metrics_fpath = await _call_aggregate_metrics(results, agg_rows, output_fpaths.output)
+            # A final failure scores 0 here as in `gym eval aggregate`, so one run never has two scores. The
+            # copies are for the metrics only; the sidecar and the returned rows are unchanged.
+            final_zeros = _failure_rows_counted_as_zero(
+                [output_fpaths.failures],
+                [],
+                {(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) for r in results},
+                retry_terminal_timeouts=config.retry_terminal_timeouts,
+            )
+            routing_keys = (AGENT_REF_KEY_NAME, TASK_SOURCE_KEY_NAME, ENVIRONMENT_SERVER_STAMP_KEY_NAME)
+            aggregate_metrics_fpath = await _call_aggregate_metrics(
+                results + final_zeros,
+                agg_rows + [{k: r[k] for k in routing_keys if k in r} for r in final_zeros],
+                output_fpaths.output,
+            )
 
         expected_rollouts = len(results) + sum(failure_counts.values())
         coverage = _coverage_report(expected_rollouts, len(results), failure_counts, output_fpaths.failures)

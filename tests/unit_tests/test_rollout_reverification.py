@@ -2394,6 +2394,34 @@ class TestRolloutReverificationRunFromConfig:
         assert returned[0]["reward"] == 1.0
 
     @pytest.mark.parametrize(
+        ("failure_class", "scored"),
+        [("verifier_error", [1.0, 0.0]), ("judge_failed", [1.0]), ("reference_missing", [1.0])],
+        ids=["final-failure-counts-as-zero", "retryable-left-out", "data-gap-left-out"],
+    )
+    async def test_reverification_counts_final_failures_as_zero_like_gym_eval_aggregate(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure_class: str, scored: list[float]
+    ) -> None:
+        """Review finding 4338966652: one run must not have two scores, so final failures count as 0 here too."""
+        success_row = self._make_row("agent_a", task=0)
+        failure_row = self._make_row("agent_a", task=1)
+        pairs = [
+            (success_row, {"reward": 1.0}),
+            (failure_row, {"reward": 0.8, NG_FAILURE_CLASS_KEY: failure_class}),
+        ]
+        self._patch_common(monkeypatch, pairs)
+        aggregate = AsyncMock(return_value=None)
+        monkeypatch.setattr("nemo_gym.rollout_reverification._call_aggregate_metrics", aggregate)
+
+        returned = await RolloutReverificationHelper().run_from_config(self._make_config(tmp_path))
+
+        [(results, rows, _)] = [call.args for call in aggregate.await_args_list]
+        assert [r["reward"] for r in results] == scored
+        assert [r[AGENT_REF_KEY_NAME] for r in rows] == [{"name": "agent_a"}] * len(scored)
+        # The artifacts and the returned rows are unchanged: only the metrics input gains the zero.
+        assert [r[TASK_INDEX_KEY_NAME] for r in returned] == [0]
+        assert len(self._read_jsonl(tmp_path / "output_failures.jsonl")) == 1
+
+    @pytest.mark.parametrize(
         ("include_failure_class", "reported_failure_class", "expected_failure_class"),
         [
             (False, None, "kill_shaped"),
