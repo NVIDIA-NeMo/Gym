@@ -3377,3 +3377,16 @@ class TestComposeVolumeSourcesAtPrepare:
             prepare_target(str(folder), output_root=tmp_path / "out", volume_sources=mapped, gpu_volume_sources={})
         prepared = prepare_target(str(folder), output_root=tmp_path / "out", gpu_volume_sources=mapped)
         assert [task.task_id for task in prepared.tasks] == ["pg"]
+
+
+def test_pulled_datasets_default_to_environments_harbor_in_the_checkout(monkeypatch, tmp_path) -> None:
+    """Fetched datasets land in environments/harbor/ of the Gym checkout unless NEMO_GYM_DATASETS_DIR says otherwise."""
+    from nemo_gym import PARENT_DIR
+    from nemo_gym.tasks.harbor.hub import datasets_dir
+
+    monkeypatch.delenv("NEMO_GYM_DATASETS_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)  # the working directory plays no part
+    assert datasets_dir() == (PARENT_DIR / "environments" / "harbor").resolve()
+
+    monkeypatch.setenv("NEMO_GYM_DATASETS_DIR", str(tmp_path / "elsewhere"))
+    assert datasets_dir() == (tmp_path / "elsewhere").resolve()
