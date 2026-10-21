@@ -14,9 +14,11 @@
 # limitations under the License.
 
 import base64
+import contextlib
 import os
 import re
 import shlex
+import signal
 import socket
 import subprocess
 import time
@@ -1252,7 +1254,7 @@ def test_render_service_command_no_pre_command_by_default():
     out = _render_service_command("svc", "img:latest", "vllm serve model")
     assert "bash -c" not in out
     assert (
-        "srun --overlap --no-container-mount-home --container-image=img:latest "
+        "srun --overlap --no-container-mount-home --container-image=img:latest --kill-on-bad-exit=1 --wait=1 "
         "--output=logs/svc-$SLURM_JOB_ID.log vllm serve model &" in out
     )
 
@@ -2712,3 +2714,131 @@ def test_a_ray_head_on_node_0_is_probed_locally(tmp_path):
     }
     script = _render(tmp_path, {"policy": _vllm(8000, "gpu", tensor_parallel_size=4), "ray": ray})
     assert "Waiting for ray at http://localhost:8011" in script
+
+
+def _run_job_script(
+    tmp_path, *, service: str, driver: str, name: str = "vllm_model", prelude: str = ""
+) -> subprocess.CompletedProcess:
+    """Run a rendered job.sh with a fake `srun` on PATH: the `name` service step runs `service`, the driver `driver`.
+
+    `prelude` is bash put after the shebang line, for a test that needs to hook the script's own commands.
+    """
+    config = SubmitConfig.model_validate(
+        {
+            "services": {name: {"type": "vllm", "container": "vllm:latest", "model": "org/model"}},
+            "compute": {"cluster": {"type": "slurm", "account": "acct"}},
+            "driver": {"container": "gym:latest", "benchmarks": {"b": {"run": {}}}},
+            "job": {"output_path": str(tmp_path)},
+            "otel": {"enabled": False},
+        }
+    )
+    script = build_sbatch_script(config, "b", config.driver.benchmarks["b"], config.compute["cluster"], tmp_path)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fakes = {"srun": f'case "$*" in *logs/driver-*) {driver} ;; *) {service} ;; esac', "curl": "exit 0"}
+    for binary, body in fakes.items():
+        (bin_dir / binary).write_text(f"#!/bin/bash\n{body}\n")
+        (bin_dir / binary).chmod(0o755)
+    shebang, _, rest = script.partition("\n")
+    (tmp_path / "job.sh").write_text(f"{shebang}\n{prelude}{rest}")
+    # A file, not a pipe: a service still running when the script exits would hold a pipe open.
+    with (tmp_path / "job.out").open("w") as out:
+        process = subprocess.Popen(
+            ["bash", "job.sh"],
+            stdout=out,
+            stderr=subprocess.STDOUT,
+            cwd=tmp_path,
+            env={"PATH": f"{bin_dir}:/usr/bin:/bin", "SLURM_JOB_ID": "1"},
+            start_new_session=True,
+        )
+        try:
+            returncode = process.wait(timeout=60)
+        finally:
+            # Slurm stops the steps a job leaves running; here the fake steps are killed with the job's group.
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+    return subprocess.CompletedProcess(["job.sh"], returncode, (tmp_path / "job.out").read_text())
+
+
+def test_a_service_that_exits_mid_run_ends_the_job_and_names_the_service(tmp_path):
+    # The service passes its health check and dies 1 s in; the driver alone would run for 10 minutes.
+    result = _run_job_script(
+        tmp_path,
+        service="sleep 1; exit 3",
+        driver="trap 'echo driver got TERM; exit 143' TERM; sleep 600 & wait",
+    )
+
+    assert result.returncode == 1
+    assert "service vllm_model exited (status 3) while the driver was running" in result.stdout
+    assert "driver got TERM" in result.stdout
+
+
+def test_the_driver_exit_code_stands_when_the_driver_finishes_first(tmp_path):
+    result = _run_job_script(tmp_path, service="exec sleep 600", driver="exit 7")
+
+    assert result.returncode == 7
+    assert "exited" not in result.stdout
+
+
+# Puts the reviewer's race window in one place: the watch loop has just seen the driver alive, and both the driver
+# and the service end before it checks the service. On that first service check, the wrapper releases both fake
+# steps, waits until both have exited, then lets `kill` answer: the service is dead.
+_DRIVER_AND_SERVICE_END_TOGETHER = """\
+kill() {
+    if [[ "${FUNCNAME[1]}" == _gym_run_driver && "$1" == -0 && "$2" != "$_gym_driver_pid" && ! -e go ]]; then
+        : > go
+        while builtin kill -0 "$_gym_driver_pid" 2>/dev/null || builtin kill -0 "$2" 2>/dev/null; do :; done
+    fi
+    builtin kill "$@"
+}
+"""
+
+
+def test_a_driver_that_ends_as_its_service_ends_keeps_its_own_status(tmp_path):
+    wait_for_go = "until [ -e go ]; do sleep 0.1; done"
+    result = _run_job_script(
+        tmp_path,
+        service=f"{wait_for_go}; exit 3",
+        driver=f"{wait_for_go}; exit 0",
+        prelude=_DRIVER_AND_SERVICE_END_TOGETHER,
+    )
+
+    assert (tmp_path / "go").exists()
+    assert result.returncode == 0
+    assert "while the driver was running" not in result.stdout
+
+
+def test_ray_workers_are_watched_and_the_collector_is_not(tmp_path):
+    script = _driver_on_aux(tmp_path, {"ray": _RAY_WITH_PROBE})
+    watch = script[script.index("_gym_run_driver() {") : script.index("\n_gym_run_driver\n")]
+    assert "OTEL_COLLECTOR_PID=$!" in script
+    assert re.findall(r"_gym_service_exited (\S+) ", watch) == ["policy", "ray", "ray_gpu_workers"]
+
+
+def test_a_service_named_driver_is_watched_apart_from_the_driver(tmp_path):
+    # Its launcher PID is DRIVER_PID; the driver's own PID must not overwrite it. The fake srun tells the two apart by the
+    # case-sensitive log name: logs/DRIVER-... is the service, logs/driver-... the driver.
+    result = _run_job_script(
+        tmp_path,
+        service="sleep 1; exit 3",
+        driver="trap 'echo driver got TERM; exit 143' TERM; sleep 600 & wait",
+        name="DRIVER",
+    )
+
+    assert result.returncode == 1
+    assert "service DRIVER exited (status 3) while the driver was running" in result.stdout
+    assert "driver got TERM" in result.stdout
+
+
+def test_one_task_exiting_ends_its_service_step_and_the_driver_step_is_unchanged(tmp_path):
+    # A multi-task service (a vllm_pd tier, a Ray worker pool) must not outlive one of its tasks, whatever the cluster's
+    # KillOnBadExit and WaitTime defaults; the driver and OTel collector steps keep Slurm's defaults.
+    script = _driver_on_aux(tmp_path, {"ray": _RAY_WITH_PROBE})
+    steps = [line for line in script.splitlines() if "srun --overlap" in line]
+    driver_steps = [line for line in steps if "logs/driver-" in line]
+    collector_steps = [line for line in steps if "logs/otel_collector-" in line]
+    service_steps = [line for line in steps if line not in driver_steps and line not in collector_steps]
+
+    assert service_steps and driver_steps
+    assert all(" --kill-on-bad-exit=1 --wait=1 " in line for line in service_steps)
+    assert not any("--kill-on-bad-exit" in line or " --wait=" in line for line in driver_steps + collector_steps)
