@@ -256,6 +256,8 @@ class SandboxOwnerResourcesServer(SimpleResourcesServer):
                 server_name=self.config.name,
                 parallelism=self.config.sandbox_checkpoint.parallelism,
                 on_stop=self.config.sandbox_checkpoint.on_stop,
+                snapshot_attempts=self.config.sandbox_checkpoint.snapshot_attempts,
+                snapshot_retry_delay_s=self.config.sandbox_checkpoint.snapshot_retry_delay_s,
             )
         return self._sandboxes
 

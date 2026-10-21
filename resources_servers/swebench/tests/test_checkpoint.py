@@ -196,7 +196,7 @@ def make_server(
         name="swebench",
         sandbox_provider="sandbox",
         sandbox_config={"ttl_s": 18000, "resources": {"cpu": 2}},
-        sandbox_checkpoint={"parallelism": parallelism, "on_stop": on_stop},
+        sandbox_checkpoint={"parallelism": parallelism, "on_stop": on_stop, "snapshot_retry_delay_s": 0},
         apply_anti_cheating=False,
         clear_swebench_debug_logs=True,
     )
