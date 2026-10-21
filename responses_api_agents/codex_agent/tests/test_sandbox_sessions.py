@@ -527,6 +527,7 @@ def test_startup_failure_reports_the_codex_stderr_tail(setup, started):
 
 def test_startup_failure_stderr_hides_the_grant_tokens(setup):
     agent, sandbox = setup
+    api_key = 'user="alice" api_key=secret-123 note=abcdef'
     sandbox.result["return_code"] = 1
     sandbox.events = json.dumps([0.0, {"type": "thread.started", "thread_id": "t"}])
     publish = sandbox.publish
@@ -538,15 +539,19 @@ def test_startup_failure_stderr_hides_the_grant_tokens(setup):
             # Codex cuts long error bodies, which can end a token early.
             "HTTP 401: {'x-nemo-gym-session-token': 'token-gd... (truncated 2048 bytes)\n"
             "authorization: Digest user=u nonce=s3cret\n"
-            "HTTP 401: x-api-key: user=alice api_key=secret-123 note=abc... (truncated 2048 bytes)\n"
-            "retry: user=ali,user=alice api_key=secret-123 note=abcdef\n"
+            'HTTP 401: x-api-key: user="alice" api_key=secret-123 note=abc... (truncated 2048 bytes)\n'
+            'retry: user="ali,user="alice" api_key=secret-123 note=abcdef\n'
+            # An error body can echo the headers as JSON.
+            f"HTTP 403: {json.dumps({'x-api-key': api_key})}\n"
             "Error: required MCP servers failed to initialize: gdpval_resources_server"
         )
 
     sandbox.publish = publish_with_stderr
     grant = mcp_grant()
     grant["connection"]["headers"]["Authorization"] = "Digest user=u nonce=s3cret"
-    grant["connection"]["headers"]["X-Api-Key"] = "user=alice api_key=secret-123 note=abcdef"
+    # Shares its start with Authorization, so redacting one must not hide the other's start.
+    grant["connection"]["headers"]["Proxy-Authorization"] = "Digest user=bob nonce=beta-secret"
+    grant["connection"]["headers"]["X-Api-Key"] = api_key
     body = seed().model_dump(mode="json")
     body["tool_accesses"] = [grant]
     with TestClient(agent.setup_webserver()) as client:
@@ -563,6 +568,7 @@ def test_startup_failure_stderr_hides_the_grant_tokens(setup):
         assert "'x-nemo-gym-session-token': '[redacted] (truncated" in text
         assert "x-api-key: [redacted] (truncated" in text
         assert "retry: [redacted]\n" in text
+        assert 'HTTP 403: {"x-api-key": "[redacted]"}' in text
         assert "required MCP servers failed to initialize: gdpval_resources_server" in text
 
 

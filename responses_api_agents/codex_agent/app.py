@@ -167,28 +167,39 @@ fi
     )
 
 
-def _redact(text: str, value: str) -> str:
-    """Replace each copy of ``value`` in ``text``, including a copy cut short after its first 8 characters.
+def _redact(text: str, values: list[str]) -> str:
+    """Replace each copy of each value in ``text``, as written or JSON-escaped, including cut copies.
 
-    Codex cuts long error bodies, which can end an echoed value early. A cut copy is replaced through its
-    last matching character and the rest of that word, so no part of a multiword value stays visible.
+    Codex cuts long error bodies, which can end an echoed value early. A copy cut after its first 8 characters is
+    replaced through its last matching character and the rest of that word, so no part of a multiword value stays
+    visible. All copies are found in the original text and replaced once, so one value cannot hide another.
     """
-    if len(value) < 8:
-        return re.sub(rf"(?<!\w){re.escape(value)}(?!\w)", "[redacted]", text)
-    spans: list[list[int]] = []
-    # Copies can overlap, so every start is checked and overlapping spans are merged.
-    for match in re.finditer(f"(?={re.escape(value[:8])})", text):
-        start = stop = match.start()
-        while stop - start < len(value) and text[stop : stop + 1] == value[stop - start]:
-            stop += 1
-        if stop - start < len(value):
-            stop = re.compile(r"[^\s'\"]*").match(text, stop).end()
-        if spans and start < spans[-1][1]:
-            spans[-1][1] = max(spans[-1][1], stop)
+    forms = {
+        form
+        for value in values
+        for form in (value, json.dumps(value)[1:-1], json.dumps(value, ensure_ascii=False)[1:-1])
+    }
+    spans: list[tuple[int, int]] = []
+    for form in forms:
+        if len(form) < 8:
+            spans += [match.span() for match in re.finditer(rf"(?<!\w){re.escape(form)}(?!\w)", text)]
+            continue
+        # Copies can overlap, so every start is checked.
+        for match in re.finditer(f"(?={re.escape(form[:8])})", text):
+            start = stop = match.start()
+            while stop - start < len(form) and text[stop : stop + 1] == form[stop - start]:
+                stop += 1
+            if stop - start < len(form):
+                stop = re.compile(r"[^\s'\"]*").match(text, stop).end()
+            spans.append((start, stop))
+    merged: list[list[int]] = []
+    for start, stop in sorted(spans):
+        if merged and start < merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], stop)
         else:
-            spans.append([start, stop])
+            merged.append([start, stop])
     parts, end = [], 0
-    for start, stop in spans:
+    for start, stop in merged:
         parts += [text[end:start], "[redacted]"]
         end = stop
     return "".join(parts) + text[end:]
@@ -1145,8 +1156,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             for value in access.connection.headers.values()
             if value
         ]
-        for value in sorted(values, key=len, reverse=True):
-            stderr = _redact(stderr, value)
+        stderr = _redact(stderr, values)
         # Codex can repeat an error body of several kilobytes on one line; keep the start, which names the server.
         lines = [line if len(line) <= 500 else f"{line[:400]} ... {line[-100:]}" for line in stderr.splitlines()]
         return "\n".join(lines).strip()[-_STDERR_TAIL_CHARS:]
