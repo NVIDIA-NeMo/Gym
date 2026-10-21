@@ -392,6 +392,8 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         response: Response = None,
     ) -> AgentSeedSessionResponse:
         """Seed once per caller ID; identical retries reuse the same harness state."""
+        if type(self)._seed_agent_session_state is SimpleResponsesAPIAgent._seed_agent_session_state:
+            raise AgentSeedRejectedError("This agent does not implement episode sessions")
         if self._restart_only is not None and response is not None:
             # This agent cannot capture the session, so the episode that seeds it starts over after a crash.
             response.headers[CHECKPOINT_RESTART_HEADER] = "1"
@@ -531,6 +533,9 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> AgentSessionState:
         """Validate grants and initialize harness state.
 
+        Raise AgentSeedRejectedError for a seed this agent cannot serve, such as a sandbox or a required grant it
+        does not support: the seed answers a final 422 and binds nothing. Any other exception answers 500, which an
+        Environment Server retries as transient.
         If setup fails and cleanup cannot finish, raise AgentSessionSetupError with the
         partial state and original error. The base retains it for close, never activation.
         """

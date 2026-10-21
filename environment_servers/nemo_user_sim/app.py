@@ -123,7 +123,7 @@ class _ParticipantActivationError(Exception):
     """Identify which participant Agent failed to produce a response."""
 
     def __init__(self, alias: str, error: Exception) -> None:
-        super().__init__(f"{alias} activation failed: {type(error).__name__}: {error}")
+        super().__init__(f"{alias} activation failed: {type(error).__name__}: {describe_dependency_error(error)}")
         self.alias = alias
         self.error = error
 

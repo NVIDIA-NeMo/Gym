@@ -12,22 +12,24 @@ from fastapi import FastAPI
 from nemo_gym.base_responses_api_agent import AgentSeedSessionRequest
 
 
-# An Environment Server retries these 4xx statuses as transient, like 5xx.
-_RETRIED_CLIENT_ERRORS = frozenset({408, 425, 429})
-
-
 def check_agent_seed_rejected(app: FastAPI, seed: AgentSeedSessionRequest) -> str:
     """Seed ``seed`` through ``app``, and raise AssertionError unless the agent refuses it as final.
 
-    The refusal must be a 4xx status the Environment Server does not retry, so the episode fails once with the
-    agent's reason. Raising ``AgentSeedRejectedError`` gives HTTP 422; a plain ``ValueError`` gives 500, which is
+    The refusal must be HTTP 422 with a string ``detail``, which is what ``AgentSeedRejectedError`` gives, so the
+    Environment Server fails the episode once with the agent's reason. A plain ``ValueError`` gives 500, which is
     retried. Returns the refusal's detail for the caller to check.
     """
     from fastapi.testclient import TestClient
 
     client = TestClient(app, raise_server_exceptions=False)
     response = client.post("/v1/agent_sessions", json=seed.model_dump(mode="json"))
-    assert 400 <= response.status_code < 500 and response.status_code not in _RETRIED_CLIENT_ERRORS, (
-        f"unsupported seed must fail with a final 4xx, got {response.status_code}: {response.text}"
+    assert response.status_code == 422, (
+        f"unsupported seed must fail with a final 422 from AgentSeedRejectedError, got {response.status_code}: "
+        f"{response.text}"
     )
-    return response.json()["detail"]
+    try:
+        detail = response.json().get("detail")
+    except (ValueError, AttributeError):
+        detail = None
+    assert isinstance(detail, str), f"the 422 refusal must carry a string detail, got: {response.text}"
+    return detail

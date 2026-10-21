@@ -5,6 +5,8 @@ import asyncio
 from unittest.mock import MagicMock
 
 import pytest
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
@@ -77,8 +79,10 @@ def test_episode_tool_access_overrides_configured_access_by_name() -> None:
 def test_base_agent_exposes_unimplemented_session_routes() -> None:
     agent = _Agent.model_construct(config=MagicMock(num_workers=1), server_client=MagicMock())
     request = MagicMock()
-    with pytest.raises(NotImplementedError, match="does not implement"):
-        asyncio.run(agent.seed_agent_session(request, _seed_request()))
+    # A configuration that routes episodes to an agent without sessions fails each episode once, not on retry.
+    detail = check_agent_seed_rejected(agent.setup_webserver(), _seed_request())
+    assert detail == "This agent does not implement episode sessions"
+    assert agent._session_records == {}
     with pytest.raises(NotImplementedError, match="does not implement"):
         asyncio.run(
             agent.close_agent_session(
@@ -141,8 +145,24 @@ def test_an_unsupported_seed_fails_with_a_final_422_and_keeps_no_session() -> No
 def test_the_check_catches_a_seed_refusal_that_would_be_retried() -> None:
     agent = _PlainValueErrorAgent.model_construct(config=MagicMock(num_workers=1), server_client=MagicMock())
 
-    with pytest.raises(AssertionError, match="final 4xx, got 500"):
+    with pytest.raises(AssertionError, match="final 422 from AgentSeedRejectedError, got 500"):
         check_agent_seed_rejected(agent.setup_webserver(), _seed_request(tool_accesses=_REQUIRED_GRANT))
+
+
+def test_the_check_requires_a_422_with_a_string_detail() -> None:
+    # An app without the session route answers 404, which is final but is not a refusal.
+    with pytest.raises(AssertionError, match="final 422 from AgentSeedRejectedError, got 404"):
+        check_agent_seed_rejected(FastAPI(), _seed_request())
+
+    # A request validation error is also 422, but its detail is a list of errors, not the agent's reason.
+    invalid = FastAPI()
+
+    @invalid.post("/v1/agent_sessions")
+    async def seed() -> JSONResponse:
+        return JSONResponse({"detail": [{"msg": "field required"}]}, status_code=422)
+
+    with pytest.raises(AssertionError, match="must carry a string detail"):
+        check_agent_seed_rejected(invalid, _seed_request())
 
 
 def test_sessions_on_several_workers_fail_with_a_final_422() -> None:

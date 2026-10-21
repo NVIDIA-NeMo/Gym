@@ -1023,6 +1023,16 @@ def test_an_agent_seed_refusal_fails_with_the_agents_reason() -> None:
     assert "Simple Agent does not support sandbox access" in failure.failure_reason
 
 
+def test_a_participant_turn_refusal_fails_with_the_agents_reason() -> None:
+    refusal = ClientResponseError(MagicMock(), (), status=422, message="Unprocessable Content")
+    refusal.response_content = b'{"detail":"user_model agent cannot serve this tool_choice"}'
+
+    failure = UserSimEnvironmentServer._failure("agent", _ParticipantActivationError("user_model", refusal)).failure
+
+    assert failure.terminal is True
+    assert "user_model agent cannot serve this tool_choice" in failure.failure_reason
+
+
 def test_wrapped_assistant_invalid_response_is_not_retryable() -> None:
     invalid = _ParticipantActivationError("assistant_model", ValueError("invalid response"))
     bad_request = _ParticipantActivationError(

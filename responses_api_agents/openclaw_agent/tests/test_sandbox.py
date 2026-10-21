@@ -329,7 +329,11 @@ def test_unsupported_seed_rejected_before_connection(setup, option):
             {"kind": "direct_http", "name": "tools", "base_url": "http://resources", "required": True}
         ]
     with TestClient(agent.setup_webserver()) as client:
-        assert client.post("/v1/agent_sessions", json=body).status_code == 422
+        refused = client.post("/v1/agent_sessions", json=body)
+    assert refused.status_code == 422
+    if option == "worker":
+        # Worker count is server configuration, checked by the shared route before seed.
+        assert refused.json()["detail"] == "Agent sessions require num_workers=1"
     sandbox.exec.assert_not_awaited()
 
 

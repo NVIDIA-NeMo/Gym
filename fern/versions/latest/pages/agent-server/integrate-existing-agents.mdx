@@ -15,6 +15,11 @@ For Environment Server execution, implement these `SimpleResponsesAPIAgent` hook
 - `_seed_agent_session_state(body)`: validate grants, initialize the harness, and return
   an `AgentSessionState`. If setup fails and cleanup cannot finish, raise
   `AgentSessionSetupError(state, error=original_error)` so close can retry cleanup.
+- For a seed the agent cannot serve, such as a sandbox or a required tool grant it does not
+  support, raise `AgentSeedRejectedError(reason)` from `_seed_agent_session_state`. The seed
+  then answers HTTP 422 and binds nothing, so the episode fails once with your reason. Any other
+  exception answers 500, which the Environment Server retries. Test each refusal with
+  `nemo_gym.testing.agent_session_conformance.check_agent_seed_rejected`.
 - `_close_agent_session_state(state)`: stop the harness process group, collect observations,
   and release the session. Preserved task services remain for the sandbox owner.
   Missing termination evidence remains retryable; a final negative receipt fails the activation
