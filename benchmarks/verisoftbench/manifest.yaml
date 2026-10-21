@@ -1,0 +1,38 @@
+name: verisoftbench
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: math
+description: 'VeriSoftBench: 500 Lean 4 proof obligations from 23 public formal-methods
+  repositories (22 open-source, one redistributed by written consent), kernel-verified
+  inside each repository''s own toolchain with upstream''s error-feedback repair loop
+  (three rounds per candidate). Curated-context condition; any-of-8 estimand with
+  eight draws per task.'
+modality: text
+licensing: MIT
+authors:
+- rshahbazyan
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: verisoftbench
+agent_server: verisoftbench_agent
+datasets:
+- name: verisoftbench
+  type: benchmark
+  jsonl_fpath: benchmarks/verisoftbench/data/verisoftbench_benchmark.jsonl
+  prepare_script: benchmarks/verisoftbench/prepare.py
+  prompt_config: benchmarks/verisoftbench/prompt.yaml
+  num_repeats: 8
+model_server: policy_model
+canonical_split: benchmark
+standard_prompt_config: benchmarks/verisoftbench/prompt.yaml
+adopted_from:
+  source: https://github.com/utopia-group/VeriSoftBench
+  ref: d066523f2b087f28b793c05eacb29bf2e42c0504  # pragma: allowlist secret
+  reconciled: 2026-09-22
+lifecycle: active

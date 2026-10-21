@@ -1,0 +1,10 @@
+# Pass-through prompt for VeriSoftBench.
+#
+# Every row is prepared with upstream's own PromptBuilder (system turn from
+# prompts/templates/init.txt, user turn from user.txt with the task's curated context)
+# and carries those two strings as `system_prompt` / `user_prompt` — and, in the
+# benchmark form, no pre-populated `responses_create_params.input`, which Gym rejects
+# alongside a prompt config. Applying this file reproduces the server split's explicit
+# input byte for byte. It adds nothing.
+system: "{system_prompt}"
+user: "{user_prompt}"
