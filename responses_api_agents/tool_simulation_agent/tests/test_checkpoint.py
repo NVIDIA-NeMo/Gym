@@ -16,7 +16,7 @@ from nemo_gym._checkpoint.agent import ActivationOutOfOrderError, AgentSessionRe
 from nemo_gym._checkpoint.control import CheckpointRequest, CommitRequest, ParticipantControlPlane, RestoreRequest
 from nemo_gym._checkpoint.errors import StaleAttemptError
 from nemo_gym.episode_types import EpisodeId
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.server_utils import ServerClient, refuse_unsupported_num_workers
 from resources_servers.single_step_tool_use_with_argument_comparison.app import (
     SingleStepToolUseArgumentComparisonResourcesServer,
     SingleStepToolUseArgumentComparisonResourcesServerConfig,
@@ -423,3 +423,28 @@ async def test_real_verifier_seed_advertises_replay_without_restart(harnesses):
         assert response.status_code == 200, response.text
         assert response.headers["x-ng-checkpoint-verify"] == "replay"
         assert response.headers.get("x-ng-checkpoint-restart") != "1"
+
+
+@pytest.mark.parametrize("checkpointing", [False, True])
+def test_several_workers_are_refused_only_with_checkpointing(checkpointing: bool) -> None:
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = (
+        {"checkpoint": {"enabled": True, "control_auth_token": "test"}} if checkpointing else {}
+    )
+    agent = ToolSimulationAgent(
+        config=ToolSimulationAgentConfig(
+            host="127.0.0.1",
+            port=0,
+            entrypoint="app.py",
+            name="agent",
+            num_workers=2,
+            resources_server={"type": "resources_servers", "name": "verifier"},
+            model_server={"type": "responses_api_models", "name": "model"},
+        ),
+        server_client=client,
+    )
+    if checkpointing:
+        with pytest.raises(ValueError, match="needs num_workers=1: with checkpointing, /run calls"):
+            refuse_unsupported_num_workers(agent)
+    else:
+        refuse_unsupported_num_workers(agent)

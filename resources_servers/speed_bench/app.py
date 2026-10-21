@@ -40,6 +40,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint, refuse_unsupported_num_workers
 from nemo_gym.server_utils import request as global_request
 
 
@@ -488,6 +489,16 @@ def _compute_std_metrics(
 class SpeedBenchResourcesServer(SimpleResourcesServer):
     config: SpeedBenchResourcesServerConfig
 
+    def multiple_workers_unsupported_reason(self) -> Optional[str]:
+        # Only the Prometheus source measures against a snapshot; the response source scores each request on its own.
+        if self.config.metrics_source != "prometheus":
+            return None
+        return (
+            "with metrics_source=prometheus, the speculative decoding measurement window starts from a metrics "
+            "snapshot kept in this process's memory, so each worker would measure from a different start and report "
+            "deltas that miss the other workers' traffic"
+        )
+
     # State populated lazily on the first verify() call so the benchmark window
     # is bounded by the first model traffic our server sees, not by server
     # init time. Wrapped in an asyncio.Lock to avoid two concurrent first calls
@@ -498,6 +509,9 @@ class SpeedBenchResourcesServer(SimpleResourcesServer):
     _init_lock: Optional[asyncio.Lock] = None
 
     def model_post_init(self, __context: Any) -> None:
+        # Refuse several workers before taking the startup metrics snapshot,
+        # so the worker-count error is the one reported.
+        refuse_unsupported_num_workers(self)
         super().model_post_init(__context)
         self._init_lock = asyncio.Lock()
         if self.config.metrics_source == "prometheus" and self.config.snapshot_at_init:
@@ -741,3 +755,6 @@ class SpeedBenchResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     SpeedBenchResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = SpeedBenchResourcesServer.run_webserver()  # noqa: F401

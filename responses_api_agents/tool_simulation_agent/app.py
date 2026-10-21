@@ -22,6 +22,7 @@ from fastapi import Body, Request
 from pydantic import ConfigDict, JsonValue, PrivateAttr, ValidationError
 
 from nemo_gym._checkpoint.agent import ActivationOutOfOrderError, LegacyRun, RestoredAgentSession, require_rollout
+from nemo_gym._checkpoint.settings import checkpoint_settings
 from nemo_gym._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER, StepType, seed_restarts, seed_verify_step_type
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
@@ -73,6 +74,15 @@ class ToolSimulationAgent(SimpleResponsesAPIAgent):
     # A completed self-dispatch may still be on its way to /run when a checkpoint
     # exports it. Keep its reply until /run records the verification boundary.
     _model_replies: dict[str, _ModelReply] = PrivateAttr(default_factory=dict)
+
+    def multiple_workers_unsupported_reason(self) -> str | None:
+        # Without checkpointing, /run keeps nothing between requests.
+        if checkpoint_settings(getattr(self.server_client, "global_config_dict", None)) is None:
+            return None
+        return (
+            "with checkpointing, /run calls this agent's /v1/responses without naming the worker that holds the run, "
+            "so the call can land on a worker that does not hold it"
+        )
 
     async def export_agent_sessions(self, session_keys: list[str]) -> dict[str, dict[str, JsonValue]]:
         states = {}

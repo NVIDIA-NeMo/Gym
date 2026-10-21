@@ -40,7 +40,7 @@ from app import (
     _weighted_delta_average,
 )
 
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.server_utils import ServerClient, refuse_unsupported_num_workers
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -804,3 +804,9 @@ def test_compute_metrics_omits_std_metrics_when_single_seed():
     m = s.compute_metrics(tasks)
     assert "spec_acceptance_length_avg" not in m
     assert "spec_acceptance_length_std_dev_across_runs" not in m
+
+
+def test_several_workers_are_refused_only_for_the_prometheus_source():
+    with pytest.raises(ValueError, match="needs num_workers=1: with metrics_source=prometheus"):
+        _make_server(num_workers=2)
+    refuse_unsupported_num_workers(_make_server(num_workers=2, metrics_source="response"))
