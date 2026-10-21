@@ -65,7 +65,7 @@ For full architecture and concepts (environments, training approaches, verificat
 
 The typical workflow is to create your own environments tailored to your evaluation or training task. An environment consists of:
 
-1. **Dataset** — JSONL with one task per row. NeMo Gym uses the OpenAI Responses API as its native format because it natively represents multi-turn, tool-calling agentic trajectories without custom serialization. Each row has `responses_create_params.input` (the input messages in Responses API format) and `verifier_metadata` (task-specific data passed to the verifier)
+1. **Dataset** — JSONL with one task per row. NeMo Gym uses the OpenAI Responses API as its data format because it represents multi-turn, tool-calling agentic trajectories without custom serialization. Each row has `responses_create_params.input` (the input messages in Responses API format) and `verifier_metadata` (task-specific data passed to the verifier)
 2. **Resources Server** — implements verification logic, environment-specific tools, and per-task state isolation
 3. **Agent Harness** — reuse a built-in agent harness (e.g. OpenHands) or bring your own
 4. **Model** — use any LLM endpoint via the Model Server (supports inference providers like OpenAI, and vLLM for local/open models), or manage inference in your own agent harness
@@ -194,6 +194,9 @@ gym env resolve --config ...
   when that area is already type-checkable; do not claim repo-wide `mypy --strict` compliance.
 - Public APIs and objects included in generated reference docs need useful docstrings. Comments should explain intent,
   invariants, or tradeoffs rather than narrating the code.
+- Name things by what they are. Avoid qualifiers that carry no information, such as "native", "legacy", "new", or
+  "old"; name the specific mechanism, owner, or format instead (for example, "agent session" rather than "native
+  session"). This applies to identifiers, comments, docs, error messages, and test names.
 - Use keyword-only arguments for new public parameters that are easy to swap or misread, especially repeated same-type
   values and boolean controls.
 - Use module loggers for library and server diagnostics. Direct console output is acceptable in CLI/user-facing paths;
