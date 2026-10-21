@@ -89,6 +89,25 @@ as `gen_ai.request.id` on its request span and in its request log, so an engine 
 can be matched to a rollout directly, without walking the trace. A caller's own `X-Request-Id`
 header is kept.
 
+### Trace Context in the Model URL
+
+Some agents hand the model URL to a client they do not instrument: a harness running inside a
+sandbox, or a third-party client library in the agent's own process. That client sends no
+`traceparent` header, so the model server's SERVER span would start a new trace and the engine
+spans under it would never join the rollout.
+
+For those clients the agent's `base_url_for_run` and `resolve_model_base_url` name the agent's
+current span in the URL itself, right after the rollout prefix:
+
+```text
+http://<model-server>/ng-rollout/{rollout_id}/ng-trace/{traceparent}/v1
+```
+
+Every Gym server strips `/ng-trace/{traceparent}` before routing, whether or not telemetry is on,
+and uses it as the inbound `traceparent` when the request carries none. A header the client did
+send wins. The segment is only added while this process exports traces, so URLs in a run without
+tracing are unchanged. Gym's own clients, which send the header, do not use it.
+
 ## Span Kinds
 
 Span kind is what tells a backend that a call left one service and arrived at another.
