@@ -296,3 +296,47 @@ def test_osworld_ray_lock_matches_parent_process_constraint() -> None:
     config = tomllib.loads((project / "uv.toml").read_text())
     assert constraint in manifest["tool"]["uv"]["constraint-dependencies"]
     assert constraint in config["constraint-dependencies"]
+
+
+@pytest.mark.parametrize("version", ["1.1.dev1", "1.1rc1"])
+def test_parent_source_accepts_installed_prerelease_without_relaxing_bounds(
+    monkeypatch: pytest.MonkeyPatch, version: str
+) -> None:
+    source = {"url": "https://github.com/example/plugin.git", "vcs_info": {"commit_id": "abc123"}}
+    monkeypatch.setattr(importlib.metadata, "distribution", lambda _: _distribution(version, source=source))
+    _locked_env.check_parent_requirements(["plugin @ git+https://github.com/example/plugin.git@abc123"], [])
+    _locked_env.check_parent_requirements(["plugin>=1,<2"], [])
+    with pytest.raises(RuntimeError, match="Parent source"):
+        _locked_env.check_parent_requirements(["plugin @ git+https://github.com/example/plugin.git@other"], [])
+    with pytest.raises(RuntimeError, match="Parent requires plugin>=2"):
+        _locked_env.check_parent_requirements(["plugin>=2"], [])
+
+
+def test_sibling_venvs_keep_independent_wheel_projects(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import nemo_gym
+
+    restored = []
+    for name in ("first", "second"):
+        package = tmp_path / name / "site-packages/nemo_gym"
+        snapshot = package / "resources/locked_project"
+        snapshot.mkdir(parents=True)
+        (package / "__init__.py").write_text(name)
+        for filename in ("pyproject.toml", "README.md", "LICENSE"):
+            (snapshot / filename).write_text(name)
+        project = tmp_path / name / "plugins/resources_servers/sample"
+        project.mkdir(parents=True)
+        (project / "pyproject.toml").write_text('[tool.uv.sources]\n"nemo-gym" = {path = "../..", editable = true}\n')
+        (project / "uv.lock").write_text(name)
+        (project / "app.py").write_text(name)
+        monkeypatch.setattr(nemo_gym, "__file__", str(package / "__init__.py"))
+        destination = _locked_env._wheel_project(project, tmp_path / "cache" / name)
+        restored.append((destination, package, name))
+
+    for destination, package, name in restored:
+        assert (destination / "uv.lock").read_text() == name
+        assert (destination / "app.py").read_text() == name
+        root = destination.parents[1]
+        assert (root / "pyproject.toml").read_text() == name
+        assert (root / "nemo_gym").resolve() == package
+        assert (root / "nemo_gym/__init__.py").read_text() == name
+    assert restored[0][0] != restored[1][0]

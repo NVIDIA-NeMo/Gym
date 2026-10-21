@@ -53,7 +53,8 @@ def check_parent_requirements(requirements: list[str], constraints: list[str]) -
             if not required:
                 continue
             raise RuntimeError(f"Parent requires {value}, but it is absent from the component lock.") from None
-        if distribution.version not in requirement.specifier:
+        # This validates an installed version, not candidate selection by a resolver.
+        if not requirement.specifier.contains(distribution.version, prereleases=True):
             raise RuntimeError(
                 f"Parent requires {value}, but the component installed {requirement.name}=={distribution.version}."
             )
@@ -89,7 +90,7 @@ def _wheel_project(project: Path, venv: Path) -> Path:
     relative_source = metadata["tool"]["uv"]["sources"]["nemo-gym"]["path"]
     source_root = (project / relative_source).resolve()
     relative = project.resolve().relative_to(source_root)
-    root = venv.parent / ".nemo-gym-project"
+    root = venv.parent / ".nemo-gym-project" / venv.name
     # This overlay is private to the venv. Invalidate its links when either the
     # installed Gym or the selected external component moves; otherwise an
     # upgrade would keep importing files from the previous installation.
