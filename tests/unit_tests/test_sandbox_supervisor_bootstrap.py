@@ -12,6 +12,7 @@ from shlex import quote
 import pytest
 
 from nemo_gym.agent_utils import process_supervisor
+from nemo_gym.agent_utils.sandbox_session import SandboxCommand
 from nemo_gym.agent_utils.supervisor_client import (
     CLEANUP_RECEIPT_FILE,
     LAUNCH_CLAIM_FILE,
@@ -195,10 +196,10 @@ async def test_launch_delayed_before_linking_does_not_recreate_a_removed_session
     assert not session_dir.exists()
 
 
-@pytest.mark.parametrize("hide_runner", [False, True])
+@pytest.mark.parametrize("stdlib_runner", [False, True])
 @pytest.mark.parametrize("linkable", [True, False])
 async def test_bootstrap_quotes_private_paths_and_uses_the_same_interpreter(
-    tmp_path: Path, linkable: bool, hide_runner: bool
+    tmp_path: Path, linkable: bool, stdlib_runner: bool
 ) -> None:
     # Interpreter links resolve /proc/self/exe; elsewhere the launch falls back to the given interpreter.
     linkable = linkable and sys.platform == "linux"
@@ -223,13 +224,13 @@ async def test_bootstrap_quotes_private_paths_and_uses_the_same_interpreter(
         timeout=1,
         cleanup_timeout=1,
         python=str(python),
-        hide_runner=hide_runner,
+        stdlib_runner=stdlib_runner,
     )
     result = await LocalSandbox().exec(command, cwd=str(tmp_path))
     assert result.return_code == 0, result.stderr
     captured = json.loads(arguments.read_text())
     supervisor_python = session_dir / SUPERVISOR_INTERPRETER if linkable else python
-    runner_python = session_dir / RUNNER_INTERPRETER if linkable and hide_runner else python
+    runner_python = session_dir / RUNNER_INTERPRETER if linkable and stdlib_runner else python
     assert captured[0] == str(supervisor_python)
     assert captured[captured.index("--") + 1 :] == [
         str(runner_python),
@@ -242,14 +243,24 @@ async def test_bootstrap_quotes_private_paths_and_uses_the_same_interpreter(
     assert (session_dir / LAUNCH_CLAIM_FILE).readlink() == Path("launch")
 
 
-def test_hide_runner_leaves_other_harness_commands_alone() -> None:
+@pytest.mark.parametrize("argv", [["/runtime/venv/bin/python", "runner"], []])
+def test_stdlib_runner_rejects_an_argv_that_does_not_start_with_the_interpreter(argv: list[str]) -> None:
+    with pytest.raises(ValueError, match="stdlib_runner requires"):
+        supervised_launch_command(
+            session_dir="/session", command=argv, timeout=1, cleanup_timeout=1, python="python3", stdlib_runner=True
+        )
+    with pytest.raises(ValueError, match="stdlib_runner requires"):
+        SandboxCommand(argv=argv, python="python3", stdlib_runner=True)
+
+
+def test_other_harness_commands_keep_their_interpreter() -> None:
     command = supervised_launch_command(
         session_dir="/session",
         command=["/runtime/venv/bin/python", "runner"],
         timeout=1,
         cleanup_timeout=1,
         python="python3",
-        hide_runner=True,
     )
     assert command.endswith("-- /runtime/venv/bin/python runner >/session/output.log 2>&1")
     assert RUNNER_INTERPRETER not in command
+    assert SandboxCommand(argv=["/runtime/venv/bin/python", "runner"], python="python3").stdlib_runner is False

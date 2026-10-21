@@ -92,7 +92,7 @@ class PiSandboxSession(AgentSessionState):
                 f"{self.session.session_dir}/{RUNNER_FILE}",
                 f"{self.session.session_dir}/input.json",
             ],
-            hide_runner=True,
+            stdlib_runner=True,
         )
 
     async def collect_artifacts(self) -> str:

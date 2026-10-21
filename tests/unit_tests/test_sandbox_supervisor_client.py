@@ -192,7 +192,7 @@ def _alive(pid: int) -> bool:
 
 
 @pytest.mark.skipif(sys.platform != "linux" or shutil.which("pgrep") is None, reason="Linux /proc and pgrep")
-async def test_kills_by_interpreter_name_miss_the_supervisor_and_hidden_runner(session, tmp_path):
+async def test_kills_by_interpreter_name_miss_the_supervisor_and_stdlib_runner(session, tmp_path):
     """pgrep matches exactly as pkill and killall would, without signalling anything on this host."""
     sandbox, session_dir = session
     shutil.copyfile(process_supervisor.__file__, session_dir / SUPERVISOR_FILE)
@@ -205,7 +205,7 @@ async def test_kills_by_interpreter_name_miss_the_supervisor_and_hidden_runner(s
         timeout=60,
         cleanup_timeout=1,
         python=sys.executable,
-        hide_runner=True,
+        stdlib_runner=True,
     )
     launch = asyncio.create_task(sandbox.exec(command, timeout_s=90))
     try:

@@ -16,6 +16,7 @@ from nemo_gym.agent_utils.supervisor_client import (
     STOP_REQUEST_FILE,
     SUPERVISOR_FILE,
     HarnessTerminationError,
+    check_stdlib_runner,
     remove_session_directory,
     stop_and_confirm_cleanup,
     supervised_launch_command,
@@ -44,15 +45,18 @@ def _reuse_or_start[T](
 class SandboxCommand:
     """Harness argv and the installed interpreter used to launch its supervisor.
 
-    ``hide_runner`` runs an argv that starts with ``python`` under a neutral process
-    name, as the supervisor always is, so that ``pkill python3`` in the task cannot
-    stop it. Set it only for a runner that needs nothing beyond the standard library:
-    the renamed interpreter is the base interpreter, outside any virtual environment.
+    ``stdlib_runner`` declares that the runner needs nothing beyond the standard library.
+    Its argv, which must start with ``python``, then runs under a neutral process name,
+    as the supervisor always does, so that ``pkill python3`` in the task cannot stop it.
+    The renamed interpreter is the base interpreter, outside any virtual environment.
     """
 
     argv: list[str]
     python: str
-    hide_runner: bool = False
+    stdlib_runner: bool = False
+
+    def __post_init__(self) -> None:
+        check_stdlib_runner(self.argv, python=self.python, stdlib_runner=self.stdlib_runner)
 
 
 @dataclass(kw_only=True)
@@ -161,7 +165,7 @@ class SandboxSession[Artifacts]:
                 timeout=timeout,
                 cleanup_timeout=cleanup_timeout,
                 python=command.python,
-                hide_runner=command.hide_runner,
+                stdlib_runner=command.stdlib_runner,
             )
             self.launch_started = True
             self._exec_task = asyncio.create_task(

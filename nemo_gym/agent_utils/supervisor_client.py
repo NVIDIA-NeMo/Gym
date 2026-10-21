@@ -12,7 +12,7 @@ Filename              Writer               When
 ===================== ==================== ===========================================
 process_supervisor    Session              Uploaded before launch
 bin/gym-supervisor    Launch shell         Interpreter link for the supervisor
-bin/gym-runner        Launch shell         Interpreter link for a hidden runner
+bin/gym-runner        Launch shell         Interpreter link for a standard-library runner
 launch.claim          Launch or stop shell Atomically claims launch or fences it
 supervisor.pid        Launch shell         After claiming launch, before exec
 stop.request          Stop shell           Before signalling the supervisor
@@ -107,6 +107,14 @@ def supervision_timeouts(*, timeout: float, close_timeout: float) -> tuple[float
     return cleanup_timeout, exec_timeout(timeout=timeout, cleanup_timeout=cleanup_timeout)
 
 
+def check_stdlib_runner(command: list[str], *, python: str, stdlib_runner: bool) -> None:
+    """Reject ``stdlib_runner`` for a harness argv that the runner link cannot replace."""
+    if stdlib_runner and command[:1] != [python]:
+        raise ValueError(
+            f"stdlib_runner requires a harness argv that starts with the interpreter {python!r}; got {command[:1]!r}"
+        )
+
+
 def supervised_launch_command(
     *,
     session_dir: str,
@@ -114,7 +122,7 @@ def supervised_launch_command(
     timeout: float,
     cleanup_timeout: float,
     python: str,
-    hide_runner: bool = False,
+    stdlib_runner: bool = False,
 ) -> str:
     """Fence delayed launches and run a harness command under the shared supervisor.
 
@@ -124,18 +132,19 @@ def supervised_launch_command(
     The supervisor stops the harness group; the sandbox owner stops escaped services.
 
     The supervisor runs through ``bin/gym-supervisor``, a link to the binary behind
-    ``python``, so that python-matching kills in the task skip it. With ``hide_runner``,
-    a harness command that starts with ``python`` runs through ``bin/gym-runner`` the
-    same way. The links resolve a virtual environment to its base interpreter, so only
+    ``python``, so that python-matching kills in the task skip it. With ``stdlib_runner``,
+    the harness command, which must start with ``python``, runs through ``bin/gym-runner``
+    the same way. The links resolve a virtual environment to its base interpreter, so only
     standard-library runners may opt in. When the link cannot be made or cannot load
     the supervisor, both processes keep ``python``.
     """
+    check_stdlib_runner(command, python=python, stdlib_runner=stdlib_runner)
     supervisor = quote(f"{session_dir}/{SUPERVISOR_FILE}")
     claim_path = quote(f"{session_dir}/{LAUNCH_CLAIM_FILE}")
     link = quote(f"{session_dir}/{SUPERVISOR_INTERPRETER}")
     harness = join(command)
     runner = ""
-    if hide_runner and command[:1] == [python]:
+    if stdlib_runner:
         runner_link = quote(f"{session_dir}/{RUNNER_INTERPRETER}")
         runner = f'run={quote(python)}; [ "$py" = {link} ] && ln -sfn "$real" {runner_link} && run={runner_link}; '
         harness = f'"$run" {join(command[1:])}'
