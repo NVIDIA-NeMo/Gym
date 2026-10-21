@@ -165,7 +165,9 @@ class InProcessNOOARunner:
                 return
             # NOOA's synchronous callbacks do not yield to sibling async calls.
             # Keep projection and persistence in one critical section as well,
-            # so concurrent callbacks cannot publish older snapshots last.
+            # so concurrent callbacks cannot publish older snapshots last. Publish
+            # before execution resumes: a queued write could lose this boundary
+            # if the worker is killed immediately after the callback returns.
             with progress_lock:
                 try:
                     episode, trajectory = trace.project(
@@ -174,6 +176,7 @@ class InProcessNOOARunner:
                         task_id=request.task_id,
                         rollout_id=request.rollout_id,
                         default_model=self._model_server_name,
+                        partial=True,
                     )
                     self._on_progress(
                         NOOARunResult(

@@ -36,11 +36,30 @@ NOOA stages its own runtime and closes its worker before disconnecting; Resource
 Agent and resource sessions use Gym's existing `single_agent_turn` environment. Agent close returns the evidence and final
 Resources cookies before verification; Resources closes its sandbox afterward.
 
-`sandbox_runner_timeout_seconds` sets a finite worker ceiling (default: 21600 seconds). Request metadata
+`sandbox_runner_timeout_seconds` sets a finite worker ceiling (default: 21420 seconds). Request metadata
 `agent_timeout_sec` can shorten that ceiling. This is separate from the environment's episode timeout;
-a longer episode timeout does not extend the worker ceiling.
+a longer episode timeout does not extend the worker ceiling. The default leaves 180 seconds before the
+default 21600-second episode deadline for finalization. Custom worker and episode budgets should preserve that headroom.
 `session_close_timeout_seconds` budgets each cleanup/capture phase and the remaining activation join
 (default: 30 seconds per phase). Both settings must be positive and finite.
 
 See [NOOA sessions and SWE-bench Pro](../../fern/versions/latest/pages/evaluation-tutorials/nooa-swe-bench-pro.mdx)
 for setup, recipes, service lifecycle and observation limits.
+
+Sandboxed mode requires the Resources server to provide `sandbox_access`; otherwise seeding returns HTTP 422.
+Its provider must support `AsyncSandbox.connect`. The Gym model server address must be reachable from inside
+the task sandbox: configure `use_absolute_ip` / `default_host` for the deployment instead of a controller-only
+loopback address. Runtime packaging runs in a thread so seeding does not block other agent requests.
+
+Close raises if the worker stop is unconfirmed or the remaining activation cannot be joined within its budget;
+the session stays available for a close retry. The bounded join also applies to embedded mode. An activation
+interrupted by session close returns HTTP 409 to a caller whose request was not itself cancelled.
+
+
+## Sandbox worker supervision
+
+The worker's execution budget is capped at six hours and may be shortened by task metadata. Exhausting that
+budget is an ungradable, non-retryable execution failure, rather than a retryable model or provider outage.
+Partial checkpoints remain available for failure inspection; they never authorize grading. Transient artifact
+transfer failures receive one retry within the existing capture deadline. Worker startup and supervisor failures
+retain up to 2,000 characters of output-log diagnostics after artifact capture.

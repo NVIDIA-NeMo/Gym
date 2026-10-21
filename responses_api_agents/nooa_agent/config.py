@@ -92,7 +92,7 @@ class NOOAAgentConfig(BaseResponsesAPIAgentConfig):
     )
 
     sandbox_runner_timeout_seconds: float = Field(
-        default=21600,
+        default=21420,
         gt=0,
         allow_inf_nan=False,
         description="Finite sandbox worker ceiling in seconds; separate from the environment's episode timeout.",

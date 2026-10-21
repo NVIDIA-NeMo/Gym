@@ -13,7 +13,11 @@ nooa_agent:
         invocation_adapter: responses_api_agents.nooa_agent.bench_agent_adapter:invoke_bench_agent
         init_kwargs: {}
         execution_mode: embedded
+        # execution_mode: sandboxed  # Requires Resources-provided sandbox_access.
       max_policy_calls: null
+      # Leave 180 seconds of the default episode budget for finalization.
+      sandbox_runner_timeout_seconds: 21420
+      session_close_timeout_seconds: 30
 
 # Recipes bind Resources and rename this instance through _inherit_from.
 nooa_environment_server:
