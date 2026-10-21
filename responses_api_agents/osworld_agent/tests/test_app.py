@@ -2268,6 +2268,25 @@ def test_a_context_overflow_mask_is_not_named_infra_in_evaluation(
     assert response.policy_stop_reason == policy_stop_reason
     assert response.failure_kind == failure_kind
     assert _masked_result_names_infra(response.model_dump()) is (failure_kind is not None)
+    # OSWorld ends the episode and scores the task: evaluation counts an exhausted context budget as 0.
+    assert response.mask_reason == ("budget" if failure_kind is None else None)
+
+
+def test_training_keeps_a_context_overflow_mask_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("responses_api_agents.osworld_agent.app.is_eval_mode", lambda: False)
+    result = {
+        **DEFAULT_RUN_RESULT,
+        "reward": 0.0,
+        "runtime_eligible": False,
+        "runtime_admission_reason": "model_call_failed",
+        "mask_sample": True,
+        "termination_reason": "model_call_failed",
+        "policy_stop_reason": "model_context_overflow",
+    }
+
+    response = _build_response(make_run_request(osworld_task=DEFAULT_OSWORLD_TASK), result, "test-policy", 1.0, 0.9)
+
+    assert (response.mask_sample, response.failure_kind, response.mask_reason) == (True, None, None)
 
 
 def test_the_context_overflow_stop_reason_is_the_adapters() -> None:

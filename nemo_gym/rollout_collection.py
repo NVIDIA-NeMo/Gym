@@ -236,6 +236,9 @@ NG_FAILURE_JUDGE_ERROR_KEY = "_ng_failure_judge_error"
 AGENT_REQUEST_FAILED_FAILURE_CLASS = "agent_request_failed"
 AGENT_RUN_ERROR_FAILURE_CLASS = "agent_run_error"
 MASKED_SAMPLE_FAILURE_CLASS = "masked_sample"
+# Why a verifier masked a result (BaseVerifyResponse.mask_reason).
+MASK_REASON_KEY = "mask_reason"
+MASK_REASON_BUDGET = "budget"
 ENVIRONMENT_SERVER_FAILURE_CLASS = "environment_server_failed"
 NG_ENVIRONMENT_SERVER_KEY = ENVIRONMENT_SERVER_STAMP_KEY_NAME
 # Implementation name under `environment_servers:`, so readers know which result type a record holds.
@@ -1668,13 +1671,15 @@ def _masked_result_names_infra(result: Mapping[str, Any]) -> bool:
     """Whether a masked verifier result says the mask comes from infra, not from the model's own budget.
 
     A mask for the model's budget (max_iteration, the context window, the agent's time limit) is not retried:
-    the row stays in the rollouts file with ``mask_sample`` set, and aggregation leaves it out of the score as
-    before. Only a mask that names infra, by an explicit cause, a retried ``failure_kind`` or infra error text,
-    becomes a retryable failure.
+    the row stays in the rollouts file with ``mask_sample`` set; with ``mask_reason="budget"`` evaluation scores
+    count it as 0, and with no reason aggregation leaves it out of the score. Only a mask that names infra, by
+    an explicit cause, a retried ``failure_kind`` or infra error text, becomes a retryable failure.
     """
     cause = result.get(NG_FAILURE_CAUSE_KEY)
     if cause in (INFRA, MODEL):
         return cause == INFRA
+    if result.get(MASK_REASON_KEY) == MASK_REASON_BUDGET:
+        return False
     rule = FAILURE_RULES.get(result.get("failure_kind"))
     if rule in (RETRY, FINAL):
         return rule == RETRY
@@ -2223,6 +2228,21 @@ def _settled_failure_keys(failures_fpath: Path, *, retry_terminal_timeouts: bool
                 settled.add(key)
     max_attempts = _get_max_rollout_attempts()
     return settled | {key for key, count in attempts.items() if count >= max_attempts}
+
+
+def _budget_masks_scored_as_zero(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The metric input for scored results: a result masked for the model's own budget counts as 0.
+
+    The evaluated system ran out of turns, context or time before it finished, which is a failed task, not
+    an unusable measurement. Only this metrics-only copy changes; the rollouts file keeps ``mask_sample``,
+    so training still leaves the sample out of the gradient. Any other mask keeps its treatment.
+    """
+    return [
+        {**result, MASK_SAMPLE_KEY: False, "reward": 0.0}
+        if result.get(MASK_SAMPLE_KEY) and result.get(MASK_REASON_KEY) == MASK_REASON_BUDGET
+        else result
+        for result in results
+    ]
 
 
 def _every_rollout_settled(rows: List[Dict[str, Any]], failures_fpath: Path, retry_terminal_timeouts: bool) -> bool:
@@ -3864,7 +3884,7 @@ class RolloutCollectionHelper(BaseModel):
             )
             # Appending leaves a missing early repeat behind the repeats that did land. The two
             # lists are zipped positionally downstream, so they are reordered together.
-            scored_rows = persisted_results + counted
+            scored_rows = _budget_masks_scored_as_zero(persisted_results) + counted
             metadata_rows = persisted_rows + counted if config.retain_results_in_memory else scored_rows
             order = sorted(range(len(scored_rows)), key=lambda i: _rollout_order_key(scored_rows[i]))
             aggregate_metrics_fpath = await self._call_aggregate_metrics(
@@ -4845,7 +4865,7 @@ class RolloutAggregationHelper(BaseModel):
         if counted:
             _fill_task_fields(counted, results, materialized_fpaths, group)
 
-        scored = sorted(results + counted, key=_rollout_order_key)
+        scored = sorted(_budget_masks_scored_as_zero(results) + counted, key=_rollout_order_key)
         aggregate_metrics_fpath = await helper._call_aggregate_metrics(
             scored, scored, output_fpath, raise_on_error=False
         )

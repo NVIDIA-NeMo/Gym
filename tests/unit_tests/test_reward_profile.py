@@ -884,6 +884,36 @@ class TestTheTwoViewsAgree:
         assert len(masked) == 1
         assert coverage["coverage/masked_rollouts"] == 1
 
+    def test_gym_eval_profile_scores_a_budget_mask_as_zero_like_aggregation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A budget-masked repeat is a failed task in evaluation scores; profiling the saved file must agree."""
+        from nemo_gym.cli import eval as eval_cli
+
+        rows = [{TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: i, "agent_ref": {"name": "agent"}} for i in range(3)]
+        results = [
+            {**rows[0], "reward": 1.0, "response": {}},
+            {**rows[1], "reward": 1.0, "mask_sample": True, "mask_reason": "budget", "response": {}},
+            # An unlabelled mask stays out of the score.
+            {**rows[2], "reward": 1.0, "mask_sample": True, "response": {}},
+        ]
+        inputs, rollouts = tmp_path / "inputs.jsonl", tmp_path / "rollouts.jsonl"
+        inputs.write_bytes(b"".join(orjson.dumps(r) + b"\n" for r in rows))
+        rollouts.write_bytes(b"".join(orjson.dumps(r) + b"\n" for r in results))
+        monkeypatch.setattr(
+            eval_cli,
+            "get_global_config_dict",
+            lambda: {"materialized_inputs_jsonl_fpath": str(inputs), "rollouts_jsonl_fpath": str(rollouts)},
+        )
+
+        eval_cli.reward_profile()
+
+        agent_metrics = orjson.loads(rollouts.with_name("rollouts_agent_metrics.json").read_bytes())
+        assert agent_metrics[0]["mean/reward"] == 0.5
+        assert agent_metrics[0]["coverage/masked_rollouts"] == 1
+        # The saved file keeps the mask: only the metric input changed.
+        assert orjson.loads(rollouts.read_bytes().splitlines()[1])["mask_sample"] is True
+
     def test_the_profiling_view_does_not_publish_the_flag_as_a_metric(self) -> None:
         measured_rows, measured_results, _, _ = select_measured(
             [{TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "agent_ref": {"name": "agent"}}],

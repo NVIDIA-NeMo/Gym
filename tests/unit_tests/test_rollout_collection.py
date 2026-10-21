@@ -8088,6 +8088,29 @@ class TestRolloutAggregationHelper:
         )
         await RolloutAggregationHelper().run_from_config(config)
 
+    async def test_a_budget_mask_counts_as_zero_in_gym_eval_aggregate(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        """The aggregate path scores a budget mask as 0, like the run path; an unlabelled mask stays out."""
+        run = tmp_path / "run" / "rollouts.jsonl"
+        self._write_rows(materialized_path_for(run), *(self._rollout(i, "agent_a") for i in range(3)))
+        self._write_rows(
+            run,
+            self._rollout(0, "agent_a", reward=1.0),
+            self._rollout(1, "agent_a", reward=1.0, mask_sample=True, mask_reason="budget"),
+            self._rollout(2, "agent_a", reward=1.0, mask_sample=True),
+        )
+        by_server: dict[str, list] = {}
+        self._serve(monkeypatch, by_server, {"env_a": "agent_a"})
+
+        await self._aggregate(tmp_path, run)
+
+        assert [(r[TASK_INDEX_KEY_NAME], r["reward"], r.get("mask_sample", False)) for r in by_server["env_a"]] == [
+            (0, 1.0, False),
+            (1, 0.0, False),
+            (2, 1.0, True),
+        ]
+
     @pytest.mark.parametrize("run1_has", ["a row", "a failure"])
     async def test_runs_that_reuse_task_indices_do_not_hide_each_others_lost_rollouts(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock, run1_has: str

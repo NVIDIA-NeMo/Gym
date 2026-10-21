@@ -57,11 +57,13 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.failure_kinds import PROVIDER_OOM_KILLED, PROVIDER_UNAVAILABLE
 from nemo_gym.global_config import (
     CACHE_DIR_KEY_NAME,
     RESULTS_DIR_KEY_NAME,
     OmegaConf,
     get_global_config_dict,
+    is_eval_mode,
     maybe_get_global_config_dict,
 )
 from nemo_gym.openai_utils import (
@@ -297,6 +299,8 @@ class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapper
 
     # GRPO related fields
     mask_sample: bool = False
+    # "budget" when mask_sample is set for the model's own turns, context or time.
+    mask_reason: Optional[Literal["budget"]] = None
 
     @property
     def instance_id(self) -> str:
@@ -3948,15 +3952,14 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         agent_timed_out = bool(persisted_metrics.agent_timed_out)
         oom_killed = bool(persisted_metrics.oom_killed)
         eval_oom_killed = bool(persisted_metrics.eval_oom_killed)
-        if (
-            agent_error_kind in ("max_iteration", "context_window")
-            or eval_timed_out
-            or persisted_metrics.eval_launch_failed
-            or agent_timed_out
-            or oom_killed
-            or eval_oom_killed
-        ):
+        # An OOM kill or an evaluator that never started is infra, retried by rollout collection. The model's
+        # own budget (turns, context window, its wall-clock time) and a test run that outlived its limit are a
+        # failed task: evaluation counts them as 0, while training still leaves them out of the gradient.
+        if oom_killed or eval_oom_killed or persisted_metrics.eval_launch_failed:
             params.mask_sample = True
+        elif agent_error_kind in ("max_iteration", "context_window") or eval_timed_out or agent_timed_out:
+            params.mask_sample = True
+            params.mask_reason = "budget"
 
         trajectories_dir = params.persistent_dir / "trajectories"
         (
@@ -4100,6 +4103,13 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 # Report it on the contract as well; `instance_config.mask_sample` stays
                 # for one release so existing consumers keep working.
                 mask_sample=instance_config.mask_sample,
+                mask_reason=instance_config.mask_reason,
+                # Evaluation only: training gets no failure_kind, as before; the mask itself is the same either way.
+                failure_kind=(
+                    (PROVIDER_OOM_KILLED if metrics.oom_killed or metrics.eval_oom_killed else PROVIDER_UNAVAILABLE)
+                    if instance_config.mask_sample and instance_config.mask_reason is None and is_eval_mode()
+                    else None
+                ),
                 **metrics.model_dump(),
                 instance_config=instance_config.model_dump(),
                 subagent_trajectories=subagent_trajectories,

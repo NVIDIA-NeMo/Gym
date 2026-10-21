@@ -568,6 +568,9 @@ class OSWorldVerifyResponse(BaseVerifyResponse):
         ):
             self.failure_kind = PROVIDER_UNAVAILABLE
             self.failure_reason = self.failure_reason or self.runtime_admission_reason
+        elif self.mask_sample and self.policy_stop_reason == CONTEXT_OVERFLOW_STOP_REASON and is_eval_mode():
+            # OSWorld itself ends such an episode and scores the task: evaluation counts it as 0.
+            self.mask_reason = "budget"
         return self
 
 

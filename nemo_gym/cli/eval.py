@@ -751,7 +751,7 @@ def reward_profile():  # pragma: no cover
         coverage_by_agent,
         select_measured,
     )
-    from nemo_gym.rollout_collection import loads_jsonl_line
+    from nemo_gym.rollout_collection import _budget_masks_scored_as_zero, loads_jsonl_line
 
     config = RewardProfileConfig.model_validate(get_global_config_dict())
 
@@ -785,7 +785,9 @@ def reward_profile():  # pragma: no cover
     # aggregation path makes, so profiling the saved rollouts of a run agrees with the
     # metrics that run published. Completion accounting below still sees every row: a
     # masked rollout did run, and is not a gap in the collection.
-    measured_rows, measured_results, masked, _ = select_measured(rows, results)
+    # A budget mask counts as 0 in evaluation scores, as gym eval run and gym eval aggregate score it.
+    metric_results = _budget_masks_scored_as_zero(results)
+    measured_rows, measured_results, masked, _ = select_measured(rows, metric_results)
     group_level_metrics, agent_level_metrics, repeat_level_metrics = rp.profile_from_data(
         measured_rows, measured_results, allow_partial_rollouts=config.allow_partial_rollouts
     )
@@ -793,7 +795,7 @@ def reward_profile():  # pragma: no cover
     # Each agent carries its own coverage, never the run's. An agent whose every result was
     # masked has no quality metrics at all, so it is kept as a coverage-only entry rather
     # than disappearing from the artifact.
-    agent_coverage = coverage_by_agent(rows, results)
+    agent_coverage = coverage_by_agent(rows, metric_results)
     for entry in agent_level_metrics:
         name = (entry.get("agent_ref") or {}).get("name")
         if name in agent_coverage:

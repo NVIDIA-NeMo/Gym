@@ -14,7 +14,7 @@
 # limitations under the License.
 from abc import abstractmethod
 from enum import Enum
-from typing import TYPE_CHECKING, Any, ClassVar, Generic, Optional, TypeVar, get_args
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, Literal, Optional, TypeVar, get_args
 
 from fastapi import FastAPI, Request
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, PrivateAttr, field_validator
@@ -164,6 +164,17 @@ class BaseVerifyResponse(BaseVerifyRequest):
             "in logs, metrics and traces — unlike failure_reason. An environment that needs "
             "something the shared set should not grow can use '<server>:<kind>'. Orthogonal "
             "to mask_sample: naming the kind does not decide whether the sample is usable."
+        ),
+    )
+
+    mask_reason: Optional[Literal["budget"]] = Field(
+        default=None,
+        # Left out when unset, so a verifier that does not name a reason serializes exactly as before.
+        exclude_if=lambda value: value is None,
+        description=(
+            "Why mask_sample is set. 'budget': the evaluated system used up its own budget (turns, context "
+            "window, wall-clock time) before finishing; evaluation scores count the sample as 0, while "
+            "training still leaves it out. Unset keeps the mask's default treatment."
         ),
     )
 

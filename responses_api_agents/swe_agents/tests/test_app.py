@@ -3553,8 +3553,10 @@ def test_merge_reparents_a_new_live_child_to_the_stable_recorded_root() -> None:
 
 class TestEvaluatorLaunchFailure:
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("eval_mode", [False, True], ids=["training", "evaluation"])
     @pytest.mark.parametrize("outcome", ["launch_failure", "post_start_failure", "failed_tests"])
-    async def test_evaluator_failure_mask(self, tmp_path: Path, monkeypatch, outcome: str) -> None:
+    async def test_evaluator_failure_mask(self, tmp_path: Path, monkeypatch, outcome: str, eval_mode: bool) -> None:
+        monkeypatch.setattr(swe_app, "is_eval_mode", lambda: eval_mode)
         params = _make_instance_config(str(tmp_path), debug=False)
         params.problem_info["dataset_name"] = "nv-internal-1"
         params.problem_info["instance_dict"] = json.dumps({"fail_to_pass": ["test_regression"]})
@@ -3634,12 +3636,48 @@ class TestEvaluatorLaunchFailure:
         assert result.reward == 0.0
         assert result.mask_sample is expected_mask
         assert result.instance_config.mask_sample is expected_mask
+        assert result.mask_reason is None
+        # The mask is the same in both modes; only evaluation names the infra failure for the retry rule.
+        assert result.failure_kind == ("provider_unavailable" if expected_mask and eval_mode else None)
         assert result.response.output[-1].generation_token_ids == [3, 4]
         if outcome == "failed_tests":
             # A completed negative verifier result is a valid policy outcome.
             report = json.loads(report_path.read_text())[params.instance_id]
             assert report["resolved"] is False
             assert report["metadata"]["test_results"]["tests"][0]["status"] == "FAILED"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("seeded", "reason"),
+        [
+            ({"agent_error_kind": "max_iteration"}, "budget"),
+            ({"agent_error_kind": "context_window"}, "budget"),
+            ({"agent_timed_out": True}, "budget"),
+            ({"eval_timed_out": True}, "budget"),
+            # Infra: masked with no budget reason; evaluation names a failure_kind for the retry rule.
+            ({"oom_killed": True}, None),
+            ({"eval_oom_killed": True}, None),
+            ({"eval_launch_failed": True}, None),
+            ({}, "unmasked"),
+        ],
+    )
+    async def test_a_mask_names_its_reason(self, tmp_path: Path, monkeypatch, seeded: dict, reason) -> None:
+        # Training mode (the default): mask_sample is set exactly as before; mask_reason is an added label.
+        # The model's own turns, time, or a test run that outlived its limit: a failed task, counted as 0 in
+        # evaluation, and still masked so training leaves it out of the gradient.
+        params = _make_instance_config(str(tmp_path), debug=False)
+        params.problem_info["dataset_name"] = "nv-internal-1"
+        params.metrics_fpath.write_text(json.dumps(seeded))
+        (params.trajectories_root / "llm_completions" / params.instance_id).mkdir(parents=True)
+        wrapper = _create_wrapper(monkeypatch)
+        wrapper._sem = asyncio.Semaphore(1)
+        wrapper._vllm_converter = swe_app.VLLMConverter(return_token_id_information=True)
+        processor = NVInternalDatasetProcessor(config=params)
+        with patch.object(swe_app.runner_ray_remote, "remote", new_callable=AsyncMock, return_value=None):
+            await wrapper._inner_responses(params, processor)
+
+        # mask_sample is set by the same conditions as before the label was added.
+        assert (params.mask_sample, params.mask_reason) == ((False, None) if reason == "unmasked" else (True, reason))
 
     def test_legacy_metrics_do_not_imply_launch_failure(self) -> None:
         metrics = SWEBenchMetrics.model_validate({"patch_exists": True, "eval_timed_out": False})

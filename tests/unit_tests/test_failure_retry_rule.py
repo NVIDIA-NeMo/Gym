@@ -51,6 +51,7 @@ from nemo_gym.rollout_collection import (
     _CompletedRollout,
     _counted_failure_row,
     _failure_rows_counted_as_zero,
+    _masked_result_names_infra,
     failure_cause_of_row,
     failures_path_for,
     is_terminal_failure,
@@ -420,6 +421,63 @@ class TestMaskedRowsInTheCollector:
         config.resume_from_cache = True
         input_rows, *_ = RolloutCollectionHelper()._load_from_cache(config)
         assert [row["x"] for row in input_rows] == [1]
+
+
+class TestBudgetMasks:
+    """A result masked for the model's own budget is a failed task: eval scores count it as 0."""
+
+    async def test_a_budget_mask_counts_as_zero_and_stays_masked_in_the_rollouts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("nemo_gym.rollout_collection.get_global_config_dict", lambda *args, **kwargs: {})
+        output = tmp_path / "out.jsonl"
+        rows = [{"responses_create_params": {"input": []}, "agent_ref": {"name": "agent"}, "x": i} for i in range(3)]
+        (tmp_path / "in.jsonl").write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
+        aggregated: list = []
+
+        class Helper(RolloutCollectionHelper):
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                futures = []
+                for row in examples:
+                    future = asyncio.get_event_loop().create_future()
+                    result = {
+                        0: {"reward": 1.0},
+                        # A resolved rollout at max_iteration: the reward is accidental, the task unfinished.
+                        1: {"reward": 1.0, "mask_sample": True, "mask_reason": "budget"},
+                        # An unlabelled mask keeps its treatment: left out of the score.
+                        2: {"reward": 1.0, "mask_sample": True},
+                    }[row["x"]]
+                    future.set_result(_CompletedRollout(row=row, result=result, rollout_latency_ms=None))
+                    futures.append(future)
+                return futures
+
+            async def _call_aggregate_metrics(self, results, rows, output_fpath, *, raise_on_error=True):
+                aggregated.extend(results)
+                return None
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(tmp_path / "in.jsonl"), output_jsonl_fpath=str(output), disable_health_check=True
+        )
+        await Helper().run_from_config(config)
+
+        stored = [orjson.loads(line) for line in output.read_bytes().splitlines()]
+        # The rollouts file, which training reads, keeps both masks as written.
+        assert [(row["reward"], row.get("mask_sample", False)) for row in stored] == [
+            (1.0, False),
+            (1.0, True),
+            (1.0, True),
+        ]
+        assert not failures_path_for(output).exists() or failures_path_for(output).read_bytes() == b""
+        # The metric input scores the budget mask as an unmasked 0; the unlabelled mask stays masked.
+        assert [(row["reward"], row["mask_sample"]) for row in aggregated if "mask_sample" in row] == [
+            (0.0, False),
+            (1.0, True),
+        ]
+
+    def test_a_budget_mask_is_not_retried_whatever_its_text(self) -> None:
+        assert not _masked_result_names_infra(
+            {"mask_sample": True, "mask_reason": "budget", "error": "Connection refused"}
+        )
 
 
 class TestScoringDefaults:
