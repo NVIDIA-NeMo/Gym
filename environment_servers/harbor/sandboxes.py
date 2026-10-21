@@ -28,6 +28,7 @@ from typing import Any
 import yaml
 from fastapi import HTTPException
 
+from environment_servers.harbor.network_policy import phase_network_policy
 from environment_servers.harbor.overlay import HarborOverlayError
 from environment_servers.harbor.session import _task_sandbox_env, resolve_env_templates
 from environment_servers.harbor.users import _creation_user
@@ -178,8 +179,16 @@ class HarborSandboxMixin:
         image: str | None = None,
         role: str = "agent",
         ttl: float | None = None,
+        network_policy: Mapping[str, Any] | None = None,
     ) -> SandboxSpec:
-        """The agent's sandbox by default; pass the verifier's environment for a separate verifier."""
+        """The agent's sandbox by default; pass the verifier's environment for a separate verifier.
+
+        ``network_policy`` is the provider's egress policy for this sandbox (the separate verifier's
+        ``[verifier].network_mode``, see :meth:`_verifier_network_policy`); it replaces the deployment's
+        ``sandbox_provider_options.network_policy`` for that sandbox (never widening a deny-by-default one, which
+        :meth:`_verifier_network_policy` refuses), as Harbor's explicit phase policy replaces
+        the environment baseline.
+        """
         global_config_dict = get_global_config_dict()
         if environment is None:
             # The agent's sandbox: Dockerfile ENV recorded by the loader, under the host-resolved `[environment.env]`.
@@ -222,6 +231,9 @@ class HarborSandboxMixin:
                 self._refuse_unsupported_group(task, step.user, global_config_dict)
         in_task_image = runs_task_image and not task.overlay
         user = _creation_user(task, default) if in_task_image else None
+        provider_options = self._provider_options_within(resources, task, role)
+        if network_policy is not None:
+            provider_options["network_policy"] = dict(network_policy)
         return SandboxSpec(
             image=image or task.image,
             ttl_s=ttl,
@@ -230,9 +242,45 @@ class HarborSandboxMixin:
             env=env,
             metadata=metadata,
             resources=resources,
-            provider_options=self._provider_options_within(resources, task, role),
+            provider_options=provider_options,
             user=user,
         )
+
+    def _verifier_network_policy(self, task: HarborTask) -> dict[str, Any] | None:
+        """The separate verifier's egress policy from ``[verifier].network_mode`` and ``allowed_hosts``; ``None`` when public.
+
+        Harbor switches the environment's policy for the verify phase and back (``_phase_network_policy``);
+        OpenSandbox cannot change a running sandbox's ``defaultAction`` (its egress API only patches rules
+        under the policy the sandbox was created with), so the restricted policy is applied to the separate
+        verifier's sandbox at creation, for the whole of its life. The loader admits the phase policy for
+        separate-mode tasks only; here the provider is checked (:func:`phase_network_policy` fails closed for
+        every provider but OpenSandbox) and the entries are turned into egress rules. Raises ``ValueError``.
+        """
+        verifier = task.config.verifier
+        if verifier.network_mode in (None, "public") and not verifier.allowed_hosts:
+            return None  # the common case: no provider lookup for a public verifier
+        policy = phase_network_policy(self._task_provider_name(task), verifier.network_mode, verifier.allowed_hosts)
+        # The task's policy replaces the deployment's for the verifier's sandbox, so under a deny-by-default
+        # deployment an allowlist would open hosts the operator closed. Refused rather than intersected (no host
+        # matching to get subtly wrong), whatever the deployment's own rules allow: such a task needs an
+        # allow-by-default deployment; `no-network` (and an empty allowlist, the same policy) only narrows and
+        # passes. OpenSandbox reads a policy that names no `defaultAction` as deny (its NetworkPolicy default),
+        # so an empty mapping `{}` is a present deny-all policy (the 0.1.15 SDK), not an absent one; only no
+        # policy at all is allow-all.
+        deployment = self.config.sandbox_provider_options.get("network_policy")
+        if deployment is not None and not isinstance(deployment, Mapping):
+            raise ValueError(
+                f"sandbox_provider_options.network_policy must be a mapping, got {type(deployment).__name__}"
+            )
+        denies = deployment is not None and deployment.get("defaultAction", "deny") == "deny"
+        if denies and policy is not None and policy["egress"]:
+            hosts = ", ".join(rule["target"] for rule in policy["egress"])
+            raise ValueError(
+                f"allowed_hosts {hosts} would widen this deployment's deny-by-default "
+                "sandbox_provider_options.network_policy for the verifier; run the task on an allow-by-default "
+                "deployment (its deny rules still apply to the agent's sandbox)"
+            )
+        return policy
 
     def _provider_options_within(self, resources: Mapping[str, Any], task: HarborTask, role: str) -> dict[str, Any]:
         """The configured provider options, with scheduling requests capped at the task's declared limits.
@@ -592,7 +640,12 @@ class HarborSandboxMixin:
             # An explicit verifier image starts in its `[verifier.environment].workdir`, else its own WORKDIR.
             workdir = environment.workdir
         spec = self._sandbox_spec(
-            task, workdir, environment=environment, image=_verifier_image(task, True), role="verifier"
+            task,
+            workdir,
+            environment=environment,
+            image=_verifier_image(task, True),
+            role="verifier",
+            network_policy=self._verifier_network_policy(task),
         )
         provider_config = resolve_provider_config(self._provider_ref(task), get_global_config_dict())
         if episode_key is None:

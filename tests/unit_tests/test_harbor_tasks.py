@@ -2037,8 +2037,50 @@ def test_discovery_keeps_file_errors_inside_task_boundary(tmp_path, monkeypatch,
     "policy", ['network_mode = "no-network"', 'network_mode = "allowlist"', 'allowed_hosts = ["example.org"]']
 )
 def test_loader_rejects_unenforced_network_policies(tmp_path, section, policy):
-    with pytest.raises(HarborTaskError, match="network.*not supported"):
+    # A shared-mode task: every phase's restriction is refused, the verifier's for a reason that names the fix.
+    with pytest.raises(HarborTaskError, match="network.*not supported") as excinfo:
         load_task(write_task(tmp_path / "t", toml=f"[{section}]\n{policy}\n"))
+    if section == "verifier":
+        assert "shared verifier mode" in str(excinfo.value) and 'environment_mode = "separate"' in str(excinfo.value)
+
+
+SEPARATE_VERIFIER_TOML = HELLO_TOML.replace(
+    "[verifier]\ntimeout_sec = 120.0", '[verifier]\ntimeout_sec = 120.0\nenvironment_mode = "separate"'
+).replace("[environment]\n", '[environment]\ndocker_image = "ubuntu:24.04"\n')
+
+
+@pytest.mark.parametrize(
+    ("policy", "mode", "hosts"),
+    [
+        ('network_mode = "no-network"', "no-network", None),
+        ('network_mode = "allowlist"', "allowlist", None),
+        (
+            'network_mode = "allowlist"\nallowed_hosts = ["pypi.org", "*.nvidia.com"]',
+            "allowlist",
+            ["pypi.org", "*.nvidia.com"],
+        ),
+    ],
+)
+def test_loader_admits_a_verifier_phase_policy_for_separate_verification(tmp_path, policy, mode, hosts):
+    """The restricted policy can be applied to the separate verifier's own sandbox, so the loader admits it there."""
+    toml = SEPARATE_VERIFIER_TOML.replace('environment_mode = "separate"', f'environment_mode = "separate"\n{policy}')
+    task = load_task(write_task(tmp_path / "t", toml=toml))
+    assert not task.config.is_shared_verifier
+    assert (task.config.verifier.network_mode, task.config.verifier.allowed_hosts) == (mode, hosts)
+    # The agent's own sandbox stays public: the other phases are still refused on the same task.
+    for section in ("environment", "agent"):
+        restricted = toml.replace(f"[{section}]\n", f'[{section}]\nnetwork_mode = "no-network"\n')
+        with pytest.raises(HarborTaskError, match=f"{section} network restrictions are not supported yet"):
+            load_task(write_task(tmp_path / section, toml=restricted))
+
+
+@pytest.mark.parametrize("policy", ['network_mode = "no-network"', 'network_mode = "public"', ""])
+def test_loader_refuses_verifier_allowed_hosts_without_an_allowlist(tmp_path, policy):
+    toml = SEPARATE_VERIFIER_TOML.replace(
+        'environment_mode = "separate"', f'environment_mode = "separate"\n{policy}\nallowed_hosts = ["pypi.org"]'
+    )
+    with pytest.raises(HarborTaskError, match="allowed_hosts is only valid when network_mode='allowlist'"):
+        load_task(write_task(tmp_path / "t", toml=toml))
 
 
 @pytest.mark.parametrize(
