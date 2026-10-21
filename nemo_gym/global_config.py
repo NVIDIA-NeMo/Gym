@@ -46,10 +46,12 @@ from nemo_gym.config_types import (
     AgentWithoutEnvironmentServerError,
     AlmostServerError,
     AmbiguousAgentRenameError,
+    BaseServerConfig,
     ConfigError,
     ConfigInterpolationError,
     ConfigMissingValuesError,
     ConfigPathNotFoundError,
+    HeadServerConfigMalformedError,
     InheritPathNotFoundError,
     MalformedConfigPathsError,
     NoServerInstancesError,
@@ -64,10 +66,12 @@ from nemo_gym.config_types import (
 )
 from nemo_gym.exporters import setup_exporters
 from nemo_gym.h2_ping_sidecar.config import H2_PING_SIDECAR_KEY_NAME
+from nemo_gym.sandbox.providers.registry import plugin_distributions
 from nemo_gym.secret_utils import recursively_hide_secrets
 from nemo_gym.telemetry.setup import (
     TELEMETRY_KEY_NAME,
     configure_telemetry_env,
+    installed_requirement,
     server_venv_requirements,
     telemetry_config_from_global_config,
 )
@@ -203,6 +207,14 @@ ALLOWED_AGENTS_KEY_NAME = "allowed_agents"
 ALLOWED_MODEL_TYPES_KEY_NAME = "allowed_model_types"
 MODEL_SERVER_TYPE_KEY_NAME = "responses_api_models"
 RESOURCES_SERVER_TYPE_KEY_NAME = "resources_servers"
+
+# Public config-group keys, in discovery order, for Gym and downstream integrations.
+SERVER_TYPE_KEYS: Tuple[str, ...] = (
+    RESOURCES_SERVER_TYPE_KEY_NAME,
+    AGENT_SERVER_TYPE_KEY_NAME,
+    MODEL_SERVER_TYPE_KEY_NAME,
+    ENVIRONMENT_SERVER_TYPE_KEY_NAME,
+)
 
 
 def environment_server_agent_refs(server: DictConfig) -> list[DictConfig]:
@@ -1539,10 +1551,27 @@ Found global config dict yaml:
             # Do one pass through all the configs validate and populate various configs for our servers.
             default_host = global_config_dict.get(DEFAULT_HOST_KEY_NAME) or "127.0.0.1"
 
-        head_server_config = global_config_dict.get(HEAD_SERVER_KEY_NAME, {})
-        head_server_port = head_server_config.get("port", DEFAULT_HEAD_SERVER_PORT)
+        # Only an absent or null block means "all defaults"; any other non-mapping (incl. false, 0, "" and []) is
+        # malformed. `host` is not read here: it may reference a server host that validate_and_populate_defaults
+        # fills in below.
+        head_server = global_config_dict.get(HEAD_SERVER_KEY_NAME)
+        if head_server is None:
+            head_server = {}
+        elif not isinstance(head_server, Mapping):
+            raise HeadServerConfigMalformedError(
+                f"""'{HEAD_SERVER_KEY_NAME}' must be a mapping of `host` and `port`. Got: {head_server!r}.
+Set the keys individually, in a config or as overrides, e.g.:
+  ++{HEAD_SERVER_KEY_NAME}.host=127.0.0.1 ++{HEAD_SERVER_KEY_NAME}.port={DEFAULT_HEAD_SERVER_PORT}"""
+            )
 
-        initial_disallowed_ports = [head_server_port] if head_server_port is not None else []
+        # The port is coerced so a quoted `port: "11000"` still keeps it away from the allocator. A port that does
+        # not coerce is left to the full check below, which reports it together with any `host` problem.
+        try:
+            initial_disallowed_ports = [
+                TypeAdapter(int).validate_python(head_server.get("port", DEFAULT_HEAD_SERVER_PORT))
+            ]
+        except ValidationError:
+            initial_disallowed_ports = []
 
         with open_dict(global_config_dict):
             port_range_low = global_config_dict.setdefault(PORT_RANGE_LOW_KEY_NAME, 10_001)
@@ -1561,11 +1590,29 @@ Found global config dict yaml:
 
         with open_dict(global_config_dict):
             # Head server defaults, filled per key so a config may pin just one.
-            head_server = global_config_dict.get(HEAD_SERVER_KEY_NAME) or {}
             head_server.setdefault("host", default_host)
             head_server.setdefault("port", DEFAULT_HEAD_SERVER_PORT)
             global_config_dict[HEAD_SERVER_KEY_NAME] = head_server
 
+        # Validated here, still in the config parse, rather than where the block is next built into a
+        # BaseServerConfig (ServerClient.load_head_server_config, after Ray is up for `gym env start`):
+        # BaseServerConfig is not a CLI config, so its pydantic error would otherwise escape `main()` as a raw
+        # traceback (#2686). Not earlier: a `host` that references another server's host only resolves once
+        # validate_and_populate_defaults has filled that host in.
+        # Validate-only: the block is left as written, so `gym env resolve` prints what the user configured.
+        try:
+            BaseServerConfig.model_validate(head_server)
+        except ValidationError as e:
+            problems = "; ".join(
+                f"{'.'.join([HEAD_SERVER_KEY_NAME, *map(str, error['loc'])])} ({error['msg']})" for error in e.errors()
+            )
+            raise HeadServerConfigMalformedError(
+                f"""'{HEAD_SERVER_KEY_NAME}' is invalid: {problems}.
+`{HEAD_SERVER_KEY_NAME}.host` must be a hostname or IP; `{HEAD_SERVER_KEY_NAME}.port` and, if set, `{HEAD_SERVER_KEY_NAME}.num_workers` must be integers. Set them in a config or as overrides, e.g.:
+  ++{HEAD_SERVER_KEY_NAME}.host=127.0.0.1 ++{HEAD_SERVER_KEY_NAME}.port={DEFAULT_HEAD_SERVER_PORT}"""
+            ) from e
+
+        with open_dict(global_config_dict):
             # Store final list of disallowed ports.
             global_config_dict[DISALLOWED_PORTS_KEY_NAME] = disallowed_ports
 
@@ -1587,7 +1634,7 @@ Found global config dict yaml:
             if _openai_version_matches_nemo_gym_constraint(openai_version):
                 head_server_deps.append(f"openai=={openai_version}")
             elif allow_openai_skew:
-                logging.warning(
+                logger.warning(
                     f"Not pinning the parent process's openai=={openai_version} into server venvs: "
                     f"it does not satisfy nemo-gym's own constraint ({_nemo_gym_openai_requirement()}). "
                     "Server venvs resolve openai from nemo-gym's constraint instead, so the parent and "
@@ -1612,6 +1659,12 @@ Found global config dict yaml:
             # lets server_venv_requirements() see that telemetry is on.
             configure_telemetry_env(telemetry_config_from_global_config(global_config_dict))
             head_server_deps.extend(server_venv_requirements())
+            # A server venv is built from that server's own requirements, so a provider
+            # installed only in this process would be unknown there.
+            for dist_name in plugin_distributions():
+                requirement = installed_requirement(dist_name, dist_name)
+                if requirement is not None:
+                    head_server_deps.append(requirement)
 
             global_config_dict[HEAD_SERVER_DEPS_KEY_NAME] = head_server_deps
 
@@ -2157,7 +2210,6 @@ def format_almost_server_warning(server_name: str, error: ValidationError) -> st
     errors = error.errors()
 
     # Identify the actual server type from the error (excluding Union discriminator noise)
-    server_type_keys = ["responses_api_models", "resources_servers", "responses_api_agents", "environment_servers"]
     actual_server_type = None
 
     # Example error structure: ('ResponsesAPIAgentServerInstanceConfig', 'responses_api_agents', 'simple_agent', 'datasets', 0, 'license')
@@ -2165,7 +2217,7 @@ def format_almost_server_warning(server_name: str, error: ValidationError) -> st
         loc = err["loc"]
         # loc[1] is the actual server type key.
         # Skip "missing" errors from the irrelevant Union variants.
-        if len(loc) > 1 and loc[1] in server_type_keys and err["type"] != "missing":
+        if len(loc) > 1 and loc[1] in SERVER_TYPE_KEYS and err["type"] != "missing":
             actual_server_type = loc[1]
             break
 
@@ -2173,7 +2225,7 @@ def format_almost_server_warning(server_name: str, error: ValidationError) -> st
     if not actual_server_type:  # pragma: no cover
         for err in errors:
             if "input" in err and isinstance(err["input"], dict):
-                for key in server_type_keys:
+                for key in SERVER_TYPE_KEYS:
                     if key in err["input"]:
                         actual_server_type = key
                         break
@@ -2189,7 +2241,7 @@ def format_almost_server_warning(server_name: str, error: ValidationError) -> st
         if (
             err["type"] == "missing"
             and len(loc) > 1
-            and loc[1] in server_type_keys
+            and loc[1] in SERVER_TYPE_KEYS
             and actual_server_type
             and loc[1] != actual_server_type
         ):

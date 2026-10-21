@@ -34,9 +34,11 @@ telemetry:
 | `service_name_per_server` | `true` | Append each server's config name, producing `nemo-gym/policy_model` and so on. |
 | `span_groups` | `default` | Which spans exist. See [Span Groups](/main/observability/span-groups). |
 | `exporter` | `otlp` | `otlp` or `console`. |
-| `traces_enabled` | `true` | Emit spans. |
+| `traces_enabled` | `true` | Emit spans. When false, NeMo Gym also skips FastAPI auto-instrumentation and outbound trace-context injection, so the `http.server.*` metrics are not reported. |
 | `metrics_enabled` | `true` | Emit metrics. |
 | `memory_profiling` | disabled | Sample host capacity and each managed server process tree. See below. |
+| `event_loop_sample_interval_seconds` | `1.0` | How often each event loop is sampled for lag. See below. |
+| `event_loop_task_count` | `false` | Also report the number of asyncio tasks on each event loop. See below. |
 | `logs_enabled` | `false` | Bridge Python logging to OpenTelemetry logs. |
 | `run_id` | generated | Correlates every process of one run. |
 
@@ -54,6 +56,20 @@ telemetry:
 ```
 
 The supervisor samples host used, available, and total memory plus every server process and its descendants, including Uvicorn workers and ordinary subprocesses. Collection starts after the servers become ready and stops before they are terminated. Server accounting reads Linux `/proc`; PSS is omitted when `smaps_rollup` is unavailable, while RSS falls back to `statm`.
+
+### Event Loop and Process Metrics
+
+Whenever metrics are exported, every server process, the head server inside the process that runs `gym env start` or `gym eval run`, and the rollout driver report how busy their event loop is, how long garbage collection pauses them, their CPU, memory, threads, and open file descriptors, and how many requests they are handling. Use them to find a server whose event loop is the bottleneck. See [Event Loop and Process Metrics](/main/observability/metrics#event-loop-and-process-metrics) for each metric.
+
+Their cost stays off the request path: a request updates a few integers, and the exporter's thread reads the totals when it exports. The event-loop task count is the exception, because counting walks every task on the loop, which takes about a millisecond per sample at 16,000 tasks. It is off by default:
+
+```yaml
+telemetry:
+  enabled: true
+  metrics_enabled: true
+  event_loop_sample_interval_seconds: 1
+  event_loop_task_count: true
+```
 
 ### Why `service_name_per_server` Defaults to True
 
@@ -86,6 +102,8 @@ config file.
 | `NEMO_GYM_OTEL_METRICS_ENABLED` | `metrics_enabled` |
 | `NEMO_GYM_OTEL_MEMORY_PROFILING_ENABLED` | `memory_profiling.enabled` |
 | `NEMO_GYM_OTEL_MEMORY_PROFILING_INTERVAL_SECONDS` | `memory_profiling.interval_seconds` |
+| `NEMO_GYM_OTEL_EVENT_LOOP_SAMPLE_INTERVAL_SECONDS` | `event_loop_sample_interval_seconds` |
+| `NEMO_GYM_OTEL_EVENT_LOOP_TASK_COUNT` | `event_loop_task_count` |
 | `NEMO_GYM_OTEL_LOGS_ENABLED` | `logs_enabled` |
 | `NEMO_GYM_OTEL_RUN_ID` | `run_id` |
 | `OTEL_SERVICE_NAME` | `service_name` |

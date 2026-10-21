@@ -6,7 +6,7 @@ from pathlib import Path
 
 from nemo_gym.task_materialization import materialize_task
 from resources_servers.nemo_user_sim.app import UserSimResourcesServerConfig, _row_digest, _validate_resolved_row
-from resources_servers.nemo_user_sim.episode_contracts import UserSimEpisodeRequest
+from resources_servers.nemo_user_sim.task_data import TaskData
 
 
 DATA_DIR = Path(__file__).parents[1] / "data"
@@ -16,7 +16,7 @@ def _jsonl(path: Path) -> list[dict[str, object]]:
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
-def test_examples_are_safe_task_rows_that_materialize_as_episode_requests() -> None:
+def test_examples_are_safe_task_rows_that_materialize_as_task_data() -> None:
     rows = _jsonl(DATA_DIR / "example.jsonl")
 
     assert len(rows) == 5
@@ -33,16 +33,14 @@ def test_examples_are_safe_task_rows_that_materialize_as_episode_requests() -> N
         assert "assets_dir" not in resolved_row["usersim_config"]
 
         task = materialize_task(row, taskset="nemo_user_sim:example", task_index=index)
-        request = UserSimEpisodeRequest.model_validate(
-            {"episode_id": {"rollout_id": f"{index}-0", "attempt": 0}, "task": task}
-        )
-        assert request.task.task_id.task_id == task_id
+        assert task["task_id"] == {"taskset": "nemo_user_sim:example", "task_id": task_id}
+        task_input = TaskData.model_validate(task["task_input"])
         expected_revision = UserSimResourcesServerConfig.model_fields["usersim_revision"].default
         expected_personas_version = UserSimResourcesServerConfig.model_fields["nemotron_personas_version"].default
         assert isinstance(expected_revision, str)
         assert isinstance(expected_personas_version, str)
         _validate_resolved_row(
-            request.task.task_input.resolved_row,
+            task_input.resolved_row,
             expected_revision=expected_revision,
             expected_personas_version=expected_personas_version,
         )

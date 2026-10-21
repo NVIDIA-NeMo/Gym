@@ -15,7 +15,7 @@
 from typing import Dict
 
 from fastapi import FastAPI, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, JsonValue
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -25,7 +25,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
 
 
 class StatefulCounterResourcesServerConfig(BaseResourcesServerConfig):
@@ -53,8 +53,29 @@ class StatefulCounterSeedSessionRequest(BaseSeedSessionRequest):
 
 
 class StatefulCounterResourcesServer(SimpleResourcesServer):
+    checkpoint_mode = "exported"
     config: StatefulCounterResourcesServerConfig
     session_id_to_counter: Dict[str, int] = Field(default_factory=dict)
+
+    async def export_session_states(self, session_ids: list[str]) -> dict[str, JsonValue]:
+        # A session the server no longer holds is left out, so the participant stops tracking it.
+        return {
+            session_id: {"count": self.session_id_to_counter[session_id]}
+            for session_id in session_ids
+            if session_id in self.session_id_to_counter
+        }
+
+    async def restore_session_states(self, states: dict[str, JsonValue]) -> None:
+        counters = {}
+        for session_id, state in states.items():
+            count = state.get("count") if isinstance(state, dict) else None
+            if not isinstance(count, int):
+                raise ValueError(f"invalid counter state for session {session_id!r}: {state!r}")
+            counters[session_id] = count
+        self.session_id_to_counter.update(counters)
+
+    async def retire_session_state(self, session_id: str) -> None:
+        self.session_id_to_counter.pop(session_id, None)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -97,3 +118,6 @@ class StatefulCounterResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     StatefulCounterResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = StatefulCounterResourcesServer.run_webserver()  # noqa: F401

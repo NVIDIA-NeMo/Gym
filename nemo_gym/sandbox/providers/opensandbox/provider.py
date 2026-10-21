@@ -1937,7 +1937,7 @@ class OpenSandboxProvider:
             timeout_s=self._connection.request_timeout_s,
         )
         # A nested shell keeps exit/exec in the command from replacing the SDK's
-        # session wrapper. The client owns the deadline: the native timeout can
+        # session wrapper. The client owns the deadline: the SDK's own timeout can
         # kill only the shell and then hang waiting for a child's output pipe.
         task = asyncio.create_task(
             commands.run_in_session(session_id, f"bash -c {shlex.quote(command)}", timeout=timedelta(0))
@@ -1974,13 +1974,16 @@ class OpenSandboxProvider:
 
         if timed_out and (task.cancelled() or task.exception() is not None):
             return SandboxExecResult(
-                None, f"Command timed out after {timeout_s:g}s; native session was deleted", 124, error_type="timeout"
+                None,
+                f"Command timed out after {timeout_s:g}s; OpenSandbox command session was deleted",
+                124,
+                error_type="timeout",
             )
         execution = task.result()
         stdout = "\n".join(msg.text for msg in execution.logs.stdout) or None
         stderr_parts = [msg.text for msg in execution.logs.stderr]
         if timed_out:
-            stderr_parts.append(f"Command timed out after {timeout_s:g}s; native session was deleted")
+            stderr_parts.append(f"Command timed out after {timeout_s:g}s; OpenSandbox command session was deleted")
             return SandboxExecResult(stdout, "\n".join(stderr_parts), 124, error_type="timeout")
         if execution.error is not None:
             stderr_parts.append(f"{execution.error.name}: {execution.error.value}")
@@ -2130,25 +2133,29 @@ class OpenSandboxProvider:
             else None,
         )
 
-    async def _read_file(self, handle: SandboxHandle, source_path: str) -> bytes:
-        """Read one file from an OpenSandbox sandbox."""
-        return await self._await_sdk_operation(
-            lambda: handle.raw.files.read_bytes(source_path),
-            operation=f"read_file({source_path})",
-            sandbox_id=handle.sandbox_id,
-            timeout_s=float(self._connection.request_timeout_s)
-            if self._connection.request_timeout_s is not None
-            else None,
-        )
-
     async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
         """Upload one local file into an OpenSandbox sandbox."""
         await self._write_file(handle, target_path, source_path.read_bytes())
 
     async def download_file(self, handle: SandboxHandle, source_path: str, target_path: Path) -> None:
-        """Download one file from an OpenSandbox sandbox."""
+        """Download one file from an OpenSandbox sandbox, streamed to disk in chunks."""
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        target_path.write_bytes(await self._read_file(handle, source_path))
+
+        async def stream() -> None:
+            # A retry starts the file again, so every attempt truncates it. The writes run in a thread so a
+            # large file does not block the event loop.
+            with target_path.open("wb") as out:
+                async for chunk in await handle.raw.files.read_bytes_stream(source_path):
+                    await asyncio.to_thread(out.write, chunk)
+
+        await self._await_sdk_operation(
+            stream,
+            operation=f"download_file({source_path})",
+            sandbox_id=handle.sandbox_id,
+            # No overall deadline: the transfer time grows with the file, and the SDK client's request timeout
+            # still applies to every read, so a stalled stream fails.
+            timeout_s=None,
+        )
 
     async def close(self, handle: SandboxHandle) -> None:
         """Terminate the sandbox and close local SDK resources."""

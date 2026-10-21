@@ -52,6 +52,10 @@ class Ether0VerifyResponse(BaseVerifyResponse):
 
 
 class Ether0ResourcesServer(SimpleResourcesServer):
+    # Each verification runs one ether0 reward function on the answer: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     config: BaseResourcesServerConfig
 
     async def verify(self, body: Ether0VerifyRequest) -> Ether0VerifyResponse:

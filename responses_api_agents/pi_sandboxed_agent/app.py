@@ -138,7 +138,9 @@ class PiSandboxedAgent(PiAgent):
         *,
         rollout_id: str | None = None,
         collect_observations: bool = True,
+        timeout: float | None = None,
     ) -> tuple[list[Any], dict[str, int], str, list[tuple[float, dict[str, Any]]]]:
+        timeout = self.config.timeout if timeout is None else timeout
         context = _RUN.get()
         if context is None:
             raise RuntimeError("Pi sandbox execution requires a seeded /run request")
@@ -196,7 +198,7 @@ class PiSandboxedAgent(PiAgent):
             result = await sandbox.exec(
                 command=f"{join(['python3', remote + '/capture.py', remote + '/events.jsonl', *cmd])} > {quote(stdout_path)} 2> {quote(stderr_path)}",
                 env=env,
-                timeout_s=self.config.timeout,
+                timeout_s=timeout,
             )
         except Exception as exc:
             error_type = type(exc).__name__

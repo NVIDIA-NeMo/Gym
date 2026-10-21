@@ -87,6 +87,16 @@ Code, Cline, OpenCode, OpenClaw and Pi), only the harness executable, plus `node
 when the executable is a node script, is put on the agent's `PATH`. The agent's
 `python`, `pip` and `node` therefore resolve to the task image, not the runtime.
 
+`agent_network_policy` sets an OpenSandbox `network_policy` on the agent sandbox only (grading keeps its network):
+
+```yaml
+agent_network_policy:
+  defaultAction: deny
+  egress:
+    - action: allow
+      target: <model server CIDR>
+```
+
 Private task images can pass registry credentials through
 `sandbox_spec.provider_options.image_auth`.
 
