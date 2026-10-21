@@ -192,8 +192,25 @@ def test_session_timeouts_must_be_positive_and_finite(field: str, value: float) 
 
 def test_session_timeout_defaults_and_fractional_budgets() -> None:
     default = agent_config()
-    assert default.sandbox_runner_timeout_seconds == 21600
+    assert default.sandbox_runner_timeout_seconds == 21420
     assert default.session_close_timeout_seconds == 30
     configured = agent_config(sandbox_runner_timeout_seconds=0.5, session_close_timeout_seconds=0.25)
     assert configured.sandbox_runner_timeout_seconds == 0.5
     assert configured.session_close_timeout_seconds == 0.25
+
+
+def test_shipped_yaml_declares_worker_and_close_defaults_with_episode_headroom() -> None:
+    from pathlib import Path
+
+    import yaml
+
+    config = yaml.safe_load((Path(__file__).parents[1] / "configs/nooa_agent.yaml").read_text())
+    agent = config["nooa_agent"]["responses_api_agents"]["nooa_agent"]
+    environment = config["nooa_environment_server"]["environment_servers"]["single_agent_turn"]
+    defaults = agent_config()
+    assert agent["sandbox_runner_timeout_seconds"] == defaults.sandbox_runner_timeout_seconds
+    assert agent["session_close_timeout_seconds"] == defaults.session_close_timeout_seconds
+    assert (
+        agent["sandbox_runner_timeout_seconds"] + environment["cleanup_timeout_seconds"]
+        <= environment["default_episode_timeout_seconds"]
+    )
