@@ -774,6 +774,8 @@ class OpenSandboxProvider:
         # sweeps any still open; ended ones are retired on the next create/attach.
         self._pty_sessions: set[Any] = set()
         self._renewals: dict[str, asyncio.Task[None]] = {}
+        # Creates whose caller gave up; each deletes its sandbox once the server answers.
+        self._abandoned_creates: set[asyncio.Task[None]] = set()
 
     def validate_runtime_requirements(self, *, cap_add: tuple[str, ...], shm_size: int | None) -> dict[str, str]:
         """Reject requirements without an operator-configured implementation."""
@@ -1045,6 +1047,17 @@ class OpenSandboxProvider:
         """Close provider-owned resources."""
         for sandbox_id in list(self._renewals):
             await self._stop_renewal(sandbox_id)
+        if self._abandoned_creates:
+            _, pending = await asyncio.wait(self._abandoned_creates, timeout=self._operations.close_timeout_s)
+            if pending:
+                LOGGER.warning(
+                    "Cancelling %d abandoned OpenSandbox creates the server has not answered; "
+                    "their sandboxes may run until their TTL",
+                    len(pending),
+                )
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
         # PTY sessions hold their own aiohttp clients, which the shared httpx
         # transport below does not cover.
         for session in list(self._pty_sessions):
@@ -1557,14 +1570,16 @@ class OpenSandboxProvider:
 
         sandbox_id: str | None = None
         sandbox: Any | None = None
+        # A create cancelled before the server answers would drop the only reply that carries
+        # the new sandbox's id, so the request is never cancelled: an abandoned one is left to
+        # finish and its sandbox deleted. Once the id is known, the SDK cleans up on failure.
+        create = asyncio.ensure_future(Sandbox.create(**kwargs))
         try:
-            if timeout_s is None:
-                sandbox = await Sandbox.create(**kwargs)
-            else:
-                sandbox = await asyncio.wait_for(
-                    Sandbox.create(**kwargs),
-                    timeout=timeout_s,
-                )
+            try:
+                sandbox = await asyncio.wait_for(asyncio.shield(create), timeout=timeout_s)
+            except BaseException:
+                self._reap_abandoned_create(create)
+                raise
             if sandbox is None:
                 raise RuntimeError("OpenSandbox SDK create returned no sandbox handle")
             sandbox_id = str(sandbox.id)
@@ -1593,6 +1608,20 @@ class OpenSandboxProvider:
         if self._create.renew_interval_s is not None:
             self._start_renewal(handle, spec.ttl_s)
         return handle
+
+    def _reap_abandoned_create(self, create: asyncio.Future[Any]) -> None:
+        async def reap() -> None:
+            try:
+                sandbox = await create
+            except BaseException:
+                return
+            handle = SandboxHandle(sandbox_id=str(sandbox.id), provider_name=self.name, raw=sandbox)
+            LOGGER.warning("Deleting OpenSandbox sandbox %s made by an abandoned create", handle.sandbox_id)
+            await self._cleanup_failed_create_handle(handle)
+
+        task = asyncio.create_task(reap())
+        self._abandoned_creates.add(task)
+        task.add_done_callback(self._abandoned_creates.discard)
 
     async def _create_with_retries(
         self,

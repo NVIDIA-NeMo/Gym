@@ -156,6 +156,87 @@ async def test_tb4_create_timeout_retries_with_jitter(monkeypatch, recovers, tim
     assert bounds[:5] == [(0, 5), (0, 10), (0, 20), (0, 40), (0, 60)]
 
 
+@pytest.mark.parametrize("abandon", ["timeout", "cancel"])
+async def test_create_deletes_the_sandbox_of_an_abandoned_request(
+    monkeypatch: pytest.MonkeyPatch, abandon: str
+) -> None:
+    """A create the caller gave up on before the server answered still finishes, and its sandbox is deleted."""
+    server_answers = asyncio.Event()
+    killed: list[str] = []
+
+    class SlowSandbox(FakeSandbox):
+        @classmethod
+        async def create(cls, **_kwargs: Any) -> "FakeSandbox":
+            await server_answers.wait()
+            return cls("late-sandbox")
+
+        async def kill(self) -> None:
+            killed.append(self.id)
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (SlowSandbox, FakeConnectionConfig, object, FakePlatformSpec, object),
+    )
+    create = {"retries": 0}
+    if abandon == "timeout":
+        create["timeout_s"] = 0.01
+    provider = opensandbox_provider.OpenSandboxProvider(create=create, probe={"command": None})
+
+    if abandon == "timeout":
+        with pytest.raises(opensandbox_provider.OpenSandboxCreateTimeoutError):
+            await provider.create(SandboxSpec(image="image:tag"))
+    else:
+        task = asyncio.create_task(provider.create(SandboxSpec(image="image:tag")))
+        await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    # The caller is released before the server answers; nothing is deleted yet.
+    assert killed == []
+    assert len(provider._abandoned_creates) == 1
+
+    server_answers.set()
+    await provider.aclose()
+    assert killed == ["late-sandbox"]
+    assert provider._abandoned_creates == set()
+
+
+async def test_aclose_cancels_abandoned_creates_the_server_never_answers(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    cancelled: list[bool] = []
+
+    class HungSandbox(FakeSandbox):
+        @classmethod
+        async def create(cls, **_kwargs: Any) -> "FakeSandbox":
+            try:
+                await asyncio.get_running_loop().create_future()
+            except asyncio.CancelledError:
+                cancelled.append(True)
+                raise
+            return cls()
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (HungSandbox, FakeConnectionConfig, object, FakePlatformSpec, object),
+    )
+    provider = opensandbox_provider.OpenSandboxProvider(
+        create={"timeout_s": 0.01, "retries": 0},
+        operations={"close_timeout_s": 0.05},
+        probe={"command": None},
+    )
+    with pytest.raises(opensandbox_provider.OpenSandboxCreateTimeoutError):
+        await provider.create(SandboxSpec(image="image:tag"))
+
+    with caplog.at_level(logging.WARNING):
+        await asyncio.wait_for(provider.aclose(), timeout=5)
+    assert cancelled == [True]
+    assert provider._abandoned_creates == set()
+    assert "Cancelling 1 abandoned OpenSandbox creates" in caplog.text
+
+
 async def test_create_does_not_retry_rejected_credentials():
     from opensandbox.exceptions import SandboxApiException
 
