@@ -37,7 +37,7 @@ from nemo_gym.config_types import (
     AggregateMetricsRequest,
     ResourcesServerRef,
 )
-from nemo_gym.failure_kinds import AGENT_INVALID_OUTPUT, AGENT_LIMIT, MODEL_TRANSPORT_ERROR
+from nemo_gym.failure_kinds import AGENT_INVALID_OUTPUT, AGENT_LIMIT, MODEL_REQUEST_ERROR, MODEL_TRANSPORT_ERROR
 from nemo_gym.global_config import (
     TOKEN_ID_CAPTURE_BLOCK,
     get_first_server_config_dict,
@@ -529,7 +529,7 @@ def agent_outcome_policy(response: NeMoGymResponse) -> AgentOutcomePolicy:
     """Grade model mistakes and limits; exclude provider failures from scores.
 
     Preserve existing behavior for adapters without classified outcomes. For
-    migrated adapters, unknown failures are neither graded nor automatically retried.
+    migrated adapters, unclassified failures remain eligible for episode retry.
     The 400/413/422 request-rejection convention matches existing Hermes behavior.
     """
     raw = (response.metadata or {}).get(AGENT_OUTCOME_METADATA_KEY)
@@ -540,12 +540,10 @@ def agent_outcome_policy(response: NeMoGymResponse) -> AgentOutcomePolicy:
     except ValidationError:
         # Keep malformed classification in the partial response for diagnosis, not scoring.
         return AgentOutcomePolicy(verifiable=False, retryable=False)
+    verifiable = outcome.failure_kind in {AGENT_INVALID_OUTPUT, AGENT_LIMIT} or outcome.status_code in {400, 413, 422}
     return AgentOutcomePolicy(
-        verifiable=outcome.failure_kind in {AGENT_INVALID_OUTPUT, AGENT_LIMIT}
-        or outcome.status_code in {400, 413, 422},
-        retryable=outcome.failure_kind == MODEL_TRANSPORT_ERROR
-        or outcome.status_code in {408, 425, 429}
-        or (outcome.status_code is not None and outcome.status_code >= 500),
+        verifiable=verifiable,
+        retryable=not verifiable and outcome.failure_kind in {MODEL_REQUEST_ERROR, MODEL_TRANSPORT_ERROR, "unknown"},
     )
 
 

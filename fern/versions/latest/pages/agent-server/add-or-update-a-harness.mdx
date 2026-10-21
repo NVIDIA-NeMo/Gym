@@ -612,8 +612,8 @@ upstream model request's status, not the agent endpoint's HTTP status. The
 | Reported cause | Verify | Eligible for episode retry |
 | --- | --- | --- |
 | `agent_invalid_output`, `agent_limit`, or model request rejection 400/413/422 | Yes | No |
-| `model_transport_error`, model request rejection 408/425/429, or 5xx | No | Yes |
-| Other registered kind or request error, including 401/403/404; unknown or malformed cause | No | No |
+| Other model request errors (including 401/403/404), `model_transport_error`, or `unknown` | No | Yes |
+| Other registered kinds or malformed metadata | No | No |
 
 Excluded attempts retain their partial response and observations in the existing
 failure flow. Retry eligibility does not force a retry; the collector's retry budget

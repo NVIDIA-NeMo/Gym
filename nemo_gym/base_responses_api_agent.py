@@ -1014,7 +1014,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         )
 
     def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
-        """Override to classify native failures; unknown leaves grading and retries disabled."""
+        """Override to classify native failures; the environment decides grading and retry eligibility."""
         return AgentOutcome(failure_kind="unknown")
 
     def report_outcome(self, response: NeMoGymResponse, native_result: Mapping[str, Any]) -> NeMoGymResponse:
