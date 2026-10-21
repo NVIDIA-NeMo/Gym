@@ -32,6 +32,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.failure_kinds import PROVIDER_OOM_KILLED
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
@@ -51,6 +52,8 @@ from resources_servers.deepswe.task_store import (
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 NEMO_GYM_ROOT = PACKAGE_DIR.parents[1]
+_DEEPSWE_OOM_METADATA_KEY = "deepswe_agent_sandbox_oom"
+_DEEPSWE_OOM_EVIDENCE = "sandbox State: Terminated (exit=137, reason=OOMKilled)"
 
 
 def _resolve_repo_path(path: Path) -> Path:
@@ -66,6 +69,7 @@ class DeepSWEResourcesServerConfig(BaseResourcesServerConfig):
     tasks_dir: Path
     expected_task_count: int = Field(default=EXPECTED_TASK_COUNT, ge=1)
     is_verifying_golden_patch: bool = False
+    score_agent_sandbox_oom_as_zero: bool = False
     task_cpu_multiplier: float = Field(default=2.0, gt=0)
     task_memory_multiplier: float = Field(default=2.0, gt=0)
 
@@ -455,6 +459,26 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
         sandbox_handle = body.sandbox_handle
         patch_collection_time_s = 0.0
         patch_error: str | None = None
+        raw_oom_marker = (body.response.metadata or {}).get(_DEEPSWE_OOM_METADATA_KEY)
+        agent_oom_marker: dict[str, str] | None = None
+        if raw_oom_marker is not None:
+            if not self.config.score_agent_sandbox_oom_as_zero:
+                raise ValueError("DeepSWE agent sandbox OOM zero scoring is disabled")
+            try:
+                parsed_marker = json.loads(raw_oom_marker)
+            except (TypeError, json.JSONDecodeError) as error:
+                raise ValueError("Invalid DeepSWE agent sandbox OOM marker") from error
+            if (
+                not isinstance(parsed_marker, dict)
+                or parsed_marker.keys() != {"sandbox_id", "evidence"}
+                or not isinstance(parsed_marker["sandbox_id"], str)
+                or not parsed_marker["sandbox_id"]
+                or parsed_marker["evidence"] != _DEEPSWE_OOM_EVIDENCE
+            ):
+                raise ValueError("Invalid DeepSWE agent sandbox OOM marker")
+            if self.config.is_verifying_golden_patch or body.response.output:
+                raise ValueError("An agent sandbox OOM zero requires a non-golden run with an empty agent response")
+            agent_oom_marker = parsed_marker
 
         if self.config.is_verifying_golden_patch:
             model_patch = task_solution_patch_path(task).read_bytes()
@@ -462,6 +486,8 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
             model_patch = b""
             agent_session = self._agent_sessions.pop(session_id, None)
             if agent_session is None:
+                if agent_oom_marker is not None:
+                    raise ValueError("Cannot score an agent sandbox OOM without its seeded DeepSWE session")
                 patch_error = f"No DeepSWE agent sandbox exists for session {session_id!r}"
             else:
                 sandbox_handle = agent_session.sandbox_handle
@@ -477,8 +503,15 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                             f"DeepSWE session image {agent_session.image!r} does not match verify image "
                             f"{current_task_image!r}"
                         )
-                    model_patch = await self._collect_model_patch(agent_session.sandbox, task)
+                    if agent_oom_marker is not None:
+                        if agent_oom_marker["sandbox_id"] != agent_session.sandbox_handle:
+                            raise ValueError("Agent sandbox OOM marker does not match the seeded DeepSWE sandbox")
+                        patch_error = f"Agent sandbox was OOM-killed during agent execution; {_DEEPSWE_OOM_EVIDENCE}"
+                    else:
+                        model_patch = await self._collect_model_patch(agent_session.sandbox, task)
                 except Exception as error:
+                    if agent_oom_marker is not None:
+                        raise
                     print(
                         f"Failed to collect DeepSWE model patch for {current_task_id}: {format_exc()}",
                         file=sys.stderr,
@@ -534,6 +567,8 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 "patch_collection_time_s": patch_collection_time_s,
                 "sandbox_start_time_s": sandbox_start_time_s,
                 "verification_time_s": verification_time_s,
+                "failure_kind": PROVIDER_OOM_KILLED if agent_oom_marker is not None else None,
+                "failure_reason": patch_error if agent_oom_marker is not None else None,
             }
         )
 
