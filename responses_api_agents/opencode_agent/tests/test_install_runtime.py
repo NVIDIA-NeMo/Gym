@@ -241,3 +241,29 @@ def test_musl_bootstraps_with_apk_and_downloads_matching_binary(sandbox: tuple[P
     assert (root / "packages.log").read_text().splitlines() == ["add --no-cache curl"]
     arch = {"x86_64": "x64-baseline", "aarch64": "arm64"}[os.uname().machine]
     assert f"opencode-linux-{arch}-musl.tar.gz" in (root / "download.log").read_text()
+
+
+@pytest.mark.parametrize("valid_digest", [True, False])
+def test_preinstalled_binary_needs_no_download_and_checks_digest(sandbox, valid_digest):
+    import hashlib
+
+    root, env = sandbox
+    binary = root / "preinstalled-opencode"
+    binary.write_text("#!/bin/bash\necho 1.17.11\n")
+    binary.chmod(0o755)
+    digest = hashlib.sha256(binary.read_bytes()).hexdigest() if valid_digest else "0" * 64
+    result = subprocess.run(
+        [str(root / "bin/bash"), str(root / "install.sh"), str(root / "runtime"), "1.17.11", str(binary), digest],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert (result.returncode == 0) is valid_digest, result.stderr
+    assert not (root / "download.log").exists()
+    assert not (root / "packages.log").exists()
+    if valid_digest:
+        assert (root / "runtime/opencode").read_bytes() == binary.read_bytes()
+    else:
+        assert "digest mismatch" in result.stderr
+        assert not (root / "runtime/opencode").exists()
