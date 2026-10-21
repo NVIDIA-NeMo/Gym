@@ -89,20 +89,19 @@ class TestParseRubricScore:
     def test_invalid_final_verdict_does_not_use_intermediate_score(self, verdict: str) -> None:
         assert parse_rubric_score(f"Score: 8/10\nVERDICT: {verdict}") is None
 
-    def test_score_slash_ten(self) -> None:
-        assert parse_rubric_score("Reasoning\nScore: 7.5/10\nJudgement: YES") == approx(7.5)
-
-    def test_score_out_of_ten(self) -> None:
-        assert parse_rubric_score("Final score: 6 out of 10") == approx(6.0)
-
-    def test_bracketed_score_format(self) -> None:
-        assert parse_rubric_score("FINAL_SCORE[8] / MAX_POSSIBLE_SCORE[10]") == approx(8.0)
-
-    def test_last_score_line_wins(self) -> None:
-        assert parse_rubric_score("Score: 3/10\nrevised\nScore: 7/10") == approx(7.0)
-
-    def test_no_score(self) -> None:
-        assert parse_rubric_score("Judgement: YES") is None
+    @mark.parametrize(
+        "text",
+        [
+            "Reasoning\nScore: 7.5/10\nJudgement: YES",
+            "Final score: 6 out of 10",
+            "FINAL_SCORE[8] / MAX_POSSIBLE_SCORE[10]",
+            "Score: 3/10\nrevised\nScore: 7/10",
+            "Judgement: YES",
+            "VERDICT: 7\nSome trailing explanation",
+        ],
+    )
+    def test_rejects_nonpaper_output(self, text: str) -> None:
+        assert parse_rubric_score(text) is None
 
 
 class TestResolvePromptPath:
@@ -557,7 +556,7 @@ class TestFrontierScienceJudgeServer:
         server = FrontierScienceJudgeServer(config=rubric_config, server_client=server_mock)
 
         response_mock = AsyncMock()
-        response_mock.json = AsyncMock(return_value=self._make_judge_response("Score: 8/10\nJudgement: YES"))
+        response_mock.json = AsyncMock(return_value=self._make_judge_response("VERDICT: 8"))
         response_mock.read = AsyncMock(return_value=orjson.dumps(response_mock.json.return_value))
         server_mock.post = AsyncMock(return_value=response_mock)
 
@@ -602,7 +601,7 @@ class TestFrontierScienceJudgeServer:
                     "finish_reason": "stop",
                     "message": {
                         "role": "assistant",
-                        "content": "Rubric notes...\nScore: 8/10\nJudgement: YES",
+                        "content": "Rubric notes...\nVERDICT: 8",
                     },
                 }
             ],

@@ -68,19 +68,6 @@ _THINK_TAG_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 _THINKING_TAG_RE = re.compile(r"<thinking>.*?</thinking>", re.DOTALL)
 _JUDGEMENT_RE = re.compile(r"Judgement:\s*(YES|NO)", re.IGNORECASE)
 _RUBRIC_VERDICT_RE = re.compile(r"VERDICT:\s*([+-]?(?:\d+(?:\.\d+)?|\.\d+))", re.IGNORECASE)
-_BRACKETED_SCORE_RE = re.compile(
-    r"(?:final[_\s-]*)?score\s*\[\s*([+-]?(?:\d+(?:\.\d+)?|\.\d+))\s*\]\s*/\s*"
-    r"(?:max[_\s-]*possible[_\s-]*)?score\s*\[\s*([+-]?(?:\d+(?:\.\d+)?|\.\d+))\s*\]",
-    re.IGNORECASE,
-)
-_DENOMINATED_SCORE_RE = re.compile(
-    r"([+-]?(?:\d+(?:\.\d+)?|\.\d+))\s*(?:/|out\s+of)\s*([+-]?(?:\d+(?:\.\d+)?|\.\d+))",
-    re.IGNORECASE,
-)
-_LABELED_SCORE_RE = re.compile(
-    r"(?:final\s+)?score\s*[:=]\s*([+-]?(?:\d+(?:\.\d+)?|\.\d+))",
-    re.IGNORECASE,
-)
 
 
 def _strip_thinking_traces(text: str) -> str:
@@ -127,42 +114,15 @@ def parse_judgement(judge_text: str) -> Optional[str]:
 
 
 def parse_rubric_score(judge_text: str, max_score: float = 10.0) -> Optional[float]:
-    """Parse a rubric score and normalize it onto ``max_score`` points.
-
-    Accepts the paper's final ``VERDICT: 7`` line and legacy ``Score: 7/10`` plus
-    a few common judge variants such as ``Score: 7 out of 10`` and
-    ``FINAL_SCORE[7] / MAX_POSSIBLE_SCORE[10]``. The last score-like line wins.
-    """
-    if not judge_text or not judge_text.strip():
+    """Parse the paper's final numeric ``VERDICT`` line on the rubric's point scale."""
+    if not judge_text.strip():
         return None
 
-    last_line = judge_text.strip().splitlines()[-1].strip()
-    if last_line.upper().startswith("VERDICT:"):
-        match = _RUBRIC_VERDICT_RE.fullmatch(last_line)
-        if match:
-            score = float(match.group(1))
-            return score if 0 <= score <= max_score else None
+    match = _RUBRIC_VERDICT_RE.fullmatch(judge_text.strip().splitlines()[-1].strip())
+    if match is None:
         return None
-
-    for line in reversed(judge_text.splitlines()):
-        if "score" not in line.lower():
-            continue
-
-        for pattern in (_BRACKETED_SCORE_RE, _DENOMINATED_SCORE_RE):
-            match = pattern.search(line)
-            if not match:
-                continue
-            numerator = float(match.group(1))
-            denominator = float(match.group(2))
-            if denominator <= 0:
-                return None
-            return numerator / denominator * max_score
-
-        match = _LABELED_SCORE_RE.search(line)
-        if match:
-            return float(match.group(1))
-
-    return None
+    score = float(match.group(1))
+    return score if 0 <= score <= max_score else None
 
 
 def _resolve_prompt_path(path: str) -> Path:
@@ -383,7 +343,6 @@ class FrontierScienceJudgeServer(SimpleResourcesServer):
 
         judge_text = await self._call_judge(judge_prompt)
 
-        verdict = parse_judgement(judge_text)
         rubric_score = None
         rubric_score_normalized = None
         invalid_judge_response = False
@@ -396,6 +355,7 @@ class FrontierScienceJudgeServer(SimpleResourcesServer):
             reward = 1.0 if rubric_score >= self.config.rubric_pass_score_threshold else 0.0
             verdict = "YES" if reward else "NO"
         else:
+            verdict = parse_judgement(judge_text)
             reward = 1.0 if verdict == "YES" else 0.0
 
         return FrontierScienceJudgeVerifyResponse(
