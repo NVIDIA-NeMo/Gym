@@ -10,24 +10,25 @@ from pathlib import Path
 from packaging.specifiers import SpecifierSet
 from packaging.version import Version
 
+from nemo_gym.cli.setup_command import setup_env_command
+
 
 ROOT = Path(__file__).resolve().parents[3]
 MODEL_DIR = ROOT / "responses_api_models/vllm_model"
 
 
-def test_vllm_model_uses_a_compatible_python_range() -> None:
+def test_vllm_model_venv_keeps_the_parent_python(tmp_path: Path) -> None:
+    # The oldest parent Gym supports must satisfy the model's .python-version, so its venv is built with the
+    # parent's exact interpreter rather than whichever patch release uv finds first.
     with (ROOT / "pyproject.toml").open("rb") as source:
         python_floor = tomllib.load(source)["project"]["requires-python"].removeprefix(">=")
-    supported = SpecifierSet((MODEL_DIR / ".python-version").read_text(encoding="utf-8").strip())
-    assert Version(python_floor) in supported
-    assert Version("3.14") not in supported
-
-
-def test_vllm_model_uses_standard_uv_runtime_files() -> None:
-    legacy_markers = {
-        "uv-managed-python.txt",
-        "uv-overrides.txt",
-        "uv-python-version.txt",
-        "uv-torch-backend.txt",
+    config = {
+        "head_server_deps": [],
+        "head_server_constraints": [],
+        "python_version": python_floor,
+        "skip_venv_if_present": False,
+        "uv_venv_dir": str(tmp_path),
     }
-    assert not [path for path in MODEL_DIR.iterdir() if path.name in legacy_markers]
+
+    assert f"--python {python_floor} " in setup_env_command(MODEL_DIR, config, "vllm_model")
+    assert Version("3.14") not in SpecifierSet((MODEL_DIR / ".python-version").read_text(encoding="utf-8").strip())

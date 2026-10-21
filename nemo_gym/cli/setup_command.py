@@ -12,10 +12,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import hashlib
 import importlib.metadata
-import json
 import os
+import platform
 import re
 import shlex
 import sys
@@ -26,6 +25,8 @@ from sys import stderr, stdout
 from typing import IO, Any, Mapping
 
 from omegaconf import DictConfig
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
+from packaging.version import InvalidVersion, Version
 
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, PARENT_DIR
 from nemo_gym.global_config import (
@@ -44,15 +45,6 @@ from nemo_gym.global_config import (
 
 
 NEMO_GYM_ALLOWED_COMPONENT_ROOTS_ENV_VAR_NAME = "NEMO_GYM_ALLOWED_COMPONENT_ROOTS"
-PARENT_RUNTIME_OVERRIDES_FILENAME = ".nemo-gym-parent-runtime-overrides.txt"
-ENVIRONMENT_IDENTITY_FILENAME = ".nemo-gym-environment-identity"
-_ENVIRONMENT_INPUT_FILENAMES = (
-    ".python-version",
-    "requirements.txt",
-    "pyproject.toml",
-    "overrides.txt",
-    "uv.toml",
-)
 
 
 def _validate_component_working_dir(
@@ -187,40 +179,52 @@ def get_venv_path(dir_path: Path, global_config_dict: DictConfig) -> Path:
     return (dir_path / ".venv").absolute()
 
 
-def _server_environment_identity(
-    dir_path: Path,
-    *,
-    python_request: str,
-    head_server_deps: list[str],
-    head_server_constraints: list[str],
-    is_editable_install: bool,
-    nemo_gym_version_spec: str,
-) -> str:
-    """Fingerprint every input that determines a managed server environment."""
+def _python_request_admits(request: str, version: str) -> bool:
+    """Whether a uv Python request admits ``version``.
 
-    component_dir = dir_path.resolve()
-    input_files: dict[str, str] = {}
-    for filename in _ENVIRONMENT_INPUT_FILENAMES:
-        path = component_dir / filename
-        if path.is_file():
-            input_files[filename] = hashlib.sha256(path.read_bytes()).hexdigest()
+    The request is a specifier such as ``>=3.13,<3.14`` or a version such as ``3.13``, optionally prefixed with
+    ``cpython@`` or ``cpython``. Requests this cannot interpret, such as ``pypy@3.10`` or the free-threaded
+    ``3.13+freethreaded``, admit nothing and are left to uv.
+    """
+    try:
+        candidate = Version(version)
+    except InvalidVersion:
+        return False
+    if platform.python_implementation() == "CPython":
+        for prefix in ("cpython@", "cpython"):
+            if request.startswith(prefix):
+                request = request.removeprefix(prefix)
+                break
+    try:
+        return candidate in SpecifierSet(request)
+    except InvalidSpecifier:
+        pass
+    try:
+        requested = Version(request)
+    except InvalidVersion:
+        return False
+    # PEP 440 reads uv's variant suffix (``+freethreaded``, ``+debug``) as a local label; a plain parent build
+    # does not satisfy a variant or pre-release request.
+    if requested.local is not None or requested.is_prerelease:
+        return False
+    return candidate.release[: len(requested.release)] == requested.release
 
-    parent_project = (component_dir / "../../pyproject.toml").resolve()
-    if parent_project.is_file():
-        input_files["../../pyproject.toml"] = hashlib.sha256(parent_project.read_bytes()).hexdigest()
 
-    payload = {
-        "schema_version": 1,
-        "component_dir": str(component_dir),
-        "head_server_constraints": head_server_constraints,
-        "head_server_deps": head_server_deps,
-        "input_files": input_files,
-        "is_editable_install": is_editable_install,
-        "nemo_gym_version_spec": nemo_gym_version_spec,
-        "python_request": python_request,
-    }
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+def _server_python_request(dir_path: Path, parent_python: str) -> str:
+    """The interpreter a server venv is built with: the parent's, unless the server's ``.python-version`` excludes it.
+
+    A range such as ``>=3.13.14,<3.14`` would otherwise let uv pick a different patch release than the parent's,
+    and Ray refuses to connect processes whose Python patch versions differ.
+    """
+    python_version_path = dir_path / ".python-version"
+    if not python_version_path.exists():
+        return parent_python
+    # Like uv, skip blank and comment lines and use the first request.
+    lines = python_version_path.read_text(encoding="utf-8").splitlines()
+    request = next((line.strip() for line in lines if line.strip() and not line.strip().startswith("#")), "")
+    if not request:
+        raise RuntimeError(f"Empty Python version in {python_version_path}")
+    return parent_python if _python_request_admits(request, parent_python) else request
 
 
 def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: str) -> str:
@@ -230,11 +234,14 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
     head_server_constraints = [
         str(constraint) for constraint in global_config_dict.get(HEAD_SERVER_CONSTRAINTS_KEY_NAME) or []
     ]
-    constraint_flag = (
-        f"-c <(printf '%s\\n' {' '.join(shlex.quote(c) for c in head_server_constraints)}) "
-        if head_server_constraints
-        else ""
-    )
+    constraint_args = " ".join(shlex.quote(c) for c in head_server_constraints)
+    constraint_flag = f"-c <(printf '%s\\n' {constraint_args}) " if head_server_constraints else ""
+    # A constraint cannot replace an exact stale pin in a server dependency (for example
+    # another Ray version), which makes the solve impossible or splits one Ray cluster across
+    # versions. Passing the same pins as overrides replaces such a pin and, like a constraint,
+    # never adds a package the server does not require. head_server_deps stay plain
+    # requirements, so a server pin that conflicts with them still fails the install loudly.
+    parent_override_flag = f"--overrides <(printf '%s\\n' {constraint_args}) " if head_server_constraints else ""
 
     venv_path = get_venv_path(dir_path, global_config_dict)
     venv_python_fpath = venv_path / "bin/python"
@@ -247,40 +254,8 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
         # completion marker or writable setup-lock directories.
         return f"cd {shlex.quote(str(dir_path))} && {activate_cmd}"
 
-    parent_runtime_overrides_path = venv_path / PARENT_RUNTIME_OVERRIDES_FILENAME
-    environment_identity_path = venv_path / ENVIRONMENT_IDENTITY_FILENAME
-    parent_runtime_override_args = shlex.join([*head_server_deps, *head_server_constraints])
-    parent_runtime_overrides_cmd = (
-        f"printf '%s\\n' {parent_runtime_override_args} > {shlex.quote(str(parent_runtime_overrides_path))}"
-    )
-
-    python_request = str(global_config_dict[PYTHON_VERSION_KEY_NAME])
-    python_request_arg = shlex.quote(python_request)
-    # A component may use uv's standard Python-version file to select a
-    # compatible interpreter independently from the parent process. Components
-    # without one retain the existing parent-Python behavior.
-    python_version_path = dir_path / ".python-version"
-    if python_version_path.exists():
-        python_request = python_version_path.read_text(encoding="utf-8").strip()
-        if not python_request:
-            raise RuntimeError(f"Empty Python version in {python_version_path}")
-        python_request_arg = shlex.quote(python_request)
-
-    is_editable_install = (dir_path.resolve() / "../../pyproject.toml").exists()
-    nemo_gym_version_spec = _get_nemo_gym_version_spec(is_editable_install)
-    environment_identity = _server_environment_identity(
-        dir_path,
-        python_request=python_request,
-        head_server_deps=head_server_deps,
-        head_server_constraints=head_server_constraints,
-        is_editable_install=is_editable_install,
-        nemo_gym_version_spec=nemo_gym_version_spec,
-    )
-    environment_identity_tmp_path = f"{shlex.quote(str(environment_identity_path))}.tmp.$$"
-    clear_environment_identity_cmd = f"rm -f {shlex.quote(str(environment_identity_path))}"
-    commit_environment_identity_cmd = (
-        f"printf '%s\\n' {environment_identity} > {environment_identity_tmp_path} && "
-        f"mv {environment_identity_tmp_path} {shlex.quote(str(environment_identity_path))}"
+    python_request_arg = shlex.quote(
+        _server_python_request(dir_path, str(global_config_dict[PYTHON_VERSION_KEY_NAME]))
     )
 
     # `uv pip --project` has no effect. A server-local uv.toml passed via
@@ -303,15 +278,9 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
     # A server is a separate process with its own venv. Allow standard uv
     # configuration in pyproject.toml or uv.toml without leaking those choices
     # into sibling server venvs through process-wide UV_* variables.
-    # Parent-sensitive packages are resolver overrides as well as direct
-    # requirements (head_server_deps) or constraints (head_server_constraints,
-    # such as Ray). Neither can replace an exact stale transitive pin in a server
-    # dependency, which can either make the solve impossible or split one Ray
-    # cluster across incompatible versions. An override replaces that pin and,
-    # like a constraint, never adds a package the server does not require.
-    # Materialize the dynamic authority inside the writable venv rather than
-    # baking the current parent version into every server's source tree.
-    server_uv_flags = f"{uv_config_flag}--overrides {shlex.quote(str(parent_runtime_overrides_path))} "
+    server_uv_flags = f"{uv_config_flag}{parent_override_flag}"
+
+    is_editable_install = (dir_path.resolve() / "../../pyproject.toml").exists()
 
     try:
         has_pyproject_toml = (dir_path / "pyproject.toml").exists()
@@ -327,7 +296,7 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
                 # install nemo-gym from pypi instead of relative path in pyproject.toml
                 # with support for pre-releases, custom indexes, and version pinning
                 install_flags = _get_nemo_gym_install_flags()
-                version_spec = nemo_gym_version_spec
+                version_spec = _get_nemo_gym_version_spec(is_editable_install)
                 install_cmd = (
                     f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{install_flags}{constraint_flag}nemo-gym{version_spec} && """
                     f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{constraint_flag}--no-sources '-e .' {head_server_dep_args}"""
@@ -341,7 +310,7 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
                 # install nemo-gym from pypi instead of relative path in requirements.txt
                 # with support for pre-releases, custom indexes, and version pinning
                 install_flags = _get_nemo_gym_install_flags()
-                version_spec = nemo_gym_version_spec
+                version_spec = _get_nemo_gym_version_spec(is_editable_install)
                 extras = _local_nemo_gym_extras(dir_path / "requirements.txt")
                 install_cmd = (
                     f"""(echo 'nemo-gym{extras}{version_spec}' && grep -v -F '../..' requirements.txt) | """
@@ -353,11 +322,7 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
             )
 
         prefix_cmd = f" > >(sed 's/^/({prefix}) /') 2> >(sed 's/^/({prefix}) /' >&2)"
-        install_command = (
-            f"{clear_environment_identity_cmd} && {uv_venv_cmd}{prefix_cmd} && "
-            f"{parent_runtime_overrides_cmd} && {activate_cmd} && "
-            f"{install_cmd}{prefix_cmd} && {commit_environment_identity_cmd}"
-        )
+        install_command = f"{uv_venv_cmd}{prefix_cmd} && {activate_cmd} && {install_cmd}{prefix_cmd}"
 
     except RuntimeError as error:
         if not skip_venv_if_present:
