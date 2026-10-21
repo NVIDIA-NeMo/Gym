@@ -315,6 +315,37 @@ def test_resubmit_refuses_a_populated_run_whose_job_sh_predates_resubmit(tmp_pat
     assert rollouts.read_text() == '{"reward": 1.0}\n'
 
 
+def test_resubmit_queues_a_populated_command_benchmark(tmp_path: Path, slurm_bin: Path) -> None:
+    config = _config(tmp_path)
+    config.driver.benchmarks["gsm8k"].command = "python harness.py"
+    job_dir = _staged_run(tmp_path, config=config)
+    # A `command` benchmark's job.sh runs its own command, never `gym eval run`, so it has no resubmit line.
+    (job_dir / "job.sh").write_text(
+        build_sbatch_script(
+            config, "gsm8k", config.driver.benchmarks["gsm8k"], next(iter(config.compute.values())), job_dir
+        )
+    )
+    (job_dir / "artifacts").mkdir()
+    (job_dir / "artifacts" / "rollouts.jsonl").write_text('{"reward": 1.0}\n')
+
+    assert resubmit(*_handle(job_dir)).job_id == "4242"
+    assert (slurm_bin / "cwd").read_text().strip() == str(job_dir)
+
+
+def test_a_failed_record_update_names_the_queued_jobs(tmp_path: Path) -> None:
+    job_dir = _staged_run(tmp_path)
+    record = _record(job_dir).with_benchmark(BenchmarkJob(benchmark="gsm8k", job_dir=str(job_dir), job_id="4242"))
+
+    def _explode(path, text, **_):
+        raise OSError("remote is read-only")
+
+    with pytest.raises(RuntimeError, match="Already queued: gsm8k=4242, mmlu=101. Record these by hand"):
+        SlurmExecutor().persist_record(record, _explode)
+    # The local index is written first, so it has the new job id although the manifest does not.
+    index = SubmissionRecord.load(json.loads((local_index_dir() / f"{job_dir.parent.name}.json").read_text()))
+    assert index.benchmark_job("gsm8k").job_id == "4242"
+
+
 @pytest.mark.skipif(os.geteuid() == 0, reason="root can write a read-only directory")
 def test_resubmit_queues_nothing_when_preparation_fails(tmp_path: Path, slurm_bin: Path) -> None:
     job_dir = _staged_run(tmp_path)

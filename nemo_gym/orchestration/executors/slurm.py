@@ -232,7 +232,8 @@ class SlurmExecutor(BaseExecutor):
         """Queue `benchmark`'s job.sh again from its job dir and record the new job id.
 
         Refuses while any of the caller's jobs runs in that job dir, so two jobs never write one run, and
-        refuses a run with rollouts whose job.sh would start it fresh, which would delete them.
+        refuses a run with rollouts whose `gym eval run` job.sh predates resubmit: it would start the run
+        fresh and delete them. A `command` benchmark's job.sh runs its own command, so it is not refused.
         """
         job = record.benchmark_job(benchmark)
         job_dir = Path(job.job_dir)
@@ -253,7 +254,10 @@ class SlurmExecutor(BaseExecutor):
                         "workdirs=$(squeue --me --noheader --format=%Z) || fail 'squeue failed'",
                         'for d in $workdirs; do [ "$d" != "$PWD" ] || '
                         'fail "A job of this run is still pending or running in $PWD."; done',
-                        "if [ -s artifacts/rollouts.jsonl ] && ! grep -qF -- ++resubmit=True job.sh; then "
+                        # Only the built-in runner's fresh start deletes rollouts; its job.sh lists
+                        # `gym eval run` on a line of its own (see `render_gym_cmd`).
+                        "if [ -s artifacts/rollouts.jsonl ] && grep -qx -- '[[:space:]]*gym eval run' job.sh "
+                        "&& ! grep -qF -- ++resubmit=True job.sh; then "
                         'fail "job.sh in $PWD predates resubmit, so it could start the run fresh and delete its '
                         'rollouts; submit the run again instead"; fi',
                         f"export {RESUBMIT_ENV}=1",
