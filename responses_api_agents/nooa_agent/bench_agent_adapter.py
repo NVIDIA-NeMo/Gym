@@ -51,7 +51,11 @@ async def invoke_bench_agent(agent: BenchAgent, request: NeMoGymResponseCreatePa
                 if Path(agent.shell.cwd).resolve() != cwd:
                     await agent.shell.close()
                     agent._install_python_tools(str(cwd))
-                result = await agent._solve_task(_latest_user_text(request))
+                task = _latest_user_text(request)
+                # Native parameter rendering can truncate task instructions; keep a full
+                # prefix copy under a separate key from the decorated method's "task".
+                agent.context.set("benchmark_task", task, prefix=True)
+                result = await agent._solve_task(task)
             except BaseException as error:
                 # Defer propagation so the upstream scope does not suppress its
                 # own cleanup failure while unwinding the task exception.

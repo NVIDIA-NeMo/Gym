@@ -8,6 +8,7 @@ import shlex
 import signal
 import sys
 from contextlib import asynccontextmanager
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -24,6 +25,7 @@ async def test_adapter_restores_task_cwd_and_always_drains_cleanup(tmp_path, mon
     monkeypatch.chdir(tmp_path)
     value = object()
     agent = SimpleNamespace(
+        context=SimpleNamespace(set=MagicMock()),
         shell=SimpleNamespace(cwd="/wrong", close=AsyncMock(), session=ShellTools(cwd=str(tmp_path)).session),
         _install_python_tools=MagicMock(),
         _solve_task=AsyncMock(return_value=value, side_effect=error),
@@ -38,6 +40,7 @@ async def test_adapter_restores_task_cwd_and_always_drains_cleanup(tmp_path, mon
     agent.shell.close.assert_awaited_once()
     agent._install_python_tools.assert_called_once_with(str(tmp_path))
     agent._solve_task.assert_awaited_once_with("unchanged canonical prompt")
+    agent.context.set.assert_called_once_with("benchmark_task", "unchanged canonical prompt", prefix=True)
     agent.aclose.assert_awaited_once()
 
 
@@ -47,6 +50,7 @@ async def test_cleanup_failure_preserves_the_original_invocation_exception(tmp_p
     monkeypatch.chdir(tmp_path)
     cleanup_error = RuntimeError("cleanup also failed")
     agent = SimpleNamespace(
+        context=SimpleNamespace(set=MagicMock()),
         shell=ShellTools(cwd=str(tmp_path)),
         _solve_task=AsyncMock(return_value="completed", side_effect=terminal),
         aclose=AsyncMock(side_effect=cleanup_error),
@@ -92,6 +96,7 @@ async def test_sequential_cleanup_preserves_all_errors_and_original_exception(
 
     monkeypatch.setattr(bench_agent_adapter, "preserve_background_services", failing_scope)
     agent = SimpleNamespace(
+        context=SimpleNamespace(set=MagicMock()),
         shell=SimpleNamespace(cwd=str(tmp_path), session=object()),
         _solve_task=AsyncMock(return_value="done", side_effect=terminal),
         aclose=AsyncMock(side_effect=first),
@@ -311,7 +316,9 @@ async def test_scope_cleanup_preserves_original_exception(tmp_path, monkeypatch,
 
     monkeypatch.setattr(BashSession, "close", close)
     shell = ShellTools(cwd=str(tmp_path))
-    agent = SimpleNamespace(shell=shell, _solve_task=solve, aclose=shell.close)
+    agent = SimpleNamespace(
+        shell=shell, context=SimpleNamespace(set=MagicMock()), _solve_task=solve, aclose=shell.close
+    )
     expected = terminal if terminal is not None else cleanup_error
     with pytest.raises(type(expected)) as caught:
         await invoke_bench_agent(agent, NeMoGymResponseCreateParamsNonStreaming(input="task"))
@@ -640,3 +647,66 @@ async def test_cleanup_failure_retry_and_diagnostic_cross_runtime_boundaries(
         assert f"{type(error).__name__}: {detail}" in diagnostic
     if wire_boundary == "worker":
         assert len(diagnostic) <= 2000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("context_limit", [None, 1])
+async def test_real_benchagent_preserves_full_task_across_model_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, context_limit: int | None
+) -> None:
+    module = pytest.importorskip("nooa_bench.bench_agent")
+    from nooa.config import TruncationConfig
+
+    from responses_api_agents.nooa_agent.gym_llm import GymResponsesLLM, RolloutLLMState
+    from responses_api_agents.nooa_agent.tests.test_gym_llm import FakeHTTPResponse, model_response
+
+    monkeypatch.chdir(tmp_path)
+    middle = "MIDDLE_REQUIREMENT: preserve use_netrc and finish tool instructions."
+    task = (
+        "  Original task\n"
+        + ("context α 'quoted' \\ path\n" * 1500)
+        + middle
+        + ("\nremaining context" * 2000)
+        + "\n  "
+    )
+    volatile = "VOLATILE_CONTEXT_SHOULD_BE_EVICTED"
+    calls = []
+    code = [
+        "print('continue to the next model call')",
+        "return_result(TaskResult(solution_description='done', evidence='two calls', how_to_verify='fixture'))",
+    ]
+
+    async def post(**kwargs):
+        calls.append(kwargs["json"])
+        output = NeMoGymResponseFunctionToolCall(
+            id=f"f{len(calls)}",
+            call_id=f"c{len(calls)}",
+            name="python_cell",
+            arguments=json.dumps({"code": code[len(calls) - 1]}),
+        )
+        return FakeHTTPResponse(model_response(output, response_id=f"r{len(calls)}"))
+
+    llm = GymResponsesLLM(
+        server_client=SimpleNamespace(post=post),
+        model_server_name="policy",
+        model_url_path="/v1/responses",
+        state=RolloutLLMState(max_policy_calls=2),
+        cookies={},
+        context_window=262144,
+    )
+    agent = module.BenchAgent(
+        llm=llm,
+        working_dir=str(tmp_path),
+        truncation=TruncationConfig(max_context_tokens=context_limit),
+    )
+    agent.context.set("volatile_probe", volatile)
+    result = await invoke_bench_agent(agent, NeMoGymResponseCreateParamsNonStreaming(input=task))
+
+    assert result.evidence == "two calls"
+    assert len(calls) == 2
+    for call in calls:
+        # These are the actual requests after native argument/context rendering.
+        assert middle in (call.instructions or "")
+        assert task in (call.instructions or "")
+        assert (volatile in call.model_dump_json()) == (context_limit is None)
+    assert agent.context["benchmark_task"] == task
