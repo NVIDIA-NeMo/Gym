@@ -2362,3 +2362,24 @@ def test_terminal_provider_failure_uses_default_episode_policy(setup, message, f
     assert observations["records"][0]["status"] == "failed"
     policy = agent_outcome_policy(NeMoGymResponse.model_validate(response))
     assert policy == OutcomeAction.RETRY
+
+
+def test_process_exit_before_promised_retry_is_execution_failure(setup):
+    agent, sandbox = setup
+    message = {"role": "assistant", "content": [], "stopReason": "error", "errorMessage": "503 unavailable"}
+    sandbox.events = "\n".join(
+        json.dumps([float(i), event])
+        for i, event in enumerate(
+            [
+                {"type": "message_end", "message": message},
+                {"type": "agent_end", "messages": [message], "willRetry": True},
+            ]
+        )
+    )
+    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        response = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "task"})
+        assert response.status_code == 500
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
+        assert closed.status_code == 200
+        assert closed.json()["agent_observations"]["records"][0]["status"] == "failed"

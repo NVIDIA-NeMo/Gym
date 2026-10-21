@@ -85,13 +85,14 @@ _MCP_SERVER_NAME = re.compile(r"[A-Za-z0-9_-]{1,62}")
 _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
 
 
-def _reported_model_error(assistant: Mapping[str, Any], cleanup: Mapping[str, Any]) -> bool:
+def _reported_model_error(assistant: Mapping[str, Any], cleanup: Mapping[str, Any], *, will_retry: bool) -> bool:
     """Recognize Pi 0.80.2's final agent_end error report without hiding worker or cleanup failures."""
     return (
         cleanup["return_code"] == 0
         and not cleanup["timed_out"]
         and not cleanup["error"]
         and assistant.get("stopReason") == "error"
+        and not will_retry
     )
 
 
@@ -1093,7 +1094,9 @@ class PiAgent(SimpleResponsesAPIAgent):
         if error:
             terminal = next((event for _, event in reversed(events) if event.get("type") == "agent_end"), {})
             assistant = next((m for m in reversed(terminal.get("messages") or []) if m.get("role") == "assistant"), {})
-            if not execution_error and _reported_model_error(assistant, cleanup):
+            if not execution_error and _reported_model_error(
+                assistant, cleanup, will_retry=terminal.get("willRetry") is True
+            ):
                 return self.report_outcome(response, assistant)
             raise RuntimeError(f"Pi agent failed: {error}")
         return response
