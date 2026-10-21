@@ -141,6 +141,12 @@ class LongmtEvalServer(SimpleResourcesServer):
     ray_enabled = True
     config: LongmtEvalConfig
 
+    def multiple_workers_unsupported_reason(self) -> Optional[str]:
+        return (
+            "each worker builds its own Ray GPU actor pool, "
+            "so several workers multiply the GPU actors and can fail to schedule them"
+        )
+
     _segale_actors: List[Any] = PrivateAttr(default_factory=list)
     _actor_lock: Any = PrivateAttr(default=None)
     _actor_idx: int = PrivateAttr(default=0)
