@@ -182,8 +182,9 @@ async def test_sandbox_capture_completes_before_activation_cancel_and_join(monke
     assert not activation.done()
     release_capture.set()
     receipt = await asyncio.wait_for(closing, timeout=1)
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(HTTPException, match="Agent session is closing") as caught:
         await activation
+    assert caught.value.status_code == 409
     assert events == ["cleanup", "capture", "cancel", "join"]
     assert NOOATerminationReason.CANCELLED in {gap.code for gap in receipt.agent_observations.gaps}
 

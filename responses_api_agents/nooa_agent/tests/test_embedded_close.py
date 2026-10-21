@@ -65,7 +65,8 @@ async def test_embedded_activation_join_is_bounded_and_retryable(monkeypatch: py
         assert instance._session_records["session"].state is state
     finally:
         release.set()
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(HTTPException, match="Agent session is closing") as caught:
             await activation
+        assert caught.value.status_code == 409
     receipt = await close(instance)
     assert await close(instance) == receipt
