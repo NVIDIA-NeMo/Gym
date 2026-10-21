@@ -180,6 +180,9 @@ def test_harbor_profile_runs_each_task_with_its_own_limits() -> None:
     assert harbor_agent["name"] == "terminus-2"
     assert harbor_agent["model_name"] == "hosted_vllm/offline-model"
     assert harbor_agent["kwargs"]["api_base"] == "http://model.invalid:8000/v1"
+    # The key reaches LiteLLM through the worker's environment, not Harbor's job config.
+    assert agent["harbor_worker_env"] == {"HOSTED_VLLM_API_KEY": "unused"}
+    assert "api_key" not in json.dumps(harbor_agent)
     # No time override anywhere: Harbor applies each task.toml's own limits.
     assert "override_timeout_sec" not in harbor_agent
     assert "harbor_verifier" not in agent
@@ -205,6 +208,7 @@ def test_harbor_profile_builds_a_harbor_job_for_one_task(tmp_path: Path) -> None
     assert job.agents[0].name == "terminus-2"
     assert job.agents[0].override_timeout_sec is None
     assert job.timeout_multiplier == 1.0
+    assert "unused" not in job.model_dump_json()
 
 
 def test_harbor_profile_gives_every_attempt_its_own_job_folder(tmp_path: Path) -> None:

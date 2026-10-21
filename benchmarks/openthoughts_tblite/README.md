@@ -41,9 +41,13 @@ gym eval run --benchmark openthoughts_tblite --split benchmark \
   --output results/openthoughts_tblite/rollouts.jsonl --resume
 ```
 
-Harbor's Terminus-2 calls the model itself (`hosted_vllm/<model>` at `--model-url`). It writes every attempt's
-trajectory and test output to its own folder under `results/openthoughts_tblite/harbor/`. Each task runs 3
-times; change this with `--num-repeats`.
+Harbor's Terminus-2 calls the model itself (`hosted_vllm/<model>` at `--model-url`, with `--model-api-key`). It
+writes every attempt's trajectory and test output to its own folder under `results/openthoughts_tblite/harbor/`.
+Each task runs 3 times; change this with `--num-repeats`.
+
+Harbor accepts only model names of letters, digits, `.`, `-` and `_`, up to 64 characters. Serve a model such as
+`nvidia/Nemotron-3-Super-120B-A12B` under a name without the `/` (vLLM: `--served-model-name`) and pass that name
+as `--model`.
 
 Set the agent's context limit and sampling for your model. Save this as `model.yaml` and add `--config model.yaml`:
 

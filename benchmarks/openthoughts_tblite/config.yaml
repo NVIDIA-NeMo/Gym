@@ -19,6 +19,10 @@ openthoughts_tblite:
       harbor_jobs_dir: ${oc.select:output_jsonl_fpath,results/openthoughts_tblite/rollouts.jsonl}
       # Gym retries a failed attempt; a Harbor retry would start another sandbox inside the same request.
       harbor_max_retries: 0
+      # Harbor's Terminus-2 calls the model itself. LiteLLM reads its key from here, which keeps it out of the job
+      # config Harbor writes to disk.
+      harbor_worker_env:
+        HOSTED_VLLM_API_KEY: ${oc.select:policy_api_key,''}
 
       ##
       # Follows harbor.models.job.config:DatasetConfig spec. prepare.py writes these task folders.
