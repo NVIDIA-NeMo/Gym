@@ -101,20 +101,22 @@ def _user_group(user: str | int | None) -> str:
     return group
 
 
-def _check_user_group(task: HarborTask, user: str | int | None, provider: str | None) -> None:
+def _check_user_group(task: HarborTask, user: str | int | None, provider: str | None, where: str = "") -> None:
     """Refuse a ``name:group`` default on a provider that cannot apply the group.
 
     Dropping the group would run the task with another gid than it asked for and lose the files readable
     only by that group, so the mismatch fails the episode instead of logging a warning. ``provider`` is the
     registry name of the block that runs the task; a provider with no name (``None``) is not known to take
-    the pair either.
+    the pair either. ``where`` names the part of the task that carries the pair when it is not the task's own
+    user (``" step 'build'"`` for a ``[steps.verifier].user``), so a multi-step task's author need not search
+    every step for it; it follows the task id, as the loader labels its per-step refusals.
     """
     group = _user_group(user)
     if not group or provider in GROUP_CAPABLE_PROVIDERS:
         return
     raise HarborUserError(
-        f"{task.task_id}: user {user!r} names group {group!r}; the {provider!r} sandbox provider switches user by "
-        "name only and cannot apply a group (Docker's --user takes the pair)"
+        f"{task.task_id}{where}: user {user!r} names group {group!r}; the {provider!r} sandbox provider switches user "
+        "by name only and cannot apply a group (Docker's --user takes the pair)"
     )
 
 
@@ -189,12 +191,17 @@ class HarborUsersMixin:
         sandbox.set_default_user(user)
 
     def _refuse_unsupported_group(
-        self, task: HarborTask, user: str | int | None, global_config_dict: Mapping[str, Any] | None = None
+        self,
+        task: HarborTask,
+        user: str | int | None,
+        global_config_dict: Mapping[str, Any] | None = None,
+        where: str = "",
     ) -> None:
         """:func:`_check_user_group` for ``user`` on the provider that runs ``task``, resolved only when there is a
-        group to check (:meth:`HarborEnvironmentServer._task_provider_name`)."""
+        group to check (:meth:`HarborEnvironmentServer._task_provider_name`); ``where`` labels the step that
+        carries the pair, as there."""
         if _user_group(user):
-            _check_user_group(task, user, self._task_provider_name(task, global_config_dict))
+            _check_user_group(task, user, self._task_provider_name(task, global_config_dict), where)
 
     async def _user_name(self, sandbox: AsyncSandbox, task: HarborTask, uid: str, names: dict[str, str]) -> str | None:
         """The name of ``uid`` in the image, looked up once with ``getent``; ``None`` (warned once) when it has none."""
