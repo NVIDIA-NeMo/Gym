@@ -170,8 +170,8 @@ class TestEvalRunFlags:
                 '+health_check_ignored_checks=["model_call_missing_token_counts","model_call_zero_completion_tokens"]',
             ),
             (
-                ["--health-max-infra-failure-fraction", "0.05"],
-                "+health_check_max_infra_failure_fraction=0.05",
+                ["--health-max-not-final-failure-fraction", "0.05"],
+                "+health_check_max_not_final_failure_fraction=0.05",
             ),
             (
                 ["--health-max-final-failure-fraction", "0.01"],

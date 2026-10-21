@@ -722,7 +722,7 @@ def _eval_health_check(args: argparse.Namespace, overrides: list[str]) -> None:
     from nemo_gym.cli.eval import health_check_rollouts
     from nemo_gym.health.types import RunHealthLimits
 
-    overridden = (args.health_max_infra_failure_fraction, args.health_max_final_failure_fraction) != (None, None)
+    overridden = (args.health_max_not_final_failure_fraction, args.health_max_final_failure_fraction) != (None, None)
     try:
         health_check_rollouts(
             args.run_dir,
@@ -731,7 +731,7 @@ def _eval_health_check(args: argparse.Namespace, overrides: list[str]) -> None:
             ignored_checks=args.ignore_checks or (),
             # Without a limit flag the run's own persisted limits judge it again.
             limits=RunHealthLimits(
-                max_infra_failure_fraction=args.health_max_infra_failure_fraction,
+                max_not_final_failure_fraction=args.health_max_not_final_failure_fraction,
                 max_final_failure_fraction=args.health_max_final_failure_fraction,
             )
             if overridden
@@ -1147,14 +1147,14 @@ COMMANDS = {
                 "Comma-separated rollout-health check IDs to exclude from verdict derivation.",
             ),
             _value_flag(
-                "health-max-infra-failure-fraction",
-                "health_check_max_infra_failure_fraction",
-                "Run health limit for non-final (infra) failures, as a share of expected rollouts (default: no limit).",
+                "health-max-not-final-failure-fraction",
+                "health_check_max_not_final_failure_fraction",
+                "Run health limit for not final (retryable) failures, as a share of expected rollouts (default: no limit).",
             ),
             _value_flag(
                 "health-max-final-failure-fraction",
                 "health_check_max_final_failure_fraction",
-                "Run health limit for final (model-caused) failures, as a share of expected rollouts (default: no limit).",
+                "Run health limit for final (not retried) failures, as a share of expected rollouts (default: no limit).",
             ),
         ),
     ),
@@ -1183,14 +1183,14 @@ COMMANDS = {
                 "Comma-separated rollout-health check IDs to exclude from verdict derivation.",
             ),
             _value_flag(
-                "health-max-infra-failure-fraction",
-                "health_check_max_infra_failure_fraction",
-                "Run health limit for non-final (infra) failures, as a share of expected rollouts (default: no limit).",
+                "health-max-not-final-failure-fraction",
+                "health_check_max_not_final_failure_fraction",
+                "Run health limit for not final (retryable) failures, as a share of expected rollouts (default: no limit).",
             ),
             _value_flag(
                 "health-max-final-failure-fraction",
                 "health_check_max_final_failure_fraction",
-                "Run health limit for final (model-caused) failures, as a share of expected rollouts (default: no limit).",
+                "Run health limit for final (not retried) failures, as a share of expected rollouts (default: no limit).",
             ),
         ),
     ),
@@ -1220,10 +1220,10 @@ COMMANDS = {
             ),
             Flag(
                 register=lambda p: p.add_argument(
-                    "--health-max-infra-failure-fraction",
+                    "--health-max-not-final-failure-fraction",
                     type=float,
                     help=(
-                        "Override the run's persisted limit for non-final (infra) failures, as a share of expected "
+                        "Override the run's persisted limit for not final (retryable) failures, as a share of expected "
                         "rollouts. Either limit flag replaces both persisted limits; an unset one is no limit."
                     ),
                 )
@@ -1233,7 +1233,7 @@ COMMANDS = {
                     "--health-max-final-failure-fraction",
                     type=float,
                     help=(
-                        "Override the run's persisted limit for final (model-caused) failures, as a share of "
+                        "Override the run's persisted limit for final (not retried) failures, as a share of "
                         "expected rollouts. Either limit flag replaces both persisted limits."
                     ),
                 )

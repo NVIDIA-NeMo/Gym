@@ -36,7 +36,7 @@ class RunHealthLimits(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    max_infra_failure_fraction: float | None = Field(default=None, ge=0, le=1)
+    max_not_final_failure_fraction: float | None = Field(default=None, ge=0, le=1)
     max_final_failure_fraction: float | None = Field(default=None, ge=0, le=1)
 
     def summary(self, source: LimitsSource) -> dict[str, Any]:
@@ -47,12 +47,12 @@ class RunHealthLimits(BaseModel):
 class RunHealthConfig(BaseModel):
     """The health-check settings every command that judges a run shares: one place for names and defaults."""
 
-    health_check_max_infra_failure_fraction: float | None = Field(
+    health_check_max_not_final_failure_fraction: float | None = Field(
         default=None,
         ge=0,
         le=1,
         description=(
-            "Run health is unhealthy when non-final (infra) failures reach this share of expected rollouts. "
+            "Run health is unhealthy when not final (retryable) failures reach this share of expected rollouts. "
             "Unset by default: no limit."
         ),
     )
@@ -61,7 +61,7 @@ class RunHealthConfig(BaseModel):
         ge=0,
         le=1,
         description=(
-            "Run health is unhealthy when final (model-caused) failures reach this share of expected rollouts. "
+            "Run health is unhealthy when final (not retried) failures reach this share of expected rollouts. "
             "Unset by default: no limit."
         ),
     )
@@ -69,7 +69,7 @@ class RunHealthConfig(BaseModel):
     @property
     def run_health_limits(self) -> RunHealthLimits:
         return RunHealthLimits(
-            max_infra_failure_fraction=self.health_check_max_infra_failure_fraction,
+            max_not_final_failure_fraction=self.health_check_max_not_final_failure_fraction,
             max_final_failure_fraction=self.health_check_max_final_failure_fraction,
         )
 

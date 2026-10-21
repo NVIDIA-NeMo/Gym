@@ -1795,16 +1795,16 @@ def test_summary_counts_expected_failed_and_missing_rollouts(tmp_path: Path) -> 
 
 
 def _run_with_outcomes(
-    root: Path, *, landed: int, infra: int = 0, final: int = 0, missing: int = 0, **limits: float
+    root: Path, *, landed: int, not_final: int = 0, final: int = 0, missing: int = 0, **limits: float
 ) -> dict:
-    """Run health on a run of 100 tasks: `landed` scored, then infra and final failures, the rest owed with no row."""
-    assert landed + infra + final + missing == 100
+    """Run health on a run of 100 tasks: `landed` scored, then not_final and final failures, the rest owed with no row."""
+    assert landed + not_final + final + missing == 100
     rollout_path = _write_fixture(root, [(_record(task, 0), [_call()]) for task in range(landed)])
     (root / "rollouts_materialized_inputs.jsonl").write_bytes(
         b"".join(orjson.dumps({"_ng_task_index": task, "_ng_rollout_index": 0}) + b"\n" for task in range(100))
     )
-    failures = [(task, False) for task in range(landed, landed + infra)]
-    failures += [(task, True) for task in range(landed + infra, landed + infra + final)]
+    failures = [(task, False) for task in range(landed, landed + not_final)]
+    failures += [(task, True) for task in range(landed + not_final, landed + not_final + final)]
     (root / "rollouts_failures.jsonl").write_bytes(
         b"".join(
             orjson.dumps(
@@ -1826,7 +1826,7 @@ def _run_with_outcomes(
 
 
 def test_run_is_healthy_when_nothing_is_missing_and_failures_stay_below_the_limits(tmp_path: Path) -> None:
-    artifacts = _run_with_outcomes(tmp_path, landed=98, infra=1, final=1)
+    artifacts = _run_with_outcomes(tmp_path, landed=98, not_final=1, final=1)
 
     assert (artifacts["failed"]["not_final"], artifacts["failed"]["final"]) == (1, 1)
     assert artifacts["healthy"] is True
@@ -1835,7 +1835,7 @@ def test_run_is_healthy_when_nothing_is_missing_and_failures_stay_below_the_limi
 
 def test_failures_have_no_limit_unless_one_is_configured(tmp_path: Path) -> None:
     """The failure limits are off by default: the counts are written, and only a configured limit judges them."""
-    artifacts = _run_with_outcomes(tmp_path, landed=20, infra=50, final=30)
+    artifacts = _run_with_outcomes(tmp_path, landed=20, not_final=50, final=30)
 
     assert (artifacts["expected"], artifacts["missing"]) == (100, 0)
     assert (artifacts["failed"]["total"], artifacts["failed"]["not_final"], artifacts["failed"]["final"]) == (
@@ -1852,11 +1852,14 @@ def test_failures_have_no_limit_unless_one_is_configured(tmp_path: Path) -> None
     ("outcomes", "reason"),
     [
         ({"landed": 99, "missing": 1}, "missing 1 of 100"),
-        ({"landed": 98, "infra": 2, "max_infra_failure_fraction": 0.02}, "infra failures 2 of 100 (2.0%), limit 2%"),
+        (
+            {"landed": 98, "not_final": 2, "max_not_final_failure_fraction": 0.02},
+            "not final failures 2 of 100 (2.0%), limit 2%",
+        ),
         ({"landed": 97, "final": 3, "max_final_failure_fraction": 0.02}, "final failures 3 of 100 (3.0%), limit 2%"),
         (
-            {"landed": 99, "infra": 1, "max_infra_failure_fraction": 0.005},
-            "infra failures 1 of 100 (1.0%), limit 0.5%",
+            {"landed": 99, "not_final": 1, "max_not_final_failure_fraction": 0.005},
+            "not final failures 1 of 100 (1.0%), limit 0.5%",
         ),
     ],
 )
@@ -2017,7 +2020,9 @@ def test_duplicated_rollout_rows_make_the_run_unhealthy(tmp_path: Path) -> None:
 
 
 def test_a_limit_of_zero_with_no_failures_is_healthy(tmp_path: Path) -> None:
-    artifacts = _run_with_outcomes(tmp_path, landed=100, max_infra_failure_fraction=0, max_final_failure_fraction=0)
+    artifacts = _run_with_outcomes(
+        tmp_path, landed=100, max_not_final_failure_fraction=0, max_final_failure_fraction=0
+    )
 
     assert artifacts["healthy"] is True
 
@@ -2091,7 +2096,7 @@ class TestOneSourceOfLimits:
 
         artifacts = json.loads(result.summary_path.read_text())["run"]["artifacts"]
         assert artifacts["limits"] == {
-            "max_infra_failure_fraction": None,
+            "max_not_final_failure_fraction": None,
             "max_final_failure_fraction": 0.01,
             "source": "config",
         }
@@ -2108,7 +2113,7 @@ class TestOneSourceOfLimits:
         artifacts = recheck.summary["run"]["artifacts"]
         assert artifacts["healthy"] is False  # The verdict does not flip on a recheck of the same artifacts.
         assert artifacts["limits"] == {
-            "max_infra_failure_fraction": None,
+            "max_not_final_failure_fraction": None,
             "max_final_failure_fraction": 0.01,
             "source": "persisted",
         }
@@ -2136,11 +2141,15 @@ class TestOneSourceOfLimits:
         _inventory(tmp_path, 2)
 
         summary_path = health.write_provisional_summary(
-            rollout_path, {(0, 0), (1, 0)}, limits=RunHealthLimits(max_infra_failure_fraction=0.1)
+            rollout_path, {(0, 0), (1, 0)}, limits=RunHealthLimits(max_not_final_failure_fraction=0.1)
         )
 
         limits = json.loads(summary_path.read_text())["run"]["artifacts"]["limits"]
-        assert limits == {"max_infra_failure_fraction": 0.1, "max_final_failure_fraction": None, "source": "config"}
+        assert limits == {
+            "max_not_final_failure_fraction": 0.1,
+            "max_final_failure_fraction": None,
+            "source": "config",
+        }
 
     @pytest.mark.parametrize("config_name", ["RolloutCollectionConfig", "RolloutAggregationConfig"])
     def test_every_command_reads_the_limits_from_the_shared_config(self, config_name: str) -> None:
@@ -2259,3 +2268,48 @@ class TestRunExcessiveFailuresCheck:
             assert coverage == {"run_excessive_failures": {"evaluated": 1, "unobserved": 0, "ignored": 0}}
             assert [finding["check"] for finding in run["findings"]] == ["run_excessive_failures"]
             assert run["artifacts"]["healthy"] is False
+
+
+class TestFailureGroupsAreNamedByRetry:
+    """The two failure groups are split by whether a failure is final; the cause is not known, so not claimed."""
+
+    def test_the_limits_name_final_and_not_final_failures(self) -> None:
+        from nemo_gym.health.types import RunHealthConfig, RunHealthLimits
+
+        assert set(RunHealthLimits.model_fields) == {"max_final_failure_fraction", "max_not_final_failure_fraction"}
+        assert {name for name in RunHealthConfig.model_fields if "failure_fraction" in name} == {
+            "health_check_max_final_failure_fraction",
+            "health_check_max_not_final_failure_fraction",
+        }
+        descriptions = " ".join(field.description or "" for field in RunHealthConfig.model_fields.values())
+        assert "infra" not in descriptions and "model" not in descriptions
+
+    def test_a_not_final_finding_and_reason_claim_no_cause(self, tmp_path: Path) -> None:
+        from nemo_gym.health.types import RunHealthLimits
+
+        rollout_path = _write_fixture(tmp_path, [(_record(task, 0), [_call()]) for task in range(98)])
+        _inventory(tmp_path, 100)
+        (tmp_path / "rollouts_failures.jsonl").write_bytes(
+            b"".join(
+                orjson.dumps({"_ng_task_index": task, "_ng_rollout_index": 0, "_ng_failure_class": "judge_failed"})
+                + b"\n"
+                for task in (98, 99)
+            )
+        )
+
+        result = run_health_checks(
+            rollout_path, workers=1, limits=RunHealthLimits(max_not_final_failure_fraction=0.01)
+        )
+
+        run = json.loads(result.summary_path.read_text())["run"]
+        [finding] = run["findings"]
+        assert finding["detail"]["group"] == "not_final"
+        assert run["artifacts"]["unhealthy_reasons"] == ["not final failures 2 of 100 (2.0%), limit 1%"]
+        assert "infra" not in json.dumps(run["artifacts"]["limits"])
+
+    @pytest.mark.parametrize("command", ["run", "aggregate"])
+    def test_the_cli_flag_names_the_not_final_group(self, command: str, monkeypatch: pytest.MonkeyPatch) -> None:
+        from tests.unit_tests.test_cli_main import _dispatch_for
+
+        _, overrides = _dispatch_for(monkeypatch, ["eval", command, "--health-max-not-final-failure-fraction", "0.05"])
+        assert overrides == ["+health_check_max_not_final_failure_fraction=0.05"]

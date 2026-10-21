@@ -283,10 +283,10 @@ as a number of calls.
 `run.artifacts` also counts the run against its `<output stem>_materialized_inputs.jsonl` inventory:
 
 - `expected`: rollouts in the inventory.
-- `failed`: the last failure row of each owed rollout in the `<output stem>_failures.jsonl` sidecar that did not later land, as `total`, `final`, `not_final` and `by_class`. Null when there is no sidecar.
+- `failed`: the last failure row of each owed rollout in the `<output stem>_failures.jsonl` sidecar that did not later land, as `total`, `final`, `not_final` and `by_class`. `final` failures are ones a resume does not retry; `not_final` ones are still retryable. The split is by retry eligibility only and does not say whether the model or the infrastructure caused a failure. Null when there is no sidecar.
 - `missing`: owed rollouts with neither a record nor a failure row.
 - `healthy`: false when a rollout is missing, two records share a rollout identity, or the final or non-final failures reach a configured limit as a share of `expected`. The failure limits are unset by default, so failures are counted but do not make the run unhealthy until a limit is set. `unhealthy_reasons` names each cause.
-- `limits`: the limits the run was judged by (`max_infra_failure_fraction`, `max_final_failure_fraction`, null for no limit) and their `source`: `config` for the run's own settings, `persisted` when `gym eval health-check` reused them, `override` when its limit flags replaced them.
+- `limits`: the limits the run was judged by (`max_not_final_failure_fraction`, `max_final_failure_fraction`, null for no limit) and their `source`: `config` for the run's own settings, `persisted` when `gym eval health-check` reused them, `override` when its limit flags replaced them.
 
 `expected`, `missing` and `healthy` are null without an inventory. The summary is also written when collection fails or Slurm stops the job with SIGTERM.
 

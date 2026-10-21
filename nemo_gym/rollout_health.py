@@ -491,7 +491,7 @@ def _rollout_accounting(
     ``landed`` holds ``(input index, task index, rollout index)`` of every persisted record. Failures come
     from each input's ``_failures.jsonl`` sidecar, where the last attempt of a rollout stands; one that
     later landed is not failed. ``is_terminal_failure`` splits them into
-    final ones and infra ones left after retries. ``failed`` is null when no input has a sidecar.
+    final ones, which are not retried, and not final ones, which are; the split says nothing of the cause. ``failed`` is null when no input has a sidecar.
     ``expected``, ``missing`` and ``healthy`` need the ``_materialized_inputs.jsonl`` inventory and
     are null when an input has none. A run is healthy when nothing is missing, no rollout is
     recorded twice, and each kind of failure with a configured limit stays below it as a share of expected.
@@ -523,7 +523,7 @@ def _rollout_accounting(
     expected = None if owed is None else len(owed)
     missing = None if owed is None else len(owed - landed - failed.keys())
     final = sum(is_terminal_failure(row) for row in failed.values())
-    infra = len(failed) - final
+    not_final = len(failed) - final
     reasons = []
     if expected == 0:
         reasons.append("no rollouts expected")
@@ -537,7 +537,7 @@ def _rollout_accounting(
         "failed": {
             "total": len(failed),
             "final": final,
-            "not_final": infra,
+            "not_final": not_final,
             "by_class": dict(
                 sorted(Counter(row.get(NG_FAILURE_CLASS_KEY) or "unknown" for row in failed.values()).items())
             ),
@@ -569,7 +569,7 @@ def _run_excessive_failures(
         return [], coverage
     expected, failed = artifacts["expected"], artifacts["failed"]
     groups = (
-        ("infra", limits.max_infra_failure_fraction, "not_final"),
+        ("not_final", limits.max_not_final_failure_fraction, "not_final"),
         ("final", limits.max_final_failure_fraction, "final"),
     )
     if not expected or failed is None or all(limit is None for _, limit, _ in groups):
@@ -595,7 +595,7 @@ def _judge_run(artifacts: dict[str, Any], findings: list[Finding], coverage: dic
         detail = finding.detail
         share = detail["count"] / detail["expected"]
         artifacts["unhealthy_reasons"].append(
-            f"{detail['group']} failures {detail['count']} of {detail['expected']} ({share:.1%}), "
+            f"{detail['group'].replace('_', ' ')} failures {detail['count']} of {detail['expected']} ({share:.1%}), "
             f"limit {detail['limit'] * 100:g}%"
         )
     if findings:
