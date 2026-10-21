@@ -488,6 +488,24 @@ async def test_create_ttl_s_ignored_with_entrypoint(
 # --------------------------------------------------------------------------- #
 # exec
 # --------------------------------------------------------------------------- #
+async def test_create_does_not_pass_the_spec_user_to_docker_run(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # In overlay mode the Dockerfile's final USER may not exist in the base image yet, so `docker run --user`
+    # would fail the create. The sandbox facade applies the default to every exec instead.
+    def responder(argv: list[str]) -> tuple[int, str, str]:
+        if "run" in argv:
+            return (0, "cid", "")
+        if "exec" in argv:
+            return (0, docker_provider.READY_PROBE_EXPECTED, "")
+        return (0, "", "")
+
+    provider, rec = _make_provider(monkeypatch, responder)
+    await provider.create(SandboxSpec(image="ubuntu:22.04", user="agent"))
+    assert rec.calls[0]["argv"][:2] == [FAKE_BINARY, "run"]
+    assert "--user" not in rec.calls[0]["argv"]
+
+
 async def test_exec_normal_with_cwd_and_env(fake_binary: str, monkeypatch: pytest.MonkeyPatch) -> None:
     provider, rec = _make_provider(monkeypatch, lambda argv: (0, "hello", ""))
     result = await provider.exec(_make_handle(), "echo hi", cwd="/work", env={"A": "b"})
@@ -548,6 +566,32 @@ async def test_exec_user_mapping(
         assert "--user" not in argv
     else:
         assert _contains_seq(argv, ["--user", expect_user_flag])
+
+
+async def test_exec_keeps_the_group_of_the_default_user(fake_binary: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review (round 14): the probe through the sandbox facade. A ``name:group`` default (Harbor's ``[agent].user``
+    ``agent:shared``) must reach ``docker exec`` as ``--user agent:shared``, as Harbor's ``-u`` passes it, not as
+    the name alone."""
+    from nemo_gym.sandbox import AsyncSandbox
+
+    def responder(argv: list[str]) -> tuple[int, str, str]:
+        if "run" in argv:
+            return (0, "cid", "")
+        if "exec" in argv:
+            return (0, docker_provider.READY_PROBE_EXPECTED, "")
+        return (0, "", "")
+
+    provider, rec = _make_provider(monkeypatch, responder)
+    sandbox = AsyncSandbox(provider)
+    await sandbox.start(SandboxSpec(image="ubuntu:22.04", user="agent:shared"))
+    await sandbox.exec("id")
+    argv = rec.calls[-1]["argv"]
+    assert argv[:2] == [FAKE_BINARY, "exec"]
+    assert _contains_seq(argv, ["--user", "agent:shared"])
+    # The default a running sandbox is switched to keeps its group the same way (a resolved `uid:gid`).
+    sandbox.set_default_user("1000:1000")
+    await sandbox.exec("id")
+    assert _contains_seq(rec.calls[-1]["argv"], ["--user", "1000:1000"])
 
 
 async def test_exec_passes_stdin(fake_binary: str, monkeypatch: pytest.MonkeyPatch) -> None:

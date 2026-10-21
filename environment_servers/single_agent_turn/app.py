@@ -41,7 +41,12 @@ from nemo_gym.global_config import (
     get_first_server_config_dict,
 )
 from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.rollout_observability import NG_AGENT_OBSERVATIONS_KEY, AgentObservationBundle
+from nemo_gym.rollout_observability import (
+    NG_AGENT_OBSERVATIONS_KEY,
+    NG_TRAJECTORY_KEY,
+    AgentObservationBundle,
+    TrajectoryRecord,
+)
 from nemo_gym.server_utils import (
     get_response_json,
     is_nemo_gym_fastapi_entrypoint,
@@ -130,6 +135,9 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             if continuation.get("observations")
             else None
         )
+        trajectory = (
+            TrajectoryRecord.model_validate(continuation["trajectory"]) if continuation.get("trajectory") else None
+        )
         verification = (
             SingleAgentTurnResult.model_validate(continuation["result"]) if continuation.get("result") else None
         )
@@ -177,6 +185,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                     pass  # Final unwind retries the close and logs its failure.
                 if closed_agent:
                     failure.failure.agent_observations = closed_agent[-1].agent_observations
+                    failure.failure.trajectory = closed_agent[-1].trajectory
                 raise
             stage = "close_agent"
 
@@ -206,10 +215,14 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                         partial_response=agent_response,
                     ) from error
             observations = close.agent_observations
+            trajectory = close.trajectory
             stage = "verify"
 
         def dumped_observations() -> dict | None:
             return observations.model_dump(mode="json") if observations else None
+
+        def dumped_trajectory() -> dict | None:
+            return trajectory.model_dump(mode="json") if trajectory else None
 
         if stage == "verify":
             await self.checkpoint_boundary(
@@ -219,10 +232,11 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                     "handles": handles.model_dump(),
                     "response": agent_response.model_dump(mode="json"),
                     "observations": dumped_observations(),
+                    "trajectory": dumped_trajectory(),
                 },
             )
             async with self.checkpoint_step(request, handles.resources_verify):
-                verification = await self._verify(request, handles, agent_response, observations)
+                verification = await self._verify(request, handles, agent_response, observations, trajectory)
             stage = "return"
 
         # Every path ends here, at the return stage.
@@ -235,6 +249,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 "handles": handles.model_dump(),
                 "result": verification.model_dump(mode="json"),
                 "observations": dumped_observations(),
+                "trajectory": dumped_trajectory(),
             },
         )
 
@@ -243,7 +258,9 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         return SingleAgentTurnResponse(
             episode_id=request.episode_id,
             task_id=request.task.task_id,
-            result=verification.model_copy(update={NG_AGENT_OBSERVATIONS_KEY: observations}),
+            result=verification.model_copy(
+                update={NG_AGENT_OBSERVATIONS_KEY: observations, NG_TRAJECTORY_KEY: trajectory}
+            ),
         )
 
     async def _seed_resources(
@@ -422,6 +439,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         handles: "SessionHandles",
         agent_response: NeMoGymResponse,
         observations: AgentObservationBundle | None,
+        trajectory: TrajectoryRecord | None = None,
     ) -> SingleAgentTurnResult:
         task_input = request.task.task_input
         try:
@@ -450,6 +468,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 terminal=not _is_retryable_dependency_error(error),
                 partial_response=agent_response,
                 agent_observations=observations,
+                trajectory=trajectory,
             ) from error
 
     def _agent_responses_path(self, request: SingleAgentTurnRequest) -> str:
@@ -472,7 +491,10 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         terminal: bool,
         partial_response: Any = None,
         agent_observations: Any = None,
+        trajectory: Any = None,
     ) -> HandledEpisodeError:
+        # The harness's evidence of a failed turn (its observations and the decisions it took before the failure)
+        # travels with the failure row, as it travels with a result.
         return HandledEpisodeError(
             SingleAgentTurnFailure(
                 stage=stage,
@@ -480,6 +502,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 terminal=terminal,
                 partial_response=partial_response,
                 agent_observations=agent_observations,
+                trajectory=trajectory,
             )
         )
 
