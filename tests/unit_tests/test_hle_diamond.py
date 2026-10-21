@@ -687,7 +687,7 @@ class TestDocumentedCommands:
         paths, _ = _cli_config_paths(argv, subcommand=("env", "start"))
         _, _, overrides = _parse_cli(["env", "start"], argv)
 
-        assert [Path(p).name for p in paths] == ["openai_model.yaml", "config.yaml", "judge_openai.yaml"]
+        assert [Path(p).name for p in paths] == ["litellm_model.yaml", "config.yaml", "judge_openai.yaml"]
         assert "++policy_model_name=policy" in overrides and "++observability_enabled=true" in overrides
         resolved = _resolve_paths(paths)
         judge = get_first_server_config_dict(resolved, JUDGE_SERVER)

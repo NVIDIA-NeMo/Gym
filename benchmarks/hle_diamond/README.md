@@ -217,7 +217,9 @@ Upstream also reports a calibration error from the model's stated confidence; it
 `judge_openai.yaml` is a composable override, not a benchmark: it declares no dataset and does not
 appear in `gym list benchmarks`. It defines `hle_diamond_judge_model`, an `openai_model` on the
 policy gateway (`policy_base_url` / `policy_api_key` from `env.yaml`) serving
-`HLE_DIAMOND_JUDGE_MODEL` (default `azure/openai/o3-mini`), and repoints the single
+`HLE_DIAMOND_JUDGE_MODEL` (default `azure/openai/o3-mini`; the GPT route returns well-formed
+reasoning items, so the judge needs none of the repair the policy server does, Quickstart > Model
+server), and repoints the single
 `hle_diamond_equivalence_llm_judge_resources_server` that every preset shares:
 
 ```bash
@@ -270,17 +272,6 @@ Model-free checks that have been run (commands below, from the repository root):
   matches return the configured labels; legacy rollouts are re-parsed with the same setting; labels
   differing only in case are rejected when the knob is on. Mutation-checked: removing the folding,
   either call-site pass-through, the validator or the knob in `config.yaml` each fails a test.
-- `responses_api_models/openai_model/tests/test_reasoning_item_normalizer.py`: the two gateway
-  response bodies for Claude Opus 5.5 and Gemini 4 Argon as the `openai` client dumped them during
-  the effort probes (`summary: null` plus the client's default top-level keys; ids, encrypted
-  content and long texts shortened, structure otherwise untouched) fail `NeMoGymResponse`
-  validation with exactly the two documented errors (`output.0.reasoning.summary` not a list,
-  `output.0.reasoning.content.0.type` not `reasoning_text`), validate through `openai_model` with
-  usage intact, and fail again with `normalize_reasoning_items: false`; a body with `summary`
-  absent, which is how Gym's own client saw it in the pilot (`Field required`), is covered by its
-  own case; message items and well-formed bodies pass through unchanged.
-  Mutation-checked: skipping the summary repair or the part rename, ignoring or bypassing the knob,
-  renaming message parts too, or mutating the input each fails a test.
 - `tests/unit_tests/test_hle_diamond_search_exclusions.py`: the generator's normalisation, dedup and
   audit trail; the rendered and the committed list loading through the real Tavily parser and
   blocking load-bearing hosts; the committed list being at least as strict as `benchmarks/hle`'s;
@@ -388,10 +379,21 @@ multipleChoice):
   exclusions). A reproduction-grade with-tools run needs the OpenSandbox provider with
   `network_access: model_and_tools`.
 - Gateway timeout: the LiteLLM gateway used for the pilot enforces a 360 s per-attempt limit
-  (HTTP 408, `litellm.Timeout ... Timeout passed=360.0`) and `openai_model` retries a 408 with a fresh
-  generation, so an answer that needs more than six minutes is lost rather than slow (Running the
-  full set says how to report the loss). Not fixable from Gym configuration; ownership of the limit
-  sits with the gateway operators.
+  (HTTP 408, `litellm.Timeout ... Timeout passed=360.0`) and the model server (`litellm_model`
+  inherits `openai_model`'s retry layer) retries a 408 with a fresh generation, so an answer that
+  needs more than six minutes is lost rather than slow (Running the full set says how to report the
+  loss). Not fixable from Gym configuration; ownership of the limit sits with the gateway operators.
+- `litellm_model` refuses to start unless the proxy's `/health/readiness/details` reports
+  `litellm_version >= 1.83.0` (the guard added after the March 2026 LiteLLM supply-chain incident;
+  `_check_proxy_version` in its `app.py`). A key scoped to the model routes gets HTTP 403 on that
+  route, so the server fails before the first request (`Could not verify LiteLLM proxy version at
+  <base>/health/readiness/details`). The runs recorded here did not meet the guard because they ran
+  `openai_model` with an equivalent normaliser (Quickstart > Model server). A follow-up change
+  (branch `rshahbazyan/litellm-model-version-header-fallback`) reads it from the
+  `x-litellm-version` header of a one-token chat-completion probe when the health route answers 403
+  (the `/v1/models` route carries no such header on real deployments), keeping the minimum-version
+  check; until it lands, a scoped key needs the gateway operators to open the health route to it. `openai_model` is not a workaround for the Claude and Gemini routes:
+  it does not repair their reasoning items, so every such rollout fails validation.
 
 ## Quickstart
 
@@ -408,6 +410,22 @@ gym list benchmarks | grep hle_diamond          # hle_diamond, hle_diamond/text,
 `hf_token`. When that key is absent, `prepare.py` passes `token=None` and `datasets` falls back to the
 cached `huggingface-cli login` / `HF_TOKEN` credentials (verified: the gated parquet resolves with
 `token=None` and fails with `401` for `token=False`).
+
+**Model server.** The commands below pass `--model-type litellm_model`, the server for LiteLLM-proxy
+gateways such as the one these runs went through: the Claude and Gemini routes return reasoning
+items whose `summary` is null or absent and whose parts are `output_text`, which `NeMoGymResponse`
+rejects, and `litellm_model` repairs exactly that shape before validation (`_normalize_to_response`
+in `responses_api_models/litellm_model/app.py` sets a missing or null `summary` to `[]` and renames
+`output_text` parts of reasoning items to `reasoning_text`; it extends `openai_model`, so the retry
+layer and the server knobs are shared, and its config file wires `openai_base_url`, `openai_api_key`
+and `openai_model` from the same `policy_*` keys of `env.yaml`). Use `--model-type openai_model` for a native
+OpenAI-compatible server (OpenAI itself, a vLLM Responses endpoint), which emits well-formed items
+and needs no repair; it has none. `litellm_model` also checks the proxy's version at start through
+`/health/readiness/details` (Known limitations). The runs recorded in this README were made with
+`openai_model` plus a normaliser equivalent to `litellm_model`'s repair, which an earlier revision
+of this branch carried as `normalize_reasoning_items` and which was dropped in favour of the
+existing `litellm_model` path; both change the same two fields and nothing else, so the numbers
+stand.
 
 ### No-tools runs
 
@@ -427,7 +445,7 @@ kept as the shortest path to a `--benchmark` run; every part of it is load-beari
 - `--num-repeats 1`; `--limit 20` for the pilot, then the full set.
 
 ```bash
-gym eval run --benchmark hle_diamond --split benchmark --model-type openai_model \
+gym eval run --benchmark hle_diamond --split benchmark --model-type litellm_model \
     '+config_paths=[benchmarks/hle_diamond/judge_openai.yaml]' \
     --num-repeats 1 --limit 20 \
     ++policy_model_name=<gateway model id> \
@@ -473,7 +491,7 @@ export OPENCODE_SANDBOX_IMAGE=gym-opencode-science:local      # PI_SANDBOX_IMAGE
 export OPENCODE_ARTIFACTS_DIR=/abs/path/oc-artifacts          # PI_ARTIFACTS_DIR for pi: the harness's native transcripts
 mkdir -p /abs/path/model-calls
 
-gym eval run --benchmark hle_diamond/opencode --split benchmark --model-type openai_model \
+gym eval run --benchmark hle_diamond/opencode --split benchmark --model-type litellm_model \
     '+config_paths=[benchmarks/hle_diamond/judge_openai.yaml,benchmarks/hle_diamond/sandbox_docker_local.yaml]' \
     --num-repeats 1 --limit 20 \
     ++policy_model_name=<gateway model id> \
@@ -547,10 +565,10 @@ named by `--input`, `--split` is not read, and the servers must already be up. R
 at the sample, `--concurrency 20`); the GPT-6 Astra pilot ran the same shape without
 `++route_failures_to_sidecar=true`, which is why one gateway timeout ended it and why the flag is
 part of the shape. The GPT-6 Astra full-set collection ran to completion with exactly this shape
-(946 of 1000 rows scored, 54 routed to the sidecar) from Gym commit `6421f1457`, before
-`judge_labels_case_insensitive` and `normalize_reasoning_items` existed: servers load code and
-configuration once at start, so that run's verdicts are byte-exact and its policy server had no
-normaliser (Reporting a full run):
+(946 of 1000 rows scored, 54 routed to the sidecar) from Gym commit `6421f1457` of the
+pre-rewrite branch (`c99ffe134` in the current history), before `judge_labels_case_insensitive`
+existed and with `openai_model` as the policy server (the GPT route needs no repair): servers load
+code and configuration once at start, so that run's verdicts are byte-exact (Reporting a full run):
 
 ```bash
 RUN=/abs/path/hle-diamond-runs/<model-slug>/<UTC timestamp>   # outside the repository
@@ -558,7 +576,7 @@ mkdir -p "$RUN/model-calls"
 
 # 1. Servers: policy, hle_diamond judge resources server, agent, dedicated judge. Blocks until stopped.
 gym env start \
-    --config responses_api_models/openai_model/configs/openai_model.yaml \
+    --config responses_api_models/litellm_model/configs/litellm_model.yaml \
     --config benchmarks/hle_diamond/config.yaml \
     --config benchmarks/hle_diamond/judge_openai.yaml \
     ++policy_model_name=<gateway model id> \
@@ -583,11 +601,14 @@ For the 728-row text variant (not run as written) pass `text.yaml` in place of `
 Claude and Gemini models through LiteLLM-style gateways return reasoning items whose `summary` is
 null or absent (the pilot's wire error was `output.0.reasoning.summary Field required`; the `openai`
 client's dump of the same bodies shows `summary: null`) with `output_text` parts, which
-`NeMoGymResponse` rejects; `openai_model` repairs exactly that shape before validation
-(`normalize_reasoning_items`, on by default, see its README). Without it every such rollout that
-reached Gym was lost to a validation error (pilot: Claude 20/20 and Gemini 16/20 rows rejected;
-Gemini's other 4 were gateway timeouts, Known limitations), so the policy server for those families
-must run code that has the knob.
+`NeMoGymResponse` rejects; `litellm_model` repairs exactly that shape before validation
+(Quickstart > Model server), which is why the server command above loads `litellm_model.yaml`.
+Without the repair every such rollout that reached Gym was lost to a validation error (pilot:
+Claude 20/20 and Gemini 16/20 rows rejected; Gemini's other 4 were gateway timeouts, Known
+limitations). The Claude Opus 5.5, Gemini 4 Argon and Nemotron 3.5 Super VL collections recorded
+here ran `openai_model` with the equivalent normaliser of an earlier branch revision, so their
+numbers stand; a new run of those families needs `litellm_model`, and so a key that passes its
+version check (Known limitations).
 
 ### Reporting a full run
 
@@ -607,8 +628,10 @@ every number:
   Reading sandboxed results).
 - The Gym commit the servers loaded, because servers read code and configuration once at start: it
   decides whether `judge_labels_case_insensitive` (verdicts matched case-insensitively, otherwise
-  byte-exact) and `normalize_reasoning_items` were in effect. The GPT-6 Astra full run launched on
-  2026-10-16 from `6421f1457` had neither.
+  byte-exact) was in effect; name the policy model server next to it (`litellm_model`, or
+  `openai_model` with the earlier normaliser). The GPT-6 Astra full run launched on 2026-10-16 from
+  `6421f1457` (pre-rewrite id; `c99ffe134` now) matched verdicts byte-exact and ran `openai_model`
+  without any normaliser.
 - When rows lost to the gateway timeout are rescued outside the collector (the identical request
   from `rollouts_materialized_inputs.jsonl` sent with `background: true` and polled, then scored
   through the same `/verify` endpoint and merged before `gym eval aggregate`), report a third view
@@ -787,8 +810,7 @@ new `serp_url_patterns` regex is reported as dropped until `SERP_PATTERN_SUBSTRI
 ```bash
 pytest tests/unit_tests/test_hle_diamond.py tests/unit_tests/test_hle_diamond_search_exclusions.py \
     resources_servers/equivalence_llm_judge/tests/test_app.py \
-    resources_servers/tavily_search/tests/test_search_policy.py \
-    responses_api_models/openai_model/tests/test_reasoning_item_normalizer.py
+    resources_servers/tavily_search/tests/test_search_policy.py
 ```
 
 ## Licensing
