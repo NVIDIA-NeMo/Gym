@@ -55,6 +55,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
+from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from nemo_gym.token_id_capture import (
     CaptureContext,
@@ -805,6 +806,32 @@ class TestApp:
             client_indices.append(next(i for i, client in enumerate(worker._clients) if client is selected_client))
 
         assert client_indices[0] == client_indices[1]
+
+    @staticmethod
+    def _request_for_session(session_id: str) -> MagicMock:
+        request = MagicMock()
+        request.session = {SESSION_ID_KEY: session_id}
+        return request
+
+    def test_calls_of_one_rollout_share_an_endpoint_whatever_their_session(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(monkeypatch)
+        server._clients = [MagicMock(spec=NeMoGymAsyncOpenAI) for _ in range(4)]
+
+        with rollout_context("task-7-0"):
+            picked = {server._resolve_client(self._request_for_session(f"fresh-{i}")) for i in range(32)}
+
+        assert len(picked) == 1
+
+    def test_rollouts_spread_across_endpoints(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(monkeypatch)
+        server._clients = [MagicMock(spec=NeMoGymAsyncOpenAI) for _ in range(2)]
+
+        picked = []
+        for task in range(64):
+            with rollout_context(f"task-{task}-0"):
+                picked.append(server._resolve_client(self._request_for_session("one-shared-session")))
+
+        assert set(picked) == set(server._clients)
 
     def test_responses_multistep(self, monkeypatch: MonkeyPatch):
         server = self._setup_server(monkeypatch)
