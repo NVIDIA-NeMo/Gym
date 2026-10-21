@@ -25,6 +25,7 @@ the written reference, which is how the task loader and the Compose resolver loo
 
 import logging
 import tomllib
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Callable
 
@@ -62,7 +63,9 @@ def compose_file(task: HarborTask) -> Path | None:
     return None
 
 
-def load_compose_document(task: HarborTask) -> dict[str, Any] | None:
+def load_compose_document(
+    task: HarborTask, *, deployment_variables: Mapping[str, str] | None = None
+) -> dict[str, Any] | None:
     """The task's Compose overlay with ``env_file`` entries inlined and ``${VAR}`` references resolved.
 
     Returns ``None`` for a task without a Compose file. Prepare and the resources server both read the
@@ -70,6 +73,9 @@ def load_compose_document(task: HarborTask) -> dict[str, Any] | None:
     both run with the same process environment (see :func:`compose_variables`). A required variable
     (``${VAR:?msg}``) without a value, a task variable the host does not set or a missing ``env_file``
     raises :class:`ImageConfigError` naming it; a variable nobody sets is an empty string, with a warning.
+
+    ``deployment_variables`` are the environment server's ``compose_variables`` for one episode, at the process
+    environment's level (see :func:`compose_variables`). Prepare reads the file without them.
     """
     path = compose_file(task)
     if path is None:
@@ -81,7 +87,7 @@ def load_compose_document(task: HarborTask) -> dict[str, Any] | None:
     try:
         # Interpolate first, as Compose does, so an env_file path may use ${CONTEXT_DIR}; env_file values are then
         # literal. Anything still carrying a ``$NAME`` afterwards fails here, at prepare, not at seed.
-        variables = compose_variables(task, unset=unset)
+        variables = compose_variables(task, unset=unset, deployment=deployment_variables)
         document = substitute_with_empty(document, variables, unset)
         document = inline_env_files(document, path.parent, variables)
         # Interpolation hands back strings; the adapter reads healthcheck ``disable`` and ``retries`` by type.

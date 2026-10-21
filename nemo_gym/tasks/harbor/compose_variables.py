@@ -360,7 +360,9 @@ COMPOSE_DOTENV = ".env"
 _WARNED_UNSET: set[tuple[str, str]] = set()
 
 
-def compose_variables(task: HarborTask, *, unset: set[str] | None = None) -> dict[str, str]:
+def compose_variables(
+    task: HarborTask, *, unset: set[str] | None = None, deployment: Mapping[str, str] | None = None
+) -> dict[str, str]:
     """The variables a task's Compose file may interpolate, resolved in the order Harbor's ``docker compose`` sees.
 
     Harbor runs ``docker compose`` with the process environment, the task's ``[environment].env`` over it and
@@ -381,7 +383,8 @@ def compose_variables(task: HarborTask, *, unset: set[str] | None = None) -> dic
        environment, the default standing in when the variable is unset, and one with neither raises
        :class:`ImageConfigError` naming the task and the variable, as Harbor fails the trial; any other value
        is literal;
-    3. the process environment;
+    3. ``deployment``, the environment server's ``compose_variables`` resolved for one episode, which stand in
+       for what a Harbor operator exports, then the process environment;
     4. ``environment/.env``, its unquoted and double-quoted values interpolated against the levels above and
        the lines before them, as Compose's dotenv reader does; single-quoted values are literal.
 
@@ -413,7 +416,7 @@ def compose_variables(task: HarborTask, *, unset: set[str] | None = None) -> dic
     for suffix, path in LOG_MOUNT_PATHS.items():
         infra[f"HOST_{suffix}_PATH"] = path
         infra[f"ENV_{suffix}_PATH"] = path
-    host = {key: _literal(value) for key, value in os.environ.items()}
+    host = {key: _literal(value) for key, value in {**os.environ, **(deployment or {})}.items()}
     above = {
         **host,
         **_task_env(task, environment.env or {}),

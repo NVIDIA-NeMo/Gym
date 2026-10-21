@@ -45,7 +45,7 @@ from uuid import uuid4
 
 from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError
 from fastapi import Body, FastAPI, HTTPException
-from pydantic import BaseModel, ConfigDict, Field, PositiveFloat
+from pydantic import BaseModel, ConfigDict, Field, PositiveFloat, model_validator
 
 from environment_servers.harbor.entrypoint import (
     EntrypointLaunch,
@@ -158,6 +158,26 @@ class HarborEpisodeResponse(BaseEpisodeResponse[HarborEpisodeResult]):
     failure: SingleAgentTurnFailure | None = None
 
 
+class ComposeVariable(BaseModel):
+    """The deployment's value for one ``${NAME}`` in a task's Compose file: exactly one source.
+
+    ``value`` is literal, ``env`` names a variable of this server's process, and ``model_server`` names a Gym
+    model server whose sandbox-reachable URL (with the episode's rollout prefix) becomes the value.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    value: str | None = None
+    env: str | None = None
+    model_server: str | None = None
+
+    @model_validator(mode="after")
+    def one_source(self) -> "ComposeVariable":
+        if sum(source is not None for source in (self.value, self.env, self.model_server)) != 1:
+            raise ValueError("A compose variable takes exactly one of value, env or model_server")
+        return self
+
+
 class HarborTasksetConfig(BaseModel):
     """Where one taskset's folders live and which digest each task was materialized with."""
 
@@ -198,6 +218,9 @@ class HarborEnvironmentServerConfig(BaseEnvironmentServerConfig):
     # Grant the task's `[[environment.mcp_servers]]` URL entries to the agent as MCP tool accesses. "off" keeps
     # them in /tmp/.nemo-gym/task.json only; "required" makes an agent that cannot connect fail its seed.
     task_mcp_grants: Literal["off", "optional", "required"] = "off"
+    # Values for `${NAME}` references in a task's Compose file, such as a sidecar's model endpoint and key, at the
+    # process environment's level: the task's `[environment].env` and Harbor's own variables take precedence.
+    compose_variables: dict[str, ComposeVariable] = Field(default_factory=dict)
 
 
 def min_reward_failure(rewards: dict[str, float] | None, min_reward: float | dict[str, float] | None) -> str | None:
@@ -731,6 +754,10 @@ class HarborEnvironmentServer(
         resolve_env_templates(task.config.verifier.env)
         if task.config.verifier.environment is not None:
             resolve_env_templates(task.config.verifier.environment.env)
+        if task.needs_compose:
+            # A compose_variables source the deployment lacks (an unset env, an unreachable model server) is a
+            # configuration error: refused before anything is provisioned, and not retried.
+            self._compose_variable_values(episode_key)
         for turn in task.turns:
             resolve_env_templates(turn.config.verifier.env)
             if turn.config.verifier.user is not None:
