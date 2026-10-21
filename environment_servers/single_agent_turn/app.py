@@ -110,6 +110,7 @@ class AgentOutcomePolicyConfig(BaseModel):
             AGENT_INVALID_OUTPUT: OutcomeAction.VERIFY,
             AGENT_LIMIT: OutcomeAction.VERIFY,
             MODEL_TRANSPORT_ERROR: OutcomeAction.RETRY,
+            "unknown": OutcomeAction.RETRY,
         }
     )
     by_status_code: dict[Annotated[int, Field(ge=400, le=599)], OutcomeAction] = Field(
