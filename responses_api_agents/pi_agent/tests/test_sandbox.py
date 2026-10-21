@@ -1751,11 +1751,33 @@ def _finishing_model(requests, replies):
     return handle
 
 
+def _long_turn_then_overflow(requests):
+    """A streaming chat model whose first reply reasons for 100 KB and calls `bash`.
+
+    Every later request fails with a context-length 400.
+    """
+
+    def handle(body):
+        requests.append(body)
+        if len(requests) > 1:
+            error = {"error": {"message": "This model's maximum context length is 262144 tokens."}}
+            return 400, "application/json", json.dumps(error).encode()
+        call = {"index": 0, "id": "call-1", "type": "function"}
+        call["function"] = {"name": "bash", "arguments": json.dumps({"command": "true"})}
+        delta = {"role": "assistant", "reasoning_content": "r" * 100_000, "tool_calls": [call]}
+        chunk = {"id": "chat-1", "object": "chat.completion.chunk", "created": 0, "model": body.get("model")}
+        chunk["choices"] = [{"index": 0, "delta": delta, "finish_reason": "tool_calls"}]
+        return 200, "text/event-stream", f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n".encode()
+
+    return handle
+
+
 @asynccontextmanager
-async def _pinned_pi_activation(setup, tmp_path, monkeypatch, *, grants, replies):
+async def _pinned_pi_activation(setup, tmp_path, monkeypatch, *, grants, replies=(), model=None):
     """One activation of the pinned Pi through the real runner and supervisor, with local MCP and model servers.
 
     `grants(up, down)` builds the episode's grants from a working MCP URL and one that refuses connections.
+    The model server runs the handler `model(run.requests)` if given, or else `_finishing_model` with `replies`.
     Yields the activation to await; close runs on exit, and its response is left on the yielded namespace.
     """
     agent, sandbox = setup
@@ -1775,11 +1797,11 @@ async def _pinned_pi_activation(setup, tmp_path, monkeypatch, *, grants, replies
     with (
         socket.socket() as refused,
         _http_server(_finish_tool_server(run.calls)) as up,
-        _http_server(_finishing_model(run.requests, replies)) as model,
+        _http_server(model(run.requests) if model else _finishing_model(run.requests, replies)) as model_url,
     ):
         refused.bind(("127.0.0.1", 0))  # Bound but not listening, so connections to it are refused.
         run.down = f"http://127.0.0.1:{refused.getsockname()[1]}"
-        agent.server_client._build_server_base_url.return_value = model
+        agent.server_client._build_server_base_url.return_value = model_url
         body = seed_with_tools(*grants(f"{up}/mcp", f"{run.down}/mcp"))
         body.sandbox_access.workdir = str(workdir)
         request = Request({"type": "http", "headers": [], "session": {}, "path_params": {"rollout_id": "pi-smoke-a2"}})
@@ -1849,6 +1871,19 @@ async def test_pinned_pi_stops_before_inference_when_a_required_grant_is_down(se
             await run.activation
     assert run.requests == run.calls == []
     assert ("mcp_setup_failed", cause) in [(gap.code, gap.detail) for gap in run.close.agent_observations.gaps]
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux sandbox contract")
+async def test_pinned_pi_grades_a_context_overflow_after_a_long_turn_as_incomplete(setup, tmp_path, monkeypatch):
+    # Pi is still writing the long turn's lines when the overflow ends the run, so outcome.mjs's event must not
+    # split one of them or be lost. Gym grades the final 400 as a model limit only when that event reaches it.
+    async with _pinned_pi_activation(
+        setup, tmp_path, monkeypatch, grants=lambda up, down: [], model=_long_turn_then_overflow
+    ) as run:
+        response = await run.activation
+    assert (response.status, response.error) == ("incomplete", None)
+    # The long turn ran and reached Gym whole; without it the pipe never fills.
+    assert [item.type for item in response.output] == ["reasoning", "function_call", "function_call_output"]
 
 
 @pytest.mark.parametrize("field", ["timeout", "sandbox_install_timeout_seconds", "session_close_timeout_seconds"])
