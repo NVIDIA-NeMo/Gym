@@ -34,7 +34,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
 
 
 class PythonExecutorResourcesServerConfig(BaseResourcesServerConfig):
@@ -357,3 +357,6 @@ def _get_last_expr_value(code: str, globals_dict: dict, locals_dict: dict):
 
 if __name__ == "__main__":
     PythonExecutorResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = PythonExecutorResourcesServer.run_webserver()  # noqa: F401

@@ -40,7 +40,7 @@ from nemo_gym.rollout_observability import SandboxObservation
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.utils import cpu_cap_env
-from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
 from resources_servers.swebench.swebench_patches import (
     patch_swebench_multilingual_golden_patch_pass,
     patch_swebench_multilingual_log_parsing,
@@ -431,3 +431,6 @@ Stderr:
 
 if __name__ == "__main__":
     SwebenchResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = SwebenchResourcesServer.run_webserver()  # noqa: F401

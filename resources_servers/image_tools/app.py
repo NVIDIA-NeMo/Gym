@@ -50,6 +50,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 
 
 # Reuse the exact parser and IoU the image-tools agent uses at rollout time, so
@@ -581,3 +582,6 @@ class ImageToolsPivotResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     ImageToolsPivotResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = ImageToolsPivotResourcesServer.run_webserver()  # noqa: F401

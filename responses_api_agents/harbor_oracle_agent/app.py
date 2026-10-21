@@ -18,7 +18,6 @@ A task without ``solution/solve.sh`` is not failed: the oracle returns a respons
 import math
 from dataclasses import dataclass
 from time import time
-from typing import Any
 from uuid import uuid4
 
 from fastapi import Body, HTTPException, Request
@@ -48,6 +47,7 @@ from nemo_gym.sandbox import AsyncSandbox
 from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.sandbox.providers import create_provider
+from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 
 
 SOLVE_SCRIPT = f"{SOLUTION_DIR}/solve.sh"
@@ -87,11 +87,6 @@ class OracleSession(AgentSessionState):
 class OracleAgent(SimpleResponsesAPIAgent):
     config: OracleAgentConfig
     ray_enabled = False
-
-    def model_post_init(self, context: Any, /) -> None:
-        super().model_post_init(context)
-        if self.config.num_workers not in (None, 1):
-            raise ValueError("Process-local oracle sessions require num_workers=1")
 
     # -- sessions --------------------------------------------------------------------------
 
@@ -226,3 +221,6 @@ class OracleAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     OracleAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = OracleAgent.run_webserver()  # noqa: F401

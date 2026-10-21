@@ -23,6 +23,7 @@ import time
 import urllib.request
 from pathlib import Path
 
+from nemo_gym.install_lock import adopt_recorded_install, install_lock, record_install
 from responses_api_agents.opencode_agent.runtime import OPENCODE_VERSION
 
 
@@ -33,6 +34,9 @@ _NODE_VERSION = "22.15.0"
 _NODE_ARCH = "arm64" if platform.machine().lower() in ("aarch64", "arm64") else "x64"
 _NODE_DIST_URL = f"https://nodejs.org/dist/v{_NODE_VERSION}/node-v{_NODE_VERSION}-linux-{_NODE_ARCH}.tar.xz"
 _LOCAL_PREFIX = Path(__file__).parent / ".opencode_node"
+# Beside the toolchain directory rather than in it, because an interrupted install's cleanup removes that directory.
+_INSTALL_LOCK = _LOCAL_PREFIX.with_name(_LOCAL_PREFIX.name + ".lock")
+_INSTALL_RECORD = _LOCAL_PREFIX.with_name(_LOCAL_PREFIX.name + ".installed")
 
 
 def _npm_install(npm_bin: str, version: str | None) -> None:
@@ -54,10 +58,12 @@ def _npm_global_bin(npm_bin: str) -> str | None:
 
 
 def _install_node_locally() -> Path:
-    node_bin = _LOCAL_PREFIX / "bin" / "node"
-    if node_bin.is_file():
+    complete = _LOCAL_PREFIX / ".complete"
+    if complete.is_file():
         return _LOCAL_PREFIX / "bin"
 
+    # The marker is written last, so a toolchain without it is left from an interrupted install.
+    shutil.rmtree(_LOCAL_PREFIX, ignore_errors=True)
     _LOCAL_PREFIX.mkdir(parents=True, exist_ok=True)
     tarball = _LOCAL_PREFIX / "node.tar.xz"
 
@@ -72,6 +78,7 @@ def _install_node_locally() -> Path:
         item.rename(_LOCAL_PREFIX / item.name)
     nested.rmdir()
     tarball.unlink(missing_ok=True)
+    complete.touch()
     return _LOCAL_PREFIX / "bin"
 
 
@@ -109,6 +116,18 @@ def ensure_opencode(version: str = OPENCODE_VERSION) -> None:
         _require_version(version)
         return
 
+    # With num_workers > 1, every worker installs on its own first local call, and those calls can arrive together.
+    # One worker installs while the others wait here, then they reuse the install it recorded.
+    with install_lock(_INSTALL_LOCK):
+        if not adopt_recorded_install(_INSTALL_RECORD, "opencode"):
+            _install_opencode(version, local_bin)
+            record_install(_INSTALL_RECORD, Path(shutil.which("opencode")).parent)
+
+    _require_version(version)
+    LOG.info("opencode is ready at %s", shutil.which("opencode"))
+
+
+def _install_opencode(version: str, local_bin: Path) -> None:
     npm = shutil.which("npm")
     if npm:
         LOG.info("installing opencode via system npm (%s)", npm)
@@ -132,6 +151,3 @@ def ensure_opencode(version: str = OPENCODE_VERSION) -> None:
 
     if not shutil.which("opencode"):
         raise RuntimeError("opencode install appeared to succeed but 'opencode' is still not on PATH")
-
-    _require_version(version)
-    LOG.info("opencode is ready at %s", shutil.which("opencode"))

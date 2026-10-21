@@ -53,7 +53,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
 
 
 logger = logging.getLogger(__name__)
@@ -150,10 +150,6 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
 
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
-        # Session state lives in this process, so a second worker would serve tool calls
-        # for browsers it does not hold.
-        if self.config.num_workers not in (None, 1):
-            raise ValueError("interactive_browser keeps browsers in-process and requires num_workers=1")
         self._session_id_to_state = {}
         # Sessions an Environment Server seeded under its own resources_session_id.
         self._typed_identity: Dict[str, Tuple[EpisodeId, TaskId]] = {}
@@ -413,3 +409,6 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     InteractiveBrowserResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = InteractiveBrowserResourcesServer.run_webserver()  # noqa: F401

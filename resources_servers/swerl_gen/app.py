@@ -27,6 +27,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.swerl_gen.eval.process_patch import (
     extract_pred_patch,
     extract_pred_patch_relaxed_formatting,
@@ -177,3 +178,6 @@ class SWEGenResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     SWEGenResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = SWEGenResourcesServer.run_webserver()  # noqa: F401

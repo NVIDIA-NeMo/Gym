@@ -68,6 +68,7 @@ from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY,
 from nemo_gym.server_utils import (
     get_response_json,
     is_global_aiohttp_client_request_debug_enabled,
+    is_nemo_gym_fastapi_entrypoint,
     raise_for_status,
 )
 from nemo_gym.server_utils import (
@@ -515,3 +516,6 @@ class RemoteAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     RemoteAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = RemoteAgent.run_webserver()  # noqa: F401

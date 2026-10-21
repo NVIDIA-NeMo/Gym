@@ -53,7 +53,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
     NeMoGymSummary,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
 from responses_api_agents.prime_agent.setup_prime_agent import ensure_prime_agent
 
 
@@ -527,3 +527,6 @@ class PrimeAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     PrimeAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = PrimeAgent.run_webserver()  # noqa: F401

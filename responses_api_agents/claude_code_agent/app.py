@@ -65,7 +65,12 @@ from nemo_gym.rollout_observability import (
 )
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec, create_provider
 from nemo_gym.sandbox.config import resolve_provider_config
-from nemo_gym.server_utils import apply_rollout_prefix, get_response_json, raise_for_status
+from nemo_gym.server_utils import (
+    apply_rollout_prefix,
+    get_response_json,
+    is_nemo_gym_fastapi_entrypoint,
+    raise_for_status,
+)
 from nemo_gym.skills import stage_skills
 from responses_api_agents.claude_code_agent.observability import extract_claude_code_observations
 from responses_api_agents.claude_code_agent.parsing import _extract_instruction, _invocation_outcome, parse_stream_json
@@ -924,3 +929,6 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     ClaudeCodeAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = ClaudeCodeAgent.run_webserver()  # noqa: F401

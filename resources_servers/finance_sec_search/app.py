@@ -56,7 +56,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json
+from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, is_nemo_gym_fastapi_entrypoint
 from resources_servers.sec_local_index.edgar_search_service import EdgarSearchService
 from resources_servers.sec_local_index.html_text import html_to_text
 from resources_servers.sec_local_index.live_edgar_search import LiveEdgarSearch
@@ -409,6 +409,18 @@ class RateLimiter:
             await asyncio.sleep(max(sleep_time, 0.01))
 
 
+def per_worker_rate_limiter(requests_per_second: int, num_workers: int) -> RateLimiter:
+    """The rate limiter for one worker, so that all workers together stay within `requests_per_second`.
+
+    SEC.gov's limit applies to the whole server, but each uvicorn worker keeps its own limiter.
+    Each worker therefore gets an equal share of the limit, rounded down.
+    When the share is below one request a second, the worker sends one request per longer window instead.
+    """
+    if requests_per_second >= num_workers:
+        return RateLimiter(max_requests=requests_per_second // num_workers, window_seconds=1.0)
+    return RateLimiter(max_requests=1, window_seconds=num_workers / requests_per_second)
+
+
 # ============================================================================
 # Finance SEC Search Resource Server
 # ============================================================================
@@ -453,7 +465,7 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
             self._filings_metadata_dir.mkdir(exist_ok=True)
             self._filings_dir.mkdir(exist_ok=True)
 
-        self._rate_limiter = RateLimiter(max_requests=self.config.requests_per_second, window_seconds=1.0)
+        self._rate_limiter = per_worker_rate_limiter(self.config.requests_per_second, self.config.num_workers or 1)
 
         self._tickers: Dict[str, Dict[str, str]] = {}  # ticker -> {"cik": ..., "name": ...}
         self._filings_cache: Dict[str, Dict[str, Dict[str, Any]]] = {}  # cik -> {acc_nodash -> filing_meta}
@@ -1567,9 +1579,17 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
         )
 
 
-if __name__ == "__main__":
+def _configure_logging() -> None:
     # Root stays at WARNING: at INFO the HTTP client logs a line per model call.
     logging.basicConfig(level=logging.WARNING)
     for _logger_name in (__name__, "resources_servers"):
         logging.getLogger(_logger_name).setLevel(os.environ.get("NEMO_GYM_LOG_LEVEL", "INFO").upper())
+
+
+if __name__ == "__main__":
+    _configure_logging()
     FinanceAgentResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    _configure_logging()
+    app = FinanceAgentResourcesServer.run_webserver()  # noqa: F401
