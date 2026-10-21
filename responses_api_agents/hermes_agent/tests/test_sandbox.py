@@ -17,12 +17,13 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from environment_servers.single_agent_turn.app import agent_outcome_policy
 from nemo_gym.agent_utils import process_supervisor
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
 from nemo_gym.agent_utils.supervisor_client import STOP_REQUEST_FILE, SUPERVISOR_FILE, parse_cleanup_receipt
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest, _AgentSessionRecord
 from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.hermes_agent import sandbox as hermes_sandbox
@@ -270,8 +271,21 @@ async def test_activation_replay_survives_disconnected_waiter(agent, state):
         )
 
 
-@pytest.mark.parametrize("status", [400, 401, 429, 500])
-def test_provider_failure_is_reported_and_replays_without_rerunning(agent, state, status):
+@pytest.mark.parametrize(
+    "error_message,outcome,retryable",
+    [
+        *[
+            (
+                f"HTTP {status} controlled model failure",
+                {"failure_kind": "model_request_error", "status_code": status},
+                status in {429, 500},
+            )
+            for status in (400, 401, 429, 500)
+        ],
+        ("Request timed out.", {"failure_kind": "model_transport_error"}, True),
+    ],
+)
+def test_provider_failure_is_reported_and_replays_without_rerunning(agent, state, error_message, outcome, retryable):
     agent._initialize_agent_session_state = AsyncMock(return_value=state)
     state.upload_json = AsyncMock()
     mock_json_download(
@@ -279,7 +293,7 @@ def test_provider_failure_is_reported_and_replays_without_rerunning(agent, state
         side_effect=[
             {"cleanup_confirmed": True, "error": None},
             {
-                "result": {"failed": True, "error": f"HTTP {status} controlled model failure", "messages": []},
+                "result": {"failed": True, "error": error_message, "messages": []},
                 "runtime": {"hostname": "sandbox", "pid": 123},
             },
         ],
@@ -291,11 +305,11 @@ def test_provider_failure_is_reported_and_replays_without_rerunning(agent, state
             response = client.post(path, json={"input": "task"})
             assert response.status_code == 200
             assert response.json()["status"] == "failed"
-            assert json.loads(response.json()["metadata"]["ng_agent_outcome"]) == {
-                "failure_kind": "model_request_error",
-                "status_code": status,
-            }
-            assert response.json()["error"]["message"] == f"HTTP {status} controlled model failure"
+            assert json.loads(response.json()["metadata"]["ng_agent_outcome"]) == outcome
+            assert response.json()["error"]["message"] == error_message
+            policy = agent_outcome_policy(NeMoGymResponse.model_validate(response.json()))
+            assert policy.retryable is retryable
+            assert policy.verifiable is (outcome.get("status_code") == 400)
         state.upload_json.assert_awaited_once()
         assert state.session.cleanup is not None and state.session.cleanup["cleanup_confirmed"] is True
         close = client.post(

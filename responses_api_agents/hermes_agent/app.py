@@ -312,7 +312,12 @@ class HermesAgent(SimpleResponsesAPIAgent):
             match = _HTTP_STATUS.search(error)
             if match and 400 <= int(match[1]) <= 599:
                 return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=int(match[1]))
-            if error in {"Connection error.", "Connection error", "All connection attempts failed"}:
+            if error in {
+                "Connection error.",
+                "Connection error",
+                "All connection attempts failed",
+                "Request timed out.",
+            }:
                 return AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
             return AgentOutcome(failure_kind="unknown")
         if native_result.get("partial"):
