@@ -3463,6 +3463,184 @@ class TestIntegrationWiring:
         assert len(cache_namespaces[0]) == 64
 
 
+class _Walltime(BaseException):
+    """Stands in for the SIGTERM a Slurm job gets at its time limit."""
+
+
+class TestIncrementalStageRows:
+    """A job killed mid-batch keeps the rows that returned before the kill."""
+
+    TASK_IDS = [f"t{i}" for i in range(10)]
+
+    async def _run(
+        self,
+        out_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        outcome,
+        *,
+        retry_inprocess: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Run ``run_e2e_multistage`` on stages ``[3, 5:2]``; ``outcome(row, position)`` answers each row."""
+        dispatched: List[Dict[str, Any]] = []
+        task_ids = self.TASK_IDS
+
+        class FakeHelper:
+            def _preprocess_rows_from_config(self, config):
+                return _materialized_rows(task_ids)
+
+            def run_examples(self, rows, **kwargs):
+                dispatched.extend(dict(row) for row in rows)
+                return [outcome(row, position) for position, row in enumerate(rows)]
+
+            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+                return out_dir / "aggregate.json"
+
+        monkeypatch.setattr(rollout_collection_module, "RolloutCollectionHelper", FakeHelper)
+        monkeypatch.setattr(
+            "resources_servers.gdpval.multistage_orchestrator.ensure_distribution",
+            lambda *args, **kwargs: (_distribution(task_ids), None),
+        )
+        config = SimpleNamespace(
+            input_jsonl_fpath=str(out_dir / "input.jsonl"),
+            output_jsonl_fpath=str(out_dir / "rollouts.jsonl"),
+            num_samples_in_parallel=None,
+            dispatch_budget_s=None,
+            drain_margin_s=None,
+            dispatch_longest_first=False,
+            resume_from_cache=True,
+            route_failures_to_sidecar=True,
+        )
+        global_config = {
+            "multistage": {
+                "enabled": True,
+                "stages": ["3", "5:2"],
+                "seed": 0,
+                "reuse_cached_deliverables": False,
+                "retry_inprocess": retry_inprocess,
+            },
+            "gdpval": {
+                "resources_servers": {
+                    "gdpval": {"reference_models": {key: {"elo": elo} for key, elo in REF_ELOS.items()}}
+                }
+            },
+        }
+        await run_e2e_multistage(config, global_config)
+        return dispatched
+
+    @staticmethod
+    def _answer(result_for):
+        """Build an ``outcome`` callable from ``result_for(row, position) -> result``; ``None`` kills the job."""
+        scored = _fake_run_rollouts_factory()
+
+        def outcome(row: Dict[str, Any], position: int):
+            async def done():
+                result = result_for(row, position)
+                if result is None:
+                    raise _Walltime()
+                if result == "success":
+                    ((_, result),) = await scored([row])
+                return row, result
+
+            return done()
+
+        return outcome
+
+    @staticmethod
+    def _rows(path: Path) -> List[Dict[str, Any]]:
+        return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+    async def test_rows_returned_before_a_timeout_survive_the_resume(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Uninterrupted reference run. Each row is saved once, not once per row and again per batch.
+        reference_dir = tmp_path / "reference"
+        reference_dir.mkdir()
+        routed: List[Tuple[Any, Any, Any]] = []
+        real_route = multistage_module.route_stage_rows
+
+        def counting_route(output_fpath, rows):
+            routed.extend((row["stage_index"], row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]) for row in rows)
+            real_route(output_fpath, rows)
+
+        monkeypatch.setattr(multistage_module, "route_stage_rows", counting_route)
+        await self._run(reference_dir, monkeypatch, self._answer(lambda row, position: "success"))
+        monkeypatch.setattr(multistage_module, "route_stage_rows", real_route)
+        assert len(routed) == 8 and len(set(routed)) == 8
+
+        # Every stage-2 row but the last returns, then the job reaches its time limit.
+        def kill_last_stage2_row(row: Dict[str, Any], position: int):
+            return None if row["stage_index"] == 1 and position == 4 else "success"
+
+        with pytest.raises(_Walltime):
+            await self._run(tmp_path, monkeypatch, self._answer(kill_last_stage2_row))
+
+        stage2 = [row for row in self._rows(tmp_path / "rollouts.jsonl") if row["stage_index"] == 1]
+        assert len(stage2) == 4
+        assert {(row["expected_final_stage_index"], row["expected_stage_row_count"]) for row in stage2} == {(1, 5)}
+
+        dispatched = await self._run(tmp_path, monkeypatch, self._answer(lambda row, position: "success"))
+
+        assert [row["stage_index"] for row in dispatched] == [1]
+
+        def identity(rows: List[Dict[str, Any]]):
+            return sorted((row["stage_index"], row[TASK_INDEX_KEY_NAME], tuple(row["per_reference"])) for row in rows)
+
+        assert identity(self._rows(tmp_path / "rollouts.jsonl")) == identity(
+            self._rows(reference_dir / "rollouts.jsonl")
+        )
+
+    async def test_a_line_cut_short_by_the_kill_does_not_block_the_resume(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def kill_last_stage2_row(row: Dict[str, Any], position: int):
+            return None if row["stage_index"] == 1 and position == 4 else "success"
+
+        with pytest.raises(_Walltime):
+            await self._run(tmp_path, monkeypatch, self._answer(kill_last_stage2_row))
+        out = tmp_path / "rollouts.jsonl"
+        for path in (out, failures_path_for(out), journal_path_for(out)):
+            with path.open("ab") as handle:
+                handle.write(b'{"stage_index": 1, "task_ind')
+
+        dispatched = await self._run(tmp_path, monkeypatch, self._answer(lambda row, position: "success"))
+
+        assert [row["stage_index"] for row in dispatched] == [1]
+        assert sum(row["stage_index"] == 1 for row in self._rows(out)) == 5
+
+    async def test_an_in_process_retry_keeps_its_returned_rows(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "3")
+        retryable = {NG_FAILURE_CLASS_KEY: "timeout_exceeded"}
+        drained = {NG_FAILURE_CLASS_KEY: "kill_shaped", NG_NO_PERSIST_KEY: True}
+
+        # Stage 2: the last 3 rows fail retryably. In the retry, the first
+        # recovers, the second is drained, and the job is killed on the third.
+        def result_for(row: Dict[str, Any], position: int):
+            if row["stage_index"] == 0:
+                return "success"
+            if not row.get(ATTEMPT_INDEX_KEY_NAME):
+                return dict(retryable) if position >= 2 else "success"
+            return ["success", dict(drained), None][position]
+
+        with pytest.raises(_Walltime):
+            await self._run(tmp_path, monkeypatch, self._answer(result_for), retry_inprocess=True)
+
+        out = tmp_path / "rollouts.jsonl"
+        assert sum(row["stage_index"] == 1 for row in self._rows(out)) == 3
+        assert sum(row["stage_index"] == 1 for row in self._rows(failures_path_for(out))) == 3
+        # The drained retry row journals no no-persist tombstone.
+        dispositions = load_latest_attempt_dispositions(journal_path_for(out)).get(1, {})
+        assert not any(disposition[NG_NO_PERSIST_KEY] for disposition in dispositions.values())
+
+        dispatched = await self._run(
+            tmp_path, monkeypatch, self._answer(lambda row, position: "success"), retry_inprocess=True
+        )
+
+        assert [(row["stage_index"], row.get(ATTEMPT_INDEX_KEY_NAME)) for row in dispatched] == [(1, 1), (1, 1)]
+        assert sum(row["stage_index"] == 1 for row in self._rows(out)) == 5
+
+
 class TestReferenceMissingCoverage:
     """A terminal ``reference_missing`` row is an omission, not a stage-killer.
 
