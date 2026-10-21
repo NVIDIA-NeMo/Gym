@@ -451,7 +451,8 @@ class GymInstallConfig(_StrictModel):
 
 
 class DriverConfig(_HostEnvRefs, _StrictModel):
-    container: str = "python:3.12"
+    # None runs on the host so native harnesses can launch their own Slurm/Pyxis steps.
+    container: str | None = "python:3.12"
     gym_install: GymInstallConfig | None = None
     # Name of a service in `services:` to use as the policy model. When set, injects
     # policy_base_url/policy_model_name/policy_api_key into each benchmark's run config.
@@ -477,6 +478,12 @@ class DriverConfig(_HostEnvRefs, _StrictModel):
     # Pyxis-style bind mounts passed as --container-mounts.
     # Each entry is "src", "src:dst", or "src:dst:flags" (e.g. "/data:/data:ro").
     mounts: list[str] = []
+
+    @model_validator(mode="after")
+    def _validate_host_driver(self) -> "DriverConfig":
+        if self.container is None and self.mounts:
+            raise ValueError("A host driver (container: null) cannot use container mounts; use host paths")
+        return self
 
     @field_validator("env")
     @classmethod
@@ -570,6 +577,8 @@ class SubmitConfig(_StrictModel):
 
         sole_compute = next(iter(compute_names))
         compute = self.compute[sole_compute]
+        if self.driver.container is None and not isinstance(compute, SlurmComputeConfig):
+            raise ValueError("driver.container: null is supported only for Slurm compute")
         if isinstance(compute, SlurmComputeConfig):
             total_nodes = sum(p.nodes for p in compute.node_pools.values())
             pool_names = set(compute.node_pools)
