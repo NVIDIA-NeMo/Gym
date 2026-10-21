@@ -16,9 +16,10 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import orjson
-from pytest import approx, fixture
+from pytest import approx, fixture, mark, raises
 
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import JudgeError, judge_failsafe
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -80,6 +81,14 @@ class TestParseJudgement:
 
 
 class TestParseRubricScore:
+    @mark.parametrize("score", [0, 2.7, 7, 10])
+    def test_paper_verdict(self, score: float) -> None:
+        assert parse_rubric_score(f"Score: 1/10\nReasoning\nVERDICT: {score}\n") == approx(score)
+
+    @mark.parametrize("verdict", ["", "eleven", "11", "-1", "7/10", "7 trailing text"])
+    def test_invalid_final_verdict_does_not_use_intermediate_score(self, verdict: str) -> None:
+        assert parse_rubric_score(f"Score: 8/10\nVERDICT: {verdict}") is None
+
     def test_score_slash_ten(self) -> None:
         assert parse_rubric_score("Reasoning\nScore: 7.5/10\nJudgement: YES") == approx(7.5)
 
@@ -191,6 +200,7 @@ class TestFrontierScienceJudgeServer:
     def _make_judge_response(self, judge_text: str) -> dict:
         return NeMoGymResponse(
             id="judge_resp",
+            status="completed",
             created_at=0.0,
             model="judge_model",
             object="response",
@@ -490,9 +500,7 @@ class TestFrontierScienceJudgeServer:
         server = FrontierScienceJudgeServer(config=rubric_config, server_client=server_mock)
 
         response_mock = AsyncMock()
-        response_mock.json = AsyncMock(
-            return_value=self._make_judge_response("Rubric notes...\nScore: 7.0/10\nJudgement: YES")
-        )
+        response_mock.json = AsyncMock(return_value=self._make_judge_response("Rubric notes...\nVERDICT: 7.0"))
         response_mock.read = AsyncMock(return_value=orjson.dumps(response_mock.json.return_value))
         server_mock.post = AsyncMock(return_value=response_mock)
 
@@ -521,9 +529,7 @@ class TestFrontierScienceJudgeServer:
         server = FrontierScienceJudgeServer(config=rubric_config, server_client=server_mock)
 
         response_mock = AsyncMock()
-        response_mock.json = AsyncMock(
-            return_value=self._make_judge_response("Rubric notes...\nScore: 6.5/10\nJudgement: NO")
-        )
+        response_mock.json = AsyncMock(return_value=self._make_judge_response("Rubric notes...\nVERDICT: 6.5"))
         response_mock.read = AsyncMock(return_value=orjson.dumps(response_mock.json.return_value))
         server_mock.post = AsyncMock(return_value=response_mock)
 
@@ -571,7 +577,8 @@ class TestFrontierScienceJudgeServer:
         judge_input = json_payload.input[0].content
         assert "Research question?" in judge_input
         assert "Points: 1.0, Item: Required derivation" in judge_input
-        assert "Score: <number>/10" in judge_input
+        assert "VERDICT: <total_points>" in judge_input
+        assert "Judgement: YES" not in judge_input
 
     async def test_verify_research_mode_chat_completion_omits_sampling_defaults(
         self, config: FrontierScienceJudgeConfig
@@ -624,6 +631,100 @@ class TestFrontierScienceJudgeServer:
         assert "Research question?" in json_payload.messages[0]["content"]
         assert result.reward == approx(1.0)
         assert result.rubric_score == approx(8.0)
+
+    @mark.parametrize("cap", [None, 8192])
+    async def test_research_judge_budget_and_effort(self, config: FrontierScienceJudgeConfig, cap: int | None) -> None:
+        config.judge_mode = "research"
+        config.use_chat_completions_for_judge = True
+        config.judge_responses_create_params = NeMoGymResponseCreateParamsNonStreaming(
+            input=[], max_output_tokens=cap, reasoning={"effort": "high"}
+        )
+        server = FrontierScienceJudgeServer(config=config, server_client=MagicMock(spec=ServerClient))
+        payload = {
+            "id": "judge",
+            "created": 0,
+            "model": "judge",
+            "object": "chat.completion",
+            "choices": [
+                {"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "VERDICT: 7"}}
+            ],
+        }
+        response = AsyncMock()
+        response.read = AsyncMock(return_value=orjson.dumps(payload))
+        server.server_client.post = AsyncMock(return_value=response)
+        assert await server._call_judge("prompt") == "VERDICT: 7"
+        request = server.server_client.post.call_args.kwargs["json"].model_dump(exclude_unset=True)
+        assert request["reasoning_effort"] == "high"
+        if cap is None:
+            assert "max_tokens" not in request
+            assert "max_completion_tokens" not in request
+        else:
+            assert request["max_tokens"] == cap
+
+    @mark.parametrize("text", ["", " \n ", "unparseable", "Judgement: YES", "VERDICT: 11"])
+    async def test_invalid_research_grade_routes_to_failure_sidecar(
+        self, config: FrontierScienceJudgeConfig, text: str
+    ) -> None:
+        config.judge_mode = "research"
+        server = FrontierScienceJudgeServer(config=config, server_client=MagicMock(spec=ServerClient))
+        server._call_judge = AsyncMock(return_value=text)
+        request = FrontierScienceJudgeVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=self._make_model_response("saved answer"),
+            question="q",
+            expected_answer="rubric",
+        )
+        response = await judge_failsafe(server.verify)(request)
+        failure = orjson.loads(response.body)
+        assert failure["_ng_failure_class"] == "judge_failed"
+        assert "no valid rubric score" in failure["_ng_failure_judge_error"]
+        assert failure["response"] == request.response.model_dump(mode="json")
+
+    @mark.parametrize("finish_reason", ["length", "content_filter"])
+    async def test_research_rejects_incomplete_chat_grade(
+        self, config: FrontierScienceJudgeConfig, finish_reason: str
+    ) -> None:
+        config.judge_mode = "research"
+        config.use_chat_completions_for_judge = True
+        server = FrontierScienceJudgeServer(config=config, server_client=MagicMock(spec=ServerClient))
+        payload = {
+            "id": "judge",
+            "created": 0,
+            "model": "judge",
+            "object": "chat.completion",
+            "choices": [
+                {"index": 0, "finish_reason": finish_reason, "message": {"role": "assistant", "content": "VERDICT: 7"}}
+            ],
+        }
+        response = AsyncMock()
+        response.read = AsyncMock(return_value=orjson.dumps(payload))
+        server.server_client.post = AsyncMock(return_value=response)
+        with raises(JudgeError, match="did not complete"):
+            await server._call_judge("prompt")
+
+    async def test_research_rejects_incomplete_responses_grade(self, config: FrontierScienceJudgeConfig) -> None:
+        config.judge_mode = "research"
+        server = FrontierScienceJudgeServer(config=config, server_client=MagicMock(spec=ServerClient))
+        payload = self._make_judge_response("VERDICT: 7") | {"status": "incomplete"}
+        response = AsyncMock()
+        response.read = AsyncMock(return_value=orjson.dumps(payload))
+        server.server_client.post = AsyncMock(return_value=response)
+        with raises(JudgeError, match="did not complete"):
+            await server._call_judge("prompt")
+
+    async def test_research_responses_omits_null_budget(self, config: FrontierScienceJudgeConfig) -> None:
+        config.judge_mode = "research"
+        config.judge_responses_create_params = NeMoGymResponseCreateParamsNonStreaming(
+            input=[], max_output_tokens=None, reasoning={"effort": "high"}
+        )
+        server = FrontierScienceJudgeServer(config=config, server_client=MagicMock(spec=ServerClient))
+        response = AsyncMock()
+        response.read = AsyncMock(return_value=orjson.dumps(self._make_judge_response("VERDICT: 7")))
+        server.server_client.post = AsyncMock(return_value=response)
+        assert await server._call_judge("prompt") == "VERDICT: 7"
+        request = server.server_client.post.call_args.kwargs["json"].model_dump(exclude_unset=True)
+        assert "max_output_tokens" not in request
+        assert request["reasoning"]["effort"] == "high"
 
 
 class TestComputeMetrics:
@@ -684,6 +785,17 @@ class TestComputeMetrics:
     def test_empty_tasks(self, server: FrontierScienceJudgeServer) -> None:
         assert server.compute_metrics([]) == {}
 
+    def test_mean_points_and_solved_rate(self, server: FrontierScienceJudgeServer) -> None:
+        tasks = [
+            [dict(self._rollout(1, "physics"), rubric_score=8, rubric_score_normalized=0.8)],
+            [dict(self._rollout(0, "biology"), rubric_score=2, rubric_score_normalized=0.2)],
+        ]
+        metrics = server.compute_metrics(tasks)
+        assert metrics["mean/rubric_score"] == approx(5.0)
+        assert metrics["pass@1/accuracy"] == approx(50.0)
+        assert metrics["physics/mean/rubric_score"] == approx(8.0)
+        assert metrics["biology/mean/rubric_score"] == approx(2.0)
+
 
 class TestGetKeyMetrics:
     def test_selects_headlines(self) -> None:
@@ -691,6 +803,7 @@ class TestGetKeyMetrics:
             "mean/input_tokens": 100.0,
             "mean/output_tokens": 500.0,
             "mean/reward": 0.5,
+            "mean/rubric_score": 4.25,
             "pass@1/accuracy": 50.0,
             "pass@1[avg-of-4]/accuracy": 50.0,
             "pass@1[avg-of-4]/accuracy/std_dev_across_runs": 3.0,
@@ -701,6 +814,7 @@ class TestGetKeyMetrics:
         assert "mean/input_tokens" in result
         assert "mean/output_tokens" in result
         assert "mean/reward" not in result
+        assert result["mean/rubric_score"] == approx(4.25)
         assert "pass@1[avg-of-4]/accuracy" in result
         assert "pass@4/accuracy" in result
         assert "majority@4/accuracy" in result
