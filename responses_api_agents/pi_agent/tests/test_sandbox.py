@@ -2343,7 +2343,7 @@ def test_native_model_error_is_reported_with_classification(setup, message, stat
     [("Request timed out.", "model_transport_error"), ("Unrecognized failure", "unknown")],
 )
 def test_terminal_provider_failure_uses_default_episode_policy(setup, message, failure_kind):
-    from environment_servers.single_agent_turn.app import agent_outcome_policy
+    from environment_servers.single_agent_turn.app import OutcomeAction, agent_outcome_policy
     from nemo_gym.openai_utils import NeMoGymResponse
 
     agent, sandbox = setup
@@ -2361,5 +2361,4 @@ def test_terminal_provider_failure_uses_default_episode_policy(setup, message, f
     assert json.loads(response["metadata"]["ng_agent_outcome"]) == {"failure_kind": failure_kind}
     assert observations["records"][0]["status"] == "failed"
     policy = agent_outcome_policy(NeMoGymResponse.model_validate(response))
-    assert policy.verifiable is False
-    assert policy.retryable is (failure_kind == "model_transport_error")
+    assert policy == OutcomeAction.RETRY
