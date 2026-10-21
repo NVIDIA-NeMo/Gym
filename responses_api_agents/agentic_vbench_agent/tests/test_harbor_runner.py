@@ -476,6 +476,7 @@ def test_hub_post_outlasts_a_provider_outage(hub_judge, monkeypatch: pytest.Monk
 def test_agent_setup_gets_a_longer_allowance_than_the_agent_budget() -> None:
     job = make_job()
     assert job["agent_setup_timeout_multiplier"] == harbor_runner.AGENT_SETUP_TIMEOUT_MULTIPLIER >= 3.0
+    assert job["environment_build_timeout_multiplier"] == harbor_runner.ENVIRONMENT_BUILD_TIMEOUT_MULTIPLIER >= 6.0
     assert job["config"]["agent_timeout_multiplier"] is None if "config" in job else True
 
 
