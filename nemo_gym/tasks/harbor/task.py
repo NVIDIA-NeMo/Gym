@@ -642,14 +642,19 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
 def task_digest(folder_digest: str, dataset: GymDatasetConfig, task_id: str) -> str:
     """The digest a task is materialized and served under: its folder's content hash plus the dataset slice applied to it.
 
-    ``dataset.toml``'s ``[gym]`` table changes the effective task without touching the folder, so the
-    defaults and the task's own override are folded in whenever the table is not empty. A dataset
-    without a ``[gym]`` table keeps the plain folder hash, which is also what the package store checks.
+    ``dataset.toml``'s ``[gym]`` table can change the effective task without touching the folder, so the
+    defaults and the task's own override are folded in whenever the table shapes tasks
+    (:attr:`GymDatasetConfig.shapes_tasks`). A dataset whose table shapes none, because it has no table or
+    declares only identity, run and catalog keys (``license``, ``type``, ``allowed_agents``, ``domain``,
+    ``verified``, ``[gym.defaults].num_repeats``), keeps the plain folder hash, which is also what the
+    package store checks: none of those keys says what the task is, so none enters its digest.
     """
-    if dataset.is_empty:
+    if not dataset.shapes_tasks:
         return folder_digest
+    # `num_repeats` is how often a run plays the task, not what the task is: left out of the slice too, so a
+    # shaping table with a repeat count hashes the same as one without.
     applied = {
-        "defaults": dataset.defaults.model_dump(mode="json"),
+        "defaults": dataset.defaults.model_dump(mode="json", exclude={"num_repeats"}),
         "task": (dataset.tasks.get(task_id) or GymTaskOverride()).model_dump(mode="json"),
     }
     return hashlib.sha256(f"{folder_digest}\n{json.dumps(applied, sort_keys=True)}".encode()).hexdigest()

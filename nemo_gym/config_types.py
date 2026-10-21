@@ -487,6 +487,42 @@ class HuggingFaceDatasetSource(BaseModel):
 DatasetSource = Annotated[Union[GitlabDatasetSource, HuggingFaceDatasetSource], Field(discriminator="type")]
 
 
+class Domain(str, Enum):
+    """The capability a resources server primarily evaluates or trains.
+
+    Pick the single domain that best fits the task. If several seem to apply, choose the most
+    specific one (e.g. prefer `math` or `coding` over `agent`); use `other` only when none
+    of the specific values fit. The values:
+
+    - `math`                  — mathematical problem solving (e.g. AIME, MATH, GSM8K).
+    - `coding`                — code generation, repair, or execution (e.g. SWE-bench, LiveCodeBench).
+    - `agent`                 — multi-step, tool-using / environment-interacting tasks (e.g. tau2,
+      workplace_assistant). Prefer a more specific value when the task is really math/coding/etc.
+    - `knowledge`             — factual or domain-knowledge question answering (e.g. GPQA, MMLU).
+    - `instruction_following` — adherence to explicit formatting/constraints (e.g. IFEval).
+    - `long_context`          — reasoning over long inputs (e.g. RULER, long-document QA).
+    - `safety`                — refusing harmful content / resisting jailbreaks & prompt injection.
+    - `games`                 — interactive game environments (e.g. blackjack, tetris).
+    - `translation`           — machine translation quality (e.g. WMT).
+    - `e2e`                   — end-to-end pipelines spanning multiple capabilities at once.
+    - `rlhf`                  — preference / reward-model / LLM-as-judge evaluations.
+    - `other`                 — catch-all when no specific domain above applies.
+    """
+
+    MATH = "math"
+    CODING = "coding"
+    AGENT = "agent"
+    KNOWLEDGE = "knowledge"
+    INSTRUCTION_FOLLOWING = "instruction_following"
+    LONG_CONTEXT = "long_context"
+    SAFETY = "safety"
+    GAMES = "games"
+    TRANSLATION = "translation"
+    E2E = "e2e"
+    RLHF = "rlhf"
+    OTHER = "other"
+
+
 class DatasetConfig(BaseModel):
     name: str
     type: DatasetType
@@ -506,6 +542,12 @@ class DatasetConfig(BaseModel):
     gitlab_identifier: Optional[JsonlDatasetGitlabIdentifer] = None
     huggingface_identifier: Optional[JsonlDatasetHuggingFaceIdentifer] = None
     license: Optional[DatasetLicense] = None
+    # Catalog metadata a dataset may declare about itself (a Harbor dataset's `[gym]` table writes them into
+    # its generated entry): the capability it evaluates, whether its rewards were baselined and reviewed,
+    # and the harnesses it admits. Left out of dumps when unset, so existing metrics sidecars do not churn.
+    domain: Optional[Domain] = Field(default=None, exclude_if=lambda value: value is None)
+    verified: Optional[bool] = Field(default=None, exclude_if=lambda value: value is None)
+    allowed_agents: Optional[List[str]] = Field(default=None, exclude_if=lambda value: value is None)
 
     @model_serializer(mode="wrap")
     def _omit_empty_preparation_fields(self, handler: Any) -> dict[str, Any]:
@@ -584,7 +626,10 @@ class BenchmarkDatasetConfig(BaseModel):
     name: str
     type: Literal["benchmark"]
     jsonl_fpath: Path
-    prepare_script: Path
+    # The script `gym eval prepare` runs to write `jsonl_fpath`. A materialized dataset (`gym eval run <task
+    # folder>`) writes its rows as part of the run that generates its entry and declares none; collate then only
+    # asks for a prepare step when the rows file is missing.
+    prepare_script: Optional[Path] = None
     taskset: Optional[str] = Field(
         default=None,
         min_length=1,
@@ -592,6 +637,11 @@ class BenchmarkDatasetConfig(BaseModel):
     )
     prompt_config: Optional[Path] = None
     num_repeats: int = Field(default=1, ge=1)
+    # Catalog metadata, as on `DatasetConfig`. A benchmark needs no license, and in-repo benchmark entries
+    # spell theirs freely, so `license` stays an ignored extra here as it always was.
+    domain: Optional[Domain] = Field(default=None, exclude_if=lambda value: value is None)
+    verified: Optional[bool] = Field(default=None, exclude_if=lambda value: value is None)
+    allowed_agents: Optional[List[str]] = Field(default=None, exclude_if=lambda value: value is None)
     # `uv pip install` arguments the prepare script needs, installed before it is
     # imported. Without this a benchmark whose prepare pulls something Gym does
     # not otherwise depend on has to shell out to pip mid-prepare to get it.
@@ -612,42 +662,6 @@ class BenchmarkDatasetConfig(BaseModel):
 ########################################
 # Base server config classes
 ########################################
-
-
-class Domain(str, Enum):
-    """The capability a resources server primarily evaluates or trains.
-
-    Pick the single domain that best fits the task. If several seem to apply, choose the most
-    specific one (e.g. prefer `math` or `coding` over `agent`); use `other` only when none
-    of the specific values fit. The values:
-
-    - `math`                  — mathematical problem solving (e.g. AIME, MATH, GSM8K).
-    - `coding`                — code generation, repair, or execution (e.g. SWE-bench, LiveCodeBench).
-    - `agent`                 — multi-step, tool-using / environment-interacting tasks (e.g. tau2,
-      workplace_assistant). Prefer a more specific value when the task is really math/coding/etc.
-    - `knowledge`             — factual or domain-knowledge question answering (e.g. GPQA, MMLU).
-    - `instruction_following` — adherence to explicit formatting/constraints (e.g. IFEval).
-    - `long_context`          — reasoning over long inputs (e.g. RULER, long-document QA).
-    - `safety`                — refusing harmful content / resisting jailbreaks & prompt injection.
-    - `games`                 — interactive game environments (e.g. blackjack, tetris).
-    - `translation`           — machine translation quality (e.g. WMT).
-    - `e2e`                   — end-to-end pipelines spanning multiple capabilities at once.
-    - `rlhf`                  — preference / reward-model / LLM-as-judge evaluations.
-    - `other`                 — catch-all when no specific domain above applies.
-    """
-
-    MATH = "math"
-    CODING = "coding"
-    AGENT = "agent"
-    KNOWLEDGE = "knowledge"
-    INSTRUCTION_FOLLOWING = "instruction_following"
-    LONG_CONTEXT = "long_context"
-    SAFETY = "safety"
-    GAMES = "games"
-    TRANSLATION = "translation"
-    E2E = "e2e"
-    RLHF = "rlhf"
-    OTHER = "other"
 
 
 class BaseServerConfig(BaseModel):

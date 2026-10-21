@@ -40,7 +40,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, List, Literal, 
 import aiohttp
 import orjson
 from aiohttp import ClientError
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, ListConfig, OmegaConf
 from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 from tqdm.asyncio import tqdm
 
@@ -64,6 +64,7 @@ from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     AGENT_SERVER_TYPE_KEY_NAME,
     ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME,
+    ALLOWED_AGENTS_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
     ENVIRONMENT_SERVER_STAMP_KEY_NAME,
     ENVIRONMENT_SERVER_TYPE_KEY_NAME,
@@ -309,6 +310,71 @@ def _materialized_taskset(row: Mapping[str, Any]) -> str | None:
     assert isinstance(task_id, Mapping)
     taskset = task_id.get("taskset")
     return taskset if isinstance(taskset, str) and taskset else None
+
+
+def _declared_datasets(agent_config: DictConfig) -> list[DictConfig]:
+    """The ``datasets`` entries one agent block declares; a list that is missing, a placeholder or not a list
+    declares nothing."""
+    datasets = OmegaConf.select(agent_config, "datasets", throw_on_resolution_failure=False)
+    if not isinstance(datasets, ListConfig):
+        return []
+    return [entry for entry in datasets if isinstance(entry, DictConfig)]
+
+
+def _datasets_declaring_taskset(global_config_dict: DictConfig, taskset: str) -> list[DictConfig]:
+    """The entries that declare the rows of ``taskset``, on whichever agent block declares them: an entry whose
+    ``taskset`` is that name, or whose ``name`` is when it sets none (a Harbor dataset's generated entry, named after
+    its taskset and routed by it)."""
+    declaring: list[DictConfig] = []
+    for _, block in global_config_dict.items_ex(resolve=False):
+        if not isinstance(block, DictConfig):
+            continue
+        agents = OmegaConf.select(block, AGENT_SERVER_TYPE_KEY_NAME, throw_on_resolution_failure=False)
+        if not isinstance(agents, DictConfig):
+            continue
+        for agent_config in agents.values():
+            if not isinstance(agent_config, DictConfig):
+                continue
+            for entry in _declared_datasets(agent_config):
+                declared = entry.get("taskset")
+                if declared == taskset or (declared is None and entry.get("name") == taskset):
+                    declaring.append(entry)
+    return declaring
+
+
+def _dataset_admitted_agents(
+    global_config_dict: DictConfig, agent_config: DictConfig, taskset: str | None
+) -> list[tuple[str, list[str]]]:
+    """``(dataset name, allowed_agents)`` for each dataset entry that declares the dispatched rows with a non-empty
+    ``allowed_agents``.
+
+    A materialized row names its dataset through its taskset, so only the entry that declares that taskset counts
+    (:func:`_datasets_declaring_taskset`), not every dataset the executing agent happens to declare: a second,
+    unrelated entry on the agent cannot refuse the rows. The lookup covers every agent block, not the executing
+    agent's alone: a Harbor dataset's entry sits on the agent block ``gym eval run`` generated for it, and a run
+    config edited to route the taskset's environment server to another agent block afterwards still has to meet
+    the dataset's list. A flat row routed to an agent directly names no dataset, so every dataset that agent
+    declares counts. So do the executing agent's entries that set no ``taskset`` when no entry anywhere declares
+    the rows' taskset: a hand-written entry may list pre-materialized rows under a name of its own
+    (``collate_samples`` accepts such rows in any entry), and those rows are still that agent's dataset, so they are
+    checked rather than none; an entry that sets a ``taskset`` materializes and routes its rows as that taskset, so
+    one naming another taskset does not hold these rows.
+
+    A bare string is one entry, as ``allowed_agents_for`` reads a resources server's.
+    """
+    entries = _declared_datasets(agent_config)
+    if taskset is not None:
+        entries = _datasets_declaring_taskset(global_config_dict, taskset) or [
+            entry for entry in entries if entry.get("taskset") is None
+        ]
+    admitted: list[tuple[str, list[str]]] = []
+    for entry in entries:
+        declared = entry.get(ALLOWED_AGENTS_KEY_NAME)
+        if not declared:
+            continue
+        names = [declared] if isinstance(declared, str) else [str(name) for name in declared]
+        admitted.append((str(entry.get("name")), names))
+    return admitted
 
 
 def _environment_server_for_config_row(row: Mapping[str, Any], config: Any) -> str | None:
@@ -4337,6 +4403,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     {
                         AGENT_REF_KEY_NAME: {"name": configured_agent},
                         TASK_SOURCE_KEY_NAME: configured_resources,
+                        # A materialized row's taskset names the dataset entry that declares it, which the
+                        # pairing guard checks the agent against (see ``_dataset_admitted_agents``).
+                        **{key: row[key] for key in ("task_id", "task_input") if key in row},
                     }
                 )
 
@@ -4345,16 +4414,25 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
     @staticmethod
     def _validate_agent_pairings(examples: List[Dict], global_config_dict: DictConfig) -> None:
-        """Fail before dispatch when a row points to agent incompatible with the resources server it runs on."""
+        """Fail before dispatch when a row points to agent incompatible with the resources server it runs on.
+
+        The verifier's ``allowed_agents`` is read from the row's ``task_source`` and from the resources server the
+        agent binds; the dataset entry that declares the rows may also name the harnesses it admits (a Harbor
+        dataset's ``[gym] allowed_agents``, carried into its generated ``datasets:`` entry, whose rows route by
+        taskset to an environment server that binds no resources server). That list is checked against the agent's
+        own type, so a run config edited to another harness after ``gym eval run`` admitted one is refused here as
+        well. A materialized row is matched to its entry by taskset, wherever the entry is declared; a flat row
+        meets every entry the agent declares (see ``_dataset_admitted_agents``).
+        """
         if pairing_override_enabled(global_config_dict):
             return
         routes = {
-            (name, row.get(TASK_SOURCE_KEY_NAME))
+            (name, row.get(TASK_SOURCE_KEY_NAME), _materialized_taskset(row))
             for row in examples
             if (name := (row.get(AGENT_REF_KEY_NAME) or {}).get("name")) is not None
         }
         rejected: Dict[Tuple[str, str], str] = {}
-        for agent, task_source in routes:
+        for agent, task_source, taskset in routes:
             # indexing by name is safe because we already validated the agent names
             agents = global_config_dict[agent][AGENT_SERVER_TYPE_KEY_NAME]
             if not agents:
@@ -4373,6 +4451,13 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 rejected[(agent, str(verifier))] = (
                     f"  - rows routed to '{agent}' run '{agent_type}', but {relation} "
                     f"'{verifier}' accepts only: {', '.join(allowed)}"
+                )
+            for dataset, admitted in _dataset_admitted_agents(global_config_dict, agents[agent_type], taskset):
+                if agent_type in admitted:
+                    continue
+                rejected[(agent, f"dataset {dataset}")] = (
+                    f"  - rows routed to '{agent}' run '{agent_type}', but its dataset "
+                    f"'{dataset}' admits only: {', '.join(admitted)}"
                 )
         if not rejected:
             return
