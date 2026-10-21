@@ -128,7 +128,7 @@ The provider constructor accepts four optional config sections:
 | `connection` | OpenSandbox SDK connection settings: domain, API key, protocol, request timeout, server proxy mode, and `tls_verify`. |
 | `create` | Sandbox create timeout, retry, image pull policy, and health-check behavior. |
 | `probe` | Post-create command probe used to verify command execution before the sandbox is returned. |
-| `operations` | Retry and timeout behavior for SDK operations after create, including command retries, close timeout, background command polling, the dedicated `status_poll_timeout_s` budget for background status polls, and `status_failure_window_s` (off by default), which ends a background command once `status_failure_limit` (5) of its status reads fail within that many seconds, even when successful reads interleave. |
+| `operations` | Retry and timeout behavior for SDK operations after create, including command retries, close timeout, background command polling, and the dedicated `status_poll_timeout_s` budget for background status polls. |
 
 ## SandboxSpec Provider Options
 
