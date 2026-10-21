@@ -1,4 +1,4 @@
-# VisionArena-Bench v0.1 prompts with Qwen reference responses.
+# VisionArena-Bench v0.1 benchmark.
 vision_arena_v1:
   resources_servers:
     arena:

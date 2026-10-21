@@ -1,4 +1,4 @@
-# VisionArena-Bench v0.1, with fixed Qwen3.5-122B-A10B baseline answers.
+# VisionArena-Bench v0.1 benchmark.
 judge_api_key: dummy  # pragma: allowlist secret
 
 config_paths:
