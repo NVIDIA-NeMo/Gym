@@ -8,6 +8,7 @@ import importlib
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 from .feedback import failure_details, reproduction
@@ -55,9 +56,14 @@ def install_runtime(harness: str) -> None:
     import yaml
 
     adapter = ROOT / "responses_api_agents" / f"{harness}_agent"
-    subprocess.run(["uv", "pip", "install", "-r", "requirements.txt"], cwd=adapter, check=True)
+    subprocess.run(
+        ["uv", "sync", "--locked", "--project", str(adapter)],
+        env=os.environ | {"UV_PROJECT_ENVIRONMENT": sys.prefix},
+        cwd=adapter,
+        check=True,
+    )
     if harness == "hermes":
-        return  # The Python requirements contain its pinned runtime.
+        return  # The component lock contains its pinned Python runtime.
     defaults = yaml.safe_load((adapter / "configs" / f"{harness}_agent.yaml").read_text())
     config = defaults[f"{harness}_agent"]["responses_api_agents"][f"{harness}_agent"]
     if harness == "opencode":

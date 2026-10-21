@@ -15,24 +15,10 @@ published protocol.
 
 ## Prepare
 
-The prepare script runs in the same Python environment as the `gym` CLI. Before preparing the
-dataset, update the repository's `.venv` with the GDP.pdf resources-server requirements. Run the
-install from the requirements file's directory so its relative editable dependency resolves to
-this NeMo Gym checkout:
-
-```bash
-# From the NeMo Gym repository root
-(
-  cd resources_servers/gdp_pdf
-  uv pip install --python ../../.venv/bin/python -r requirements.txt
-)
-
-source .venv/bin/activate
-```
-
-This installs the preparation dependencies (`liteparse`, `datasets`, and `huggingface_hub`) into
-the environment that executes `gym eval prepare`. It does not update the agent's isolated
-`responses_api_agents/gdp_pdf_agent/.venv`.
+The dataset declares `prepare_project: resources_servers/gdp_pdf`. Gym syncs
+that component's committed lock with `uv sync --locked` and runs preparation in
+an isolated environment under `uv_venv_dir`. It does not modify the running Gym
+interpreter or the agent's environment.
 
 Then prepare the dataset:
 

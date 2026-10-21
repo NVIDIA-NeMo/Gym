@@ -1,0 +1,60 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[project]
+name = "gym-resources-servers-over-refusal-detection"
+version = "0.0.0"
+requires-python = ">=3.13.14"
+dependencies = [
+    "nemo-gym[dev]",
+    "fastapi",
+    "uvicorn",
+]
+
+[tool.uv]
+package = false
+constraint-dependencies = [
+    "grpcio>=1.81.0rc1",
+    "msgpack>=1.2.1",
+]
+override-dependencies = [
+    "spacy>=3.8.13",
+    "wcwidth; sys_platform == 'never'",
+    "opencv-python-headless; sys_platform == 'never'",
+    "pynvvideocodec; sys_platform == 'never'",
+    "torchcodec; sys_platform == 'never'",
+    "torchvision; sys_platform == 'never'",
+    "torchaudio; sys_platform == 'never'",
+    "pycountry; sys_platform == 'never'",
+    "gprof2dot; sys_platform == 'never'",
+    "pathspec; sys_platform == 'never'",
+]
+exclude-dependencies = [
+    "fasttext-wheel",
+    "alembic",
+    "blinker",
+    "cryptography",
+    "flask",
+    "flask-cors",
+    "graphene",
+    "graphql-core",
+    "graphql-relay",
+    "gunicorn",
+    "huey",
+    "prettytable",
+    "skops",
+    "sqlalchemy",
+    "werkzeug",
+    "waitress",
+    "diskcache",
+]
+
+[tool.uv.sources]
+"nemo-lens" = { git = "https://github.com/NVIDIA-NeMo/Lens.git", rev = "4d045c03186b90afdc815db46b671f6a21bc7e98" }
+"nemo-gym" = { path = "../..", editable = true }
+
+[project.optional-dependencies]
+telemetry = ["nemo-gym[telemetry]"]
+
+[tool.uv.workspace]
+members = []

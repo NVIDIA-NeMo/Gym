@@ -88,14 +88,14 @@ tool-schema injection (A/B'd — no effect; gated by
 ## Install
 
 ToolSandbox's dependencies are **not** part of the base gym install — they live
-in this server's `requirements.txt` and are installed into an isolated
+in this server's `pyproject.toml` and are installed into an isolated
 per-server `.venv` only when the benchmark is used. `gym env start` / `gym env
 test` build that venv automatically. To set it up manually for development:
 
 ```bash
 cd gym/resources_servers/toolsandbox
 uv venv --python 3.13.14 --seed .venv && source .venv/bin/activate
-uv pip install -r requirements.txt
+uv sync --locked
 ```
 
 (scipy is intentionally not required — the one assignment-solver call is served

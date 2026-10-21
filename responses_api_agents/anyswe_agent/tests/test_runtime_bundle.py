@@ -6,6 +6,8 @@ import tarfile
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from responses_api_agents.anyswe_agent import app as anyswe_app
 from responses_api_agents.anyswe_agent.app import GymAgentHarnessProcessor, _pack_runtime
 from responses_api_agents.anyswe_agent.tests.test_app import _config
@@ -67,3 +69,24 @@ class TestRuntimeBundle:
         helper = (Path(__file__).parent.parent / "setup_scripts" / "_portable_python.sh").read_text()
         assert 'install_python_packages --no-deps --force-reinstall "$NEMO_GYM_ROOT"' in helper
         assert 'install_python_packages --no-deps --reinstall "$NEMO_GYM_ROOT"' in helper
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        "responses_api_agents/hermes_agent/pyproject.toml",
+        "responses_api_agents/hermes_agent/uv.lock",
+        "uv.lock",
+        "setup.py",
+    ],
+)
+def test_recipe_changes_with_migrated_dependency_metadata(tmp_path: Path, metadata: str) -> None:
+    path = tmp_path / metadata
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("before")
+    processor = GymAgentHarnessProcessor(config=_config())
+    with patch.object(anyswe_app, "PARENT_DIR", tmp_path):
+        before = processor._recipe()
+        assert processor._recipe() == before
+        path.write_text("after")
+        assert processor._recipe() != before

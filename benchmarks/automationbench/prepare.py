@@ -43,8 +43,8 @@ def prepare(
         # "not installed" sends people to reinstall something already present.
         raise SystemExit(
             f"Could not import automationbench_env ({type(exc).__name__}: {exc}).\n"
-            "If the package is missing, install it with:\n"
-            "    uv pip install -e benchmarks/automationbench"
+            "If the package is missing, sync and use its isolated environment from the repo root:\n"
+            "    uv run --locked --project benchmarks/automationbench python benchmarks/automationbench/prepare.py"
         ) from exc
 
     env = load_environment(domains=domains, max_turns=max_turns, toolset=TOOLSET)

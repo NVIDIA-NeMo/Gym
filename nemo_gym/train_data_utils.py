@@ -918,7 +918,7 @@ class TrainDataProcessor(BaseModel):
                 if isinstance(d, DatasetConfig):
                     # Preparation controls how a local source file is produced; they are not
                     # properties of the rows and defaults must not churn existing sidecars.
-                    excluded_dataset_fields.update({"prepare_script", "prepare_dependencies"})
+                    excluded_dataset_fields.update({"prepare_script", "prepare_dependencies", "prepare_project"})
                 aggregate_metrics_dict = (
                     d.model_dump(mode="json", exclude=excluded_dataset_fields) | aggregate_metrics_dict
                 )

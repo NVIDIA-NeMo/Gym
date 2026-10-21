@@ -10,6 +10,7 @@ indic_frontiermath_simple_agent:
           type: benchmark
           jsonl_fpath: benchmarks/indic/frontier_math/data/indic_frontiermath_raw.jsonl
           prepare_script: benchmarks/indic/frontier_math/prepare.py
+          prepare_project: benchmarks/indic/frontier_math
           prompt_config: benchmarks/indic/frontier_math/prompts/default.yaml
           num_repeats: 1
 

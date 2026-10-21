@@ -27,6 +27,7 @@ def _scaffold_entry(
 ) -> EnvironmentCatalogEntry:
     monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, str(tmp_path))
     asset = scaffold_environment(root=tmp_path, kind="environment", name=name).asset_dir
+    (tmp_path / "resources_servers" / name / "uv.lock").touch()
     return EnvironmentCatalogEntry(
         name=name,
         path=asset,
@@ -48,6 +49,18 @@ async def test_verifies_manifest_resources_server_in_process(tmp_path: Path, mon
     assert report.fixture_path == str(tmp_path / "resources_servers/sample/tests/verifier_cases.jsonl")
     assert [case.kind for case in report.cases] == ["full_reward", "zero_reward", "malformed"]
     assert report.to_dict()["cases"][0]["observed_rewards"] == (1.0,)
+
+
+async def test_missing_lock_fails_before_importing_verifier(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    entry = _scaffold_entry(tmp_path, monkeypatch)
+    (tmp_path / "resources_servers/sample/uv.lock").unlink()
+    marker = tmp_path / "imported"
+    (tmp_path / "resources_servers/sample/app.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('imported')\n"
+    )
+    with pytest.raises(EnvironmentOnboardingError, match=r"has no uv\.lock.*Run `uv lock`"):
+        await verify_environment(entry)
+    assert not marker.exists()
 
 
 async def test_expected_reward_updates_are_explicit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

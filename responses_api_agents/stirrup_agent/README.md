@@ -87,5 +87,5 @@ to vLLM.
 ## Licensing
 
 - **Code**: Apache License 2.0 (see repository `LICENSE`).
-- **Dependencies**: `stirrup` (Apache 2.0). See `requirements.txt` and the top-level `pyproject.toml` for full
+- **Dependencies**: `stirrup` (Apache 2.0). See `pyproject.toml` and the top-level `pyproject.toml` for full
   attribution.

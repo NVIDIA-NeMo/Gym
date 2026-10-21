@@ -40,8 +40,18 @@ def source_tree(tmp_path: Path) -> Path:
     )
     (agent / "results.json").write_text("secret")
     pin = "a" * 40
-    (agent / "requirements.txt").write_text(
-        f"-e nemo-gym[dev] @ ../../\njsonschema>=4\nnooa @ git+https://github.com/NVIDIA-NeMo/labs-OO-Agents.git@{pin}\n"
+    import json
+
+    (agent / "pyproject.toml").write_text(
+        "[project]\ndependencies = "
+        + json.dumps(
+            [
+                "nemo-gym[dev]",
+                "jsonschema>=4",
+                f"nooa @ git+https://github.com/NVIDIA-NeMo/labs-OO-Agents.git@{pin}",
+            ]
+        )
+        + "\n"
     )
     return tmp_path
 

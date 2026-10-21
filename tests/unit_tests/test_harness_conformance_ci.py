@@ -142,3 +142,19 @@ def test_custom_check_is_separate_from_required_ci_and_probe_permissions():
     )
     assert workflow["jobs"]["report"]["if"] == "always()"
     assert set(workflow["jobs"]["report"]["needs"]) == {"select", "probe"}
+
+
+def test_install_runtime_syncs_committed_lock_in_job_environment(monkeypatch):
+    import sys
+
+    from scripts.harness_conformance import ci
+
+    calls = []
+    monkeypatch.setattr(ci.subprocess, "run", lambda command, **kwargs: calls.append((command, kwargs)))
+    ci.install_runtime("hermes")
+    command, options = calls[0]
+    adapter = ci.ROOT / "responses_api_agents/hermes_agent"
+    assert command == ["uv", "sync", "--locked", "--project", str(adapter)]
+    assert options["env"]["UV_PROJECT_ENVIRONMENT"] == sys.prefix
+    assert options["check"] is True
+    assert options["cwd"] == adapter

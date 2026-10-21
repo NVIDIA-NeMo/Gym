@@ -11,6 +11,7 @@ import re
 import shlex
 import tarfile
 import tempfile
+import tomllib
 from pathlib import Path
 from uuid import uuid4
 
@@ -48,10 +49,10 @@ def _runtime_archive(root: Path) -> tuple[bytes, str]:
     for path in agent_dir.glob("*.py"):
         if not path.is_symlink():
             files[path.relative_to(root).as_posix()] = path.read_bytes()
-    requirements = (agent_dir / "requirements.txt").read_text()
+    requirements = tomllib.loads((agent_dir / "pyproject.toml").read_text())["project"]["dependencies"]
     runtime_requirements = []
-    for line in requirements.splitlines():
-        if not line.strip() or line.startswith(("#", "-e ")):
+    for line in requirements:
+        if line.startswith("nemo-gym"):
             continue
         # Same immutable source pin, without a dependency on the task image's git.
         line = re.sub(

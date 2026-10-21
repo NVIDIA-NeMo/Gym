@@ -473,6 +473,8 @@ class DatasetConfig(BaseModel):
     type: DatasetType
     jsonl_fpath: str
     prepare_script: Optional[Path] = None
+    prepare_project: Optional[Path] = None
+    # Legacy unlocked arguments are rejected at preparation with migration guidance.
     prepare_dependencies: List[str] = Field(default_factory=list)
     taskset: Optional[str] = Field(
         default=None,
@@ -507,6 +509,8 @@ class DatasetConfig(BaseModel):
         data = handler(self)
         if self.prepare_script is None:
             data.pop("prepare_script", None)
+        if self.prepare_project is None:
+            data.pop("prepare_project", None)
         if not self.prepare_dependencies:
             data.pop("prepare_dependencies", None)
         return data
@@ -587,9 +591,9 @@ class BenchmarkDatasetConfig(BaseModel):
     )
     prompt_config: Optional[Path] = None
     num_repeats: int = Field(default=1, ge=1)
-    # `uv pip install` arguments the prepare script needs, installed before it is
-    # imported. Without this a benchmark whose prepare pulls something Gym does
-    # not otherwise depend on has to shell out to pip mid-prepare to get it.
+    # Isolated project containing the committed dependency lock for preparation.
+    prepare_project: Optional[Path] = None
+    # Legacy unlocked arguments are rejected at preparation with migration guidance.
     prepare_dependencies: List[str] = Field(default_factory=list)
     agent: Optional[str] = Field(
         default=None,

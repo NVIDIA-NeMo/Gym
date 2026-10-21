@@ -157,7 +157,7 @@ class TestPlanBenchmarkCommand:
     def _run(self, config: dict, module: MagicMock | None = None) -> None:
         with (
             patch("nemo_gym.cli.eval.get_global_config_dict", return_value=OmegaConf.create(config)),
-            patch("nemo_gym.cli.eval.importlib.import_module", return_value=module or MagicMock()),
+            patch("nemo_gym.cli._prepare_worker.load_preparer", return_value=module or MagicMock()),
         ):
             plan_benchmark()
 

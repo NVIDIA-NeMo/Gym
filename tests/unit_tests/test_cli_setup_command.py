@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import importlib.metadata
 import os
 import select
 import shlex
@@ -21,20 +20,15 @@ import subprocess
 import sys
 from contextlib import contextmanager
 from pathlib import Path
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, call
 
 import pytest
 from pytest import MonkeyPatch, raises
 
 import nemo_gym.cli._venv_setup
 import nemo_gym.cli.setup_command
-from nemo_gym import PARENT_DIR
 from nemo_gym.cli._venv_setup import SETUP_COMPLETE_MARKER, setup_environment
 from nemo_gym.cli.setup_command import (
-    _LOCAL_NEMO_GYM_REQUIREMENT_RE,
-    _get_nemo_gym_install_flags,
-    _get_nemo_gym_version_spec,
-    _local_nemo_gym_extras,
     get_venv_path,
     run_command,
     setup_env_command,
@@ -44,263 +38,60 @@ from tests.unit_tests.test_global_config import TestGlobalConfig as _TestGlobalC
 
 
 class TestCLISetupCommandSetupEnvCommand:
-    def _installation_command(self, command: str) -> str:
-        # Keep the dependency-command assertions independent of the shell quoting
-        # used to pass that command as one argument to the setup runner.
+    def _setup(self, tmp_path: Path) -> tuple[Path, dict]:
+        server = tmp_path / "resources_servers" / "sample"
+        server.mkdir(parents=True)
+        (server / "pyproject.toml").write_text('[project]\nname="sample"\nversion="0"\n')
+        (server / "uv.lock").write_text("version=1\nrevision=3\n")
+        config = _TestGlobalConfig._default_global_config_dict_values.fget(None) | {
+            UV_VENV_DIR_KEY_NAME: str(tmp_path / "custom venvs")
+        }
+        return server, config
+
+    def test_locked_setup_targets_custom_venv_and_preserves_parent_contracts(self, tmp_path: Path) -> None:
+        server, config = self._setup(tmp_path)
+        command = setup_env_command(server, config, "sample")
         args = shlex.split(command)
-        return f"cd {args[1]} && {args[args.index('--command') + 1]}"
+        installer = shlex.split(args[args.index("--command") + 1].split(" > >(")[0])
+        assert installer[1].endswith("/_locked_env.py")
+        assert installer[installer.index("--project") + 1] == str(server)
+        assert installer[installer.index("--venv") + 1] == str(get_venv_path(server, config))
+        assert installer[installer.index("--python") + 1] == config["python_version"]
+        assert installer[installer.index("--requirement") + 1] == "openai==test openai version"
+        assert installer[installer.index("--constraint") + 1] == "ray==test ray version"
+        assert "uv pip install" not in command
+        assert command.endswith(f"source {shlex.quote(str(get_venv_path(server, config) / 'bin/activate'))}")
 
-    def _setup_server_dir(self, tmp_path: Path) -> Path:
-        server_dir = tmp_path / "first_level" / "second_level"
-        server_dir.mkdir(parents=True)
-        (server_dir / "requirements.txt").write_text("pytest\n")
-        (tmp_path / "pyproject.toml").write_text("")
+    def test_component_extras_are_scoped_and_forwarded(self, tmp_path: Path) -> None:
+        server, config = self._setup(tmp_path)
+        config["component_extras"] = {
+            "resources_servers/sample": ["lexmount"],
+            "responses_api_agents/other": ["example-tools"],
+        }
+        command = setup_env_command(server, config, "sample")
+        args = shlex.split(command)
+        installer = shlex.split(args[args.index("--command") + 1].split(" > >(")[0])
+        assert installer[installer.index("--extra") + 1] == "lexmount"
+        assert "example-tools" not in installer
 
-        return server_dir.absolute()
+    @pytest.mark.parametrize("extras", ["lexmount", [1], [""]])
+    def test_invalid_component_extras_fail_before_install(self, tmp_path: Path, extras: object) -> None:
+        server, config = self._setup(tmp_path)
+        config["component_extras"] = {"resources_servers/sample": extras}
+        with raises(RuntimeError, match="must be a list"):
+            setup_env_command(server, config, "sample")
 
-    def _debug_global_config_dict(self, tmp_path: Path) -> dict:
-        return _TestGlobalConfig._default_global_config_dict_values.fget(None) | {UV_VENV_DIR_KEY_NAME: str(tmp_path)}
+    @pytest.mark.parametrize("missing", ["pyproject.toml", "uv.lock"])
+    def test_missing_metadata_fails_before_install(self, tmp_path: Path, missing: str) -> None:
+        server, config = self._setup(tmp_path)
+        (server / missing).unlink()
+        with raises(RuntimeError, match=f"Missing {missing}"):
+            setup_env_command(server, config, "sample")
 
-    def test_sanity(self, tmp_path: Path) -> None:
-        server_dir = self._setup_server_dir(tmp_path)
-
-        actual_command = setup_env_command(
-            dir_path=server_dir,
-            global_config_dict=self._debug_global_config_dict(tmp_path),
-            prefix="my server name",
-        )
-        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python 'test python version' {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && uv pip install -c <(printf '%s\\n' 'ray==test ray version') -r requirements.txt openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
-        assert expected_command == self._installation_command(actual_command)
-
-    def test_requirements_uses_server_local_overrides(self, tmp_path: Path) -> None:
-        server_dir = self._setup_server_dir(tmp_path)
-        (server_dir / "overrides.txt").write_text("dependency==2\n")
-
-        actual_command = setup_env_command(
-            dir_path=server_dir,
-            global_config_dict=self._debug_global_config_dict(tmp_path),
-            prefix="my server name",
-        )
-
-        assert (
-            "uv pip install -c <(printf '%s\\n' 'ray==test ray version') --override overrides.txt -r requirements.txt"
-            in self._installation_command(actual_command)
-        )
-
-    @pytest.mark.parametrize("has_marker", [False, True])
-    def test_existing_venv_skips_setup(self, tmp_path: Path, has_marker: bool) -> None:
-        server_dir = self._setup_server_dir(tmp_path)
-        config = self._debug_global_config_dict(tmp_path) | {"skip_venv_if_present": True}
-        before = setup_env_command(server_dir, config, "policy")
-
-        (server_dir / ".venv/bin").mkdir(parents=True)
-        (server_dir / ".venv/bin/python").touch()
-        (server_dir / ".venv/bin/activate").touch()
-        if has_marker:
-            (server_dir / ".venv" / SETUP_COMPLETE_MARKER).touch()
-
-        assert setup_env_command(server_dir, config, "policy") == (
-            f"cd {server_dir} && source {server_dir}/.venv/bin/activate"
-        )
-        assert "--skip-if-ready" in shlex.split(before)
-        assert "uv pip install" in self._installation_command(before)
-
-    def test_head_server_deps(self, tmp_path: Path) -> None:
-        server_dir = self._setup_server_dir(tmp_path)
-
-        actual_command = setup_env_command(
-            dir_path=server_dir,
-            global_config_dict=self._debug_global_config_dict(tmp_path) | {"head_server_deps": ["dep 1", "dep 2"]},
-            prefix="my server name",
-        )
-        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python 'test python version' {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && uv pip install -c <(printf '%s\\n' 'ray==test ray version') -r requirements.txt dep 1 dep 2 > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
-        assert expected_command == self._installation_command(actual_command)
-
-    def test_python_version(self, tmp_path: Path) -> None:
-        server_dir = self._setup_server_dir(tmp_path)
-
-        actual_command = setup_env_command(
-            dir_path=server_dir,
-            global_config_dict=self._debug_global_config_dict(tmp_path) | {"python_version": "my python version"},
-            prefix="my server name",
-        )
-        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python 'my python version' {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && uv pip install -c <(printf '%s\\n' 'ray==test ray version') -r requirements.txt openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
-        assert expected_command == self._installation_command(actual_command)
-
-    def test_uv_pip_set_python(self, tmp_path: Path) -> None:
-        server_dir = self._setup_server_dir(tmp_path)
-
-        actual_command = setup_env_command(
-            dir_path=server_dir,
-            global_config_dict=self._debug_global_config_dict(tmp_path) | {"uv_pip_set_python": True},
-            prefix="my server name",
-        )
-        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python 'test python version' {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && uv pip install --python {server_dir}/.venv/bin/python -c <(printf '%s\\n' 'ray==test ray version') -r requirements.txt openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
-        assert expected_command == self._installation_command(actual_command)
-
-    def test_pip_install_verbose(self, tmp_path: Path) -> None:
-        server_dir = self._setup_server_dir(tmp_path)
-
-        actual_command = setup_env_command(
-            dir_path=server_dir,
-            global_config_dict=self._debug_global_config_dict(tmp_path) | {"pip_install_verbose": True},
-            prefix="my server name",
-        )
-        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python 'test python version' {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && uv pip install -v -c <(printf '%s\\n' 'ray==test ray version') -r requirements.txt openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
-        assert expected_command == self._installation_command(actual_command)
-
-    def test_pyproject_requirements_raises_error(self, tmp_path: Path) -> None:
-        server_dir = self._setup_server_dir(tmp_path)
-        (server_dir / "pyproject.toml").write_text("")
-
-        with raises(RuntimeError, match="Found both pyproject.toml and requirements.txt"):
-            setup_env_command(
-                dir_path=server_dir,
-                global_config_dict=self._debug_global_config_dict(tmp_path),
-                prefix="my server name",
-            )
-
-    def test_missing_pyproject_requirements_raises_error(self, tmp_path: Path) -> None:
-        server_dir = self._setup_server_dir(tmp_path)
-        (server_dir / "requirements.txt").unlink()
-
-        with raises(RuntimeError, match="Missing pyproject.toml or requirements.txt"):
-            setup_env_command(
-                dir_path=server_dir,
-                global_config_dict=self._debug_global_config_dict(tmp_path),
-                prefix="my server name",
-            )
-
-    def test_pyproject(self, tmp_path: Path) -> None:
-        server_dir = self._setup_server_dir(tmp_path)
-        (server_dir / "pyproject.toml").write_text("")
-        (server_dir / "requirements.txt").unlink()
-
-        actual_command = setup_env_command(
-            dir_path=server_dir,
-            global_config_dict=self._debug_global_config_dict(tmp_path),
-            prefix="my server name",
-        )
-        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python 'test python version' {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && uv pip install -c <(printf '%s\\n' 'ray==test ray version') '-e .' openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
-        assert expected_command == self._installation_command(actual_command)
-
-    def test_uv_venv_dir_with_install(self, tmp_path: Path) -> None:
-        server_dir = self._setup_server_dir(tmp_path)
-
-        uv_venv_dir = tmp_path / "uv_venv_dir"
-
-        actual_command = setup_env_command(
-            dir_path=server_dir,
-            global_config_dict=self._debug_global_config_dict(tmp_path) | {"uv_venv_dir": str(uv_venv_dir)},
-            prefix="my server name",
-        )
-        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python 'test python version' {uv_venv_dir}/first_level/second_level/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {uv_venv_dir}/first_level/second_level/.venv/bin/activate && uv pip install -c <(printf '%s\\n' 'ray==test ray version') -r requirements.txt openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
-        assert expected_command == self._installation_command(actual_command)
-
-    def test_uv_venv_dir_path_is_shared_with_cleanup(self, tmp_path: Path) -> None:
-        server_dir = self._setup_server_dir(tmp_path)
-        uv_venv_dir = tmp_path / "uv_venv_dir"
-
-        actual_path = get_venv_path(
-            server_dir,
-            self._debug_global_config_dict(tmp_path) | {"uv_venv_dir": str(uv_venv_dir)},
-        )
-
-        assert actual_path == uv_venv_dir / "first_level/second_level/.venv"
-
-    @pytest.mark.parametrize("version", ["0.3.0", "0.3.0rc0", "1.0.0", "2.1.3rc1"])
-    def test_installs_from_pypi_when_not_editable(
-        self, tmp_path: Path, version: str, monkeypatch: MonkeyPatch
-    ) -> None:
-        server_dir = (tmp_path / "first_level" / "second_level").absolute()
-        server_dir.mkdir(parents=True)
-        (server_dir / "requirements.txt").write_text("pytest\n")
-        monkeypatch.delenv("NEMO_GYM_ALLOW_PRERELEASE", raising=False)
-        monkeypatch.delenv("UV_INDEX_URL", raising=False)
-        monkeypatch.delenv("UV_EXTRA_INDEX_URL", raising=False)
-        monkeypatch.delenv("UV_INDEX_STRATEGY", raising=False)
-
-        with patch("importlib.metadata.version", return_value=version):
-            actual_command = setup_env_command(
-                dir_path=server_dir,
-                global_config_dict=self._debug_global_config_dict(tmp_path),
-                prefix="my server name",
-            )
-        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python 'test python version' {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && (echo 'nemo-gym=={version}' && grep -v -F '../..' requirements.txt) | uv pip install -c <(printf '%s\\n' 'ray==test ray version') -r /dev/stdin openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
-        assert expected_command == self._installation_command(actual_command)
-
-    @pytest.mark.parametrize("version", ["0.3.0", "0.3.0rc0", "1.0.0", "2.1.3rc1"])
-    def test_installs_from_pypi_when_not_editable_pyproject(
-        self, tmp_path: Path, version: str, monkeypatch: MonkeyPatch
-    ) -> None:
-        server_dir = (tmp_path / "first_level" / "second_level").absolute()
-        server_dir.mkdir(parents=True)
-        (server_dir / "pyproject.toml").write_text("")
-        monkeypatch.delenv("NEMO_GYM_ALLOW_PRERELEASE", raising=False)
-        monkeypatch.delenv("UV_INDEX_URL", raising=False)
-        monkeypatch.delenv("UV_EXTRA_INDEX_URL", raising=False)
-        monkeypatch.delenv("UV_INDEX_STRATEGY", raising=False)
-
-        with patch("importlib.metadata.version", return_value=version):
-            actual_command = setup_env_command(
-                dir_path=server_dir,
-                global_config_dict=self._debug_global_config_dict(tmp_path),
-                prefix="my server name",
-            )
-        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python 'test python version' {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && uv pip install -c <(printf '%s\\n' 'ray==test ray version') nemo-gym=={version} && uv pip install -c <(printf '%s\\n' 'ray==test ray version') --no-sources '-e .' openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
-        assert expected_command == self._installation_command(actual_command)
-
-    def test_installs_from_pypi_keeps_requested_extras(self, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
-        server_dir = (tmp_path / "first_level" / "second_level").absolute()
-        server_dir.mkdir(parents=True)
-        (server_dir / "requirements.txt").write_text("-e nemo-gym[dev,sandbox] @ ../../\npytest\n")
-        for name in ("NEMO_GYM_ALLOW_PRERELEASE", "UV_INDEX_URL", "UV_EXTRA_INDEX_URL", "UV_INDEX_STRATEGY"):
-            monkeypatch.delenv(name, raising=False)
-
-        with patch("importlib.metadata.version", return_value="0.3.0"):
-            actual_command = setup_env_command(
-                dir_path=server_dir,
-                global_config_dict=self._debug_global_config_dict(tmp_path),
-                prefix="my server name",
-            )
-
-        assert "(echo 'nemo-gym[dev,sandbox]==0.3.0' && grep -v -F '../..' requirements.txt)" in (
-            self._installation_command(actual_command)
-        )
-
-
-class TestLocalNemoGymExtras:
-    @pytest.mark.parametrize(
-        ("requirements", "expected"),
-        [
-            ("-e nemo-gym[dev] @ ../../\n", "[dev]"),
-            ("-e nemo-gym[dev,sandbox] @ ../..\n", "[dev,sandbox]"),
-            ("-e nemo-gym[ dev , sandbox ] @ ../../  # local checkout\n", "[dev,sandbox]"),
-            ("nemo_gym[sandbox] @ ../../\n", "[sandbox]"),
-            ("-e nemo-gym @ ../../\n", ""),
-            ("-e ../../\n", ""),
-            ("-e ../../benchmarks/automationbench\n", ""),
-            ("pytest\n", ""),
-            ("-e nemo-gym[dev] @ ../../\n-e nemo-gym[sandbox,dev] @ ../../\n", "[dev,sandbox]"),
-        ],
-    )
-    def test_reads_extras_from_the_local_gym_requirement(
-        self, tmp_path: Path, requirements: str, expected: str
-    ) -> None:
-        requirements_fpath = tmp_path / "requirements.txt"
-        requirements_fpath.write_text(requirements)
-
-        assert _local_nemo_gym_extras(requirements_fpath) == expected
-
-    def test_recognizes_every_shipped_local_gym_requirement(self) -> None:
-        unrecognized = [
-            f"{path.relative_to(PARENT_DIR)}: {line.strip()}"
-            for path in PARENT_DIR.glob("*/*/requirements.txt")
-            for line in path.read_text().splitlines()
-            if "nemo-gym" in line and "../.." in line and not _LOCAL_NEMO_GYM_REQUIREMENT_RE.match(line)
-        ]
-
-        assert not unrecognized, "PyPI installs would drop the extras on these lines:\n" + "\n".join(unrecognized)
+    def test_verbosity_is_forwarded(self, tmp_path: Path) -> None:
+        server, config = self._setup(tmp_path)
+        command = setup_env_command(server, config | {"pip_install_verbose": True}, "sample")
+        assert "--verbose" in command
 
 
 @pytest.fixture
@@ -308,7 +99,8 @@ def setup_component(tmp_path: Path) -> tuple[Path, dict, Path]:
     server_dir = tmp_path / "source with spaces" / "models" / "example"
     server_dir.mkdir(parents=True)
     (server_dir.parent.parent / "pyproject.toml").touch()
-    (server_dir / "requirements.txt").touch()
+    (server_dir / "pyproject.toml").touch()
+    (server_dir / "uv.lock").touch()
     config = _TestGlobalConfig._default_global_config_dict_values.fget(None) | {
         "uv_venv_dir": str(tmp_path / "venvs with spaces"),
         "skip_venv_if_present": True,
@@ -409,7 +201,7 @@ def test_failed_forced_setup_invalidates_marker_and_can_retry(setup_component, c
 def test_existing_venv_activates_without_setup_or_manifest_validation(setup_component, has_marker, manifest) -> None:
     server_dir, config, venv = setup_component
     if manifest == "missing":
-        (server_dir / "requirements.txt").unlink()
+        (server_dir / "pyproject.toml").unlink()
     else:
         (server_dir / "pyproject.toml").touch()
     marker = venv / SETUP_COMPLETE_MARKER
@@ -431,13 +223,25 @@ def test_generated_setup_installs_and_activates_before_starting_server(setup_com
         (venv / "bin" / missing_file).unlink()
     else:
         config["skip_venv_if_present"] = False
-    # Substitute only the dependency installer; execute the generated setup and activation.
-    activate = shlex.quote(str(venv / "bin/activate"))
-    uv = (
-        f'uv() {{ if [ "$1" = venv ]; then echo "export SETUP_TEST_ACTIVATED=1" > {activate}; '
-        f"else {_install_command(venv)}; fi; }}; export -f uv; "
+    # Substitute only the sync helper; keep the real serialization and activation wrapper.
+    (venv / "bin").mkdir(exist_ok=True)
+    fake = server_dir / "fake_sync.py"
+    fake.write_text(
+        "from pathlib import Path\n"
+        f"venv = Path({str(venv)!r})\n"
+        "(venv / 'bin/python').touch()\n"
+        "(venv / 'bin/activate').write_text('export SETUP_TEST_ACTIVATED=1\\n')\n"
+        "(venv / 'attempts').write_text('install\\n')\n"
     )
-    command = uv + setup_env_command(server_dir, config, "server")
+    directory_command, _, rest = setup_env_command(server_dir, config, "server").partition(" && ")
+    runner, _, activation = rest.rpartition(" && ")
+    args = shlex.split(runner)
+    install_index = args.index("--command") + 1
+    args[install_index] = args[install_index].replace(
+        shlex.quote(str(Path(nemo_gym.cli.setup_command.__file__).with_name("_locked_env.py"))),
+        shlex.quote(str(fake)),
+    )
+    command = f"{directory_command} && {shlex.join(args)} && {activation}"
     command += f' && test "$SETUP_TEST_ACTIVATED" = 1 && test -f {shlex.quote(str(venv / "attempts"))} && echo STARTED'
     with _setup_process(command) as process:
         _expect_success(process)
@@ -594,109 +398,6 @@ class TestCLISetupCommandRunCommand:
         assert env["SECRET_KEY"] == "supersecret"
         assert env["NEMO_GYM_CONFIG_PATH"] == "my_path"
         assert env["PYTHONPATH"] == "/my path"
-
-
-class TestGetNemoGymInstallFlags:
-    """Test _get_nemo_gym_install_flags helper function."""
-
-    def test_no_env_vars_returns_empty(self, monkeypatch: MonkeyPatch) -> None:
-        """When no env vars are set, should return empty string."""
-        monkeypatch.delenv("NEMO_GYM_ALLOW_PRERELEASE", raising=False)
-        monkeypatch.delenv("UV_INDEX_URL", raising=False)
-        monkeypatch.delenv("UV_EXTRA_INDEX_URL", raising=False)
-        monkeypatch.delenv("UV_INDEX_STRATEGY", raising=False)
-
-        flags = _get_nemo_gym_install_flags()
-        assert flags == ""
-
-    def test_prerelease_flag(self, monkeypatch: MonkeyPatch) -> None:
-        """When NEMO_GYM_ALLOW_PRERELEASE=true, should add --pre and --index-strategy."""
-        monkeypatch.setenv("NEMO_GYM_ALLOW_PRERELEASE", "true")
-        monkeypatch.delenv("UV_INDEX_URL", raising=False)
-        monkeypatch.delenv("UV_EXTRA_INDEX_URL", raising=False)
-        monkeypatch.delenv("UV_INDEX_STRATEGY", raising=False)
-
-        flags = _get_nemo_gym_install_flags()
-        assert flags == "--pre --index-strategy unsafe-best-match 'fastapi<1.0' "
-
-    def test_prerelease_false(self, monkeypatch: MonkeyPatch) -> None:
-        """When NEMO_GYM_ALLOW_PRERELEASE=false, should not add flags."""
-        monkeypatch.setenv("NEMO_GYM_ALLOW_PRERELEASE", "false")
-        monkeypatch.delenv("UV_INDEX_URL", raising=False)
-        monkeypatch.delenv("UV_EXTRA_INDEX_URL", raising=False)
-        monkeypatch.delenv("UV_INDEX_STRATEGY", raising=False)
-
-        flags = _get_nemo_gym_install_flags()
-        assert flags == ""
-
-    def test_index_url(self, monkeypatch: MonkeyPatch) -> None:
-        """Should include UV_INDEX_URL if set."""
-        monkeypatch.delenv("NEMO_GYM_ALLOW_PRERELEASE", raising=False)
-        monkeypatch.setenv("UV_INDEX_URL", "https://test.pypi.org/simple/")
-        monkeypatch.delenv("UV_EXTRA_INDEX_URL", raising=False)
-        monkeypatch.delenv("UV_INDEX_STRATEGY", raising=False)
-
-        flags = _get_nemo_gym_install_flags()
-        assert flags == "--index-url https://test.pypi.org/simple/ "
-
-    def test_extra_index_url(self, monkeypatch: MonkeyPatch) -> None:
-        """Should include UV_EXTRA_INDEX_URL if set."""
-        monkeypatch.delenv("NEMO_GYM_ALLOW_PRERELEASE", raising=False)
-        monkeypatch.delenv("UV_INDEX_URL", raising=False)
-        monkeypatch.setenv("UV_EXTRA_INDEX_URL", "https://pypi.org/simple/")
-        monkeypatch.delenv("UV_INDEX_STRATEGY", raising=False)
-
-        flags = _get_nemo_gym_install_flags()
-        assert flags == "--extra-index-url https://pypi.org/simple/ "
-
-    def test_explicit_index_strategy(self, monkeypatch: MonkeyPatch) -> None:
-        """Explicit UV_INDEX_STRATEGY should override auto-set from prerelease."""
-        monkeypatch.setenv("NEMO_GYM_ALLOW_PRERELEASE", "true")
-        monkeypatch.setenv("UV_INDEX_STRATEGY", "first-match")
-
-        flags = _get_nemo_gym_install_flags()
-        # Should have --pre but use explicit strategy, not auto-set unsafe-best-match
-        assert flags == "--pre 'fastapi<1.0' --index-strategy first-match "
-
-    def test_all_flags_combined(self, monkeypatch: MonkeyPatch) -> None:
-        """Test all flags together."""
-        monkeypatch.setenv("NEMO_GYM_ALLOW_PRERELEASE", "true")
-        monkeypatch.setenv("UV_INDEX_URL", "https://test.pypi.org/simple/")
-        monkeypatch.setenv("UV_EXTRA_INDEX_URL", "https://pypi.org/simple/")
-        monkeypatch.setenv("UV_INDEX_STRATEGY", "unsafe-best-match")
-
-        flags = _get_nemo_gym_install_flags()
-        assert (
-            flags
-            == "--pre 'fastapi<1.0' --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ --index-strategy unsafe-best-match "
-        )
-
-
-class TestGetNemoGymVersionSpec:
-    """Test _get_nemo_gym_version_spec helper function."""
-
-    def test_editable_install_returns_empty(self) -> None:
-        """For editable installs, should return empty string (no version pinning)."""
-        version_spec = _get_nemo_gym_version_spec(is_editable_install=True)
-        assert version_spec == ""
-
-    def test_non_editable_detects_version(self) -> None:
-        """For non-editable installs, should detect and pin to parent version."""
-        with patch("importlib.metadata.version", return_value="0.2.1rc0"):
-            version_spec = _get_nemo_gym_version_spec(is_editable_install=False)
-            assert version_spec == "==0.2.1rc0"
-
-    def test_non_editable_stable_version(self) -> None:
-        """Should work with stable versions too."""
-        with patch("importlib.metadata.version", return_value="0.2.0"):
-            version_spec = _get_nemo_gym_version_spec(is_editable_install=False)
-            assert version_spec == "==0.2.0"
-
-    def test_package_not_found_returns_empty(self) -> None:
-        """If nemo-gym is not installed, should return empty string gracefully."""
-        with patch("importlib.metadata.version", side_effect=importlib.metadata.PackageNotFoundError):
-            version_spec = _get_nemo_gym_version_spec(is_editable_install=False)
-            assert version_spec == ""
 
 
 class TestCLISetupCommandRunCommandTeeLog(TestCLISetupCommandRunCommand):

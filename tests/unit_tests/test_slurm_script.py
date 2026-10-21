@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import base64
+import os
 import re
 import shlex
 import subprocess
@@ -608,7 +609,7 @@ def test_render_driver_entrypoint_with_gym_install():
     assert "checkout main" in out
     assert "uv venv --seed .venv" in out
     assert "source .venv/bin/activate" in out
-    assert "uv pip install -e ." in out
+    assert "uv sync --locked" in out
     assert "--system" not in out
     assert "--break-system-packages" not in out
     assert 'exec "$@"' in out
@@ -2544,3 +2545,28 @@ def test_a_ray_head_on_node_0_is_probed_locally(tmp_path):
     }
     script = _render(tmp_path, {"policy": _vllm(8000, "gpu", tensor_parallel_size=4), "ray": ray})
     assert "Waiting for ray at http://localhost:8011" in script
+
+
+@pytest.mark.parametrize("inherited_target", [None, "/opt/nemo_gym_venv"])
+def test_driver_sync_targets_its_checkout_venv(tmp_path, monkeypatch, inherited_target):
+    """A container's explicit uv target must not override the freshly activated driver venv."""
+    if inherited_target is None:
+        monkeypatch.delenv("UV_PROJECT_ENVIRONMENT", raising=False)
+    else:
+        monkeypatch.setenv("UV_PROJECT_ENVIRONMENT", inherited_target)
+    venv = tmp_path / ".venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin/activate").write_text(f'export VIRTUAL_ENV="{venv}"\n')
+    uv = tmp_path / "uv"
+    uv.write_text('#!/bin/bash\nprintf "%s\\n" "${UV_PROJECT_ENVIRONMENT:-unset}" "$@"\n')
+    uv.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}:" + os.environ["PATH"])
+    body = shlex.split(render_driver_entrypoint("https://github.com/NVIDIA-NeMo/gym", "main", None))[2]
+    activation = body.index("source .venv/bin/activate")
+    sync_line = next(line for line in body[activation:].splitlines() if "uv sync --locked" in line)
+    end = body.index(sync_line, activation) + len(sync_line)
+    result = subprocess.run(
+        ["bash", "-c", body[activation:end]], cwd=tmp_path, check=True, capture_output=True, text=True
+    )
+    assert result.stdout.splitlines()[:3] == [str(venv), "sync", "--locked"]
+    assert os.environ.get("UV_PROJECT_ENVIRONMENT") == inherited_target

@@ -35,7 +35,7 @@ Ray isn't included by default. To run environments that use Ray, such as `local_
 git clone https://github.com/NVIDIA-NeMo/Gym.git
 cd Gym
 uv venv --python 3.13.14 && source .venv/bin/activate
-uv sync
+uv sync --locked
 ```
 
 Add `--extra ray` to `uv sync` to run environments that use Ray.
@@ -133,3 +133,35 @@ Run your first evaluation.
 </Card>
 
 </Cards>
+
+## Component dependency locks
+
+Each independently installed server has its own `pyproject.toml` and committed
+`uv.lock`. `gym env start`, `gym env prefetch`, and `gym env test` use
+`uv sync --locked` for that component, including when `uv_venv_dir` places its
+virtual environment outside the checkout. Components are not combined into one
+workspace.
+
+A missing or stale lock fails setup. After intentionally editing a component's
+dependencies, run `uv lock` in that directory and commit both files. Do not use
+`--frozen` to hide a stale lock or add packages with an unlocked install.
+
+The server's locked OpenAI version must match the parent process. Ray is checked
+only when installed by that server. Telemetry uses the component's locked
+`telemetry` extra; additional parent plugins must be declared and locked in the
+component before startup. Incompatible versions or sources fail explicitly.
+
+Wheel installations carry the source metadata needed for relative Gym dependencies;
+the installer reconstructs that metadata beside the writable component environment
+without modifying site-packages or resolving a different Gym version from PyPI.
+Custom indexes and prerelease policy belong in the project used to generate the
+lock, not in a startup-only dependency override.
+
+### Benchmark preparation
+
+A dataset that needs additional preparation dependencies declares `prepare_project`
+pointing at an isolated project with `pyproject.toml` and `uv.lock`. Gym syncs it with
+`uv sync --locked` and imports/runs the preparer in that environment, including its
+cache-freshness hook. It never installs packages into the running Gym interpreter.
+Move legacy `prepare_dependencies` arguments into that project's dependency list;
+unlocked arguments now fail with migration guidance.

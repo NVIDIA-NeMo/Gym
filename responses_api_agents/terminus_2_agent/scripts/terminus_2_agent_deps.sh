@@ -9,9 +9,14 @@ source "${PORTABLE_PYTHON_SH:-$SCRIPT_DIR/_portable_python.sh}"
 : "${DEPS_DIR:?DEPS_DIR must be set}"
 : "${NEMO_GYM_ROOT:?NEMO_GYM_ROOT must be set}"
 
-TERMINUS_REQ="$NEMO_GYM_ROOT/responses_api_agents/terminus_2_agent/requirements.txt"
-HARBOR_SPEC="${HARBOR_SPEC:-$(sed -n 's/^harbor @ //p' "$TERMINUS_REQ")}"
-: "${HARBOR_SPEC:?could not read the Harbor pin from $TERMINUS_REQ}"
+TERMINUS_PROJECT="$NEMO_GYM_ROOT/responses_api_agents/terminus_2_agent/pyproject.toml"
+if [ -z "${HARBOR_SPEC:-}" ]; then
+    # Read this canonical single-line TOML dependency before Python is provisioned.
+    HARBOR_SPEC="$(sed -n '/^[[]project[]]$/,/^[[]/ {
+        s/^[[:space:]]*"harbor @ \([^"]*\)"[,[:space:]]*$/\1/p
+    }' "$TERMINUS_PROJECT")"
+fi
+: "${HARBOR_SPEC:?could not read the Harbor pin from $TERMINUS_PROJECT}"
 
 install_portable_python
 install_nemo_gym_deps

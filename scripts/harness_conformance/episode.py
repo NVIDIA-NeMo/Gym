@@ -40,7 +40,9 @@ def check_runtime(harness: str, *, use_agent_sessions: bool = False) -> dict:
         return {"installation": "agent_session"}
     if harness == "hermes":
         if importlib.util.find_spec("run_agent") is None or importlib.util.find_spec("model_tools") is None:
-            raise RuntimeError("install responses_api_agents/hermes_agent/requirements.txt in this Python environment")
+            raise RuntimeError(
+                "sync responses_api_agents/hermes_agent with uv sync --locked in this isolated Python environment"
+            )
         source = Path(importlib.util.find_spec("run_agent").origin)
         return {"source": str(source), "sha256": digest_file(source)}
     elif not shutil.which(harness):

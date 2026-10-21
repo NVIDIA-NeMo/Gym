@@ -196,7 +196,7 @@ def render_driver_entrypoint(
     """
     preamble: list[str] = []
     # Double quotes: the whole preamble ends up inside a single-quoted `bash -c` block.
-    install_target = f'".[{",".join(extras)}]"' if extras else "."
+    sync_extras = "".join(f" --extra {shlex.quote(extra)}" for extra in extras)
 
     if repo and ref:
         # Clone to /tmp rather than the job directory: a checkout plus its .venv
@@ -216,7 +216,7 @@ def render_driver_entrypoint(
             # EXTERNALLY-MANAGED (PEP 668), so no --break-system-packages override needed either.
             "uv venv --seed .venv",
             "source .venv/bin/activate",
-            f"uv pip install -e {install_target}",
+            f'UV_PROJECT_ENVIRONMENT="$VIRTUAL_ENV" uv sync --locked{sync_extras}',
         ]
 
     if prepare_cmd:

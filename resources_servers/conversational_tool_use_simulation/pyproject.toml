@@ -16,7 +16,7 @@
 [project]
 name = "conversational-tool-use-simulation"
 version = "0.0.0"
-requires-python = ">=3.12"
+requires-python = ">=3.13.14"
 dependencies = [
     "json-repair==0.53.0",
     "nemo-gym[dev]",
@@ -31,4 +31,48 @@ where = [".."]
 include = ["conversational_tool_use_simulation*"]
 
 [tool.uv.sources]
+nemo-lens = { git = "https://github.com/NVIDIA-NeMo/Lens.git", rev = "4d045c03186b90afdc815db46b671f6a21bc7e98" }
 nemo-gym = { path = "../..", editable = true }
+
+[tool.uv]
+constraint-dependencies = [
+    "grpcio>=1.81.0rc1",
+    "msgpack>=1.2.1",
+]
+override-dependencies = [
+    "spacy>=3.8.13",
+    "wcwidth; sys_platform == 'never'",
+    "opencv-python-headless; sys_platform == 'never'",
+    "pynvvideocodec; sys_platform == 'never'",
+    "torchcodec; sys_platform == 'never'",
+    "torchvision; sys_platform == 'never'",
+    "torchaudio; sys_platform == 'never'",
+    "pycountry; sys_platform == 'never'",
+    "gprof2dot; sys_platform == 'never'",
+    "pathspec; sys_platform == 'never'",
+]
+exclude-dependencies = [
+    "fasttext-wheel",
+    "alembic",
+    "blinker",
+    "cryptography",
+    "flask",
+    "flask-cors",
+    "graphene",
+    "graphql-core",
+    "graphql-relay",
+    "gunicorn",
+    "huey",
+    "prettytable",
+    "skops",
+    "sqlalchemy",
+    "werkzeug",
+    "waitress",
+    "diskcache",
+]
+
+[project.optional-dependencies]
+telemetry = ["nemo-gym[telemetry]"]
+
+[tool.uv.workspace]
+members = []

@@ -64,7 +64,8 @@ verifif/
 ├── tests/
 │   ├── __init__.py
 │   └── test_app.py           # Unit tests (47 tests)
-├── requirements.txt
+├── pyproject.toml
+├── uv.lock
 └── README.md
 ```
 

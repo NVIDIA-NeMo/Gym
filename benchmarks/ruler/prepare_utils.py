@@ -17,9 +17,10 @@
 Adapted from https://github.com/NVIDIA-NeMo/Skills/blob/54d2e113c2f64bf74bda72e15f23f01b524850da/nemo_skills/dataset/ruler/prepare.py#L79"""
 
 import json
-from os import environ
+from os import environ, pathsep
 from pathlib import Path
 from subprocess import run
+from sys import executable
 
 from nemo_gym.global_config import get_hf_token
 
@@ -63,15 +64,12 @@ def prepare_helper(
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     output_fpath = DATA_DIR / output_name
 
-    run(
-        """uv venv --python 3.13.14 --allow-existing --seed .venv \
-&& source .venv/bin/activate \
-&& uv pip install pyyaml bs4 scipy wonderwords html2text tenacity nltk transformers""",
-        check=True,
-        shell=True,
-        cwd=BENCHMARK_DIR,
-        executable="/bin/bash",
-    )
+    prepared_venv = environ.get("NEMO_GYM_PREPARE_VENV")
+    venv = Path(prepared_venv) if prepared_venv else BENCHMARK_DIR / ".venv"
+    if not prepared_venv:
+        from nemo_gym.cli._locked_env import sync_environment
+
+        sync_environment(BENCHMARK_DIR, venv, executable, [], [])
 
     maybe_hf_token = get_hf_token()
     env_vars = dict()
@@ -86,21 +84,21 @@ def prepare_helper(
     tmp_data_dir = BENCHMARK_DIR / "temp_ruler_data_dir" / model_dirname / str(length)
 
     run(
-        f"""source .venv/bin/activate \
-&& python ruler_prepare_script.py \
-    --data_format={data_format} \
-    --setup={model}-{length} \
-    --max_seq_length={length} \
-    --tokenizer_path={model} \
-    --max_seq_length={length} \
-    --ruler_parent_dir={BENCHMARK_DIR} \
-    --tmp_data_dir={tmp_data_dir.absolute()}
-""",
+        [
+            str(venv / "bin/python"),
+            str(BENCHMARK_DIR / "ruler_prepare_script.py"),
+            f"--data_format={data_format}",
+            f"--setup={model}-{length}",
+            f"--max_seq_length={length}",
+            f"--tokenizer_path={model}",
+            f"--ruler_parent_dir={BENCHMARK_DIR}",
+            f"--tmp_data_dir={tmp_data_dir.absolute()}",
+        ],
         check=True,
-        shell=True,
         cwd=BENCHMARK_DIR,
-        env=environ | env_vars,
-        executable="/bin/bash",
+        env=environ
+        | env_vars
+        | {"VIRTUAL_ENV": str(venv), "PATH": str(venv / "bin") + pathsep + environ.get("PATH", "")},
     )
 
     samples = []

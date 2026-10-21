@@ -23,9 +23,9 @@ from packaging.version import Version
 
 
 ROOT = Path(__file__).resolve().parents[3]
-OSWORLD_AGENT_REQUIREMENTS = ROOT / "responses_api_agents/osworld_agent/requirements.txt"
+OSWORLD_AGENT_REQUIREMENTS = ROOT / "responses_api_agents/osworld_agent/pyproject.toml"
 OSWORLD_AGENT_UV_CONFIG = ROOT / "responses_api_agents/osworld_agent/uv.toml"
-OSWORLD_AGENT_PUBLIC_OVERRIDES = ROOT / "responses_api_agents/osworld_agent/overrides.txt"
+OSWORLD_AGENT_PUBLIC_OVERRIDES = ROOT / "responses_api_agents/osworld_agent/pyproject.toml"
 OSWORLD_RESOURCES_PROJECT = ROOT / "resources_servers/osworld/pyproject.toml"
 OSWORLD_RESOURCES_PYTHON = ROOT / "resources_servers/osworld/.python-version"
 OSWORLD_AGENT_README = ROOT / "responses_api_agents/osworld_agent/README.md"
@@ -56,9 +56,11 @@ def test_osworld_agent_uv_config_mirrors_project_resolver_policy() -> None:
     project_overrides = set(project_config["override-dependencies"])
     server_overrides = set(server_config["override-dependencies"])
     assert project_overrides <= server_overrides
+    public_project = tomllib.loads(OSWORLD_AGENT_REQUIREMENTS.read_text())
     assert server_overrides - project_overrides == {
         "grpcio-status==1.71.2",
         "protobuf==5.29.6",
+        *(set(public_project["tool"]["uv"]["override-dependencies"]) - project_overrides),
     }
     project_exclusions = set(project_config["exclude-dependencies"])
     server_exclusions = set(server_config["exclude-dependencies"])
@@ -136,7 +138,7 @@ def test_osworld_agent_dependency_overrides() -> None:
     requirements = OSWORLD_AGENT_REQUIREMENTS.read_text(encoding="utf-8")
     with OSWORLD_AGENT_UV_CONFIG.open("rb") as config_file:
         agent_overrides = tomllib.load(config_file)["override-dependencies"]
-    public_overrides = OSWORLD_AGENT_PUBLIC_OVERRIDES.read_text(encoding="utf-8")
+    public_overrides = tomllib.loads(OSWORLD_AGENT_PUBLIC_OVERRIDES.read_text())["tool"]["uv"]["override-dependencies"]
 
     assert "grpcio-status==1.71.2" in agent_overrides
     assert "protobuf==5.29.6" in agent_overrides
@@ -183,3 +185,18 @@ def test_nemo_rl_servers_use_a_compatible_python_range() -> None:
         supported = SpecifierSet(python_policy.read_text(encoding="utf-8").strip())
         assert Version(python_floor) in supported
         assert Version("3.14") not in supported
+
+
+def test_opt_in_runtime_lock_preserves_overlapping_agent_requirements() -> None:
+    agent = tomllib.loads(OSWORLD_AGENT_REQUIREMENTS.read_text())
+    runtime = tomllib.loads((OSWORLD_AGENT_REQUIREMENTS.parent / "runtime/uv.lock").read_text())
+    versions = {package["name"]: package["version"] for package in runtime["package"] if "version" in package}
+    overlapping = set()
+    for value in agent["project"]["dependencies"]:
+        requirement = Requirement(value)
+        name = requirement.name.lower().replace("_", "-")
+        if name not in versions or requirement.marker and not requirement.marker.evaluate():
+            continue
+        overlapping.add(name)
+        assert Version(versions[name]) in requirement.specifier, f"runtime lock violates {value}: {versions[name]}"
+    assert {"pillow", "numpy"} <= overlapping

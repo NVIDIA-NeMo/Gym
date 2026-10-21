@@ -94,12 +94,11 @@ def _resources_server_app(component: ResolvedComponent) -> tuple[Path, Path, Pat
     for root in component_search_roots():
         component_root = root.expanduser().resolve()
         server_dir = component_root / relative_dir
-        markers = [path for path in (server_dir / "requirements.txt", server_dir / "pyproject.toml") if path.is_file()]
-        if not markers:
+        if not (server_dir / "pyproject.toml").is_file():
             continue
-        if len(markers) > 1:
+        if not (server_dir / "uv.lock").is_file():
             raise EnvironmentOnboardingError(
-                f"Resources server '{server_dir}' must use requirements.txt or pyproject.toml, not both."
+                f"Resources server '{server_dir}' has no uv.lock. Run `uv lock` there and commit the lockfile."
             )
         candidate = server_dir / entrypoint
         if not candidate.is_file():

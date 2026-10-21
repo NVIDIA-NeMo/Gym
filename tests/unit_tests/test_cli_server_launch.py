@@ -39,7 +39,8 @@ class TestServerLaunchCommand:
         # A space in the path catches any unquoted venv or server path in the generated command.
         server_dir = tmp_path / "my checkout" / "resources_servers" / "my_server"
         server_dir.mkdir(parents=True)
-        (server_dir / "requirements.txt").write_text("pytest\n")
+        (server_dir / "pyproject.toml").touch()
+        (server_dir / "uv.lock").touch()
         (tmp_path / "my checkout" / "pyproject.toml").write_text("")
         return server_dir.absolute()
 

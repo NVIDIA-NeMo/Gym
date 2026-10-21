@@ -506,7 +506,7 @@ class TestPrepareBenchmark:
                     {"config_paths": [str(config_path)], **safe_load(config_path.read_text())}
                 ),
             ),
-            patch("nemo_gym.cli.eval.importlib.import_module", return_value=mock_module),
+            patch("nemo_gym.cli._prepare_worker.load_preparer", return_value=mock_module),
         ):
             prepare_benchmark()
             mock_module.prepare.assert_called_once_with()
@@ -536,7 +536,7 @@ class TestPrepareBenchmark:
                     {"config_paths": [str(config_path)], **safe_load(config_path.read_text())}
                 ),
             ),
-            patch("nemo_gym.cli.eval.importlib.import_module", return_value=mock_module),
+            patch("nemo_gym.cli._prepare_worker.load_preparer", return_value=mock_module),
         ):
             prepare_benchmark()
 
@@ -578,11 +578,11 @@ class TestPrepareBenchmark:
         validation_module.prepare.return_value = validation_output
 
         def import_prepare(module_path: str) -> MagicMock:
-            return validation_module if module_path.endswith("prepare_validation") else benchmark_module
+            return validation_module if Path(module_path).stem == "prepare_validation" else benchmark_module
 
         with (
             patch("nemo_gym.cli.eval.get_global_config_dict", return_value=_mock_global_config(config)),
-            patch("nemo_gym.cli.eval.importlib.import_module", side_effect=import_prepare),
+            patch("nemo_gym.cli._prepare_worker.load_preparer", side_effect=import_prepare),
         ):
             prepare_benchmark()
 
@@ -611,7 +611,7 @@ class TestPrepareBenchmark:
                     }
                 ),
             ),
-            patch("nemo_gym.cli.eval.importlib.import_module", return_value=mock_module),
+            patch("nemo_gym.cli._prepare_worker.load_preparer", return_value=mock_module),
         ):
             prepare_benchmark()
 
@@ -647,7 +647,7 @@ class TestPrepareBenchmark:
                     {"config_paths": [str(config_path)], **safe_load(config_path.read_text())}
                 ),
             ),
-            patch("nemo_gym.cli.eval.importlib.import_module", return_value=mock_module),
+            patch("nemo_gym.cli._prepare_worker.load_preparer", return_value=mock_module),
         ):
             with pytest.raises(SystemExit) as exc_info:
                 prepare_benchmark()
@@ -699,7 +699,7 @@ class TestPrepareBenchmark:
                     {"config_paths": [str(config_path)], **safe_load(config_path.read_text())}
                 ),
             ),
-            patch("nemo_gym.cli.eval.importlib.import_module", return_value=mock_module),
+            patch("nemo_gym.cli._prepare_worker.load_preparer", return_value=mock_module),
         ):
             prepare_benchmark()
 
@@ -723,7 +723,7 @@ class TestPrepareBenchmark:
                     }
                 ),
             ),
-            patch("nemo_gym.cli.eval.importlib.import_module", return_value=mock_module),
+            patch("nemo_gym.cli._prepare_worker.load_preparer", return_value=mock_module),
         ):
             prepare_benchmark()
 
@@ -737,7 +737,7 @@ class TestPrepareBenchmark:
             config["use_cached_prepared_benchmarks"] = True
         with (
             patch("nemo_gym.cli.eval.get_global_config_dict", return_value=_mock_global_config(config)),
-            patch("nemo_gym.cli.eval.importlib.import_module", return_value=module),
+            patch("nemo_gym.cli._prepare_worker.load_preparer", return_value=module),
         ):
             prepare_benchmark()
 
@@ -857,14 +857,14 @@ class TestPrepareBenchmark:
         prepared: list[str] = []
 
         def fake_import(module_path: str):
-            suffix = module_path[-1]
+            suffix = Path(module_path).stem[-1]
             module = MagicMock()
             module.prepare = lambda **kwargs: prepared.append(suffix) or tmp_path / f"{suffix}.jsonl"
             return module
 
         with (
             patch("nemo_gym.cli.eval.get_global_config_dict", return_value=_mock_global_config(config)),
-            patch("nemo_gym.cli.eval.importlib.import_module", side_effect=fake_import),
+            patch("nemo_gym.cli._prepare_worker.load_preparer", side_effect=fake_import),
         ):
             prepare_benchmark()
 
@@ -1087,7 +1087,7 @@ class TestNativeTasksetBenchmark:
         module = MagicMock()
         module.prepare.side_effect = prepare
         monkeypatch.setattr("nemo_gym.cli.eval.get_global_config_dict", lambda **_: config)
-        with patch("nemo_gym.cli.eval.importlib.import_module", return_value=module):
+        with patch("nemo_gym.cli._prepare_worker.load_preparer", return_value=module):
             prepare_benchmark()
         module.prepare.assert_called_once_with()
         original = source.read_bytes()

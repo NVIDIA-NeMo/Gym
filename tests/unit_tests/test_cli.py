@@ -127,7 +127,8 @@ def test_server_suite_exit_status(tmp_path: Path, monkeypatch: MonkeyPatch, capf
     for server in servers:
         server.mkdir(parents=True)
         (server / "README.md").touch()
-        (server / "requirements.txt").touch()
+        (server / "pyproject.toml").touch()
+        (server / "uv.lock").touch()
         (server / "test_app.py").write_text("from pathlib import Path\n\ndef test_runs():\n    Path('ran').touch()\n")
     if internal_error:
         (servers[0] / "conftest.py").write_text(
@@ -182,7 +183,8 @@ def test_server_suite_setup_only_installs_every_venv_without_running_tests(
     for server in servers:
         server.mkdir(parents=True)
         (server / "README.md").touch()
-        (server / "requirements.txt").touch()
+        (server / "pyproject.toml").touch()
+        (server / "uv.lock").touch()
         (server / "test_app.py").write_text("from pathlib import Path\n\ndef test_runs():\n    Path('ran').touch()\n")
     venv_root = tmp_path / "venvs"
     config = OmegaConf.create(
@@ -328,7 +330,8 @@ class TestCLI:
         # Create a fake local server dir in tmp_path (simulates user's own resources_servers/)
         local_server = tmp_path / "resources_servers" / "my_server"
         local_server.mkdir(parents=True)
-        (local_server / "requirements.txt").write_text("nemo-gym\n")
+        (local_server / "pyproject.toml").touch()
+        (local_server / "uv.lock").touch()
 
         with patch.object(Path, "cwd", return_value=tmp_path):
             _cwd_path = Path.cwd() / Path("resources_servers", "my_server")
@@ -351,7 +354,8 @@ class TestResolveServerDir:
     def test_prefers_local_server_in_cwd(self, tmp_path: Path, monkeypatch) -> None:
         local = tmp_path / "resources_servers" / "my_server"
         local.mkdir(parents=True)
-        (local / "requirements.txt").write_text("nemo-gym\n")
+        (local / "pyproject.toml").touch()
+        (local / "uv.lock").touch()
         monkeypatch.chdir(tmp_path)
         assert _resolve_server_dir(Path("resources_servers/my_server")) == local
 
@@ -1684,3 +1688,17 @@ def test_version_reports_a_missing_dependency_instead_of_failing(
     dependencies = json.loads(capsys.readouterr().out)["dependencies"]
     assert dependencies["ray"] == "not installed"
     assert dependencies["openai"] == installed_version("openai")
+
+
+def test_missing_local_lock_does_not_fall_back_to_installed_component(tmp_path, monkeypatch):
+    import nemo_gym
+    from nemo_gym.cli.env import _resolve_server_dir
+
+    local = tmp_path / "local/resources_servers/sample"
+    installed = tmp_path / "installed/resources_servers/sample"
+    for directory in (local, installed):
+        directory.mkdir(parents=True)
+        (directory / "pyproject.toml").touch()
+    (installed / "uv.lock").touch()
+    monkeypatch.setattr(nemo_gym, "component_search_roots", lambda: [tmp_path / "local", tmp_path / "installed"])
+    assert _resolve_server_dir(Path("resources_servers/sample")) == local

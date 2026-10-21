@@ -22,7 +22,7 @@ Activate this environment in every new terminal used below. You do not need to r
 For a checkout-based run, install vLLM once in the active environment:
 
 ```bash
-uv pip install -U "vllm>=0.12.0"
+uv sync --locked --extra vllm
 ```
 
 The published NeMo-Gym container already includes vLLM, but intentionally omits codec-bearing packages. vLLM 0.24 imports `torchvision` during kernel warmup for this configuration, so container users must restore the image's pinned optional dependencies before launching the server:
