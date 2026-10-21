@@ -26,7 +26,16 @@ from typing import Any, ClassVar, Optional
 from warnings import warn
 
 from fastapi import Body, FastAPI, HTTPException, Request, Response
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, PrivateAttr, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    PrivateAttr,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+)
 
 from nemo_gym._checkpoint.agent import (
     ActivationOutOfOrderError,
@@ -122,7 +131,6 @@ class AgentSeedSessionRequest(BaseModel):
     sandbox_access: SandboxAccess | None = None
     continuation: AgentContinuationRequirements | None = Field(
         default=None,
-        exclude_if=lambda value: value is None,
         description=(
             "Opt into continuation by resuming the harness's saved session and require these observations at seed time. "
             "Omitted for ordinary sessions."
@@ -137,6 +145,14 @@ class AgentSeedSessionRequest(BaseModel):
             raise ValueError("tool access names must be unique within an agent session")
         return tool_accesses
 
+    # Keep the model schema; a serializer return annotation would replace it.
+    @model_serializer(mode="wrap")
+    def _serialize_optional_metadata(self, handler: SerializerFunctionWrapHandler):
+        result = handler(self)
+        if self.continuation is None:
+            result.pop("continuation", None)
+        return result
+
 
 class AgentSeedSessionResponse(BaseModel):
     """Confirm the caller-assigned agent session identifier."""
@@ -146,12 +162,19 @@ class AgentSeedSessionResponse(BaseModel):
     agent_session_id: str
     capabilities: AgentContinuationCapabilities | None = Field(
         default=None,
-        exclude_if=lambda value: value is None,
         description=(
             "Continuation mode and observations supported by this adapter. "
             "Returned only when continuation was requested."
         ),
     )
+
+    # Keep the model schema; a serializer return annotation would replace it.
+    @model_serializer(mode="wrap")
+    def _serialize_optional_metadata(self, handler: SerializerFunctionWrapHandler):
+        result = handler(self)
+        if self.capabilities is None:
+            result.pop("capabilities", None)
+        return result
 
 
 class AgentCloseSessionRequest(BaseModel):
@@ -172,7 +195,6 @@ class AgentCloseSessionResponse(BaseModel):
     agent_observations: AgentObservationBundle | None = None
     cleanup_confirmed: bool | None = Field(
         default=None,
-        exclude_if=lambda value: value is None,
         description=(
             "True means no harness was launched, termination was confirmed, or an owned sandbox was stopped. "
             "False means a final negative termination receipt. None is omitted when the adapter does not report "
@@ -189,11 +211,19 @@ class AgentCloseSessionResponse(BaseModel):
 
     trajectory: TrajectoryRecord | None = Field(
         default=None,
-        exclude_if=lambda value: value is None,
         description=(
             "Cumulative trajectory across this continuation session's activations. Omitted when not reported."
         ),
     )
+
+    # Keep the model schema; a serializer return annotation would replace it.
+    @model_serializer(mode="wrap")
+    def _serialize_optional_metadata(self, handler: SerializerFunctionWrapHandler):
+        result = handler(self)
+        for key in ("cleanup_confirmed", "trajectory"):
+            if getattr(self, key) is None:
+                result.pop(key, None)
+        return result
 
 
 @dataclass(frozen=True)

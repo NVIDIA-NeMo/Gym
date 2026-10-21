@@ -2829,7 +2829,7 @@ requires-dist = [
     { name = "psutil" },
     { name = "pyarrow", marker = "extra == 'mlflow'", specifier = ">=23.0.1" },
     { name = "pyasn1", specifier = ">=0.6.4" },
-    { name = "pydantic", specifier = ">=2.12" },
+    { name = "pydantic" },
     { name = "pydantic-core" },
     { name = "pydot" },
     { name = "pyjwt", specifier = ">=2.15.1" },

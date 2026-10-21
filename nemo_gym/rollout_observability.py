@@ -10,7 +10,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer, model_validator
 
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseInputItem
@@ -83,7 +83,6 @@ class TrajectoryTurn(ObservationModel):
     activation_id: Optional[int] = Field(
         default=None,
         ge=1,
-        exclude_if=lambda value: value is None,
         description="1-based activation that produced this turn; omitted for producers without activation IDs.",
     )
     source_message_id: Optional[str] = Field(
@@ -102,6 +101,14 @@ class TrajectoryTurn(ObservationModel):
     resolved: Optional[bool] = None
     step_count: int = Field(ge=0, description="Producer-reported cumulative step count within this invocation.")
     model_calls: list[ModelCallRef] = Field(default_factory=list)
+
+    # Keep the model schema; a serializer return annotation would replace it.
+    @model_serializer(mode="wrap")
+    def _serialize_optional_metadata(self, handler: SerializerFunctionWrapHandler):
+        result = handler(self)
+        if self.activation_id is None:
+            result.pop("activation_id", None)
+        return result
 
 
 class AgentInvocation(ObservationModel):
@@ -123,12 +130,10 @@ class AgentInvocation(ObservationModel):
     activation_id: Optional[int] = Field(
         default=None,
         ge=1,
-        exclude_if=lambda value: value is None,
         description="1-based activation owning this invocation; omitted for producers without activation IDs.",
     )
     harness_session_id: Optional[str] = Field(
         default=None,
-        exclude_if=lambda value: value is None,
         description="Session ID assigned by the harness, retained as context across activations; omitted when not reported.",
     )
     parent_invocation_id: Optional[str] = None
@@ -147,6 +152,15 @@ class AgentInvocation(ObservationModel):
         default_factory=list,
         description="Normalized conversation items supported by this producer; gaps describe unavailable evidence.",
     )
+
+    # Keep the model schema; a serializer return annotation would replace it.
+    @model_serializer(mode="wrap")
+    def _serialize_optional_metadata(self, handler: SerializerFunctionWrapHandler):
+        result = handler(self)
+        for key in ("activation_id", "harness_session_id"):
+            if getattr(self, key) is None:
+                result.pop(key, None)
+        return result
 
 
 class ToolCallObservation(ObservationModel):

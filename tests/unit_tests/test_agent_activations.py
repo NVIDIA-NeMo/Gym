@@ -2,13 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
-from pydantic import BaseModel, PrivateAttr
+from pydantic import BaseModel, PrivateAttr, TypeAdapter
 
 from nemo_gym.agent_activation_types import AgentContinuationCapabilities, AgentContinuationRequirements
 from nemo_gym.agent_utils.ordered_operations import ActivationConflictError, OrderedOperationLedger
@@ -17,11 +18,13 @@ from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionRequest,
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
+    AgentSeedSessionResponse,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.rollout_observability import AgentInvocation, TrajectoryRecord, TrajectoryTurn
 from nemo_gym.server_utils import ServerClient
 
 
@@ -376,3 +379,53 @@ def test_existing_schema_route_and_close_payload_are_unchanged(agent):
         "resources_cookies": None,
     }
     assert not any(path.endswith("/activate") for path in agent.setup_webserver().openapi()["paths"])
+
+
+@pytest.mark.parametrize(
+    "model,metadata,legacy_null",
+    [
+        (
+            AgentSeedSessionRequest(
+                agent_session_id="s", episode_id={"rollout_id": "r"}, task_id={"taskset": "t", "task_id": "t"}
+            ),
+            {"continuation": AgentContinuationRequirements()},
+            "sandbox_access",
+        ),
+        (AgentSeedSessionResponse(agent_session_id="s"), {"capabilities": AgentContinuationCapabilities()}, None),
+        (
+            AgentCloseSessionResponse(agent_session_id="s"),
+            {"cleanup_confirmed": False, "trajectory": TrajectoryRecord(task_id="t", rollout_id="r")},
+            "agent_observations",
+        ),
+        (AgentInvocation(invocation_id="i"), {"activation_id": 1, "harness_session_id": "h"}, "parent_invocation_id"),
+        (
+            TrajectoryTurn(invocation_id="i", task_id="t", rollout_id="r", turn_no=1, timestamp=0, step_count=0),
+            {"activation_id": 1},
+            "question",
+        ),
+    ],
+)
+@pytest.mark.parametrize("populated", [False, True])
+def test_optional_continuation_metadata_serialization(model, metadata, legacy_null, populated):
+    # Explicit nulls must also be omitted; False remains a meaningful cleanup result.
+    updates = metadata if populated else dict.fromkeys(metadata)
+    model = model.model_copy(update=updates)
+    adapter = TypeAdapter(list[type(model)])
+    payload = model.model_dump(mode="json")
+    assert json.loads(model.model_dump_json()) == payload
+    assert adapter.dump_python([model], mode="json") == [payload]
+    assert json.loads(adapter.dump_json([model])) == [payload]
+    for key in metadata:
+        assert (key in payload) == populated
+    if legacy_null is not None:
+        assert legacy_null in payload and payload[legacy_null] is None
+    if populated and "cleanup_confirmed" in metadata:
+        assert payload["cleanup_confirmed"] is False
+    assert model.model_dump(include=set(metadata), mode="json") == {
+        key: payload[key] for key in metadata if key in payload
+    }
+    assert not set(metadata).intersection(model.model_dump(exclude=set(metadata)))
+    for mode in ("validation", "serialization"):
+        schema = type(model).model_json_schema(mode=mode)
+        assert schema["type"] == "object"
+        assert set(schema["properties"]) == set(type(model).model_fields)
