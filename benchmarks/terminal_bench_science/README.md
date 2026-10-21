@@ -114,6 +114,9 @@ PYTHONPATH=. python benchmarks/terminal_bench_science/oracle.py \
   --env-file /path/to/private.env   # OPENSANDBOX_* credentials
 ```
 
+Instead of the templates, `--images map.json` takes the same per-task map as `tbsci_task_images`
+(`{"<task>": {"agent": ..., "verifier": ..., "services": {...}}}`).
+
 A task passes when its official reward is 1. The runner writes one line per task to
 `oracle.jsonl`, with the reward, `partial_credit`, the test counts, the oracle exit code and
 the trial directory.
@@ -340,6 +343,11 @@ For a capped smoke run, add `++tbsci_max_steps=3 ++tbsci_agent_max_timeout_sec=9
 Capped runs check setup, execution, verification and cleanup. They are not benchmark scores.
 They also log `opensandbox.adapters.filesystem_adapter` 404 tracebacks for declared artifacts
 the agent never wrote; these are harmless.
+
+When the model endpoint reports no cached-token count (vLLM without
+`--enable-prompt-tokens-details`, for example), each agent log shows a LiteLLM
+`Error creating standard logging object` traceback per model call. It comes from LiteLLM's
+logging callback; the calls and the run are unaffected.
 
 The profile runs one trial per task; add `++num_repeats=3` for the leaderboard's three.
 
