@@ -141,7 +141,7 @@ def supervised_launch_command(
         f"[ -d {quote(session_dir)} ] && [ ! -L {claim_path} ] || exit 0; "
         f"py={quote(python)}; "
         f"real=$({quote(python)} -I -c {quote(_RESOLVE_INTERPRETER)} 2>/dev/null) && "
-        f'mkdir -p {quote(f"{session_dir}/bin")} && ln -sfn "$real" {link} && '
+        f'{{ [ -d {quote(f"{session_dir}/bin")} ] || mkdir {quote(f"{session_dir}/bin")}; }} && ln -sfn "$real" {link} && '
         f"{link} -I {supervisor} --help >/dev/null 2>&1 && py={link}; "
         f'[ "$py" = {link} ] || {quote(python)} -I {supervisor} --help >/dev/null || exit $?; '
         f"{runner}trap '' TERM; ln -s launch {claim_path} 2>/dev/null || exit 0; "
