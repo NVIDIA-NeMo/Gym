@@ -326,3 +326,30 @@ def test_compute_metrics_scores_pass_at_k_from_the_verifier_reward(agent: Harbor
 def test_compute_metrics_leaves_an_unscored_rollout_out_of_the_average(agent: HarborAgent) -> None:
     """A row carrying no reward is a rollout nobody scored, which is not the same as a zero."""
     assert agent.compute_metrics([[{"reward": 1.0}, {}]])["pass@1/accuracy"] == 100.0
+
+
+def test_failure_response_uses_native_agent_model(agent: HarborAgent, tmp_path: Path) -> None:
+    agent.config = app.HarborAgentConfig.model_validate(
+        {
+            "name": "harbor_agent_general",
+            "host": "0.0.0.0",
+            "port": 8080,
+            "entrypoint": "app.py",
+            "job": {
+                "jobs_dir": tmp_path / "jobs",
+                "datasets": [{"path": tmp_path / "tasks"}],
+                "agents": [{"name": "opencode", "model_name": "native-model"}],
+            },
+        }
+    )
+    body = app.HarborRunRequest.model_validate(
+        {
+            "task_name": "task",
+            app.TASK_INDEX_KEY_NAME: 0,
+            app.ROLLOUT_INDEX_KEY_NAME: 0,
+            "responses_create_params": {"input": []},
+        }
+    )
+    response = agent.failure_response(body, RuntimeError("trial failed"))
+    assert response.response.model == "native-model"
+    assert response.response.status == "failed"
