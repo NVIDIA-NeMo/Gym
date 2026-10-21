@@ -2250,7 +2250,7 @@ async def test_activation_failure_takes_precedence_over_recorded_rejection(setup
     state.session.artifacts = json.dumps(
         [1.0, {"type": "turn.failed", "error": {"message": "model rejected request"}}]
     )
-    state.model_attempt_statuses = [200, 400]
+    state.model_attempts = [{"status": 200}, {"status": 400}]
     with patch.object(state, "execute", AsyncMock(side_effect=RuntimeError("sandbox connection lost"))):
         with pytest.raises(RuntimeError, match="sandbox connection lost"):
             await agent._sandbox_response(
@@ -2280,3 +2280,40 @@ async def test_failed_native_snapshot_preserves_collected_cli_events(setup):
         assert any(gap.code == "model_call_join_key_unavailable" for gap in state.observations.gaps)
     finally:
         await state.close(1)
+
+
+@pytest.mark.parametrize("transport_error", ["timed out", "IncompleteRead(0 bytes read, 20 more expected)", None])
+def test_post_header_failure_reaches_outcome_policy(setup, transport_error):
+    from environment_servers.single_agent_turn.app import agent_outcome_policy
+    from nemo_gym.openai_utils import NeMoGymResponse
+
+    agent, sandbox = setup
+    sandbox.result["return_code"] = 1
+    records = [
+        {"type": "turn.started"},
+        {"type": "turn.failed", "error": {"message": "stream disconnected before completion: server error"}},
+    ]
+    sandbox.events = "\n".join(json.dumps([float(i), event]) for i, event in enumerate(records))
+    original_publish = sandbox.publish
+
+    def publish():
+        original_publish()
+        attempt = {"status": 200}
+        if transport_error is not None:
+            attempt["transport_error"] = transport_error
+        sandbox.files[f"{sandbox.directory}/model_attempts.jsonl"] = json.dumps(attempt) + "\n"
+
+    sandbox.publish = publish
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        response = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["status"] == "failed"
+        assert body["usage"] is None
+        outcome = json.loads(body["metadata"]["ng_agent_outcome"])
+        assert outcome == {"failure_kind": "model_transport_error" if transport_error is not None else "unknown"}
+        policy = agent_outcome_policy(NeMoGymResponse.model_validate(body))
+        assert not policy.verifiable
+        assert policy.retryable is (transport_error is not None)
+        client.post("/v1/agent_sessions/close", json=close_body(session_id)).raise_for_status()

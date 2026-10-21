@@ -48,7 +48,7 @@ class CodexSandboxSession(AgentSessionState):
     runtime_info: HarnessProcessInfo | None = None
     observations: AgentObservationBundle | None = None
     native_transcript: str | None = None
-    model_attempt_statuses: list[int | None] | None = None
+    model_attempts: list[dict[str, JsonValue]] | None = None
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
 
     async def upload_json(self, name: str, payload: JsonValue) -> None:
@@ -130,7 +130,7 @@ class CodexSandboxSession(AgentSessionState):
             LOG.warning("Codex native session transcript unavailable", exc_info=True)
         try:
             attempts = await self.read_text("model_attempts.jsonl")
-            self.model_attempt_statuses = [json.loads(line)["status"] for line in attempts.splitlines()]
+            self.model_attempts = [json.loads(line) for line in attempts.splitlines()]
         except Exception:
             LOG.warning("Codex model attempt statuses unavailable", exc_info=True)
         return events

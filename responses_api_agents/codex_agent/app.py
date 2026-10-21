@@ -498,13 +498,16 @@ class CodexAgent(SimpleResponsesAPIAgent):
     def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
         """Read Codex 0.144.4's turn.failed error; tested on that pinned version.
 
-        Prefer the sandbox forwarder's retained status. Without it, body-only errors
+        Prefer the sandbox forwarder's retained status and body-read failures. Without them, errors
         remain unknown; a provider's arbitrary error.code is not an HTTP status.
         """
         if native_result.get("type") != "turn.failed":
             return AgentOutcome(failure_kind="unknown")
-        if "upstream_status" in native_result:
-            status = native_result["upstream_status"]
+        if "upstream_attempt" in native_result:
+            attempt = native_result["upstream_attempt"]
+            if "transport_error" in attempt:
+                return AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
+            status = attempt["status"]
             if status is None:
                 return AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
             if type(status) is int and 400 <= status <= 599:
@@ -883,7 +886,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             native_usage = parse_codex_usage(state.native_transcript)
             if native_usage is not None:
                 response_usage = native_usage
-            elif output or not state.model_attempt_statuses or 200 in state.model_attempt_statuses:
+            elif output or not state.model_attempts or any(a["status"] == 200 for a in state.model_attempts):
                 # Prior work without a usage artifact is unknown, not a zero-token run.
                 response_usage = None
         conversation = [NeMoGymEasyInputMessage(role="user", content=prompt)]
@@ -1023,8 +1026,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
         )
 
         terminal = next((event for _, event in reversed(events) if event.get("type") == "turn.failed"), {})
-        if state.model_attempt_statuses:
-            terminal = {**terminal, "upstream_status": state.model_attempt_statuses[-1]}
+        if state.model_attempts:
+            terminal = {**terminal, "upstream_attempt": state.model_attempts[-1]}
         return self.report_outcome(response, terminal)
 
     def _resolve_call_base_url(self, rollout_id: Optional[str]) -> str:

@@ -146,3 +146,59 @@ with urlopen(Request(url + '/responses', data=b'{}')) as response:
         200,
     ]
     assert json.loads((tmp_path / "events.jsonl").read_text())[1]["result"] == "done"
+
+
+@pytest.mark.parametrize("fault", ["timeout", "truncated_chunk", "truncated_length", "server_error"])
+def test_body_failure_retains_http_status_and_transport_error(tmp_path, fault):
+    from threading import Event
+
+    release = Event()
+
+    class Upstream(BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            if fault == "truncated_chunk":
+                self.send_header("Transfer-Encoding", "chunked")
+            elif fault == "truncated_length":
+                self.send_header("Content-Length", "1000")
+            self.end_headers()
+            if fault == "timeout":
+                release.wait(2)
+            elif fault == "truncated_chunk":
+                self.wfile.write(b"20\r\ndata: partial")
+            elif fault == "truncated_length":
+                self.wfile.write(b"data: partial")
+            else:
+                self.wfile.write(
+                    b'data: {"type":"response.failed","response":{"error":{"message":"invalid input"}}}\n\n'
+                )
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
+    thread = Thread(target=upstream.serve_forever, daemon=True)
+    thread.start()
+    attempts_path = tmp_path / "attempts.jsonl"
+    try:
+        with rate_limit_proxy(
+            f"http://127.0.0.1:{upstream.server_port}", "invocation", attempts_path, timeout=0.1
+        ) as proxy:
+            with urlopen(Request(f"{proxy}/responses", data=b"{}"), timeout=5) as response:
+                assert response.status == 200
+                body = response.read()
+        records = [json.loads(line) for line in attempts_path.read_text().splitlines()]
+        assert len(records) == 1
+        assert records[0]["status"] == 200
+        if fault == "server_error":
+            assert b"invalid input" in body
+            assert "transport_error" not in records[0]
+        else:
+            assert records[0]["transport_error"]
+    finally:
+        release.set()
+        upstream.shutdown()
+        upstream.server_close()
+        thread.join()
