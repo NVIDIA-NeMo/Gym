@@ -116,7 +116,9 @@ shared resources-session protocol instead of the contract above, as
 - `/verify` with the task row, `responses_create_params`, and the agent's `response`
   grades once, as above; the session cookie names the episode. Termination comes from
   `response.status`: `completed`, `incomplete` (`timeout`, or `nonzero_exit` for
-  `max_output_tokens`). Identical retries replay the verdict.
+  `max_output_tokens`), and `nonzero_exit` for any other status, such as the `failed`
+  response of an agent that died while its sandbox still runs (codex_agent's
+  `verify_after_agent_error`). Identical retries replay the verdict.
 - `/close_session` fences the session first, so a seed still provisioning releases its
   sandboxes instead of lending them (HTTP 409), even if the close's caller stops waiting.
   It then waits for in-flight provisioning or grading, stops anything still running

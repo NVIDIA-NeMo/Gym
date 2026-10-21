@@ -433,6 +433,8 @@ async def test_relative_workdir_fails_provisioning(harness, monkeypatch) -> None
         ("completed", None, "completed"),
         ("incomplete", None, "timeout"),
         ("incomplete", {"reason": "max_output_tokens"}, "nonzero_exit"),
+        # An agent that died while its sandbox lives (codex_agent verify_after_agent_error).
+        ("failed", None, "nonzero_exit"),
     ],
 )
 async def test_termination_follows_the_agent_response_and_grading_still_runs(harness, status, details, reason) -> None:
