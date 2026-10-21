@@ -216,6 +216,9 @@ NG_NO_PERSIST_KEY = "_ng_no_persist"
 # Set only by Gym, on the result it builds for a row the dispatch budget never started.
 NG_DISPATCH_DRAINED_KEY = "_ng_dispatch_drained"
 NG_TERMINAL_KEY = "_ng_failure_terminal"
+# The attempt cap the collecting process ran with, stamped on each sidecar row: offline aggregation reads it
+# instead of its own environment. The `_ng_failure_` prefix keeps it out of the metrics of a counted row.
+NG_FAILURE_MAX_ATTEMPTS_KEY = "_ng_failure_max_attempts"
 NG_FAILURE_JUDGE_ERROR_KEY = "_ng_failure_judge_error"
 AGENT_REQUEST_FAILED_FAILURE_CLASS = "agent_request_failed"
 AGENT_RUN_ERROR_FAILURE_CLASS = "agent_run_error"
@@ -2246,7 +2249,10 @@ def _failure_export_metrics(
     than one job's. ``identity`` keys a sidecar row the way ``landed`` keys the rollouts that have a row.
     ``coverage/failed/<class>`` counts the rollouts with no row, by the class of their last attempt.
     ``retries/attempts`` counts failed attempts, ``retries/rollouts_retried`` the rollouts dispatched
-    more than once, and ``retries/at_cap`` the rollouts with no row that used all ``retries/max_attempts``.
+    more than once, and ``retries/at_cap`` the rollouts with no row that used all their attempts. Each rollout
+    is held to the cap its collection recorded on its last attempt (``_ng_failure_max_attempts``), or the
+    current cap for a row written before the cap was recorded. ``retries/max_attempts`` is that cap, and is
+    left out when the rollouts were collected with different caps.
     """
     attempts: Counter = Counter()
     latest: Dict[Any, Dict[str, Any]] = {}
@@ -2264,14 +2270,16 @@ def _failure_export_metrics(
                 failed.setdefault(row.get(NG_FAILURE_CLASS_KEY) or "unknown", 0)
                 attempts[identity(row)] += 1
                 latest[identity(row)] = row
-    max_attempts = get_max_rollout_attempts()
+    current_cap = get_max_rollout_attempts()
+    caps = {key: row.get(NG_FAILURE_MAX_ATTEMPTS_KEY) or current_cap for key, row in latest.items()}
     failed.update(row.get(NG_FAILURE_CLASS_KEY) or "unknown" for key, row in latest.items() if key not in landed)
+    recorded_caps = set(caps.values()) or {current_cap}
     return {
         "retries/attempts": sum(attempts.values()),
         # A rollout that landed after n failed attempts was dispatched n + 1 times.
         "retries/rollouts_retried": sum(1 for key, n in attempts.items() if n + (key in landed) > 1),
-        "retries/at_cap": sum(1 for key, n in attempts.items() if key not in landed and n >= max_attempts),
-        "retries/max_attempts": max_attempts,
+        "retries/at_cap": sum(1 for key, n in attempts.items() if key not in landed and n >= caps[key]),
+        **({"retries/max_attempts": recorded_caps.pop()} if len(recorded_caps) == 1 else {}),
         **{f"coverage/failed/{name}": count for name, count in sorted(failed.items())},
     }
 
@@ -3462,6 +3470,8 @@ class RolloutCollectionHelper(BaseModel):
                         f"class={failure_class} error={detail}"
                     )
                     write_started = perf_counter()
+                    # The cap this attempt ran under travels with it, for offline aggregation.
+                    serialized = orjson.dumps({**result, NG_FAILURE_MAX_ATTEMPTS_KEY: get_max_rollout_attempts()})
                     failures_file.write(serialized + b"\n")
                     failures_file.flush()
                     _record_rollout_outcome(result, "failed", dispatch_name)
