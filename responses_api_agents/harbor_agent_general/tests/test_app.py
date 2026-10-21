@@ -255,6 +255,46 @@ async def test_run_job_rejects_failed_steps_and_invalidates_resume(tmp_path, mon
         assert result_path.exists()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_location", ["trial", "step"])
+@pytest.mark.parametrize("verified", [True, False])
+async def test_run_job_keeps_graded_agent_timeouts(tmp_path, monkeypatch, failure_location, verified):
+    """Harbor runs the tests after an agent timeout; that result is the score, as in Harbor's own runs."""
+    from harbor.models.job.config import JobConfig
+
+    from responses_api_agents.harbor_agent_general import app
+
+    trial_dir = tmp_path / "job" / "trial"
+    trial_dir.mkdir(parents=True)
+    result_path = trial_dir / "result.json"
+    result_path.write_text("{}")
+    timeout = SimpleNamespace(exception_type="AgentTimeoutError", exception_message="timed out after 900.0 seconds")
+    verifier_result = SimpleNamespace(rewards={"reward": 1.0}) if verified else None
+    trial = SimpleNamespace(
+        task_name="task",
+        exception_info=timeout if failure_location == "trial" else None,
+        verifier_result=verifier_result if failure_location == "trial" else None,
+        step_results=[
+            SimpleNamespace(
+                exception_info=timeout if failure_location == "step" else None,
+                verifier_result=verifier_result if failure_location == "step" else None,
+            )
+        ],
+    )
+    monkeypatch.setattr(app.TrialResult, "model_validate_json", lambda _: trial)
+    monkeypatch.setattr(app.Job, "create", AsyncMock(return_value=SimpleNamespace(run=AsyncMock())))
+    config = JobConfig(job_name="job", jobs_dir=tmp_path)
+
+    if verified:
+        assert Path(await HarborAgent.run_job(config.model_dump(mode="json"), "task")) == trial_dir
+        assert result_path.exists()
+    else:
+        # The tests didn't run (e.g. the verifier timed out too): a failure Gym retries, as before.
+        with pytest.raises(RuntimeError, match="AgentTimeoutError"):
+            await HarborAgent.run_job(config.model_dump(mode="json"), "task")
+        assert not result_path.exists()
+
+
 @pytest.fixture
 def agent(monkeypatch: pytest.MonkeyPatch) -> HarborAgent:
     """An agent built without a server: compute_metrics reads only the rollouts it is handed."""
