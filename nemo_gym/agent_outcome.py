@@ -20,11 +20,11 @@ class AgentOutcome(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    reason: Literal["model_request_error", "model_transport_error", "invalid_output", "limit", "unknown"]
+    failure_kind: Literal["model_request_error", "model_transport_error", "invalid_output", "limit", "unknown"]
     status_code: int | None = Field(default=None, ge=400, le=599, strict=True)
 
     @model_validator(mode="after")
     def require_request_status(self) -> "AgentOutcome":
-        if (self.reason == "model_request_error") != (self.status_code is not None):
+        if (self.failure_kind == "model_request_error") != (self.status_code is not None):
             raise ValueError("Only model_request_error requires an upstream HTTP status")
         return self

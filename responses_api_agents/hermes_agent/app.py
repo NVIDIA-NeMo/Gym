@@ -306,17 +306,17 @@ class HermesAgent(SimpleResponsesAPIAgent):
         """Read Hermes 26bb847a native result flags and API errors; tested on that pin."""
         error = str(native_result.get("error") or "")
         if error == _TRUNCATION_ERROR or native_result.get("stop_reason") in {"wall_time", "max_turns"}:
-            return AgentOutcome(reason="limit")
+            return AgentOutcome(failure_kind="limit")
         if native_result.get("failed"):
             match = _HTTP_STATUS.search(error)
             if match and 400 <= int(match[1]) <= 599:
-                return AgentOutcome(reason="model_request_error", status_code=int(match[1]))
+                return AgentOutcome(failure_kind="model_request_error", status_code=int(match[1]))
             if error in {"Connection error.", "Connection error", "All connection attempts failed"}:
-                return AgentOutcome(reason="model_transport_error")
-            return AgentOutcome(reason="unknown")
+                return AgentOutcome(failure_kind="model_transport_error")
+            return AgentOutcome(failure_kind="unknown")
         if native_result.get("partial"):
-            return AgentOutcome(reason="invalid_output")
-        return AgentOutcome(reason="unknown")
+            return AgentOutcome(failure_kind="invalid_output")
+        return AgentOutcome(failure_kind="unknown")
 
     config: HermesAgentConfig
     # The harness runs inside the task sandbox and calls the model server from there.

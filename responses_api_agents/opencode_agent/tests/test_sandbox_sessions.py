@@ -1426,7 +1426,7 @@ async def test_native_model_error_is_reported_with_classification(setup, status)
     assert response.status == "failed"
     assert "provider error" in response.error.message
     assert json.loads(response.metadata["ng_agent_outcome"]) == {
-        "reason": "model_request_error",
+        "failure_kind": "model_request_error",
         "status_code": status,
     }
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))

@@ -291,7 +291,7 @@ def test_provider_failure_is_reported_and_replays_without_rerunning(agent, state
             assert response.status_code == 200
             assert response.json()["status"] == "failed"
             assert json.loads(response.json()["metadata"]["ng_agent_outcome"]) == {
-                "reason": "model_request_error",
+                "failure_kind": "model_request_error",
                 "status_code": 429,
             }
         state.upload_json.assert_awaited_once()

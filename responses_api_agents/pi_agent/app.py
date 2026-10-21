@@ -611,14 +611,14 @@ class PiAgent(SimpleResponsesAPIAgent):
     def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
         """Read Pi 0.80.2's terminal assistant error; tested on that pinned version."""
         if native_result.get("stopReason") != "error":
-            return AgentOutcome(reason="unknown")
+            return AgentOutcome(failure_kind="unknown")
         message = str(native_result.get("errorMessage") or "")
         match = re.match(r"^(?:HTTP )?([45]\d{2})(?::|\s|$)", message)
         if match:
-            return AgentOutcome(reason="model_request_error", status_code=int(match[1]))
+            return AgentOutcome(failure_kind="model_request_error", status_code=int(match[1]))
         if message in {"Connection error.", "Connection error", "fetch failed"}:
-            return AgentOutcome(reason="model_transport_error")
-        return AgentOutcome(reason="unknown")
+            return AgentOutcome(failure_kind="model_transport_error")
+        return AgentOutcome(failure_kind="unknown")
 
     config: PiAgentConfig
     # Sandbox sessions run the CLI inside the task sandbox, which calls the model server from there.

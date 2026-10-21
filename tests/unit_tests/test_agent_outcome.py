@@ -38,7 +38,7 @@ def test_inherited_outcome_reporting_preserves_response_and_marks_unknown():
         metadata={"existing": "retained"},
     )
     reported = agent.report_outcome(response, {"error": "unrecognized"})
-    assert reported.metadata == {"existing": "retained", AGENT_OUTCOME_METADATA_KEY: '{"reason":"unknown"}'}
+    assert reported.metadata == {"existing": "retained", AGENT_OUTCOME_METADATA_KEY: '{"failure_kind":"unknown"}'}
     assert reported.model_dump(exclude={"metadata"}) == response.model_dump(exclude={"metadata"})
     for status in ("completed", "incomplete"):
         response = response.model_copy(update={"status": status})
@@ -48,10 +48,10 @@ def test_inherited_outcome_reporting_preserves_response_and_marks_unknown():
 @pytest.mark.parametrize(
     "fields",
     [
-        {"reason": "model_request_error"},
-        {"reason": "unknown", "status_code": 503},
-        {"reason": "model_request_error", "status_code": True},
-        {"reason": "model_request_error", "status_code": 200},
+        {"failure_kind": "model_request_error"},
+        {"failure_kind": "unknown", "status_code": 503},
+        {"failure_kind": "model_request_error", "status_code": True},
+        {"failure_kind": "model_request_error", "status_code": 200},
     ],
 )
 def test_rejects_inconsistent_model_request_evidence(fields):

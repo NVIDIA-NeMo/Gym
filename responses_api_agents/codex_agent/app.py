@@ -463,14 +463,14 @@ class CodexAgent(SimpleResponsesAPIAgent):
         remain unknown; a provider's arbitrary error.code is not an HTTP status.
         """
         if native_result.get("type") != "turn.failed":
-            return AgentOutcome(reason="unknown")
+            return AgentOutcome(failure_kind="unknown")
         message = str((native_result.get("error") or {}).get("message") or "")
         match = re.search(r"\bunexpected status ([45]\d{2})\b", message)
         if match:
-            return AgentOutcome(reason="model_request_error", status_code=int(match[1]))
+            return AgentOutcome(failure_kind="model_request_error", status_code=int(match[1]))
         if message.startswith("stream disconnected before completion: error sending request for url"):
-            return AgentOutcome(reason="model_transport_error")
-        return AgentOutcome(reason="unknown")
+            return AgentOutcome(failure_kind="model_transport_error")
+        return AgentOutcome(failure_kind="unknown")
 
     config: CodexAgentConfig
     # Sandbox sessions run the CLI inside the task sandbox, which calls the model server from there.

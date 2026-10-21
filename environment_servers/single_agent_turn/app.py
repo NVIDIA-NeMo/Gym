@@ -540,8 +540,8 @@ def agent_outcome_policy(response: NeMoGymResponse) -> AgentOutcomePolicy:
         # Keep malformed classification in the partial response for diagnosis, not scoring.
         return AgentOutcomePolicy(verifiable=False, retryable=False)
     return AgentOutcomePolicy(
-        verifiable=outcome.reason in {"invalid_output", "limit"} or outcome.status_code in {400, 413, 422},
-        retryable=outcome.reason == "model_transport_error"
+        verifiable=outcome.failure_kind in {"invalid_output", "limit"} or outcome.status_code in {400, 413, 422},
+        retryable=outcome.failure_kind == "model_transport_error"
         or outcome.status_code in {408, 425, 429}
         or (outcome.status_code is not None and outcome.status_code >= 500),
     )

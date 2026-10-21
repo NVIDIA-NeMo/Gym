@@ -2009,7 +2009,7 @@ async def test_native_model_error_is_reported_with_classification(setup, status)
     assert response.status == "failed"
     assert response.error.message.endswith(message)
     assert json.loads(response.metadata["ng_agent_outcome"]) == {
-        "reason": "model_request_error",
+        "failure_kind": "model_request_error",
         "status_code": status,
     }
     closed = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
@@ -2025,5 +2025,5 @@ async def test_native_failure_without_http_status_reports_unknown(setup):
     response = await task
     assert response.status == "failed"
     assert response.error.message == message
-    assert json.loads(response.metadata["ng_agent_outcome"]) == {"reason": "unknown"}
+    assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "unknown"}
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))

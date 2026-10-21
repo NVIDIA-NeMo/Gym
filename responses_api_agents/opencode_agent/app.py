@@ -220,11 +220,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         """Read OpenCode 1.17.11's native assistant APIError; tested on that version."""
         error = native_result.get("error") or {}
         if error.get("name") != "APIError":
-            return AgentOutcome(reason="unknown")
+            return AgentOutcome(failure_kind="unknown")
         status = (error.get("data") or {}).get("statusCode")
         if type(status) is int and 400 <= status <= 599:
-            return AgentOutcome(reason="model_request_error", status_code=status)
-        return AgentOutcome(reason="unknown")
+            return AgentOutcome(failure_kind="model_request_error", status_code=status)
+        return AgentOutcome(failure_kind="unknown")
 
     config: OpenCodeAgentConfig
     # Sandbox sessions run the CLI inside the task sandbox, which calls the model server from there.

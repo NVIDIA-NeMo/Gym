@@ -1873,7 +1873,7 @@ async def test_provider_failure_is_not_gradable_but_context_limit_preserves_patc
     else:
         response = await task
         assert response.status == "failed"
-        assert json.loads(response.metadata["ng_agent_outcome"]) == {"reason": "unknown"}
+        assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "unknown"}
         # Replay the report without running the harness again; the environment owns policy.
         assert await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task")) == response
     close = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
@@ -2187,7 +2187,7 @@ def test_native_model_error_is_reported_with_classification(setup, message, stat
     assert response["status"] == "failed"
     assert response["error"]["message"] == message
     assert json.loads(response["metadata"]["ng_agent_outcome"]) == {
-        "reason": "model_request_error",
+        "failure_kind": "model_request_error",
         "status_code": status,
     }
     assert observations["records"][0]["status"] == "failed"

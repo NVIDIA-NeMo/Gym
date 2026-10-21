@@ -1451,6 +1451,6 @@ def test_native_model_error_is_reported_with_classification(status):
     response = agent.report_outcome(response, native)
     assert response.status == "failed"
     assert json.loads(response.metadata["ng_agent_outcome"]) == {
-        "reason": "model_request_error",
+        "failure_kind": "model_request_error",
         "status_code": status,
     }
