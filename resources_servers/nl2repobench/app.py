@@ -35,6 +35,7 @@ from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_utils import SESSION_ID_KEY, get_first_server_config_dict, is_nemo_gym_fastapi_entrypoint
+from resources_servers.nl2repobench.guard_v2 import derive_identifiers, install_guard_v2, network_policy_for_v2
 from resources_servers.nl2repobench.task_store import (
     EXPECTED_TASK_COUNT,
     NL2RepoBenchTaskStore,
@@ -56,7 +57,11 @@ NEMO_GYM_ROOT = PACKAGE_DIR.parents[1]
 #   replaced with wrappers that refuse to install/clone the specific task's own package/repo -
 #   mitigates the observed "fetch the real upstream source and submit it" exploit without
 #   losing general internet access.
-AgentNetworkMode = Literal["official", "no_internet_preinstalled", "block_target"]
+# "block_target_v2": added 2026-10-20 (guard_v2.py). Same open-egress idea but with real package/GitHub identifiers,
+#   subcommand-aware pip/git/curl/uv/... wrappers, interpreter (python/node) code inspection, and default-allow egress
+#   with deny rules for source-hosting domains. "block_target" above is unchanged (backup of this file before the
+#   change: app.py.bak_pre_guard_v2_20261020). See guard_v2.py and sft_runs/lightning_vahid1016/testset/LEAK_AUDIT.md.
+AgentNetworkMode = Literal["official", "no_internet_preinstalled", "block_target", "block_target_v2"]
 
 # "block_target" wrapper: installed in place of the real binaries (the real binary is moved
 # aside to "<path>.nl2repobench-real" and exec'd from there), rather than relying on a
@@ -124,6 +129,54 @@ fi
 exec "$REAL" "$@"
 """
 
+# Removes the editable-install metadata of the reference repo from an agent sandbox (see _create_sandbox).
+_METADATA_SCRUB_COMMAND = r"""python3 - <<'PYEOF'
+import glob, os, re, shutil
+IDENTS = set("__IDENTS__".split())
+roots = set(glob.glob("/usr/local/lib/python3*/site-packages") + glob.glob("/usr/lib/python3*/dist-packages")
+            + glob.glob("/usr/local/lib/python3*/dist-packages") + glob.glob("/usr/local/venv/lib/python3*/site-packages")
+            + glob.glob("/openhands/micromamba/envs/*/lib/python3*/site-packages"))
+removed = 0
+for root in roots:
+    for di in glob.glob(root + "/*.dist-info"):
+        try:
+            data = open(di + "/direct_url.json").read()
+        except OSError:
+            continue
+        if "_reference_repo" not in data:
+            continue
+        record = di + "/RECORD"
+        if os.path.exists(record):
+            for line in open(record):
+                path = os.path.normpath(os.path.join(root, line.split(",")[0]))
+                if os.path.isfile(path) and not path.startswith(di):
+                    os.remove(path)
+                    removed += 1
+        shutil.rmtree(di, ignore_errors=True)
+        removed += 1
+    for pattern in ("/*.pth", "/__editable__*"):
+        for f in glob.glob(root + pattern):
+            try:
+                if os.path.isfile(f) and "_reference_repo" in open(f, errors="ignore").read():
+                    os.remove(f)
+                    removed += 1
+            except OSError:
+                pass
+# Rust crates named after the target (e.g. pyca/bcrypt wraps the `bcrypt` crate whose source sits in the image's
+# cargo registry) and shell/python history files from the image build
+for pattern in ("/root/.cargo/registry/src/*/*", "/root/.cargo/registry/cache/*/*"):
+    for path in glob.glob(pattern):
+        crate = re.sub(r"-\d.*$", "", os.path.basename(path).lower())
+        if re.sub(r"[-_.]", "", crate) in IDENTS:
+            shutil.rmtree(path, ignore_errors=True) if os.path.isdir(path) else os.remove(path)
+            removed += 1
+for f in ("/root/.python_history", "/root/.bash_history"):
+    if os.path.exists(f):
+        os.remove(f)
+        removed += 1
+print("scrubbed", removed)
+PYEOF"""
+
 # Timeout for the agent-side workspace collection tar command.
 WORKSPACE_COLLECT_TIMEOUT_S = 300.0
 # Per-command timeout for install/test commands run in the fresh verifier sandbox.
@@ -183,12 +236,28 @@ class NL2RepoBenchResourcesServerConfig(BaseResourcesServerConfig):
     # with no pinned, deps-preinstalled grading image of its own - test_commands must then
     # install deps itself (e.g. `pip install -e .`) since the image won't have them pre-baked.
     verify_image_override: str | None = None
+    # None (default): task_image(task) resolves against upstream's own
+    # ghcr.io/multimodal-art-projection/nl2repobench/<task>:1.0 registry. Set to a format string
+    # with a {name} placeholder (e.g. "ghcr.io/<org>/nl2repobench-vahid1016/{name}:1.0") for a
+    # task set with its OWN pre-built, deps-preinstalled per-task images under a different
+    # registry namespace - required to use agent_network_mode="no_internet_preinstalled" with
+    # any task set other than upstream's 104 pinned tasks.
+    task_image_registry_template: str | None = None
     sandbox_config: dict[str, Any]
 
     logs_dir: Path = Path("resources_servers/nl2repobench/logs")
     clear_verifier_logs: bool = True
     include_workspace_in_response: bool = False
     workspace_tar_max_bytes: int = 209_715_200
+    # None (default): the collected workspace tar is never written to disk - it only exists
+    # in-memory for the duration of a single verify() call, between _collect_workspace and
+    # _run_verifier, and is discarded once that call returns (confirmed the hard way: every v2
+    # eval run's generated code is unrecoverable, only workspace_sha256/workspace_bytes survive
+    # in the results JSONL). Set this to persist each rollout's generated workspace as
+    # <save_workspace_dir>/<task_id>/<session_id>.tar.gz, so a *future* grading-mechanism change
+    # (a different test_commands.json, a different verify image, etc.) can re-verify against the
+    # already-generated code without re-running the agent/LLM at all.
+    save_workspace_dir: Path | None = None
 
 
 class NL2RepoBenchInstanceRequest(BaseModel):
@@ -272,10 +341,15 @@ def _resolve_task_id(body: NL2RepoBenchInstanceRequest) -> str:
     return current_task_id
 
 
-def _resolve_task(body: NL2RepoBenchInstanceRequest, task_store: NL2RepoBenchTaskStore) -> Task:
+def _resolve_task(
+    body: NL2RepoBenchInstanceRequest,
+    task_store: NL2RepoBenchTaskStore,
+    *,
+    registry_template: str | None = None,
+) -> Task:
     requested_task_id = _resolve_task_id(body)
     task = task_store.get(requested_task_id)
-    if body.image != task_image(task):
+    if body.image != task_image(task, registry_template=registry_template):
         raise ValueError(f"NL2RepoBench request image does not match the pinned image for task {requested_task_id!r}")
     return task
 
@@ -326,6 +400,11 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
             # regardless of this flag (the previous bug here - the model-egress branch below
             # used to run unconditionally).
             options.pop("network_policy", None)
+            return options
+        if mode == "block_target_v2":
+            # Default-allow egress plus deny rules for source-hosting domains (guard_v2.DENY_EGRESS_TARGETS); the
+            # pip/git/curl/python wrappers installed in _create_sandbox do the package-aware part.
+            options["network_policy"] = network_policy_for_v2(options.get("network_policy"))
             return options
         if mode == "block_target":
             # Open egress, same as official-with-no-enforcement: the pip/pip3/git guard
@@ -381,13 +460,33 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
         # "no_internet_preinstalled" boots the agent from the pinned per-task grading image too
         # (deps pre-installed), instead of the generic image - the held-out test files it also
         # ships get stripped out below, before the agent gets a turn.
-        agent_image = task_image(task) if mode == "no_internet_preinstalled" else _AGENT_SANDBOX_IMAGE
+        agent_image = (
+            task_image(task, registry_template=self.config.task_image_registry_template)
+            if mode == "no_internet_preinstalled"
+            else _AGENT_SANDBOX_IMAGE
+        )
         # verify_image_override: for task sets with no pinned, deps-preinstalled grading image
         # (e.g. a custom held-out split derived outside upstream NL2RepoBench's 104), point the
         # verifier sandbox at a generic image instead and let its test_commands install deps
         # fresh (pip install -e . etc.) at verify time. None (default) reproduces upstream
         # behavior exactly - the real pinned per-task image, no network needed.
-        verify_image = self.config.verify_image_override or task_image(task)
+        #
+        # mode == "no_internet_preinstalled" always uses the real preinstalled per-task image for
+        # verification too, IGNORING verify_image_override - mirrors agent_image's own mode
+        # branch above exactly, and is safe to do unconditionally in that branch since
+        # test_commands.json's clone+install step (see
+        # sft_runs/lightning_vahid1016/testset/make_test_commands_preinstall_aware.py) is
+        # idempotent: it detects /tmp/_reference_repo/.git already existing and skips straight to
+        # the copy+pytest steps, rather than re-cloning into (and failing against) an
+        # already-populated directory. For every OTHER mode, verify_image_override is left as the
+        # deciding factor exactly as before - this keeps block_target/official verify behavior
+        # byte-identical to already-reported eval baselines, since those don't touch this branch.
+        verify_image = (
+            task_image(task, registry_template=self.config.task_image_registry_template)
+            if mode == "no_internet_preinstalled"
+            else self.config.verify_image_override
+            or task_image(task, registry_template=self.config.task_image_registry_template)
+        )
         spec = SandboxSpec(
             image=agent_image if phase == "agent" else verify_image,
             ttl_s=self.config.sandbox_config.get("ttl_s"),
@@ -453,19 +552,58 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
                 # requirements.txt sitting in /workspace across most tasks (e.g. icecream's real
                 # setup.py), leaking real dependency versions/package metadata the agent was
                 # never supposed to see. Wipe /workspace entirely instead of targeting the known
-                # test-file list - the task's pre-installed Python deps live in system
-                # site-packages (e.g. /usr/local/lib/python3.*/site-packages), not /workspace, so
-                # this can't lose them. Must happen before the agent's session is usable
-                # (seed_session can't return until this function returns, so there's no window
-                # where the agent could read any of it first).
-                wipe_result = await sandbox.exec(command="find /workspace -mindepth 1 -delete", cwd="/", timeout_s=60)
+                # test-file list. Must happen before the agent's session is usable (seed_session
+                # can't return until this function returns, so there's no window where the agent
+                # could read any of it first).
+                #
+                # /tmp/_reference_repo ALSO wiped, not just /workspace: our own per-task images
+                # (sft_runs/lightning_vahid1016/testset/task_images/) install the reference repo
+                # with `pip install -e .` (an EDITABLE install - deliberately matching what
+                # test_commands.json itself does at verify time), which leaves the real
+                # implementation AND the real held-out tests/ sitting in /tmp/_reference_repo,
+                # readable in full by the agent, and importable as the real package via Python's
+                # normal import machinery - a complete answer leak, strictly worse than the
+                # /workspace case above. Deleting it does NOT break any genuinely-needed
+                # pre-installed dependency: only this ONE package's own (editable) install
+                # resolves through /tmp/_reference_repo; every other third-party dependency the
+                # task needs was installed normally into system site-packages (e.g.
+                # /usr/local/lib/python3.*/site-packages), unaffected by this deletion. The agent
+                # losing the ability to `import <the task's own package>` is the point, not a
+                # side effect to work around - it is never supposed to have the real
+                # implementation available at all.
+                wipe_result = await sandbox.exec(
+                    command="find /workspace -mindepth 1 -delete && rm -rf /tmp/_reference_repo",
+                    cwd="/",
+                    timeout_s=60,
+                )
                 if wipe_result.return_code != 0:
                     raise RuntimeError(
-                        f"Failed to wipe pre-existing /workspace contents in agent sandbox for {task_id(task)!r}: "
-                        f"{wipe_result.stderr or wipe_result.stdout or '(no output)'}"
+                        f"Failed to wipe pre-existing /workspace/_reference_repo contents in agent sandbox for "
+                        f"{task_id(task)!r}: {wipe_result.stderr or wipe_result.stdout or '(no output)'}"
+                    )
+                # Metadata scrub (added 2026-10-21 after a leak scan of the real per-task images, see
+                # sft_runs/lightning_vahid1016/testset/LEAK_AUDIT.md): the editable install of the reference repo
+                # leaves, outside /tmp/_reference_repo, the package's dist-info (METADATA embeds the README with code
+                # examples + version + Home-page URL + dependency list; `pip show` prints them), its console-script
+                # stubs in bin/ (reveal the module layout) and the .pth/__editable__ pointer. Remove every dist-info
+                # whose direct_url.json points at /tmp/_reference_repo together with the files its RECORD lists, and
+                # any leftover .pth/__editable__ file naming it. The verifier uses its own fresh sandbox, unaffected.
+                scrub_result = await sandbox.exec(
+                    command=_METADATA_SCRUB_COMMAND.replace(
+                        "__IDENTS__", " ".join(derive_identifiers(task_id(task), task.test_commands.commands)[0])
+                    ),
+                    cwd="/",
+                    timeout_s=120,
+                )
+                if scrub_result.return_code != 0:
+                    raise RuntimeError(
+                        f"Failed to scrub editable-install metadata in agent sandbox for {task_id(task)!r}: "
+                        f"{scrub_result.stderr or scrub_result.stdout or '(no output)'}"
                     )
             elif mode == "block_target":
                 await self._install_pip_git_guard(sandbox, task)
+            elif mode == "block_target_v2":
+                await install_guard_v2(sandbox, task_id(task), task.test_commands.commands)
             with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
                 f.write(task.start_md)
                 local_start_md_path = Path(f.name)
@@ -564,7 +702,7 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
     async def seed_session(
         self, request: Request, body: NL2RepoBenchSeedSessionRequest
     ) -> NL2RepoBenchSeedSessionResponse:
-        task = _resolve_task(body, self._task_store)
+        task = _resolve_task(body, self._task_store, registry_template=self.config.task_image_registry_template)
         session_id = str(request.session[SESSION_ID_KEY])
         previous_session = self._agent_sessions.pop(session_id, None)
         if previous_session is not None:
@@ -578,7 +716,7 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
         try:
             sandbox = await self._create_sandbox(task, phase="agent")
             current_task_id = task_id(task)
-            current_task_image = task_image(task)
+            current_task_image = task_image(task, registry_template=self.config.task_image_registry_template)
             descriptor = await sandbox.serialize()
             sandbox_handle = descriptor.get("sandbox_id") if isinstance(descriptor, dict) else None
             if not isinstance(sandbox_handle, str) or not sandbox_handle:
@@ -701,9 +839,9 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
         )
 
     async def verify(self, request: Request, body: NL2RepoBenchVerifyRequest) -> NL2RepoBenchVerifyResponse:
-        task = _resolve_task(body, self._task_store)
+        task = _resolve_task(body, self._task_store, registry_template=self.config.task_image_registry_template)
         current_task_id = task_id(task)
-        current_task_image = task_image(task)
+        current_task_image = task_image(task, registry_template=self.config.task_image_registry_template)
         session_id = str(request.session.get(SESSION_ID_KEY, "unknown"))
         sandbox_handle = body.sandbox_handle
 
@@ -747,6 +885,15 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
         workspace_bytes = len(workspace_tar)
         log_dir = _resolve_repo_path(self.config.logs_dir) / current_task_id / session_id
 
+        saved_workspace_path: str | None = None
+        if self.config.save_workspace_dir is not None and workspace_error is None and workspace_tar:
+            workspace_save_path = (
+                _resolve_repo_path(self.config.save_workspace_dir) / current_task_id / f"{session_id}.tar.gz"
+            )
+            workspace_save_path.parent.mkdir(parents=True, exist_ok=True)
+            workspace_save_path.write_bytes(workspace_tar)
+            saved_workspace_path = str(workspace_save_path)
+
         sandbox: AsyncSandbox | None = None
         sandbox_start_time_s = 0.0
         verification_time_s = 0.0
@@ -776,9 +923,9 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
                 if sandbox is not None:
                     await self._stop_sandbox(sandbox, task_id=current_task_id, phase="verifier")
 
-        # No per-task artifacts are persisted to disk (test_output is captured in-memory and
-        # returned directly), so log_dir is a nominal per-session path; clearing is a no-op unless
-        # something else wrote into it.
+        # test_output is captured in-memory and returned directly, not written under log_dir, so
+        # log_dir is a nominal per-session path; clearing is a no-op unless something else wrote
+        # into it (e.g. save_workspace_dir, which is a separate directory, unaffected by this).
         if self.config.clear_verifier_logs:
             rmtree(str(log_dir), ignore_errors=True)
             log_dir_str = ""
@@ -794,7 +941,9 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
                 "sandbox_handle": sandbox_handle,
                 "workspace_bytes": workspace_bytes,
                 "workspace_sha256": workspace_sha256,
-                "workspace_tar": workspace_tar.hex() if self.config.include_workspace_in_response else None,
+                "workspace_tar": saved_workspace_path
+                if saved_workspace_path is not None
+                else (workspace_tar.hex() if self.config.include_workspace_in_response else None),
                 "log_dir": log_dir_str,
                 "workspace_collection_time_s": workspace_collection_time_s,
                 "sandbox_start_time_s": sandbox_start_time_s,
