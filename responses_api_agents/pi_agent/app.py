@@ -71,13 +71,89 @@ from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, create_provider
 from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.server_utils import get_global_config_dict, get_response_json, raise_for_status
+from nemo_gym.tool_access import MCPToolAccess, ToolAccess
 from responses_api_agents.pi_agent.sandbox import PiSandboxSession
 from responses_api_agents.pi_agent.setup_pi import ensure_pi
 
 
 LOG = logging.getLogger(__name__)
 MCP_SETUP_ERROR_EXIT_CODE = 78  # Must match gym_mcp.mjs (EX_CONFIG).
+# gym_mcp.mjs names each tool `<grant>_<tool>` and allows at most 64 of these characters.
+_MCP_SERVER_NAME = re.compile(r"[A-Za-z0-9_-]{1,62}")
 _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
+
+
+def _ends_on_finish_tool(messages: list[Any]) -> bool:
+    """True when the run's last assistant turn stopped for tool use and called only finish tools that succeeded.
+
+    gym_mcp.mjs marks those results terminal. Pi ends a run after a tool batch only when every result in it
+    is terminal, so no assistant message follows them.
+    """
+    results = []
+    for message in reversed(messages):
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") == "assistant":
+            return (
+                message.get("stopReason") == "toolUse"
+                and bool(results)
+                and all(
+                    isinstance(result.get("details"), dict)
+                    and result["details"].get("terminal") is True
+                    and not result.get("isError")
+                    for result in results
+                )
+            )
+        if message.get("role") == "toolResult":
+            results.append(message)
+    return False
+
+
+def _gym_mcp_tool_name(name: str, server_names: list[str]) -> str:
+    """Rename gym_mcp.mjs' ``<server>_<tool>`` to Gym's ``mcp__<server>__<tool>``, which Gym strips before verify.
+
+    `server_names` must not hold a name that starts with another one and ``_`` (`_mcp_grant_problems` leaves such
+    grants out), so at most one name matches.
+    """
+    for server in server_names:
+        if name.startswith(f"{server}_"):
+            return f"mcp__{server}__{name[len(server) + 1 :]}"
+    return name
+
+
+def _mcp_grant_problems(accesses: list[ToolAccess]) -> dict[str, str]:
+    """Return a dict of grant name to reason for each of the episode's MCP grants that Pi cannot use.
+
+    gym_mcp.mjs names each tool `<grant>_<tool>`, so the tools of two grants whose names differ by a `_<suffix>`
+    could not be told apart. Of such a pair, an optional grant is always listed, and a required one only when the
+    other is required too. Seeding refuses the required grants listed here; activation leaves out the optional ones.
+    """
+    grants = [access for access in accesses if isinstance(access, MCPToolAccess)]
+    problems = {
+        grant.name: "its name is not 1 to 62 letters, digits, '-' and '_'"
+        for grant in grants
+        if not _MCP_SERVER_NAME.fullmatch(grant.name)
+    }
+    named = [grant for grant in grants if grant.name not in problems]
+    for grant in named:
+        for other in named:
+            overlap = grant.name.startswith(f"{other.name}_") or other.name.startswith(f"{grant.name}_")
+            if overlap and (not grant.required or other.required):
+                problems[grant.name] = f"its tools could not be told apart from those of grant {other.name}"
+    return problems
+
+
+def _gym_mcp_gaps(events: list[tuple[float, dict[str, Any]]]) -> list[ObservationGap]:
+    """Observation gaps for the Gym MCP servers gym_mcp.mjs skipped or could not set up."""
+    gaps = []
+    for _, event in events:
+        if event.get("type") == "ng_gym_mcp_server_skipped":
+            gaps.append(
+                ObservationGap(code="mcp_server_skipped", detail=f"{event.get('server')}: {event.get('error')}")
+            )
+        elif event.get("type") == "ng_gym_mcp_setup_failed":
+            gaps.append(ObservationGap(code="mcp_setup_failed", detail=str(event.get("error") or "")))
+    return gaps
 
 
 def _sandbox_prepare_command(directory: str) -> str:
@@ -276,6 +352,8 @@ def _build_pi_observations(
                     "aborted": "incomplete",
                     "length": "incomplete",
                 }.get(stop_reason, "unknown")
+                if _ends_on_finish_tool(terminal_messages):
+                    invocation_status = "completed"
         elif event_type == "tool_execution_start" and isinstance(call_id, str):
             starts[call_id] = (observed_at, tool_name)
         elif event_type == "tool_execution_end" and isinstance(call_id, str):
@@ -488,6 +566,24 @@ class PiAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
     sandbox_bash_timeout_seconds: int = Field(default=900, gt=0)
+    sandbox_mcp_timeout_seconds: float = Field(
+        default=300,
+        ge=0.001,
+        # Node timers overflow above 2**31 - 1 ms.
+        le=2_147_483,
+        allow_inf_nan=False,
+        description=(
+            "Timeout of each call to a granted MCP tool in sandbox sessions. The call keeps running on the server "
+            "after the timeout, and the run as a whole stays bounded by `timeout`."
+        ),
+    )
+    finish_tool_names: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Granted MCP tools, by their name on the server, whose successful call ends a sandbox session's run "
+            "when every tool call of that turn is one of them."
+        ),
+    )
     session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
 
     @property
@@ -533,8 +629,22 @@ class PiAgent(SimpleResponsesAPIAgent):
             provider_ref = body.sandbox_access.connection.provider_config_ref
         if not isinstance(workdir, str) or not workdir.startswith("/"):
             raise HTTPException(422, "Pi sandbox workdir must be absolute")
-        if any(access.required for access in self.effective_tool_accesses(body)):
-            raise HTTPException(422, "Pi supports its own sandbox tools, not required HTTP/MCP tools")
+        tool_accesses = self.effective_tool_accesses(body)
+        unsupported = sorted(
+            access.name for access in tool_accesses if access.required and not isinstance(access, MCPToolAccess)
+        )
+        if unsupported:
+            raise HTTPException(
+                422, "Pi supports only MCP tool grants; required grants it cannot use: " + ", ".join(unsupported)
+            )
+        problems = _mcp_grant_problems(tool_accesses)
+        refused = sorted(
+            f"{access.name} ({problems[access.name]})"
+            for access in tool_accesses
+            if isinstance(access, MCPToolAccess) and access.required and access.name in problems
+        )
+        if refused:
+            raise HTTPException(422, "Pi cannot use these required MCP grants: " + "; ".join(refused))
         if self.config.model_server is None:
             raise HTTPException(422, "Pi requires a sandbox-reachable Gym model_server")
         if not self.config.pi_version or not re.fullmatch(r"\d+\.\d+\.\d+", self.config.pi_version):
@@ -661,6 +771,32 @@ class PiAgent(SimpleResponsesAPIAgent):
         system = "\n\n".join(part for part in (self.config.system_prompt, body.instructions, input_system) if part)
         return prompt, system
 
+    def _session_mcp_servers(
+        self, request: AgentSeedSessionRequest
+    ) -> tuple[dict[str, dict[str, Any]], list[ObservationGap]]:
+        """gym_mcp.mjs configuration for the episode's MCP tool grants, and gaps for the grants Pi cannot use.
+
+        Seeding refused the required grants Pi cannot use, so the gaps are for optional ones left out.
+        """
+        accesses = self.effective_tool_accesses(request)
+        problems = _mcp_grant_problems(accesses)
+        servers = {
+            access.name: {
+                "url": str(access.connection.url),
+                "headers": access.connection.headers,
+                "timeout": round(self.config.sandbox_mcp_timeout_seconds * 1000),
+                "required": access.required,
+                "terminal_tools": list(self.config.finish_tool_names),
+            }
+            for access in accesses
+            if isinstance(access, MCPToolAccess) and access.name not in problems
+        }
+        gaps = [
+            ObservationGap(code="mcp_server_skipped", detail=f"{name}: {problem}")
+            for name, problem in problems.items()
+        ]
+        return servers, gaps
+
     async def _sandbox_response(
         self,
         state: PiSandboxSession,
@@ -688,6 +824,17 @@ class PiAgent(SimpleResponsesAPIAgent):
         await state.session.sandbox.upload(
             Path(__file__).with_name("outcome.mjs"), f"{state.session.session_dir}/outcome.mjs"
         )
+        mcp_servers, unusable_grant_gaps = self._session_mcp_servers(state.request)
+        mcp_extension = []
+        mcp_env = {}
+        if mcp_servers:
+            await state.session.sandbox.upload(
+                Path(__file__).with_name("gym_mcp.mjs"), f"{state.session.session_dir}/gym_mcp.mjs"
+            )
+            # The headers carry this episode's tool session token.
+            await state.upload_json("mcp-servers.json", mcp_servers)
+            mcp_extension = ["--extension", f"{state.session.session_dir}/gym_mcp.mjs"]
+            mcp_env["NEMO_GYM_PI_MCP_CONFIG"] = f"{state.session.session_dir}/mcp-servers.json"
         timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
         command = [
             f"{state.runtime}/node/bin/node",
@@ -707,6 +854,7 @@ class PiAgent(SimpleResponsesAPIAgent):
             f"{state.session.session_dir}/{runtime_guards_extension}",
             "--extension",
             f"{state.session.session_dir}/outcome.mjs",
+            *mcp_extension,
             "--no-skills",
             "--no-prompt-templates",
             "--no-themes",
@@ -725,6 +873,7 @@ class PiAgent(SimpleResponsesAPIAgent):
                 "PI_SKIP_VERSION_CHECK": "1",
                 "PI_TELEMETRY": "0",
                 "NEMO_GYM_PI_BASH_TIMEOUT": str(self.config.sandbox_bash_timeout_seconds),
+                **mcp_env,
             },
         }
         try:
@@ -764,6 +913,7 @@ class PiAgent(SimpleResponsesAPIAgent):
             state.observations.gaps.append(
                 ObservationGap(code="agent_activation_interrupted", detail=type(failure).__name__)
             )
+            state.observations.gaps.extend([*unusable_grant_gaps, *_gym_mcp_gaps(events)])
             if state.runtime_info is None:
                 state.observations.gaps.append(ObservationGap(code="runtime_info_unavailable"))
             for record in state.observations.records:
@@ -778,10 +928,16 @@ class PiAgent(SimpleResponsesAPIAgent):
         terminal_error = None
         context_overflow = False
         stop_reasons = []
+        mcp_setup_failure = None
+        messages = []
         for _, event in events:
             if event.get("type") == "ng_pi_outcome":
                 context_overflow = event.get("context_overflow") is True
+            elif event.get("type") == "ng_gym_mcp_setup_failed":
+                mcp_setup_failure = str(event.get("error") or "")
             message = event.get("message") or {}
+            if event.get("type") == "message_end":
+                messages.append(message)
             if event.get("type") == "message_end" and message.get("role") == "assistant":
                 for part in message.get("content") or []:
                     if part.get("type") == "thinking" and part.get("thinking"):
@@ -820,12 +976,20 @@ class PiAgent(SimpleResponsesAPIAgent):
             # They must not erase an independently confirmed worker or cleanup failure.
             terminal_error = None
         error = cleanup["error"] or terminal_error
+        if mcp_servers and cleanup["return_code"] == MCP_SETUP_ERROR_EXIT_CODE:
+            cause = f": {mcp_setup_failure}" if mcp_setup_failure else ""
+            error = error or f"Required Gym MCP tools could not be initialized{cause}"
+        ended_on_finish_tool = _ends_on_finish_tool(messages)
         if cleanup["return_code"] not in (None, 0) and not cleanup["timed_out"] and not model_limit:
             error = error or f"Pi exited with code {cleanup['return_code']}"
         if not stop_reasons:
             cached_tokens = None
             error = error or "Pi produced no assistant result"
-        elif stop_reasons[-1] not in ("stop", "length", "error", "aborted") and not cleanup["timed_out"]:
+        elif (
+            stop_reasons[-1] not in ("stop", "length", "error", "aborted")
+            and not cleanup["timed_out"]
+            and not ended_on_finish_tool
+        ):
             error = error or "Pi ended without a terminal assistant result"
         incomplete = (
             cleanup["timed_out"] or model_limit or (stop_reasons and stop_reasons[-1] in ("length", "aborted"))
@@ -837,7 +1001,13 @@ class PiAgent(SimpleResponsesAPIAgent):
             created_at=int(time()),
             model=self.config.model,
             object="response",
-            output=output,
+            # Verifiers see Gym's MCP naming; the model's own names stay in the observations and model calls.
+            output=[
+                item.model_copy(update={"name": _gym_mcp_tool_name(item.name, list(mcp_servers))})
+                if getattr(item, "type", None) == "function_call"
+                else item
+                for item in output
+            ],
             status="failed" if error else "incomplete" if incomplete else "completed",
             error={"code": "server_error", "message": error} if error else None,
             tool_choice=body.tool_choice,
@@ -883,6 +1053,7 @@ class PiAgent(SimpleResponsesAPIAgent):
         if cleanup["return_code"] is None:
             state.observations.gaps.append(ObservationGap(code="worker_exit_code_unavailable"))
         state.observations.gaps.append(ObservationGap(code="reasoning_token_usage_unavailable"))
+        state.observations.gaps.extend([*unusable_grant_gaps, *_gym_mcp_gaps(events)])
         if cached_tokens is None:
             state.observations.gaps.append(
                 ObservationGap(

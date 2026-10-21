@@ -352,15 +352,14 @@ def test_unsupported_seed_rejected_before_connection(setup, option):
     sandbox.exec.assert_not_awaited()
 
 
-def test_shared_seed_rejects_multiple_workers_before_initialization(setup):
+def test_several_workers_seed_sessions(setup):
+    """Session routing sends a session's later requests to the worker that seeded it."""
     agent, sandbox = setup
     agent.config.num_workers = 2
     with TestClient(agent.setup_webserver()) as client:
-        # Worker count is server configuration, checked by the shared route before seed.
-        with pytest.raises(ValueError, match="Agent sessions require num_workers=1"):
-            client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
-    assert not agent._session_records
-    sandbox.exec.assert_not_awaited()
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        assert created.json()["agent_session_id"] in agent._session_records
 
 
 def test_cookie_identity_and_single_activation(setup):

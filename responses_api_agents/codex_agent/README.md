@@ -73,10 +73,11 @@ A new pairing does not need another combined preset.
 
 ## Runtime and model requirements
 
-Use one agent worker, a pinned `codex_version` (default **0.144.4**), direct `SandboxAccess`,
+Use a pinned `codex_version` (default **0.144.4**), direct `SandboxAccess`,
 and an absolute task workdir disjoint from the adapter directories. Required Resources HTTP/MCP
 tools are rejected; Codex supplies its own tools. The task sandbox supplies isolation, so
 `sandbox_mode` must be `danger-full-access`. No Codex CLI is required on the agent-server host.
+With several agent workers, session routing sends each session's requests to the worker that seeded it.
 
 The installer accepts Linux x86_64/aarch64 glibc and x86_64 musl/Alpine with Python 3.8+.
 POSIX sh installs missing Python and Bash using apt-get or apk when running as root,

@@ -486,8 +486,6 @@ class CodexAgent(SimpleResponsesAPIAgent):
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> CodexSandboxSession:
         # Match Hermes: session initialization owns the sandbox runtime setup,
         # with the same AgentSeedSessionRequest/SandboxAccess wire contracts.
-        if self.config.num_workers not in (None, 1):
-            raise HTTPException(422, "Native Codex sessions require num_workers=1")
         owns_sandbox = body.sandbox_access is None
         if owns_sandbox:
             if not self.config.sandbox_provider:

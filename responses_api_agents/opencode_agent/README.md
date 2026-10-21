@@ -102,8 +102,9 @@ SQLite observations are captured; services must use task-owned files rather than
 agent session directory, which close removes. Capture requires confirmed termination.
 Missing evidence remains retryable; a final negative receipt skips capture and verification
 but permits connection release. Successful close receipts are retained for `session_close_retry_window_seconds` (default 300).
-Session state is process-local; use one worker. Provider TTL and the episode owner
-handle abandoned sessions. Process cleanup is not a hostile-code security boundary.
+Session state lives in the worker that seeded the session.
+With several agent workers, session routing sends each session's requests to the worker that seeded it.
+Provider TTL and the episode owner handle abandoned sessions. Process cleanup is not a hostile-code security boundary.
 
 Tool shells retain the task HOME and XDG directories through the shell environment hook,
 so home-directory deliverables survive agent close. The CLI keeps private HOME and XDG

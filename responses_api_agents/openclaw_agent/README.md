@@ -194,7 +194,7 @@ exec host refers to the embedded CLI process inside the borrowed sandbox.
 
 Sandbox request support is deliberately explicit:
 
-- One activation per session; one worker per agent server. Concurrent sessions are independent.
+- One activation per session. Concurrent sessions are independent.
   Identical activation requests join the running task or replay its result/error. A different request
   is rejected with HTTP 409. Session close owns cancellation; waiter cancellation does not stop the harness.
 - EnvironmentServer assigns the session ID. Repeating the full seed request is idempotent, even
@@ -264,7 +264,9 @@ whose cleanup fails retain cleanup-only state through `AgentSessionSetupError`.
 `timeout`, `model_timeout_seconds`, `sandbox_install_timeout_seconds`, and `session_close_timeout_seconds` must be positive
 and finite. The shared `session_close_retry_window_seconds` bounds close receipts and tombstones.
 
-Session state is process-local. Keep requests on one worker. Missing evidence or failed release
+Session state lives in the worker that seeded the session.
+With several agent workers, session routing sends each session's requests to the worker that seeded it.
+Missing evidence or failed release
 retains the session for retry. Releasing a final failed activation does not make it gradable.
 Cached runtime files and preserved task services remain until Resources destroys the sandbox.
 

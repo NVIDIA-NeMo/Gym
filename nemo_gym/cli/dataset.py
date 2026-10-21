@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from nemo_gym.cli.utils import exit_cleanly_on_config_error
 from nemo_gym.config_types import (
     DeleteJsonlDatasetGitlabConfig,
     DownloadJsonlDatasetGitlabConfig,
@@ -32,24 +33,28 @@ from nemo_gym.prompt import MaterializePromptsConfig, materialize_prompts
 from nemo_gym.train_data_utils import TrainDataProcessor
 
 
+@exit_cleanly_on_config_error
 def upload_jsonl_dataset_cli() -> None:  # pragma: no cover
     global_config = get_global_config_dict()
     config = UploadJsonlDatasetGitlabConfig.model_validate(global_config)
     upload_jsonl_dataset(config)
 
 
+@exit_cleanly_on_config_error
 def download_jsonl_dataset_cli() -> None:  # pragma: no cover
     global_config = get_global_config_dict()
     config = DownloadJsonlDatasetGitlabConfig.model_validate(global_config)
     download_jsonl_dataset(config)
 
 
+@exit_cleanly_on_config_error
 def upload_jsonl_dataset_to_hf_cli() -> None:  # pragma: no cover
     global_config = get_global_config_dict()
     config = UploadJsonlDatasetHuggingFaceMaybeDeleteConfig.model_validate(global_config)
     upload_jsonl_dataset_to_hf_maybe_delete(config, delete_from_gitlab=config.delete_from_gitlab)
 
 
+@exit_cleanly_on_config_error
 def download_jsonl_dataset_from_hf_cli() -> None:  # pragma: no cover
     global_config = get_global_config_dict()
     config = DownloadJsonlDatasetHuggingFaceConfig.model_validate(global_config)
@@ -62,18 +67,21 @@ def download_jsonl_dataset_from_hf_cli() -> None:  # pragma: no cover
     download_hf_dataset_as_jsonl(config)
 
 
+@exit_cleanly_on_config_error
 def delete_jsonl_dataset_from_gitlab_cli() -> None:  # pragma: no cover
     global_config = get_global_config_dict()
     config = DeleteJsonlDatasetGitlabConfig.model_validate(global_config)
     delete_jsonl_dataset_from_gitlab(config.dataset_name)
 
 
+@exit_cleanly_on_config_error
 def upload_jsonl_dataset_to_hf_and_delete_gitlab_cli() -> None:  # pragma: no cover
     global_config = get_global_config_dict()
     config = UploadJsonlDatasetHuggingFaceConfig.model_validate(global_config)
     upload_jsonl_dataset_to_hf_maybe_delete(config, delete_from_gitlab=True)
 
 
+@exit_cleanly_on_config_error
 def materialize_prompts_cli() -> None:  # pragma: no cover
     """CLI entry point for gym dataset render."""
     global_config_dict = get_global_config_dict(
@@ -85,6 +93,7 @@ def materialize_prompts_cli() -> None:  # pragma: no cover
     materialize_prompts(config.input_jsonl_fpath, config.prompt_config, config.output_jsonl_fpath)
 
 
+@exit_cleanly_on_config_error
 def prepare_data():  # pragma: no cover
     global_config_dict = get_global_config_dict(
         global_config_dict_parser_config=GlobalConfigDictParserConfig(
