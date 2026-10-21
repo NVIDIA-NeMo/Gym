@@ -9047,6 +9047,15 @@ class TestPreprocessExamples:
         with pytest.raises(ValueError, match="empty list"):
             RolloutCollectionHelper().preprocess_examples([self._ts_row()], fan_out={"math": []})
 
+    def test_selects_task_ids_once_each_then_repeats(self) -> None:
+        examples = [{**self._ts_row(), "task_id": task_id} for task_id in ("a", "a", "b", "c")]
+        rows = RolloutCollectionHelper().preprocess_examples(examples, task_ids=["c", "a"], num_repeats=2)
+        assert [r["task_id"] for r in rows] == ["a", "a", "c", "c"]
+
+    def test_unknown_task_id_fails(self) -> None:
+        with pytest.raises(ConfigError, match="No input rows for task ids"):
+            RolloutCollectionHelper().preprocess_examples([{**self._ts_row(), "task_id": "a"}], task_ids=["b"])
+
 
 class TestTurnsFromModelCalls:
     """Turns come from captured model calls when the agent reports no turns of its own."""

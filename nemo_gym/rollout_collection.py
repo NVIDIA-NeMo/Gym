@@ -26,7 +26,7 @@ import time
 import warnings
 from asyncio import Future, Semaphore
 from collections import Counter, defaultdict, deque
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
@@ -128,6 +128,7 @@ from nemo_gym.server_utils import (
 )
 from nemo_gym.skills import SkillsConfig, load_skill_directory
 from nemo_gym.task_materialization import TASK_ID_FIELDS
+from nemo_gym.task_selection import select_tasks
 from nemo_gym.token_id_capture import (
     TokenCaptureStore,
     TokenIdCaptureConfig,
@@ -2596,6 +2597,7 @@ class RolloutCollectionHelper(BaseModel):
         num_repeats: Union[int, Dict[str, int]] = 1,
         num_repeats_add_seed: Union[bool, Dict[str, bool]] = False,
         global_config_dict: Optional[DictConfig] = None,
+        task_ids: Optional[Sequence[str]] = None,
     ) -> List[Dict]:
         """Apply run-level routing and repetition to caller-held rows.
 
@@ -2606,8 +2608,9 @@ class RolloutCollectionHelper(BaseModel):
 
         Pass ``global_config_dict`` (the merged config) to also resolve task_source-only rows to
         their agents here; leave it None to defer that to ``run_examples``, which does it against
-        the head server's config. Input rows are not mutated; the expanded, stamped copies are
-        returned.
+        the head server's config. Pass ``task_ids`` to keep only those tasks, selected by the id
+        stored in each row (see ``nemo_gym.task_selection.select_tasks``), each task once before
+        repetition. Input rows are not mutated; the expanded, stamped copies are returned.
         """
         config = RolloutCollectionConfig(
             input_jsonl_fpath="<in-memory>",
@@ -2617,9 +2620,10 @@ class RolloutCollectionHelper(BaseModel):
             num_repeats=num_repeats,
             num_repeats_add_seed=num_repeats_add_seed,
         )
+        selected = range(len(examples)) if task_ids is None else select_tasks(examples, task_ids)
         raw_rows = [
-            (idx, orjson.dumps(row, option=orjson.OPT_SORT_KEYS).decode(), row.copy())
-            for idx, row in enumerate(examples)
+            (idx, orjson.dumps(examples[idx], option=orjson.OPT_SORT_KEYS).decode(), examples[idx].copy())
+            for idx in selected
         ]
         rows = self._preprocess_raw_rows(raw_rows, config)
         if global_config_dict is not None:
