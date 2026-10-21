@@ -112,6 +112,11 @@ Keep `create.skip_health_check: false` to avoid commands racing sandbox readines
 Keep `create.timeout_s` above the task's `ready_timeout_s`: the shipped mini-SWE
 values are 1500 and 1200 seconds respectively. Adjust them together.
 
+When `create.timeout_s` expires or the caller cancels, the provider stops waiting but lets the
+create request finish, then deletes the sandbox it made. Keep `create.request_timeout_s` longer
+than the server takes to create a sandbox so that answer arrives: a request cut off before the
+server answers can leave its sandbox running until its TTL.
+
 Run an agent with the provider config by passing it alongside the agent and model configs:
 
 ```bash
