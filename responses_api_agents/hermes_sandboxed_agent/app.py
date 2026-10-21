@@ -14,6 +14,7 @@ from uuid import uuid4
 from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field
 
+from nemo_gym._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER
 from nemo_gym.agent_utils import process_supervisor
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
@@ -361,6 +362,8 @@ class HermesSandboxedAgent(SimpleResponsesAPIAgent):
                     url_path="/verify",
                     json=body.model_dump(mode="json") | {"response": response.model_dump(mode="json")},
                     cookies=cookies,
+                    # The finally block closes the session, so the resources server keeps tracking it until then.
+                    headers={CHECKPOINT_CLOSE_FOLLOWS_HEADER: "1"},
                 )
                 await raise_for_status(verified)
                 result = await get_response_json(verified)

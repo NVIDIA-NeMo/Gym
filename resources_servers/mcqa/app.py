@@ -384,6 +384,10 @@ def _parse_answer_with_custom_regexes(
 
 
 class MCQAResourcesServer(SimpleResourcesServer):
+    # Each verification matches the chosen option against the request: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     config: MCQAResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:

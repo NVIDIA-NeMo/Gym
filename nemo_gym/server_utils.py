@@ -60,6 +60,7 @@ from omegaconf import DictConfig, OmegaConf, open_dict
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 from requests.exceptions import ConnectionError
 from starlette.middleware.sessions import SessionMiddleware
+from starlette.routing import Match
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from uvicorn.protocols.http.httptools_impl import HttpToolsProtocol
 
@@ -86,7 +87,19 @@ from nemo_gym.global_config import (
     get_global_config_dict,
 )
 from nemo_gym.profiling import Profiler
-from nemo_gym.rollout_correlation import current_rollout_id, maybe_rollout_id_from_run_body
+from nemo_gym.rollout_correlation import (
+    ROUTED_PATH_STATE_KEY,
+    current_rollout_id,
+    maybe_rollout_id_from_run_body,
+    rollout_context,
+)
+from nemo_gym.session_routing import (
+    SESSION_CLAIM_SCOPE_KEY,
+    SESSION_ID_SCOPE_KEY,
+    SESSION_SOCKET_DIR_ENV,
+    create_session_socket_dir,
+    install_session_routing,
+)
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, safe_set_span_attributes
 from nemo_gym.telemetry.connection_pool import (
     QueueTimedTCPConnector,
@@ -102,6 +115,12 @@ from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.telemetry.startup import ServerStartupTimeline
 
 
+try:
+    from opentelemetry import context as _otel_context
+except ImportError:  # the telemetry extra is optional; without the SDK there is no span context to isolate
+    _otel_context = None
+
+
 logger = logging.getLogger(__name__)
 
 _GLOBAL_AIOHTTP_CLIENT: Union[None, ClientSession] = None
@@ -115,6 +134,8 @@ _VALIDATION_ERROR_LOG_BODY_CHARS = 4096
 _VALIDATION_ERROR_LOG_MAX_ERRORS = 20
 _VALIDATION_ERROR_LOG_FIELD_CHARS = 256
 _VALIDATION_ERROR_LOG_LOC_ITEMS = 8
+# Bound the rendered error summaries in the log message to 4 KiB.
+_VALIDATION_ERROR_LOG_ERRORS_CHARS = 4096
 
 
 def _escaped_log_text(value: str, max_chars: int) -> tuple[str, bool]:
@@ -177,10 +198,29 @@ def _validation_error_summaries(errors: list[dict[str, Any]]) -> tuple[list[dict
     return summaries, truncated
 
 
+def _validation_errors_log_text(error_summaries: list[dict[str, Any]]) -> tuple[str, bool]:
+    """Render the error summaries for the log message, bounded by ``_VALIDATION_ERROR_LOG_ERRORS_CHARS``."""
+    # Custom validator messages can echo credentials from headers, queries, paths, or cookies.
+    # Keep their type and location visible without copying their messages into the default log.
+    message_summaries = [
+        summary if summary["loc"] and summary["loc"][0] == "body" else {key: summary[key] for key in ("type", "loc")}
+        for summary in error_summaries
+    ]
+    rendered = json.dumps(message_summaries, ensure_ascii=True, separators=(",", ":"))
+    if len(rendered) <= _VALIDATION_ERROR_LOG_ERRORS_CHARS:
+        return rendered, False
+    suffix = "...[truncated]"
+    return rendered[: _VALIDATION_ERROR_LOG_ERRORS_CHARS - len(suffix)] + suffix, True
+
+
 async def _log_validation_exception(request: Request, exc: RequestValidationError) -> None:
     errors = exc.errors()
     error_summaries, errors_truncated = _validation_error_summaries(errors)
-    errors_suffix = " ...[truncated]" if errors_truncated else ""
+    # The summaries are also attached as ``extra``, but the default formatter drops extras,
+    # so render them into the message too: a 422 log line should say which field failed.
+    errors_text, errors_text_truncated = _validation_errors_log_text(error_summaries)
+    errors_log_truncated = errors_truncated or errors_text_truncated
+    errors_suffix = " ...[truncated]" if errors_log_truncated else ""
     extra = {
         "validation_error_count": len(errors),
         "validation_errors": error_summaries,
@@ -192,9 +232,11 @@ async def _log_validation_exception(request: Request, exc: RequestValidationErro
     )
     if not has_body_error:
         logger.warning(
-            "Request validation failed; validation_error_count=%d validation_errors_truncated=%s%s",
+            "Request validation failed; validation_error_count=%d validation_errors=%s "
+            "validation_errors_truncated=%s%s",
             len(errors),
-            errors_truncated,
+            errors_text,
+            errors_log_truncated,
             errors_suffix,
             extra=extra,
         )
@@ -205,9 +247,10 @@ async def _log_validation_exception(request: Request, exc: RequestValidationErro
     except Exception:
         logger.warning(
             "Request validation failed; request body unavailable; "
-            "validation_error_count=%d validation_errors_truncated=%s%s",
+            "validation_error_count=%d validation_errors=%s validation_errors_truncated=%s%s",
             len(errors),
-            errors_truncated,
+            errors_text,
+            errors_log_truncated,
             errors_suffix,
             extra=extra,
         )
@@ -227,12 +270,13 @@ async def _log_validation_exception(request: Request, exc: RequestValidationErro
     )
     logger.warning(
         "Request validation failed; request_body_size_bytes=%d request_body_truncated=%s request_body_prefix=%s "
-        "validation_error_count=%d validation_errors_truncated=%s%s",
+        "validation_error_count=%d validation_errors=%s validation_errors_truncated=%s%s",
         len(body),
         body_truncated,
         escaped_prefix,
         len(errors),
-        errors_truncated,
+        errors_text,
+        errors_log_truncated,
         errors_suffix,
         extra=extra,
     )
@@ -833,8 +877,7 @@ class ServerClient(BaseModel):
                 model = config.get("model_server") or {}
                 if model.get("name") != model_server_name or model.get("type") != "responses_api_models":
                     continue
-                # Nested harnesses are keyed by directory path (e.g. `conversational_tool_use/simulation`).
-                package = import_module(f"responses_api_agents.{harness.replace('/', '.')}")
+                package = import_module(f"responses_api_agents.{harness}")
                 header = getattr(package, "_assistant_message_header", None)
                 if header is not None:
                     headers.add(header.lower())
@@ -1238,6 +1281,81 @@ def _telemetry_server_type(server_cls: Type) -> Optional[str]:
     return None
 
 
+def _cancelled_request_route(scope: Scope) -> str:
+    """Return a registered route template, never a path containing request or rollout IDs."""
+    route = scope.get("route")
+    if route is not None:
+        return getattr(route, "path_format", "<unmatched>")
+
+    # Prefix middleware copies the scope, but shares its actual routed path in state.
+    # Respect each server's prefix rules and resolve only registered templates.
+    path = scope.get("state", {}).get(ROUTED_PATH_STATE_KEY, scope["path"])
+    routed_scope = {**scope, "path": path}
+    for candidate in getattr(scope.get("app"), "routes", ()):
+        match, _ = candidate.matches(routed_scope)
+        if match == Match.FULL:
+            return getattr(candidate, "path_format", "<unmatched>")
+    return "<unmatched>"
+
+
+class RequestContextIsolationMiddleware:
+    """Start every request from a clean context, whatever task uvicorn started it from.
+
+    uvicorn starts a *pipelined* request's task from inside the previous request's task
+    (``on_response_complete`` → ``loop.create_task``), so that task inherits the previous
+    request's contextvars. The OTel ASGI instrumentation, which runs outermost, has the previous
+    request's server span current at that point; for the new request it sees a current span,
+    skips ``traceparent`` extraction, and files the request as an INTERNAL child of the previous
+    one, under the previous rollout's trace. Pipelining happens whenever a client reuses a
+    kept-alive connection before this server has sent the terminating body message, which
+    Starlette's ``BaseHTTPMiddleware`` sends late.
+
+    Installed outside the instrumentor (see ``install_request_context_isolation``), this resets
+    the OTel context for the request's duration, so the instrumentor extracts the inbound
+    ``traceparent``. It also clears the rollout id. Today that is a guard only: Gym's
+    ``BaseHTTPMiddleware`` layers run the rollout middleware, ``/run`` and the handlers in a
+    child task, so a rollout id set there does not reach the task uvicorn copies; the guard
+    keeps that true if those layers are ever replaced by plain ASGI middleware.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        otel_token = _otel_context.attach(_otel_context.Context()) if _otel_context is not None else None
+        try:
+            with rollout_context(None):
+                await self.app(scope, receive, send)
+        finally:
+            if otel_token is not None:
+                _otel_context.detach(otel_token)
+
+
+def install_request_context_isolation(app: FastAPI) -> None:
+    """Wrap the complete middleware stack, instrumentation included, in context isolation.
+
+    `add_middleware` is not enough: the FastAPI instrumentor installs its middleware by
+    overriding `build_middleware_stack`, so it always ends up outside anything added that way.
+    Wrapping the build the same way, after instrumentation, puts isolation outside the
+    instrumentor, which is the only place it works: the instrumentor must see an empty context
+    so it extracts `traceparent`, and the handlers must still see the server span the
+    instrumentor then makes current. Call it after `instrument_app_for_telemetry`.
+    """
+    if getattr(app.state, "nemo_gym_request_context_isolation_installed", False):
+        return
+    app.state.nemo_gym_request_context_isolation_installed = True
+    build_inner = app.build_middleware_stack
+
+    def build_middleware_stack() -> ASGIApp:
+        return RequestContextIsolationMiddleware(build_inner())
+
+    app.build_middleware_stack = build_middleware_stack  # type: ignore[method-assign]
+    app.middleware_stack = None
+
+
 class ClientDisconnectCancellationMiddleware:
     """Cancel an in-flight HTTP request when its client disconnects."""
 
@@ -1267,17 +1385,23 @@ class ClientDisconnectCancellationMiddleware:
         received_messages: asyncio.Queue[Message] = asyncio.Queue()
         client_disconnected = asyncio.Event()
         response_complete = asyncio.Event()
+        debug = is_global_aiohttp_client_request_debug_enabled()
+        started_at = time.monotonic() if debug else None
+        response_started = False
 
         async def receive_message() -> Message:
             return await received_messages.get()
 
         async def send_message(message: Message) -> None:
+            nonlocal response_started
             if client_disconnected.is_set():
                 return
 
             if counts is not None and message["type"] == "http.response.start":
                 counts.count_response(message["status"])
             await send(message)
+            if message["type"] == "http.response.start":
+                response_started = True
             if message["type"] == "http.response.body" and not message.get("more_body", False):
                 response_complete.set()
 
@@ -1309,13 +1433,18 @@ class ClientDisconnectCancellationMiddleware:
                     client_disconnected.set()
                     self.num_cancelled += 1
                     if counts is not None:
-                        counts.cancelled += 1
-                    if is_global_aiohttp_client_request_debug_enabled() or self.num_cancelled % 100 == 0:
+                        counts.count_cancellation(_cancelled_request_route(scope), response_started=response_started)
+                    if debug or self.num_cancelled % 100 == 0:
                         client = scope.get("client")
                         client_address = f"{client[0]}:{client[1]}" if client else "-:-"
+                        detail = ""
+                        if started_at is not None:
+                            elapsed_s = time.monotonic() - started_at
+                            phase = "response_started" if response_started else "before_response_start"
+                            detail = f" after {elapsed_s:.1f}s {phase}"
                         print(
                             f'{client_address} - "{scope["method"]} {scope["path"]}" '
-                            f"499 CLIENT DISCONNECTED ({self.num_cancelled} total for this server worker)"
+                            f"499 CLIENT DISCONNECTED{detail} ({self.num_cancelled} total for this server worker)"
                         )
                     task_group.cancel_scope.cancel()
                     return
@@ -1394,10 +1523,27 @@ class SimpleServer(BaseServer):
     # Servers that use Ray must declare `ray_enabled = True` on the class their entrypoint runs. Gym reads it
     # before launch to decide whether to start Ray, and connects only those servers to it.
     ray_enabled: ClassVar[bool] = False
+    # Whether this server keeps state per session,
+    # so that with several uvicorn workers a session's requests must reach the worker that created it.
+    # See nemo_gym.session_routing.
+    routes_sessions_to_owner: ClassVar[bool] = False
+
+    def claimed_session_routing(self) -> dict[str, Any]:
+        """Arguments to ``install_session_routing``: where requests name their session, and how long claims last.
+
+        A server that sets ``routes_sessions_to_owner`` implements it.
+        """
+        raise NotImplementedError(f"{type(self).__name__} routes sessions but does not say how they are named")
 
     @abstractmethod
     def setup_webserver(self) -> FastAPI:
         pass
+
+    def setup_checkpoint_participant(self, app: FastAPI) -> None:
+        """Take part in partial-rollout checkpoints on the app ``setup_webserver`` built, if it does not yet.
+
+        Called for every server, so a server whose ``setup_webserver`` builds its own app takes part too.
+        """
 
     def setup_telemetry(self) -> None:
         """Initialise this process's nemo-lens telemetry. Idempotent, once per process.
@@ -1459,9 +1605,34 @@ class SimpleServer(BaseServer):
         @app.middleware("http")
         async def add_session_id(request: Request, call_next):  # pragma: no cover
             # Always assign so Starlette 1.0+ marks session.modified=True and re-sends Set-Cookie.
-            request.session[SESSION_ID_KEY] = request.session.get(SESSION_ID_KEY, str(uuid4()))
+            # A new session takes the ID the session router chose, if any (see nemo_gym.session_routing):
+            # a typed resources seed's resources_session_id, or an ID the router minted.
+            new_session_id = request.scope.get(SESSION_ID_SCOPE_KEY) or str(uuid4())
+            claim = request.scope.get(SESSION_CLAIM_SCOPE_KEY)
+            session = request.session
+            minted = SESSION_ID_KEY not in session
+            session[SESSION_ID_KEY] = session.get(SESSION_ID_KEY, new_session_id)
+            if claim is None:
+                return await call_next(request)
 
+            # With several workers, a session nobody claims, new or named by a cookie whose claim ended,
+            # is claimed only if the handler uses it, before the reply leaves this worker,
+            # so the client's next request finds the claim.
+            # Starlette's session records each access through request.session; only the handler's count from here.
+            tracks_access = hasattr(session, "mark_accessed")
+            if tracks_access:
+                session.accessed = False
             response: Response = await call_next(request)
+            used = session.accessed if tracks_access else True
+            if tracks_access:
+                # The reply keeps its Vary: Cookie header, as for any request that reads the session.
+                session.mark_accessed()
+            if used and not claim():
+                # Another worker claimed the same ID meanwhile; serving the request here would split the session.
+                return JSONResponse({"detail": "This session's ID is already claimed. Retry it."}, status_code=409)
+            if not used and minted:
+                # No cookie names an ID that nothing holds, so a later request cannot name an unclaimed session.
+                del session[SESSION_ID_KEY]
             return response
 
         session_middleware_key = self.get_session_middleware_key()
@@ -1614,13 +1785,18 @@ repr(e): {repr(e)}"""
         app = server.setup_webserver()
         startup.mark("setup_webserver")
         observe_app_event_loop(app, "server")
+        server.setup_checkpoint_participant(app)
         # After the app is fully built so subclass routes are present. Only resources servers expose tools over MCP,
         # so gating the lazy import on their config keeps the MCP SDK out of agent/model processes that never need it.
+        mcp_token_routing = {}
         if getattr(getattr(server, "config", None), "expose_tools_over_mcp", False):
-            from nemo_gym.mcp_auto_exposure import maybe_auto_expose
+            from nemo_gym.mcp_auto_exposure import TOKEN_HEADER, maybe_auto_expose, session_token_serializer
 
             maybe_auto_expose(server, app)
             startup.mark("expose_tools_over_mcp")
+            mcp_token_routing = dict(
+                mcp_token_header=TOKEN_HEADER, mcp_token_serializer=session_token_serializer(server)
+            )
         server.setup_liveness(app)
         server.set_ulimit()
         server.prefix_server_logs()
@@ -1632,6 +1808,22 @@ repr(e): {repr(e)}"""
         if is_main_fastapi_proc:
             report_connection_pool_capacity(connection_pool_config, pool_capacity, visible=True)
         server.setup_exception_middleware(app)
+        # A worker of a multi-worker server serves a private socket in this directory and claims sessions in it.
+        # The main process of a multi-worker server never serves the app.
+        session_socket_dir = getenv(SESSION_SOCKET_DIR_ENV) if not is_main_fastapi_proc else None
+        is_multi_worker_main_proc = is_main_fastapi_proc and (server.config.num_workers or 1) > 1
+        if server.routes_sessions_to_owner and not is_multi_worker_main_proc:
+            # Outside SessionMiddleware and the exception middleware:
+            # a forwarded request is handled only by the worker that claims its session.
+            session_cookie = server.get_session_middleware_key()
+            install_session_routing(
+                app,
+                socket_dir=session_socket_dir,
+                session_cookie=session_cookie,
+                secret_key=session_cookie,
+                **mcp_token_routing,
+                **server.claimed_session_routing(),
+            )
         # Register last so cancellation wraps the complete request stack.
         server.setup_cancellation_middleware(app)
         # Must precede uvicorn.run: Starlette refuses add_middleware once the app has
@@ -1639,6 +1831,9 @@ repr(e): {repr(e)}"""
         # extracts an inbound `traceparent` and parents this server's SERVER span to the
         # caller's CLIENT span.
         server.instrument_app_for_telemetry(app)
+        # After the instrumentor and outermost of all, so the instrumentor runs inside a clean
+        # context even when uvicorn started this request's task from the previous request's.
+        install_request_context_isolation(app)
 
         app.exception_handler(RequestValidationError)(_validation_exception_handler)
 
@@ -1693,6 +1888,9 @@ repr(e): {repr(e)}"""
             set_is_nemo_gym_fastapi_worker()
             set_is_nemo_gym_fastapi_entrypoint(str(relative_fpath))
             set_nemo_gym_fastapi_num_workers(server.config.num_workers)
+            if is_main_fastapi_proc and server.routes_sessions_to_owner:
+                # The workers uvicorn spawns inherit this, and each serves a private socket in it.
+                environ[SESSION_SOCKET_DIR_ENV] = create_session_socket_dir()
 
             uvicorn_kwargs["app"] = f"{module_import_str}:app"
             uvicorn_kwargs["workers"] = server.config.num_workers

@@ -32,6 +32,8 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseInput,
     NeMoGymResponseOutputItem,
     NeMoGymResponseOutputMessage,
+    NeMoGymResponseUsage,
+    accumulate_response_usage,
 )
 from resources_servers.aviary.schemas import (
     AviaryAgentVerifyRequest,
@@ -75,6 +77,13 @@ class AviaryAgentConfig(BaseResponsesAPIAgentConfig):
 
     done_if_no_tool_calls: bool = Field(
         default=True, description="If True, end the rollout if the model does not call any tools."
+    )
+    generate_final_response_after_done: bool = Field(
+        default=False,
+        description="If True, make one final model call after the environment returns done. "
+        "The terminal observation is included in the model context, tools are disabled, "
+        "and the final model output is not sent back to the environment. "
+        "Hypotest suppresses answer correctness feedback for these sessions.",
     )
 
     collapse_old_env_states: bool = Field(
@@ -125,10 +134,13 @@ class AviaryAgent(SimpleResponsesAPIAgent):
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential_jitter(initial=5))
     async def _seed_session(self, task_idx: int) -> AviarySeedSessionResponse:
+        seed_request = {"task_idx": task_idx}
+        if self.config.generate_final_response_after_done:
+            seed_request["suppress_answer_feedback"] = True
         reset_response = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/seed_session",
-            json={"task_idx": task_idx},
+            json=seed_request,
         )
         reset_response.raise_for_status()
         seed_session_response = AviarySeedSessionResponse.model_validate(await reset_response.json())
@@ -151,16 +163,22 @@ class AviaryAgent(SimpleResponsesAPIAgent):
 
         env_id = seed_session_response.env_id
         model_response: NeMoGymResponse | None = None
+        usage: NeMoGymResponseUsage | None = None
         agent_state_history: list[NeMoGymResponseInput] = []
         all_messages: list[NeMoGymResponseOutputItem] = []
         model_server_cookies = None
 
         step = 0
+        final_response_pending = False
         try:
             while True:
-                if self.config.max_steps is not None and step >= self.config.max_steps:
+                is_final_response_turn = final_response_pending
+                final_response_pending = False
+
+                if self.config.max_steps is not None and step >= self.config.max_steps and not is_final_response_turn:
                     break
-                step += 1
+                if not is_final_response_turn:
+                    step += 1
                 successful_transition = True
 
                 # Sample action from model
@@ -187,6 +205,7 @@ class AviaryAgent(SimpleResponsesAPIAgent):
                 except ValidationError as e:
                     logger.warning(f"Error validating model response: {e!r}. Response: {model_response_json!r}.")
                     break
+                usage = accumulate_response_usage(usage, model_response.usage)
 
                 # Parse model response
                 model_output = model_response.output
@@ -197,8 +216,17 @@ class AviaryAgent(SimpleResponsesAPIAgent):
                     o for o in model_output if o.type == "message" and o.role == "assistant"
                 ]
                 done = False
+                environment_done = False
 
-                if not all_fn_calls and all_output_messages:
+                if is_final_response_turn:
+                    if all_fn_calls:
+                        logger.warning(
+                            "Model emitted tool calls during its post-terminal response; "
+                            "ignoring them and ending the rollout."
+                        )
+                    obs = []
+                    done = True
+                elif not all_fn_calls and all_output_messages:
                     if self.config.done_if_no_tool_calls:
                         done = True
                         obs = []
@@ -223,7 +251,8 @@ class AviaryAgent(SimpleResponsesAPIAgent):
                     )
                     env_response = AviaryStepResponse.model_validate(await raw_env_response.json())
                     obs = env_response.obs
-                    done = env_response.done
+                    environment_done = env_response.done
+                    done = environment_done
 
                 agent_state = self.update_agent_state(agent_state, model_output, obs, successful_transition)
                 if self.config.return_transitions:
@@ -232,6 +261,11 @@ class AviaryAgent(SimpleResponsesAPIAgent):
                     all_messages.extend(model_output)
                     if successful_transition:
                         all_messages.extend(obs)
+
+                if environment_done and self.config.generate_final_response_after_done:
+                    agent_state = agent_state.model_copy(update={"tools": [], "tool_choice": "none"})
+                    final_response_pending = True
+                    continue
 
                 if done:
                     break
@@ -250,6 +284,8 @@ class AviaryAgent(SimpleResponsesAPIAgent):
             "group_id": str(req.task_idx),
             "contains_transitions": self.config.return_transitions,
             "output": agent_state_history if self.config.return_transitions else all_messages,
+            # The base response is the last model call; usage covers every call in the episode.
+            "usage": usage,
         }
         output = AviaryNeMoGymResponse.model_validate(model_response.model_dump() | output_overrides)
         return output

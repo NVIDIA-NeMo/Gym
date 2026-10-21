@@ -14,7 +14,7 @@
 
 """Provider-facing sandbox protocol."""
 
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -92,6 +92,26 @@ class SandboxResources:
 
 
 @dataclass(frozen=True)
+class SandboxSidecarSpec:
+    """An extra container started with the sandbox from its own image.
+
+    The sidecar has its own filesystem. Start services in it with ``AsyncSandbox.sidecar(name).exec``.
+    How the sandbox reaches a sidecar over the network is provider-specific.
+    """
+
+    name: str
+    image: str
+    env: dict[str, str] = field(default_factory=dict)
+    resources: SandboxResources | Mapping[str, Any] = field(default_factory=SandboxResources)
+
+    def __post_init__(self) -> None:
+        if not self.name or not self.image:
+            raise ValueError("A sandbox sidecar needs a name and an image")
+        if not isinstance(self.resources, SandboxResources):
+            object.__setattr__(self, "resources", SandboxResources.from_mapping(self.resources))
+
+
+@dataclass(frozen=True)
 class SandboxSpec:
     """Sandbox creation request."""
 
@@ -106,10 +126,24 @@ class SandboxSpec:
     entrypoint: list[str] | None = None
     provider_options: dict[str, Any] = field(default_factory=dict)
     ports: tuple[int, ...] | list[int] = field(default_factory=tuple)
+    # Extra containers started with the sandbox (mappings are accepted); needs a provider that
+    # implements `SupportsSandboxSidecars`.
+    sidecars: tuple[SandboxSidecarSpec, ...] | list[SandboxSidecarSpec | Mapping[str, Any]] = field(
+        default_factory=tuple
+    )
 
     def __post_init__(self) -> None:
         if not isinstance(self.resources, SandboxResources):
             object.__setattr__(self, "resources", SandboxResources.from_mapping(self.resources))
+        if not isinstance(self.sidecars, (list, tuple)):
+            raise TypeError("Sandbox sidecars must be a list or tuple of sidecar specs or mappings")
+        sidecars = tuple(
+            sidecar if isinstance(sidecar, SandboxSidecarSpec) else SandboxSidecarSpec(**sidecar)
+            for sidecar in self.sidecars
+        )
+        if len({sidecar.name for sidecar in sidecars}) != len(sidecars):
+            raise ValueError("Sandbox sidecar names must be unique")
+        object.__setattr__(self, "sidecars", sidecars)
         if not isinstance(self.ports, (list, tuple)):
             raise TypeError("Sandbox ports must be a list or tuple of TCP port numbers")
         normalized_ports: list[int] = []
@@ -319,6 +353,34 @@ class SupportsSandboxEndpoint(Protocol):
 
     async def endpoint(self, handle: SandboxHandle, port: int) -> SandboxEndpoint:
         """Resolve a declared service port to a caller-reachable endpoint."""
+        ...
+
+
+@runtime_checkable
+class SupportsSandboxSidecars(Protocol):
+    """Optional provider capability to run sidecar containers next to the sandbox.
+
+    The provider creates the sidecars declared in ``SandboxSpec.sidecars`` together with the sandbox, then runs
+    commands in them and reads files from them through these calls. Commands run as an argv without a shell,
+    because sidecar images can be distroless.
+    """
+
+    async def sidecar_exec(
+        self,
+        handle: SandboxHandle,
+        sidecar: str,
+        argv: list[str],
+        *,
+        timeout_s: int | float,
+        on_stdout: Callable[[str], None] | None = None,
+    ) -> SandboxExecResult:
+        """Run ``argv`` in ``sidecar``; ``on_stdout`` receives stdout text as it arrives, for long-running services."""
+        ...
+
+    async def download_sidecar_file(
+        self, handle: SandboxHandle, sidecar: str, source_path: str, target_path: Path
+    ) -> None:
+        """Download one file from ``sidecar`` to the local filesystem."""
         ...
 
 

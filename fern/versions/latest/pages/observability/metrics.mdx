@@ -11,14 +11,12 @@ is deliberately absent and why.
 These metrics answer "how is this software behaving?" — where time goes, what failed, how
 a configuration performs on hardware you do not control.
 
-They do not answer "how is my run doing?" Reward, accuracy, and benchmark scores are
-experiment telemetry. They belong in Weights & Biases or MLflow, which are built for
-comparing runs and keep data for the lifetime of a project. NeMo Gym already reports them
-through `AggregateMetricsMixin` and continues to do so, unchanged.
-
-Mirroring reward into OpenTelemetry would put a number in a system that aggregates across
-every deployment and retains for weeks. That is the wrong home for it, and the two systems
-would disagree the first time one dropped a sample.
+Benchmark scores such as pass@k are experiment telemetry. They belong in Weights & Biases or
+MLflow, which are built for comparing runs and keep data for the lifetime of a project. NeMo Gym
+reports them through `AggregateMetricsMixin`, unchanged. What NeMo Gym does export is the reward
+of each scored rollout as it arrives, so a broken run (all zeros, a sudden drop, many masked
+samples) shows up while it is still running. See
+[What the Reward Metrics Show](#what-the-reward-metrics-show).
 
 ## Metrics NeMo Gym Emits
 
@@ -33,6 +31,7 @@ would disagree the first time one dropped a sample.
 | `gym.http.connection_pool.connect_total` | Observable counter | count | All outbound aiohttp connection attempts (`connect()` calls), including attempts that later fail or are abandoned. |
 | `gym.rollout.completed_total` | Counter | count | Rollout attempts the collection driver finished handling, by outcome. See below. |
 | `gym.http.connection_pool.connect_duration_ms` | Histogram | ms | Time to open one new pooled connection, including DNS, TCP, and TLS setup. Reused connections record nothing. |
+| `gym.rollout.rewarded_total` | Counter | count | Scored rollout attempts that carry a reward, by reward range. See below. |
 | `gym.server.memory.usage` | Gauge | bytes | Current RSS or PSS for one managed server and its descendants. |
 | `gym.server.memory.sampled_peak` | Gauge | bytes | Largest value observed by the sampler for one managed server and its descendants. |
 | `gym.server.processes` | Gauge | count | Processes currently attributed to one managed server. |
@@ -65,6 +64,25 @@ A failed `/run` is counted as `failed` with class `agent_request_failed` only wh
 `route_failures_to_sidecar` is on; otherwise it aborts the run. Only the serving collection path
 records the counter: `gym eval run --no-serve`, direct `run_examples` callers and rollout
 reverification do not.
+
+### What the Reward Metrics Show
+
+Every `scored` attempt that carries a numeric reward is counted once in
+`gym.rollout.rewarded_total`, at the same point as `gym.rollout.completed_total`. A result without a
+numeric reward is unscored, not a zero, and is not counted. Failed and omitted attempts have no
+reward.
+
+Rewards are whatever the environment's verifier returns: binary, partial credit, or a negative
+penalty. `nemo.gym.rollout.reward.range` sorts each one into `negative`, `zero`, `partial`
+(strictly between 0 and 1), `full` (exactly 1) or `above_one`.
+
+The counter also carries `nemo.gym.rollout.dispatch.name` and `nemo.gym.rollout.masked`, the
+result's `mask_sample`. Filter on `masked="false"` to leave out samples whose reward is not a valid
+measurement, as the aggregate metrics do.
+
+The share of `full` rollouts is a live view, not the benchmark score. Scores like pass@k or
+per-task averages are computed from all rollouts at the end by `/aggregate_metrics` and can differ
+from it.
 
 ### Startup Metrics
 
@@ -108,10 +126,16 @@ A Gym server answers every request on one asyncio event loop. When synchronous w
 | `process.thread.count` | Gauge | count | Threads in the process. |
 | `process.open_file_descriptor.count` | Gauge | count | Open file descriptors, where the platform reports them. |
 | `gym.server.requests.in_flight` | Up/down counter | count | HTTP requests the server is handling. |
-| `gym.server.requests.cancelled_total` | Counter | count | Requests cancelled because the client disconnected before the response finished. |
+| `gym.server.requests.cancelled_total` | Counter | count | Requests cancelled because the client disconnected before the response finished, by `http.route` and `nemo.gym.request.phase`. |
 | `gym.server.requests.unhandled_exceptions_total` | Counter | count | Requests whose handler raised an exception that no middleware turned into a response. A handled error, such as an `HTTPException`, is a response and is counted in `gym.server.responses_total` instead. |
 | `gym.server.responses_total` | Counter | count | Responses the server started sending, by `http.response.status_code`. It does not depend on the FastAPI instrumentor, so it reports 4xx and 5xx responses in any run with metrics on. |
 | `gym.http.client.requests.in_flight` | Up/down counter | count | Outbound calls through `server_utils.request` still waiting for their response headers. |
+
+`gym.server.requests.cancelled_total` uses registered route templates such as `/work/{item_id}`, never raw paths or rollout IDs. Rollout prefixes are removed before matching a template; requests without a matching route use `<unmatched>`. The phase is `before_response_start` until the ASGI `http.response.start` message has been sent, then `response_started`. A headers-only response and an SSE keepalive both count as `response_started`; this does not imply a model token was produced. Model-call capture's `ttft_ms` supplies token timing when capture is enabled.
+
+Sum the route and phase series to recover the server's cancellation total; no separate aggregate series is exported. Each server counts its own HTTP disconnect, so one cancelled rollout can count at both the agent and its downstream model server. These are request counts, not unique rollout counts.
+
+The stdout 499 line remains sampled once per 100 disconnects on every route. With `++global_aiohttp_client_request_debug=true`, the existing debug override logs each disconnect and adds elapsed seconds and response-start phase. Without debug logging, the sampled line has no timing or phase fields.
 
 The rollout driver, which is `gym eval run`, reports how much work it holds and where that work waits:
 
@@ -168,6 +192,42 @@ Host usage is `total - available`, matching the memory the operating system cann
 Descendants remain attributed while they stay in the server's Linux process tree. Detached or reparented processes and remote Ray actors are not included.
 
 Compare these series with `http.server.active_requests`, which requires traces, while increasing workload concurrency. Separate server processes export their HTTP metrics independently, so sum active requests by Gym server name when a server uses several Uvicorn workers.
+
+### Partial-Rollout Checkpoint Metrics
+
+Servers that take part in partial-rollout checkpoints, and the controller that coordinates them, report
+these metrics whenever metrics are exported, whether or not the `checkpoint` span group is enabled.
+
+| Metric | Type | Unit | Meaning |
+| --- | --- | --- | --- |
+| `gym.checkpoint.operation_duration_ms` | Histogram | ms | Wall-clock time of one checkpoint operation, by `nemo.gym.checkpoint.operation`, `nemo.gym.checkpoint.participant_kind`, and `outcome` (`ok` or `error`). |
+| `gym.checkpoint.records_total` | Counter | count | Checkpoint records a participant wrote at commit or restored, by `nemo.gym.checkpoint.operation` (`commit` or `restore`) and `nemo.gym.checkpoint.participant_kind`. |
+| `gym.checkpoint.bytes_total` | Counter | bytes | Size of the records files a participant wrote at commit or read at restore, with the same attributes. |
+| `gym.checkpoint.control_errors_total` | Counter | count | Checkpoint control calls that failed, by `nemo.gym.checkpoint.error_code`. |
+| `gym.checkpoint.events_total` | Counter | count | Events that change a checkpoint's outcome without failing a call, by `nemo.gym.checkpoint.event`. |
+
+The operation is one of a participant's control operations (`prepare`, `commit`, `restore`, `resume`,
+`retire`, or `forget`), `lease_reopen` for one attempt to reopen a participant whose lease expired, or
+`coordinate.<operation>` for one call the controller makes to every participant. The participant kind is
+the server's role in the checkpoint, such as `model`, `agent`, `resources`, or `environment`, and
+`controller` for coordination.
+
+A commit counts its records and bytes once, when its write finishes, and a restore counts them once it
+succeeds. A commit or restore that is retried therefore does not count the same records again. The bytes of
+a restore cover the whole records file it reads, while its records are only those it restores.
+
+`gym.checkpoint.control_errors_total` counts each failed call to a participant's checkpoint control routes
+once. The error code is the `code` in the reply, such as `deadline_exceeded`, `invalid_phase`, or
+`checkpoint_conflict`. A data request refused because of a checkpoint, such as a late request from a retired
+attempt, is not counted.
+
+`gym.checkpoint.events_total` has these events:
+
+| Event | Meaning |
+| --- | --- |
+| `lease_expired` | A participant's lease ran out before its controller resumed it, so the participant started reopening on its own. Counted once per checkpoint, with `nemo.gym.checkpoint.participant_kind` and `nemo.gym.checkpoint.phase`. Each attempt to reopen is a `lease_reopen` operation. |
+| `prepare_not_ready` | A prepare reached its deadline while episodes still blocked it, by `nemo.gym.checkpoint.participant_kind`. |
+| `generation_cut` | In-flight model calls a model server cut while it prepared, by `nemo.gym.checkpoint.disposition`. |
 
 ### What `gym.verify.success_rate` Measures
 

@@ -25,6 +25,12 @@ from nemo_gym.responses_streaming import (
 from .scenarios import Scenario
 
 
+SHELL_TOOLS = ("bash", "terminal", "shell", "shell_command", "exec_command", "code_exec")
+# Harnesses that end an episode on a tool call rather than on a text answer.
+FINISH_TOOLS = ("finish", "submit")
+ANSWER = "CONFORMANCE_DONE"
+
+
 @dataclass
 class Probe:
     scenario: Scenario
@@ -33,9 +39,11 @@ class Probe:
     tool_calls: list[dict] = field(default_factory=list)
     violations: list[str] = field(default_factory=list)
     verifications: list[dict] = field(default_factory=list)
+    agent_responses: list[dict] = field(default_factory=list)
     seeded: int = 0
     closed: int = 0
     finished: bool = False
+    finish_call: dict | None = None
 
     def save(self) -> None:
         """Persist independent observations even if collection fails."""
@@ -44,9 +52,11 @@ class Probe:
             "tool_calls": self.tool_calls,
             "violations": self.violations,
             "verifications": self.verifications,
+            "agent_responses": self.agent_responses,
             "seeded": self.seeded,
             "closed": self.closed,
             "finished": self.finished,
+            "finish_call": self.finish_call,
         }
         (self.directory / "witness.json").write_text(json.dumps(witness, indent=2) + "\n")
 
@@ -57,7 +67,7 @@ class Probe:
             name = function.get("name", "")
             bare = name.rsplit("__", 1)[-1]
             properties = (function.get("parameters") or {}).get("properties", {})
-            if bare in ("bash", "terminal", "shell", "shell_command", "exec_command"):
+            if bare in SHELL_TOOLS:
                 index = len(self.tool_calls)
                 token = f"probe_{uuid4().hex}"
                 marker = self.directory / f"tool-{index}.txt"
@@ -86,6 +96,29 @@ class Probe:
                 )
                 return name, args, namespaces
         raise ValueError("harness did not advertise a supported shell tool")
+
+    def _finish(self, body: dict) -> tuple[str, dict, dict] | None:
+        """Return a call to an advertised finish tool carrying the answer, or None to answer in text."""
+        tools, namespaces = flatten_namespace_tools(body.get("tools"))
+        for tool in tools:
+            function = tool.get("function", tool)
+            name = function.get("name", "")
+            if name.rsplit("__", 1)[-1] not in FINISH_TOOLS:
+                continue
+            parameters = function.get("parameters") or {}
+            properties = parameters.get("properties", {})
+            args = {}
+            for field_name in parameters.get("required", []):
+                field_type = properties.get(field_name, {}).get("type")
+                if field_type == "string":
+                    args[field_name] = ANSWER
+                elif field_type == "array":
+                    args[field_name] = []
+                else:
+                    break
+            else:
+                return name, args, namespaces
+        return None
 
     def _observe_tool_results(self, body: dict) -> None:
         history = body.get("messages", body.get("input", []))
@@ -149,6 +182,20 @@ class Probe:
                             "status": "completed",
                         }
                     ]
+                elif (finish := self._finish(body)) is not None:
+                    name, arguments, namespaces = finish
+                    self.finish_call = {"id": f"call_{uuid4().hex}", "name": name, "arguments": arguments}
+                    output = [
+                        {
+                            "type": "function_call",
+                            "id": self.finish_call["id"],
+                            "call_id": self.finish_call["id"],
+                            "name": name,
+                            "arguments": json.dumps(arguments),
+                            "status": "completed",
+                        }
+                    ]
+                    self.finished = True
                 else:
                     output = [
                         {
@@ -156,17 +203,18 @@ class Probe:
                             "id": f"msg_{uuid4().hex}",
                             "role": "assistant",
                             "status": "completed",
-                            "content": [{"type": "output_text", "text": "CONFORMANCE_DONE", "annotations": []}],
+                            "content": [{"type": "output_text", "text": ANSWER, "annotations": []}],
                         }
                     ]
                     self.finished = True
+                calls_tool = output[0]["type"] == "function_call"
                 if request.url.path.endswith("/chat/completions"):
                     message = {
                         "role": "assistant",
-                        "content": "CONFORMANCE_DONE" if self.finished else None,
+                        "content": None if calls_tool else ANSWER,
                         "reasoning_content": "Perform the prescribed check.",
                     }
-                    if not self.finished:
+                    if calls_tool:
                         message["tool_calls"] = [
                             {
                                 "id": output[0]["call_id"],
@@ -183,7 +231,7 @@ class Probe:
                             {
                                 "index": 0,
                                 "message": message,
-                                "finish_reason": "stop" if self.finished else "tool_calls",
+                                "finish_reason": "tool_calls" if calls_tool else "stop",
                             }
                         ],
                     }
@@ -264,16 +312,21 @@ class Probe:
         async def verify(request: Request) -> dict:
             body = await request.json()
             output = body.get("response", {}).get("output", [])
-            complete = any(
+            answered = any(
                 item.get("type") == "message"
                 and item.get("role") == "assistant"
-                and any(
-                    part.get("text") == "CONFORMANCE_DONE"
-                    for part in item.get("content", [])
-                    if isinstance(part, dict)
-                )
+                and any(part.get("text") == ANSWER for part in item.get("content", []) if isinstance(part, dict))
                 for item in output
             )
+            # A harness that ends on a finish tool may never emit a final assistant message.
+            finish_name = (self.finish_call or {}).get("name", "").rsplit("__", 1)[-1]
+            finished_by_tool = bool(finish_name) and any(
+                item.get("type") == "function_call"
+                and item.get("name", "").rsplit("__", 1)[-1] == finish_name
+                and ANSWER in str(item.get("arguments"))
+                for item in output
+            )
+            complete = answered or finished_by_tool
             reward = float(complete and self.scenario.expected_reward == 1.0)
             self.verifications.append({"reward": reward, "answer_seen": complete})
             self.save()

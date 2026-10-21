@@ -25,14 +25,19 @@ from time import monotonic, time, time_ns
 from typing import Any, Awaitable, ClassVar, Dict, List, Literal, Optional, Union, get_args
 
 from aiohttp.client_exceptions import ClientConnectionError, ClientResponseError
-from fastapi import HTTPException, Request, Response
+from fastapi import HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import Field, PrivateAttr, model_validator
 
 from nemo_gym._checkpoint.model import note_generation_backend, note_generation_request
 from nemo_gym.base_responses_api_model import (
+    CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
+    PROPAGATED_REFUSAL_CODE_ATTRIBUTE,
     BaseResponsesAPIModelConfig,
     Body,
     SimpleResponsesAPIModel,
+    context_overflow_error_fields,
+    is_propagated_refusal,
     start_model_execution,
 )
 from nemo_gym.openai_utils import (
@@ -85,30 +90,65 @@ def _log_unhandled_engine_error(request: Request, status: int, body: str, route:
     )
 
 
-_PROPAGATE_CONTEXT_ERROR_ATTRIBUTE = "nemo_gym_vllm_propagate_context_error"
+# Phrases an engine's 400 body uses when the request does not fit the context window. vLLM:
+# "This model's maximum context length is ..." and "Input length (N) exceeds model's maximum
+# context length (M)." (both contain "context length"), and the engine's "decoder prompt ... is
+# longer than the maximum model length". llama.cpp: two phrases a proxy may forward without the
+# error type.
+_CONTEXT_WINDOW_MARKERS = (
+    "context length",
+    "maximum model length",
+    "exceeds the available context size",
+    "is larger than the max context size",
+)
+# Phrases vLLM uses when the request's own output-token parameter is invalid ("max_tokens must be
+# at least 1", "max_completion_tokens=N cannot be greater than max_model_len"). Lowering the
+# parameter fixes these; shortening the prompt does not.
+_MAX_TOKENS_PARAMETER_MARKERS = ("max_tokens", "max_completion_tokens")
 
 
-def _is_context_length_error(error: ClientResponseError) -> bool:
-    """Recognize request overflow without swallowing runtime KV-cache failures."""
-    if error.status != 400:
-        return False
-
-    message = error.response_content.decode(errors="replace")
-    if "context length" in message or "max_tokens" in message:
+def _names_context_window(message: str) -> bool:
+    """Whether an engine's error body says the request exceeds the context window."""
+    if any(marker in message for marker in _CONTEXT_WINDOW_MARKERS):
         return True
-
     # llama.cpp supplies a dedicated error type, unlike vLLM's BadRequestError.
     try:
         payload = json.loads(message)
     except json.JSONDecodeError:
-        payload = None
+        return False
     if isinstance(payload, dict):
         payload = payload.get("error", payload)
-    if isinstance(payload, dict) and payload.get("type") == "exceed_context_size_error":
-        return True
+    return isinstance(payload, dict) and payload.get("type") == "exceed_context_size_error"
 
-    # Retain compatibility when a proxy forwards only llama.cpp's message.
-    return "exceeds the available context size" in message or "is larger than the max context size" in message
+
+def _is_context_length_error(error: ClientResponseError) -> bool:
+    """Recognize request overflow without swallowing runtime KV-cache failures.
+
+    Both a full context window and an invalid output-token parameter count: either way the
+    engine refused to generate for a length reason, and the propagation setting decides whether
+    the refusal reaches the harness or becomes an empty completion.
+    """
+    if error.status != 400:
+        return False
+    message = error.response_content.decode(errors="replace")
+    return _names_context_window(message) or any(marker in message for marker in _MAX_TOKENS_PARAMETER_MARKERS)
+
+
+def _mark_propagated_overflow(error: ClientResponseError) -> None:
+    """Mark a length refusal the server propagates, with the envelope code chosen for it.
+
+    A body that names the context window gets OpenAI's ``context_length_exceeded``, which tells
+    an OpenAI-compatible harness to compact its history and retry. A body that only names the
+    output-token parameter gets no code: compaction would not help, so the harness sees an
+    ordinary invalid request with the engine's own message. The attribute's presence is the mark,
+    so the ``None`` code marks the error all the same.
+    """
+    message = error.response_content.decode(errors="replace")
+    setattr(
+        error,
+        PROPAGATED_REFUSAL_CODE_ATTRIBUTE,
+        CONTEXT_LENGTH_EXCEEDED_ERROR_CODE if _names_context_window(message) else None,
+    )
 
 
 _TRANSPORT_LOG_CONTEXT_HEADERS = {
@@ -459,17 +499,33 @@ class VLLMModel(SimpleResponsesAPIModel):
     _tar_audio_reader: TarAudioReader = PrivateAttr(default_factory=TarAudioReader)
     _generation_cut_control_urls: Dict[str, str] = PrivateAttr(default_factory=dict)
 
+    def _should_propagate_upstream_http_error(self, error: ClientResponseError) -> bool:
+        # The shared handler answers every other engine error with the provider's raw body. A
+        # marked length refusal is let through to the middleware below, which answers with
+        # OpenAI's envelope instead: vLLM's body carries the integer code 400, which
+        # OpenAI-compatible harnesses cannot match against "context_length_exceeded".
+        return not is_propagated_refusal(error)
+
     def setup_exception_middleware(self, app) -> None:
         @app.middleware("http")
         async def context_error_middleware(request: Request, call_next):
             try:
                 return await call_next(request)
             except ClientResponseError as error:
-                if getattr(error, _PROPAGATE_CONTEXT_ERROR_ATTRIBUTE, False):
-                    return Response(
-                        content=error.response_content,
+                if is_propagated_refusal(error):
+                    # The engine's message and param are preserved verbatim inside OpenAI's error
+                    # envelope; the code says whether compacting the prompt is the remedy.
+                    message, code, param = context_overflow_error_fields(error)
+                    return JSONResponse(
+                        content={
+                            "error": {
+                                "message": message,
+                                "type": "invalid_request_error",
+                                "param": param,
+                                "code": code,
+                            }
+                        },
                         status_code=error.status,
-                        media_type="application/json",
                     )
                 raise
 
@@ -507,6 +563,8 @@ class VLLMModel(SimpleResponsesAPIModel):
                     if (self.config.endpoint_file or self.config.route_around_failing_endpoints)
                     else None
                 ),
+                # The wait budget is for outside providers; a job must notice a down model server quickly.
+                max_rate_limit_wait_seconds=0,
             )
             for base_url in self.config.base_url
         ]
@@ -1175,7 +1233,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             if _is_context_length_error(e):
                 execution["error_category"] = "context_length_exceeded"
                 if self.config.propagate_context_overflow_errors:
-                    setattr(e, _PROPAGATE_CONTEXT_ERROR_ATTRIBUTE, True)
+                    _mark_propagated_overflow(e)
                     raise
                 res = self._create_empty_chat_completion()
                 res.choices[0].finish_reason = "length"
@@ -1523,7 +1581,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             if _is_context_length_error(e):
                 execution["error_category"] = "context_length_exceeded"
                 if self.config.propagate_context_overflow_errors:
-                    setattr(e, _PROPAGATE_CONTEXT_ERROR_ATTRIBUTE, True)
+                    _mark_propagated_overflow(e)
                     raise
                 res = self._create_empty_chat_completion()
                 res.choices[0].finish_reason = "length"
@@ -1785,6 +1843,8 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         if completion_dict.get("usage") is not None:
             chat_completion_dict["usage"] = completion_dict["usage"]
+        if completion_dict.get("metrics") is not None:
+            chat_completion_dict["metrics"] = completion_dict["metrics"]
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
 
@@ -1862,6 +1922,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 api_key=self.config.api_key,
                 default_headers=self.config.default_headers,
                 max_connection_retries=self.config.endpoint_connection_retries,
+                max_rate_limit_wait_seconds=0,
             )
         ]
         # Every session re-resolves onto the new host.

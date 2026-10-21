@@ -37,6 +37,13 @@ _ROLLOUT_ID: ContextVar[Optional[str]] = ContextVar("nemo_gym_rollout_id", defau
 # Exclude leading dots because stores also use the id as a filename component.
 # Middleware uses the same pattern.
 ROLLOUT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+ROUTED_PATH_STATE_KEY = "nemo_gym.routed_path"
+
+
+def scope_with_routed_path(scope: dict[str, Any], path: str) -> dict[str, Any]:
+    """Copy the scope for routing and share the rewritten path with outer middleware."""
+    scope.setdefault("state", {})[ROUTED_PATH_STATE_KEY] = path
+    return {**scope, "path": path, "raw_path": path.encode("utf-8")}
 
 
 def maybe_rollout_id_from_run_body(body: BaseModel | Mapping[str, Any] | None) -> Optional[str]:
@@ -132,6 +139,6 @@ class RolloutContextMiddleware:
             return
 
         path = match.group("rest")
-        scope = {**scope, "path": path, "raw_path": path.encode()}
+        scope = scope_with_routed_path(scope, path)
         with rollout_context(match.group("rollout_id")):
             await self._app(scope, receive, send)

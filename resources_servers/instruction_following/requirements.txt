@@ -1,3 +1,10 @@
 -e nemo-gym[dev] @ ../../
 git+https://github.com/abukharin-nv/verifiable-instructions.git
 https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
+# IndicIFEval-Trans language-specific tokenization (MIT); checked 2026-09-23.
+indic-nlp-library==0.92
+langdetect==1.0.9
+immutabledict==4.3.1
+# Safe NLTK tokenizer resources (Apache-2.0) and concurrent setup lock (Unlicense).
+nltk>=3.10.0
+filelock
