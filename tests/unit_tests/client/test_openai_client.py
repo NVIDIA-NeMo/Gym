@@ -105,6 +105,48 @@ class TestOpenAIUtils:
         assert captured["timeout"].total == 300
         assert captured["timeout"].connect == 60
 
+    async def test_rollout_id_headers_carry_the_current_rollout(self, monkeypatch) -> None:
+        sent = []
+
+        async def fake_request(**kwargs):
+            sent.append(kwargs["headers"])
+            return SimpleNamespace(status=200)
+
+        monkeypatch.setattr(openai_client_module, "request", fake_request)
+        client = NeMoGymAsyncOpenAI(
+            api_key="abc",
+            base_url="https://example.test/v1",
+            default_headers={"X-Static": "1"},
+            rollout_id_headers=["X-Session", "X-Other-Session"],
+        )
+
+        with rollout_context("trial-1"):
+            await client._request(method="POST", url="https://example.test/v1/responses")
+        await client._request(method="POST", url="https://example.test/v1/responses")
+        with rollout_context("trial-2"):
+            await client._request(method="POST", url="https://example.test/v1/responses", headers={"X-Session": "own"})
+
+        assert sent[0]["X-Session"] == sent[0]["X-Other-Session"] == "trial-1"
+        assert sent[0]["X-Static"] == "1"
+        assert "X-Session" not in sent[1]
+        assert sent[2]["X-Session"] == "own"
+        assert sent[2]["X-Other-Session"] == "trial-2"
+
+    async def test_rollout_id_headers_are_off_by_default(self, monkeypatch) -> None:
+        sent = []
+
+        async def fake_request(**kwargs):
+            sent.append(kwargs["headers"])
+            return SimpleNamespace(status=200)
+
+        monkeypatch.setattr(openai_client_module, "request", fake_request)
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.test/v1")
+
+        with rollout_context("trial-1"):
+            await client._request(method="POST", url="https://example.test/v1/responses")
+
+        assert "X-Session" not in sent[0]
+
     async def test_request_id_names_the_rollout_inside_a_rollout_context(self, monkeypatch) -> None:
         captured = {}
 
