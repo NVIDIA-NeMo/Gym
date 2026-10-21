@@ -47,6 +47,35 @@ proxy/CAPTCHA availability, judge behavior, and exact policy serving assets
 remain part of the reproducibility contract. Direct policy comparison also
 requires those inputs to be held fixed.
 
+### Instance-pool validation on 2026-10-21
+
+Nano Omni tuned checkpoint `iter_0004622` completed **418/552 = 75.72% SR**
+on frozen Gym revision `60fa5e37cb1812e2e377ac441eac371197e15e1a`.
+All 552 task IDs have valid unique scores: 418 successes and 134 scored zeros,
+with no missing tasks, duplicate valid results, masked selected results, or
+unresolved invalid tasks. This is not the public standard Nano Omni v3 checkpoint.
+
+The run used `visual_browser` with `local_instance_pool`, 16 browser instances,
+a per-site session limit of 2, and TP8 H100 serving. Temperature was 0.1,
+top_p was 0.95, and the request-level output-token cap was omitted. The task
+file was rendered for reference date 2026-10-11 and reused unchanged during
+recovery; its SHA-256 is
+`951bfe5c328bf53859a81b6d75e45943a630fb19f2d73e8f09a4aa275af8cb6d`.
+
+This was the append-only completion of the 2026-10-20 run, not a fresh
+single-pass rerun. Recovery preserved all 275 original valid outcomes,
+including 59 scored zeros, and added 265 valid results on the first recovery
+node and 12 on its successor. Only tasks without valid outcomes were retried;
+no valid scored zero was replaced. Gym code, policy prompts, task content,
+judge logic, and the model-serving recipe stayed fixed during recovery.
+
+Automatic continuation ran the final 12 invalid tasks on a queued successor
+and obtained 12 valid scores, including 9 successes. The unused standby was
+cancelled and active GPU allocations were released. This exercised handoff
+after generation completion, not a four-hour-deadline handoff. As with the
+earlier runs, execution date and live-site conditions remain part of the
+comparison contract.
+
 The [profile YAML files](configs/) and [provenance.yaml](provenance.yaml) are
 the machine-readable authority for model-specific serving behavior and immutable
 source identity. The complete setup, smoke, full-population execution, and
