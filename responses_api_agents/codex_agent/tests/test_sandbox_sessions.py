@@ -396,11 +396,22 @@ def test_mcp_grants_reach_the_sandbox_codex_config(setup):
         # An optional direct HTTP grant stays unused rather than failing the seed.
         {"kind": "direct_http", "name": "direct.tools", "base_url": "http://resources", "required": False},
     ]
+    transcript = [json.loads(line) for line in sandbox.events.splitlines()]
+    mcp_call = {"id": "mcp-1", "type": "mcp_tool_call", "server": "gdpval_resources_server", "tool": "finish"}
+    transcript[-2:-2] = [
+        [1.5, {"type": "item.started", "item": mcp_call}],
+        [1.6, {"type": "item.completed", "item": mcp_call | {"status": "completed", "arguments": {}}}],
+    ]
+    sandbox.events = "\n".join(json.dumps(record) for record in transcript)
     with TestClient(agent.setup_webserver()) as client:
         created = client.post("/v1/agent_sessions", json=body)
         assert created.status_code == 200, created.text
         result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "Fix the code"})
         assert result.status_code == 200, result.text
+        assert [item["name"] for item in result.json()["output"] if item["type"] == "function_call"] == [
+            "exec_command",
+            "finish",
+        ]
         config = tomllib.loads(sandbox.files[f"{sandbox.directory}/home/.codex/config.toml"])
         assert config["mcp_servers"] == {
             "search-tools": {
@@ -418,7 +429,15 @@ def test_mcp_grants_reach_the_sandbox_codex_config(setup):
         payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
         # The token reaches Codex only through its config, never the command line.
         assert "token-gdpval_resources_server" not in json.dumps(payload)
-        assert client.post("/v1/agent_sessions/close", json=close_body(body["agent_session_id"])).status_code == 200
+        closed = client.post("/v1/agent_sessions/close", json=close_body(body["agent_session_id"]))
+        assert closed.status_code == 200, closed.text
+    tools = {
+        record["tool_call_id"]: record["tool_name"]
+        for record in closed.json()["agent_observations"]["records"]
+        if record["kind"] == "tool_call"
+    }
+    # Observations name an MCP call by its tool, as the response does.
+    assert tools == {"tool-1": "exec_command", "mcp-1": "finish"}
 
 
 @pytest.mark.parametrize(
@@ -519,23 +538,32 @@ def test_startup_failure_stderr_hides_the_grant_tokens(setup):
             # Codex cuts long error bodies, which can end a token early.
             "HTTP 401: {'x-nemo-gym-session-token': 'token-gd... (truncated 2048 bytes)\n"
             "authorization: Digest user=u nonce=s3cret\n"
+            "HTTP 401: x-api-key: user=alice api_key=secret-123 note=abc... (truncated 2048 bytes)\n"
+            "retry: user=ali,user=alice api_key=secret-123 note=abcdef\n"
             "Error: required MCP servers failed to initialize: gdpval_resources_server"
         )
 
     sandbox.publish = publish_with_stderr
     grant = mcp_grant()
     grant["connection"]["headers"]["Authorization"] = "Digest user=u nonce=s3cret"
+    grant["connection"]["headers"]["X-Api-Key"] = "user=alice api_key=secret-123 note=abcdef"
     body = seed().model_dump(mode="json")
     body["tool_accesses"] = [grant]
     with TestClient(agent.setup_webserver()) as client:
         assert client.post("/v1/agent_sessions", json=body).status_code == 200
         result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
+        closed = client.post("/v1/agent_sessions/close", json=close_body(body["agent_session_id"])).json()
     assert result.status_code == 502
-    detail = result.json()["detail"]
-    assert "token-gd" not in detail
-    assert "s3cret" not in detail
-    assert "X-NeMo-Gym-Session-Token: [redacted]" in detail
-    assert "'x-nemo-gym-session-token': '[redacted] (truncated" in detail
+    gap = {gap["code"]: gap["detail"] for gap in closed["agent_observations"]["gaps"]}["agent_startup_failed"]
+    for text in (result.json()["detail"], gap):
+        assert "token-gd" not in text
+        assert "s3cret" not in text
+        assert "secret-123" not in text
+        assert "X-NeMo-Gym-Session-Token: [redacted]" in text
+        assert "'x-nemo-gym-session-token': '[redacted] (truncated" in text
+        assert "x-api-key: [redacted] (truncated" in text
+        assert "retry: [redacted]\n" in text
+        assert "required MCP servers failed to initialize: gdpval_resources_server" in text
 
 
 def test_unreadable_startup_stderr_does_not_hold_the_activation(setup):

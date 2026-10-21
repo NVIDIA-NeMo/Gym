@@ -167,6 +167,33 @@ fi
     )
 
 
+def _redact(text: str, value: str) -> str:
+    """Replace each copy of ``value`` in ``text``, including a copy cut short after its first 8 characters.
+
+    Codex cuts long error bodies, which can end an echoed value early. A cut copy is replaced through its
+    last matching character and the rest of that word, so no part of a multiword value stays visible.
+    """
+    if len(value) < 8:
+        return re.sub(rf"(?<!\w){re.escape(value)}(?!\w)", "[redacted]", text)
+    spans: list[list[int]] = []
+    # Copies can overlap, so every start is checked and overlapping spans are merged.
+    for match in re.finditer(f"(?={re.escape(value[:8])})", text):
+        start = stop = match.start()
+        while stop - start < len(value) and text[stop : stop + 1] == value[stop - start]:
+            stop += 1
+        if stop - start < len(value):
+            stop = re.compile(r"[^\s'\"]*").match(text, stop).end()
+        if spans and start < spans[-1][1]:
+            spans[-1][1] = max(spans[-1][1], stop)
+        else:
+            spans.append([start, stop])
+    parts, end = [], 0
+    for start, stop in spans:
+        parts += [text[end:start], "[redacted]"]
+        end = stop
+    return "".join(parts) + text[end:]
+
+
 def _codex_mcp_server_name(name: str) -> bool:
     """Whether Codex accepts ``name`` as an MCP server name."""
     return _CODEX_MCP_SERVER_NAME.fullmatch(name) is not None
@@ -1016,8 +1043,12 @@ class CodexAgent(SimpleResponsesAPIAgent):
                         ToolCallObservation(
                             invocation_id=state.request.episode_id.capture_key,
                             tool_call_id=item_id,
-                            tool_name={"command_execution": "exec_command", "file_change": "apply_patch"}.get(
-                                item["type"], item["type"]
+                            tool_name=(
+                                item.get("tool")
+                                if item["type"] == "mcp_tool_call"
+                                else {"command_execution": "exec_command", "file_change": "apply_patch"}.get(
+                                    item["type"], item["type"]
+                                )
                             ),
                             started_at=start,
                             completed_at=observed_at,
@@ -1115,12 +1146,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             if value
         ]
         for value in sorted(values, key=len, reverse=True):
-            if len(value) < 8:
-                pattern = rf"(?<!\w){re.escape(value)}(?!\w)"
-            else:
-                # Codex cuts long error bodies, which can end a value early; its first characters still identify it.
-                pattern = rf"{re.escape(value)}|{re.escape(value[:8])}[^\s'\"]*"
-            stderr = re.sub(pattern, "[redacted]", stderr)
+            stderr = _redact(stderr, value)
         # Codex can repeat an error body of several kilobytes on one line; keep the start, which names the server.
         lines = [line if len(line) <= 500 else f"{line[:400]} ... {line[-100:]}" for line in stderr.splitlines()]
         return "\n".join(lines).strip()[-_STDERR_TAIL_CHARS:]
