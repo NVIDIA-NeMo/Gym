@@ -9,6 +9,7 @@ from copy import deepcopy
 
 from fastapi import Body, Request
 
+from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_models.vllm_model.app import VLLMModel
 
 
@@ -32,3 +33,5 @@ class OpenHandsCompatModel(VLLMModel):
 
 if __name__ == "__main__":
     OpenHandsCompatModel.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = OpenHandsCompatModel.run_webserver()

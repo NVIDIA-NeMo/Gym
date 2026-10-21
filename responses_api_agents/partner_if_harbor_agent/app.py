@@ -16,7 +16,7 @@ from pydantic import field_validator
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.sandbox.agent_tools import sandbox_server_url
-from nemo_gym.server_utils import raise_for_status
+from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint, raise_for_status
 from resources_servers.partner_if.evidence import EvidenceBundle
 from resources_servers.partner_if.grading_service import GradeRequest, GradeResponse, contract_hash
 from resources_servers.partner_if.native_evidence import captured_artifact, visible_events
@@ -146,3 +146,5 @@ class PartnerIFHarborAgent(HarborAgent):
 
 if __name__ == "__main__":
     PartnerIFHarborAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = PartnerIFHarborAgent.run_webserver()

@@ -185,6 +185,46 @@ async def test_uncaptured_llm_prerequisite_masks_dependent_if():
     assert result.items[0].blocked_by == ["file"]
 
 
+@pytest.mark.parametrize(
+    "format_depends_on,status,reward,earned", [([], "scored", 1, 1), (["file"], "unscorable", None, None)]
+)
+async def test_only_prerequisites_of_if_rubrics_gate_availability(format_depends_on, status, reward, earned):
+    contract = GradingContract.model_validate(
+        task([item("format")]).model_dump()
+        | {
+            "rubrics": [
+                item("format", depends_on=format_depends_on),
+                item("content", dimension="completion", depends_on=["file"]),
+            ],
+            # Keeps the default dimension; its artifact was never captured.
+            "prerequisites": [item("file", params={"source": "artifact:missing", "literal": "HELLO"})],
+        }
+    )
+    result = await evaluate(contract, evidence(), judge=no_judge)
+    assert result.status == status and result.reward == reward
+    assert result.dimensions["if"].points_earned == earned and result.dimensions["if"].points_possible == 1
+    assert result.dimensions["completion"].binary_score is None
+
+
+@pytest.mark.parametrize("format_depends_on", [["file"], ["relay"]])
+async def test_dependency_failure_does_not_hide_an_unavailable_prerequisite(format_depends_on):
+    contract = GradingContract.model_validate(
+        task([item("format")]).model_dump()
+        | {
+            # `format` needs `file` directly or through `relay`.
+            "rubrics": [item("format", depends_on=format_depends_on)],
+            "prerequisites": [
+                item("absent", params={"source": "answer", "literal": "ABSENT"}),
+                item("file", params={"source": "artifact:missing", "literal": "HELLO"}, depends_on=["absent"]),
+                item("relay", depends_on=["file"]),
+            ],
+        }
+    )
+    result = await evaluate(contract, evidence(), judge=no_judge)
+    assert result.prerequisites[1].raw_passed is None and result.prerequisites[1].passed is False
+    assert result.status == "unscorable" and result.reward is None
+
+
 @pytest.mark.parametrize("artifacts", ["deliverable", [""], ["deliverable", "deliverable"]])
 async def test_llm_artifact_dependencies_are_validated(artifacts):
     with pytest.raises(ValueError):

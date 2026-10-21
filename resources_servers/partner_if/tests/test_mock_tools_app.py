@@ -98,8 +98,8 @@ def plugin(monkeypatch):
     return module
 
 
-def make_server(tmp_path, backend="synthetic_tools:NotesBackend"):
-    (tmp_path / "tasks.jsonl").write_text(json.dumps(row()) + "\n")
+def make_server(tmp_path, backend="synthetic_tools:NotesBackend", task=None, **config):
+    (tmp_path / "tasks.jsonl").write_text(json.dumps(task or row()) + "\n")
     (tmp_path / "notes.json").write_text(json.dumps({"greeting": "HELLO"}))
     return api.MockToolsResourcesServer(
         config=api.MockToolsServerConfig(
@@ -111,6 +111,7 @@ def make_server(tmp_path, backend="synthetic_tools:NotesBackend"):
             fixture_path=tmp_path / "notes.json",
             tasks_path=tmp_path / "tasks.jsonl",
             judge_model_server={"type": "responses_api_models", "name": "judge"},
+            **config,
         ),
         server_client=MagicMock(spec=ServerClient),
     )
@@ -134,6 +135,12 @@ def test_backend_is_a_class_named_by_import_path(tmp_path, plugin):
     for backend in ("synthetic_tools:Missing", "missing_tools:NotesBackend"):
         with pytest.raises(ValueError, match="Cannot load tool backend"):
             make_server(tmp_path, backend=backend)
+
+
+def test_process_local_sessions_require_a_single_worker(tmp_path, plugin):
+    with pytest.raises(ValueError, match="num_workers=1"):
+        make_server(tmp_path, num_workers=2)
+    make_server(tmp_path, num_workers=1)
 
 
 class ServiceBackend(NotesBackend):
@@ -352,3 +359,24 @@ def test_http_verify_grades_backend_artifacts_and_returns_its_receipts(server):
         "responses_create_params": {"input": [{"role": "user", "content": "Other task"}], "tools": TOOLS}
     }
     assert client.post("/verify", json=changed | {"response": raw}).status_code == 409
+
+
+def test_uuid_rule_checks_assistant_messages_before_the_last_tool_result(tmp_path, plugin):
+    task = row()
+    task["verifier_metadata"]["partner_if"]["rubrics"] = [
+        {"id": "no_uuid", "constraint": "Shows no UUIDs.", "verifier": {"id": "text_no_uuid_v1"}}
+    ]
+    client = TestClient(make_server(tmp_path, task=task).setup_webserver())
+    seed = {
+        "resources_session_id": "session-one",
+        "episode_id": {"rollout_id": "r", "attempt": 0},
+        "task_id": {"taskset": "synthetic", "task_id": "smoke"},
+        "task_data": {"verifier_metadata": task["verifier_metadata"]},
+    }
+    assert client.post("/seed_session", json=seed).status_code == 200
+    found = client.post("/lookup", json={"key": "greeting"}).json()
+    # The final answer is clean; the UUID is only in assistant text before the tool result.
+    events = [answer("Opening 0f1e2d3c-4b5a-4968-8776-a5b4c3d2e1f0."), call(), output(found), answer()]
+    body = client.post("/verify", json=task | {"response": episode(events).model_dump(mode="json")}).json()
+    assert body["grading_result"]["items"][0]["raw_passed"] is False
+    assert body["reward"] == 0 and body["mask_sample"] is False

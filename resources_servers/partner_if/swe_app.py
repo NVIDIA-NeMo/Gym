@@ -102,6 +102,8 @@ class SWEIFResourcesServer(PartnerIFMetricsMixin, ScaleSWEResourcesServer):
 
     def model_post_init(self, context: object) -> None:
         super().model_post_init(context)
+        if self.config.num_workers not in (None, 1):
+            raise ValueError("Scale-SWE sandbox sessions are process-local and require num_workers=1")
         if self.config.is_verifying_golden_patch:
             raise ValueError("Golden patches are not agent instruction-following trajectories")
         register_modules(self.config.task_check_modules)

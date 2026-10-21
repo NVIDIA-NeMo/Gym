@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 import copy
 import json
-from unittest.mock import AsyncMock, patch
+import runpy
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -10,7 +12,12 @@ from pydantic import ValidationError
 
 from nemo_gym.judge import JudgeError
 from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.server_utils import (
+    IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME,
+    IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME,
+    ServerClient,
+    SimpleServer,
+)
 from resources_servers.partner_if.app import PartnerIFResourcesServer, PartnerIFResourcesServerConfig, VerifyRequest
 from resources_servers.partner_if.grading_contract import GradingContract
 from resources_servers.partner_if.grading_service import contract_hash
@@ -286,3 +293,18 @@ async def test_verifier_fixture_pins_both_reward_endpoints_without_a_judge():
         )
     assert {result.kind for result in results} == {"full_reward", "zero_reward", "malformed"}
     call.assert_not_called()
+
+
+def test_uvicorn_workers_import_a_module_level_app(monkeypatch):
+    # With num_workers > 1, each uvicorn worker imports `resources_servers.partner_if.app:app`.
+    path, name = str(Path(__file__).parents[1] / "app.py"), "resources_servers.partner_if.app"
+    started = MagicMock(return_value=object())
+    monkeypatch.setattr(SimpleServer, "run_webserver", started)
+    for key in (IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME, IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME):
+        monkeypatch.delenv(key, raising=False)
+    assert "app" not in runpy.run_path(path, run_name=name)
+    started.assert_not_called()
+    monkeypatch.setenv(IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME, "1")
+    monkeypatch.setenv(IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME, "resources_servers/partner_if/app.py")
+    assert runpy.run_path(path, run_name=name)["app"] is started.return_value
+    started.assert_called_once_with()

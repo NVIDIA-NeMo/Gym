@@ -201,6 +201,8 @@ class MockToolsResourcesServer(PartnerIFResourcesServer):
 
     def model_post_init(self, context: object) -> None:
         super().model_post_init(context)
+        if self.config.num_workers not in (None, 1):
+            raise ValueError("Mock-tool sessions are process-local and require num_workers=1")
         self._backend = load_backend(self.config.backend)(self.config.fixture_path)
         for line in self.config.tasks_path.read_text().splitlines():
             if not line.strip():

@@ -97,6 +97,25 @@ async def test_if_points_do_not_depend_on_patch_correctness(completion, answer, 
     assert result.model_dump()["task_name"] == "swe-1"
 
 
+def test_process_local_swe_sessions_require_a_single_worker():
+    from nemo_gym.server_utils import ServerClient
+    from resources_servers.partner_if.swe_app import SWEIFConfig, SWEIFResourcesServer
+
+    config = SWEIFConfig(
+        host="127.0.0.1",
+        port=8001,
+        name="swe",
+        entrypoint="swe_app.py",
+        sandbox_provider="sandbox",
+        sandbox_config={},
+        actor_system_prompt="Say HELLO.",
+        judge_model_server={"type": "responses_api_models", "name": "judge"},
+        num_workers=2,
+    )
+    with pytest.raises(ValueError, match="num_workers=1"):
+        SWEIFResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+
 def test_description_plugin_changes_description_only(tmp_path):
     import json
     import shutil

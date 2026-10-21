@@ -33,3 +33,18 @@ def test_uuid_visibility_rule_keeps_tool_identifiers_out_of_scope(answer, expect
         ],
     )
     assert checker.run(params, CheckContext(evidence=evidence))[0] is expected
+
+
+@pytest.mark.parametrize(
+    "event,expected",
+    [
+        ({"kind": "assistant", "role": "assistant", "text": "Record 0f1e2d3c-4b5a-4968-8776-a5b4c3d2e1f0."}, False),
+        ({"kind": "tool_result", "call_id": "c1", "text": '{"id": "0f1e2d3c-4b5a-4968-8776-a5b4c3d2e1f0"}'}, True),
+        ({"kind": "tool_call", "call_id": "c1", "arguments": {"id": "0f1e2d3c-4b5a-4968-8776-a5b4c3d2e1f0"}}, True),
+        ({"kind": "context", "role": "user", "text": "Open 0f1e2d3c-4b5a-4968-8776-a5b4c3d2e1f0."}, True),
+    ],
+)
+def test_uuid_rule_covers_assistant_messages_but_not_tool_traffic_or_context(event, expected):
+    checker, params = resolve(VerifierSpec(id="text_no_uuid_v1"))
+    evidence = EvidenceBundle(answer="HELLO", trajectory=[{"source_index": 0, **event}])
+    assert checker.run(params, CheckContext(evidence=evidence))[0] is expected

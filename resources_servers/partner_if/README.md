@@ -22,7 +22,8 @@ Each row has `responses_create_params` and `verifier_metadata.partner_if`, a
 
 Built-in verifiers: `llm_judge_v1` (optional `artifacts`: the captured artifacts an item
 needs; omit it to require all), `text_contains_v1` (`source`: `answer` or
-`artifact:<name>`; `literal`) and `text_no_uuid_v1` (fails if the answer contains a UUID).
+`artifact:<name>`; `literal`) and `text_no_uuid_v1` (fails if the answer or any assistant
+message contains a UUID; tool calls, tool results and context are not checked).
 
 ## Scoring
 
@@ -35,10 +36,10 @@ needs; omit it to require all), `text_contains_v1` (`source`: `answer` or
   instead; the Harbor agent sends that row, like any Harbor or grading failure, to the
   failures file.
 - These rollouts are masked (`mask_sample: true`, `failure_kind: partner_if:unscorable`):
-  - an IF item or IF prerequisite is unscorable: the judge reply is invalid or
-    incomplete, a capture the item needs is missing or failed, a live agent's trajectory
-    is incomplete or does not match its tool receipts, or an item it depends on is
-    unscorable;
+  - an IF item, or a prerequisite an IF item depends on, is unscorable: the judge reply
+    is invalid or incomplete, a capture the item needs is missing or failed, a live
+    agent's trajectory is incomplete or does not match its tool receipts, or an item it
+    depends on is unscorable;
   - on this server's `/verify`, the reply is incomplete, or, in `text_response` and
     `frozen_tool_history` modes, blank or not text-only;
   - on this server's `/verify`, the input relies on hidden context
@@ -68,7 +69,8 @@ and a concurrency of 2.
   `fixture_path` and `tasks_path`. `swe_app.py` (Scale-SWE with an OpenCode agent) and
   `responses_api_agents/partner_if_harbor_agent` also capture `live_agent` evidence.
   `responses_api_agents/partner_if_dispatcher` routes each task of a mixed benchmark to
-  its environment.
+  its environment. The mock-tool and SWE servers keep sessions in process memory, so
+  `num_workers` must be unset or 1.
 
 Relative paths in these configs resolve under `--search-dir` / `NEMO_GYM_EXTRA_ROOTS`
 first, then the working directory, then the Gym root.

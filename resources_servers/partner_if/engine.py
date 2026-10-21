@@ -101,10 +101,16 @@ def aggregate(contract: GradingContract, judgments: list[RawJudgment]) -> Evalua
             binary_score=int(earned == len(group)) if earned is not None else None,
         )
     # Completion is diagnostic, including when it cannot be scored. The contract
-    # rejects IF dependencies on completion, so only IF availability gates reward.
-    complete = all(
-        r.passed is not None and r.raw_passed is not None for r in results + prerequisites if r.dimension == "if"
-    )
+    # rejects IF dependencies on completion, so only IF rubrics and the checks they
+    # depend on, directly or transitively, gate reward.
+    if_checks = {r.id for r in contract.rubrics if r.dimension == "if"}
+    pending = list(if_checks)
+    while pending:
+        for dependency in items[pending.pop()].depends_on:
+            if dependency not in if_checks:
+                if_checks.add(dependency)
+                pending.append(dependency)
+    complete = all(effective[i].passed is not None and effective[i].raw_passed is not None for i in if_checks)
     return Evaluation(
         status="scored" if complete else "unscorable",
         items=results,

@@ -56,8 +56,10 @@ def text_contains(params: TextParams, context: CheckContext) -> tuple[bool, str]
 
 
 def text_no_uuid(context: CheckContext) -> tuple[bool, str]:
-    """Check captured user-facing text only; tool arguments may contain UUIDs."""
-    found = re.search(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", context.evidence.answer, re.I)
+    """Check the answer and every assistant message; tool calls, tool results and context may contain UUIDs."""
+    evidence = context.evidence
+    text = "\n".join([evidence.answer] + [event.text for event in evidence.trajectory if event.kind == "assistant"])
+    found = re.search(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", text, re.I)
     return found is None, "Checked visible text for UUID-format identifiers; tool arguments excluded."
 
 
