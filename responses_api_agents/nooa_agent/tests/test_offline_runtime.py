@@ -15,8 +15,8 @@ import pytest
 from responses_api_agents.nooa_agent import offline_runtime
 
 
-@pytest.fixture
-def builder(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> AsyncMock:
+@pytest.fixture(params=["1000:1001", "0:0"])
+def builder(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, request: pytest.FixtureRequest) -> AsyncMock:
     from nemo_gym import server_utils
     from responses_api_agents.miniswe_sandboxed_agent import bootstrap
 
@@ -34,6 +34,9 @@ def builder(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> AsyncMock:
         if arguments[1:3] == ("image", "inspect"):
             return "sha256:builder\n"
         if arguments[1] == "run":
+            if arguments[-4:] == ("stat", "-c", "%u:%g", "/build"):
+                return f"{request.param}\n"
+            assert arguments[arguments.index("--user") + 1] == request.param
             work = Path(arguments[arguments.index("--volume") + 1].removesuffix(":/build"))
             assert (work / "source.tar.gz").read_bytes() == b"source"
             assert (work / "bundle/python.tar.gz").read_bytes() == b"portable Python"
@@ -61,8 +64,13 @@ async def test_builder_publishes_validated_bundle_and_reuses_without_docker(
     assert manifest["builder_image"] == "sha256:builder"
     assert manifest["glibc"] == "2.28"
     assert (output / "build.log").read_text() == "wheel build completed\n"
-    assert [call.args[1] for call in builder.await_args_list] == ["pull", "image", "run", "rm"]
-    assert builder.await_args_list[-1].args[2] == "--force"
+    assert [call.args[1] for call in builder.await_args_list] == ["pull", "image", "run", "run", "rm"]
+    owner_probe, build, cleanup = builder.await_args_list[2:]
+    assert owner_probe.args[:9] == build.args[:9]
+    assert owner_probe.args[9] == build.args[11] == "sha256:builder"
+    assert cleanup.args[2] == "--force"
+    assert cleanup.args[-1] == build.args[build.args.index("--name") + 1]
+    assert not list(tmp_path.glob(".nooa-wheelhouse-*"))
     builder.reset_mock()
     assert await offline_runtime.prepare_runtime_wheelhouse(output, target="x86_64/gnu") == output
     builder.assert_not_awaited()
@@ -74,10 +82,11 @@ async def test_builder_publishes_validated_bundle_and_reuses_without_docker(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", [RuntimeError("build failed"), asyncio.CancelledError()])
+@pytest.mark.parametrize("stage", ["owner", "build"])
 async def test_builder_failure_removes_owned_container_without_publishing(
-    tmp_path: Path, builder: AsyncMock, failure: BaseException
+    tmp_path: Path, builder: AsyncMock, failure: BaseException, stage: str
 ) -> None:
-    builder.side_effect = ["", "sha256:builder", failure, ""]
+    builder.side_effect = ["", "sha256:builder", *(["1000:1001"] if stage == "build" else []), failure, ""]
     output = tmp_path / "bundle"
     with pytest.raises(type(failure)):
         await offline_runtime.prepare_runtime_wheelhouse(output, target="x86_64/gnu")
