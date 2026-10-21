@@ -131,6 +131,12 @@ METADATA_VALUE_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 DEFAULT_ATTRIBUTION_KEY_PREFIX = "nemo-gym.nvidia.com/"
 # Kubernetes label-key prefixes must be DNS-1123 subdomains (max 253 chars).
 ATTRIBUTION_KEY_PREFIX_RE = re.compile(r"(?=.{1,253}$)[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*")
+# Returned as stderr when a finished background command deleted its own output file,
+# so a caller that needed the output sees why it is empty.
+DELETED_OUTPUT_NOTE = (
+    "OpenSandbox could not return this command's output: the command deleted its output file "
+    "in the sandbox's temporary directory. Its exit status is kept."
+)
 DEFAULT_IMAGE_PULL_POLICY = "IfNotPresent"
 IMAGE_PULL_POLICY_EXTENSION_KEY = "imagePullPolicy"
 IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY = "opensandbox.extensions.image-pull-policy"
@@ -1875,6 +1881,7 @@ class OpenSandboxProvider:
         # The execution has finished, so one call returns its whole buffer; the
         # cursor this endpoint reports back is the end offset rather than a
         # more-data flag, so there is no tail to follow.
+        output_deleted = False
         try:
             logs = await self._await_sdk_operation(
                 lambda: handle.raw.commands.get_background_command_logs(execution_id),
@@ -1885,22 +1892,29 @@ class OpenSandboxProvider:
                 is_retryable=_command_read_is_retryable,
             )
         except Exception as error:
-            # execd keeps the output under /tmp/opensandbox-execd, so a command that
-            # empties /tmp (e.g. a verifier resetting its scratch roots) deletes it.
-            # The status read above already holds the authoritative exit code.
+            # execd keeps background output under os.TempDir() (/tmp unless TMPDIR is set),
+            # so a command that empties /tmp (e.g. a verifier resetting its scratch roots)
+            # deletes it, and the log read then fails with execd's "error open combined
+            # output file for command <id>: ... no such file or directory". The status read
+            # above already holds the authoritative exit code. Any other error, including a
+            # reworded execd message, still raises.
             message = str(error)
             if "combined output file" not in message or "no such file or directory" not in message:
                 raise
             LOGGER.warning(
-                "OpenSandbox command output was deleted by the command itself; keeping its exit status. "
+                "OpenSandbox command output was deleted by the command itself; keeping its exit status %r. "
                 "sandbox_id=%r execution_id=%r",
+                status.exit_code,
                 handle.sandbox_id,
                 execution_id,
             )
             logs = None
+            output_deleted = True
         stdout = getattr(logs, "content", None) or None
         status_error = getattr(status, "error", None)
         stderr = status_error or None
+        if output_deleted:
+            stderr = f"{stderr}\n{DELETED_OUTPUT_NOTE}" if stderr else DELETED_OUTPUT_NOTE
         error_type = None
         if status.exit_code is not None:
             return_code = status.exit_code

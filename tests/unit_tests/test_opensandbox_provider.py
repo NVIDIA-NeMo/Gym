@@ -1232,9 +1232,10 @@ async def test_exec_background_polls_status_and_logs(monkeypatch: pytest.MonkeyP
         ("Get command logs failed: HTTP 500", False),
     ],
 )
+@pytest.mark.parametrize("status_error", [None, "killed by signal"])
 @pytest.mark.asyncio
 async def test_exec_background_keeps_exit_status_when_the_command_deleted_its_output(
-    monkeypatch: pytest.MonkeyPatch, log_error: str, kept: bool
+    monkeypatch: pytest.MonkeyPatch, log_error: str, kept: bool, status_error: str | None
 ) -> None:
     class FakeRunCommandOpts:
         def __init__(self, **kwargs: Any) -> None:
@@ -1245,7 +1246,7 @@ async def test_exec_background_keeps_exit_status_when_the_command_deleted_its_ou
             return SimpleNamespace(id="exec-42")
 
         async def get_command_status(self, execution_id: str) -> Any:
-            return SimpleNamespace(running=False, exit_code=3, error=None)
+            return SimpleNamespace(running=False, exit_code=3, error=status_error)
 
         async def get_background_command_logs(self, execution_id: str) -> Any:
             raise RuntimeError(log_error)
@@ -1267,8 +1268,13 @@ async def test_exec_background_keeps_exit_status_when_the_command_deleted_its_ou
 
     if kept:
         result = await provider.exec(handle, "/tests/test.sh", timeout_s=30)
+        # The exit status stands, and the empty output says why instead of looking like silence.
+        note = opensandbox_provider.DELETED_OUTPUT_NOTE
         assert result == opensandbox_provider.SandboxExecResult(
-            stdout=None, stderr=None, return_code=3, error_type=None
+            stdout=None,
+            stderr=f"{status_error}\n{note}" if status_error else note,
+            return_code=3,
+            error_type=None,
         )
     else:
         with pytest.raises(RuntimeError, match="HTTP 500"):
