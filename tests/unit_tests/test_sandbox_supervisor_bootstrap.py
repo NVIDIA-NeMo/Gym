@@ -195,12 +195,13 @@ async def test_launch_delayed_before_linking_does_not_recreate_a_removed_session
     assert not session_dir.exists()
 
 
-@pytest.mark.skipif(sys.platform != "linux", reason="interpreter links resolve /proc/self/exe")
 @pytest.mark.parametrize("hide_runner", [False, True])
 @pytest.mark.parametrize("linkable", [True, False])
 async def test_bootstrap_quotes_private_paths_and_uses_the_same_interpreter(
     tmp_path: Path, linkable: bool, hide_runner: bool
 ) -> None:
+    # Interpreter links resolve /proc/self/exe; elsewhere the launch falls back to the given interpreter.
+    linkable = linkable and sys.platform == "linux"
     session_dir = tmp_path / "session's $(touch unintended) files"
     session_dir.mkdir()
     if not linkable:
