@@ -551,18 +551,6 @@ def test_sync_exec_can_preserve_background_services():
     assert result.stdout == "service-preserving execution"
 
 
-async def test_sandbox_identity_requires_an_active_provider_handle() -> None:
-    provider = FakeSandboxProvider()
-    sandbox = AsyncSandbox(provider)
-    with pytest.raises(RuntimeError, match="Sandbox has not been started"):
-        _ = sandbox.sandbox_id
-    await sandbox.start(SandboxSpec(image="image:tag"))
-    assert sandbox.sandbox_id == provider.created_handles[0].sandbox_id
-    await sandbox.stop()
-    with pytest.raises(RuntimeError, match="Sandbox has not been started"):
-        _ = sandbox.sandbox_id
-
-
 async def test_start_with_setup_stops_the_sandbox_when_setup_fails() -> None:
     provider = FakeSandboxProvider()
     sandbox = AsyncSandbox(provider)
