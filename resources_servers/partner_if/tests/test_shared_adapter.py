@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from resources_servers.partner_if.app import VerifyRequest
 from resources_servers.partner_if.grading_contract import GradingContract
+from resources_servers.partner_if.llm import MAX_JUDGE_INPUT_CHARS
 from resources_servers.partner_if.native_evidence import LiveAgentCapture
 from resources_servers.partner_if.tests.test_app import response, server
 
@@ -189,6 +190,41 @@ async def test_the_judge_input_holds_only_the_artifacts_the_judged_items_need():
     sources = json.loads(call.call_args.kwargs["json"]["input"][1]["content"])["evidence_sources"]
     assert "artifact:submission" in sources and "artifact:build_log" not in sources
     assert (result.reward, result.mask_sample) == (1, False)
+
+
+@pytest.mark.parametrize(
+    "limit,judged,row",
+    [
+        (MAX_JUDGE_INPUT_CHARS, [["semantic"]], (1, False, None)),
+        # The IF item's own input is over this limit too, so nothing is sent.
+        (500, [], (0, True, "partner_if:evidence_too_large")),
+    ],
+    ids=["if_items_fit", "if_items_too_large"],
+)
+async def test_a_completion_items_artifact_cannot_push_the_if_items_over_the_judge_limit(limit, judged, row):
+    from resources_servers.partner_if.tests.test_shared_judge import verdict
+
+    # Within the artifact limit, but its many lines put the shared judge input over the default limit.
+    build_log = {"exists": True, "text": "ok\n" * 200_000}
+    body = live_request(artifacts={"submission": {"exists": True, "text": "HELLO"}, "build_log": build_log})
+    rubrics = body.verifier_metadata.partner_if.rubrics
+    needs_log = rubrics[1].verifier.model_copy(update={"params": {"artifacts": ["build_log"]}})
+    rubrics.append(rubrics[1].model_copy(update={"id": "built", "dimension": "completion", "verifier": needs_log}))
+    reply = verdict(id="semantic", references=[{"source": "artifact:submission", "start_line": 1, "end_line": 1}])
+    with patch(
+        "resources_servers.partner_if.grading_service.call_judge",
+        new_callable=AsyncMock,
+        return_value=response(json.dumps(reply)),
+    ) as call:
+        result = await server(accept_verification_input=True, judge_max_input_chars=limit).verify(body)
+    sent = [json.loads(c.kwargs["json"]["input"][1]["content"]) for c in call.call_args_list]
+    # Judged alone, the IF item is sent only its own artifact.
+    assert [[r["id"] for r in payload["rubrics"]] for payload in sent] == judged
+    assert not any("artifact:build_log" in payload["evidence_sources"] for payload in sent)
+    assert (result.reward, result.mask_sample, result.failure_kind) == row
+    built = next(item for item in result.grading_result.items if item.id == "built")
+    assert (built.raw_passed, built.failure_kind) == (None, "partner_if:evidence_too_large")
+    assert result.grading_result.dimensions["completion"].binary_score is None
 
 
 @pytest.mark.parametrize("accept", [False, True])

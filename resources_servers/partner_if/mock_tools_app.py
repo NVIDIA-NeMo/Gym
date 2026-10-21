@@ -20,19 +20,21 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import Field, JsonValue, PrivateAttr, ValidationError
 
 from nemo_gym.base_resources_server import (
+    ClosedResourcesSessionRecords,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
     ReverifyMode,
+    SimpleResourcesServer,
 )
 from nemo_gym.mcp_auto_exposure import MCPTool
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
 from resources_servers.partner_if.app import (
     NoAnswer,
-    PartnerIFResourcesServer,
-    PartnerIFResourcesServerConfig,
+    PartnerIFGradingConfig,
+    PartnerIFGradingMixin,
     VerifyRequest,
     VerifyResponse,
     is_complete,
@@ -42,6 +44,7 @@ from resources_servers.partner_if.checks import resolve
 from resources_servers.partner_if.evidence import Artifact, EvidenceBundle
 from resources_servers.partner_if.grading_contract import NO_ANSWER, TRUNCATED, GradingContract, StrictModel
 from resources_servers.partner_if.grading_service import contract_hash
+from resources_servers.partner_if.metrics import PartnerIFMetricsMixin
 from resources_servers.partner_if.native_evidence import visible_events
 from resources_servers.partner_if.package import RepoPath
 from resources_servers.partner_if.tool_backend import ToolBackend, ToolCallError
@@ -74,7 +77,7 @@ class MockToolEpisode:
     calls: list[RecordedToolCall] = field(default_factory=list)
 
 
-class MockToolsServerConfig(PartnerIFResourcesServerConfig):
+class MockToolsServerConfig(PartnerIFGradingConfig):
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.UNSUPPORTED
     backend: str = Field(pattern=r"^[\w.]+:\w+$")  # the ToolBackend class, as module:Class
     fixture_path: RepoPath
@@ -183,7 +186,7 @@ def _actor_input(params: dict[str, JsonValue]) -> dict[str, JsonValue]:
     return {key: normalized.get(key) for key in ("input", "instructions", "tools")}
 
 
-class MockToolsResourcesServer(PartnerIFResourcesServer):
+class MockToolsResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixin, SimpleResourcesServer):
     # Episodes live in this process and are not exported, so a checkpoint restarts their rollouts.
     checkpoint_mode = "restart_only"
     checkpoint_verify = "wait"
@@ -193,10 +196,11 @@ class MockToolsResourcesServer(PartnerIFResourcesServer):
     _tasks: dict[str, dict[str, JsonValue]] = PrivateAttr(default_factory=dict)
     _tools: dict[str, dict[str, dict[str, JsonValue]]] = PrivateAttr(default_factory=dict)
     _episodes: dict[str, MockToolEpisode] = PrivateAttr(default_factory=dict)
-    _closed: set[str] = PrivateAttr(default_factory=set)
+    _closed: ClosedResourcesSessionRecords[bool] = PrivateAttr()
 
     def model_post_init(self, context: object) -> None:
         super().model_post_init(context)
+        self._closed = ClosedResourcesSessionRecords(self.config.session_close_retry_window_seconds)
         self._backend = load_backend(self.config.backend)(self.config.fixture_path)
         for line in self.config.tasks_path.read_text().splitlines():
             if not line.strip():
@@ -274,12 +278,12 @@ class MockToolsResourcesServer(PartnerIFResourcesServer):
         if episode and episode.seed.episode_id != body.episode_id:
             raise HTTPException(409, "Session belongs to another episode")
         self._episodes.pop(body.resources_session_id, None)
-        self._closed.add(body.resources_session_id)
+        self._closed.remember(body.resources_session_id, True)
         return ResourcesCloseSessionResponse(resources_session_id=body.resources_session_id)
 
     async def retire_session_state(self, session_id: str) -> None:
         self._episodes.pop(session_id, None)
-        self._closed.add(session_id)
+        self._closed.remember(session_id, True)
 
     async def call_tool(self, request: Request, tool_name: str, body: dict[str, JsonValue]):
         """Run one tool this rollout's task may use; any other name is absent."""

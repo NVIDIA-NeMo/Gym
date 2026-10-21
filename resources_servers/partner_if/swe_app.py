@@ -107,7 +107,8 @@ class SWEIFResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixin, ScaleSW
         outcome = await super().verify(request, body)
         response = body.response
         if response.status is None:
-            # OpenCode leaves the status of a run that ended normally unset.
+            # OpenCode leaves the status unset for every run that did not stop on the output-token cap, including
+            # failed runs; such a run is graded on the events it left.
             response = response.model_copy(update={"status": "completed"})
 
         def evidence() -> EvidenceBundle:

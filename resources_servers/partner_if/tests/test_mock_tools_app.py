@@ -135,6 +135,8 @@ def test_episodes_are_not_exported_so_checkpoints_restart_them(server):
     # The episodes are gone after the run, so reverify cannot grade the rollouts again.
     resource, _, _ = server
     assert TestClient(resource.setup_webserver()).get("/reverify_mode").json() == "unsupported"
+    # The server grades its own episodes, so it has no setting for captures an agent sends.
+    assert "accept_verification_input" not in api.MockToolsServerConfig.model_fields
 
 
 @pytest.mark.parametrize(
@@ -451,6 +453,24 @@ async def test_a_retired_session_frees_its_episode_and_stays_closed(server):
     await resource.retire_session_state("session-one")
     assert "session-one" not in resource._episodes
     assert client.post("/seed_session", json=seed).status_code == 409
+
+
+async def test_closed_ids_are_remembered_for_the_close_retry_window(tmp_path, plugin, monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr("nemo_gym.base_resources_server.monotonic", lambda: clock[0])
+    resource = make_server(tmp_path, session_close_retry_window_seconds=10)
+    client = TestClient(resource.setup_webserver())
+    closed, retired = seed_for(row()), seed_for(row(), session="session-two")
+    client.post("/seed_session", json=closed)
+    close = {k: closed[k] for k in ("resources_session_id", "episode_id")}
+    assert client.post("/close_session", json=close).status_code == 200
+    await resource.retire_session_state("session-two")
+    clock[0] = 9.5
+    assert [client.post("/seed_session", json=seed).status_code for seed in (closed, retired)] == [409, 409]
+    # No record outlives the routing claim on its ID, so with several workers every worker then treats it as new.
+    clock[0] = 10.0
+    assert len(resource._closed) == 0
+    assert [client.post("/seed_session", json=seed).status_code for seed in (closed, retired)] == [200, 200]
 
 
 def test_an_unsigned_contract_is_masked_rather_than_rejected(tmp_path, plugin):

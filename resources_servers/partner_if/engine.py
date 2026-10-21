@@ -21,13 +21,29 @@ from resources_servers.partner_if.grading_contract import (
 Judge = Callable[[list[GradingItem], EvidenceBundle], Awaitable[list[RawJudgment]]]
 
 
+def too_large(items: list[GradingItem], error: EvidenceTooLarge) -> list[RawJudgment]:
+    # Nothing is sent: these items are unscorable rather than judged on truncated evidence.
+    return [
+        RawJudgment(
+            id=item.id,
+            passed=None,
+            reason=str(error),
+            evidence="Evidence too large for the judge",
+            failure_kind=EVIDENCE_TOO_LARGE,
+        )
+        for item in items
+    ]
+
+
 async def evaluate(contract: GradingContract, evidence: EvidenceBundle, *, judge: Judge) -> Evaluation:
     """Score each item exactly once; errors raised by `judge`, such as a failed judge call, propagate.
-    The judge is sent only the artifacts its items need."""
+    The judge is sent only the artifacts its items need. If `judge` refuses that input as too large
+    (EvidenceTooLarge, before sending it), the checks that gate reward are judged alone with their own
+    artifacts, and any item left out is evidence_too_large."""
     implementations = {r.id: resolve(r.verifier) for r in contract.checks}
     context = CheckContext(evidence=evidence)
     raw: dict[str, RawJudgment] = {}
-    llm_items, judged_artifacts = [], set()
+    llm_items, needed_artifacts = [], {}
     for item in contract.checks:
         if evidence.trajectory_error:
             raw[item.id] = RawJudgment(
@@ -48,7 +64,7 @@ async def evaluate(contract: GradingContract, evidence: EvidenceBundle, *, judge
                 for name in required:
                     evidence.artifact_text(name)
                 llm_items.append(item)
-                judged_artifacts.update(required)
+                needed_artifacts[item.id] = set(required)
                 continue
             passed, detail = await asyncio.to_thread(checker.run, params, context)
             raw[item.id] = RawJudgment(id=item.id, passed=passed, reason=detail, evidence=detail)
@@ -61,12 +77,32 @@ async def evaluate(contract: GradingContract, evidence: EvidenceBundle, *, judge
                 failure_kind=EVIDENCE_TOO_LARGE if isinstance(error, EvidenceTooLarge) else None,
             )
 
-    if llm_items:
-        artifacts = {name: artifact for name, artifact in evidence.artifacts.items() if name in judged_artifacts}
-        judgments = await judge(llm_items, evidence.model_copy(update={"artifacts": artifacts}))
+    async def judge_items(items: list[GradingItem]) -> list[RawJudgment]:
+        needed = set().union(*(needed_artifacts[r.id] for r in items))
+        artifacts = {name: artifact for name, artifact in evidence.artifacts.items() if name in needed}
+        judgments = await judge(items, evidence.model_copy(update={"artifacts": artifacts}))
         identifiers = [j.id for j in judgments]
-        if len(set(identifiers)) != len(identifiers) or set(identifiers) != {r.id for r in llm_items}:
+        if len(set(identifiers)) != len(identifiers) or set(identifiers) != {r.id for r in items}:
             raise ValueError("Judge must return every rubric ID exactly once")
+        return judgments
+
+    if llm_items:
+        try:
+            judgments = await judge_items(llm_items)
+        except EvidenceTooLarge as error:
+            # Too large together: the checks that gate reward are judged alone, so the evidence of a
+            # completion item cannot leave them unscored. The other items are too large.
+            gating = reward_checks(contract)
+            gating_items = [item for item in llm_items if item.id in gating]
+            other_items = [item for item in llm_items if item.id not in gating]
+            judgments = too_large(other_items, error)
+            if gating_items and other_items:
+                try:
+                    judgments += await judge_items(gating_items)
+                except EvidenceTooLarge as still_too_large:
+                    judgments += too_large(gating_items, still_too_large)
+            else:
+                judgments += too_large(gating_items, error)
         raw.update({j.id: j for j in judgments})
 
     return aggregate(contract, list(raw.values()))

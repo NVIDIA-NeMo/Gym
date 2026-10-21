@@ -12,7 +12,6 @@ from nemo_gym.server_utils import ServerClient
 from resources_servers.partner_if.engine import aggregate, evaluate
 from resources_servers.partner_if.evidence import EvidenceBundle, EvidenceTooLarge
 from resources_servers.partner_if.grading_contract import (
-    EVIDENCE_TOO_LARGE,
     Evaluation,
     GradingContract,
     GradingItem,
@@ -67,18 +66,9 @@ async def grade(
             if any(item.type not in {"message", "reasoning"} for item in receipt_response.output):
                 raise ValueError("Judge returned unexpected tool output")
             return parse_verdict(receipt_response.output_text, items, evidence)
-        except EvidenceTooLarge as error:
-            # Nothing is sent: these items are unscorable rather than judged on truncated evidence.
-            return [
-                RawJudgment(
-                    id=item.id,
-                    passed=None,
-                    reason=str(error),
-                    evidence="Evidence too large for the judge",
-                    failure_kind=EVIDENCE_TOO_LARGE,
-                )
-                for item in items
-            ]
+        except EvidenceTooLarge:
+            # Nothing was sent; the engine decides which items the judge grades instead.
+            raise
         except ValueError as error:
             # A reply that fails protocol or validation checks leaves these items
             # unscorable and keeps the actual request/reply. A failed judge call

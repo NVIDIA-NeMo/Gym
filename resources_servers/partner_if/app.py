@@ -52,7 +52,8 @@ class PartnerIFGradingConfig(BaseResourcesServerConfig):
     )
     judge_max_concurrency: int = Field(default=8, gt=0)
     # Characters of the judge's user message (the serialized rubrics and evidence); size it to the judge's
-    # context window. A larger input is not sent, and the items it holds are evidence_too_large.
+    # context window. A larger input is not sent: the checks that gate reward are judged alone, and any item
+    # left out is evidence_too_large.
     judge_max_input_chars: int = Field(default=MAX_JUDGE_INPUT_CHARS, gt=0)
     allow_provisional_rubrics: bool = False
     # Importable modules whose CHECKERS add task-specific verifier IDs (see checks.register_modules).
