@@ -72,6 +72,7 @@ from nemo_gym.trajectory import (
     TrajectoryRecord,
     TrajectoryTurn,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 LOG = logging.getLogger(__name__)
@@ -418,3 +419,6 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     ScicodeAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = ScicodeAgent.run_webserver()  # noqa: F401

@@ -17,7 +17,8 @@ activation; changed requests, wrong rollout identities, and closed sessions retu
 Close cancels and drains active graph execution before verification.
 
 Required HTTP/MCP grants and any sandbox access return a final 422. Optional grants
-are ignored. Set `resources_tool_transports: []` and `num_workers: 1` in the pairing.
+are ignored. Set `resources_tool_transports: []` in the pairing. The adapter runs with several
+workers: session routing sends each agent session's requests to the worker that holds it.
 An unbound agent config has `resources_server: null`; the Environment Server owns
 resource setup, verification and cleanup. Use a checked-in pairing, such as
 `--resources-server reasoning_gym/reflection_agent`, then select its configured
