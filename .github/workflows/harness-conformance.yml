@@ -80,6 +80,14 @@ jobs:
             dirname "$(command -v uv)" >> "$GITHUB_PATH"
           } 2>&1 | tee "$RESULTS/setup.log"
           echo "$NPM_CONFIG_PREFIX/bin" >> "$GITHUB_PATH"
+      - name: Provision multimodal sandbox
+        if: matrix.harness == 'opencode_multimodal'
+        timeout-minutes: 10
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          .venv/bin/python -m scripts.harness_conformance.multimodal_runtime \
+            --directory "$RUNNER_TEMP/multimodal-runtime" --github-env "$GITHUB_ENV"
       - name: Validate probes, checker, and adapter
         timeout-minutes: 5
         env:

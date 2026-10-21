@@ -100,6 +100,9 @@ def install_runtime(harness: str) -> None:
     adapter = ROOT / "responses_api_agents" / f"{harness}_agent"
     override_flag = ["--override", "overrides.txt"] if (adapter / "overrides.txt").exists() else []
     subprocess.run(["uv", "pip", "install", *override_flag, "-r", "requirements.txt"], cwd=adapter, check=True)
+    if harness == "opencode_multimodal":
+        # The separate sandbox setup installs the native executable, not npm's Node launcher.
+        return
     if harness in ("hermes", "stirrup"):
         return  # Hermes' pinned runtime is in its requirements; Stirrup installs its runtime in the task sandbox.
     defaults = yaml.safe_load((adapter / "configs" / f"{harness}_agent.yaml").read_text())

@@ -87,7 +87,26 @@ pinned runtime during session setup, using Gym's local subprocess sandbox provid
 Legacy probes require the selected `codex`, `pi`, and `opencode` executables on
 `PATH`; Hermes must be importable in the same Python environment. Missing
 dependencies or unsuccessful runtime installation are execution failures.
-Omitting `--harness` selects all four.
+Omitting `--harness` selects all registered harnesses.
+
+The `opencode_multimodal` probe also requires Bubblewrap and a separate Python/image
+runtime. CI provisions these automatically for that matrix entry. To provision
+them locally on Linux with `bwrap`, `npm`, and `uv` installed:
+
+```bash
+python -m scripts.harness_conformance.ci install --harness opencode_multimodal
+python -m scripts.harness_conformance.multimodal_runtime --directory /tmp/gym-multimodal-runtime
+export GYM_MULTIMODAL_SANDBOX_CONFIG=/tmp/gym-multimodal-runtime/sandbox.json
+export PATH="/tmp/gym-multimodal-runtime/dependencies/node_modules/opencode-linux-x64/bin:$PATH"
+python scripts/run_harness_conformance.py --harness opencode_multimodal --output /tmp/multimodal-probes
+```
+
+Use `opencode-linux-arm64` in the PATH on aarch64. Provisioning pins the native
+OpenCode executable and plugin to the agent's configured release, installs the
+image libraries in a separate virtualenv, and checks their imports and OpenCode's
+version **inside the actual agent sandbox** before writing its config. A host
+that disallows Bubblewrap/user namespaces fails setup; it never falls back to
+unsandboxed execution. Existing harness entries do not run this setup.
 
 No model service or model credentials are needed. Each scenario starts fresh
 local model, resources, agent, and compatibility environment servers on dynamically assigned loopback ports.

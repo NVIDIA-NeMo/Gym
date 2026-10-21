@@ -35,6 +35,7 @@ ANSWER = "CONFORMANCE_DONE"
 class Probe:
     scenario: Scenario
     directory: Path
+    sandbox_workspace_root: Path | None = None
     attempts: list[dict] = field(default_factory=list)
     tool_calls: list[dict] = field(default_factory=list)
     violations: list[str] = field(default_factory=list)
@@ -70,7 +71,8 @@ class Probe:
             if bare in SHELL_TOOLS:
                 index = len(self.tool_calls)
                 token = f"probe_{uuid4().hex}"
-                marker = self.directory / f"tool-{index}.txt"
+                marker_root = Path("/testbed") if self.sandbox_workspace_root is not None else self.directory
+                marker = marker_root / f"tool-{index}.txt"
                 code = self.scenario.tool_exit_code if index == 0 else 0
                 command = f"printf %s {shlex.quote(token)} > {shlex.quote(str(marker))}; printf %s {shlex.quote(token)}; exit {code}"
                 if "cmd" in properties:
@@ -146,7 +148,12 @@ class Probe:
                 if output is not None and output not in call["outputs"]:
                     call["outputs"].append(output)
             marker = Path(call["marker"])
-            call["executed"] = marker.is_file() and marker.read_text() == call["token"]
+            candidates = (
+                list(self.sandbox_workspace_root.glob(f"opencode_*/{marker.name}"))
+                if self.sandbox_workspace_root is not None
+                else [marker]
+            )
+            call["executed"] = any(path.is_file() and path.read_text() == call["token"] for path in candidates)
 
     async def model(self, request: Request) -> JSONResponse | StreamingResponse:
         body = await request.json()

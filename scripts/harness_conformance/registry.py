@@ -5,6 +5,7 @@
 
 HARNESSES = {
     "opencode": "OpenCodeAgent",
+    "opencode_multimodal": "OpenCodeMultimodalEvalAgent",
     "pi": "PiAgent",
     "codex": "CodexAgent",
     "hermes": "HermesAgent",
