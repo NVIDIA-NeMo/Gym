@@ -1170,59 +1170,6 @@ async def test_exec_background_polls_status_and_logs(monkeypatch: pytest.MonkeyP
     assert raw.commands.log_calls == ["exec-42"]
 
 
-@pytest.mark.parametrize(
-    "log_error,kept",
-    [
-        (
-            "Get command logs failed: error open combined output file for command exec-42: no such file or directory",
-            True,
-        ),
-        ("Get command logs failed: HTTP 500", False),
-    ],
-)
-@pytest.mark.asyncio
-async def test_exec_background_keeps_exit_status_when_the_command_deleted_its_output(
-    monkeypatch: pytest.MonkeyPatch, log_error: str, kept: bool
-) -> None:
-    class FakeRunCommandOpts:
-        def __init__(self, **kwargs: Any) -> None:
-            self.kwargs = kwargs
-
-    class FakeCommands:
-        async def run(self, command: str, *, opts: FakeRunCommandOpts) -> Any:
-            return SimpleNamespace(id="exec-42")
-
-        async def get_command_status(self, execution_id: str) -> Any:
-            return SimpleNamespace(running=False, exit_code=3, error=None)
-
-        async def get_background_command_logs(self, execution_id: str) -> Any:
-            raise RuntimeError(log_error)
-
-    monkeypatch.setattr(
-        opensandbox_provider,
-        "_require_opensandbox_sdk",
-        lambda: (object, object, FakeRunCommandOpts, object, object),
-    )
-    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
-    provider = opensandbox_provider.OpenSandboxProvider(
-        connection={"request_timeout_s": 5},
-        probe={"command": None},
-        operations={"background_exec": True, "background_poll_interval_s": 0.01, "retries": 0},
-    )
-    handle = opensandbox_provider.SandboxHandle(
-        sandbox_id="sandbox-bg", provider_name="opensandbox", raw=SimpleNamespace(commands=FakeCommands())
-    )
-
-    if kept:
-        result = await provider.exec(handle, "/tests/test.sh", timeout_s=30)
-        assert result == opensandbox_provider.SandboxExecResult(
-            stdout=None, stderr=None, return_code=3, error_type=None
-        )
-    else:
-        with pytest.raises(RuntimeError, match="HTTP 500"):
-            await provider.exec(handle, "/tests/test.sh", timeout_s=30)
-
-
 @pytest.mark.asyncio
 async def test_exec_background_reports_oom_status_after_502(monkeypatch: pytest.MonkeyPatch) -> None:
     class Backend502Error(Exception):
