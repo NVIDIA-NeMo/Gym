@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError
 from fastapi import Body
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationInfo, field_validator
 
 from nemo_gym._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER, StepMode, seed_restarts, seed_verify_mode
 from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
@@ -98,7 +98,8 @@ class OutcomeAction(StrEnum):
 class AgentOutcomePolicyConfig(BaseModel):
     """Route classified failed responses; HTTP status rules take precedence over failure-kind rules.
 
-    Each supplied mapping replaces its default mapping. Unmatched failures use default_action.
+    Supplied entries override matching defaults; omitted entries keep their defaults.
+    Unmatched failures use default_action.
     Retry means an ungraded episode failure eligible for the collector's bounded retries.
     """
 
@@ -118,6 +119,14 @@ class AgentOutcomePolicyConfig(BaseModel):
         }
     )
     default_action: OutcomeAction = OutcomeAction.FAIL
+
+    @field_validator("by_failure_kind", "by_status_code")
+    @classmethod
+    def merge_default_rules(
+        cls, value: dict[str | int, OutcomeAction], info: ValidationInfo
+    ) -> dict[str | int, OutcomeAction]:
+        """Merge validated overrides so JSON status keys are normalized before replacing defaults."""
+        return cls.model_fields[info.field_name].get_default(call_default_factory=True) | value
 
     @field_validator("by_failure_kind")
     @classmethod
