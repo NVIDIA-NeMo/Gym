@@ -577,6 +577,8 @@ class SubmitConfig(_StrictModel):
 
         sole_compute = next(iter(compute_names))
         compute = self.compute[sole_compute]
+        if self.driver.container is None and not isinstance(compute, SlurmComputeConfig):
+            raise ValueError("driver.container: null is supported only for Slurm compute")
         if isinstance(compute, SlurmComputeConfig):
             total_nodes = sum(p.nodes for p in compute.node_pools.values())
             pool_names = set(compute.node_pools)

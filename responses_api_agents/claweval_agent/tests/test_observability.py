@@ -187,9 +187,10 @@ async def test_streaming_native_media_is_captured_and_passes_p0(tmp_path, monkey
     assert summary["run"]["verdicts"] == {"healthy": 1, "unhealthy": 0, "unobserved": 0}
 
 
-async def test_timeout_is_masked_and_excluded_from_scores(tmp_path, monkeypatch):
+@pytest.mark.parametrize("error", [TimeoutError, RuntimeError, FileNotFoundError])
+async def test_worker_failure_is_masked_and_excluded_from_scores(tmp_path, monkeypatch, error):
     digest = fake_root(tmp_path)
-    monkeypatch.setattr(ClawEvalAgent, "_launch_worker", AsyncMock(side_effect=TimeoutError))
+    monkeypatch.setattr(ClawEvalAgent, "_launch_worker", AsyncMock(side_effect=error))
     result = await make_agent(tmp_path).run(
         ClawEvalRunRequest.model_validate(
             {
@@ -198,20 +199,22 @@ async def test_timeout_is_masked_and_excluded_from_scores(tmp_path, monkeypatch)
             }
         )
     )
-    assert result.mask_sample and result.failure_kind == "agent_timeout"
+    assert result.mask_sample
+    assert result.failure_kind == ("agent_timeout" if error is TimeoutError else "agent_run_error")
     metrics = benchmark_metrics([result.model_dump()])
     assert metrics["claweval/masked_trials"] == 1
     assert "claweval/mean_task_score" not in metrics
 
 
 @pytest.mark.parametrize("repeats", [1, 3])
-def test_repetition_produces_exact_task_seed_pairs(repeats, monkeypatch):
+@pytest.mark.parametrize("split", ["general", "multimodal", "multi_turn"])
+def test_repetition_produces_exact_task_seed_pairs(repeats, split, monkeypatch):
     from nemo_gym.benchmarks import BenchmarkConfig
     from nemo_gym.train_data_utils import TrainDataProcessor
 
     for key in ("CLAW_EVAL_ROOT", "CLAW_EVAL_SANDBOX_IMAGE", "CLAW_EVAL_SANDBOX_DEPS"):
         monkeypatch.setenv(key, "/tmp/test")
-    cfg = BenchmarkConfig.from_config_path(Path("benchmarks/claweval/multimodal.yaml"))
+    cfg = BenchmarkConfig.from_config_path(Path(f"benchmarks/claweval/{split}.yaml"))
     cfg.dataset.jsonl_fpath = Path("responses_api_agents/claweval_agent/data/example.jsonl")
     rows = [json.loads(line) for line in TrainDataProcessor()._iter_dataset_lines(cfg.dataset)]
     expanded = RolloutCollectionHelper().preprocess_examples(rows, num_repeats=repeats)
@@ -219,3 +222,51 @@ def test_repetition_produces_exact_task_seed_pairs(repeats, monkeypatch):
     assert {row["_ng_rollout_index"] for row in expanded} == set(range(repeats))
     pairs = [(row["verifier_metadata"]["task_id"], 1001 + row["_ng_rollout_index"]) for row in expanded]
     assert len(set(pairs)) == len(pairs)
+
+
+@pytest.mark.parametrize("failure", ["missing_result", "native_failure", "wrong_task", "contract_error"])
+async def test_result_failure_boundary(tmp_path, monkeypatch, failure):
+    digest = fake_root(tmp_path)
+
+    async def launch(self, payload, output_dir):
+        if failure == "missing_result":
+            return
+        trace = output_dir / "trace.jsonl"
+        events = write_trace(trace)
+        events[-2]["failure_modes"] = ["model_error"]
+        trace.write_text("\n".join(json.dumps(event) for event in events))
+        result = {
+            "task_id": "wrong" if failure == "wrong_task" else "T001_test",
+            "status": "completed",
+            "task_score": 0.8,
+            "passed": True,
+            "trace": str(trace),
+            "model": "test-model",
+        }
+        if failure == "contract_error":
+            result.update(
+                status="failed", failure_kind="claweval:contract_error", failure_reason="Native prompt mismatch"
+            )
+        (output_dir / "result.json").write_text(json.dumps(result))
+
+    monkeypatch.setattr(ClawEvalAgent, "_launch_worker", launch)
+    body = ClawEvalRunRequest.model_validate(
+        {
+            "responses_create_params": {"input": "Solve"},
+            "verifier_metadata": {"task_id": "T001_test", "task_sha256": digest},
+        }
+    )
+    agent = make_agent(tmp_path)
+    if failure in ("wrong_task", "contract_error"):
+        with pytest.raises(ValueError, match="mismatch"):
+            await agent.run(body)
+    else:
+        with TestClient(agent.setup_webserver()) as client:
+            response = client.post("/run", json=body.model_dump(by_alias=True))
+        assert response.status_code == 200
+        row = response.json()
+        assert row["mask_sample"] and not row["evaluation_completed"]
+        assert row["failure_reason"]
+        metrics = benchmark_metrics([row])
+        assert metrics["claweval/masked_trials"] == 1
+        assert "claweval/mean_task_score" not in metrics

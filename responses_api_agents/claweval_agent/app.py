@@ -8,6 +8,7 @@ import asyncio
 import json
 import math
 import os
+import shutil
 import signal
 import sys
 from collections import defaultdict
@@ -17,19 +18,25 @@ from typing import Any
 from uuid import uuid4
 
 from fastapi import HTTPException
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from responses_api_agents.claweval_agent.trajectory import trace_observations, trace_to_response
+from responses_api_agents.claweval_agent.task_data import TaskData as ClawEvalMetadata
+from responses_api_agents.claweval_agent.trajectory import (
+    ClawEvalExecutionError,
+    trace_observations,
+    trace_to_response,
+)
 from responses_api_agents.claweval_agent.worker import source_root, task_path
 
 
 class ClawEvalAgentConfig(BaseResponsesAPIAgentConfig):
     claweval_root: str
+    claweval_revision: str | None = Field(default=None, pattern=r"^[a-f0-9]{40}$")
     claweval_config: str = "config_multimodal.yaml"
     python_executable: str = sys.executable
     fixture_root: str = ""
@@ -52,16 +59,10 @@ class ClawEvalAgentConfig(BaseResponsesAPIAgentConfig):
     user_agent_model_overrides: dict[str, Any] = Field(default_factory=dict)
 
 
-class ClawEvalMetadata(BaseModel):
-    task_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
-    task_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    split: str | None = None
-
-
 class ClawEvalRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
     verifier_metadata: ClawEvalMetadata
-    rollout_index: int = Field(default=0, ge=0, alias=ROLLOUT_INDEX_KEY_NAME)
+    rollout_index: int = Field(default=0, ge=0, le=2, alias=ROLLOUT_INDEX_KEY_NAME)
 
 
 class ClawEvalVerifyResponse(BaseVerifyResponse):
@@ -74,6 +75,9 @@ class ClawEvalVerifyResponse(BaseVerifyResponse):
 
 def benchmark_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        if row[ROLLOUT_INDEX_KEY_NAME] not in (0, 1, 2):
+            raise ValueError("Claw-Eval trial index must be 0, 1, or 2; apply repetition only during collection")
     masked = sum(bool(row.get("mask_sample")) for row in rows)
     rows = [row for row in rows if not row.get("mask_sample")]
     for row in rows:
@@ -126,6 +130,7 @@ async def stop_worker(process: asyncio.subprocess.Process, grace: float) -> None
 
 class ClawEvalAgent(SimpleResponsesAPIAgent):
     config: ClawEvalAgentConfig
+    ray_enabled = False
 
     def model_post_init(self, context: Any) -> None:
         self._sem = asyncio.Semaphore(self.config.concurrency)
@@ -137,7 +142,7 @@ class ClawEvalAgent(SimpleResponsesAPIAgent):
     async def run(self, body: ClawEvalRunRequest = Body()) -> ClawEvalVerifyResponse:
         async with self._sem:
             started = monotonic()
-            root = source_root(self.config.claweval_root)
+            root = source_root(self.config.claweval_root, expected_revision=self.config.claweval_revision)
             meta = body.verifier_metadata
             task_path(root, meta.task_id, meta.task_sha256)
             params = body.responses_create_params
@@ -197,7 +202,8 @@ class ClawEvalAgent(SimpleResponsesAPIAgent):
             payload["model_overrides"] = model_overrides
             try:
                 await self._launch_worker(payload, output_dir)
-            except (TimeoutError, RuntimeError) as exc:
+                result = json.loads((output_dir / "result.json").read_text(encoding="utf-8"))
+            except (OSError, RuntimeError) as exc:
                 return self._failed_response(
                     body,
                     output_dir,
@@ -210,7 +216,10 @@ class ClawEvalAgent(SimpleResponsesAPIAgent):
                         "failure_reason": f"{type(exc).__name__}; inspect {output_dir / 'worker.log'}",
                     },
                 )
-            result = json.loads((output_dir / "result.json").read_text(encoding="utf-8"))
+            if result["task_id"] != meta.task_id:
+                raise ValueError("Claw-Eval worker returned a mismatched task")
+            if result.get("failure_kind") == "claweval:contract_error":
+                raise ValueError(result["failure_reason"])
             if result.get("status") == "failed" and result.get("failure_kind"):
                 return self._failed_response(body, output_dir, invocation_id, prompt, started, result)
             score = float(result["task_score"])
@@ -221,7 +230,22 @@ class ClawEvalAgent(SimpleResponsesAPIAgent):
             trace = Path(result["trace"]).resolve()
             if not trace.is_relative_to(output_dir):
                 raise ValueError("Claw-Eval returned a trace outside this rollout workspace")
-            response = trace_to_response(trace, meta.task_id, result["model"], expected_score=score)
+            try:
+                response = trace_to_response(trace, meta.task_id, result["model"], expected_score=score)
+            except ClawEvalExecutionError as exc:
+                return self._failed_response(
+                    body,
+                    output_dir,
+                    invocation_id,
+                    prompt,
+                    started,
+                    {
+                        **result,
+                        "status": "failed",
+                        "failure_kind": "claweval:execution_error",
+                        "failure_reason": str(exc),
+                    },
+                )
             return ClawEvalVerifyResponse.model_validate(
                 {
                     **body.model_dump(by_alias=True),
@@ -291,13 +315,22 @@ class ClawEvalAgent(SimpleResponsesAPIAgent):
     async def _launch_worker(self, payload: dict[str, Any], output_dir: Path) -> None:
         worker = Path(__file__).with_name("worker.py")
         log_path = output_dir / "worker.log"
+        # Invoking a venv Python directly does not activate its companion tools
+        # (notably ffprobe/ffmpeg used by the native video graders).
+        native_python = shutil.which(self.config.python_executable) or self.config.python_executable
+        native_bin = str(Path(native_python).absolute().parent)
         # Credentials travel over stdin, never argv or a generated config file.
         with log_path.open("wb") as log:
             process = await asyncio.create_subprocess_exec(
                 self.config.python_executable,
                 str(worker),
                 cwd=payload["claweval_root"],
-                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "CLAW_AGENT_HARNESS": "native"},
+                env={
+                    **os.environ,
+                    "PATH": native_bin + os.pathsep + os.environ.get("PATH", ""),
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                    "CLAW_AGENT_HARNESS": "native",
+                },
                 stdin=asyncio.subprocess.PIPE,
                 stdout=log,
                 stderr=asyncio.subprocess.STDOUT,

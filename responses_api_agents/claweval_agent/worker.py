@@ -17,7 +17,12 @@ from pathlib import Path
 from typing import Any
 
 
-def source_root(value: str) -> Path:
+class ClawEvalContractError(ValueError):
+    """A prepared row no longer matches the native task contract."""
+
+
+def source_root(value: str, *, expected_revision: str | None = None) -> Path:
+    """Validate the ClawEval layout and optional HEAD pin; runtime hashes retain local edits."""
     root = Path(value).expanduser().resolve()
     for relative in (
         "src/claw_eval/config.py",
@@ -26,6 +31,12 @@ def source_root(value: str) -> Path:
     ):
         if not (root / relative).is_file():
             raise FileNotFoundError(f"CLAW_EVAL_ROOT is missing {relative}: {root}")
+    if expected_revision is not None:
+        revision = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True, errors="replace", check=True
+        ).stdout.strip()
+        if revision != expected_revision:
+            raise ClawEvalContractError(f"Claw-Eval revision mismatch: expected {expected_revision}, got {revision}")
     return root
 
 
@@ -36,7 +47,7 @@ def task_path(root: Path, task_id: str, digest: str) -> Path:
     if not path.is_relative_to(root / "tasks"):
         raise ValueError("task definition is outside the task root")
     if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
-        raise ValueError(f"Task digest mismatch for {task_id}; prepare the dataset again")
+        raise ClawEvalContractError(f"Task digest mismatch for {task_id}; prepare the dataset again")
     return path
 
 
@@ -117,7 +128,7 @@ def run_trial(payload: dict[str, Any], root: Path) -> dict[str, Any]:
     path = task_path(root, metadata["task_id"], metadata["task_sha256"])
     task = TaskDefinition.from_yaml(path)
     if task.task_id != metadata["task_id"] or task.prompt.text != payload["prompt"]:
-        raise ValueError("Gym row does not match the native task ID and prompt; prepare the dataset again")
+        raise ClawEvalContractError("Gym row does not match the native task ID and prompt; prepare the dataset again")
     config_path = Path(payload["claweval_config"])
     if not config_path.is_absolute():
         config_path = root / config_path
@@ -213,7 +224,7 @@ def main() -> None:
 
     signal.signal(signal.SIGTERM, terminate)
     payload = json.load(sys.stdin)
-    root = source_root(payload["claweval_root"])
+    root = source_root(payload["claweval_root"], expected_revision=payload.get("claweval_revision"))
     sys.path[:0] = [str(root / "src"), str(root)]
     os.chdir(root)
     if payload["operation"] == "prepare":
@@ -229,8 +240,12 @@ def main() -> None:
             result = {
                 "task_id": payload["verifier_metadata"]["task_id"],
                 "status": "failed",
-                "failure_kind": "claweval:execution_error",
-                "failure_reason": f"{type(exc).__name__}; inspect this rollout's worker.log",
+                "failure_kind": "claweval:contract_error"
+                if isinstance(exc, ClawEvalContractError)
+                else "claweval:execution_error",
+                "failure_reason": str(exc)
+                if isinstance(exc, ClawEvalContractError)
+                else f"{type(exc).__name__}; inspect this rollout's worker.log",
                 "seed": payload["seed"],
             }
         Path(payload["output_dir"], "result.json").write_text(json.dumps(result), encoding="utf-8")

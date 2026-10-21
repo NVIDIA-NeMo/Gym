@@ -22,8 +22,9 @@ are included with the figure.
 | `claweval/multi_turn` | 38 | 3 |
 
 This integration launches the original runner in the supplied
-[NVIDIA Claw-Eval fork](https://gitlab-master.nvidia.com/ehosseiniasl/claw-eval),
-inspected at revision `0e272107a96c2af54b6191c6b09cd534d7368d0d` with local
+[NVIDIA Claw-Eval fork](https://gitlab-master.nvidia.com/ehosseiniasl/claw-eval).
+The upstream [Claw-Eval license](https://github.com/claw-eval/claw-eval/blob/main/LICENSE)
+is MIT; the supplied fork retains the same license. The fork was inspected at revision `0e272107a96c2af54b6191c6b09cd534d7368d0d` with local
 modifications. It requires that fork's `evaluation/task_catalog.py` and
 `evaluation/run_multimodal.py`. It reads public prompts through the native
 `TaskDefinition` loader; no separate Gym exporter or changes to the native agent
@@ -190,35 +191,20 @@ native agent loop and grader using a stub model and sandbox. They check grader
 fixture isolation, reward/trace conversion, repeat indices, configuration parsing,
 incomplete aggregation, and worker failure/cleanup.
 
-A live Slurm/Pyxis comparison on 2026-10-04 (job `7175467`) ran
-`T002_email_triage` with `us/azure/openai/gpt-4o-mini` and the native
-Gemini 3 Flash judge. Direct native execution and `gym eval run` both returned
-`0.715`, with identical seed, runtime hash, and profile hash. Both traces called
-the mock Gmail tool and reported no execution failure. This is a one-task
-integration smoke test, not full-suite baselining.
+For baselining, prepare each task once and collect exactly three distinct trials
+per task with seeds 1001, 1002, and 1003. Retain `resolved-config.yaml`, native
+profiles and source fingerprints, rollout JSONL, model captures, native traces,
+aggregate metrics, and `quality_summary.json`. Compare each Gym reward with its
+native grading event before aggregating. Incomplete or masked trials prevent
+full-run Pass@3 and Pass³ reporting; a smoke subset is not a benchmark baseline.
 
-A Factory backend smoke on the same date (job `7175842`) submitted the general
-recipe with a CPU allocation and external GPT-4o mini endpoint, limited to
-`T001zh_email_triage`. Seeds 1001/1002/1003 scored 0.935/0.870/0.935; all three
-trials completed, with native mean score 0.913333 and Pass@1, Pass@3 and strict
-Pass³ of 1.0 for this single task. The pinned Gym commit was
-`e2a4a6b15a9b4be119e24275e537b8fce0c4bd5c`. Those earlier trials bypassed Gym capture and their health was unobserved;
-they do not satisfy onboarding evidence requirements.
-
-The 303 saved native Nano 3 Omni multimodal traces (101 tasks, three trials)
-also pass Gym's trace conversion and native-score checks, including 1,334 tool
-calls. This checks historical trace compatibility; it is not a new model run.
-
-The October 5 Nano comparison is invalid as a full-run parity result: dataset
-repetition expanded each intended single-seed job three times. The retained
-outputs contain overlapping task/seed pairs and incomplete coverage. They must
-not be used for certification. The corrected implementation removes dataset-level
-repetition and preserves provider extensions through Gym's capture proxy.
-
-For every corrected run retain `resolved-config.yaml`, native profiles and
-fingerprints, `rollouts.jsonl`, aggregate metrics, and `quality_summary.json`.
 Run `python scripts/inspect_harness_conformance.py --bundle <rollouts.jsonl>
---output <evidence-dir>` and require `gym-p0/v1` on every rollout. Native parity,
-current harness capability evidence, Frontier Eval review, SWQA full-run score
-bands, and Evergreen certification are separate onboarding requirements. This
-branch does not claim those outstanding review or certification steps are complete.
+--output <evidence-dir>` and inspect every P0 failure, including direct-answer
+rollouts with no tool requests. Keep the original inspector verdict. Native
+parity, harness capability qualification, Frontier Eval review, SWQA score bands,
+and Evergreen certification are separate requirements.
+
+Baseline numbers, exact evaluated revisions, scheduler overrides, and retained
+artifact locations live in [Gym PR #3997](https://github.com/NVIDIA-NeMo/Gym/pull/3997)
+and its linked Factory MR. These records distinguish historical compatibility
+checks, fresh smoke results, incomplete evaluations, and accepted full runs.

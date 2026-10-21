@@ -188,3 +188,25 @@ def test_worker_protocol_writes_results_and_handles_shutdown(boundary, monkeypat
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({**b.payload, "operation": "unknown"})))
     with pytest.raises(ValueError, match="Unknown operation"):
         worker.main()
+
+
+def test_worker_preserves_contract_errors(boundary, monkeypatch):
+    b = boundary
+    b.payload["prompt"] = "A different native prompt"
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(b.payload)))
+    monkeypatch.setattr(sys, "path", sys.path.copy())
+    monkeypatch.chdir(b.root)
+    worker.main()
+    result = json.loads((b.root / "out/result.json").read_text())
+    assert result["failure_kind"] == "claweval:contract_error"
+    assert "does not match" in result["failure_reason"]
+    b.native.run_one.assert_not_called()
+
+
+def test_source_revision_mismatch_is_a_contract_error(boundary, monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(worker.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(stdout="a" * 40))
+    assert worker.source_root(str(boundary.root), expected_revision="a" * 40) == boundary.root
+    with pytest.raises(worker.ClawEvalContractError, match="revision mismatch"):
+        worker.source_root(str(boundary.root), expected_revision="b" * 40)

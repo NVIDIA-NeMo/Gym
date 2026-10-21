@@ -18,6 +18,10 @@ from nemo_gym.rollout_observability import (
 )
 
 
+class ClawEvalExecutionError(ValueError):
+    """Native execution failed after its task and grading identities were validated."""
+
+
 def trace_observations(
     path: Path | None,
     *,
@@ -175,7 +179,7 @@ def trace_to_response(path: Path, task_id: str, model: str, expected_score: floa
     if any(event["trace_id"] != start["trace_id"] for event in (end, grade)):
         raise ValueError("Claw-Eval trace ID mismatch")
     if end.get("failure_modes"):
-        raise ValueError(f"Claw-Eval execution failed: {end['failure_modes']}")
+        raise ClawEvalExecutionError(f"Claw-Eval execution failed: {end['failure_modes']}")
     if calls != results:
         raise ValueError("Claw-Eval trace has tool calls without results")
     input_tokens = end.get("model_input_tokens", end.get("input_tokens", 0))

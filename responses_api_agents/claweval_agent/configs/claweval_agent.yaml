@@ -8,6 +8,7 @@ claweval_agent:
       description: Native Claw-Eval evaluation with Pyxis sandboxes and native graders
       value: Evaluate general, multimodal, and multi-turn assistant tasks
       claweval_root: ${oc.env:CLAW_EVAL_ROOT}
+      claweval_revision: ${oc.env:CLAW_EVAL_REVISION,null}
       claweval_config: ${oc.env:CLAW_EVAL_CONFIG,config_multimodal.yaml}
       python_executable: ${oc.env:CLAW_EVAL_PYTHON,python3}
       fixture_root: ${oc.env:CLAW_EVAL_FIXTURE_ROOT,''}

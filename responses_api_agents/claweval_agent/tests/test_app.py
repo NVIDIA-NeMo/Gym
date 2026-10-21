@@ -162,6 +162,13 @@ def test_partial_or_duplicate_trials_do_not_look_complete():
         benchmark_metrics(rows + [rows[0]])
 
 
+@pytest.mark.parametrize("index", [-1, 3, 8])
+@pytest.mark.parametrize("masked", [False, True])
+def test_trial_indices_outside_three_trial_protocol_raise(index, masked):
+    with pytest.raises(ValueError, match="trial index"):
+        benchmark_metrics([{**trial("A", index, False), "mask_sample": masked}])
+
+
 def test_digest_and_path_validation(tmp_path):
     digest = fake_root(tmp_path)
     assert task_path(tmp_path, "T001_test", digest).is_file()
@@ -379,3 +386,21 @@ def test_suite_config_resolves(monkeypatch):
         initial_global_config_dict=OmegaConf.load("benchmarks/claweval/config.yaml"),
     )
     assert all(f"claweval_{split}_agent" in config for split in ("general", "multimodal", "multi_turn"))
+
+
+async def test_worker_finds_tools_beside_native_python(tmp_path, monkeypatch):
+    native_bin = tmp_path / "native-bin"
+    native_bin.mkdir()
+    (native_bin / "python").symlink_to(sys.executable)
+    probe = native_bin / "ffprobe"
+    probe.write_text("#!/bin/sh\nprintf 'native ffprobe available\\n'\n")
+    probe.chmod(0o755)
+    agent = make_agent(tmp_path, python_executable=str(native_bin / "python"))
+    create = asyncio.create_subprocess_exec
+
+    async def run_probe(*args, **kwargs):
+        return await create(args[0], "-c", "import subprocess; subprocess.run(['ffprobe'], check=True)", **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", run_probe)
+    await agent._launch_worker({"claweval_root": str(tmp_path)}, tmp_path)
+    assert "native ffprobe available" in (tmp_path / "worker.log").read_text()

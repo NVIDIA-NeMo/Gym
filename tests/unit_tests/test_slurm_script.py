@@ -2734,7 +2734,7 @@ def test_host_driver_rejects_container_path_remapping():
     from nemo_gym.orchestration.api import DriverConfig
 
     with pytest.raises(ValueError, match="cannot use container mounts"):
-        DriverConfig(container=None, mounts=["/source:/destination"], benchmarks={})
+        DriverConfig(container=None, mounts=["/source:/destination"], benchmarks={"example": {}})
 
 
 def test_host_driver_install_does_not_modify_user_environment():
