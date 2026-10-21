@@ -2715,8 +2715,13 @@ def test_a_ray_head_on_node_0_is_probed_locally(tmp_path):
     assert "Waiting for ray at http://localhost:8011" in script
 
 
-def _run_job_script(tmp_path, *, service: str, driver: str, name: str = "vllm_model") -> subprocess.CompletedProcess:
-    """Run a rendered job.sh with a fake `srun` on PATH: the `name` service step runs `service`, the driver `driver`."""
+def _run_job_script(
+    tmp_path, *, service: str, driver: str, name: str = "vllm_model", prelude: str = ""
+) -> subprocess.CompletedProcess:
+    """Run a rendered job.sh with a fake `srun` on PATH: the `name` service step runs `service`, the driver `driver`.
+
+    `prelude` is bash put after the shebang line, for a test that needs to hook the script's own commands.
+    """
     config = SubmitConfig.model_validate(
         {
             "services": {name: {"type": "vllm", "container": "vllm:latest", "model": "org/model"}},
@@ -2730,10 +2735,11 @@ def _run_job_script(tmp_path, *, service: str, driver: str, name: str = "vllm_mo
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     fakes = {"srun": f'case "$*" in *logs/driver-*) {driver} ;; *) {service} ;; esac', "curl": "exit 0"}
-    for name, body in fakes.items():
-        (bin_dir / name).write_text(f"#!/bin/bash\n{body}\n")
-        (bin_dir / name).chmod(0o755)
-    (tmp_path / "job.sh").write_text(script)
+    for binary, body in fakes.items():
+        (bin_dir / binary).write_text(f"#!/bin/bash\n{body}\n")
+        (bin_dir / binary).chmod(0o755)
+    shebang, _, rest = script.partition("\n")
+    (tmp_path / "job.sh").write_text(f"{shebang}\n{prelude}{rest}")
     # A file, not a pipe: a service still running when the script exits would hold a pipe open.
     with (tmp_path / "job.out").open("w") as out:
         process = subprocess.Popen(
@@ -2771,6 +2777,34 @@ def test_the_driver_exit_code_stands_when_the_driver_finishes_first(tmp_path):
 
     assert result.returncode == 7
     assert "exited" not in result.stdout
+
+
+# Puts the reviewer's race window in one place: the watch loop has just seen the driver alive, and both the driver
+# and the service end before it checks the service. On that first service check, the wrapper releases both fake
+# steps, waits until both have exited, then lets `kill` answer: the service is dead.
+_DRIVER_AND_SERVICE_END_TOGETHER = """\
+kill() {
+    if [[ "${FUNCNAME[1]}" == _gym_run_driver && "$1" == -0 && "$2" != "$_gym_driver_pid" && ! -e go ]]; then
+        : > go
+        while builtin kill -0 "$_gym_driver_pid" 2>/dev/null || builtin kill -0 "$2" 2>/dev/null; do :; done
+    fi
+    builtin kill "$@"
+}
+"""
+
+
+def test_a_driver_that_ends_as_its_service_ends_keeps_its_own_status(tmp_path):
+    wait_for_go = "until [ -e go ]; do sleep 0.1; done"
+    result = _run_job_script(
+        tmp_path,
+        service=f"{wait_for_go}; exit 3",
+        driver=f"{wait_for_go}; exit 0",
+        prelude=_DRIVER_AND_SERVICE_END_TOGETHER,
+    )
+
+    assert (tmp_path / "go").exists()
+    assert result.returncode == 0
+    assert "while the driver was running" not in result.stdout
 
 
 def test_ray_workers_are_watched_and_the_collector_is_not(tmp_path):

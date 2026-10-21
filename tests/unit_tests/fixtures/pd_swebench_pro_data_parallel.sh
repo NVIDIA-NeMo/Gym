@@ -154,6 +154,11 @@ GYM_CMD=(
 env NEMO_GYM_OTEL_ENABLED=1 NEMO_GYM_OTEL_RUN_ID=jobs NEMO_GYM_OTEL_SPAN_GROUPS=default,verify NEMO_GYM_OTEL_LOGS_ENABLED=1 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf srun --overlap --no-container-mount-home --nodelist="${gym_nodes[0]}" --nodes=1 --ntasks=1 --container-mounts=/jobs/swebench_pro:/jobs/swebench_pro --container-image=img --output=logs/driver-$SLURM_JOB_ID.log "${GYM_CMD[@]}" &
 _gym_driver_pid=$!
 _gym_service_exited() {
+    # A successful run tears its services down as the driver ends: if the driver is already gone, its status stands.
+    if ! kill -0 "$_gym_driver_pid" 2>/dev/null; then
+        wait "$_gym_driver_pid"
+        return
+    fi
     wait "$2"
     local status=$?
     echo "ERROR: service $1 exited (status $status) while the driver was running; stopping the driver."

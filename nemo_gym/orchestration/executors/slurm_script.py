@@ -775,6 +775,11 @@ _WATCHED_DRIVER_TEMPLATE = """\
 {driver} &
 _gym_driver_pid=$!
 _gym_service_exited() {{
+    # A successful run tears its services down as the driver ends: if the driver is already gone, its status stands.
+    if ! kill -0 "$_gym_driver_pid" 2>/dev/null; then
+        wait "$_gym_driver_pid"
+        return
+    fi
     wait "$2"
     local status=$?
     echo "ERROR: service $1 exited (status $status) while the driver was running; stopping the driver."
