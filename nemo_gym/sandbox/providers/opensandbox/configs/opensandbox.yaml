@@ -47,6 +47,14 @@ sandbox:
       retries: 10
       retry_delay_s: 5.0
       retry_max_delay_s: 90.0
+      # A lease instead of the spec's ttl_s: each sandbox is created with renew_ttl_s and the process that
+      # created it renews it every renew_interval_s, so a crashed process's sandboxes are deleted by the
+      # service within renew_ttl_s instead of running out the spec's lifetime (hours). The API may be
+      # unreachable for renew_ttl_s - renew_interval_s before live sandboxes expire. Load is one renew per
+      # sandbox per interval (under 2/s at 512 sandboxes).
+      renew_ttl_s: 1200
+      renew_interval_s: 300
+      renew_timeout_s: 30
     probe:
       timeout_s: 60
       deadline_s: 180

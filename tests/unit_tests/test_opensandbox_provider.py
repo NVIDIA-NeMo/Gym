@@ -27,7 +27,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-from nemo_gym.sandbox.providers.base import SandboxResources, SandboxSpec, SandboxStatus
+from nemo_gym.sandbox.providers.base import SandboxHandle, SandboxResources, SandboxSpec, SandboxStatus
 
 
 pytestmark = pytest.mark.sandbox
@@ -179,6 +179,88 @@ async def test_renewal_requires_ttl_longer_than_interval(ttl: int | None) -> Non
         await provider.create(SandboxSpec(image="example", ttl_s=ttl))
 
 
+@pytest.mark.parametrize(
+    ("create", "match"),
+    [
+        ({"renew_ttl_s": 1200}, "renew_ttl_s requires a shorter"),
+        ({"renew_ttl_s": 300, "renew_interval_s": 300}, "renew_ttl_s requires a shorter"),
+        ({"renew_ttl_s": 0, "renew_interval_s": 1}, "renew_ttl_s must be finite"),
+        ({"renew_ttl_s": float("inf"), "renew_interval_s": 1}, "renew_ttl_s must be finite"),
+        ({"renew_timeout_s": 0}, "renew_timeout_s must be finite"),
+        ({"renew_timeout_s": float("nan")}, "renew_timeout_s must be finite"),
+    ],
+)
+def test_lease_settings_are_validated(create: dict[str, float], match: str) -> None:
+    with pytest.raises(ValueError, match=match):
+        opensandbox_provider.OpenSandboxCreateConfig(**create)
+
+
+async def test_a_lease_replaces_the_spec_ttl_at_create_and_in_every_renewal(
+    fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        create={"renew_ttl_s": 1200, "renew_interval_s": 0.01, "renew_timeout_s": 7}, probe={"command": None}
+    )
+    budgets: list[float | None] = []
+    await_operation = provider._await_sdk_operation
+
+    async def recording(factory: Any, **kwargs: Any) -> Any:
+        if kwargs["operation"] == "renew":
+            budgets.append(kwargs["timeout_s"])
+        return await await_operation(factory, **kwargs)
+
+    monkeypatch.setattr(provider, "_await_sdk_operation", recording)
+    # No spec TTL at all: the lease is the provider's, so the spec need not carry one.
+    for ttl_s in (None, 18000):
+        handle = await provider.create(SandboxSpec(image="example", ttl_s=ttl_s))
+        assert FakeSandbox.created_kwargs["timeout"] == timedelta(seconds=1200)
+        durations: list[timedelta] = []
+        renewed = asyncio.Event()
+
+        async def renew(duration: timedelta) -> None:
+            durations.append(duration)
+            if len(durations) >= 2:
+                renewed.set()
+
+        handle.raw.renew = renew
+        handle.raw.kill = AsyncMock()
+        await asyncio.wait_for(renewed.wait(), timeout=1)
+        await provider.close(handle)
+        assert set(durations) == {timedelta(seconds=1200)}
+    assert budgets and set(budgets) == {7}
+    await provider.aclose()
+
+
+async def test_the_renewal_interval_is_jittered_within_ten_percent(
+    fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bounds: list[tuple[float, float]] = []
+    monkeypatch.setattr(opensandbox_provider.random, "uniform", lambda low, high: bounds.append((low, high)) or high)
+    sleeps: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def recording_sleep(delay: float) -> None:
+        sleeps.append(delay)
+        await real_sleep(0)
+
+    # Patched before create, so the renewal loop's first wait is recorded too, and returns at once.
+    monkeypatch.setattr(asyncio, "sleep", recording_sleep)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        create={"renew_ttl_s": 1200, "renew_interval_s": 300}, probe={"command": None}
+    )
+    handle = await provider.create(SandboxSpec(image="example"))
+    handle.raw.renew = AsyncMock()
+    handle.raw.kill = AsyncMock()
+    async with asyncio.timeout(1):
+        while handle.raw.renew.await_count < 2:
+            await real_sleep(0)
+    await provider.close(handle)
+    await provider.aclose()
+
+    assert bounds and set(bounds) == {(0.9, 1.1)}
+    assert sleeps.count(300 * 1.1) >= 2
+
+
 async def test_renewal_refreshes_ttl_and_stops_before_termination(fake_opensandbox_sdk: None) -> None:
     provider = opensandbox_provider.OpenSandboxProvider(create={"renew_interval_s": 0.01}, probe={"command": None})
     handle = await provider.create(SandboxSpec(image="example", ttl_s=28800))
@@ -205,23 +287,38 @@ async def test_renewal_refreshes_ttl_and_stops_before_termination(fake_opensandb
     await provider.aclose()
 
 
-async def test_renewal_failure_surfaces_and_still_allows_cleanup(fake_opensandbox_sdk: None) -> None:
+async def test_a_failed_renewal_is_logged_and_the_next_one_tries_again(
+    fake_opensandbox_sdk: None, caplog: pytest.LogCaptureFixture
+) -> None:
     provider = opensandbox_provider.OpenSandboxProvider(
         create={"renew_interval_s": 0.01}, probe={"command": None}, operations={"retries": 0}
     )
     handle = await provider.create(SandboxSpec(image="example", ttl_s=28800))
-    handle.raw.renew = AsyncMock(side_effect=RuntimeError("renewal rejected"))
+    attempts: list[int] = []
+    renewed = asyncio.Event()
+
+    async def flaky_renew(duration: timedelta) -> None:
+        attempts.append(len(attempts))
+        if len(attempts) <= 2:
+            raise RuntimeError("renewal rejected")
+        renewed.set()
+
+    handle.raw.renew = flaky_renew
     handle.raw.kill = AsyncMock()
     handle.raw.close = AsyncMock()
     task = provider._renewals[handle.sandbox_id]
-    with pytest.raises(RuntimeError, match="renewal rejected"):
-        await asyncio.wait_for(asyncio.shield(task), timeout=1)
-    operation = AsyncMock()
-    with pytest.raises(RuntimeError, match="lifetime renewal failed"):
+    with caplog.at_level(logging.WARNING):
+        await asyncio.wait_for(renewed.wait(), timeout=1)
+    assert not task.done(), "the loop survives failed renewals"
+    assert "lifetime renewal failed" in caplog.text
+    # Other operations and the close are not held hostage by earlier renewal failures.
+    operation = AsyncMock(return_value="ok")
+    assert (
         await provider._await_sdk_operation(operation, operation="get_info", sandbox_id=handle.sandbox_id, timeout_s=1)
-    operation.assert_not_awaited()
-    with pytest.raises(RuntimeError, match="lifetime renewal failed"):
-        await provider.close(handle)
+        == "ok"
+    )
+    await provider.close(handle)
+    assert task.cancelled()
     handle.raw.kill.assert_awaited_once()
     handle.raw.close.assert_awaited_once()
     await provider.aclose()
@@ -2550,3 +2647,160 @@ async def test_shared_memory_metadata_reaches_create_api(fake_opensandbox_sdk, s
     provider = OpenSandboxProvider(attribution={"enabled": False}, probe={"command": None})
     await provider.create(SandboxSpec(image="image:tag", metadata={"nemo.nvidia.com/shm": size}))
     assert FakeSandbox.created_kwargs["metadata"]["nemo.nvidia.com/shm"] == size
+
+
+class _ManagementResponse:
+    def __init__(self, status: int, payload: Any) -> None:
+        self.status = status
+        self._payload = payload
+
+    async def __aenter__(self) -> "_ManagementResponse":
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        return None
+
+    async def json(self, content_type: object = None) -> Any:
+        return self._payload
+
+
+def _management(monkeypatch: pytest.MonkeyPatch, responses: list[_ManagementResponse]) -> list[dict[str, object]]:
+    """Replace Gym's shared client with a scripted management API; returns the calls it received."""
+    import nemo_gym.server_utils as server_utils
+
+    calls: list[dict[str, object]] = []
+
+    async def fake_request(method: str, url: str, **kwargs: object) -> _ManagementResponse:
+        calls.append({"method": method, "url": url, **kwargs})
+        return responses.pop(0) if len(responses) > 1 else responses[0]
+
+    monkeypatch.setattr(server_utils, "request", fake_request)
+    return calls
+
+
+def _snapshot_provider(**operations: Any) -> Any:
+    return opensandbox_provider.OpenSandboxProvider(
+        connection={"domain": "https://cell.example", "api_key": "k", "protocol": "https", "tls_verify": False},
+        create={"connect_poll_s": 0.01},
+        operations=operations,
+    )
+
+
+class _SnapshottingSandbox(FakeSandbox):
+    snapshot_names: list[str | None] = []
+
+    async def create_snapshot(self, name: str | None = None) -> Any:
+        type(self).snapshot_names.append(name)
+        return SimpleNamespace(id="snap-1", status=SimpleNamespace(state="Creating"))
+
+
+def _snapshot_handle() -> SandboxHandle:
+    return SandboxHandle(sandbox_id="sb-1", provider_name="opensandbox", raw=_SnapshottingSandbox("sb-1"))
+
+
+async def test_snapshot_starts_through_the_sdk_and_returns_the_id_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _management(monkeypatch, [_ManagementResponse(200, {})])
+    _SnapshottingSandbox.snapshot_names = []
+
+    assert await _snapshot_provider().snapshot(_snapshot_handle(), name="ng-s1") == "snap-1"
+
+    assert _SnapshottingSandbox.snapshot_names == ["ng-s1"]
+    assert calls == [], "starting a snapshot does not wait for it"
+
+
+@pytest.mark.parametrize("tls_verify", [False, True])
+async def test_wait_snapshot_ready_polls_the_management_api_until_ready(
+    monkeypatch: pytest.MonkeyPatch, tls_verify: bool
+) -> None:
+    calls = _management(
+        monkeypatch,
+        [
+            _ManagementResponse(200, {"id": "snap-1", "status": {"state": "Creating"}}),
+            _ManagementResponse(200, {"id": "snap-1", "status": {"state": "Ready"}}),
+        ],
+    )
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"domain": "cell.example", "api_key": "k", "protocol": "https", "tls_verify": tls_verify},
+        create={"connect_poll_s": 0.01},
+    )
+
+    await provider.wait_snapshot_ready("snap-1")
+
+    assert [call["method"] for call in calls] == ["GET", "GET"], "polled until Ready"
+    assert {call["url"] for call in calls} == {"https://cell.example/v1/snapshots/snap-1"}
+    assert calls[0]["headers"] == {"OPEN-SANDBOX-API-KEY": "k"}
+    # The polls go over Gym's shared client, so they must carry connection.tls_verify themselves.
+    assert all((call.get("ssl") is False) == (not tls_verify) for call in calls)
+
+
+async def test_wait_snapshot_ready_reads_a_top_level_state_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    _management(monkeypatch, [_ManagementResponse(200, {"id": "snap-1", "state": "READY"})])
+    await _snapshot_provider().wait_snapshot_ready("snap-1")
+
+
+async def test_a_failed_snapshot_raises_with_the_servers_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    _management(
+        monkeypatch,
+        [_ManagementResponse(200, {"id": "snap-1", "status": {"state": "Failed", "message": "registry push failed"}})],
+    )
+    with pytest.raises(RuntimeError, match="snapshot 'snap-1' failed: registry push failed"):
+        await _snapshot_provider().wait_snapshot_ready("snap-1")
+
+
+async def test_a_snapshot_that_is_not_ready_in_time_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    _management(monkeypatch, [_ManagementResponse(200, {"id": "snap-1", "status": {"state": "Creating"}})])
+    with pytest.raises(TimeoutError, match="snapshot 'snap-1' to be ready after 0.05s"):
+        await _snapshot_provider(snapshot_timeout_s=0.05).wait_snapshot_ready("snap-1")
+
+
+async def test_a_snapshot_lookup_error_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    _management(monkeypatch, [_ManagementResponse(500, {})])
+    with pytest.raises(RuntimeError, match="lookup failed -> HTTP 500"):
+        await _snapshot_provider().wait_snapshot_ready("snap-1")
+
+
+class _TextResponse(_ManagementResponse):
+    async def json(self, content_type: object = None) -> Any:
+        raise ValueError("not JSON")
+
+
+@pytest.mark.parametrize(
+    ("response", "detail"),
+    [
+        (_TextResponse(200, None), "a body that is not JSON"),
+        (_ManagementResponse(200, ["not", "an", "object"]), "a body that is not a JSON object"),
+        (_ManagementResponse(200, {"id": "snap-1"}), "returned no state"),
+    ],
+)
+async def test_a_lookup_answer_without_a_state_fails_at_once_instead_of_polling_until_the_timeout(
+    monkeypatch: pytest.MonkeyPatch, response: _ManagementResponse, detail: str
+) -> None:
+    calls = _management(monkeypatch, [response])
+    with pytest.raises(RuntimeError, match=detail):
+        await _snapshot_provider(snapshot_timeout_s=5).wait_snapshot_ready("snap-1")
+    assert len(calls) == 1
+
+
+async def test_delete_snapshot_tolerates_a_snapshot_that_is_already_gone(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _management(monkeypatch, [_ManagementResponse(404, {"code": "SNAPSHOT::NOT_FOUND"})])
+
+    await _snapshot_provider().delete_snapshot("snap-1")
+
+    [call] = calls
+    assert call["method"] == "DELETE" and call["url"] == "https://cell.example/v1/snapshots/snap-1"
+
+    _management(monkeypatch, [_ManagementResponse(500, {})])
+    with pytest.raises(RuntimeError, match="snapshot 'snap-1' delete failed -> HTTP 500"):
+        await _snapshot_provider().delete_snapshot("snap-1")
+
+
+async def test_snapshot_operations_require_a_domain() -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(connection={"api_key": "k"}, create={"connect_poll_s": 0.01})
+    with pytest.raises(RuntimeError, match="require connection.domain"):
+        await provider.delete_snapshot("snap-1")
+
+
+def test_snapshot_timeout_is_validated() -> None:
+    with pytest.raises(ValueError, match="operations.snapshot_timeout_s must be > 0"):
+        _snapshot_provider(snapshot_timeout_s=0)
+    assert opensandbox_provider.OpenSandboxOperationConfig().snapshot_timeout_s == 240.0

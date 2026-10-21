@@ -401,6 +401,28 @@ class SupportsSandboxPauseResume(Protocol):
 
 
 @runtime_checkable
+class SupportsSandboxSnapshot(Protocol):
+    """Optional provider capability to snapshot a running sandbox into a durable, independent copy.
+
+    A snapshot is a restore point: ``create`` with ``provider_options["snapshot_id"]`` (and no image) builds a new
+    sandbox from it, however the source sandbox changed or ended since. Partial-rollout checkpoints take one per
+    sandbox at commit; see ``nemo_gym.sandbox.checkpoint``.
+    """
+
+    async def snapshot(self, handle: SandboxHandle, *, name: str | None = None) -> str:
+        """Start a snapshot of the sandbox and return its id at once; it may not be usable yet."""
+        ...
+
+    async def wait_snapshot_ready(self, snapshot_id: str) -> None:
+        """Return once the snapshot can create sandboxes; raise if it failed or is not ready in time."""
+        ...
+
+    async def delete_snapshot(self, snapshot_id: str) -> None:
+        """Delete a snapshot; a snapshot that is already gone is not an error."""
+        ...
+
+
+@runtime_checkable
 class SandboxPtySession(Protocol):
     """One live interactive terminal. Async context manager; exit closes it."""
 

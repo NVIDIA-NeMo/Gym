@@ -156,6 +156,12 @@ INVALID_BODIES: dict[str, list[dict[str, Any]]] = {
     "renew": [{"checkpoint_id": "c"}, {"checkpoint_id": "c", "deadline_ts": "soon"}],
     "retire": [body(), body(episode_ids=[]), body(episode_ids=[{"rollout_id": "r-a1"}]), body(episode_ids="r")],
     "forget": [body(), body(rollout_ids=[])],
+    "release": [
+        body(),
+        body(kept_checkpoint_ids="c"),
+        body(kept_checkpoint_ids=["../x"]),
+        body(kept_checkpoint_ids=[""]),
+    ],
     "commit": [body(), body(checkpoint_dir=""), body(checkpoint_dir="d", extra=1)],
     "restore": [body(), body(checkpoint_dir="d"), body(checkpoint_dir="d", episode_ids=[{"attempt": 1}])],
     "resume": [{"deadline_ts": 1}, body(checkpoint_id=7)],

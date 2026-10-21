@@ -140,7 +140,7 @@ class CoordinatedPolicyParticipant(CoordinatedParticipant[GateReport]):
     def export_records(self, episode_ids: Optional[list[EpisodeId]]) -> list[CheckpointRecord]:
         raise NotImplementedError("the coordinated policy participant exports asynchronously; use export()")
 
-    async def export(self, episode_ids: Optional[list[EpisodeId]]) -> list[CheckpointRecord]:
+    async def export(self, episode_ids: Optional[list[EpisodeId]], *, checkpoint_id: str) -> list[CheckpointRecord]:
         if self.ledger is None:
             return []
         # Workers are closed, so what they hold is stable: fetch it once, then read the ledgers off the loop.
