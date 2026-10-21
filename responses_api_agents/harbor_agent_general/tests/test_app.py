@@ -295,6 +295,37 @@ async def test_run_job_keeps_graded_agent_timeouts(tmp_path, monkeypatch, failur
         assert not result_path.exists()
 
 
+@pytest.mark.asyncio
+async def test_run_job_rejects_a_graded_timeout_beside_another_failed_step(tmp_path, monkeypatch):
+    """One step's graded timeout doesn't excuse another step's failure."""
+    from harbor.models.job.config import JobConfig
+
+    from responses_api_agents.harbor_agent_general import app
+
+    trial_dir = tmp_path / "job" / "trial"
+    trial_dir.mkdir(parents=True)
+    result_path = trial_dir / "result.json"
+    result_path.write_text("{}")
+    timeout = SimpleNamespace(exception_type="AgentTimeoutError", exception_message="timed out after 900.0 seconds")
+    failure = SimpleNamespace(exception_type="RuntimeError", exception_message="notebook unavailable")
+    trial = SimpleNamespace(
+        task_name="task",
+        exception_info=None,
+        verifier_result=None,
+        step_results=[
+            SimpleNamespace(exception_info=timeout, verifier_result=SimpleNamespace(rewards={"reward": 1.0})),
+            SimpleNamespace(exception_info=failure, verifier_result=None),
+        ],
+    )
+    monkeypatch.setattr(app.TrialResult, "model_validate_json", lambda _: trial)
+    monkeypatch.setattr(app.Job, "create", AsyncMock(return_value=SimpleNamespace(run=AsyncMock())))
+    config = JobConfig(job_name="job", jobs_dir=tmp_path)
+
+    with pytest.raises(RuntimeError, match="notebook unavailable"):
+        await HarborAgent.run_job(config.model_dump(mode="json"), "task")
+    assert not result_path.exists()
+
+
 @pytest.fixture
 def agent(monkeypatch: pytest.MonkeyPatch) -> HarborAgent:
     """An agent built without a server: compute_metrics reads only the rollouts it is handed."""
