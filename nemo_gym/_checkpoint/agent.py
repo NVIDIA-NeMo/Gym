@@ -62,7 +62,7 @@ class AgentSessionRecord(CheckpointRecord):
     session_key: str
     session: JsonPayload
     boundary: Optional[JsonPayload] = None
-    # A legacy /run episode's own boundary (which protocol step is next); None for native sessions.
+    # An agent's own /run episode boundary (which protocol step is next); None for agent sessions.
     episode: Optional[JsonPayload] = None
 
 

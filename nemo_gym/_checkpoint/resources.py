@@ -584,7 +584,7 @@ class ResourcesCheckpointMiddleware:
         mcp_token = self.mcp_token_claims(scope) if is_mcp else None
         if mcp_token is not None:
             session_id = mcp_token.session_id
-        # Inside an episode every resources call carries the rollout prefix, native seeds included.
+        # Inside an episode every resources call carries the rollout prefix, seeds from an Environment Server included.
         seed = current_episode_id() if starts_session else None
         # A session start without the prefix creates a session that nothing tracks.
         # No checkpoint would export it, and no retire would free it.

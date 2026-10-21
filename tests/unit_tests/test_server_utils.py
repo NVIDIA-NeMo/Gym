@@ -117,7 +117,11 @@ class TestRequestRetries:
 
         with raises(failure_type) as exc_info:
             await nemo_gym.server_utils.request(
-                "POST", "http://server.test/step", _internal=internal, _retry=False, json={"action": "move"}
+                "POST",
+                "http://server.test/step",
+                _internal=internal,
+                _resend_after_disconnect=False,
+                json={"action": "move"},
             )
 
         assert exc_info.value is failure

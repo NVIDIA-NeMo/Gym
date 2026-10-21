@@ -382,8 +382,7 @@ async def _admit_candidate(context: CaptureContext, request_items: list[dict]) -
             else:
                 root_reason = "non_user_suffix"
     if matches:
-        # Prefer the longest complete prefix. Two equally long occurrences
-        # still need explicit identity; equal text is not acceptance evidence.
+        # Prefer the longest complete prefix; use identity to break ties when available.
         longest = max(record.replay.item_count for record in matches)
         matches = [record for record in matches if record.replay.item_count == longest]
         if len(matches) > 1:
@@ -397,9 +396,12 @@ async def _admit_candidate(context: CaptureContext, request_items: list[dict]) -
             ]
             if len(identified) == 1:
                 matches = identified
-        if len(matches) != 1:
-            raise CaptureAdmissionError("Ambiguous source-prefix candidate")
-        predecessor = matches[0]
+        if len(matches) == 1:
+            predecessor = matches[0]
+        else:
+            # Capture a fresh context without guessing a parent. Training selection
+            # still needs independent evidence of which generations were accepted.
+            root_reason = "ambiguous_candidate"
     chain = []
     if predecessor is not None:
         by_id = {record.model_call_id: record for record in manifest.records}

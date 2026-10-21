@@ -87,7 +87,19 @@ from nemo_gym.global_config import (
     get_global_config_dict,
 )
 from nemo_gym.profiling import Profiler
-from nemo_gym.rollout_correlation import ROUTED_PATH_STATE_KEY, current_rollout_id, maybe_rollout_id_from_run_body
+from nemo_gym.rollout_correlation import (
+    ROUTED_PATH_STATE_KEY,
+    current_rollout_id,
+    maybe_rollout_id_from_run_body,
+    rollout_context,
+)
+from nemo_gym.session_routing import (
+    SESSION_CLAIM_SCOPE_KEY,
+    SESSION_ID_SCOPE_KEY,
+    SESSION_SOCKET_DIR_ENV,
+    create_session_socket_dir,
+    install_session_routing,
+)
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, safe_set_span_attributes
 from nemo_gym.telemetry.connection_pool import (
     QueueTimedTCPConnector,
@@ -101,6 +113,12 @@ from nemo_gym.telemetry.observer import observe_app_event_loop, request_counts
 from nemo_gym.telemetry.setup import is_trace_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.telemetry.startup import ServerStartupTimeline
+
+
+try:
+    from opentelemetry import context as _otel_context
+except ImportError:  # the telemetry extra is optional; without the SDK there is no span context to isolate
+    _otel_context = None
 
 
 logger = logging.getLogger(__name__)
@@ -522,7 +540,6 @@ async def request(
     _max_connection_retries: Optional[int] = None,
     _server_name: Optional[str] = None,
     _max_num_tries: Optional[int] = None,
-    _retry: bool = True,
     _control: bool = False,
     _resend_after_disconnect: bool = True,
     **kwargs: Unpack[_RequestOptions],
@@ -532,8 +549,6 @@ async def request(
     This is the only place Gym talks to another server, so it is also the only place
     trace context has to be injected: every agent -> model and agent -> resources hop goes
     through here. `CLAUDE.md` bans httpx precisely to keep it that way.
-
-    Set ``_retry=False`` when replaying an ambiguous request could repeat a state change.
 
     ``_server_name`` is the bounded logical destination label for pool metrics: a configured
     ``ServerClient`` server name, ``remote_agent_service`` for the remote agent's external
@@ -570,7 +585,6 @@ async def request(
             _max_num_tries=_max_num_tries,
             _max_connection_retries=_max_connection_retries,
             _server_name=_server_name,
-            _retry=_retry,
             _control=_control,
             _resend_after_disconnect=_resend_after_disconnect,
             **kwargs,
@@ -585,7 +599,6 @@ async def request(
             _max_num_tries=_max_num_tries,
             _max_connection_retries=_max_connection_retries,
             _server_name=_server_name,
-            _retry=_retry,
             _control=_control,
             _resend_after_disconnect=_resend_after_disconnect,
             **kwargs,
@@ -601,7 +614,6 @@ async def _traced_request(
     _max_connection_retries: Optional[int] = None,
     _server_name: Optional[str] = None,
     _max_num_tries: Optional[int] = None,
-    _retry: bool = True,
     _control: bool = False,
     _resend_after_disconnect: bool = True,
     **kwargs: Unpack[_RequestOptions],
@@ -645,7 +657,6 @@ async def _traced_request(
             _max_num_tries=_max_num_tries,
             _max_connection_retries=_max_connection_retries,
             _server_name=_server_name,
-            _retry=_retry,
             _control=_control,
             _resend_after_disconnect=_resend_after_disconnect,
             **kwargs,
@@ -699,7 +710,6 @@ async def _request_with_retries(
     _max_connection_retries: Optional[int] = None,
     _server_name: Optional[str] = None,
     _max_num_tries: Optional[int] = None,
-    _retry: bool = True,
     _control: bool = False,
     _resend_after_disconnect: bool = True,
     **kwargs: Unpack[_RequestOptions],
@@ -708,9 +718,6 @@ async def _request_with_retries(
     # Initialization stays inside the client span and sets the metrics flag before it is read.
     token = set_server_name(_server_name or "external") if _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY else None
     try:
-        if not _retry:
-            return await client.request(method=method, url=url, **kwargs)
-
         num_tries = 1
         explicit_tries = 0
         retries = 0
@@ -932,6 +939,7 @@ class ServerClient(BaseModel):
         method: str,
         *,
         _control: bool = False,
+        _resend_after_disconnect: bool = True,
         **kwargs: Unpack[_RequestOptions],
     ) -> ClientResponse:
         """Call another server. ``_control`` sends the call over the reserved control pool."""
@@ -985,7 +993,8 @@ class ServerClient(BaseModel):
             # Sending it again would run the attempt a second time,
             # and the first run's sessions on other servers would never be freed: the second run replies,
             # so the controller never retires the attempt.
-            _resend_after_disconnect=not (self.checkpoint_enabled() and url_path == "/run"),
+            _resend_after_disconnect=_resend_after_disconnect
+            and not (self.checkpoint_enabled() and url_path == "/run"),
             **kwargs,
         )
 
@@ -1291,6 +1300,64 @@ def _cancelled_request_route(scope: Scope) -> str:
     return "<unmatched>"
 
 
+class RequestContextIsolationMiddleware:
+    """Start every request from a clean context, whatever task uvicorn started it from.
+
+    uvicorn starts a *pipelined* request's task from inside the previous request's task
+    (``on_response_complete`` → ``loop.create_task``), so that task inherits the previous
+    request's contextvars. The OTel ASGI instrumentation, which runs outermost, has the previous
+    request's server span current at that point; for the new request it sees a current span,
+    skips ``traceparent`` extraction, and files the request as an INTERNAL child of the previous
+    one, under the previous rollout's trace. Pipelining happens whenever a client reuses a
+    kept-alive connection before this server has sent the terminating body message, which
+    Starlette's ``BaseHTTPMiddleware`` sends late.
+
+    Installed outside the instrumentor (see ``install_request_context_isolation``), this resets
+    the OTel context for the request's duration, so the instrumentor extracts the inbound
+    ``traceparent``. It also clears the rollout id. Today that is a guard only: Gym's
+    ``BaseHTTPMiddleware`` layers run the rollout middleware, ``/run`` and the handlers in a
+    child task, so a rollout id set there does not reach the task uvicorn copies; the guard
+    keeps that true if those layers are ever replaced by plain ASGI middleware.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        otel_token = _otel_context.attach(_otel_context.Context()) if _otel_context is not None else None
+        try:
+            with rollout_context(None):
+                await self.app(scope, receive, send)
+        finally:
+            if otel_token is not None:
+                _otel_context.detach(otel_token)
+
+
+def install_request_context_isolation(app: FastAPI) -> None:
+    """Wrap the complete middleware stack, instrumentation included, in context isolation.
+
+    `add_middleware` is not enough: the FastAPI instrumentor installs its middleware by
+    overriding `build_middleware_stack`, so it always ends up outside anything added that way.
+    Wrapping the build the same way, after instrumentation, puts isolation outside the
+    instrumentor, which is the only place it works: the instrumentor must see an empty context
+    so it extracts `traceparent`, and the handlers must still see the server span the
+    instrumentor then makes current. Call it after `instrument_app_for_telemetry`.
+    """
+    if getattr(app.state, "nemo_gym_request_context_isolation_installed", False):
+        return
+    app.state.nemo_gym_request_context_isolation_installed = True
+    build_inner = app.build_middleware_stack
+
+    def build_middleware_stack() -> ASGIApp:
+        return RequestContextIsolationMiddleware(build_inner())
+
+    app.build_middleware_stack = build_middleware_stack  # type: ignore[method-assign]
+    app.middleware_stack = None
+
+
 class ClientDisconnectCancellationMiddleware:
     """Cancel an in-flight HTTP request when its client disconnects."""
 
@@ -1403,24 +1470,33 @@ def _connect_server_to_ray(server_class: type, global_config_dict: DictConfig) -
     initialize_ray()
 
 
-def _declared_ray_enabled(class_node: ast.ClassDef) -> bool | None:
-    """The literal `ray_enabled` assigned in a class body, or None when there is none."""
+def _declared_class_flag(class_node: ast.ClassDef, name: str) -> bool | None:
+    """The literal boolean assigned to `name` in a class body, annotated or not, or None when there is none."""
     for item in class_node.body:
-        if not isinstance(item, ast.Assign):
+        if isinstance(item, ast.Assign):
+            targets = item.targets
+        elif isinstance(item, ast.AnnAssign):
+            targets = [item.target]
+        else:
             continue
-        if not any(isinstance(target, ast.Name) and target.id == "ray_enabled" for target in item.targets):
+        if not any(isinstance(target, ast.Name) and target.id == name for target in targets):
             continue
         if isinstance(item.value, ast.Constant) and isinstance(item.value.value, bool):
             return item.value.value
     return None
 
 
-def entrypoint_ray_enabled(entrypoint_fpath: Path) -> bool | None:
-    """The `ray_enabled` declaration of the server an entrypoint starts, read from source.
+def _declared_ray_enabled(class_node: ast.ClassDef) -> bool | None:
+    """The literal `ray_enabled` assigned in a class body, or None when there is none."""
+    return _declared_class_flag(class_node, "ray_enabled")
 
-    The supervisor must decide whether to start Ray before any server exists, and each server runs in its own
-    venv, so this reads the source instead of importing it. It finds the classes the entrypoint calls
-    `run_webserver()` on and checks their literal `ray_enabled` declarations.
+
+def entrypoint_class_flag(entrypoint_fpath: Path, name: str) -> bool | None:
+    """The boolean class attribute `name` declared by the server an entrypoint starts, read from source.
+
+    Gym settles some things before any server exists, and each server runs in its own venv, so this reads the
+    source instead of importing it. It finds the classes the entrypoint calls `run_webserver()` on and checks
+    their literal `name` declarations (`name = True` or `name: ClassVar[bool] = True` in the class body).
 
     Returns True when any of them declares True, False when all of them declare False, and None when that can't
     be settled from the source alone, such as an inherited declaration, a class imported from another module, or
@@ -1445,7 +1521,10 @@ def entrypoint_ray_enabled(entrypoint_fpath: Path) -> bool | None:
     }
     if not invoked_class_names:
         return None
-    declarations = [_declared_ray_enabled(classes[name]) if name in classes else None for name in invoked_class_names]
+    declarations = [
+        _declared_class_flag(classes[class_name], name) if class_name in classes else None
+        for class_name in invoked_class_names
+    ]
     if True in declarations:
         return True
     if all(declaration is False for declaration in declarations):
@@ -1453,11 +1532,31 @@ def entrypoint_ray_enabled(entrypoint_fpath: Path) -> bool | None:
     return None
 
 
+def entrypoint_ray_enabled(entrypoint_fpath: Path) -> bool | None:
+    """The `ray_enabled` declaration of the server an entrypoint starts, read from source.
+
+    The supervisor must decide whether to start Ray before any server exists; see `entrypoint_class_flag` for
+    what the source alone can settle.
+    """
+    return entrypoint_class_flag(entrypoint_fpath, "ray_enabled")
+
+
 class SimpleServer(BaseServer):
     server_client: ServerClient
     # Servers that use Ray must declare `ray_enabled = True` on the class their entrypoint runs. Gym reads it
     # before launch to decide whether to start Ray, and connects only those servers to it.
     ray_enabled: ClassVar[bool] = False
+    # Whether this server keeps state per session,
+    # so that with several uvicorn workers a session's requests must reach the worker that created it.
+    # See nemo_gym.session_routing.
+    routes_sessions_to_owner: ClassVar[bool] = False
+
+    def claimed_session_routing(self) -> dict[str, Any]:
+        """Arguments to ``install_session_routing``: where requests name their session, and how long claims last.
+
+        A server that sets ``routes_sessions_to_owner`` implements it.
+        """
+        raise NotImplementedError(f"{type(self).__name__} routes sessions but does not say how they are named")
 
     @abstractmethod
     def setup_webserver(self) -> FastAPI:
@@ -1529,9 +1628,34 @@ class SimpleServer(BaseServer):
         @app.middleware("http")
         async def add_session_id(request: Request, call_next):  # pragma: no cover
             # Always assign so Starlette 1.0+ marks session.modified=True and re-sends Set-Cookie.
-            request.session[SESSION_ID_KEY] = request.session.get(SESSION_ID_KEY, str(uuid4()))
+            # A new session takes the ID the session router chose, if any (see nemo_gym.session_routing):
+            # a typed resources seed's resources_session_id, or an ID the router minted.
+            new_session_id = request.scope.get(SESSION_ID_SCOPE_KEY) or str(uuid4())
+            claim = request.scope.get(SESSION_CLAIM_SCOPE_KEY)
+            session = request.session
+            minted = SESSION_ID_KEY not in session
+            session[SESSION_ID_KEY] = session.get(SESSION_ID_KEY, new_session_id)
+            if claim is None:
+                return await call_next(request)
 
+            # With several workers, a session nobody claims, new or named by a cookie whose claim ended,
+            # is claimed only if the handler uses it, before the reply leaves this worker,
+            # so the client's next request finds the claim.
+            # Starlette's session records each access through request.session; only the handler's count from here.
+            tracks_access = hasattr(session, "mark_accessed")
+            if tracks_access:
+                session.accessed = False
             response: Response = await call_next(request)
+            used = session.accessed if tracks_access else True
+            if tracks_access:
+                # The reply keeps its Vary: Cookie header, as for any request that reads the session.
+                session.mark_accessed()
+            if used and not claim():
+                # Another worker claimed the same ID meanwhile; serving the request here would split the session.
+                return JSONResponse({"detail": "This session's ID is already claimed. Retry it."}, status_code=409)
+            if not used and minted:
+                # No cookie names an ID that nothing holds, so a later request cannot name an unclaimed session.
+                del session[SESSION_ID_KEY]
             return response
 
         session_middleware_key = self.get_session_middleware_key()
@@ -1687,11 +1811,15 @@ repr(e): {repr(e)}"""
         server.setup_checkpoint_participant(app)
         # After the app is fully built so subclass routes are present. Only resources servers expose tools over MCP,
         # so gating the lazy import on their config keeps the MCP SDK out of agent/model processes that never need it.
+        mcp_token_routing = {}
         if getattr(getattr(server, "config", None), "expose_tools_over_mcp", False):
-            from nemo_gym.mcp_auto_exposure import maybe_auto_expose
+            from nemo_gym.mcp_auto_exposure import TOKEN_HEADER, maybe_auto_expose, session_token_serializer
 
             maybe_auto_expose(server, app)
             startup.mark("expose_tools_over_mcp")
+            mcp_token_routing = dict(
+                mcp_token_header=TOKEN_HEADER, mcp_token_serializer=session_token_serializer(server)
+            )
         server.setup_liveness(app)
         server.set_ulimit()
         server.prefix_server_logs()
@@ -1703,6 +1831,22 @@ repr(e): {repr(e)}"""
         if is_main_fastapi_proc:
             report_connection_pool_capacity(connection_pool_config, pool_capacity, visible=True)
         server.setup_exception_middleware(app)
+        # A worker of a multi-worker server serves a private socket in this directory and claims sessions in it.
+        # The main process of a multi-worker server never serves the app.
+        session_socket_dir = getenv(SESSION_SOCKET_DIR_ENV) if not is_main_fastapi_proc else None
+        is_multi_worker_main_proc = is_main_fastapi_proc and (server.config.num_workers or 1) > 1
+        if server.routes_sessions_to_owner and not is_multi_worker_main_proc:
+            # Outside SessionMiddleware and the exception middleware:
+            # a forwarded request is handled only by the worker that claims its session.
+            session_cookie = server.get_session_middleware_key()
+            install_session_routing(
+                app,
+                socket_dir=session_socket_dir,
+                session_cookie=session_cookie,
+                secret_key=session_cookie,
+                **mcp_token_routing,
+                **server.claimed_session_routing(),
+            )
         # Register last so cancellation wraps the complete request stack.
         server.setup_cancellation_middleware(app)
         # Must precede uvicorn.run: Starlette refuses add_middleware once the app has
@@ -1710,6 +1854,9 @@ repr(e): {repr(e)}"""
         # extracts an inbound `traceparent` and parents this server's SERVER span to the
         # caller's CLIENT span.
         server.instrument_app_for_telemetry(app)
+        # After the instrumentor and outermost of all, so the instrumentor runs inside a clean
+        # context even when uvicorn started this request's task from the previous request's.
+        install_request_context_isolation(app)
 
         app.exception_handler(RequestValidationError)(_validation_exception_handler)
 
@@ -1764,6 +1911,9 @@ repr(e): {repr(e)}"""
             set_is_nemo_gym_fastapi_worker()
             set_is_nemo_gym_fastapi_entrypoint(str(relative_fpath))
             set_nemo_gym_fastapi_num_workers(server.config.num_workers)
+            if is_main_fastapi_proc and server.routes_sessions_to_owner:
+                # The workers uvicorn spawns inherit this, and each serves a private socket in it.
+                environ[SESSION_SOCKET_DIR_ENV] = create_session_socket_dir()
 
             uvicorn_kwargs["app"] = f"{module_import_str}:app"
             uvicorn_kwargs["workers"] = server.config.num_workers
