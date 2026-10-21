@@ -532,13 +532,6 @@ def _rollout_accounting(
             reasons.append(f"missing {missing} of {expected}")
         if duplicated:
             reasons.append(f"{duplicated} records share a rollout identity")
-        for name, count, limit in (
-            ("infra failures", infra, limits.max_infra_failure_fraction),
-            ("final failures", final, limits.max_final_failure_fraction),
-        ):
-            # No limit is configured by default: the failures are counted, and judged only against a set limit.
-            if limit is not None and count and count / expected >= limit:
-                reasons.append(f"{name} {count} of {expected} ({count / expected:.1%}), limit {limit * 100:g}%")
     return {
         "expected": expected,
         "failed": {
@@ -557,6 +550,56 @@ def _rollout_accounting(
         # The limits the verdict was judged by, so a recheck reuses them and the decision can be reproduced.
         "limits": limits.summary(limits_source),
     }
+
+
+_RUN_FAILURES_CHECK = "run_excessive_failures"
+
+
+def _run_excessive_failures(
+    artifacts: dict[str, Any], limits: RunHealthLimits, ignored_checks: frozenset[str]
+) -> tuple[list[Finding], dict[str, int]]:
+    """The ``run_excessive_failures`` check: one finding per group of failed rollouts that reaches its limit.
+
+    It reads only the run accounting, so a stopped run can evaluate it without the rollouts. With no limit
+    configured, or no inventory to count expected rollouts against, it is unobserved.
+    """
+    coverage = {"evaluated": 0, "unobserved": 0, "ignored": 0}
+    if _RUN_FAILURES_CHECK in ignored_checks:
+        coverage["ignored"] = 1
+        return [], coverage
+    expected, failed = artifacts["expected"], artifacts["failed"]
+    groups = (
+        ("infra", limits.max_infra_failure_fraction, "not_final"),
+        ("final", limits.max_final_failure_fraction, "final"),
+    )
+    if not expected or failed is None or all(limit is None for _, limit, _ in groups):
+        coverage["unobserved"] = 1
+        return [], coverage
+    coverage["evaluated"] = 1
+    findings = [
+        Finding(
+            check=_RUN_FAILURES_CHECK,
+            subject={},
+            detail={"group": group, "count": failed[field], "expected": expected, "limit": limit},
+        )
+        for group, limit, field in groups
+        if limit is not None and failed[field] and failed[field] / expected >= limit
+    ]
+    return findings, coverage
+
+
+def _judge_run(artifacts: dict[str, Any], findings: list[Finding], coverage: dict[str, int]) -> None:
+    """Add the run-level check to the accounting: its coverage, and a reason and an unhealthy verdict per finding."""
+    artifacts.setdefault("coverage", {})[_RUN_FAILURES_CHECK] = coverage
+    for finding in findings:
+        detail = finding.detail
+        share = detail["count"] / detail["expected"]
+        artifacts["unhealthy_reasons"].append(
+            f"{detail['group']} failures {detail['count']} of {detail['expected']} ({share:.1%}), "
+            f"limit {detail['limit'] * 100:g}%"
+        )
+    if findings:
+        artifacts["healthy"] = False
 
 
 def _sort_key(digest: RolloutDigest) -> tuple[tuple[int, Any], ...]:
@@ -653,7 +696,8 @@ def run_health_checks(
     digests = worker_results
     _mark_duplicate_identities(digests, ignored)
     summary = _reduce(digests, ignored)
-    summary["run"]["artifacts"].update(
+    artifacts = summary["run"]["artifacts"]
+    artifacts.update(
         _rollout_accounting(
             {(line.source_index, d.task_index, d.rollout_index) for d, line in zip(digests, lines, strict=True)},
             paths,
@@ -662,6 +706,10 @@ def run_health_checks(
             duplicated=summary["run"]["issues"]["rollout_duplicate_identity"],
         )
     )
+    run_findings, run_coverage = _run_excessive_failures(artifacts, limits, ignored)
+    _judge_run(artifacts, run_findings, run_coverage)
+    summary["run"]["issues"][_RUN_FAILURES_CHECK] = len(run_findings)
+    summary["run"]["findings"] = [finding.model_dump(mode="json", exclude={"subject"}) for finding in run_findings]
     report_dir = output_dir or paths[0].parent
     summary_path, verdicts_path = _write_reports(summary, digests, report_dir)
     return HealthCheckResult(
@@ -677,6 +725,7 @@ def write_provisional_summary(
     landed: set[tuple[Any, Any]],
     *,
     limits: RunHealthLimits = RunHealthLimits(),
+    ignored_checks: Sequence[str] = (),
 ) -> Path:
     """Write the run accounting of a stopped run fast: ``rollouts.jsonl`` is not read, and the per-record checks
     are skipped.
@@ -692,11 +741,22 @@ def write_provisional_summary(
         limits_source="config",
         duplicated=0,
     )
+    ignored = frozenset(normalize_ignored_checks(ignored_checks))
+    run_findings, run_coverage = _run_excessive_failures(artifacts, limits, ignored)
+    _judge_run(artifacts, run_findings, run_coverage)
     artifacts["partial"] = True
+    # Only run_excessive_failures runs here; every other check needs the rollouts and is not evaluated.
+    artifacts["not_evaluated"] = sorted(spec.id for spec in CHECK_REGISTRY if spec.id != _RUN_FAILURES_CHECK)
     if artifacts["healthy"]:
         artifacts["healthy"] = None
     summary_path = rollout_path.parent / QUALITY_SUMMARY_FILENAME
-    summary_path.write_bytes(orjson.dumps({"run": {"artifacts": artifacts}}, option=orjson.OPT_INDENT_2))
+    run = {
+        "ignored_checks": sorted(ignored),
+        "artifacts": artifacts,
+        "issues": {_RUN_FAILURES_CHECK: len(run_findings)},
+        "findings": [finding.model_dump(mode="json", exclude={"subject"}) for finding in run_findings],
+    }
+    summary_path.write_bytes(orjson.dumps({"run": run}, option=orjson.OPT_INDENT_2))
     (rollout_path.parent / ROLLOUT_VERDICTS_FILENAME).unlink(missing_ok=True)
     return summary_path
 

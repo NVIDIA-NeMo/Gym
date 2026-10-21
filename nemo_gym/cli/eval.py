@@ -700,6 +700,7 @@ def _health_check_collected_rollouts(output_fpath: Path, config: Any, landed_key
                 output_fpath,
                 landed_keys,
                 limits=config.run_health_limits,
+                ignored_checks=config.health_check_ignored_checks,
             )
         except Exception:
             logger.exception("Writing the provisional quality summary failed; rollout artifacts are still available.")

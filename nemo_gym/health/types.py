@@ -88,6 +88,7 @@ class CheckSubject(str, Enum):
     MODEL_CALL = "model_call"
     TRAJECTORY_CAPTURE = "trajectory_capture"
     TASK = "task"
+    RUN = "run"
 
 
 class CheckInput(str, Enum):
@@ -110,6 +111,9 @@ class CheckInput(str, Enum):
     REPEAT_VERDICTS = "repeat_verdicts"
     # Runner-derived RolloutDigest objects grouped by task for task-level reduction.
     REPEAT_DIGESTS = "repeat_digests"
+    # The run accounting: the _materialized_inputs.jsonl inventory, the _failures.jsonl sidecar and the identities
+    # of the saved records, which a stopped run still holds in memory.
+    RUN_ACCOUNTING = "run_accounting"
 
 
 CALL_BINDING_INPUTS = frozenset({CheckInput.BOUND_CALLS, CheckInput.OWNED_MODEL_CALLS})

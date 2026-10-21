@@ -292,7 +292,9 @@ def test_all_registered_semantic_checks_fire_on_synthetic_artifacts(tmp_path: Pa
     result = run_health_checks(rollout_path, workers=2)
 
     assert set(result.summary["run"]["issues"]) == {spec.id for spec in CHECK_REGISTRY}
-    assert all(result.summary["run"]["issues"][spec.id] > 0 for spec in CHECK_REGISTRY if spec.id not in RUNNER_CHECKS)
+    # Run-scope checks judge the run accounting, not records; TestRunExcessiveFailuresCheck covers them.
+    record_checks = [spec for spec in CHECK_REGISTRY if spec.evaluation_scope != health.CheckScope.RUN]
+    assert all(result.summary["run"]["issues"][spec.id] > 0 for spec in record_checks if spec.id not in RUNNER_CHECKS)
     assert all(result.summary["run"]["issues"][check_id] == 0 for check_id in RUNNER_CHECKS)
     assert result.summary["tasks"]["0"]["flags"] == ["task_consistently_unhealthy"]
     assert "task_no_successful_model_calls" in result.summary["tasks"]["8"]["flags"]
@@ -2172,3 +2174,88 @@ class TestOneSourceOfLimits:
         cli_main.main()
 
         assert received["limits"] == RunHealthLimits(max_final_failure_fraction=0.05)
+
+
+class TestRunExcessiveFailuresCheck:
+    """The run-level failure limits are one check of the suite: findings, coverage, and an ignore switch."""
+
+    @staticmethod
+    def _summary(root: Path, *, ignored: tuple[str, ...] = (), **limits: float) -> dict:
+        from nemo_gym.health.types import RunHealthLimits
+
+        rollout_path = TestOneSourceOfLimits._failed_run(root)
+        result = run_health_checks(rollout_path, workers=1, ignored_checks=ignored, limits=RunHealthLimits(**limits))
+        return json.loads(result.summary_path.read_text())["run"]
+
+    def test_the_check_is_registered_at_run_scope(self) -> None:
+        from nemo_gym.health.checks import normalize_ignored_checks
+        from nemo_gym.health.types import CheckScope
+
+        [spec] = [spec for spec in CHECK_REGISTRY if spec.id == "run_excessive_failures"]
+        assert spec.evaluation_scope == CheckScope.RUN
+        assert normalize_ignored_checks("run_excessive_failures") == ("run_excessive_failures",)
+
+    def test_a_crossed_limit_is_a_finding_with_coverage(self, tmp_path: Path) -> None:
+        run = self._summary(tmp_path, max_final_failure_fraction=0.01)
+
+        assert run["issues"]["run_excessive_failures"] == 1
+        assert run["artifacts"]["coverage"]["run_excessive_failures"] == {
+            "evaluated": 1,
+            "unobserved": 0,
+            "ignored": 0,
+        }
+        [finding] = run["findings"]
+        assert finding["check"] == "run_excessive_failures"
+        assert finding["detail"] == {"group": "final", "count": 2, "expected": 100, "limit": 0.01}
+        assert run["artifacts"]["healthy"] is False
+
+    def test_an_ignored_check_judges_nothing_but_the_counts_stay(self, tmp_path: Path) -> None:
+        run = self._summary(tmp_path, ignored=("run_excessive_failures",), max_final_failure_fraction=0.01)
+
+        assert run["artifacts"]["coverage"]["run_excessive_failures"] == {
+            "evaluated": 0,
+            "unobserved": 0,
+            "ignored": 1,
+        }
+        assert run["issues"]["run_excessive_failures"] == 0
+        assert run["findings"] == []
+        assert run["artifacts"]["healthy"] is True
+        assert run["artifacts"]["failed"]["final"] == 2
+        assert "run_excessive_failures" in run["ignored_checks"]
+
+    def test_without_a_limit_the_check_is_not_evaluated(self, tmp_path: Path) -> None:
+        run = self._summary(tmp_path)
+
+        assert run["artifacts"]["coverage"]["run_excessive_failures"] == {
+            "evaluated": 0,
+            "unobserved": 1,
+            "ignored": 0,
+        }
+        assert run["issues"]["run_excessive_failures"] == 0
+        assert run["artifacts"]["healthy"] is True
+
+    @pytest.mark.parametrize("ignored", [(), ("run_excessive_failures",)], ids=["evaluated", "ignored"])
+    def test_the_provisional_summary_evaluates_only_this_check(self, tmp_path: Path, ignored: tuple) -> None:
+        from nemo_gym.health.types import RunHealthLimits
+
+        rollout_path = TestOneSourceOfLimits._failed_run(tmp_path)
+
+        summary_path = health.write_provisional_summary(
+            rollout_path,
+            {(task, 0) for task in range(98)},
+            limits=RunHealthLimits(max_final_failure_fraction=0.01),
+            ignored_checks=ignored,
+        )
+
+        run = json.loads(summary_path.read_text())["run"]
+        others = sorted(spec.id for spec in CHECK_REGISTRY if spec.id != "run_excessive_failures")
+        assert run["artifacts"]["not_evaluated"] == others
+        coverage = run["artifacts"]["coverage"]
+        if ignored:
+            assert coverage == {"run_excessive_failures": {"evaluated": 0, "unobserved": 0, "ignored": 1}}
+            assert run["findings"] == []
+            assert run["artifacts"]["healthy"] is None  # The accounting alone proves nothing here.
+        else:
+            assert coverage == {"run_excessive_failures": {"evaluated": 1, "unobserved": 0, "ignored": 0}}
+            assert [finding["check"] for finding in run["findings"]] == ["run_excessive_failures"]
+            assert run["artifacts"]["healthy"] is False
