@@ -3,6 +3,7 @@
 
 """Resources-backed single-agent environment server."""
 
+from enum import StrEnum
 from typing import Annotated, Any, Literal
 from uuid import uuid4
 
@@ -86,7 +87,12 @@ class SessionHandles(BaseModel):
         )
 
 
-OutcomeAction = Literal["verify", "retry", "fail"]
+class OutcomeAction(StrEnum):
+    """Mutually exclusive grading or episode-failure action."""
+
+    VERIFY = "verify"
+    RETRY = "retry"
+    FAIL = "fail"
 
 
 class AgentOutcomePolicyConfig(BaseModel):
@@ -100,18 +106,18 @@ class AgentOutcomePolicyConfig(BaseModel):
 
     by_failure_kind: dict[str, OutcomeAction] = Field(
         default_factory=lambda: {
-            AGENT_INVALID_OUTPUT: "verify",
-            AGENT_LIMIT: "verify",
-            MODEL_TRANSPORT_ERROR: "retry",
+            AGENT_INVALID_OUTPUT: OutcomeAction.VERIFY,
+            AGENT_LIMIT: OutcomeAction.VERIFY,
+            MODEL_TRANSPORT_ERROR: OutcomeAction.RETRY,
         }
     )
     by_status_code: dict[Annotated[int, Field(ge=400, le=599)], OutcomeAction] = Field(
         default_factory=lambda: {
-            **dict.fromkeys((400, 413, 422), "verify"),
-            **dict.fromkeys((408, 425, 429, *range(500, 600)), "retry"),
+            **dict.fromkeys((400, 413, 422), OutcomeAction.VERIFY),
+            **dict.fromkeys((408, 425, 429, *range(500, 600)), OutcomeAction.RETRY),
         }
     )
-    default_action: OutcomeAction = "fail"
+    default_action: OutcomeAction = OutcomeAction.FAIL
 
     @field_validator("by_failure_kind")
     @classmethod
@@ -265,12 +271,12 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             return trajectory.model_dump(mode="json") if trajectory else None
 
         if stage == "verify":
-            policy = agent_outcome_policy(agent_response, config=self.config.agent_outcome_policy)
-            if not policy.verifiable:
+            action = agent_outcome_policy(agent_response, config=self.config.agent_outcome_policy)
+            if action != OutcomeAction.VERIFY:
                 raise self._failure(
                     stage="agent",
                     failure_reason=agent_response.error.message if agent_response.error else "Agent reported failure",
-                    terminal=not policy.retryable,
+                    terminal=action == OutcomeAction.FAIL,
                     partial_response=agent_response,
                     agent_observations=observations,
                 )
@@ -556,16 +562,9 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         )
 
 
-class AgentOutcomePolicy(BaseModel):
-    """This environment's scoring and episode-retry decision, not a harness decision."""
-
-    verifiable: bool
-    retryable: bool
-
-
 def agent_outcome_policy(
     response: NeMoGymResponse, *, config: AgentOutcomePolicyConfig | None = None
-) -> AgentOutcomePolicy:
+) -> OutcomeAction:
     """Apply configured grading/retry rules to a classified failed response.
 
     Unclassified legacy responses retain their existing grading behavior; malformed
@@ -573,17 +572,16 @@ def agent_outcome_policy(
     """
     raw = (response.metadata or {}).get(AGENT_OUTCOME_METADATA_KEY)
     if response.status != "failed" or raw is None:
-        return AgentOutcomePolicy(verifiable=True, retryable=False)
+        return OutcomeAction.VERIFY
     try:
         outcome = AgentOutcome.model_validate_json(raw)
     except ValidationError:
         # Keep malformed classification in the partial response for diagnosis, not scoring.
-        return AgentOutcomePolicy(verifiable=False, retryable=False)
+        return OutcomeAction.FAIL
     config = config or AgentOutcomePolicyConfig()
-    action = config.by_status_code.get(
+    return config.by_status_code.get(
         outcome.status_code, config.by_failure_kind.get(outcome.failure_kind, config.default_action)
     )
-    return AgentOutcomePolicy(verifiable=action == "verify", retryable=action == "retry")
 
 
 def _cookies(response: Any) -> dict[str, str]:
