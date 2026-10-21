@@ -1890,7 +1890,10 @@ async def test_session_retry_ownership_uses_provider_correlation(setup, interrup
         "type": "message_end",
         "message": {"role": "assistant", "content": [], "stopReason": "error", "errorMessage": "429 retry"},
     }
-    sandbox.events = json.dumps([0.0, failure]) + "\n" + events()
+    recorded = [failure, {"type": "auto_retry_start", "attempt": 1}, failure]
+    sandbox.events = "\n".join(json.dumps([float(i), event]) for i, event in enumerate(recorded))
+    if not interrupted:
+        sandbox.events += "\n" + events()
     sandbox.blocked = interrupted
     request, session_id, task = await activate(agent, sandbox)
     if interrupted:
@@ -1904,8 +1907,25 @@ async def test_session_retry_ownership_uses_provider_correlation(setup, interrup
     assert provider["headers"] == {"x-session-id": "pi-smoke-a2"}
     root = close.agent_observations.records[0]
     assert root.invocation_id == provider["headers"]["x-session-id"]
-    assert len(root.model_calls) == 2  # Failed attempts join later through capture, without fake response IDs.
-    assert "model_call_ownership_unavailable" not in [gap.code for gap in close.agent_observations.gaps]
+    gaps = [gap.code for gap in close.agent_observations.gaps]
+    assert "model_call_ownership_unavailable" not in gaps
+    if interrupted:
+        from nemo_gym.observability.model_calls import ModelCallRecord
+        from nemo_gym.rollout_observability import join_model_call_observations
+
+        assert "agent_activation_interrupted" in gaps
+        assert root.status == "incomplete"
+        assert root.model_calls == []  # Rejected attempts have no provider response IDs.
+        captured = [
+            ModelCallRecord(model_call_id=f"attempt-{i}", client_session_id=root.invocation_id, call_index=i)
+            for i in range(2)
+        ]
+        joined = join_model_call_observations(close.agent_observations, captured)
+        assert [ref.model_call_id for ref in joined.records[0].model_calls] == ["attempt-0", "attempt-1"]
+        assert all(ref.response_id is None for ref in joined.records[0].model_calls)
+        assert "model_call_ownership_unavailable" not in [gap.code for gap in joined.gaps]
+    else:
+        assert len(root.model_calls) == 2
 
 
 @pytest.mark.parametrize(
