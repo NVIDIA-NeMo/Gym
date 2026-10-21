@@ -33,7 +33,7 @@ from nemo_gym.global_config import get_first_server_config_dict
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.providers.base import ConnectableProvider, SandboxHandle, SandboxSpec
 from nemo_gym.sandbox.providers.registry import create_provider
-from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
 from resources_servers.swe_atlas_qa.prepare import TASKS_DIR, load_task, validate_source
 
 
@@ -331,3 +331,6 @@ class SWEAtlasQAResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     SWEAtlasQAResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = SWEAtlasQAResourcesServer.run_webserver()  # noqa: F401

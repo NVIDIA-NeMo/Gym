@@ -84,6 +84,20 @@ def test_startup_prepares_assets_then_rebuilds_runtime(tmp_path) -> None:
     assert "/verify" in {route.path for route in app.routes}
 
 
+def test_workers_reuse_the_runtime_tree_the_main_process_built(tmp_path) -> None:
+    server = _server(tmp_path)
+    with (
+        patch("resources_servers.legal_agent_bench.app.is_nemo_gym_fastapi_worker", return_value=True),
+        patch("resources_servers.legal_agent_bench.app.ensure_assets") as ensure,
+        patch("resources_servers.legal_agent_bench.app.hydrate_runtime_tasks") as hydrate,
+    ):
+        app = server.setup_webserver()
+
+    ensure.assert_not_called()
+    hydrate.assert_not_called()
+    assert "/verify" in {route.path for route in app.routes}
+
+
 def test_judge_model_is_preserved_through_openai_compatible_prefix() -> None:
     config = LegalAgentBenchResourcesServerConfig(
         name="legal_agent_bench",

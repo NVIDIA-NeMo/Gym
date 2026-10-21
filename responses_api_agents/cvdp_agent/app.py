@@ -22,6 +22,7 @@ import hashlib
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -45,6 +46,7 @@ from nemo_gym.base_responses_api_agent import (
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import get_first_server_config_dict
+from nemo_gym.install_lock import async_install_lock, install_lock
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -60,12 +62,17 @@ from nemo_gym.sandbox import (
     resolve_provider_config,
     resolve_provider_metadata,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
 
 
 _DEFAULT_HARVEST_GLOBS = ["rtl/**/*.sv", "rtl/**/*.v", "rtl/**/*.vhd", "verif/**/*.sv", "verif/**/*.v"]
 
 _RUNNER_SOURCE_PATH = Path(__file__).with_name("sandbox_entrypoint.py")
+DEPS_ROOT = Path(__file__).parent / "deps"
+# With num_workers > 1, every worker builds the runtime on its first rollout, into the same paths under DEPS_ROOT.
+# The build steps take this lock file in the directory they write to,
+# so one worker builds while the others wait and then reuse its result.
+DEPS_LOCK_NAME = ".setup.lock"
 
 _ARCHES = {
     "amd64": ("amd64", "x86_64-unknown-linux-gnu", "linux-x64"),
@@ -421,7 +428,7 @@ class CVDPAgent(SimpleResponsesAPIAgent):
         key = agent_key(self.config.agent_server_module)
         scripts_dir = Path(__file__).parent / "setup_scripts"
         target, python_arch, node_arch = self._deps_target_arch()
-        deps_dir = Path(__file__).parent / "deps" / f"{key}-{target}"
+        deps_dir = DEPS_ROOT / f"{key}-{target}"
         script = scripts_dir / f"{key}_deps.sh"
         sentinel = deps_dir / ".installed"
         # fingerprint the per-harness script AND the shared helper it sources, so editing
@@ -436,9 +443,17 @@ class CVDPAgent(SimpleResponsesAPIAgent):
             return deps_dir
         if not script.exists():
             raise RuntimeError(f"no setup script for {key!r} at {script}")
-        deps_dir.mkdir(parents=True, exist_ok=True)
-        subprocess.run(["bash", str(script)], env=deps_build_env(deps_dir, arch_env), check=True)
-        sentinel.write_text(recipe)
+        with install_lock(DEPS_ROOT / DEPS_LOCK_NAME):
+            # Another worker may have finished the install while this one waited.
+            if sentinel.exists() and sentinel.read_text().strip() == recipe:
+                return deps_dir
+            # The sentinel is written last,
+            # so a prefix without a matching one is left from an interrupted or outdated install.
+            # The setup scripts skip steps whose output already exists, so start again from an empty prefix.
+            shutil.rmtree(deps_dir, ignore_errors=True)
+            deps_dir.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["bash", str(script)], env=deps_build_env(deps_dir, arch_env), check=True)
+            sentinel.write_text(recipe)
         return deps_dir
 
     def _deps_target_arch(self) -> tuple[str, str, str]:
@@ -476,7 +491,7 @@ class CVDPAgent(SimpleResponsesAPIAgent):
         return script, recipe
 
     def _build_nemo_gym_wheel(self, recipe: str) -> Path:
-        wheel_dir = Path(__file__).parent / "deps" / f".nemo-gym-wheel-{recipe[:16]}"
+        wheel_dir = DEPS_ROOT / f".nemo-gym-wheel-{recipe[:16]}"
         wheel_dir.mkdir(parents=True, exist_ok=True)
         wheels = sorted(wheel_dir.glob("nemo_gym-*.whl"))
         if wheels:
@@ -508,12 +523,18 @@ class CVDPAgent(SimpleResponsesAPIAgent):
         key = agent_key(self.config.agent_server_module)
         script, recipe = self._deps_recipe(key)
         target, _python_arch, _node_arch = self._deps_target_arch()
-        deps_root = Path(__file__).parent / "deps"
-        deps_root.mkdir(parents=True, exist_ok=True)
-        archive = deps_root / f".{key}-{target}-{recipe[:16]}.tar.gz"
+        DEPS_ROOT.mkdir(parents=True, exist_ok=True)
+        archive = DEPS_ROOT / f".{key}-{target}-{recipe[:16]}.tar.gz"
         if archive.exists():
             return archive
+        async with async_install_lock(DEPS_ROOT / DEPS_LOCK_NAME):
+            # Another worker may have built the archive while this one waited.
+            if archive.exists():
+                return archive
+            await self._build_deps_archive_in_sandbox(image, script, recipe, archive)
+        return archive
 
+    async def _build_deps_archive_in_sandbox(self, image: str, script: Path, recipe: str, archive: Path) -> None:
         wheel = await asyncio.to_thread(self._build_nemo_gym_wheel, recipe)
         scripts_dir = script.parent
         remote_root = "/tmp/nemo-gym-agent-deps-build"
@@ -557,7 +578,6 @@ class CVDPAgent(SimpleResponsesAPIAgent):
                 raise RuntimeError(f"sandbox agent deps archive failed with code {pack.return_code}: {details}")
             await box.download(remote_archive, temporary)
         temporary.replace(archive)
-        return archive
 
     def _resolve_image(self) -> str:
         """Validate and normalize the configured image reference."""
@@ -580,11 +600,15 @@ class CVDPAgent(SimpleResponsesAPIAgent):
         archive = deps_dir.parent / f".{deps_dir.name}-{recipe[:16]}.tar.gz"
         if archive.exists() and archive.stat().st_mtime >= sentinel.stat().st_mtime:
             return archive
-        temporary = archive.with_suffix(".tmp")
-        with tarfile.open(temporary, "w:gz", compresslevel=1) as tar:
-            for child in sorted(deps_dir.iterdir()):
-                tar.add(child, arcname=child.name)
-        temporary.replace(archive)
+        with install_lock(deps_dir.parent / DEPS_LOCK_NAME):
+            # Another worker may have packed the archive while this one waited.
+            if archive.exists() and archive.stat().st_mtime >= sentinel.stat().st_mtime:
+                return archive
+            temporary = archive.with_suffix(".tmp")
+            with tarfile.open(temporary, "w:gz", compresslevel=1) as tar:
+                for child in sorted(deps_dir.iterdir()):
+                    tar.add(child, arcname=child.name)
+            temporary.replace(archive)
         return archive
 
     def _model_url(self) -> str:
@@ -808,3 +832,6 @@ class CVDPAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     CVDPAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = CVDPAgent.run_webserver()  # noqa: F401

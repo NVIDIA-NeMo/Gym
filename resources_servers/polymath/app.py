@@ -44,6 +44,7 @@ from nemo_gym.reward_profile import (
     compute_subset_metrics,
     highest_k_metrics,
 )
+from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.math_with_judge.app import (
     LibraryJudgeMathResourcesServer,
     LibraryJudgeMathResourcesServerConfig,
@@ -235,3 +236,6 @@ class PolyMathResourcesServer(LibraryJudgeMathResourcesServer):
 
 if __name__ == "__main__":
     PolyMathResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = PolyMathResourcesServer.run_webserver()  # noqa: F401

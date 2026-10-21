@@ -35,7 +35,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, raise_for_status
+from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
 from resources_servers.nemo_user_sim.episode_contracts import (
     UserSimSeedResponse,
     UserSimSimulationResult,
@@ -183,6 +183,17 @@ class UserSimResourcesServer(SimpleResourcesServer):
     """Validate task identity and verify the Environment-owned UserSim result."""
 
     config: UserSimResourcesServerConfig
+
+    def claimed_session_routing(self) -> dict[str, Any]:
+        # A closed session's tombstone lasts session_ttl_seconds.
+        # With several workers, the routing claim must last at least as long,
+        # so a delayed seed reaches the worker that holds the tombstone and is refused there.
+        routing = super().claimed_session_routing()
+        routing["close_window_seconds"] = max(
+            self.config.session_close_retry_window_seconds, self.config.session_ttl_seconds
+        )
+        return routing
+
     session_id_to_seed: dict[str, SeededUserSimEpisode] = {}
     # The cookie session each resources session was seeded under, so a close that carries no cookie, as after a
     # lost seed reply, still finds and releases the seed.
@@ -594,3 +605,6 @@ def _response_text(response: NeMoGymResponse) -> str:
 
 if __name__ == "__main__":
     UserSimResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = UserSimResourcesServer.run_webserver()  # noqa: F401

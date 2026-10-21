@@ -31,6 +31,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.instruction_following.count_unique import CountUniqueChecker
 from resources_servers.instruction_following.counting_composition import CountingCompositionChecker
 from resources_servers.instruction_following.indicifeval import (
@@ -241,3 +242,6 @@ class InstructionFollowingResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     InstructionFollowingResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = InstructionFollowingResourcesServer.run_webserver()  # noqa: F401

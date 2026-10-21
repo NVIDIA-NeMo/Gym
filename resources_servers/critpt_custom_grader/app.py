@@ -46,6 +46,7 @@ from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.providers.base import SandboxResources, SandboxSpec
 from nemo_gym.sandbox.providers.registry import create_provider
+from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.task_data import normalize_task_fields
 from resources_servers.critpt_custom_grader.execution import (
     CLEANUP_STATUSES,
@@ -594,3 +595,6 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     CritPtCustomGraderServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = CritPtCustomGraderServer.run_webserver()  # noqa: F401

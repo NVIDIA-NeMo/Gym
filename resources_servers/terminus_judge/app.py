@@ -38,6 +38,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.terminus_judge.schemas import TERMINUS_1_SCHEMA, TERMINUS_2_SCHEMA
 
 
@@ -610,3 +611,6 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     TerminusJudgeResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = TerminusJudgeResourcesServer.run_webserver()  # noqa: F401

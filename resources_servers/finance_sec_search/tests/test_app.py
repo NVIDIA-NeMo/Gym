@@ -39,6 +39,7 @@ from resources_servers.finance_sec_search.app import (
     RateLimiter,
     RetrieveInformationRequest,
     _extract_judge_rating,
+    per_worker_rate_limiter,
 )
 from resources_servers.sec_local_index.tests.index_fixtures import build_index
 
@@ -375,6 +376,53 @@ class TestRateLimiter:
 
         # Requests should be recorded
         assert len(limiter.requests) == 5
+
+    def test_workers_share_the_configured_limit(self, server_config) -> None:
+        """Each worker's limiter allows its share of requests_per_second, so the whole server stays within it."""
+        server_config.requests_per_second = 10
+        server_config.num_workers = 4
+        server = FinanceAgentResourcesServer(config=server_config, server_client=MagicMock(spec=ServerClient))
+
+        assert (server._rate_limiter.max_requests, server._rate_limiter.window_seconds) == (2, 1.0)
+
+    def test_one_worker_keeps_the_configured_limit(self, server_config) -> None:
+        server_config.requests_per_second = 10
+        server = FinanceAgentResourcesServer(config=server_config, server_client=MagicMock(spec=ServerClient))
+
+        assert (server._rate_limiter.max_requests, server._rate_limiter.window_seconds) == (10, 1.0)
+
+    def test_more_workers_than_requests_per_second_are_refused(self, server_config) -> None:
+        server_config.requests_per_second = 2
+        server_config.num_workers = 8
+
+        with pytest.raises(ValueError, match="needs num_workers=1: with more workers than requests_per_second"):
+            FinanceAgentResourcesServer(config=server_config, server_client=MagicMock(spec=ServerClient))
+
+    @pytest.mark.asyncio
+    async def test_the_workers_together_admit_at_most_the_limit_in_one_second(self, monkeypatch) -> None:
+        """Each worker keeps its own limiter; within one second their admissions add up to no more than the limit."""
+
+        class Blocked(Exception):
+            pass
+
+        async def block(seconds: float) -> None:
+            raise Blocked
+
+        # A frozen clock: every request falls in the same one-second window, and a limiter that would wait stops.
+        monkeypatch.setattr("resources_servers.finance_sec_search.app.time.monotonic", lambda: 100.0)
+        monkeypatch.setattr("resources_servers.finance_sec_search.app.asyncio.sleep", block)
+
+        for requests_per_second, num_workers in ((10, 4), (10, 10), (7, 3)):
+            admitted = 0
+            for _ in range(num_workers):
+                limiter = per_worker_rate_limiter(requests_per_second, num_workers)
+                while True:
+                    try:
+                        await limiter.acquire()
+                    except Blocked:
+                        break
+                    admitted += 1
+            assert admitted <= requests_per_second
 
 
 # ============================================================================

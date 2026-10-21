@@ -57,6 +57,7 @@ from nemo_gym.reward_profile import (
     compute_pass_majority_metrics,
     highest_k_metrics,
 )
+from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 
 
 _SUPPORTED_SPLITS = ("single_line", "multi_line", "random_span", "random_span_light")
@@ -294,3 +295,6 @@ def _load_split(split: str) -> Dict[str, Any]:
 
 if __name__ == "__main__":
     CodeFIMResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = CodeFIMResourcesServer.run_webserver()  # noqa: F401

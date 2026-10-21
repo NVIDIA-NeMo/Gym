@@ -98,6 +98,7 @@ from nemo_gym.config_types import ModelServerRef
 from nemo_gym.judge import JudgeError, call_judge
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.reward_profile import compute_subset_metrics
+from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.beam.prompts import (
     BINARY_LLM_JUDGE_BASE_PROMPT,
     EQUIVALENCE_SYSTEM_PROMPT,
@@ -520,3 +521,6 @@ class BEAMResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     BEAMResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = BEAMResourcesServer.run_webserver()  # noqa: F401

@@ -10,7 +10,7 @@ from harbor.models.job.config import JobConfig
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.sandbox import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.server_utils import get_first_server_config_dict
+from nemo_gym.server_utils import get_first_server_config_dict, is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.harbor_agent_general.app import HarborAgent, HarborAgentConfig, HarborRunRequest
 
 
@@ -59,3 +59,6 @@ class SkillsBenchHarborAgent(HarborAgent):
 
 if __name__ == "__main__":
     SkillsBenchHarborAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = SkillsBenchHarborAgent.run_webserver()  # noqa: F401

@@ -46,7 +46,12 @@ from nemo_gym.sandbox.agent_tools import sandbox_server_url
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.providers.base import ConnectableProvider, SandboxSpec
 from nemo_gym.sandbox.providers.registry import create_provider
-from nemo_gym.server_utils import get_response_json, raise_for_status, trace_context_path_segment
+from nemo_gym.server_utils import (
+    get_response_json,
+    is_nemo_gym_fastapi_entrypoint,
+    raise_for_status,
+    trace_context_path_segment,
+)
 
 
 LOG = logging.getLogger(__name__)
@@ -513,3 +518,6 @@ class HarnessAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     HarnessAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = HarnessAgent.run_webserver()  # noqa: F401

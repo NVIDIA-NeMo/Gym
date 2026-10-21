@@ -66,6 +66,7 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 
 
 # ViBench's two-phase grading path. run-seed-then-evaluate.py looks like a convenient
@@ -691,3 +692,6 @@ class VibenchResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     VibenchResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = VibenchResourcesServer.run_webserver()  # noqa: F401

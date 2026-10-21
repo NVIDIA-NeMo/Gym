@@ -31,7 +31,7 @@ from pytest import MonkeyPatch
 from nemo_gym.base_resources_server import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.failure_kinds import SESSION_LOST
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient, refuse_unsupported_num_workers
 from nemo_gym.testing.session_conformance import check_resources_session_contract
 
 
@@ -347,10 +347,9 @@ def test_typed_sessions_follow_the_session_contract(browsers) -> None:
     assert all(browser.closed == 1 for browser in browsers.created)
 
 
-def test_more_than_one_worker_is_refused() -> None:
-    """Browsers live in this process; a second worker would get tool calls for browsers it lacks."""
-    with pytest.raises(ValueError, match="num_workers=1"):
-        _server(num_workers=2)
+def test_several_workers_are_allowed() -> None:
+    """Session routing sends a seed and close by resources_session_id to the worker that holds the browser."""
+    refuse_unsupported_num_workers(_server(num_workers=2))
 
 
 def test_verify_after_close_is_a_masked_lost_session(browsers) -> None:

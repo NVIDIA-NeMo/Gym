@@ -51,7 +51,7 @@ from nemo_gym.openai_utils import (
     accumulate_response_usage,
 )
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
 from responses_api_models.vllm_model.app import VLLMConverter
 
 
@@ -1130,3 +1130,6 @@ def _prompt_tokens_from_tokenize_response(tokenize_response: dict) -> int:
 
 if __name__ == "__main__":
     BrowsecompAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = BrowsecompAgent.run_webserver()  # noqa: F401

@@ -43,6 +43,7 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.judge import JudgeError
 from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
+from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 
 
 # Per-request collector for judge failures. A ContextVar is shared by reference
@@ -939,3 +940,6 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     TuringVIFResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = TuringVIFResourcesServer.run_webserver()  # noqa: F401
