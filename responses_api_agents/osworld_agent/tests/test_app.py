@@ -146,21 +146,21 @@ def test_log_context_headers_do_not_change_model_payload() -> None:
         "parse_attempt": 1,
     }
 
-    assert _log_context_headers(context) == {
-        "x-nemo-gym-log-run-id": "run-001",
-        "x-nemo-gym-log-adapter": "gym",
-        "x-nemo-gym-log-sampling-event-id": "sampling-training-001",
-        "x-nemo-gym-log-source-group-id": "dataset-group-001",
-        "x-nemo-gym-log-rollout-id": "rollout-001",
-        "x-nemo-gym-log-group-id": "group-001",
-        "x-nemo-gym-log-rollout-index": "4",
-        "x-nemo-gym-log-attempt-index": "2",
-        "x-nemo-gym-log-task-id": "task-001",
-        "x-nemo-gym-log-domain": "chrome",
-        "x-nemo-gym-log-task-attempt": "2",
-        "x-nemo-gym-log-step": "3",
-        "x-nemo-gym-log-parse-attempt": "1",
-    }
+    headers = _log_context_headers(context)
+
+    # One header carries OSWorld's own fields, with their types, for the model server's transport log.
+    assert list(headers) == ["x-nemo-gym-log-context"]
+    assert json.loads(headers["x-nemo-gym-log-context"]) == context
+    assert headers["x-nemo-gym-log-context"].isascii()
+
+
+def test_log_context_headers_drop_unknown_fields_and_bound_values() -> None:
+    headers = _log_context_headers({"task_id": "t\u00e9\nx" + "a" * 2000, "api_key": "secret", "step": "x"})
+
+    assert json.loads(headers["x-nemo-gym-log-context"]) == {"task_id": ("t\u00e9\nx" + "a" * 2000)[:1024]}
+    assert "\n" not in headers["x-nemo-gym-log-context"]
+    assert headers["x-nemo-gym-log-context"].isascii()
+    assert _log_context_headers({}) == {}
 
 
 @patch("openai.DefaultHttpxClient")
@@ -209,10 +209,11 @@ def test_messages_model_fn_propagates_task_context_in_headers_and_logs(
     sent = client.chat.completions.create.call_args.kwargs
     assert sent["messages"] == messages
     assert "_osworld_log_context" not in sent
-    assert sent["extra_headers"]["x-nemo-gym-log-task-id"] == "task-001"
-    assert sent["extra_headers"]["x-nemo-gym-log-rollout-id"] == "rollout-001"
-    assert sent["extra_headers"]["x-nemo-gym-log-group-id"] == "group-001"
-    assert sent["extra_headers"]["x-nemo-gym-log-step"] == "4"
+    sent_context = json.loads(sent["extra_headers"]["x-nemo-gym-log-context"])
+    assert sent_context["task_id"] == "task-001"
+    assert sent_context["rollout_id"] == "rollout-001"
+    assert sent_context["group_id"] == "group-001"
+    assert sent_context["step"] == 4
     rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
     assert [row["event"] for row in rows] == ["model_request", "model_response"]
     assert all(row["task_id"] == "task-001" for row in rows)

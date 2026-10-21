@@ -164,27 +164,21 @@ def test_transport_io_writer_keeps_full_payload(monkeypatch: MonkeyPatch, tmp_pa
     assert row["embedded_images"][0]["decoded_bytes"] == 3
 
 
-def test_transport_log_context_reads_generic_headers_without_body_fields() -> None:
+def test_transport_log_context_is_the_callers_json_object() -> None:
+    # The model server knows no field names: any caller-defined keys and JSON types pass through unchanged.
+    context = {"task_id": "task-001", "step": 3, "caller_defined": {"nested": True}}
     request = MagicMock()
-    request.headers = {
-        "x-nemo-gym-log-run-id": "run-001",
-        "x-nemo-gym-log-adapter": "gym",
-        "x-nemo-gym-log-task-id": "task-001",
-        "x-nemo-gym-log-domain": "chrome",
-        "x-nemo-gym-log-task-attempt": "2",
-        "x-nemo-gym-log-step": "3",
-        "x-nemo-gym-log-parse-attempt": "1",
-    }
+    request.headers = {"x-nemo-gym-log-context": json.dumps(context)}
 
-    assert _transport_log_context(request) == {
-        "run_id": "run-001",
-        "adapter": "gym",
-        "task_id": "task-001",
-        "domain": "chrome",
-        "task_attempt": 2,
-        "step": 3,
-        "parse_attempt": 1,
-    }
+    assert _transport_log_context(request) == context
+
+
+@mark.parametrize("raw", [None, "", "not json", "[1, 2]", '"text"'])
+def test_transport_log_context_ignores_a_missing_or_malformed_header(raw: str | None) -> None:
+    request = MagicMock()
+    request.headers = {} if raw is None else {"x-nemo-gym-log-context": raw}
+
+    assert _transport_log_context(request) == {}
 
 
 def test_redacted_error_repr_without_request_info() -> None:
@@ -6476,6 +6470,86 @@ class TestSamplingOverrides:
         server = self._server({"temperature": 1.0}, is_responses_native=True)
         body = {"model": "dummy_model", "temperature": 0.2}
         assert server._apply_sampling_overrides(body)["temperature"] == 1.0
+
+    def test_transport_log_records_the_request_the_engine_receives(
+        self, monkeypatch: MonkeyPatch, tmp_path, capsys
+    ) -> None:
+        """The opt-in transport log is the request trace: it records the body after overrides."""
+        log_path = tmp_path / "model-io-transport.jsonl"
+        monkeypatch.setenv("NEMO_GYM_VLLM_TRANSPORT_LOG", str(log_path))
+        server = self._server({"temperature": 1.0, "top_p": 1.0})
+        sent: dict[str, Any] = {}
+
+        async def create_chat_completion(**kwargs: Any) -> dict[str, Any]:
+            sent.update(kwargs)
+            return {
+                "id": "chatcmpl",
+                "object": "chat.completion",
+                "created": FIXED_TIME,
+                "model": "dummy_model",
+                "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "ok"}}],
+            }
+
+        provider = MagicMock(spec=NeMoGymAsyncOpenAI)
+        provider.create_chat_completion = AsyncMock(side_effect=create_chat_completion)
+        server._clients = [provider]
+        request = NeMoGymResponseCreateParamsNonStreaming(
+            input=[NeMoGymEasyInputMessage(type="message", role="user", content="hello")],
+            temperature=0.2,
+            top_p=0.5,
+            metadata={"extra_body": json.dumps({"new_param": "value"})},
+        )
+
+        response = TestClient(server.setup_webserver()).post(
+            "/v1/responses", json=request.model_dump(exclude_unset=True, mode="json")
+        )
+
+        assert response.status_code == 200
+        (event,) = [
+            json.loads(line)
+            for line in log_path.read_text(encoding="utf-8").splitlines()
+            if json.loads(line)["event"] == "transport_request"
+        ]
+        assert event["request_payload"]["temperature"] == sent["temperature"] == 1.0
+        assert event["request_payload"]["top_p"] == sent["top_p"] == 1.0
+        assert event["request_payload"]["new_param"] == sent["new_param"] == "value"
+        # Nothing is printed per request; the trace exists only when the log is enabled.
+        assert capsys.readouterr().out == ""
+
+    def test_transport_log_records_the_callers_context_under_one_key(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        log_path = tmp_path / "model-io-transport.jsonl"
+        monkeypatch.setenv("NEMO_GYM_VLLM_TRANSPORT_LOG", str(log_path))
+        server = self._server(None)
+        provider = MagicMock(spec=NeMoGymAsyncOpenAI)
+        provider.create_chat_completion = AsyncMock(
+            return_value={
+                "id": "chatcmpl",
+                "object": "chat.completion",
+                "created": FIXED_TIME,
+                "model": "dummy_model",
+                "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "ok"}}],
+            }
+        )
+        server._clients = [provider]
+        request = NeMoGymResponseCreateParamsNonStreaming(
+            input=[NeMoGymEasyInputMessage(type="message", role="user", content="hello")]
+        )
+        context = {"task_id": "task-001", "step": 3, "event": "not the log's event"}
+
+        response = TestClient(server.setup_webserver()).post(
+            "/v1/responses",
+            json=request.model_dump(exclude_unset=True, mode="json"),
+            headers={"x-nemo-gym-log-context": json.dumps(context)},
+        )
+
+        assert response.status_code == 200
+        events = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+        assert [event["event"] for event in events] == ["transport_request", "transport_response"]
+        # The caller's fields stay under one key, so they can never pass for the log's own fields.
+        assert all(event["schema_version"] == 3 and event["log_context"] == context for event in events)
+        assert all("task_id" not in event for event in events)
+        # The context never reaches the engine.
+        assert "task_id" not in provider.create_chat_completion.call_args.kwargs
 
 
 class TestEndpointFile:

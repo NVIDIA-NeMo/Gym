@@ -807,11 +807,12 @@ Set `OSWORLD_RECORD_VIDEO_DIR` before `gym env start`. To select only specific
 tasks, also set `OSWORLD_RECORD_VIDEO_TASK_IDS_FILE`. Recording is best-effort
 and does not fail the rollout if the VM cannot produce an mp4.
 
-Schema-v2 events carry `run_id`, `adapter`, `task_id`, `domain`,
+Agent events (schema version 2) carry `run_id`, `adapter`, `task_id`, `domain`,
 `task_attempt`, logical `step`, and `parse_attempt` in addition to the event,
-call, timestamp, and process identifiers. The agent passes that identity to
-the transport logger in HTTP headers; it is not inserted into the model JSON
-body. Embedded image data remains in the full request; a separate image index
+call, timestamp, and process identifiers. The agent passes the same identity to
+the transport logger as one JSON object in the `x-nemo-gym-log-context` HTTP
+header, and transport events (schema version 3) record it unchanged under
+`log_context`; it is not inserted into the model JSON body. Embedded image data remains in the full request; a separate image index
 records encoded/decoded sizes and SHA-256 values for integrity checks. These
 files can be large and can contain screenshots or prompt content, so keep the
 option disabled for normal runs and apply the same access controls as the

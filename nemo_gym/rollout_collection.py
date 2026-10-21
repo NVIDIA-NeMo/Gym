@@ -134,6 +134,7 @@ _failures_path_for = failures_path_for  # Backwards-compatible alias
 from nemo_gym.server_utils import (
     ServerClient,
     get_response_json,
+    is_global_aiohttp_client_request_debug_enabled,
     raise_for_status,
     request,
 )
@@ -508,6 +509,12 @@ def _has_observation_gap(result: dict[str, Any], code: str) -> bool:
 
 
 def _trajectory_identity(row: dict[str, Any]) -> tuple[str, str]:
+    identity = row.get("trajectory_identity")
+    if isinstance(identity, dict):
+        task_id = identity.get("task_id")
+        rollout_id = identity.get("rollout_id")
+        if isinstance(task_id, str) and task_id and isinstance(rollout_id, str) and rollout_id:
+            return task_id, rollout_id
     task_id = next(
         (str(row[key]) for key in TASK_ID_FIELDS if row.get(key) is not None),
         str(row[TASK_INDEX_KEY_NAME]),
@@ -1951,6 +1958,7 @@ def _rollout_request_debug_summary(row: Dict[str, Any]) -> Dict[str, Any]:
     summary = {
         TASK_INDEX_KEY_NAME: row.get(TASK_INDEX_KEY_NAME),
         ROLLOUT_INDEX_KEY_NAME: row.get(ROLLOUT_INDEX_KEY_NAME),
+        ROLLOUT_ID_KEY_NAME: row.get(ROLLOUT_ID_KEY_NAME),
         "agent_name": agent_ref.get("name") if isinstance(agent_ref, dict) else None,
         "environment_server": row.get(NG_ENVIRONMENT_SERVER_KEY),
         "taskset": _materialized_taskset(row),
@@ -4367,6 +4375,12 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                             environment_server_type=server_type,
                         )
 
+                if is_global_aiohttp_client_request_debug_enabled():
+                    print(
+                        "[rollout_collection] /run dispatch "
+                        f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
+                        flush=True,
+                    )
                 started = time.monotonic()
                 started_at = time.time()
                 if run_timing is not None:
