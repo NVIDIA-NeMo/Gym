@@ -687,6 +687,20 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
         sys.exit(1)
 
 
+def _harness_optimize(args: argparse.Namespace, overrides: list[str]) -> None:
+    from omegaconf import OmegaConf
+
+    from nemo_gym.cli.harness import optimize
+    from nemo_gym.harness_optimization import HarnessOptimizationRecipe
+
+    merged = OmegaConf.merge(
+        OmegaConf.load(args.config),
+        OmegaConf.from_dotlist([token.lstrip("+") for token in overrides]) if overrides else OmegaConf.create(),
+    )
+    recipe = HarnessOptimizationRecipe.model_validate(OmegaConf.to_container(merged, resolve=True))
+    optimize(recipe)
+
+
 def _eval_run(args: argparse.Namespace, overrides: list[str]) -> None:
     target = getattr(args, "target", None)
     if target:
@@ -814,6 +828,7 @@ GROUPS = {
     "dataset": "Manage datasets.",
     "env": "Develop and run environments.",
     "eval": "Run evaluations.",
+    "harness": "Optimize Agent harness configuration.",
     "dev": "Contributor helpers.",
 }
 
@@ -1382,6 +1397,17 @@ COMMANDS = {
                 "report_format",
                 "Report artifacts to write (default: both).",
                 choices=("md", "json", "both"),
+            ),
+        ),
+    ),
+    "harness optimize": Command(
+        target=_harness_optimize,
+        summary="Optimize a declared Agent harness target.",
+        flags=(
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--config", "-c", required=True, metavar="PATH", help="Harness optimization recipe YAML."
+                ),
             ),
         ),
     ),
