@@ -41,6 +41,13 @@ infrastructure-failure marker. Recognition requires an explicit provider death
 report. Setup failures, node-pressure evictions, unrelated sandbox losses, and
 verifier failures retain their existing infrastructure-error handling.
 
+In evaluation (`gym eval run`), failures follow Terminal-Bench's own handling. A
+trial that leaves no reward file (`RewardFileNotFoundError`) scores 0 and is not
+retried. A verifier sandbox that misses its start deadline
+(`VerifierStartTimeoutError`) and an agent harness failure such as a mini-SWE run
+with no trajectory (named `AgentInfrastructureError`) are retried. Outside
+evaluation the recorded failure text and types are unchanged.
+
 The wire models in `models.py` are resources-owned. Agent implementations use
 their own HTTP models and need not import this server. `termination.reason` accepts
 `completed`, `timeout`, `nonzero_exit`, `cancelled`, and `infrastructure_error`;

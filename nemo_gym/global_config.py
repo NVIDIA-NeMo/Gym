@@ -1774,6 +1774,18 @@ Set the keys individually, in a config or as overrides, e.g.:
         return almost_servers
 
 
+# Set by `gym eval run` for every server it starts. Evaluation-only failure handling (naming infra failures so
+# rollout collection retries them, scoring a failed judge call as no game) reads it, so training and RL, which
+# start servers without it, keep their behaviour.
+EVAL_MODE_KEY_NAME = "nemo_gym_eval_mode"
+
+
+def is_eval_mode() -> bool:
+    """Whether this process serves an evaluation run (`gym eval run`, or servers started with the key set)."""
+    global_config_dict = maybe_get_global_config_dict()
+    return bool(global_config_dict is not None and global_config_dict.get(EVAL_MODE_KEY_NAME, False))
+
+
 def maybe_get_global_config_dict() -> Optional[DictConfig]:
     """The global config dict when this process already has one; never triggers a CLI parse.
 

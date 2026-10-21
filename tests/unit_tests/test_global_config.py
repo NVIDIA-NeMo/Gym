@@ -3642,3 +3642,26 @@ class TestRolloutRunLabels:
 
         assert labels == {"judge": "judge", "judge_twin": "judge_twin", "grader": "grader"}
         assert label_runs(dict(reversed(list(agent_by_key.items())))) == labels
+
+
+class TestEvalMode:
+    """Evaluation-only failure handling reads this key; training and RL never set it."""
+
+    def test_a_process_without_a_gym_config_is_not_in_eval_mode(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.delenv(nemo_gym.global_config.NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        assert nemo_gym.global_config.is_eval_mode() is False
+
+    def test_a_config_without_the_key_is_not_in_eval_mode(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", OmegaConf.create({"policy_model": {}}))
+        assert nemo_gym.global_config.is_eval_mode() is False
+
+    def test_gym_eval_run_marks_the_config_its_servers_inherit(self, monkeypatch: MonkeyPatch) -> None:
+        from nemo_gym.cli.eval import mark_eval_mode
+
+        config = OmegaConf.create({"policy_model": {}})
+        mark_eval_mode(config)
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setenv(nemo_gym.global_config.NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, OmegaConf.to_yaml(config))
+        # A child server reads the config its parent serialized into the environment.
+        assert nemo_gym.global_config.is_eval_mode() is True

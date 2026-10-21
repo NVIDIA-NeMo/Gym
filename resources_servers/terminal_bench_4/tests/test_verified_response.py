@@ -3,7 +3,10 @@
 
 from types import SimpleNamespace
 
+import pytest
+
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.rollout_collection import is_terminal_failure
 from resources_servers.terminal_bench_4.app import TerminalBench4ResourcesServer
 from resources_servers.terminal_bench_4.models import AgentTermination, SandboxedVerifyRequest, SandboxedVerifyResponse
 
@@ -60,6 +63,24 @@ def test_a_free_text_infrastructure_detail_is_not_a_type(tmp_path):
     assert verified["_ng_failure_class"] == "infrastructure_error"
     assert verified["failure_reason"] == "sandbox 10.0.0.7 went away after 3 retries"
     assert "_ng_failure_type" not in verified
+
+
+@pytest.mark.parametrize("eval_mode", [False, True], ids=["training", "evaluation"])
+def test_an_agent_harness_failure_is_named_for_the_retry_rule_in_evaluation(tmp_path, monkeypatch, eval_mode):
+    """A mini-SWE run with no trajectory: Terminal-Bench retries the trial, so evaluation names it as infra."""
+    monkeypatch.setattr("resources_servers.terminal_bench_4.app.is_eval_mode", lambda: eval_mode)
+    verified = _verified(
+        tmp_path,
+        {"verifier_result": {"rewards": {"reward": 0.0}}},
+        AgentTermination(reason="infrastructure_error", detail="mini-SWE produced no trajectory"),
+    )
+
+    expected = (
+        "AgentInfrastructureError: mini-SWE produced no trajectory" if eval_mode else "mini-SWE produced no trajectory"
+    )
+    assert verified["failure_reason"] == expected
+    if eval_mode:
+        assert not is_terminal_failure(verified)
 
 
 def test_a_scored_trial_carries_no_failure(tmp_path):

@@ -21,6 +21,7 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.global_config import is_eval_mode
 from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.server_utils import (
     SESSION_ID_KEY,
@@ -275,6 +276,9 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             failure_type = failure
         elif session.termination.reason == "infrastructure_error" and not result.get("sandbox_resource_limit"):
             failure = session.termination.detail or "Agent infrastructure failure"
+            if is_eval_mode():
+                # Named, so evaluation's retry rule sees the agent harness failure (a run with no trajectory).
+                failure = f"AgentInfrastructureError: {failure}"
         return SandboxedVerifyResponse(
             **(
                 session.verify_body.model_dump(

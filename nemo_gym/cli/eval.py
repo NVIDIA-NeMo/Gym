@@ -63,6 +63,7 @@ from nemo_gym.eval_plan import (
 )
 from nemo_gym.global_config import (
     COMPONENT_NAME_KEY_NAME,
+    EVAL_MODE_KEY_NAME,
     JSON_OUTPUT_KEY_NAME,
     QUERY_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
@@ -542,6 +543,13 @@ def _validate_prepared_split_file_exists(input_jsonl_fpath: Path, split: str, ou
     )
 
 
+def mark_eval_mode(global_config_dict: DictConfig) -> None:
+    """Mark the run as an evaluation. Every server it starts inherits the key, so evaluation-only failure
+    handling applies there; training and RL start their servers without it."""
+    with open_dict(global_config_dict):
+        global_config_dict[EVAL_MODE_KEY_NAME] = True
+
+
 @exit_cleanly_on_config_error
 def e2e_rollout_collection():  # pragma: no cover
     from nemo_gym.rollout_collection import (
@@ -597,6 +605,8 @@ def e2e_rollout_collection():  # pragma: no cover
     rollout_collection_config = RolloutCollectionConfig.model_validate(
         OmegaConf.to_container(rollout_collection_config_dict)
     )
+
+    mark_eval_mode(global_config_dict)
 
     rh = RunHelper()
     rh.start(None)

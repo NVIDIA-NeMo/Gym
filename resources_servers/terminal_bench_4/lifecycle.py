@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from nemo_gym.global_config import is_eval_mode
 from resources_servers.terminal_bench_4.collection import collect
 from resources_servers.terminal_bench_4.environment import Environment
 from resources_servers.terminal_bench_4.models import AgentTermination
@@ -223,10 +224,17 @@ async def finalize_session(session, *, grade):
         try:
             # Compatibility: both startups use the task's environment build
             # budget; verifier healthchecks are not run by the reference.
-            await asyncio.wait_for(
-                session.verifier_environment.start(),
-                session.task.config.environment.build_timeout_sec,
-            )
+            try:
+                await asyncio.wait_for(
+                    session.verifier_environment.start(),
+                    session.task.config.environment.build_timeout_sec,
+                )
+            except TimeoutError as exc:
+                # The verifier sandbox missed its start deadline: Terminal-Bench retries the trial, so evaluation
+                # names it for the retry rule. Outside evaluation the recorded type stays TimeoutError.
+                if is_eval_mode():
+                    exception(session, exc, "VerifierStartTimeoutError")
+                raise
             if getattr(session.verifier_environment, "efs_logs_fallback", None):
                 session.diagnostics.append(
                     {

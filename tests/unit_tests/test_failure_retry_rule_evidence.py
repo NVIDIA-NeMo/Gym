@@ -77,7 +77,9 @@ class TestTerminalBench4Rows:
         "name",
         [
             "AgentInfrastructureError",
+            "AgentInfrastructureError: mini-SWE produced no trajectory",  # how evaluation names it now
             "SandboxApiException",
+            "VerifierStartTimeoutError",
             "ClientPayloadError",
             "APIConnectionError",  # model server down mid-run
             "OpenSandboxCreateError",  # sandbox provisioning

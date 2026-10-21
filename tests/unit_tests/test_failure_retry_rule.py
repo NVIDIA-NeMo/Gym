@@ -349,8 +349,9 @@ class TestHarnessFailurePaths:
             ("NonZeroAgentExitCodeError", True),
             ("AgentTimeoutError", True),
             ("VerifierOutputParseError", True),
-            # Terminal-Bench scores a trial that leaves no reward file as 0.
+            # Terminal-Bench scores a trial that leaves no reward file as 0, and retries a verifier start timeout.
             ("RewardFileNotFoundError", True),
+            ("VerifierStartTimeoutError", False),
             ("EnvironmentStartTimeoutError", False),
             ("HealthcheckError", False),
             ("AgentSetupTimeoutError", False),

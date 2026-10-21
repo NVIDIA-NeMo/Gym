@@ -292,6 +292,7 @@ _INFRA_SUBCLASS_NAMES = frozenset(
         "AgentInfrastructureError",
         "AgentRecordError",
         "SeededSessionExpired",
+        "VerifierStartTimeoutError",
     }
 )
 # Ray's wrapper of a task's own exception: "RayTaskError(ImportError): ...". The wrapped name decides.
