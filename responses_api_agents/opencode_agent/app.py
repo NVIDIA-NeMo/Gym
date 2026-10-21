@@ -608,6 +608,10 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # Run each session in its own sandbox instead of on a cluster node (see OpenCodeSessionSandboxConfig).
     # Takes the place of session_nodes and private_tmp: a sandbox is private by construction.
     session_sandbox: Optional[OpenCodeSessionSandboxConfig] = None
+    # OpenCode provider id of the generated (model_server) model entry. OpenCode's system prompt names
+    # the model as "<provider>/<model>", so a model trained on another harness's sessions can be given
+    # the same line it saw in training.
+    provider_id: str = "nemo"
 
     @property
     def command_parts(self) -> list[str]:
@@ -790,7 +794,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         return JSONResponse(completion)
 
     def _effective_model(self) -> str:
-        return f"nemo/{self.config.model}" if self.config.model_server else self.config.model
+        return f"{self.config.provider_id}/{self.config.model}" if self.config.model_server else self.config.model
 
     def _build_opencode_config(
         self, rollout_id: Optional[str] = None, run_key: Optional[str] = None
@@ -798,7 +802,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         config = self._deep_merge({}, copy.deepcopy(_without_empty_tools(self.config.opencode_config)))
         if self.config.model_server:
             providers = config.setdefault("provider", {})
-            nemo = providers.setdefault("nemo", {"npm": "@ai-sdk/openai-compatible"})
+            nemo = providers.setdefault(self.config.provider_id, {"npm": "@ai-sdk/openai-compatible"})
             nemo.setdefault("options", {}).update(
                 {
                     "baseURL": self._resolve_model_base_url(rollout_id, run_key),
