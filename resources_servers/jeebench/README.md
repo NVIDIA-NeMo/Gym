@@ -45,15 +45,24 @@ Reference answers are never passed to the extractor. Units are stripped without
 conversion; unsupported expressions and ambiguous conclusions require review.
 The published scoring formula and the manual-review mechanism are unchanged.
 
-Version `indic-formats-v2.8` also reads explicit option selections and true/false
+Version `indic-formats-v2.9` also reads explicit option selections and true/false
 verdicts within a concluding paragraph, accounting for every option label and
 rejecting conflicting or conditional selections. Roman statement annotations do
 not replace an explicitly selected A–D option. Numeric handling accepts agreeing
-literal equality chains and annotations that introduce no other value. If the
+literal equality chains and a limited set of complete affirmative annotations
+(for example, “as required” or “This is the required coefficient”). Unknown prose,
+retractions, and conditions are not discarded. A selected option followed by a
+description must repeat the unique matching option text from the question, or
+use a supported annotation, scalar value, or Roman statement list. If the
 question explicitly ends by asking for the value of one typeset symbol, complete,
 agreeing assignments to that symbol can identify the answer before a trailing
-explanation of a different quantity. No equations are solved during extraction.
+explanation of a different quantity. Each assignment must start its line with
+the symbol or an explicit concluding connective; assumptions and rejected or
+conditional assignments remain unparsed. No equations are solved during extraction.
 These rules apply to all models; remaining unsupported conclusions need review.
+The stricter rules can lower extraction coverage and provisional scores relative
+to v2.8. Recompute from original responses without `--baseline-corrected` when
+applying this fix; preserving earlier extractions would also preserve their bugs.
 
 Rescore every audited, completed language shard in an existing campaign:
 

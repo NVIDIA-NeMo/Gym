@@ -10,7 +10,6 @@ from resources_servers.jeebench.scoring import extract_answer
     "text,kind,expected",
     [
         ("अंतिम उत्तर: 1.78", "Numeric", "1.78"),
-        ("**अंतिम उत्तर : [C] Zn धातु और NaOH(aq)**", "MCQ", "C"),
         ("Final Answer: (A) और (C)", "MCQ(multiple)", "AC"),
         ("চূড়ান্ত উত্তর: (B)", "MCQ", "B"),
         ("চূড়ান্ত উত্তৰ: (B)", "MCQ", "B"),
@@ -28,7 +27,6 @@ from resources_servers.jeebench.scoring import extract_answer
         (r"\boxed{0.20\ \text{bar}}", "Numeric", "0.2"),
         (r"\boxed{935.00\ \text{K}}", "Numeric", "935.0"),
         (r"\boxed{(B)\ 103}", "MCQ", "B"),
-        (r"\boxed{\text{C) } \mathrm{Zn}\ \text{धातु और}\ \mathrm{NaOH}\ (aq)}", "MCQ", "C"),
         (r"\boxed{\text{Correct options: }A,\;B,\;D}", "MCQ(multiple)", "ABD"),
         (r"\boxed{\frac{16}{9}}", "Numeric", str(16 / 9)),
         (r"\boxed{6.75\times 10^{-5}}", "Numeric", "6.75e-05"),
@@ -44,7 +42,6 @@ from resources_servers.jeebench.scoring import extract_answer
         (r"\boxed{2**3}", "Integer", "8"),
         (r"\boxed{C और D सही हैं; A और B गलत हैं।}", "MCQ(multiple)", "CD"),
         ("(A) सही है\n(B) गलत है\n(C) सही है\n(D) गलत है", "MCQ(multiple)", "AC"),
-        ("সুতৰাং, সঠিক উত্তৰ হ'ল (B) ডায়ামেগনেটিক।", "MCQ(multiple)", "B"),
         ("সেয়ে, সঠিক উক্তিবোৰ (B) আৰু (C)।", "MCQ(multiple)", "BC"),
         ("সেয়ে, Y-ৰ মান হৈছে 4।", "Integer", "4"),
         ("সুতৰাং, চূড়ান্ত উত্তৰ হৈছে 2.14।", "Numeric", "2.14"),
@@ -135,7 +132,6 @@ def test_later_markers_are_considered_across_languages():
         ("Final answer: 2, the value is 5", "Integer", "None"),
         ("Final answer: 2; n = 5", "Integer", "None"),
         ("Final answer: (B) wrong because of symmetry", "MCQ", "None"),
-        ("अंतिम उत्तर: (B) अभिक्रिया ऊष्माक्षेपी है", "MCQ", "B"),
         ("अंतिम उत्तर: (B) किया गया", "MCQ", "B"),
         ("حتمی جواب: (B) کیا گیا", "MCQ", "B"),
         ("अंतिम उत्तर: (A) या (B)", "MCQ", "None"),
@@ -295,3 +291,31 @@ def test_requested_symbol_is_not_a_transformed_or_counted_quantity(question):
     from resources_servers.jeebench.extraction import requested_symbol
 
     assert requested_symbol(question) is None
+
+
+@pytest.mark.parametrize(
+    "text,kind,label,option_text",
+    [
+        ("**अंतिम उत्तर : [C] Zn धातु और NaOH(aq)**", "MCQ", "C", "Zn धातु और NaOH(aq)"),
+        (
+            r"\boxed{\text{C) } \mathrm{Zn}\ \text{धातु और}\ \mathrm{NaOH}\ (aq)}",
+            "MCQ",
+            "C",
+            "Zn धातु और NaOH(aq)",
+        ),
+        ("সুতৰাং, সঠিক উত্তৰ হ'ল (B) ডায়ামেগনেটিক।", "MCQ(multiple)", "B", "ডায়ামেগনেটিক"),
+        ("अंतिम उत्तर: (B) अभिक्रिया ऊष्माक्षेपी है", "MCQ", "B", "अभिक्रिया ऊष्माक्षेपी है"),
+        ("Final Answer: B: option text", "MCQ", "B", "option text"),
+        ("Final Answer: (B) The reaction isn't exothermic.", "MCQ", "B", "The reaction isn't exothermic."),
+    ],
+)
+def test_selected_option_description_requires_matching_question(text, kind, label, option_text):
+    question = "Select an option.\n" + "\n".join(
+        f"[{choice}] {option_text if choice == label else 'distractor ' + choice}" for choice in "ABCD"
+    )
+    assert extract_answer(text, kind, question=question)[0] == label
+    # Unknown prose is no longer silently discarded. The selection and its
+    # description must identify the same unique option in the actual question.
+    assert extract_answer(text, kind) == ("None", "unparsed")
+    assert extract_answer(text, kind, question=question.replace(option_text, "unrelated text")) == ("None", "unparsed")
+    assert extract_answer(text, kind, question=question.replace("distractor A", option_text)) == ("None", "unparsed")

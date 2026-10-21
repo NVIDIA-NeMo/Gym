@@ -151,7 +151,7 @@ def test_answer_normalization_is_type_aware(text, kind, expected):
         ("Answer: A\nFinal answer: B", "MCQ", "B", "answer_marker"),
         ("**Answer**: B", "MCQ", "B", "answer_marker"),
         (r"Final Answer: (B) $6.4 \times 10^{-34}$", "MCQ", "B", "answer_marker"),
-        ("Final Answer: B: option text", "MCQ", "B", "answer_marker"),
+        ("Final Answer: B: option text", "MCQ", "None", "unparsed"),
         ("Final Answer: (B) or (C)", "MCQ", "None", "unparsed"),
         ("Final Answer: (B), (C)", "MCQ", "None", "unparsed"),
         ("Final Answer: Maybe B", "MCQ", "None", "unparsed"),
@@ -326,3 +326,63 @@ def test_five_synthetic_examples_are_valid_requests():
     assert len(rows) == 5
     for row in rows:
         JeebenchVerifyRequest.model_validate(row | {"response": response()})
+
+
+@pytest.mark.parametrize(
+    "text,kind,gold",
+    [
+        ("Final Answer: (B) isn't correct.", "MCQ", "B"),
+        ("Final Answer: (C) cannot be correct.", "MCQ", "C"),
+        ("Final Answer: (B) isn’t correct.", "MCQ", "B"),
+        ("Final Answer: (B) can't be correct.", "MCQ", "B"),
+        ("Final Answer: (B) is ruled out.", "MCQ", "B"),
+        ("Final Answer: (B) fails the test.", "MCQ", "B"),
+        ("अंतिम उत्तर: A\nसही विकल्प B isn't correct.", "MCQ", "A"),
+        ("अंतिम उत्तर: A\nसही विकल्प B एक असमर्थित विवरण", "MCQ", "A"),
+        ("Final Answer: (A), (B) aren't correct.", "MCQ(multiple)", "AB"),
+        ("Final Answer: (B) only if the assumption holds.", "MCQ", "B"),
+        ("Final Answer: (B) as it yields a valid configuration only if the assumption holds.", "MCQ", "B"),
+        ("Final answer: 2. This isn't correct.", "Numeric", "2"),
+        ("Final answer: 2. This cannot be correct.", "Numeric", "2"),
+        ("Final answer: 2. Only if the assumption holds.", "Numeric", "2"),
+        ("Final answer: 2. This isn’t correct.", "Integer", "2"),
+        ("Final answer: 2. This is ruled out.", "Numeric", "2"),
+        ("Final answer: 2. This fails the test.", "Numeric", "2"),
+        ("Final answer: 2. This follows from symmetry only if the assumption holds.", "Numeric", "2"),
+        ("Final answer: 2, as required. This fails the test.", "Numeric", "2"),
+        ("Assume Y = 2\n\nThis leads to a contradiction.", "Numeric", "2"),
+        ("Suppose Y = 2\n\nThis leads to a contradiction.", "Numeric", "2"),
+        ("Assume Y = 2\n\nThis is the coefficient.", "Numeric", "2"),
+        ("Try Y = 2\n\nThis is the coefficient.", "Numeric", "2"),
+        ("The tentative assignment is Y = 2\n\nThis is the coefficient.", "Numeric", "2"),
+        ("Assume\nY = 2\n\nThis is the coefficient.", "Numeric", "2"),
+        ("Y = 2\n\nThis leads to a contradiction.", "Numeric", "2"),
+        ("Y = 2\n\nThis cannot be correct.", "Numeric", "2"),
+        ("Y = 2\n\nOnly if the assumption holds.", "Numeric", "2"),
+    ],
+)
+async def test_rejected_or_conditional_answers_receive_no_credit(server, text, kind, gold):
+    result = await server.verify(body(text, question_type=kind, gold=gold, question="What is the value of $Y$?"))
+    assert result.extracted_answer == "None"
+    assert result.extraction_method == "unparsed"
+    assert result.extraction_failed and result.failure_kind == "jeebench:unparsed_answer"
+    assert result.reward == 0 and not result.exact_match
+    assert result.provisional and not result.mask_sample
+
+
+@pytest.mark.parametrize(
+    "text,kind,gold",
+    [
+        ("Final Answer: (C), as it yields a valid configuration.", "MCQ", "C"),
+        ("Final Answer: (A), (B), (D) are correct; (C) is not correct.", "MCQ(multiple)", "ABD"),
+        ("Final answer: 2. This is the required coefficient.", "Numeric", "2"),
+        ("Final answer: 2, as required.", "Integer", "2"),
+        ("Final answer: 2. This follows from symmetry.", "Numeric", "2"),
+        ("Therefore, Y = 2\n\nThe corresponding rate is 2e-5.", "Numeric", "2"),
+        ("Y = 2\n\nThe corresponding rate is 2e-5.", "Numeric", "2"),
+    ],
+)
+async def test_supported_affirmative_answers_retain_credit(server, text, kind, gold):
+    result = await server.verify(body(text, question_type=kind, gold=gold, question="What is the value of $Y$?"))
+    assert result.reward == 1 and result.exact_match
+    assert not result.extraction_failed and result.extraction_method != "unparsed"

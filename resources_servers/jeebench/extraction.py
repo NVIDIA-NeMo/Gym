@@ -15,7 +15,7 @@ import unicodedata
 from collections.abc import Callable
 
 
-PARSER_VERSION = "indic-formats-v2.8"
+PARSER_VERSION = "indic-formats-v2.9"
 MAX_PAYLOAD_CHARS = 4096
 # Answer/option vocabulary covers the fourteen languages in the Indic campaign.
 ANSWER_WORDS = (
@@ -243,6 +243,8 @@ VALUE_WORDS = (
 )
 UNCERTAIN = re.compile(
     r"or|maybe|perhaps|uncertain|unsure|possibly|probably|might|either|not|neither|incorrect|false"
+    r"|cannot|(?:is|are|was|were|has|have|had|do|does|did|ca|could|wo|would|should|must|need)n['’]t"
+    r"|if|unless|assum(?:e|ing|ption)|suppos(?:e|ing)|hypothetical|tentative|contradiction|inconsistent|rejected"
     r"|या|अथवा|नहीं|गलत|অথবা|ভুল|અથવા|ಅಥವಾ|അല്ലെങ്കിൽ|ଅଥବା|ਜਾਂ|அல்லது|లేదా|یا|" + NEGATIVE_PATTERN,
     re.IGNORECASE,
 )
@@ -374,15 +376,29 @@ CONCLUSION_PATTERN = re.compile(
 )
 
 
+def harmless_annotation(text: str) -> bool:
+    """Accept complete supported annotations, never arbitrary non-negative prose."""
+    return bool(
+        re.fullmatch(
+            r"(?:as required|(?:this|it) is the required (?:answer|value|coefficient|result)"
+            r"|this follows from symmetry|(?:as|because) it yields a valid (?:configuration|solution|result)"
+            r"|किया गया|کیا گیا)[.।۔]*",
+            text.strip(),
+            re.I,
+        )
+    )
+
+
 def scalar_prefix(text: str, kind: str, normalize: Callable[[str, str], str | None]) -> str | None:
     """Require a complete scalar expression; never discard a numeric suffix."""
     text = clean_math(text).lstrip(" :：=≈~")
     number = numeric_value(text.removesuffix("%"))
     if number is not None:
         return normalize(number, kind)
-    # A prose annotation cannot introduce another value, expression or negation.
+    # Only recognized complete annotations may be discarded. Absence of a
+    # known negative word is not evidence that arbitrary prose is affirmative.
     annotation = re.fullmatch(r"(.+?)(?:[.।۔]\s+|,\s+(?=as\b|which\b|because\b))([\w\s,.'’।۔-]+)", text)
-    if annotation and not re.search(r"\d|[_+-]", annotation[2]) and not uncertain(annotation[2]):
+    if annotation and harmless_annotation(annotation[2]):
         number = numeric_value(annotation[1])
         if number is not None:
             return normalize(number, kind)
@@ -560,8 +576,19 @@ def explicit_choices(
         leading = re.match(rf"({labels})(.*)$", clause, re.S)
         if selected and leading:
             tail = leading[2].strip(" ,:।۔.")
-            # Preserve a selected list before its explanation, but never hide another label.
-            if not re.search(label, tail) and not uncertain(tail):
+            # A selected list may repeat a scalar value or statement indices,
+            # or carry a supported affirmative annotation. Unknown prose must
+            # not silently turn a rejection/condition into a positive selection.
+            statement_indices = re.fullmatch(
+                r"[\[(](?:I|II|III|IV)[\])]"
+                r"(?:\s*(?:,|and|और|&)\s*[\[(](?:I|II|III|IV)[\])])*",
+                tail,
+            )
+            if (
+                not re.search(label, tail)
+                and not uncertain(tail)
+                and (not tail or numeric_value(tail) is not None or statement_indices or harmless_annotation(tail))
+            ):
                 yes.update(normalize_labels(leading[1]) or "")
                 continue
         return None
@@ -632,6 +659,14 @@ def payload_answer(
     text = re.sub(r"(?i)^(?:(?:the\s+)?(?:correct\s+)?(?:options?|choices?|answers?)\s*(?:are|is|:)?)\s*", "", text)
     text = re.sub(r"^(?:(?:सही|अंतिम|केवल|correct)\s+)?(?:" + LOCAL_WORDS + r"|कथन)\s*[:：]?\s*", "", text)
     text = re.sub(rf"^(?:(?:{COPULA_PATTERN})|হ'ল)\s*[:：-]?\s*", "", text, flags=re.I)
+    # A label followed by the exact text of that supplied option is an explicit
+    # selection, even when the option itself is a negative statement. Do not
+    # accept arbitrary descriptors when the question provides no matching text.
+    selected_option = re.fullmatch(r"(?:[\[(]([A-Da-d])[\])]|([A-Da-d])[).:]?)\s*[:：]?\s+(.+)", text, re.S)
+    if question and selected_option:
+        label = (selected_option[1] or selected_option[2]).upper()
+        if match_option_text(selected_option[3], question) == label:
+            return label
     return explicit_choices(text.replace(r"\&", "&"), kind, normalize, selected=True)
 
 
@@ -712,7 +747,7 @@ def requested_symbol(question: str) -> str | None:
 
 
 def requested_scalar(text: str, target: str, kind: str, normalize: Callable[[str, str], str | None]) -> str | None:
-    """Read agreeing, complete assignments to the requested symbol, without solving."""
+    """Read affirmative, agreeing assignments with their surrounding context."""
     start = max(0, len(text) - MAX_PAYLOAD_CHARS)
     if start:
         start = text.find("\n", start)
@@ -726,6 +761,12 @@ def requested_scalar(text: str, target: str, kind: str, normalize: Callable[[str
         return None
     answers = []
     for match in assignments:
+        # Never skip a hypothetical/narrative prefix to reach an equality.
+        # The whole assignment line must start with the symbol or an explicit
+        # concluding connective. The context guard above also checks other lines.
+        prefix = tail[tail.rfind("\n", 0, match.start()) + 1 : match.start()]
+        if CONCLUSION_PATTERN.sub("", prefix).strip(" ,:।۔."):
+            return None
         # No prefix/last-number selection from lists, prose or symbolic equations.
         number = numeric_value(match[1])
         answer = normalize(number, kind) if number is not None else None
@@ -778,7 +819,11 @@ def extract_formatted_answer(
                 # normal outputs retain a parseable trailing option/value.
                 has_relation = ":" in match[0] or "=" in match[0] or any(word in match[0] for word in COPULAS)
                 parsed_payload = payload_answer(payload, kind, normalize, question=question)
-                if (":" not in match[0] and "=" not in match[0] and parsed_payload is None) or (
+                # Keep an explicit leading option as the latest candidate even
+                # when its annotation is unsupported. Skipping it could revive
+                # an earlier (possibly hypothetical) answer instead.
+                leading_option = kind.startswith("MCQ") and re.match(r"(?:[\[(][A-Da-d][\])]|[A-D](?!\w))", payload)
+                if (":" not in match[0] and "=" not in match[0] and parsed_payload is None and not leading_option) or (
                     not has_relation and len(text) > MAX_PAYLOAD_CHARS and "\n" not in text
                 ):
                     continue
