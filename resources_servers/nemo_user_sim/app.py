@@ -28,7 +28,7 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.failure_kinds import JUDGE_FAILED, VERIFIER_ERROR, is_namespaced, is_registered
+from nemo_gym.failure_kinds import JUDGE_FAILED, SESSION_EXPIRED, VERIFIER_ERROR, is_namespaced, is_registered
 from nemo_gym.global_config import get_first_server_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
@@ -187,7 +187,11 @@ class UserSimResourcesServer(SimpleResourcesServer):
     # The cookie session each resources session was seeded under, so a close that carries no cookie, as after a
     # lost seed reply, still finds and releases the seed.
     resources_session_id_to_session_id: dict[str, str] = {}
-    closed_resources_session_ids: dict[str, float] = {}
+    # Each closed resources session, with the episode that closed it and when the record expires.
+    closed_resources_session_ids: dict[str, tuple[EpisodeId, float]] = {}
+    # The cookie sessions whose seed outlived session_ttl_seconds, so their verify reports session_expired. Expires
+    # like the closed record.
+    expired_session_ids: dict[str, float] = {}
 
     async def seed_session(
         self,
@@ -231,6 +235,7 @@ class UserSimResourcesServer(SimpleResourcesServer):
                 resources_session_id=existing.resources_session_id,
                 sandbox_access=None,
             )
+        self.expired_session_ids.pop(session_id, None)
         self.session_id_to_seed[session_id] = SeededUserSimEpisode(
             resources_session_id=body.resources_session_id,
             episode_id=body.episode_id,
@@ -253,11 +258,13 @@ class UserSimResourcesServer(SimpleResourcesServer):
         seeded = self._seeded_episode(request)
         if seeded is None:
             # The seed expired, was closed, or this process restarted, so there is no task to score against.
-            return UserSimVerification(
-                **lost_session_verification("No active NeMo UserSim task for this request"),
-                reward_components={},
-                scenario_completed=False,
-            )
+            if request.session[SESSION_ID_KEY] in self.expired_session_ids:
+                lost = lost_session_verification(
+                    "The NeMo UserSim task outlived session_ttl_seconds", failure_kind=SESSION_EXPIRED
+                )
+            else:
+                lost = lost_session_verification("No active NeMo UserSim task for this request")
+            return UserSimVerification(**lost, reward_components={}, scenario_completed=False)
         verification_input = body.verification_input
         if body.episode_id != seeded.episode_id or body.task_id != seeded.task_id:
             raise HTTPException(status_code=409, detail="Verification identity does not match the seeded episode")
@@ -451,6 +458,9 @@ class UserSimResourcesServer(SimpleResourcesServer):
         body: ResourcesCloseSessionRequest,
     ) -> ResourcesCloseSessionResponse:
         self._expire_sessions()
+        closed = self.closed_resources_session_ids.get(body.resources_session_id)
+        if closed is not None and closed[0] != body.episode_id:
+            raise HTTPException(status_code=409, detail="Resources session was closed by another episode")
         # The Environment Server closes by resources_session_id and may not hold the seed's cookie.
         session_id = self.resources_session_id_to_session_id.get(
             body.resources_session_id, request.session[SESSION_ID_KEY]
@@ -463,7 +473,7 @@ class UserSimResourcesServer(SimpleResourcesServer):
             self.resources_session_id_to_session_id.pop(seeded.resources_session_id, None)
         self.closed_resources_session_ids.setdefault(
             body.resources_session_id,
-            monotonic() + self.config.session_ttl_seconds,
+            (body.episode_id, monotonic() + self.config.session_ttl_seconds),
         )
         return ResourcesCloseSessionResponse(resources_session_id=body.resources_session_id)
 
@@ -478,7 +488,11 @@ class UserSimResourcesServer(SimpleResourcesServer):
             if seeded.expires_at <= now:
                 del self.session_id_to_seed[session_id]
                 self.resources_session_id_to_session_id.pop(seeded.resources_session_id, None)
-        for resources_session_id, expires_at in tuple(self.closed_resources_session_ids.items()):
+                self.expired_session_ids[session_id] = now + self.config.session_ttl_seconds
+        for session_id, expires_at in tuple(self.expired_session_ids.items()):
+            if expires_at <= now:
+                del self.expired_session_ids[session_id]
+        for resources_session_id, (_, expires_at) in tuple(self.closed_resources_session_ids.items()):
             if expires_at <= now:
                 del self.closed_resources_session_ids[resources_session_id]
 

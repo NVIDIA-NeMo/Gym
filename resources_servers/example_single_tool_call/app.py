@@ -90,6 +90,9 @@ class SimpleWeatherResourcesServer(SimpleWeatherVerifier, SimpleResourcesServer)
         # Sessions are keyed by resources_session_id, not the cookie's session id, so the body names the session.
         resources_session_id = body.resources_session_id
         async with self._fence.locked(resources_session_id):
+            closed_episode = self._fence.closed_episode(resources_session_id)
+            if closed_episode is not None and closed_episode != body.episode_id:
+                raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
             identity = self._session_episodes.get(resources_session_id)
             if identity is not None and body.episode_id != identity[0]:
                 raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")

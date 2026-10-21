@@ -4,9 +4,10 @@
 
 :func:`check_resources_session_contract` drives the app a server builds through its real HTTP routes and middleware,
 in process, the way an Environment Server calls a deployed server: typed seed, repeated seed, a conflicting seed,
-close, repeated close, close of a never-seeded session, a seed after close, a close without the session cookie after
-a seed whose reply was lost, and optionally a verify after close. Call it from the server's own tests. Because it goes
-through the routes, it also catches a route that another registration shadows.
+close, repeated close, a close that names another episode, close of a never-seeded session, a seed after close, a
+close without the session cookie after a seed whose reply was lost, and optionally a verify after close. Call it from
+the server's own tests. Because it goes through the routes, it also catches a route that another registration
+shadows.
 """
 
 from collections.abc import Callable, Mapping
@@ -35,6 +36,7 @@ def check_resources_session_contract(
     ``seed`` must use a ``resources_session_id`` the app has not seen. With ``keeps_state``:
 
     - a seed that names the open session's ID with another episode is refused with 409;
+    - a close of the closed session that names another episode is refused with 409;
     - a seed that arrives after its session closed, or after a close for an ID that was never seeded, is refused
       with 409. A server that keeps no state has nothing such a seed could recreate.
 
@@ -80,6 +82,18 @@ def check_resources_session_contract(
         assert response.status_code == 200, f"{attempt} failed: {response.status_code} {response.text}"
         closed = ResourcesCloseSessionResponse.model_validate(response.json())
         assert closed.resources_session_id == seed.resources_session_id, f"{attempt} named another session"
+
+    if keeps_state:
+        response = client.post(
+            "/close_session",
+            json=ResourcesCloseSessionRequest(
+                resources_session_id=seed.resources_session_id, episode_id=other_episode
+            ).model_dump(mode="json"),
+        )
+        assert response.status_code == 409, (
+            f"a close of {seed.resources_session_id} that names another episode must get 409, "
+            f"got {response.status_code}: {response.text}"
+        )
 
     if verify_body is not None:
         client.cookies.clear()

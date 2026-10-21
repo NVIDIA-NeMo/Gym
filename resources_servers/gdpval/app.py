@@ -657,7 +657,8 @@ class GDPValResourcesServer(SimpleResourcesServer):
 
     async def seed_session(self, request: Request, body: ResourcesSeedSessionRequest) -> ResourcesSeedSessionResponse:
         session_id = body.resources_session_id
-        request.session[SESSION_ID_KEY] = session_id
+        # The cookie is set only on success: a refusal's reply passes through the session middleware too, and must
+        # not hand the caller a cookie for a session that another episode holds.
         async with self._fence.locked(session_id):
             self._fence.raise_if_closed(session_id)
             session = self._sessions.get(session_id)
@@ -666,6 +667,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     raise ResourcesSessionConflictError(
                         "resources_session_id is already bound to another episode or task"
                     )
+                request.session[SESSION_ID_KEY] = session_id
                 return await self._seed_response(session_id, session)
             try:
                 task = TaskData.model_validate(body.task_data)
@@ -705,6 +707,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 await self._release(session)
                 raise
             self._sessions[session_id] = session
+            request.session[SESSION_ID_KEY] = session_id
             return response
 
     async def _download_reference_files(self, task: TaskData, reference_dir: Path) -> List[str]:

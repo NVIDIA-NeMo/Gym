@@ -387,6 +387,36 @@ def test_a_seed_for_another_task_than_its_data_is_rejected(server, root, tmp_pat
     assert not root.exists()
 
 
+def test_task_data_that_is_not_a_task_is_refused_as_final(server, root, tmp_path):
+    client = TestClient(server.setup_webserver())
+    seed = _seed(tmp_path)
+    del seed.task_data["task_id"]
+
+    refused = _post_seed(client, seed)
+
+    assert refused.status_code == 422, "task_data that no retry can fix is final, not a retried 500"
+    assert "task_data is not a GDPVal task" in refused.json()["detail"]
+    assert not root.exists(), "no sandbox is started for a row that is not a task"
+    assert (server._sessions, server._claimed_directories) == ({}, {})
+    # A refusal does not fence the ID: it was never seeded, so a corrected seed can still use it.
+    assert _post_seed(client, _seed(tmp_path)).status_code == 200
+
+
+def test_a_refused_seed_does_not_hand_out_the_cookie_of_the_live_session(server, root, tmp_path):
+    app = server.setup_webserver()
+    seed = _seed(tmp_path)
+    assert _post_seed(TestClient(app), seed).status_code == 200
+    intruder = TestClient(app)
+
+    refused = _post_seed(intruder, seed.model_copy(update={"episode_id": EpisodeId(rollout_id="0-2")}))
+
+    assert refused.status_code == 409
+    # The refused caller's cookie does not name the live session, so its tools and verify cannot reach it.
+    assert intruder.post("/abandon_task_finish", json={"reason": "stolen"}).status_code == 404
+    assert server._sessions[seed.resources_session_id].finish_call is None
+    assert _verify(intruder)["failure_kind"] == SESSION_LOST
+
+
 def test_a_seed_whose_rollout_id_names_no_rollout_index_is_rejected(server, root, tmp_path):
     seed = _seed(tmp_path).model_copy(update={"episode_id": EpisodeId(rollout_id="explicit")})
 
@@ -532,14 +562,25 @@ def test_a_request_with_no_session_and_no_deliverables_is_masked(server):
     assert (verified["reward"], verified["mask_sample"], verified["failure_kind"]) == (0.0, True, SESSION_LOST)
 
 
-def test_a_request_with_a_gone_session_and_an_explicit_deliverables_dir_is_judged(server, root, tmp_path):
+def test_a_request_with_a_gone_session_and_an_explicit_deliverables_dir_is_judged(server, root, tmp_path, monkeypatch):
+    async def judge(**_kwargs):
+        return 1.0, {"score": 1.0}
+
+    for scorer in ("score_with_rubric", "score_with_rubric_visual"):
+        monkeypatch.setattr(f"resources_servers.gdpval.scoring.{scorer}", judge)
+    monkeypatch.setattr("resources_servers.gdpval.app.get_server_url", lambda name: "http://localhost:9999")
+    stored = tmp_path / "stored"
+    stored.mkdir()
+    (stored / "report.md").write_text("the report")
     client = TestClient(server.setup_webserver())
     _post_seed(client, _seed(tmp_path))
     client = _restart(client, tmp_path)
 
-    verified = _verify(client, deliverables_dir=str(tmp_path / "stored"))
+    verified = _verify(client, deliverables_dir=str(stored), rubric_json=[{"criterion": "clarity", "score": 1}])
 
-    assert verified["deliverables_dir"] == str(tmp_path / "stored")
+    # Only a gone session with nothing to judge is a lost session; stored deliverables are a real measurement.
+    assert verified["deliverables_dir"] == str(stored)
+    assert (verified["reward"], verified["mask_sample"], verified["failure_kind"]) == (1.0, False, None)
 
 
 def test_a_reuse_request_without_a_session_scores_the_persisted_deliverable(server, tmp_path):

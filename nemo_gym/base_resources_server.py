@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import logging
 from abc import abstractmethod
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable
@@ -57,6 +58,8 @@ from nemo_gym.sandbox.access import SandboxAccess
 from nemo_gym.server_utils import SESSION_ID_KEY, BaseRunServerInstanceConfig, BaseServer, SimpleServer
 from nemo_gym.telemetry.endpoints import traced_verify_endpoint
 
+
+logger = logging.getLogger(__name__)
 
 NEMO_GYM_MCP_SESSION_TOKEN_HEADER = "X-NeMo-Gym-Session-Token"
 NEMO_GYM_MCP_METADATA_KEY = "mcp"
@@ -307,16 +310,21 @@ class ResourcesSessionConflictError(HTTPException, ValueError):
 class ResourcesSessionLostError(HTTPException):
     """Answer a tool call for a session this server no longer holds with HTTP 404.
 
-    Return this instead of a tool observation that tells the model the session is gone: the model would keep
-    going and produce a trajectory that measures nothing. The detail names the ``failure_kind`` so a harness or a
-    log can group it.
+    Raise this instead of returning an ordinary tool observation that says the session is gone. What a harness does
+    with the 404 varies: simple_agent returns its body to the model as the tool output and keeps going, Stirrup
+    fails the run so the episode is dispatched again, and an MCP client reports a tool error. In every case the
+    trajectory records a failed tool call whose detail names the ``failure_kind``, which a log can group by. The
+    verify for the session answers with ``lost_session_verification``, whose masked sample keeps the episode out
+    of the score.
     """
 
     def __init__(self, message: str, *, failure_kind: str = SESSION_LOST) -> None:
-        super().__init__(404, {"failure_kind": failure_kind, "message": message})
+        super().__init__(404, {"failure_kind": validate_failure_kind(failure_kind), "message": message})
 
 
 class LostSessionVerification(TypedDict):
+    """The verify response fields of a masked sample for a session the server no longer holds."""
+
     reward: float
     mask_sample: bool
     failure_kind: str
@@ -327,10 +335,16 @@ def lost_session_verification(reason: str, *, failure_kind: str = SESSION_LOST) 
     """Return the verify response fields for an episode whose session this server no longer holds.
 
     The sample is masked: the environment lost the state it would measure, so a reward of 0 would read as a
-    policy that solved nothing. Spread the result into the server's own response model, for example
-    ``BaseVerifyResponse(**body.model_dump(), **lost_session_verification("sandbox gone"))``. Use
-    ``failure_kind=SESSION_EXPIRED`` when the server closed the session itself because its lifetime ran out.
+    policy that solved nothing. Merge the result over the request's fields so these win, for example
+    ``BaseVerifyResponse(**(body.model_dump() | lost_session_verification("sandbox gone")))``; spreading both as
+    keyword arguments raises ``TypeError`` when a request model that allows extra fields already carries a
+    ``reward``. Use ``failure_kind=SESSION_EXPIRED`` when the server closed the session itself because its lifetime
+    ran out.
+
+    Each call logs a warning, because a masked sample is otherwise visible only in coverage metrics: many of them
+    point at a wiring fault such as a session cookie that never reaches ``/verify``.
     """
+    logger.warning("Masking the verify of a session this server no longer holds (%s): %s", failure_kind, reason)
     return {"reward": 0.0, "mask_sample": True, "failure_kind": failure_kind, "failure_reason": reason}
 
 

@@ -16,9 +16,9 @@ import asyncio
 from unittest.mock import MagicMock
 
 import pytest
-from fastapi import HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
-from pydantic import PrivateAttr
+from pydantic import ConfigDict, PrivateAttr
 
 from nemo_gym.base_resources_server import (
     BaseMultiRewardVerifyResponse,
@@ -40,7 +40,9 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.failure_kinds import JUDGE_FAILED, SESSION_EXPIRED, SESSION_LOST
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.reward_profile import select_measured
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+from nemo_gym.single_agent_turn_types import SingleAgentTurnResult
 from nemo_gym.testing.session_conformance import check_resources_session_contract
 
 
@@ -279,6 +281,41 @@ class TestResourcesSessionFence:
         assert order == ["seed in", "seed out", "close in", "close out"]
         assert fence._locks == {}
 
+    def test_the_lock_does_not_block_another_session(self) -> None:
+        fence = ResourcesSessionFence()
+
+        async def main() -> None:
+            release = asyncio.Event()
+            entered: list[str] = []
+
+            async def hold() -> None:
+                async with fence.locked("slow-seed"):
+                    entered.append("slow-seed")
+                    await release.wait()
+
+            holder = asyncio.create_task(hold())
+            await asyncio.sleep(0)
+            # Another session's close must not wait for the slow seed.
+            async with asyncio.timeout(1):
+                async with fence.locked("other"):
+                    entered.append("other")
+            release.set()
+            await holder
+            assert entered == ["slow-seed", "other"]
+
+        asyncio.run(main())
+
+        assert fence._locks == {}
+
+    def test_clear_forgets_closed_sessions(self) -> None:
+        fence = ResourcesSessionFence()
+        fence.mark_closed("closed", EPISODE)
+
+        fence.clear()
+
+        assert fence.closed_episode("closed") is None
+        fence.raise_if_closed("closed")
+
     def test_a_cancelled_waiter_releases_its_lock_entry(self) -> None:
         fence = ResourcesSessionFence()
 
@@ -296,7 +333,11 @@ class TestResourcesSessionFence:
 
 
 def _cookie_keyed_server(
-    *, releases_by_resources_session_id: bool = True, conflict_is_final: bool = True, masks_lost_session: bool = True
+    *,
+    releases_by_resources_session_id: bool = True,
+    conflict_is_final: bool = True,
+    masks_lost_session: bool = True,
+    fences_close: bool = True,
 ) -> SimpleResourcesServer:
     """A server that keys per-rollout state by the session cookie, as several servers do."""
     config = BaseResourcesServerConfig(host="", port=0, entrypoint="", name="")
@@ -330,6 +371,9 @@ def _cookie_keyed_server(
             self, request: Request, body: ResourcesCloseSessionRequest
         ) -> ResourcesCloseSessionResponse:
             async with self._fence.locked(body.resources_session_id):
+                closed_episode = self._fence.closed_episode(body.resources_session_id)
+                if fences_close and closed_episode not in (None, body.episode_id):
+                    raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
                 if releases_by_resources_session_id:
                     for key in [key for key, held in self._held.items() if held == body.resources_session_id]:
                         del self._held[key]
@@ -392,6 +436,24 @@ class TestLostSeedReplyConformance:
         with pytest.raises(AssertionError, match="to another episode must get 409, got 500"):
             check_resources_session_contract(server.setup_webserver(), self.SEED, keeps_state=True)
 
+    def test_a_late_seed_must_be_refused_with_409_not_500(self) -> None:
+        class ValueErrorFence(ResourcesSessionFence):
+            def raise_if_closed(self, resources_session_id: str) -> None:
+                if self.closed_episode(resources_session_id) is not None:
+                    raise ValueError(f"Resources session is already closed: {resources_session_id}")
+
+        server = _cookie_keyed_server()
+        server._fence = ValueErrorFence()
+
+        with pytest.raises(AssertionError, match="seed after close must get 409 for contract-session, got 500"):
+            check_resources_session_contract(server.setup_webserver(), self.SEED, keeps_state=True)
+
+    def test_a_close_naming_another_episode_after_close_must_be_refused(self) -> None:
+        server = _cookie_keyed_server(fences_close=False)
+
+        with pytest.raises(AssertionError, match="close of contract-session that names another episode must get 409"):
+            check_resources_session_contract(server.setup_webserver(), self.SEED, keeps_state=True)
+
     def test_a_lost_session_must_verify_as_a_masked_sample(self) -> None:
         server = _cookie_keyed_server(masks_lost_session=False)
 
@@ -442,12 +504,82 @@ class TestRefusalsAndLostSessions:
         assert lost.detail == {"failure_kind": SESSION_LOST, "message": "browser is gone"}
         assert expired.detail["failure_kind"] == SESSION_EXPIRED
 
-    def test_a_lost_session_verifies_as_a_masked_sample(self) -> None:
-        verified = BaseVerifyResponse(
-            **BaseVerifyRequest.model_validate(VERIFY_BODY).model_dump(), **lost_session_verification("sandbox gone")
-        )
+    def test_a_lost_session_tool_call_warns_on_an_unregistered_failure_kind(self, caplog) -> None:
+        import logging
+
+        from nemo_gym import failure_kinds
+
+        failure_kinds._WARNED_UNKNOWN.discard("invented_lost_kind")
+        with caplog.at_level(logging.WARNING):
+            lost = ResourcesSessionLostError("gone", failure_kind="invented_lost_kind")
+
+        assert lost.detail["failure_kind"] == "invented_lost_kind"
+        assert any("invented_lost_kind" in record.getMessage() for record in caplog.records)
+
+    def test_a_lost_session_verifies_as_a_masked_sample(self, caplog) -> None:
+        import logging
+
+        class ExtraVerifyRequest(BaseVerifyRequest):
+            model_config = ConfigDict(extra="allow")
+
+        # A request model that allows extra fields can already carry verify fields, such as on a reverify.
+        body = ExtraVerifyRequest.model_validate(VERIFY_BODY | {"reward": 1.0, "mask_sample": False})
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.base_resources_server"):
+            verified = BaseVerifyResponse(**(body.model_dump() | lost_session_verification("sandbox gone")))
 
         assert verified.reward == 0.0
         assert verified.mask_sample is True
         assert verified.failure_kind == SESSION_LOST
         assert verified.failure_reason == "sandbox gone"
+        # The warning makes a systematic loss, such as a cookie that never reaches /verify, visible in the logs.
+        assert [record.getMessage() for record in caplog.records] == [
+            "Masking the verify of a session this server no longer holds (session_lost): sandbox gone"
+        ]
+
+    def test_a_lost_session_sample_is_kept_for_coverage_and_dropped_from_quality(self) -> None:
+        verified = BaseVerifyResponse(
+            **(BaseVerifyRequest.model_validate(VERIFY_BODY).model_dump() | lost_session_verification("sandbox gone"))
+        )
+        # The Environment Server's result keeps the verify fields at the top level.
+        lost = SingleAgentTurnResult.model_validate(verified.model_dump(mode="json")).model_dump(mode="json")
+        scored = {"reward": 1.0, "mask_sample": False}
+        rows = [{"_ng_task_index": 0, "_ng_rollout_index": index} for index in range(2)]
+        results = [scored | rows[0], lost | rows[1]]
+
+        measured_rows, measured, masked, coverage = select_measured(rows, results)
+
+        assert [row["_ng_rollout_index"] for row in measured_rows] == [0]
+        assert [result["reward"] for result in measured] == [1.0]
+        assert [(result["failure_kind"], result["reward"]) for result in masked] == [(SESSION_LOST, 0.0)]
+        assert coverage
+
+    def test_refusals_reach_the_wire_as_final_4xx_through_the_server_middleware(self) -> None:
+        config = BaseResourcesServerConfig(host="", port=0, entrypoint="", name="")
+
+        class RefusingResourcesServer(SimpleResourcesServer):
+            def setup_webserver(self) -> FastAPI:
+                app = super().setup_webserver()
+                app.post("/tool")(self.tool)
+                return app
+
+            async def tool(self) -> str:
+                raise ResourcesSessionLostError("sandbox is gone")
+
+            async def seed_session(self, body: ResourcesSeedSessionRequest) -> ResourcesSeedSessionResponse:
+                raise ResourcesSeedRejectedError("task_data is not a task")
+
+            async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+                raise AssertionError("not called")
+
+        server = RefusingResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+        seed = TestLostSeedReplyConformance.SEED
+
+        rejected = client.post("/seed_session", json=seed.model_dump(mode="json"))
+        lost = client.post("/tool", json={})
+
+        assert (rejected.status_code, rejected.json()) == (422, {"detail": "task_data is not a task"})
+        assert (lost.status_code, lost.json()) == (
+            404,
+            {"detail": {"failure_kind": SESSION_LOST, "message": "sandbox is gone"}},
+        )
