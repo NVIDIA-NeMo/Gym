@@ -52,11 +52,19 @@ def test_osworld_agent_uv_config_mirrors_project_resolver_policy() -> None:
         server_config = tomllib.load(f)
     project_config = _uv_config()
 
-    assert server_config["constraint-dependencies"] == project_config["constraint-dependencies"]
+    public_project = tomllib.loads(OSWORLD_AGENT_REQUIREMENTS.read_text())
+    assert server_config["constraint-dependencies"] == public_project["tool"]["uv"]["constraint-dependencies"]
+    assert set(project_config["constraint-dependencies"]) <= set(server_config["constraint-dependencies"])
+    with (OSWORLD_AGENT_REQUIREMENTS.parent / "uv.lock").open("rb") as f:
+        packages = tomllib.load(f)["package"]
+    with (ROOT / "uv.lock").open("rb") as f:
+        parent_packages = tomllib.load(f)["package"]
+    ray_version = next(package["version"] for package in parent_packages if package["name"] == "ray")
+    assert f"ray=={ray_version}" in server_config["constraint-dependencies"]
+    assert next(package["version"] for package in packages if package["name"] == "ray") == ray_version
     project_overrides = set(project_config["override-dependencies"])
     server_overrides = set(server_config["override-dependencies"])
     assert project_overrides <= server_overrides
-    public_project = tomllib.loads(OSWORLD_AGENT_REQUIREMENTS.read_text())
     assert server_overrides - project_overrides == {
         "grpcio-status==1.71.2",
         "protobuf==5.29.6",
@@ -65,7 +73,12 @@ def test_osworld_agent_uv_config_mirrors_project_resolver_policy() -> None:
     project_exclusions = set(project_config["exclude-dependencies"])
     server_exclusions = set(server_config["exclude-dependencies"])
     assert project_exclusions <= server_exclusions
-    assert server_exclusions - project_exclusions == OSWORLD_UNSUPPORTED_VM_PROVIDER_DEPENDENCIES
+    assert server_exclusions == (
+        set(public_project["tool"]["uv"]["exclude-dependencies"]) | OSWORLD_UNSUPPORTED_VM_PROVIDER_DEPENDENCIES
+    )
+    # OSWorld's ag2 dependency also advertises an optional AGP client, which is
+    # excluded from this runtime alongside unsupported cloud VM providers.
+    assert server_exclusions - project_exclusions == OSWORLD_UNSUPPORTED_VM_PROVIDER_DEPENDENCIES | {"agp-client"}
     required_version = SpecifierSet(server_config["required-version"])
     assert Version("0.11.24") not in required_version
     assert Version("0.11.25") in required_version

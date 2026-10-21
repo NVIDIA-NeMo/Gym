@@ -30,7 +30,9 @@ override-dependencies = [
     "torchaudio; sys_platform == 'never'",
     "pycountry; sys_platform == 'never'",
     "gprof2dot; sys_platform == 'never'",
-    "pathspec; sys_platform == 'never'",
+    # Harbor imports pathspec when loading its job packager. Opt in only here;
+    # Gym's shipped root environment keeps the default exclusion.
+    "pathspec",
 ]
 exclude-dependencies = [
     "fasttext-wheel",

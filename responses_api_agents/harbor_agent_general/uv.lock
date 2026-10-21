@@ -18,7 +18,7 @@ constraints = [
 overrides = [
     { name = "gprof2dot", marker = "sys_platform == 'never'" },
     { name = "opencv-python-headless", marker = "sys_platform == 'never'" },
-    { name = "pathspec", marker = "sys_platform == 'never'" },
+    { name = "pathspec" },
     { name = "pycountry", marker = "sys_platform == 'never'" },
     { name = "pynvvideocodec", marker = "sys_platform == 'never'" },
     { name = "spacy", specifier = ">=3.8.13" },
@@ -840,7 +840,7 @@ dependencies = [
     { name = "jsonschema" },
     { name = "litellm" },
     { name = "packaging" },
-    { name = "pathspec", marker = "sys_platform == 'never'" },
+    { name = "pathspec" },
     { name = "platformdirs" },
     { name = "pydantic" },
     { name = "pyjwt" },
@@ -1435,7 +1435,7 @@ version = "1.17.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "mypy-extensions" },
-    { name = "pathspec", marker = "sys_platform == 'never'" },
+    { name = "pathspec" },
     { name = "typing-extensions" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/8e/22/ea637422dedf0bf36f3ef238eab4e455e2a0dcc3082b5cc067615347ab8e/mypy-1.17.1.tar.gz", hash = "sha256:25e01ec741ab5bb3eec8ba9cdb0f769230368a22c959c4937360efb89b7e9f01", size = 3352570, upload-time = "2025-07-31T07:54:19.204Z" }
@@ -2791,7 +2791,7 @@ version = "0.0.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "attrs" },
-    { name = "pathspec", marker = "sys_platform == 'never'" },
+    { name = "pathspec" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/b3/e4/40998faefc72ba1ddeb640a44fba92935353525dba110488806da8339c0b/scantree-0.0.4.tar.gz", hash = "sha256:15bd5cb24483b04db2c70653604e8ea3522e98087db7e38ab8482f053984c0ac", size = 24643, upload-time = "2024-08-03T20:08:59.413Z" }
 wheels = [
