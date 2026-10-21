@@ -163,7 +163,7 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
         self._typed_identity: Dict[str, Tuple[EpisodeId, TaskId]] = {}
         # Closed ids stay known for a bounded time: a seed that lands after its close would
         # otherwise open a browser nobody will ever close.
-        self._fence = ResourcesSessionFence()
+        self._fence = ResourcesSessionFence(self.config.session_close_retry_window_seconds)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()

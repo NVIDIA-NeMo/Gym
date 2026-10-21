@@ -217,7 +217,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         self._session_id_to_pristine_untracked: dict[str, frozenset[str]] = {}
         # Typed sessions, which an Environment Server seeds and closes by resources_session_id.
         self._session_id_to_identity: dict[str, tuple[EpisodeId, TaskId]] = {}
-        self._fence = ResourcesSessionFence()
+        self._fence = ResourcesSessionFence(self.config.session_close_retry_window_seconds)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()

@@ -10,6 +10,7 @@ from pathlib import Path
 
 from nemo_gym.tasks.harbor.digest import content_hash
 from nemo_gym.tasks.harbor.dockerfile import base_image_only
+from nemo_gym.tasks.harbor.errors import HarborTaskError
 from nemo_gym.tasks.harbor.models import HarborTaskConfig
 
 
@@ -17,10 +18,6 @@ logger = logging.getLogger(__name__)
 
 TASK_FILE = "task.toml"
 INSTRUCTION_FILE = "instruction.md"
-
-
-class HarborTaskError(ValueError):
-    """The folder is not a runnable Harbor task."""
 
 
 @dataclass(frozen=True)

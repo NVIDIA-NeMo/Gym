@@ -62,7 +62,7 @@ When `compute_comet: true`, `verify()` leaves `comet_score` unset.
 `predict` calls (`comet_batch_size` triples per extra_gpu actor, one
 wave of `comet_num_shards` actors at a time) and checkpoints
 `evaluator_rollouts.jsonl` after each wave. Already-scored resume rows
-are skipped; empty generations stay `None`.
+are skipped; empty generations are scored like any other row.
 
 When `language_consistency_backend` is configured, `verify()` also computes a
 per-row `language_consistency_score` in-process. WMT24++ selects the

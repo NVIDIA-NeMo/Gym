@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI
 from pydantic import BaseModel, PrivateAttr
@@ -61,7 +62,11 @@ class SimpleWeatherResourcesServer(SimpleWeatherVerifier, SimpleResourcesServer)
     checkpoint_mode = "stateless"
     config: SimpleWeatherResourcesServerConfig
     _session_episodes: dict[str, tuple[EpisodeId, TaskId]] = PrivateAttr(default_factory=dict)
-    _fence: ResourcesSessionFence = PrivateAttr(default_factory=ResourcesSessionFence)
+    _fence: ResourcesSessionFence = PrivateAttr()
+
+    def model_post_init(self, context: Any, /) -> None:
+        super().model_post_init(context)
+        self._fence = ResourcesSessionFence(self.config.session_close_retry_window_seconds)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()

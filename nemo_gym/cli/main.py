@@ -600,6 +600,28 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
     # strict validation so it fails loudly instead of being silently dropped.
     resolved = OmegaConf.to_container(composed, resolve=True)
     scratch_keys = {key for key in resolved if key.startswith("_")}
+    # Malformed driver/benchmarks shapes are left for SubmitConfig validation to report.
+    driver = resolved.get("driver")
+    available = driver.get("benchmarks") if isinstance(driver, dict) else None
+    if (
+        args.select is not None
+        and isinstance(available, dict)
+        and available
+        and all(isinstance(name, str) for name in available)
+    ):
+        selected = [name.strip() for name in args.select.split(",") if name.strip()]
+        if not selected:
+            raise ConfigError(
+                f"--select was given no benchmark names. Available: {', '.join(available)}. "
+                "Omit --select to submit all of them."
+            )
+        unknown = [name for name in selected if name not in available]
+        if unknown:
+            raise ConfigError(
+                f"--select named {', '.join(unknown)}, which {'is' if len(unknown) == 1 else 'are'} not under "
+                f"driver.benchmarks in '{config_path}'. Available: {', '.join(available)}."
+            )
+        resolved["driver"]["benchmarks"] = {name: available[name] for name in selected}
     # SubmitConfig is an orchestration model: report schema errors against its YAML file
     # rather than using the generic CLI handler's +key=<value> hint.
     try:
@@ -650,6 +672,18 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
     if record.failed:
         names = ", ".join(b.benchmark for b in record.failed)
         print(f"Error: {len(record.failed)} benchmark(s) failed to submit: {names}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
+    if overrides:
+        args._parser.error("resubmit does not accept Hydra overrides")
+    from nemo_gym.orchestration.submit import resubmit
+
+    try:
+        print(resubmit(args.gym_job_id, args.benchmark).job_id)
+    except (ValueError, RuntimeError) as error:
+        print(f"Error: {error}", file=sys.stderr)
         sys.exit(1)
 
 
@@ -1260,6 +1294,14 @@ COMMANDS = {
             ),
             Flag(
                 register=lambda p: p.add_argument(
+                    "--select",
+                    metavar="NAME[,NAME...]",
+                    help="Submit only the named entries under driver.benchmarks (comma-separated). "
+                    "Default: submit all of them.",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
                     "--dry-run", action="store_true", help="Print generated job scripts without submitting."
                 ),
             ),
@@ -1278,6 +1320,18 @@ COMMANDS = {
                     help="Emit the submission record (or, with --resolve-only, the resolved config) as JSON.",
                 ),
             ),
+        ),
+    ),
+    "eval resubmit": Command(
+        target=_eval_resubmit,
+        summary="Queue one benchmark of a submitted run again, in place.",
+        flags=(
+            Flag(
+                register=lambda p: p.add_argument(
+                    "gym_job_id", metavar="GYM_JOB_ID", help="The submission's id, as printed by `gym eval submit`."
+                ),
+            ),
+            Flag(register=lambda p: p.add_argument("benchmark", metavar="BENCHMARK", help="The benchmark to queue.")),
         ),
     ),
     "eval compare": Command(
