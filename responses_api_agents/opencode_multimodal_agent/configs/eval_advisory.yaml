@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Advisory 20-step threshold with trajectory validation at 20 turns.
+# Prompt, sampling and serving settings are supplied by the caller.
+visual_opencode:
+  responses_api_agents:
+    opencode_multimodal_agent:
+      entrypoint: eval.py
+      max_turns: 20
+      final_answer_turn_headroom: 0
+      final_answer_reserve: null
+      strip_reasoning_for_grading: false
+      turn_budget: null
+policy_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: visual_eval.py
+      turn_budget: null

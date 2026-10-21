@@ -67,11 +67,13 @@ class VLLMCaptureAdapter:
 
     def extract_extras(self, response_payload: dict[str, Any]) -> dict[str, Any] | None:
         extras: dict[str, Any] = {}
-        routed_experts = _message(_single_choice(response_payload)).get(ROUTED_EXPERTS_FIELD)
-        if routed_experts is not None:
-            if not isinstance(routed_experts, (str, dict, list)):
-                raise ValueError("vLLM routed_experts must use a JSON-compatible envelope")
-            extras[ROUTED_EXPERTS_FIELD] = routed_experts
+        message = _message(_single_choice(response_payload))
+        for field in (ROUTED_EXPERTS_FIELD, "routed_experts_prefix_boundary"):
+            routes = message.get(field)
+            if routes is not None:
+                if not isinstance(routes, (str, dict, list)):
+                    raise ValueError(f"vLLM {field} must use a JSON-compatible envelope")
+                extras[field] = routes
         # Expanded-space prefix replacement needs the original placeholder
         # positions. Pixels travel beside the record as sink attachments.
         if MEDIA_SPANS_FIELD in response_payload:

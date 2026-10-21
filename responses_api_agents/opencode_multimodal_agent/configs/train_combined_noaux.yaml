@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Merge after opencode_multimodal_agent.yaml and the caller's training recipe.
+opencode_multimodal_agent:
+  responses_api_agents:
+    opencode_multimodal_agent:
+      entrypoint: combined.py
+      system_prompt: null
+      tool_rewards: null

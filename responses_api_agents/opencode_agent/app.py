@@ -21,6 +21,7 @@ import os
 import re
 import shlex
 import shutil
+import sqlite3
 from asyncio import Semaphore
 from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
@@ -208,6 +209,7 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
     session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
+    capture_failure_artifacts: bool = False
 
     @property
     def command_parts(self) -> list[str]:
@@ -384,6 +386,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             env["OPENAI_API_KEY"] = "EMPTY"  # pragma: allowlist secret
         return env
 
+    def _prepare_command(self, command: list[str], project_dir: Path, env: dict[str, str]) -> list[str]:
+        """Allow specialized agents to isolate the process without replacing collection."""
+        return command
+
     async def _run_opencode(
         self,
         instruction: str,
@@ -393,6 +399,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         collect_observations: bool = True,
         trajectory: Optional[TrajectoryRecord] = None,
         timeout: float | None = None,
+        artifact_path: Optional[Path] = None,
     ) -> tuple[list[Any], dict[str, int], str, AgentObservationBundle]:
         """Run one headless OpenCode session and read its persisted artifact."""
         timeout = self.config.timeout if timeout is None else timeout
@@ -412,6 +419,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         cmd.append(prompt)
 
         try:
+            cmd = self._prepare_command(cmd, project_dir, env)
             timed_out = False
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -432,6 +440,29 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 LOG.warning("opencode exited %d: %s", proc.returncode, stderr.decode(errors="replace")[:500])
 
             db_path = data_home / "opencode" / "opencode.db"
+            if artifact_path is not None:
+                failed = timed_out or proc.returncode != 0
+                failure_message = (
+                    f"OpenCode failed (timeout={timed_out}, exit={proc.returncode}): "
+                    + stderr.decode(errors="replace")[-2000:]
+                )
+                if failed and not self.config.capture_failure_artifacts:
+                    raise RuntimeError(failure_message)
+                if failed and not db_path.is_file():
+                    raise RuntimeError(failure_message)
+                if not db_path.is_file():
+                    raise RuntimeError("OpenCode did not produce its session database")
+                source = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True)
+                try:
+                    destination = sqlite3.connect(artifact_path)
+                    try:
+                        source.backup(destination)
+                    finally:
+                        destination.close()
+                finally:
+                    source.close()
+                if failed:
+                    raise RuntimeError(failure_message)
             invocation_id = rollout_id or f"opencode-{uuid4().hex}"
             output_items, usage = (
                 ([], {"input_tokens": 0, "output_tokens": 0}) if timed_out else parse_opencode_session(db_path)

@@ -152,3 +152,19 @@ Once you see that server instances are up, call the server. If you see a model r
 ```bash
 python responses_api_agents/simple_agent/client.py
 ```
+
+### Stock OpenCode 1.17.11 training
+
+Use `entrypoint: app_opencode.py` for the model server serving OpenCode training.
+Stock 1.17.11 appends its fixed maximum-steps instruction as an assistant message.
+That instruction was never model-generated, so ordinary lineage correctly
+rejects it. This opt-in entry point reclassifies only that exact trailing
+instruction as a user message before both lineage resolution and inference.
+It preserves the instruction text and captures it as prompt tokens with no
+training loss. It does not change ordinary assistant history, loosen parent
+matching, or recognize approximate prompt matches. Empty `reasoning_content`
+added by the stock provider is accepted; generated reasoning is not.
+
+The adapter is specific to 1.17.11. Re-run the stock runtime protocol test when
+changing the OpenCode version; an unknown final-turn instruction fails closed.
+The standard `app.py` entry point is unchanged.
