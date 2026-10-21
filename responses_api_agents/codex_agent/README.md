@@ -169,7 +169,10 @@ Known model-metadata/compaction warnings remain visible as gaps after clean comp
 both must be finite and positive. Measure setup time, supervisor process/memory cost, and close
 latency before scaling. Inference support does not establish training token-ID/logprob support.
 
-## Direct-agent quick start
+## Legacy `/run` quick start
+
+This section runs Codex through its own `/run`, which rollout collection reaches through a `legacy_agent` Environment Server.
+That is the legacy path, and Gym plans to deprecate `legacy_agent` and remove support for it over time, so prefer the agent session workflow above for new experiments.
 
 ### env.yaml
 
@@ -315,7 +318,7 @@ gym eval run --agent reasoning_gym_codex_agent \
 
 Each rollout result is stamped with a `skills_ref` for provenance and grouping during reward profiling, exactly as for the Claude Code agent (see its README for the full workflow).
 
-## Direct-agent limitations
+## Legacy `/run` limitations
 
 - Eval only for now. Token IDs and logprobs are not wired up yet.
 - Token counts come from Codex's own usage reporting (`turn.completed`).
