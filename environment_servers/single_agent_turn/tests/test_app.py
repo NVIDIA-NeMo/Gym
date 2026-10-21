@@ -35,7 +35,7 @@ from nemo_gym.config_types import AgentServerRef, ResourcesServerRef
 from nemo_gym.episode_types import EpisodeId, MaterializedTask, TaskId
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.rollout_correlation import current_rollout_id
-from nemo_gym.rollout_observability import AgentObservationBundle
+from nemo_gym.rollout_observability import AgentObservationBundle, TrajectoryRecord
 from nemo_gym.server_utils import BaseServerConfig, ServerClient, SimpleServer
 from nemo_gym.single_agent_turn_types import SingleAgentTurnRequest, SingleAgentTurnResponse, SingleAgentTurnTaskInput
 
@@ -484,8 +484,24 @@ async def test_results_preserve_verification_and_observations(mask_sample: bool,
             }
         ],
     }
+    trajectory = {
+        "task_id": "task",
+        "rollout_id": "rollout",
+        "turns": [
+            {
+                "invocation_id": "root",
+                "task_id": "task",
+                "rollout_id": "rollout",
+                "turn_no": 1,
+                "timestamp": 1.0,
+                "step_count": 2,
+                "model_calls": [{"model_call_id": "model-call-1"}],
+            }
+        ],
+    }
     close_body = orjson.loads(client.responses[3].body)
     close_body["agent_observations"] = observations
+    close_body["trajectory"] = trajectory
     client.responses[3] = _Response(close_body)
     verification_body = orjson.loads(client.responses[4].body)
     verification_body.update(mask_sample=mask_sample, grader_output={"resolved": True})
@@ -499,6 +515,8 @@ async def test_results_preserve_verification_and_observations(mask_sample: bool,
     assert result.result.model_extra["grader_output"] == {"resolved": True}
     assert result.result.response == _agent_response()
     assert result.result.ng_agent_observations == AgentObservationBundle.model_validate(observations)
+    # The harness's own turns from the close reach the result in the slot rollout collection reads.
+    assert result.result.ng_trajectory == TrajectoryRecord.model_validate(trajectory)
     if result_path != "flat-adapter":
         return
     adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment.config, server_client=client)
@@ -511,6 +529,7 @@ async def test_results_preserve_verification_and_observations(mask_sample: bool,
     assert legacy["ng_agent_observations"] == AgentObservationBundle.model_validate(observations).model_dump(
         mode="json"
     )
+    assert legacy["ng_trajectory"] == TrajectoryRecord.model_validate(trajectory).model_dump(mode="json")
 
 
 @pytest.mark.parametrize("stage", ["agent", "verification"])
@@ -533,8 +552,29 @@ async def test_dependency_failure_closes_sessions(stage: str, error: Exception) 
         "source": "hermes",
         "records": [{"kind": "agent_invocation", "invocation_id": "root", "status": "failed", "model_calls": []}],
     }
+    # One decision taken before the failure: the collector keeps it only if the failure row carries it.
+    trajectory = {
+        "task_id": "t",
+        "rollout_id": "r",
+        "turns": [
+            {
+                "invocation_id": "root",
+                "task_id": "t",
+                "rollout_id": "r",
+                "turn_no": 1,
+                "timestamp": 1.0,
+                "question": "do it",
+                "answer": [],
+                "step_count": 2,
+                "model_calls": [
+                    {"model_ref": {"type": "responses_api_models", "name": "policy"}, "response_id": "resp_0"}
+                ],
+            }
+        ],
+    }
     close_body = orjson.loads(client.responses[3].body)
     close_body["agent_observations"] = observations
+    close_body["trajectory"] = trajectory
     client.responses[3] = _Response(close_body)
     responses = client.responses
     if stage == "agent":
@@ -549,14 +589,20 @@ async def test_dependency_failure_closes_sessions(stage: str, error: Exception) 
     assert result.failure.failure_reason == str(error)
     assert result.failure.terminal is isinstance(error, ValueError)
     assert result.failure.partial_response == (_agent_response() if stage == "verification" else None)
-    # The closed agent session's evidence survives the failure, including in the legacy flat reply.
+    # The closed agent session's evidence survives the failure, including in the legacy flat reply: the
+    # observations and the decisions taken before the failure, with their model-call references and step counts.
     assert result.failure.agent_observations == AgentObservationBundle.model_validate(observations)
+    assert result.failure.trajectory == TrajectoryRecord.model_validate(trajectory)
+    [turn] = result.failure.trajectory.turns
+    assert (turn.step_count, turn.model_calls[0].response_id) == (2, "resp_0")
+    assert result.model_dump(mode="json")["failure"]["trajectory"]["turns"][0]["step_count"] == 2
     legacy = SingleAgentTurnLegacyEnvironmentServer(config=environment.config, server_client=client)._legacy_result(
         result
     )
     assert legacy["ng_agent_observations"] == AgentObservationBundle.model_validate(observations).model_dump(
         mode="json"
     )
+    assert legacy["ng_trajectory"] == TrajectoryRecord.model_validate(trajectory).model_dump(mode="json")
     paths = [path for _, path, _ in client.calls]
     assert paths == [
         "/seed_session",
@@ -793,7 +839,13 @@ async def test_a_restored_replacement_admitted_during_a_second_checkpoint_parks_
         boundary = {"next": "close_agent", "handles": handles, "response": response}
         remaining = ["/v1/agent_sessions/close", "/verify", "/close_session"]
     else:
-        boundary = {"next": "return", "handles": handles, "result": result, "observations": None}
+        boundary = {
+            "next": "return",
+            "handles": handles,
+            "result": result,
+            "observations": None,
+            "trajectory": None,
+        }
         remaining = ["/close_session"]
     record = EpisodeRecord(
         episode_id=first_attempt, task_digest=task_digest(request.task.model_dump(mode="json")), boundary=boundary
