@@ -720,13 +720,22 @@ def _eval_health_check(args: argparse.Namespace, overrides: list[str]) -> None:
     if overrides != expected_overrides:
         args._parser.error("health-check does not accept Hydra overrides")
     from nemo_gym.cli.eval import health_check_rollouts
+    from nemo_gym.health.types import RunHealthLimits
 
+    overridden = (args.health_max_infra_failure_fraction, args.health_max_final_failure_fraction) != (None, None)
     try:
         health_check_rollouts(
             args.run_dir,
             rollout_file=args.rollout_file,
             workers=args.workers,
             ignored_checks=args.ignore_checks or (),
+            # Without a limit flag the run's own persisted limits judge it again.
+            limits=RunHealthLimits(
+                max_infra_failure_fraction=args.health_max_infra_failure_fraction,
+                max_final_failure_fraction=args.health_max_final_failure_fraction,
+            )
+            if overridden
+            else None,
             json_output=args.json,
         )
     except (FileNotFoundError, ValueError) as exc:
@@ -1207,6 +1216,26 @@ COMMANDS = {
                     type=_split_comma_separated,
                     metavar="CHECK[,CHECK...]",
                     help="Comma-separated check IDs to exclude from verdict derivation.",
+                )
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--health-max-infra-failure-fraction",
+                    type=float,
+                    help=(
+                        "Override the run's persisted limit for non-final (infra) failures, as a share of expected "
+                        "rollouts. Either limit flag replaces both persisted limits; an unset one is no limit."
+                    ),
+                )
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--health-max-final-failure-fraction",
+                    type=float,
+                    help=(
+                        "Override the run's persisted limit for final (model-caused) failures, as a share of "
+                        "expected rollouts. Either limit flag replaces both persisted limits."
+                    ),
                 )
             ),
             JSON,

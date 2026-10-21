@@ -699,8 +699,7 @@ def _health_check_collected_rollouts(output_fpath: Path, config: Any, landed_key
             summary_path = write_provisional_summary(
                 output_fpath,
                 landed_keys,
-                max_infra_failure_fraction=config.health_check_max_infra_failure_fraction,
-                max_final_failure_fraction=config.health_check_max_final_failure_fraction,
+                limits=config.run_health_limits,
             )
         except Exception:
             logger.exception("Writing the provisional quality summary failed; rollout artifacts are still available.")
@@ -712,8 +711,7 @@ def _health_check_collected_rollouts(output_fpath: Path, config: Any, landed_key
             output_fpath,
             workers=config.health_check_workers,
             ignored_checks=config.health_check_ignored_checks,
-            max_infra_failure_fraction=config.health_check_max_infra_failure_fraction,
-            max_final_failure_fraction=config.health_check_max_final_failure_fraction,
+            limits=config.run_health_limits,
         )
     except Exception:
         logger.exception("Rollout health checks failed after collection; rollout artifacts are still available.")
@@ -773,9 +771,13 @@ def health_check_rollouts(
     rollout_file: str | Path | None = None,
     workers: int | None = None,
     ignored_checks: Sequence[str] = (),
+    limits: Any = None,
     json_output: bool = False,
 ):
-    """Run rollout quality verification for an existing run directory."""
+    """Run rollout quality verification for an existing run directory.
+
+    ``limits`` (a ``RunHealthLimits``) overrides the run's persisted limits; by default those judge it again.
+    """
     from nemo_gym.rollout_health import health_check_run_dir
 
     return health_check_run_dir(
@@ -783,6 +785,7 @@ def health_check_rollouts(
         rollout_file=rollout_file,
         workers=workers,
         ignored_checks=ignored_checks,
+        limits=limits,
         json_output=json_output,
     )
 

@@ -59,6 +59,7 @@ from nemo_gym.global_config import (
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
 )
+from nemo_gym.health.types import RunHealthLimits
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.path_utils import materialized_path_for
 from nemo_gym.reward_profile import compute_aggregate_metrics, compute_subset_metrics
@@ -4680,8 +4681,7 @@ class TestRolloutCollection:
             output_fpath,
             workers=None,
             ignored_checks=[],
-            max_infra_failure_fraction=None,
-            max_final_failure_fraction=None,
+            limits=RunHealthLimits(),
         )
         format_health_report.assert_called_once_with(health_result)
 

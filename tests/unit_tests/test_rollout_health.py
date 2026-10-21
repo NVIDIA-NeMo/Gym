@@ -460,7 +460,9 @@ def test_health_check_cli_accepts_run_dir_workers_and_ignored_checks(
 ) -> None:
     received = {}
 
-    def fake_health_check(run_dir, *, rollout_file=None, workers=None, ignored_checks=(), json_output=False):
+    def fake_health_check(
+        run_dir, *, rollout_file=None, workers=None, ignored_checks=(), limits=None, json_output=False
+    ):
         received.update(
             run_dir=run_dir,
             rollout_file=rollout_file,
@@ -1815,7 +1817,9 @@ def _run_with_outcomes(
             for task, terminal in failures
         )
     )
-    result = run_health_checks(rollout_path, workers=1, **limits)
+    from nemo_gym.health.types import RunHealthLimits
+
+    result = run_health_checks(rollout_path, workers=1, limits=RunHealthLimits(**limits))
     return json.loads(result.summary_path.read_text())["run"]["artifacts"]
 
 
@@ -2050,3 +2054,121 @@ def test_a_provisional_summary_without_a_reason_leaves_healthy_unknown(tmp_path:
         None,
     )
     assert not (tmp_path / "rollout_verdicts.jsonl").exists()
+
+
+class TestOneSourceOfLimits:
+    """The run-health limits come from one shared config, are persisted, and a recheck reuses them."""
+
+    @staticmethod
+    def _failed_run(root: Path) -> Path:
+        # 100 tasks: 98 land, 2 fail for good. 2% is past a 1% limit for final failures.
+        rollout_path = _write_fixture(root, [(_record(task, 0), [_call()]) for task in range(98)])
+        _inventory(root, 100)
+        (root / "rollouts_failures.jsonl").write_bytes(
+            b"".join(
+                orjson.dumps(
+                    {
+                        "_ng_task_index": task,
+                        "_ng_rollout_index": 0,
+                        "_ng_failure_class": "agent_run_error",
+                        "_ng_failure_terminal": True,
+                    }
+                )
+                + b"\n"
+                for task in (98, 99)
+            )
+        )
+        return rollout_path
+
+    def test_the_effective_limits_are_written_to_the_summary(self, tmp_path: Path) -> None:
+        from nemo_gym.health.types import RunHealthLimits
+
+        result = run_health_checks(
+            self._failed_run(tmp_path), workers=1, limits=RunHealthLimits(max_final_failure_fraction=0.01)
+        )
+
+        artifacts = json.loads(result.summary_path.read_text())["run"]["artifacts"]
+        assert artifacts["limits"] == {
+            "max_infra_failure_fraction": None,
+            "max_final_failure_fraction": 0.01,
+            "source": "config",
+        }
+        assert artifacts["healthy"] is False
+
+    def test_a_recheck_uses_the_runs_persisted_limits(self, tmp_path: Path) -> None:
+        from nemo_gym.health.types import RunHealthLimits
+
+        rollout_path = self._failed_run(tmp_path)
+        run_health_checks(rollout_path, workers=1, limits=RunHealthLimits(max_final_failure_fraction=0.01))
+
+        recheck = health.health_check_run_dir(tmp_path, workers=1)
+
+        artifacts = recheck.summary["run"]["artifacts"]
+        assert artifacts["healthy"] is False  # The verdict does not flip on a recheck of the same artifacts.
+        assert artifacts["limits"] == {
+            "max_infra_failure_fraction": None,
+            "max_final_failure_fraction": 0.01,
+            "source": "persisted",
+        }
+
+    def test_an_explicit_override_wins_and_is_recorded(self, tmp_path: Path) -> None:
+        from nemo_gym.health.types import RunHealthLimits
+
+        rollout_path = self._failed_run(tmp_path)
+        run_health_checks(rollout_path, workers=1, limits=RunHealthLimits(max_final_failure_fraction=0.01))
+
+        recheck = health.health_check_run_dir(
+            tmp_path, workers=1, limits=RunHealthLimits(max_final_failure_fraction=0.05)
+        )
+
+        artifacts = recheck.summary["run"]["artifacts"]
+        assert artifacts["healthy"] is True
+        assert artifacts["limits"]["max_final_failure_fraction"] == 0.05
+        assert artifacts["limits"]["source"] == "override"
+
+    def test_the_provisional_summary_records_its_limits(self, tmp_path: Path) -> None:
+        from nemo_gym.health.types import RunHealthLimits
+
+        rollout_path = tmp_path / "rollouts.jsonl"
+        rollout_path.write_bytes(b"")
+        _inventory(tmp_path, 2)
+
+        summary_path = health.write_provisional_summary(
+            rollout_path, {(0, 0), (1, 0)}, limits=RunHealthLimits(max_infra_failure_fraction=0.1)
+        )
+
+        limits = json.loads(summary_path.read_text())["run"]["artifacts"]["limits"]
+        assert limits == {"max_infra_failure_fraction": 0.1, "max_final_failure_fraction": None, "source": "config"}
+
+    @pytest.mark.parametrize("config_name", ["RolloutCollectionConfig", "RolloutAggregationConfig"])
+    def test_every_command_reads_the_limits_from_the_shared_config(self, config_name: str) -> None:
+        from nemo_gym.health.types import RunHealthConfig, RunHealthLimits
+
+        config_cls = getattr(rollout_collection, config_name)
+        assert issubclass(config_cls, RunHealthConfig)
+        config = config_cls.model_validate(
+            {
+                "input_jsonl_fpath": "in.jsonl",
+                "input_glob": "in.jsonl",
+                "output_jsonl_fpath": "out.jsonl",
+                "health_check_max_final_failure_fraction": 0.03,
+            }
+        )
+        assert config.run_health_limits == RunHealthLimits(max_final_failure_fraction=0.03)
+
+    def test_health_check_cli_passes_the_limit_overrides(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from nemo_gym.health.types import RunHealthLimits
+
+        received = {}
+        monkeypatch.setattr(cli_eval, "health_check_rollouts", lambda run_dir, **kwargs: received.update(kwargs))
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["gym", "eval", "health-check", str(tmp_path), "--health-max-final-failure-fraction", "0.05"],
+        )
+
+        cli_main.main()
+
+        assert received["limits"] == RunHealthLimits(max_final_failure_fraction=0.05)

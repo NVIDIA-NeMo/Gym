@@ -58,7 +58,9 @@ from nemo_gym.health.types import (
     CheckSubject,
     Finding,
     HealthCheckResult,
+    LimitsSource,
     RolloutDigest,
+    RunHealthLimits,
     Verdict,
     _LineSlice,
     _TaskRepeat,
@@ -480,8 +482,8 @@ def _rollout_accounting(
     landed: set[tuple[Any, ...]],
     paths: Sequence[Path],
     *,
-    max_infra_failure_fraction: float | None,
-    max_final_failure_fraction: float | None,
+    limits: RunHealthLimits,
+    limits_source: LimitsSource,
     duplicated: int,
 ) -> dict[str, Any]:
     """Count the rollouts each input owed against those that landed, failed or left no row, and judge the run.
@@ -531,8 +533,8 @@ def _rollout_accounting(
         if duplicated:
             reasons.append(f"{duplicated} records share a rollout identity")
         for name, count, limit in (
-            ("infra failures", infra, max_infra_failure_fraction),
-            ("final failures", final, max_final_failure_fraction),
+            ("infra failures", infra, limits.max_infra_failure_fraction),
+            ("final failures", final, limits.max_final_failure_fraction),
         ):
             # No limit is configured by default: the failures are counted, and judged only against a set limit.
             if limit is not None and count and count / expected >= limit:
@@ -552,6 +554,8 @@ def _rollout_accounting(
         "missing": missing,
         "healthy": None if expected is None else not reasons,
         "unhealthy_reasons": reasons,
+        # The limits the verdict was judged by, so a recheck reuses them and the decision can be reproduced.
+        "limits": limits.summary(limits_source),
     }
 
 
@@ -592,8 +596,8 @@ def run_health_checks(
     output_dir: Path | None = None,
     workers: int | None = None,
     ignored_checks: Sequence[str] = (),
-    max_infra_failure_fraction: float | None = None,
-    max_final_failure_fraction: float | None = None,
+    limits: RunHealthLimits = RunHealthLimits(),
+    limits_source: LimitsSource = "config",
 ) -> HealthCheckResult:
     """Run the RFC's map/group/reduce pipeline and write both reports."""
     ignored = frozenset(normalize_ignored_checks(ignored_checks))
@@ -653,8 +657,8 @@ def run_health_checks(
         _rollout_accounting(
             {(line.source_index, d.task_index, d.rollout_index) for d, line in zip(digests, lines, strict=True)},
             paths,
-            max_infra_failure_fraction=max_infra_failure_fraction,
-            max_final_failure_fraction=max_final_failure_fraction,
+            limits=limits,
+            limits_source=limits_source,
             duplicated=summary["run"]["issues"]["rollout_duplicate_identity"],
         )
     )
@@ -672,8 +676,7 @@ def write_provisional_summary(
     rollout_path: Path,
     landed: set[tuple[Any, Any]],
     *,
-    max_infra_failure_fraction: float | None = None,
-    max_final_failure_fraction: float | None = None,
+    limits: RunHealthLimits = RunHealthLimits(),
 ) -> Path:
     """Write the run accounting of a stopped run fast: ``rollouts.jsonl`` is not read, and the per-record checks
     are skipped.
@@ -685,8 +688,8 @@ def write_provisional_summary(
     artifacts = _rollout_accounting(
         {(0, task, rollout) for task, rollout in landed},
         [rollout_path],
-        max_infra_failure_fraction=max_infra_failure_fraction,
-        max_final_failure_fraction=max_final_failure_fraction,
+        limits=limits,
+        limits_source="config",
         duplicated=0,
     )
     artifacts["partial"] = True
@@ -696,6 +699,15 @@ def write_provisional_summary(
     summary_path.write_bytes(orjson.dumps({"run": {"artifacts": artifacts}}, option=orjson.OPT_INDENT_2))
     (rollout_path.parent / ROLLOUT_VERDICTS_FILENAME).unlink(missing_ok=True)
     return summary_path
+
+
+def _persisted_limits(run_dir: Path) -> RunHealthLimits:
+    """The limits the run's earlier summary was judged by; none (no limit) when it has no readable summary."""
+    try:
+        persisted = orjson.loads((run_dir / QUALITY_SUMMARY_FILENAME).read_bytes())["run"]["artifacts"]["limits"]
+        return RunHealthLimits.model_validate({k: v for k, v in persisted.items() if k != "source"})
+    except (OSError, orjson.JSONDecodeError, KeyError, TypeError, ValueError):
+        return RunHealthLimits()
 
 
 def _resolve_rollout_path(run_dir: Path, rollout_file: str | Path | None) -> Path:
@@ -726,15 +738,24 @@ def health_check_run_dir(
     rollout_file: str | Path | None = None,
     workers: int | None = None,
     ignored_checks: Sequence[str] = (),
+    limits: RunHealthLimits | None = None,
     json_output: bool = False,
 ) -> HealthCheckResult:
+    """Recheck a run directory. Without ``limits``, the run's own persisted limits judge it, so the verdict of
+    the same artifacts does not change; explicit ``limits`` win and are recorded as an override."""
     path = Path(run_dir)
     rollout_path = _resolve_rollout_path(path, rollout_file)
+    if limits is None:
+        limits, limits_source = _persisted_limits(path), "persisted"
+    else:
+        limits_source = "override"
     result = run_health_checks(
         rollout_path,
         output_dir=path,
         workers=workers,
         ignored_checks=ignored_checks,
+        limits=limits,
+        limits_source=limits_source,
     )
     if json_output:
         print(orjson.dumps(result.summary).decode())

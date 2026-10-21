@@ -26,6 +26,52 @@ QUALITY_SUMMARY_FILENAME = "quality_summary.json"
 ROLLOUT_VERDICTS_FILENAME = "rollout_verdicts.jsonl"
 
 Verdict = Literal["healthy", "unhealthy", "unobserved"]
+# Where the limits a summary was judged by came from: the run's config, the run's own earlier summary, or an
+# explicit override when it was rechecked.
+LimitsSource = Literal["config", "persisted", "override"]
+
+
+class RunHealthLimits(BaseModel):
+    """The run-level failure limits, as a share of expected rollouts; ``None`` is no limit, the default."""
+
+    model_config = ConfigDict(frozen=True)
+
+    max_infra_failure_fraction: float | None = Field(default=None, ge=0, le=1)
+    max_final_failure_fraction: float | None = Field(default=None, ge=0, le=1)
+
+    def summary(self, source: LimitsSource) -> dict[str, Any]:
+        """The limits as written to ``quality_summary.json``, so the verdict can be reproduced."""
+        return {**self.model_dump(), "source": source}
+
+
+class RunHealthConfig(BaseModel):
+    """The health-check settings every command that judges a run shares: one place for names and defaults."""
+
+    health_check_max_infra_failure_fraction: float | None = Field(
+        default=None,
+        ge=0,
+        le=1,
+        description=(
+            "Run health is unhealthy when non-final (infra) failures reach this share of expected rollouts. "
+            "Unset by default: no limit."
+        ),
+    )
+    health_check_max_final_failure_fraction: float | None = Field(
+        default=None,
+        ge=0,
+        le=1,
+        description=(
+            "Run health is unhealthy when final (model-caused) failures reach this share of expected rollouts. "
+            "Unset by default: no limit."
+        ),
+    )
+
+    @property
+    def run_health_limits(self) -> RunHealthLimits:
+        return RunHealthLimits(
+            max_infra_failure_fraction=self.health_check_max_infra_failure_fraction,
+            max_final_failure_fraction=self.health_check_max_final_failure_fraction,
+        )
 
 
 class CheckScope(str, Enum):

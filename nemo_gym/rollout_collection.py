@@ -81,6 +81,7 @@ from nemo_gym.global_config import (
     pairing_override_enabled,
     resolve_dataset_agent,
 )
+from nemo_gym.health.types import RunHealthConfig
 from nemo_gym.observability.model_calls import (
     await_model_call_capture_quiescence,
     clear_model_call_captures_for_rollouts,
@@ -1018,7 +1019,9 @@ def _normalize_health_check_ignored_checks(value) -> List[str]:
     return list(normalize_ignored_checks(value))
 
 
-class SharedRolloutCollectionConfig(RemovedRolloutOptionsMixin, UploadRolloutsConfigMixin, BaseNeMoGymCLIConfig):
+class SharedRolloutCollectionConfig(
+    RemovedRolloutOptionsMixin, UploadRolloutsConfigMixin, RunHealthConfig, BaseNeMoGymCLIConfig
+):
     output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
     batch_manifest_fpath: Optional[str] = Field(
         default=None,
@@ -1082,24 +1085,6 @@ class SharedRolloutCollectionConfig(RemovedRolloutOptionsMixin, UploadRolloutsCo
     health_check_ignored_checks: List[str] = Field(
         default_factory=list,
         description="Health-check IDs to exclude from execution and verdict derivation.",
-    )
-    health_check_max_infra_failure_fraction: Optional[float] = Field(
-        default=None,
-        ge=0,
-        le=1,
-        description=(
-            "Run health is unhealthy when non-final (infra) failures reach this share of expected rollouts. "
-            "Unset by default: no limit."
-        ),
-    )
-    health_check_max_final_failure_fraction: Optional[float] = Field(
-        default=None,
-        ge=0,
-        le=1,
-        description=(
-            "Run health is unhealthy when final (model-caused) failures reach this share of expected rollouts. "
-            "Unset by default: no limit."
-        ),
     )
 
     @field_validator("health_check_ignored_checks", mode="before")
@@ -3739,8 +3724,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     output_fpath,
                     workers=config.health_check_workers,
                     ignored_checks=config.health_check_ignored_checks,
-                    max_infra_failure_fraction=config.health_check_max_infra_failure_fraction,
-                    max_final_failure_fraction=config.health_check_max_final_failure_fraction,
+                    limits=config.run_health_limits,
                 )
             except Exception:
                 logger.exception(
@@ -4419,7 +4403,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         return setup_server_client_utils(head_server_config)
 
 
-class RolloutAggregationConfig(BaseNeMoGymCLIConfig):
+class RolloutAggregationConfig(RunHealthConfig, BaseNeMoGymCLIConfig):
     """
     Aggregate metrics across rollout shards produced by `gym eval run --no-serve +disable_aggregation=true`.
 
@@ -4505,24 +4489,6 @@ class RolloutAggregationConfig(BaseNeMoGymCLIConfig):
     health_check_ignored_checks: List[str] = Field(
         default_factory=list,
         description="Health-check IDs to exclude from execution and verdict derivation.",
-    )
-    health_check_max_infra_failure_fraction: Optional[float] = Field(
-        default=None,
-        ge=0,
-        le=1,
-        description=(
-            "Run health is unhealthy when non-final (infra) failures reach this share of expected rollouts. "
-            "Unset by default: no limit."
-        ),
-    )
-    health_check_max_final_failure_fraction: Optional[float] = Field(
-        default=None,
-        ge=0,
-        le=1,
-        description=(
-            "Run health is unhealthy when final (model-caused) failures reach this share of expected rollouts. "
-            "Unset by default: no limit."
-        ),
     )
 
     @field_validator("health_check_ignored_checks", mode="before")
@@ -4727,8 +4693,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     output_dir=output_fpath.parent,
                     workers=config.health_check_workers,
                     ignored_checks=config.health_check_ignored_checks,
-                    max_infra_failure_fraction=config.health_check_max_infra_failure_fraction,
-                    max_final_failure_fraction=config.health_check_max_final_failure_fraction,
+                    limits=config.run_health_limits,
                 )
             except Exception:
                 logger.exception(

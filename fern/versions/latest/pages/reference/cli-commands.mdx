@@ -946,6 +946,7 @@ Verify rollout quality for an existing run directory. The command reads `<run-di
 | `--rollouts-file PATH` | Rollout JSONL path. Relative paths resolve under `RUN_DIR`; absolute paths are used as written. Defaults to `rollouts.jsonl`. |
 | `--workers` | Number of worker processes. Defaults to the smaller of the CPU count and 8. |
 | `--ignore-checks`, `--ignore` | Comma-separated health-check IDs to exclude from execution and verdict derivation. |
+| `--health-max-infra-failure-fraction`, `--health-max-final-failure-fraction` | Override the run's failure limits. Without either flag, the limits recorded in the run's `quality_summary.json` judge it again, so a recheck of the same artifacts keeps its verdict. Either flag replaces both recorded limits; an unset one is no limit. The summary records the override. |
 | `--json` | Output health-check results as JSON. |
 
 ```bash
