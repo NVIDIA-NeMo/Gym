@@ -751,7 +751,11 @@ a changed `dataset.toml` fetches nothing: the pull only refreshes the digests th
 datasets folder (`$NEMO_GYM_DATASETS_DIR`, default `environments/harbor/` in the Gym checkout, or under the working directory when Gym is installed as a package). `harbor:<org>/<name>[@<tag> | @sha256:<digest>]`
 fetches a package-store dataset instead (for example `harbor:terminal-bench/terminal-bench@4.0.0`): every task
 package is downloaded by content hash into `<name>/` (`latest`), `<name>-<tag>/` or `<name>-<12 digest chars>/` (a digest pin), checked against the content hash Harbor published for it and recorded in
-`manifest.toml`, whose per-task pins carry the task's package and that content hash, so a later fetch never mixes another package or a moved `latest` into the folder. A local task folder, or a folder of task folders, works the same way; task folders may be
+`manifest.toml`, whose per-task pins carry the task's package and that content hash, so a later fetch never mixes another package or a moved `latest` into the folder.
+`gym dataset pull <reference>` is that fetch on its own: it prints the folder, the task count and the dataset
+digest, refuses a stale, edited or foreign folder in the same words as the fetch inside `gym eval run`, and
+prepares, builds and runs nothing. See [Committed dataset entries](#committed-dataset-entries) for
+`gym dataset pull terminal_bench_4`, the entry-name form. A local task folder, or a folder of task folders, works the same way; task folders may be
 grouped in subfolders (the search is recursive, `task_id` stays the task folder's own name and must be unique
 across the dataset, and `dataset.toml` and the recorded image configurations sit at the dataset root). The
 taskset mapping records the relative path of a task found below the first level under `paths`. The fetch stages its clone in a hidden `.nemo-gym-harbor-*` directory inside the dataset folder, which the search skips. A fetch interrupted under a `main` build from before this change staged under an unhidden `nemo-gym-harbor-*` name; the recursive search sees that clone and refuses the dataset (a duplicate task ID, or a task the manifest does not record) rather than running it. Delete those directories once; nothing in them is needed. The generated run config declares the materialized rows as the agent's
@@ -761,11 +765,78 @@ per task, the verifier's wall time (`verify_s`) and the network it ran under (`n
 requires a harness that accepts `sandbox_access` in its session seed and leaves the sandbox to the server
 when its session is closed.
 
+### Committed dataset entries
+
+`environments/harbor/<entry>/` commits what a checkout keeps for one dataset: a README, deployment YAML overlays
+(`terminal_bench_4/harbor_sandbox.yaml`) and a `dataset.toml` whose `[gym]` table declares `source`, the hub
+reference the task folders come from (`terminal_bench_4` declares `harbor:terminal-bench/terminal-bench@4.0.0`,
+`terminal_bench_2_1` the content-hash pin of the store's TB 2.1). `gym dataset pull <entry>` fetches that reference
+into the entry's own folder, where the pulled task folders and `manifest.toml` are gitignored next to the committed
+files, and a pull of the reference itself (`gym dataset pull harbor:terminal-bench/terminal-bench@4.0.0`, or
+`gym eval run` on it) lands in the same folder, so one dataset never lives in two sibling folders. The match is
+exact: `harbor:terminal-bench/terminal-bench` (the store's `latest`) is another reference and lands in
+`environments/harbor/terminal-bench/` as any reference no entry declares does. `gym dataset validate <entry>` and
+`gym eval run <entry> ...` resolve the bare name to that folder without fetching (an entry not pulled yet names the
+pull to run; an existing folder of the same name in the working directory, or an explicit path, keeps meaning the
+path for these two commands, which take paths, while `gym dataset pull <entry>` takes none and finds the entry from
+any working directory), and the manifest check that follows refuses a pulled folder that was edited; task folders
+in the entry's folder with no `manifest.toml`, or with one that records another source or a fetch of another
+reference than the entry's `source` declares now (the declaration moved to another tag since the pull), are refused
+with the pull to run, never run as a local dataset under the entry's name; the pull re-records a reference that
+resolves to the tasks already there without fetching them again. The entry's
+`dataset.toml` is the dataset's `dataset.toml`: its other `[gym]` keys apply as on any dataset, and the dataset digest covers it, so
+`terminal_bench_4`'s identity differs from that of a bare `harbor:terminal-bench/terminal-bench@4.0.0` pull made
+before the entry existed, on purpose. An entry is pulled into its own folder when that folder is under the working
+root (the Gym checkout of an editable install, the working directory of a package install) and is not installed. An
+installed entry, one a package install ships under `site-packages` or another Python installation prefix (shared,
+often read-only; a project-local `.venv` under the working directory counts), and an entry committed outside the
+working root (one a `NEMO_GYM_EXTRA_ROOTS` root commits) are pulled into `<datasets dir>/<entry>/` instead
+(`environments/harbor/<entry>/` under the working directory, the default every other pull uses), by name and by the
+reference the entry declares alike, and the installation is left untouched; `NEMO_GYM_DATASETS_DIR` moves every
+pulled dataset there. An entry's tasks
+then live in `<datasets dir>/<entry>/` with a copy of the entry's Gym layer beside them, its `dataset.toml` and whatever dataset-level `task_data.py` or `verifier.py` it
+commits, placed before the first task lands and replaced when the entry's files change (the next pull, validate or
+run does it alike and brings the manifest beside the tasks up to date with the copies at once, so the three commands
+never disagree about one folder or its digest; a copy edited in place is refused, never overwritten: the entry's
+files are where the layer is edited, and the copies are checked against the record of what was placed, a hidden
+`.gym-layer.json` beside them that only the placing writes, so a run of the folder by its path in a shell without
+the variable, which rewrites the manifest's digests over an edit as for any dataset, does not make the next pull
+overwrite it), and the entry name resolves to that folder. That copy folder, told by its `.gym-layer.json`, is never
+itself an entry: the name and the reference keep resolving past it to the installed entry, so an edit of the
+installed entry's `dataset.toml` reaches the next pull, validate or run, while a folder of the entry's name without
+that file (one the checkout commits itself) keeps precedence over the installed one. The record file is what marks the
+copy: delete it and the folder becomes a user-authored entry of that name and shadows the installed one again, so move
+the folder aside instead. A copy whose installed entry was removed or renamed is no longer reached by the name; run it
+by its path as a plain dataset. A checkout that fetched
+`harbor:terminal-bench/terminal-bench@4.0.0` before the entry declared it still holds `environments/harbor/terminal-bench-4.0.0/`: the reference now lands in `terminal_bench_4/` (fetched afresh;
+no folder is moved), the pull and a run of the reference name the old folder while it is there, and it can be
+moved aside or deleted. Runs of that reference now carry the entry's name as the taskset, as the rows'
+`task_source` and in the `results/harbor/terminal_bench_4/` path, and a dataset digest that covers the entry's
+`dataset.toml`, so they differ from runs of the same reference made before the entry declared it. `dataset.toml` is
+not gitignored in any folder under `environments/harbor/`, pulled hub folders included, so one written into such a
+folder by hand (the `nextjs-performance` override an earlier TB4 README placed in `terminal-bench-4.0.0/`) now shows
+as untracked: move its keys into the entry's `dataset.toml` and delete it.
+
+To move an entry to another version, change `source` in its `dataset.toml`, delete (or move aside) only the pulled
+task folders and `manifest.toml` in the entry's folder, and pull again; the README, YAML files and `dataset.toml`
+stay. A fetch refused because the folder was written for another version of the dataset, or because a task folder
+no longer matches the store, says so in the fetcher's words and, when the folder is a committed entry's own, adds
+what to delete there (the same hint follows the manifest check's refusal of a run by entry name; under
+`NEMO_GYM_DATASETS_DIR`, or for an entry committed outside the working root, the pull's folder holds nothing git
+tracks and the fetcher's words stand alone). A pull whose
+fetch downloaded nothing, every folder being in place, still brings the manifest's digest of `dataset.toml` up to
+date and announces the change (`Rewrote manifest.toml: dataset.toml changed; dataset digest <old> ->
+<new>`, the manifest check's own notice), so the digest a pull reports after an edit of the entry's table is the one
+the next run carries, and that run rewrites nothing. A run or pull of an entry whose fetch was interrupted says to run
+`gym dataset pull <entry>` again, which finishes it. Publishing a dataset to the hub is not part of this slice.
+
 ### Dataset identity
 
-`manifest.toml` beside the task folders holds derived facts only, never a copy of the name or version
+`manifest.toml` beside the task folders holds derived facts only, never a copy of the dataset's name or version
 (those live in `dataset.toml`): `[dataset]` `source` (`harbor-registry`, `harbor-package-store`, `git` or
-`local`), `digest` (the dataset's identity: a hash over the sorted per-task digests, `dataset.toml` and, when the
+`local`), `ref` (the hub reference the fetch was made from, a fact of the fetch like the pins:
+`harbor:<org>/<name>@<tag | latest | sha256:digest>` for the store, `harbor:<dataset>@<version>` with the version
+resolved for the registry; absent for a local folder), `digest` (the dataset's identity: a hash over the sorted per-task digests, `dataset.toml` and, when the
 dataset ships them, the dataset-level `task_data.py` and `verifier.py`), `dataset_toml_digest` on its own,
 `dataset_files_digest` (the two Gym files, written only
 when at least one is present, so a dataset without them hashes and reads as before), and per task
@@ -1038,7 +1109,8 @@ The loader generates the task mapping and dataset rows for that run.
 datasets folder (`$NEMO_GYM_DATASETS_DIR`, default `environments/harbor/` in the Gym checkout, or under the working directory when Gym is installed as a package). `harbor:<org>/<name>[@<tag> | @sha256:<digest>]`
 fetches a package-store dataset instead (for example `harbor:terminal-bench/terminal-bench@4.0.0`): every task
 package is downloaded by content hash into `<name>/` (`latest`), `<name>-<tag>/` or `<name>-<12 digest chars>/` (a digest pin), checked against Gym's task digest and recorded in
-`manifest.toml`. A local task folder, or a folder of task folders, works the same way.
+`manifest.toml`. `gym dataset pull <reference | entry>` is the fetch alone (see
+[Committed dataset entries](#committed-dataset-entries)). A local task folder, or a folder of task folders, works the same way.
 
 ## Compose template variables and `env_file`
 

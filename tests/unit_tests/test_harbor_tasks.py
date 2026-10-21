@@ -1345,6 +1345,7 @@ class TestHub:
         manifest = (folder / "manifest.toml").read_text()
         assert f'git_commit_id = "{head}"' in manifest
         assert "HEAD" not in manifest.replace("hello-world", "")
+        assert 'ref = "harbor:hello-world@1.0"' in manifest  # the reference fetched, the version resolved (round 32)
         assert [t.task_id for t in discover_tasks(folder)] == ["hello-world", "renamed"]
 
         # A rerun keeps existing folders and does not need the repository again.
@@ -2373,6 +2374,10 @@ def test_registry_versions_keep_distinct_rows_routes_and_outputs(tmp_path, monke
 
     for version in ("1.0", "2.0"):
         write_task(tmp_path / f"ds-{version}" / "a")
+        # A fetch always leaves the folder's manifest behind; prepare reads it back for the fetch report.
+        manifest_module.Manifest.build(tmp_path / f"ds-{version}", source="harbor-registry").write(
+            tmp_path / f"ds-{version}"
+        )
     monkeypatch.setattr(harbor_cli, "fetch_ref", lambda target, **kw: tmp_path / f"ds-{target.split('@')[1]}")
     first = prepare_target("harbor:ds@1.0", output_root=tmp_path / "out")
     first_rows = first.rows_path.read_bytes()
@@ -3618,6 +3623,125 @@ def test_pulled_datasets_default_to_the_working_directory_for_a_package_install(
     parent_dir, pulled = completed.stdout.splitlines()[-2:]
     assert Path(parent_dir) == site  # the probe ran the installed layout, not this checkout
     assert Path(pulled) == (work / "environments" / "harbor").resolve()
+
+
+def test_installed_entries_are_pulled_under_the_working_directory_not_the_installation(tmp_path) -> None:
+    """A committed entry that ships with a package install lives in site-packages, which is shared and often
+    read-only: with ``NEMO_GYM_DATASETS_DIR`` unset, the pull of its name and of the reference it declares both land
+    in ``<working directory>/environments/harbor/<entry>/`` (``datasets_dir()``), with the entry's ``dataset.toml``
+    copied there, and nothing is created under the installation.
+
+    The installed layout is rebuilt in a subprocess as in
+    :func:`test_pulled_datasets_default_to_the_working_directory_for_a_package_install`: the package and the entry
+    reached through a ``site/`` folder with no ``pyproject.toml`` beside it, run from a working directory elsewhere.
+    The plan is inspected (:func:`~nemo_gym.tasks.harbor.entries.plan_pull`) and the destination prepared; nothing
+    is fetched.
+    """
+    import os
+    import sys
+
+    from nemo_gym import ROOT_DIR
+
+    ref = "harbor:terminal-bench/terminal-bench@4.0.0"
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "nemo_gym").symlink_to(ROOT_DIR, target_is_directory=True)
+    installed = site / "environments" / "harbor" / "tb4_installed"
+    installed.mkdir(parents=True)
+    table = f'[gym]\nsource = "{ref}"\n'
+    (installed / "dataset.toml").write_text(table)
+    work = tmp_path / "work"
+    work.mkdir()
+    probe = (
+        "import sys\n"
+        f"sys.path = [{str(site)!r}, *(p for p in sys.path if '__editable__' not in p and p != '')]\n"
+        "sys.meta_path = [f for f in sys.meta_path if 'editable' not in getattr(f, '__module__', '').lower()]\n"
+        "import nemo_gym\n"
+        "from nemo_gym.tasks.harbor.entries import entry_target, plan_pull, prepare_destination\n"
+        "print(nemo_gym.PARENT_DIR)\n"
+        f"by_name, by_ref = plan_pull('tb4_installed'), plan_pull({ref!r})\n"
+        "assert by_name.entry == by_ref.entry and by_name.ref == by_ref.ref, (by_name, by_ref)\n"
+        "print(by_name.entry.folder)\n"
+        "print(by_name.folder)\n"
+        "print(by_ref.folder)\n"
+        "print(entry_target('tb4_installed').destination)\n"
+        "print(prepare_destination(by_name.entry))\n"
+    )
+    env = {
+        key: value for key, value in os.environ.items() if key not in ("NEMO_GYM_DATASETS_DIR", "NEMO_GYM_EXTRA_ROOTS")
+    }
+    completed = subprocess.run(
+        [sys.executable, "-c", probe], cwd=work, env=env, capture_output=True, text=True, check=True, timeout=300
+    )
+    parent_dir, folder, by_name, by_ref, by_target, prepared = completed.stdout.splitlines()[-6:]
+    assert Path(parent_dir) == site  # the probe ran the installed layout, not this checkout
+    assert Path(folder) == installed.resolve()  # the entry is the installed one
+    expected = (work / "environments" / "harbor" / "tb4_installed").resolve()
+    assert Path(by_name) == Path(by_ref) == Path(by_target) == Path(prepared) == expected
+    # The destination holds a copy of the entry's table; the installation is left as it was.
+    assert (expected / "dataset.toml").read_text() == table
+    assert sorted(p.name for p in installed.iterdir()) == ["dataset.toml"]
+    assert sorted(p.name for p in (site / "environments" / "harbor").iterdir()) == ["tb4_installed"]
+
+
+def test_installed_entries_in_a_project_local_venv_are_pulled_under_the_working_directory(tmp_path) -> None:
+    """A project-local ``.venv`` puts site-packages under the working directory, so an entry the package ships there
+    lies under the working root too; it is installed all the same, and with ``NEMO_GYM_DATASETS_DIR`` unset the pull
+    of its name and of its reference both land in ``<working directory>/environments/harbor/<entry>/``, with the
+    entry's ``dataset.toml`` copied there, and nothing is written under ``.venv`` (Yu He, round 36: both pulls
+    targeted the installation and failed on a read-only one).
+
+    The installed layout is rebuilt in a subprocess as in
+    :func:`test_installed_entries_are_pulled_under_the_working_directory_not_the_installation`, with the ``site/``
+    folder placed at ``work/.venv/lib/python3.X/site-packages`` and the probe run from ``work``.
+    """
+    import os
+    import sys
+
+    from nemo_gym import ROOT_DIR
+
+    ref = "harbor:terminal-bench/terminal-bench@4.0.0"
+    work = tmp_path / "work"
+    site = work / ".venv" / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
+    site.mkdir(parents=True)
+    (site / "nemo_gym").symlink_to(ROOT_DIR, target_is_directory=True)
+    installed = site / "environments" / "harbor" / "tb4_installed"
+    installed.mkdir(parents=True)
+    table = f'[gym]\nsource = "{ref}"\n'
+    (installed / "dataset.toml").write_text(table)
+    venv_before = sorted(str(path.relative_to(work)) for path in (work / ".venv").rglob("*"))
+    probe = (
+        "import sys\n"
+        f"sys.path = [{str(site)!r}, *(p for p in sys.path if '__editable__' not in p and p != '')]\n"
+        "sys.meta_path = [f for f in sys.meta_path if 'editable' not in getattr(f, '__module__', '').lower()]\n"
+        "import nemo_gym\n"
+        "from nemo_gym.tasks.harbor.entries import entry_target, plan_pull, prepare_destination\n"
+        "print(nemo_gym.PARENT_DIR)\n"
+        "print(nemo_gym.WORKING_DIR)\n"
+        f"by_name, by_ref = plan_pull('tb4_installed'), plan_pull({ref!r})\n"
+        "assert by_name.entry == by_ref.entry and by_name.ref == by_ref.ref, (by_name, by_ref)\n"
+        "print(by_name.entry.folder)\n"
+        "print(by_name.folder)\n"
+        "print(by_ref.folder)\n"
+        "print(entry_target('tb4_installed').destination)\n"
+        "print(prepare_destination(by_name.entry))\n"
+    )
+    env = {
+        key: value for key, value in os.environ.items() if key not in ("NEMO_GYM_DATASETS_DIR", "NEMO_GYM_EXTRA_ROOTS")
+    }
+    completed = subprocess.run(
+        [sys.executable, "-c", probe], cwd=work, env=env, capture_output=True, text=True, check=True, timeout=300
+    )
+    parent_dir, working_dir, folder, by_name, by_ref, by_target, prepared = completed.stdout.splitlines()[-7:]
+    assert Path(parent_dir) == site  # the probe ran the installed layout, not this checkout
+    assert Path(working_dir) == work  # a package install's working root is the working directory, above .venv
+    assert Path(folder) == installed.resolve()  # the entry is the installed one
+    expected = (work / "environments" / "harbor" / "tb4_installed").resolve()
+    assert Path(by_name) == Path(by_ref) == Path(by_target) == Path(prepared) == expected
+    # The destination holds a copy of the entry's table; nothing under .venv was written or created.
+    assert (expected / "dataset.toml").read_text() == table
+    assert sorted(str(path.relative_to(work)) for path in (work / ".venv").rglob("*")) == venv_before
+    assert (installed / "dataset.toml").read_text() == table
 
 
 def test_pulled_datasets_default_to_environments_harbor_in_the_checkout(monkeypatch, tmp_path) -> None:

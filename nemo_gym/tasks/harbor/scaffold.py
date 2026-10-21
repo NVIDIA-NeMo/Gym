@@ -42,6 +42,9 @@ description = "One-line description of the dataset."
 # allowed_agents = ["hermes_agent"]
 # domain = "coding"
 # verified = false
+# A committed entry under environments/harbor/ names the hub dataset `gym dataset pull <entry>` fetches
+# into its folder; an authored dataset, whose task folders are its own, leaves this unset.
+# source = "harbor:<org>/<name>@<tag>"
 
 [gym.defaults]
 # Rollouts per task for an evaluation; `+num_repeats=` on the command line replaces it.

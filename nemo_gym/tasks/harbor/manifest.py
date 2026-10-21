@@ -6,8 +6,10 @@
 The file sits beside the task folders and holds only facts computed from them: where the folders
 came from (``source``), one dataset digest, the digest of ``dataset.toml`` alone, and per task the
 folder digest (the value rows carry as
-``_ng_digest``) with its upstream pin. Name and version live only in ``dataset.toml``, so nothing
-appears in both files. Nobody edits the manifest by hand.
+``_ng_digest``) with its upstream pin. The dataset's name and version live only in ``dataset.toml``, so nothing
+appears in both files; what a fetch records besides is the hub reference it was made from (``ref``), a fact of the
+fetch like the pins, which is what a committed entry's declared ``source`` is checked against without the hub
+(:func:`nemo_gym.tasks.harbor.cli._check_fetch_record`). Nobody edits the manifest by hand.
 
 The output is deterministic: a fixed key order, sorted tasks and no timestamps, so equal manifests
 mean identical inputs and two runs compare by ``[dataset].digest``. The dataset digest is a hash over
@@ -153,6 +155,10 @@ class Manifest:
     tasks: dict[str, dict[str, str]] = field(default_factory=dict)
     # The dataset-level Gym files (:data:`DATASET_FILES`); the digest of nothing, and not written, without them.
     dataset_files_digest: str = _EMPTY_DIGEST
+    # The hub reference the fetch was made from: ``harbor:<org>/<name>@<tag | latest | sha256:digest>`` for the
+    # package store, ``harbor:<dataset>@<version>`` with the version it resolved for the registry; ``None``, and not
+    # written, for a local folder.
+    ref: str | None = None
     # The task folders :meth:`build` could not hash (recorded by name, no digest): computed, never written or read.
     unhashable: frozenset[str] = field(default_factory=frozenset)
 
@@ -175,13 +181,15 @@ class Manifest:
         pins: dict[str, dict[str, str]] | None = None,
         digests: dict[str, str] | None = None,
         names: Iterable[str] | None = None,
+        ref: str | None = None,
     ) -> "Manifest":
         """Compute the manifest of ``folder`` from its task folders and ``dataset.toml``.
 
         ``pins`` are the upstream pins to record per task; a pinned task whose folder is absent
         (an interrupted fetch) keeps its pin and gets no digest. ``digests`` are folder digests
         already computed (by a loader or a fetch); any task folder not in it is hashed here, and the
-        mapping is extended in place so a caller can reuse the work.
+        mapping is extended in place so a caller can reuse the work. ``ref`` is the hub reference a fetch
+        was made from, recorded as the pins are and kept by every rewrite of the manifest.
 
         ``names`` are the tasks to record. A fetcher passes the tasks it fetched, so a folder it did not
         fetch stays unrecorded (and prepare refuses it as not in the manifest) and no folder is scanned
@@ -230,6 +238,7 @@ class Manifest:
             dataset_toml_digest=toml_digest,
             tasks=tasks,
             dataset_files_digest=files_digest,
+            ref=ref,
             unhashable=frozenset(unhashable),
         )
 
@@ -255,11 +264,13 @@ class Manifest:
         tasks = data.get("tasks", {})
         if not isinstance(dataset, dict) or not isinstance(tasks, dict):
             raise ManifestError(f"{path} is not a valid manifest: [dataset] and [tasks] must be tables")
+        ref = dataset.get("ref")
         return cls(
             source=str(dataset.get("source", "")),
             digest=str(dataset.get("digest", "")),
             dataset_toml_digest=str(dataset.get("dataset_toml_digest", "")),
             dataset_files_digest=str(dataset.get("dataset_files_digest", _EMPTY_DIGEST)),
+            ref=ref if isinstance(ref, str) and ref else None,
             tasks={
                 str(name): {
                     # The package-store fetcher wrote `digest = "sha256:<hex>"` before the schema was numbered; the
@@ -295,9 +306,11 @@ class Manifest:
             "",
             "[dataset]",
             f"source = {_quote(self.source)}",
-            f"digest = {_quote(self.digest)}",
-            f"dataset_toml_digest = {_quote(self.dataset_toml_digest)}",
         ]
+        if self.ref is not None:
+            lines.append(f"ref = {_quote(self.ref)}")
+        lines.append(f"digest = {_quote(self.digest)}")
+        lines.append(f"dataset_toml_digest = {_quote(self.dataset_toml_digest)}")
         if self.dataset_files_digest != _EMPTY_DIGEST:
             lines.append(f"dataset_files_digest = {_quote(self.dataset_files_digest)}")
         lines.append("")
@@ -587,6 +600,7 @@ def check_manifest(folder: Path, *, digests: dict[str, str] | None = None) -> Ma
             )
     source = previous.source if previous is not None else LOCAL_SOURCE
     pins = previous.pins if previous is not None else None
+    ref = previous.ref if previous is not None else None
     if previous is not None and source != LOCAL_SOURCE and previous.records_content:
         # A pin without a digest in a manifest that records digests is a task the fetch never finished:
         # the claim is complete, the folder is not. Checked before the folders, since a claim-only folder
@@ -596,7 +610,7 @@ def check_manifest(folder: Path, *, digests: dict[str, str] | None = None) -> Ma
             raise ManifestError(
                 f"the fetch of {folder} was interrupted (tasks not yet recorded: {_some(unfetched)}); run the fetch again"
             )
-    fresh = Manifest.build(folder, source=source, pins=pins, digests=digests)
+    fresh = Manifest.build(folder, source=source, pins=pins, digests=digests, ref=ref)
     if previous is None:
         if tracked_by_git(folder):
             print(
@@ -620,18 +634,61 @@ def check_manifest(folder: Path, *, digests: dict[str, str] | None = None) -> Ma
         )
     if not previous.records_content:
         why = "it recorded pins only"
-    elif not previous.digest:
-        # Written before the dataset digest existed (per-task digests only, see Manifest.records_content):
-        # rewritten for that alone, whatever dataset.toml held when it was written.
-        why = "it recorded no dataset digest"
     elif differences is not None:
         why = f"task folders changed ({differences})"
-    elif previous.dataset_files_digest != fresh.dataset_files_digest:
-        why = f"a dataset-level {' or '.join(DATASET_FILES)} changed"
     else:
-        why = f"{DATASET_FILE} changed"
+        why = gym_layer_change(previous, fresh)
     if _write_or_warn(fresh, folder):
-        print(
-            f"Rewrote {folder / MANIFEST_FILE}: {why}; dataset digest {previous.digest[:12] or '-'} -> {fresh.digest[:12]}"
-        )
+        report_rewrite(folder, previous, fresh, why)
+    return fresh
+
+
+def gym_layer_change(previous: "Manifest", fresh: "Manifest") -> str:
+    """Which part of the Gym layer differs between two manifests of one task set, for a rewrite notice.
+
+    A manifest from before the dataset digest existed (per-task digests only, see :attr:`Manifest.records_content`)
+    is rewritten for that alone, whatever ``dataset.toml`` held when it was written.
+    """
+    if not previous.digest:
+        return "it recorded no dataset digest"
+    if previous.dataset_files_digest != fresh.dataset_files_digest:
+        return f"a dataset-level {' or '.join(DATASET_FILES)} changed"
+    return f"{DATASET_FILE} changed"
+
+
+def report_rewrite(folder: Path, previous: "Manifest", fresh: "Manifest", why: str) -> None:
+    """The one-line notice that ``folder``'s manifest was rewritten, and how the dataset digest moved."""
+    print(
+        f"Rewrote {Path(folder) / MANIFEST_FILE}: {why}; dataset digest {previous.digest[:12] or '-'} -> {fresh.digest[:12]}"
+    )
+
+
+def refresh_gym_layer(folder: Path) -> Manifest | None:
+    """Bring a fetched manifest's Gym-layer digests up to date with ``folder`` without touching its task records.
+
+    A fetch records ``dataset.toml`` and the dataset-level Gym files as it found them, and
+    rewrites the manifest only when it fetches something: a registry fetch with every folder in place, or a
+    pull that only replaced the copy of an entry's ``dataset.toml`` beside the tasks
+    (:func:`nemo_gym.tasks.harbor.entries.prepare_destination`), leaves ``dataset_toml_digest`` and the dataset
+    digest describing a file that is no longer there. This recomputes those digests from disk and keeps every
+    task's recorded digest and pin, and the fetch's reference, as they are (nothing is hashed, so a hand-edited
+    folder is still caught by :func:`check_manifest`, which rehashes), then writes the manifest when its text
+    changed, with the notice ``check_manifest`` prints for the same rewrite (``Rewrote ...; dataset digest <old> ->
+    <new>``), so a change of
+    the dataset's identity is announced whichever function applies it. Returns the manifest now on disk: ``None``
+    without one, and the old one untouched when it records pins only (``check_manifest`` upgrades those) or names a
+    source this Gym does not know (``check_manifest`` refuses those).
+    """
+    folder = Path(folder)
+    previous = Manifest.read(folder)
+    if previous is None or not previous.records_content or previous.source not in SOURCES:
+        return previous
+    digests = {name: digest for name, digest in previous.task_digests.items() if digest is not None}
+    fresh = Manifest.build(
+        folder, source=previous.source, pins=previous.pins, digests=digests, names=list(digests), ref=previous.ref
+    )
+    if fresh.text() == previous.text():
+        return previous
+    if _write_or_warn(fresh, folder):
+        report_rewrite(folder, previous, fresh, gym_layer_change(previous, fresh))
     return fresh
