@@ -13,6 +13,9 @@ dependencies = [
   "nemo-gym",
   "httpx",
   "pillow",
+  # Gym requires Python 3.13; NumPy 1.x has no CPython 3.13 wheels.
+  "numpy>=2.1,<3",
+  "scikit-image",
   # The qualified WebArena evaluation image contains the Playwright 1.55
   # browser bundle (Chromium 1187).  Python and browser revisions must match.
   "playwright==1.55.0",

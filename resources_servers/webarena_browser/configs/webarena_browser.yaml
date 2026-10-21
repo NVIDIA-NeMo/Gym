@@ -7,8 +7,8 @@ webarena_browser:
       entrypoint: app.py
       domain: agent
       verified: false
-      description: Headed Chromium and PyAutoGUI runtime with the WebArena evaluator
-      value: Run the maintained WebArena population behind Gym's visual web protocol
+      description: Headed Chromium and PyAutoGUI runtime with WebArena-family evaluators
+      value: Run maintained WebArena-family populations behind Gym's visual web protocol
       max_sessions: 1
       artifact_dir: cache/webarena-browser/artifacts
       inline_screenshots: true
@@ -25,4 +25,6 @@ webarena_browser:
       require_auth: false
       # One replica must not overlap writers targeting the same mutable site.
       site_pool_mode: local_locks
+      # VisualWebArena overrides this with its confined reference-image root.
+      task_image_root: null
       allowed_benchmarks: [webarena]
