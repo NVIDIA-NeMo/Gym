@@ -361,7 +361,8 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             return await self._seed_session(request.session[SESSION_ID_KEY], body)
 
         session_id = body.resources_session_id
-        request.session[SESSION_ID_KEY] = session_id
+        # The cookie is bound only once the seed succeeds: a refused seed's reply would otherwise point this client at
+        # the session it was refused, which may belong to another episode.
         async with self._fence.locked(session_id):
             self._fence.raise_if_closed(session_id)
             identity = self._session_id_to_identity.get(session_id)
@@ -370,7 +371,9 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                     raise ResourcesSessionConflictError(
                         "resources_session_id is already bound to another episode or task"
                     )
-                return await self._typed_seed_response(session_id)
+                response = await self._typed_seed_response(session_id)
+                request.session[SESSION_ID_KEY] = session_id
+                return response
             try:
                 task = SWEBenchProInstanceRequest.model_validate(body.task_data)
             except ValidationError as error:
@@ -385,6 +388,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                 await self._stop_session_sandbox(session_id)
                 raise
             self._session_id_to_identity[session_id] = (body.episode_id, body.task_id)
+            request.session[SESSION_ID_KEY] = session_id
             return response
 
     async def _typed_seed_response(self, session_id: str) -> ResourcesSeedSessionResponse:
@@ -501,14 +505,11 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         body: SWEBenchProVerifyRequest,
     ) -> SWEBenchProVerifyResponse:
         session_id = request.session[SESSION_ID_KEY]
-        # A typed session whose task sandbox an earlier verify consumed, or that a close released, has nothing left to
-        # grade: grading would score an empty patch as a policy that changed nothing, so the sample is masked. A
-        # failed patch extraction from a live sandbox stays an unmasked failure, since the agent can cause it.
-        if (
-            not self.config.is_verifying_golden_patch
-            and session_id not in self._session_id_to_sandbox
-            and (session_id in self._session_id_to_identity or self._fence.closed_episode(session_id) is not None)
-        ):
+        # A session with no task sandbox (an earlier verify consumed it, a close released it, or the server never held
+        # it) has nothing left to grade: grading would score an empty patch as a policy that changed nothing, so the
+        # sample is masked. A failed patch extraction from a live sandbox stays an unmasked failure, since the agent
+        # can cause it.
+        if not self.config.is_verifying_golden_patch and session_id not in self._session_id_to_sandbox:
             return SWEBenchProVerifyResponse.model_validate(
                 body.model_dump()
                 | lost_session_verification("SWE-bench Pro task sandbox is no longer available")
@@ -602,9 +603,13 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                 file=sys.stderr,
             )
 
+        # The request allows extra fields, so response-owned fields a caller sent are overwritten, not passed through.
         response_data = body.model_dump() | {
             "image_provenance": await asyncio.to_thread(self._image_info, body),
             "reward": float(result.resolved),
+            "mask_sample": False,
+            "failure_kind": None,
+            "failure_reason": None,
             "evaluation_completed": result.completed and reason is None,
             "eval_timed_out": result.timed_out,
             "resolved": result.resolved,

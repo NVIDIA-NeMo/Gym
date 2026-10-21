@@ -47,6 +47,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
+    ResourcesSeedRejectedError,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
     ResourcesSessionConflictError,
@@ -189,7 +190,8 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
             return BaseSeedSessionResponse()
 
         session_id = body.resources_session_id
-        request.session[SESSION_ID_KEY] = session_id
+        # The cookie is bound only once the seed succeeds: a refused seed's reply would otherwise point this client at
+        # the session it was refused, which may belong to another episode.
         async with self._fence.locked(session_id):
             self._fence.raise_if_closed(session_id)
             identity = self._typed_identity.get(session_id)
@@ -199,10 +201,15 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
                     raise ResourcesSessionConflictError(
                         "resources_session_id is already bound to another episode or task"
                     )
+                request.session[SESSION_ID_KEY] = session_id
                 return ResourcesSeedSessionResponse(resources_session_id=session_id)
-            spec = BrowserSeedSessionRequest.model_validate(body.task_data)
+            try:
+                spec = BrowserSeedSessionRequest.model_validate(body.task_data)
+            except ValidationError as error:
+                raise ResourcesSeedRejectedError(f"task_data is not an interactive_browser task: {error}") from error
             await self._open_session(session_id, spec, episode_id=body.episode_id)
             self._typed_identity[session_id] = (body.episode_id, body.task_id)
+            request.session[SESSION_ID_KEY] = session_id
             return ResourcesSeedSessionResponse(resources_session_id=session_id)
 
     async def close_resources_session(

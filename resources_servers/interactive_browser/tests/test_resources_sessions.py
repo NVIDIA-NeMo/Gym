@@ -159,13 +159,23 @@ class TestTypedSessionsOverHttp:
         assert again.status_code == 200
         assert browsers.created[0].closed == 1
 
-    def test_a_tool_call_without_a_browser_is_a_lost_session(self, browsers) -> None:
+    @pytest.mark.parametrize(
+        "tool,arguments",
+        [
+            ("browser_navigate", {"url": "https://example.com"}),
+            ("browser_click", {"element_id": 0}),
+            ("browser_type", {"element_id": 0, "text": "hi"}),
+            ("browser_observe", None),
+            ("browser_finish", {"answer": "42"}),
+        ],
+    )
+    def test_a_tool_call_without_a_browser_is_a_lost_session(self, browsers, tool, arguments) -> None:
         """A tool call with no browser gets 404 session_lost, so the trajectory records it as a failed call."""
         client = TestClient(_server().setup_webserver())
         client.post("/seed_session", json=_seed_json())
         client.post("/close_session", json=_close_json())
 
-        response = client.post("/browser_navigate", json={"url": "https://example.com"})
+        response = client.post(f"/{tool}", json=arguments)
 
         assert response.status_code == 404
         assert response.json()["detail"]["failure_kind"] == SESSION_LOST
@@ -179,6 +189,49 @@ class TestTypedSessionsOverHttp:
         assert refused.status_code == 409
         assert "does not match" in refused.json()["detail"]
         assert browsers.created[0].closed == 0
+
+    def test_a_close_for_another_episode_is_refused_after_the_close_too(self, browsers) -> None:
+        client = TestClient(_server().setup_webserver())
+        client.post("/seed_session", json=_seed_json())
+        client.post("/close_session", json=_close_json())
+
+        refused = client.post("/close_session", json=_close_json(episode={"rollout_id": "other", "attempt": 0}))
+
+        assert refused.status_code == 409
+        assert "does not match the closed" in refused.json()["detail"]
+
+    def test_task_data_that_is_not_a_browser_task_is_refused_as_final(self, browsers) -> None:
+        client = TestClient(_server().setup_webserver())
+        body = _seed_json()
+        body["task_data"] = {"initial_url": 5}
+
+        refused = client.post("/seed_session", json=body)
+
+        assert refused.status_code == 422, "a task no retry can fix is refused as final"
+        assert "task_data is not an interactive_browser task" in refused.json()["detail"]
+        assert browsers.created == []
+
+    def test_a_refused_seed_leaves_the_clients_cookie_alone(self, browsers) -> None:
+        """A refused seed must not rebind the client to the session it was refused, which another episode owns."""
+        server = _server()
+        app = server.setup_webserver()
+        owner, other = TestClient(app), TestClient(app)
+        owner.post("/seed_session", json=_seed_json("owner"))
+        other.post("/seed_session", json=_seed_json("other", episode={"rollout_id": "other", "attempt": 0}))
+        cookies = dict(other.cookies)
+        bad_task = _seed_json("third", episode={"rollout_id": "other", "attempt": 0})
+        bad_task["task_data"] = {"initial_url": 5}
+
+        conflict = other.post("/seed_session", json=_seed_json("owner", episode={"rollout_id": "other", "attempt": 0}))
+        rejected = other.post("/seed_session", json=bad_task)
+        finished = other.post("/browser_finish", json={"answer": "42"})
+
+        assert (conflict.status_code, rejected.status_code) == (409, 422)
+        assert dict(other.cookies) == cookies
+        # The tool call still reaches this client's own browser, not the owner's.
+        assert finished.status_code == 200
+        assert server._session_id_to_state["other"].answer == "42"
+        assert server._session_id_to_state["owner"].answer is None
 
     def test_a_malformed_close_is_a_validation_error_not_a_silent_success(self, browsers) -> None:
         client = TestClient(_server().setup_webserver())
@@ -268,7 +321,9 @@ def test_typed_sessions_follow_the_session_contract(browsers) -> None:
         server.setup_webserver(),
         _typed_seed("contract-session"),
         keeps_state=True,
-        holds_state=lambda resources_session_id: resources_session_id in server._session_id_to_state,
+        holds_state=lambda resources_session_id: (
+            resources_session_id in server._session_id_to_state or resources_session_id in server._typed_identity
+        ),
         verify_body=_body().model_dump(mode="json"),
     )
     assert all(browser.closed == 1 for browser in browsers.created)
@@ -293,6 +348,19 @@ def test_verify_after_close_is_a_masked_lost_session(browsers) -> None:
         return await server.verify(SimpleNamespace(session={SESSION_ID_KEY: "resources-session"}), _body())
 
     response = asyncio.run(run())
+
+    assert (response.reward, response.mask_sample, response.failure_kind) == (0.0, True, SESSION_LOST)
+    assert response.failure_reason == "browser session not found at verify"
+
+
+def test_a_lost_verify_ignores_response_fields_the_caller_sent(browsers) -> None:
+    """The request allows extra fields; a caller's reward or mask must not override the lost-session verdict."""
+    from test_verify_reporting import _body
+
+    sent = {"reward": 1.0, "mask_sample": False, "failure_kind": "judge_error", "failure_reason": "sent by caller"}
+    response = asyncio.run(
+        _server().verify(SimpleNamespace(session={SESSION_ID_KEY: "resources-session"}), _body(**sent))
+    )
 
     assert (response.reward, response.mask_sample, response.failure_kind) == (0.0, True, SESSION_LOST)
     assert response.failure_reason == "browser session not found at verify"
