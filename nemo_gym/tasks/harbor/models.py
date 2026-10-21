@@ -4,9 +4,9 @@
 """Pydantic mirror of Harbor's ``task.toml`` (schema 1.4).
 
 Field names are Harbor's. Deprecated spellings (``version``, ``memory``, ``storage``,
-``allow_internet``) are read and normalized but never written back. Keys
-this mirror does not know are ignored, as Harbor ignores them; :meth:`HarborSettings.unknown_keys`
-lists them so the loader can say so.
+``allow_internet``) are read and normalized but never written back; the pre-1.3 ``multi_step_reward_mode``
+is accepted and dropped, as Harbor drops it. Keys this mirror does not know are ignored, as Harbor ignores
+them; :meth:`HarborSettings.unknown_keys` lists them so the loader can say so.
 """
 
 import re
@@ -285,7 +285,12 @@ class HarborStep(HarborSettings):
 class HarborTaskConfig(HarborSettings):
     """One ``task.toml``."""
 
-    deprecated_keys: ClassVar[frozenset[str]] = frozenset({"version"})
+    # `multi_step_reward_mode` is the pre-1.3 spelling older multi-step generators (the MemoryArena adapters
+    # among them) write as "aggregate". Harbor 0.22.0 has no such field: `TaskConfig` drops the key and the
+    # task rolls up with the default `mean`, or its own `multi_step_reward_strategy`. The mirror does the same
+    # through `extra="ignore"`; naming the key here only keeps the loader from reporting it as unknown (the
+    # loader warns about a value other than "aggregate", which Harbor drops silently).
+    deprecated_keys: ClassVar[frozenset[str]] = frozenset({"version", "multi_step_reward_mode"})
 
     schema_version: str = "1.4"
     task: dict[str, Any] = Field(default_factory=dict)

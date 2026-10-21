@@ -900,11 +900,16 @@ class HarborVerificationMixin:
         installs as its default (:meth:`HarborUsersMixin._set_default_user` with ``role="verifier"``). Only
         Docker applies a group. Refused here, the episode fails as a seed failure instead of paying the whole
         rollout and failing at verification; a verifier in another image keeps that image's default untouched
-        and names no user.
+        and names no user. A multi-step task's turn grades as its step's own ``[steps.verifier].user`` when the
+        step sets one (:meth:`_turn_verifier_settings` dispatches the pair as written), which is as static as the
+        task's: every step's pair is refused here the same way, before the first turn runs, with the step named
+        (``<task_id> step 'build': user ...``), as the loader names the step in its own per-step refusals.
         """
         if _verifier_runs_task_image(task):
             self._refuse_unsupported_group(task, task.entrypoint_user)
         self._refuse_unsupported_group(task, _verifier_user(task))
+        for turn in task.turns:
+            self._refuse_unsupported_group(task, turn.config.verifier.user, where=f" step {turn.name!r}")
 
     @staticmethod
     def _measured(reward: float, kind: str, reason: str) -> dict[str, Any]:

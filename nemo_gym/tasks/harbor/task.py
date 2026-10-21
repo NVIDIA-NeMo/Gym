@@ -60,6 +60,9 @@ INSTRUCTION_FILE = "instruction.md"
 STEPS_DIR = "steps"
 # Per-step Harbor features this loader does not run yet; a task using one is refused by name.
 UNSUPPORTED_STEP_FILES = ("workdir", "setup.sh")
+# The one value of the pre-1.3 `multi_step_reward_mode` key that older multi-step generators wrote: the per-step
+# average, which is the default `mean` roll-up the task gets once the key is dropped, so it is dropped silently.
+LEGACY_AGGREGATE_REWARD_MODE = "aggregate"
 DOCKERFILE = Path("environment") / "Dockerfile"
 # The names the loader accepts for a task's Compose overlay under ``environment/``, first match wins
 # (``nemo_gym.tasks.harbor.image_configs.compose_file``); Harbor's Docker environment reads the first one only.
@@ -321,6 +324,16 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
         data = tomllib.loads((path / TASK_FILE).read_text())
         for key in HarborTaskConfig.unknown_keys(data):
             logger.warning("%s: ignoring unknown key `%s`", path / TASK_FILE, key)
+        legacy_mode = data.get("multi_step_reward_mode")
+        if legacy_mode is not None and legacy_mode != LEGACY_AGGREGATE_REWARD_MODE:
+            # Harbor 0.22.0 drops the key whatever it says and rolls the steps up with `mean` (or the task's own
+            # `multi_step_reward_strategy`); so does the mirror, and the task author hears which value was dropped.
+            logger.warning(
+                "%s: ignoring legacy key `multi_step_reward_mode = %r` (Harbor reads `multi_step_reward_strategy`, "
+                "`mean` when unset)",
+                path / TASK_FILE,
+                legacy_mode,
+            )
         config = HarborTaskConfig.model_validate(data)
     except (OSError, ValueError) as exc:
         raise HarborTaskError(f"{path / TASK_FILE}: {exc}") from exc
@@ -660,6 +673,9 @@ def _load_turns(path: Path, config: HarborTaskConfig) -> tuple[HarborTurn, ...]:
 
     Each turn needs ``steps/<name>/instruction.md`` and a ``test.sh``, its own under
     ``steps/<name>/tests/`` or the task's under ``tests/``, which is the script Harbor runs for the step.
+    A step's own ``[steps.agent].user`` is among the refused features: Harbor switches the agent's user per
+    step, while every turn here runs as the task's user, so a task that sets one is refused rather than run
+    as the wrong user.
     """
     turns: list[HarborTurn] = []
     for step in config.steps:
@@ -672,6 +688,8 @@ def _load_turns(path: Path, config: HarborTaskConfig) -> tuple[HarborTurn, ...]:
                 raise HarborTaskError(f"{where}: steps/{step.name}/{name} is not supported yet")
         if step.healthcheck is not None or step.artifacts:
             raise HarborTaskError(f"{where}: per-step healthcheck and artifacts are not supported yet")
+        if step.agent.user is not None:
+            raise HarborTaskError(f"{where}: per-step agent user is not supported yet")
         if step.verifier.environment_mode == "separate" or step.verifier.environment is not None:
             raise HarborTaskError(f"{where}: separate per-step verification is not supported yet")
         if not (step_dir / "tests" / "test.sh").is_file() and not (path / "tests" / "test.sh").is_file():

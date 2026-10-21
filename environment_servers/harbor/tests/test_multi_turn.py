@@ -380,6 +380,41 @@ timeout_sec = 0.05
     assert [turn.name for turn in result.turns] == ["plan", "build"] and result.reward == 1.0
 
 
+@pytest.mark.parametrize("provider", ["docker", "opensandbox"])
+async def test_a_step_verifier_user_with_a_group_follows_the_provider_at_seed(tmp_path, monkeypatch, provider):
+    """Review (round 24): a step's `[steps.verifier].user = "name:group"` reached `_run_shared_verifier` as written
+    through `_turn_verifier_settings` on every provider, while the task-level `[verifier].user` pair had been refused
+    at seed (`_refuse_verifier_group`) where only Docker applies a group. Every step's pair is refused the same way
+    now: at seed, before the sandbox exists and the turns before that step are paid for. The refusal names the step
+    that carries the pair (repair round 4), as the loader's per-step refusals do, so the author of a six-step task need
+    not search every `[steps.verifier]` table for it."""
+    steps = '[[steps]]\nname = "plan"\n[[steps]]\nname = "build"\n[steps.verifier]\nuser = "tester:grp"\n'
+    server, task, sandbox, created = multi_turn_server(tmp_path, monkeypatch, steps, {"plan": "P", "build": "B"})
+    assert task.config.verifier.user is None and task.turns[1].config.verifier.user == "tester:grp"
+    monkeypatch.setattr(
+        "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {provider: {}}}
+    )
+
+    response = await server.run_request(request_for(task))
+
+    runs = [call for call in sandbox.execs if "bash /tests/test.sh" in call["command"]]
+    if provider == "docker":
+        assert response.failure is None, response.failure
+        assert [turn.name for turn in response.result.turns] == ["plan", "build"]
+        # The first turn grades as the task's verifier user; the second as the step's own pair, as written.
+        assert [run["user"] for run in runs] == [None, "tester:grp"]
+    else:
+        failure = response.failure
+        assert failure is not None and failure.stage == "seed" and failure.terminal
+        # The step that carries the pair is named, right after the task id; the task's own user is not blamed.
+        assert "hello step 'build': user 'tester:grp' names group 'grp'" in failure.failure_reason
+        assert "hello: user" not in failure.failure_reason and "'plan'" not in failure.failure_reason
+        assert "'opensandbox'" in failure.failure_reason and "switches user by name only" in failure.failure_reason
+        # Nothing ran: no sandbox, no agent session, no turn.
+        assert created == [] and sandbox.execs == [] and server.server_client.seed_bodies() == []
+        assert runs == [] and response.result is None
+
+
 async def test_a_forced_separate_verifier_is_refused_at_seed_for_a_multi_step_task(tmp_path, monkeypatch):
     """The loader admits multi-step tasks in shared mode only; `separate_verifier_for_artifacts` cannot force
     them into a mode their turns do not run, and the refusal costs no sandbox."""
