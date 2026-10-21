@@ -33,6 +33,8 @@ from pydantic import (
 )
 
 from nemo_gym.orchestration.service_refs import (
+    SERVER_TYPE_FIELDS,
+    SERVICE_REF_PREFIX,
     ServiceAccessors,
     check_host_var_collisions,
     resolve_service_refs,
@@ -233,7 +235,7 @@ class VllmPDServiceConfig(BaseModelServiceConfig):
     """Prefill/decode disaggregated vLLM: two tiers behind a vllm-router.
 
     Deployed as three services named `<name>-prefill`, `<name>-decode` and `<name>`
-    (the router); `driver.policy_model` names the router.
+    (the router); the router is the one that serves the model.
     """
 
     type: Literal["vllm_pd"]
@@ -468,14 +470,16 @@ class ResumeConfig(_StrictModel):
 class BenchmarkRunConfig(_StrictModel):
     # Hydra overrides forwarded to `gym eval prepare`. Flattened to +key=value tokens.
     prepare: dict[str, Any] = {}
-    # Hydra overrides forwarded to `gym eval run`. policy_model wiring is injected here at
+    # Hydra overrides forwarded to `gym eval run`. The policy model's wiring is injected here at
     # validation time so all executors see it uniformly via flatten_run_args.
     run: dict[str, Any] = {}
+    _policy_service: str | None = PrivateAttr(default=None)
+    _policy_model_type: str | None = PrivateAttr(default=None)
     # Shell script the driver runs INSTEAD of `gym eval run`, for a benchmark whose
     # harness is not Gym's own runner -- one that provisions external machines and
     # drives Gym from there, for instance. `prepare` still runs first, and the
     # driver exports NEMO_GYM_BENCH_DIR plus the policy's base URL, model name and
-    # API key (when driver.policy_model is set) so the script can reach the served
+    # API key (when the job has a policy model) so the script can reach the served
     # model without repeating its address.
     command: str | None = None
 
@@ -501,10 +505,39 @@ class BenchmarkRunConfig(_StrictModel):
     resumable: bool | ResumeConfig = False
 
     @property
+    def policy_service(self) -> str | None:
+        """Name of the service that serves this benchmark's policy model, if it has one."""
+        return self._policy_service
+
+    @property
+    def policy_model_type(self) -> str | None:
+        """The `--model-type` for `gym eval run`: the server type the policy's `service:` reference sits under."""
+        return self._policy_model_type
+
+    @property
     def resume_config(self) -> ResumeConfig | None:
         if self.resumable is False:
             return None
         return ResumeConfig() if self.resumable is True else self.resumable
+
+
+_POLICY_NODE = "policy_model"
+_POLICY_VARS = ("policy_base_url", "policy_model_name", "policy_api_key")
+_IMPLICIT_POLICY_TYPE = "openai_model"
+_POLICY_WIRING = (
+    "The policy is the server named `policy_model`, wired like any other: in a benchmark's `run`, write "
+    "`policy_model: {responses_api_models: {<type>: service:<name>}}`. With a single model service in `services` "
+    "it is bound without writing anything."
+)
+_REMOVED_POLICY_FIELDS = {
+    "policy_model": _POLICY_WIRING
+    + " A benchmark that brings a complete policy of its own writes `policy_model: {}` in its `run`.",
+    "policy_host": "A pinned service's host resolves by itself. For an address other clients can route to, write the "
+    "policy's `run.policy_model.responses_api_models.<type>` fields yourself, e.g. "
+    "`openai_base_url: http://${oc.env:HEAD_NODE_IP}:<port>/v1`.",
+    "policy_model_type": "`--model-type` is the server type the `service:` reference sits under in `run.policy_model`. "
+    "For a benchmark whose own config already declares a complete policy, write `policy_model: {}` in its `run`.",
+}
 
 
 class GymInstallConfig(_StrictModel):
@@ -515,22 +548,6 @@ class GymInstallConfig(_StrictModel):
 class DriverConfig(_HostEnvRefs, _StrictModel):
     container: str = "python:3.12"
     gym_install: GymInstallConfig | None = None
-    # Name of a service in `services:` to use as the policy model. When set, injects
-    # policy_base_url/policy_model_name/policy_api_key into each benchmark's run config.
-    policy_model: str | None = None
-    # Host in the injected policy_base_url. localhost suits clients on the driver's
-    # node; an agent in a remote sandbox needs an address it can route to, e.g.
-    # "${oc.env:HEAD_NODE_IP}", resolved when the driver runs.
-    policy_host: str = "localhost"
-    # Which responses_api_models asset serves as the policy, passed as
-    # `--model-type`. Not every benchmark wants the same one: Gym permits exactly
-    # one entry under `policy_model.responses_api_models`, so composing
-    # openai_model against a benchmark that ships its own vllm_model policy (e.g.
-    # lmarena_v3) fails validation with "Dictionary should have at most 1 item
-    # after validation, not 2", and overrides keyed on `vllm_model.*` land on a
-    # server that was never composed. Set to "" to compose no policy model config
-    # at all, for a benchmark whose own config already declares a complete one.
-    policy_model_type: str = "openai_model"
     benchmarks: dict[str, BenchmarkRunConfig] = Field(min_length=1)
     # Values may be prefixed `lit:` (literal), `host:VAR` (read from the submitting
     # machine's env), or `runtime:VAR` (resolved from the job's own env at run time).
@@ -539,6 +556,15 @@ class DriverConfig(_HostEnvRefs, _StrictModel):
     # Pyxis-style bind mounts passed as --container-mounts.
     # Each entry is "src", "src:dst", or "src:dst:flags" (e.g. "/data:/data:ro").
     mounts: list[str] = []
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_removed_policy_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            for field, advice in _REMOVED_POLICY_FIELDS.items():
+                if field in data:
+                    raise ValueError(f"driver.{field} was removed. {advice}")
+        return data
 
     @field_validator("env")
     @classmethod
@@ -728,37 +754,77 @@ class SubmitConfig(_StrictModel):
 
         self._validate_pd_services(compute)
 
-        if self.driver.policy_model is not None:
-            if self.driver.policy_model not in self.services:
-                raise ValueError(
-                    f"driver.policy_model '{self.driver.policy_model}' does not match any service "
-                    f"({', '.join(sorted(self.services))})."
-                )
-            service = self.services[self.driver.policy_model]
-            if isinstance(service, BaseModelServiceConfig):
-                for bench_name, benchmark in self.driver.benchmarks.items():
-                    conflicts = [
-                        k for k in ("policy_base_url", "policy_model_name", "policy_api_key") if k in benchmark.run
-                    ]
-                    if conflicts:
-                        raise ValueError(
-                            f"Benchmark '{bench_name}' run config already sets {conflicts} "
-                            f"but driver.policy_model is also set. Remove one."
-                        )
-                    benchmark.run["policy_base_url"] = f"http://{self.driver.policy_host}:{service.port}/v1"
-                    benchmark.run["policy_model_name"] = service.served_model_name or service.model
-                    # vLLM doesn't require auth; dummy key satisfies clients that require the header.
-                    benchmark.run["policy_api_key"] = "dummy"  # pragma: allowlist secret
-
         for bench_name, benchmark in self.driver.benchmarks.items():
+            self._bind_policy(bench_name, benchmark)
             try:
                 benchmark.run, deferred = resolve_service_refs(benchmark.run, self.services)
             except ValueError as e:
                 raise ValueError(f"Benchmark '{bench_name}' run config: {e}") from None
             self._deferred_host_services |= deferred
+            self._export_policy_vars(benchmark)
         check_host_var_collisions(self._deferred_host_services)
 
         return self
+
+    @property
+    def policy_service(self) -> str | None:
+        """The service serving the policy model, taken from the first benchmark that has one."""
+        return next((b.policy_service for b in self.driver.benchmarks.values() if b.policy_service), None)
+
+    def _bind_policy(self, bench_name: str, benchmark: BenchmarkRunConfig) -> None:
+        """Settle which service is the benchmark's policy, adding the implicit `policy_model` node if needed."""
+        node = benchmark.run.get(_POLICY_NODE)
+        if node == {}:
+            del benchmark.run[_POLICY_NODE]
+            return
+        if node is not None:
+            if not isinstance(node, dict):
+                raise ValueError(
+                    f"Benchmark '{bench_name}' run config: policy_model must be a mapping, got {node!r}. "
+                    + _POLICY_WIRING
+                )
+            for model_type, value in (node.get("responses_api_models") or {}).items():
+                if (
+                    model_type in SERVER_TYPE_FIELDS
+                    and isinstance(value, str)
+                    and value.startswith(SERVICE_REF_PREFIX)
+                ):
+                    name = value[len(SERVICE_REF_PREFIX) :]
+                    if "." not in name:
+                        benchmark._policy_service, benchmark._policy_model_type = name, model_type
+                        break
+            return
+        candidates = [n for n, s in self.services.items() if isinstance(s, BaseModelServiceConfig)]
+        if len(candidates) == 1:
+            benchmark._policy_service = candidates[0]
+            if benchmark.command is None:
+                benchmark._policy_model_type = _IMPLICIT_POLICY_TYPE
+                benchmark.run[_POLICY_NODE] = {
+                    "responses_api_models": {_IMPLICIT_POLICY_TYPE: f"{SERVICE_REF_PREFIX}{candidates[0]}"}
+                }
+        elif len(candidates) > 1 and benchmark.command is None:
+            raise ValueError(
+                f"Benchmark '{bench_name}' has no policy_model and services has several model services "
+                f"({', '.join(candidates)}). Add run.policy_model.responses_api_models.<type>: service:<name>, "
+                "or `run.policy_model: {}` if the benchmark's own config declares a complete policy."
+            )
+
+    def _export_policy_vars(self, benchmark: BenchmarkRunConfig) -> None:
+        """Fill `policy_base_url`, `policy_model_name` and `policy_api_key` for the bound policy, unless set.
+
+        They stay available for configs that use them outside the policy node, and are what a `command`
+        benchmark exports as `NEMO_GYM_POLICY_*`. A deployed policy is addressed on localhost, because the
+        driver runs on its node; a declarative one by its own URL.
+        """
+        if benchmark.policy_service is None or benchmark.policy_service not in self.services:
+            return
+        service = self.services[benchmark.policy_service]
+        accessors = service.accessors(benchmark.policy_service)
+        url = (
+            accessors.url if isinstance(service, DeclarativeServiceConfig) else f"http://localhost:{accessors.port}/v1"
+        )
+        for key, value in zip(_POLICY_VARS, (url, accessors.model, accessors.key)):
+            benchmark.run.setdefault(key, value)
 
     @property
     def deferred_host_services(self) -> list[str]:

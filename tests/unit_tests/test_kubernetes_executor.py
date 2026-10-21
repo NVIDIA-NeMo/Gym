@@ -457,7 +457,7 @@ def test_benchmark_command_is_forwarded_to_the_driver(tmp_path):
 
 
 def test_benchmark_command_gets_policy_and_bench_dir_env_vars(tmp_path):
-    # driver.policy_model injects policy_base_url/model_name/api_key into benchmark.run *after*
+    # the implicit policy binding injects policy_base_url/model_name/api_key into benchmark.run *after*
     # construction (see SubmitConfig._resolve_and_validate_placements), so this works even for a
     # `command` benchmark -- it just reaches the policy via env vars instead of CLI args.
     from nemo_gym.orchestration.executors.kubernetes_script import build_job_manifest
@@ -468,7 +468,6 @@ def test_benchmark_command_gets_policy_and_bench_dir_env_vars(tmp_path):
             "compute": {"cluster": {"type": "kubernetes", "namespace": "eng-test", "pvc_name": "workspace"}},
             "driver": {
                 "container": "gym:latest",
-                "policy_model": "vllm_model",
                 "benchmarks": {"bench_a": {"command": "./run_my_harness.sh"}},
             },
             "job": {"output_path": str(tmp_path / "jobs")},
