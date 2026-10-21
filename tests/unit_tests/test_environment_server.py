@@ -488,3 +488,35 @@ async def test_an_episode_is_untracked_even_if_its_cleanup_is_cancelled() -> Non
 
     assert participant.readiness().blocker_count == 0
     assert participant.export_records(None) == []
+
+
+def test_a_protocol_may_derive_the_episode_deadline_per_request() -> None:
+    """`episode_timeout_seconds` is the one place the per-episode deadline comes from: the base returns the
+    configured default, and a server that derives a longer one for a request (the Harbor server, for a multi-step
+    task whose steps add up to more than the default) is held to that, not to the default."""
+
+    class _SlowEnvironmentServer(_EnvironmentServer):
+        async def run(self, request: _Request, cleanup: CleanupContext) -> _Response:
+            await asyncio.sleep(0.05)
+            return _Response(episode_id=request.episode_id, task_id=request.task.task_id, result="late")
+
+    class _DerivingEnvironmentServer(_SlowEnvironmentServer):
+        asked: list[str] = []
+
+        async def episode_timeout_seconds(self, request: _Request) -> float | None:
+            self.asked.append(request.task.task_input.value)
+            return 5.0
+
+    config = _environment_server(default_episode_timeout_seconds=0.01).config
+    assert (
+        asyncio.run(_environment_server(default_episode_timeout_seconds=0.01).episode_timeout_seconds(_request()))
+        == 0.01
+    )
+    cut = asyncio.run(
+        _SlowEnvironmentServer(config=config, server_client=MagicMock(spec=ServerClient)).run_request(_request())
+    )
+    assert cut.failure is not None and cut.failure.failure_reason == "Episode timed out"
+    server = _DerivingEnvironmentServer(config=config, server_client=MagicMock(spec=ServerClient))
+    response = asyncio.run(server.run_request(_request()))
+    assert response.failure is None and response.result == "late"
+    assert server.asked == [_request().task.task_input.value]
