@@ -2492,6 +2492,39 @@ class TestComposeAndRouting:
         )
         return captured
 
+    def test_a_sidecar_without_deploy_resources_is_warned_about_once_per_task(self, tmp_path, monkeypatch, caplog):
+        """G7 round 24, attempts 6 and 7: a Compose sidecar without `deploy.resources` gets the provider's default
+        sandbox size (`_sidecar_spec` hands the adapter no task resources), where Harbor's `docker compose` gives it
+        the host's, and the WebShop sidecar died at start for it. The default is unchanged; the seed now says, once
+        per task, which sidecars run at it and where a size goes, and a sized sidecar is not named."""
+        server, task, _, _ = make_server(tmp_path, monkeypatch)
+        (task.path / "environment" / "docker-compose.yaml").write_text(
+            "services:\n  main:\n    image: ${MAIN_IMAGE_NAME}\n"
+            "  api:\n    image: org/api:1\n    expose: ['8080']\n"
+            "  kafka:\n    image: org/kafka:1\n    deploy:\n      resources:\n        limits:\n          memory: 2g\n"
+            "  cache:\n    image: org/api:1\n    cpus: 1\n"
+        )
+        for image in ("org/api:1", "org/kafka:1"):
+            write_image_config(task.path.parent, image, **IMAGE_CONFIGS[image]["config"])
+        task = load_task(task.path)
+        server.config.tasksets["ds"].tasks["hello"] = task.digest
+        captured = self.capture_compose_specs(monkeypatch)
+
+        with caplog.at_level("WARNING", logger="environment_servers.harbor.sandboxes"):
+            asyncio.run(server._create_compose(task, "r1"))
+            asyncio.run(server._create_compose(task, "r2"))
+
+        warnings = [r.getMessage() for r in caplog.records if "deploy.resources" in r.getMessage()]
+        assert len(warnings) == 1
+        assert warnings[0].startswith("hello: Compose service(s) api declare no deploy.resources")
+        assert "sandbox provider's default size" in warnings[0] and "deploy.resources.limits" in warnings[0]
+        assert "kafka" not in warnings[0] and "cache" not in warnings[0]
+        # The sizes themselves are the adapter's to apply from the document: the specs still carry no task resources.
+        from nemo_gym.sandbox import SandboxResources
+
+        assert captured["specs"]["api"].resources == SandboxResources()
+        assert captured["specs"]["kafka"].resources == SandboxResources()
+
     def test_main_env_layers_image_env_under_the_compose_file_under_the_host_resolved_task_env(
         self, tmp_path, monkeypatch
     ):
