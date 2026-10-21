@@ -24,6 +24,21 @@ separately. Internal Gym clients retain their existing unbounded extension for
 rate-limit statuses; 404 and 408 never trigger that extension.
 
 
+## Session-affinity routing
+
+Endpoints behind a router that pins a session to one replica (to reuse its KV cache) need every
+request of a rollout to carry the same session id. `rollout_id_headers` sends the rollout id in the
+named headers on every upstream request made for a rollout:
+
+```bash
+++rollout_correlation=true \
+++policy_model.responses_api_models.openai_model.rollout_id_headers='[X-Session-Id]'
+```
+
+The model server learns the rollout from the `/ng-rollout/<id>` prefix that agents add to their
+model calls. `rollout_correlation=true` makes agents add it without turning on model-call capture;
+`observability_enabled` and token capture add it too. Requests without a rollout get no header.
+
 # Licensing information
 Code: Apache 2.0
 Data: N/A

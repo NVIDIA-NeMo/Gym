@@ -229,6 +229,52 @@ class TestOpenAIUtils:
         assert captured["headers"]["x-request-id"] == "mine"
         assert "X-Request-Id" not in captured["headers"]
 
+    async def test_rollout_id_headers_carry_the_current_rollout(self, monkeypatch) -> None:
+        from nemo_gym.rollout_correlation import rollout_context
+
+        sent = []
+
+        async def fake_request(**kwargs):
+            sent.append(kwargs["headers"])
+            return SimpleNamespace(status=200)
+
+        monkeypatch.setattr(openai_utils_module, "request", fake_request)
+        client = NeMoGymAsyncOpenAI(
+            api_key="abc",
+            base_url="https://example.test/v1",
+            default_headers={"X-Static": "1"},
+            rollout_id_headers=["X-Session", "X-Other-Session"],
+        )
+
+        with rollout_context("trial-1"):
+            await client._request(method="POST", url="https://example.test/v1/responses")
+        await client._request(method="POST", url="https://example.test/v1/responses")
+        with rollout_context("trial-2"):
+            await client._request(method="POST", url="https://example.test/v1/responses", headers={"X-Session": "own"})
+
+        assert sent[0]["X-Session"] == sent[0]["X-Other-Session"] == "trial-1"
+        assert sent[0]["X-Static"] == "1"
+        assert "X-Session" not in sent[1]
+        assert sent[2]["X-Session"] == "own"
+        assert sent[2]["X-Other-Session"] == "trial-2"
+
+    async def test_rollout_id_headers_are_off_by_default(self, monkeypatch) -> None:
+        from nemo_gym.rollout_correlation import rollout_context
+
+        sent = []
+
+        async def fake_request(**kwargs):
+            sent.append(kwargs["headers"])
+            return SimpleNamespace(status=200)
+
+        monkeypatch.setattr(openai_utils_module, "request", fake_request)
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.test/v1")
+
+        with rollout_context("trial-1"):
+            await client._request(method="POST", url="https://example.test/v1/responses")
+
+        assert set(sent[0]) == {"Authorization", "X-Request-Id"}
+
     @pytest.mark.parametrize("internal", [False, True])
     @pytest.mark.parametrize("status", [429, 500, 504])
     async def test_explicit_attempt_cap_has_no_exhausted_status_sleep(

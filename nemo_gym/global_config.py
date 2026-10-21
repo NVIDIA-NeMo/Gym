@@ -133,6 +133,8 @@ VERBOSE_KEY_NAME = "verbose"
 JSON_OUTPUT_KEY_NAME = "json"
 QUERY_KEY_NAME = "query"
 OBSERVABILITY_ENABLED_KEY_NAME = "observability_enabled"
+# Agents add the /ng-rollout/<id> prefix to model calls without capturing them, so model servers know the rollout.
+ROLLOUT_CORRELATION_KEY_NAME = "rollout_correlation"
 MODEL_CALL_CAPTURE_DIR_KEY_NAME = "model_call_capture_dir"
 # Run-wide training-token capture settings.
 # See ``nemo_gym/token_id_capture/config.py``.
@@ -181,6 +183,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     JSON_OUTPUT_KEY_NAME,
     QUERY_KEY_NAME,
     OBSERVABILITY_ENABLED_KEY_NAME,
+    ROLLOUT_CORRELATION_KEY_NAME,
     MODEL_CALL_CAPTURE_DIR_KEY_NAME,
     TOKEN_ID_CAPTURE_BLOCK,
     COMPONENT_NAME_KEY_NAME,

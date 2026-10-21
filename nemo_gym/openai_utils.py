@@ -1672,6 +1672,14 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         description="Extra headers to include in every request.",
     )
 
+    rollout_id_headers: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Headers that carry the current rollout id on every request made for a rollout, e.g. for "
+            "session-affinity routing upstream. Requests outside a rollout do not get them."
+        ),
+    )
+
     max_num_tries: Optional[Literal[1]] = Field(
         default=None,
         description=(
@@ -1739,7 +1747,12 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         if self._permanent_trip is not None:
             self._raise_permanent_error()
         request_headers = request_kwargs.pop("headers", {})
-        headers = self.default_headers | request_headers | {"Authorization": f"Bearer {self.api_key}"}
+        headers = (
+            self.default_headers
+            | self._rollout_headers()
+            | request_headers
+            | {"Authorization": f"Bearer {self.api_key}"}
+        )
         request_id = _rollout_request_id(headers)
         if request_id is not None:
             headers["X-Request-Id"] = request_id
@@ -1755,6 +1768,12 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                 connect=self.connect_timeout_seconds,
             )
         return await self._request_with_retry(**request_kwargs)
+
+    def _rollout_headers(self) -> Dict[str, str]:
+        rollout_id = current_rollout_id()
+        if rollout_id is None:
+            return {}
+        return {name: rollout_id for name in self.rollout_id_headers}
 
     async def _request_with_retry(self, **request_kwargs: Dict) -> ClientResponse:
         if self._permanent_trip is not None:

@@ -1002,6 +1002,16 @@ def test_base_agent_url_path_for_run_gates_on_observability_and_indices():
     assert _make_base_agent(MagicMock()).url_path_for_run("/v1/responses", body) == "/v1/responses"
 
 
+def test_base_agent_rollout_correlation_adds_the_prefix_without_capture():
+    body = {TASK_INDEX_KEY_NAME: 3, ROLLOUT_INDEX_KEY_NAME: 1}
+
+    agent = _make_base_agent({"rollout_correlation": True})
+
+    assert agent.url_path_for_run("/v1/responses", body) == "/ng-rollout/3-1/v1/responses"
+    assert agent.base_url_for_run("http://h:1", body) == "http://h:1/ng-rollout/3-1"
+    assert not agent._model_call_capture_enabled()
+
+
 def test_base_agent_propagates_explicit_token_capture_intent():
     body = {TASK_INDEX_KEY_NAME: 3, ROLLOUT_INDEX_KEY_NAME: 1}
     global_config = {

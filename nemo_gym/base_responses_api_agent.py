@@ -47,6 +47,7 @@ from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMEN
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.global_config import (
     OBSERVABILITY_ENABLED_KEY_NAME,
+    ROLLOUT_CORRELATION_KEY_NAME,
     TOKEN_ID_CAPTURE_BLOCK,
     get_first_server_config_dict,
 )
@@ -532,6 +533,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
 
         Evaluation uses ``/ng-rollout/<id>/...`` for every agent.
         Training capture uses ``/ng-rollout/<id>/training-token-capture/...``.
+        ``rollout_correlation`` adds the prefix without any capture, e.g. so a model server can route by rollout.
         Training capture requires ``token_id_capture.enabled``.
         It also requires the static agent flag or run-level ``all_agents``.
         Partial-rollout checkpointing also needs it for this agent.
@@ -539,6 +541,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         """
         return (
             self._model_call_capture_enabled()
+            or self._rollout_correlation_enabled()
             or self._token_id_capture_enabled()
             # Checkpointing keys a legacy /run by its rollout, so its self-dispatch must carry the rollout.
             or self._checkpoint_participant is not None
@@ -551,6 +554,13 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         if not isinstance(global_config, Mapping):
             return False
         return bool(global_config.get(OBSERVABILITY_ENABLED_KEY_NAME, False))
+
+    def _rollout_correlation_enabled(self) -> bool:
+        """Whether the run asked for rollout prefixes without capture."""
+        global_config = getattr(self.server_client, "global_config_dict", None)
+        if not isinstance(global_config, Mapping):
+            return False
+        return bool(global_config.get(ROLLOUT_CORRELATION_KEY_NAME, False))
 
     def _token_id_capture_enabled(self) -> bool:
         """Whether this agent explicitly opted into training-token capture."""
