@@ -496,3 +496,14 @@ def test_sequential_worker_jobs_share_live_http_client_and_limits(monkeypatch):
         if server_utils.is_global_aiohttp_client_setup():
             loop.run_until_complete(server_utils.get_global_aiohttp_client().close())
         loop.close()
+
+
+def test_startup_logs_the_deprecation_notice(agent: HarborAgent, caplog: pytest.LogCaptureFixture) -> None:
+    """The server says on startup that it is superseded by the Harbor task format and where that lives."""
+    with caplog.at_level("WARNING", logger="responses_api_agents.harbor_agent_general.app"):
+        agent.model_post_init(None)
+    notices = {record.getMessage() for record in caplog.records if "deprecated" in record.getMessage()}
+    assert len(notices) == 1
+    (notice,) = notices
+    assert "responses_api_agents/harbor_agent_general is deprecated" in notice
+    assert "https://github.com/NVIDIA-NeMo/Gym/pull/3674" in notice

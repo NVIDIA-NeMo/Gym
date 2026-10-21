@@ -245,6 +245,11 @@ class HarborAgent(SimpleResponsesAPIAgent):
         global_config = get_global_config_dict()
         self._sem = asyncio.Semaphore(global_config.get(NUM_SAMPLES_IN_PARALLEL_KEY_NAME) or 1)
         self._worker_http_config = GlobalAIOHTTPAsyncClientConfig.model_validate(global_config)
+        logger.warning(
+            "responses_api_agents/harbor_agent_general is deprecated and will be removed soon. "
+            "New work should run Harbor tasks through the Harbor environment server "
+            "(PR stack from https://github.com/NVIDIA-NeMo/Gym/pull/3674)."
+        )
 
     def _configure_job_for_run(self, job_config: JobConfig, body: HarborRunRequest) -> None:
         """Customize a request's copied job without modifying the shared template."""
