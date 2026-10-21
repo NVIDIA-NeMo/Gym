@@ -1,6 +1,21 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""JSON boundary for running the existing NOOA harness in a task sandbox."""
+"""JSON boundary for running the existing NOOA harness in a task sandbox.
+
+A missing or malformed result plus a nonzero exit is an infrastructure failure,
+including invalid input, transport setup, finalization, or publication failures.
+The controller must not grade a recovered checkpoint or infer success from it;
+process status and stderr distinguish these failures from an abrupt worker kill.
+
+The worker has no independent wall-clock deadline. Its caller must supervise it:
+SandboxNOOARunner (introduced in PR #3851) supplies the shared supervisor's
+execution timeout, which also bounds model requests and their connection retries.
+Standalone callers must enforce the same process deadline.
+
+Artifacts are private (0600). The supervisor launches the worker without changing
+its UID, and the provider's artifact reader must use that UID or privileged file
+access. Cross-UID, unprivileged artifact collection is not supported.
+"""
 
 import asyncio
 import os
@@ -132,6 +147,7 @@ class _ModelClient:
         headers: dict[str, str] | None = None,
     ) -> ClientResponse:
         # The supplied path already includes rollout and token-capture routing.
+        # The caller's process deadline bounds the shared client's connection retries.
         return await request(
             "POST",
             self.base_url + url_path,
