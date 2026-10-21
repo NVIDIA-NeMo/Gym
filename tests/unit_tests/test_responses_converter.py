@@ -84,6 +84,23 @@ def test_backwards_compatible_aliases():
     assert VLLMConverterResponsesToChatCompletionsState is ResponsesConverterState
 
 
+def test_score_centering_fields_survive_response_conversion():
+    converter = ResponsesConverter(return_token_id_information=True)
+    output = converter.postprocess_assistant_message_dict(
+        {
+            "role": "assistant",
+            "content": "answer",
+            "prompt_token_ids": [1],
+            "generation_token_ids": [2],
+            "generation_log_probs": [-0.2],
+            "score_centering_ids": [[2, 3]],
+            "score_centering_logprobs": [[-0.2, -1.7]],
+        }
+    )
+    assert output[0].score_centering_ids == [[2, 3]]
+    assert output[0].score_centering_logprobs == [[-0.2, -1.7]]
+
+
 def test_usage_detail_ignores_ambiguous_top_level_names():
     usage = {"cached_tokens": 99, "cached_input_tokens": 7, "reasoning_tokens": 88, "reasoning_output_tokens": 3}
     assert _usage_detail(usage, "prompt_tokens_details", "cached_tokens", "cached_input_tokens") == 7
