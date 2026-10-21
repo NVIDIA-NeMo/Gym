@@ -27,6 +27,7 @@ import pytest
 from omegaconf import OmegaConf
 from pytest import MonkeyPatch, raises
 
+import nemo_gym.cli.dataset
 import nemo_gym.cli.env
 import nemo_gym.global_config
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, PARENT_DIR
@@ -55,7 +56,12 @@ from nemo_gym.cli.env import (
     test_environment_manifest as run_manifest_test,
 )
 from nemo_gym.cli.utils import exit_cleanly_on_config_error
-from nemo_gym.config_types import ConfigError, NoServerInstancesError, ResourcesServerInstanceConfig
+from nemo_gym.config_types import (
+    ConfigError,
+    ConfigPathNotFoundError,
+    NoServerInstancesError,
+    ResourcesServerInstanceConfig,
+)
 from nemo_gym.environment.scaffold import ScaffoldError
 from nemo_gym.registry import EnvironmentCatalogEntry
 
@@ -1016,6 +1022,18 @@ class TestExitCleanlyOnConfigError:
         status,
         pip_list,
     ]
+    # The `gym dataset` entrypoints read the config through their own module's `get_global_config_dict`, so they are
+    # listed (and patched) separately.
+    DECORATED_DATASET_COMMANDS = [
+        nemo_gym.cli.dataset.upload_jsonl_dataset_cli,
+        nemo_gym.cli.dataset.download_jsonl_dataset_cli,
+        nemo_gym.cli.dataset.upload_jsonl_dataset_to_hf_cli,
+        nemo_gym.cli.dataset.download_jsonl_dataset_from_hf_cli,
+        nemo_gym.cli.dataset.delete_jsonl_dataset_from_gitlab_cli,
+        nemo_gym.cli.dataset.upload_jsonl_dataset_to_hf_and_delete_gitlab_cli,
+        nemo_gym.cli.dataset.materialize_prompts_cli,
+        nemo_gym.cli.dataset.prepare_data,
+    ]
 
     def test_config_error_becomes_clean_exit(self) -> None:
         @exit_cleanly_on_config_error
@@ -1071,6 +1089,27 @@ class TestExitCleanlyOnConfigError:
 
         monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", _raise)
         monkeypatch.setattr(nemo_gym.cli.env, "_command_overrides", _raise)
+
+        with raises(RuntimeError, match="unexpected"):
+            command()
+
+    @pytest.mark.parametrize("command", DECORATED_DATASET_COMMANDS)
+    def test_dataset_command_exits_cleanly_on_config_error(self, monkeypatch: MonkeyPatch, command) -> None:
+        def _raise(*args, **kwargs):
+            raise ConfigPathNotFoundError("config_paths entry 'missing.yaml' was not found.")
+
+        monkeypatch.setattr(nemo_gym.cli.dataset, "get_global_config_dict", _raise)
+
+        with raises(SystemExit) as exc_info:
+            command()
+        assert exc_info.value.code == 1
+
+    @pytest.mark.parametrize("command", DECORATED_DATASET_COMMANDS)
+    def test_dataset_command_propagates_non_config_error(self, monkeypatch: MonkeyPatch, command) -> None:
+        def _raise(*args, **kwargs):
+            raise RuntimeError("unexpected")
+
+        monkeypatch.setattr(nemo_gym.cli.dataset, "get_global_config_dict", _raise)
 
         with raises(RuntimeError, match="unexpected"):
             command()
