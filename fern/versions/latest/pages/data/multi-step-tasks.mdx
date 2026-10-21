@@ -1,0 +1,154 @@
+---
+title: "Multi-Step Harbor Tasks"
+description: "How a Harbor [[steps]] task runs as turns on the Harbor path: per-step verification, reward roll-up, early stop, per-step solutions and users, and what is accepted or refused"
+position: 6
+---
+
+# Multi-Step Harbor Tasks
+
+A Harbor task with one or more `[[steps]]` tables is a multi-step task: an ordered sequence of steps the agent
+works through in one environment, each with its own instruction and its own verifier. NeMo Gym runs such a task as
+one episode of several **turns** on a single sandbox, the way Harbor's multi-step trial runs its steps
+(`harbor.trial.multi_step`). See [Harbor Tasks](/main/data/harbor-tasks) for the single-step shape and the
+dataset layout this builds on.
+
+```toml
+# task.toml
+multi_step_reward_strategy = "mean"   # or "final"; "mean" is Harbor's default
+
+[[steps]]
+name = "01-select-cake-base"
+[steps.agent]
+timeout_sec = 1800.0
+[steps.verifier]
+timeout_sec = 1800.0
+
+[[steps]]
+name = "02-select-frosting"
+# ... one table per step
+```
+
+```
+hello/
+├── task.toml
+├── instruction.md          # optional and never sent to the agent for a multi-step task (see below)
+├── environment/            # the one environment all turns share (Dockerfile or docker-compose.yaml)
+├── tests/test.sh           # the task-level verifier, run for every step under the step's tests/ on top
+└── steps/
+    ├── 01-select-cake-base/
+    │   ├── instruction.md  # the turn's own instruction (required)
+    │   ├── tests/test.sh   # the step's verifier, layered over the task's tests/ (optional)
+    │   └── solution/solve.sh  # the step's reference solution for the oracle (optional)
+    └── 02-select-frosting/
+        └── ...
+```
+
+## What runs per turn
+
+Each step is one turn. A turn:
+
+1. Opens a **fresh agent session** on the shared sandbox (Harbor's default, `resume_trajectory = false`): the
+   agent does not carry a conversation across steps, only whatever it left in the environment.
+2. Sends the step's own `steps/<name>/instruction.md` as the only input, under the step's
+   `[steps.agent].timeout_sec` (else the task's `[agent].timeout_sec`).
+3. Closes the session and runs the step's verifier.
+
+The task's top-level `instruction.md` is **never sent** for a multi-step task. A multi-step task may keep material
+there that the agent must not see (SWE-Interact puts the full hidden specification in the top-level file); each
+turn sees only its step's instruction, and the ATIF transcript the verifier reads holds that turn's request alone.
+
+## Verification per step
+
+After each turn the **shared verifier** runs in the agent's sandbox: the task's `tests/` with
+`steps/<name>/tests/` layered on top (a step's `test.sh` wins where it names the same path), under the step's
+`[steps.verifier]` timeout, user and environment over the task's `[verifier]`. The task's `[[verifier.collect]]`
+hooks run for every step, as in Harbor. Each turn's verifier run reports as a single-turn verification does, with
+its own reward files and its own logs directory.
+
+Multi-step tasks run in Harbor's **shared** verifier mode only; a task that declares a separate verifier (a
+`[verifier.environment]`, `environment_mode = "separate"`, or per-step separate verification) is refused by the
+loader, and `separate_verifier_for_artifacts` cannot force a multi-step task into separate mode (the seed refuses
+it).
+
+## Reward roll-up
+
+The episode's reward comes from the turns by `multi_step_reward_strategy` (Harbor's field):
+
+- **`mean`** (the default): the mean reward over the turns that produced a verifier result, and per-key means for
+  `verifier_rewards`, counting a key a turn lacks as 0.
+- **`final`**: the reward of the last turn that ran.
+
+The result lists every turn under `turns`; `response` and `ng_agent_observations` are the last turn's. A turn
+that is masked (a Gym-side failure) masks the whole episode.
+
+## Early stop
+
+The episode stops after a turn that is masked, writes no valid reward file, or misses the step's `min_reward`
+(a number gates the `reward` key, a table gates each named key; a turn with no verifier result fails every gate).
+The remaining turns do not run, and `stopped_after_turn` names the step it stopped after.
+
+## Per-step reference solutions (the oracle)
+
+`gym dataset validate` runs an oracle harness that executes the reference solution. For a multi-step task the
+solutions are per step: before each turn the server places that step's `steps/<name>/solution/` at `/solution`
+(emptying what the previous turn left), falling back to the task's top-level `solution/` for a step that has no
+folder of its own, exactly as Harbor's oracle resolves each step's solution (`harbor.agents.oracle`). The oracle
+then runs `/solution/solve.sh` for the turn, as it does for a single-turn task.
+
+`gym dataset validate` counts a multi-step task as validatable when **every** step has a solution — its own or
+the task's top-level one. A task with no solution for some step is listed as unvalidated (as a single-turn task
+without `solution/` is), and a step folder that exists without a `solve.sh` is that step's own (missing) answer,
+never covered by the task's script, as in Harbor.
+
+## Per-step agent user
+
+Harbor runs each step as its own `[steps.agent].user` (else the task's `[agent].user`). The server applies it per
+turn: when a step's user differs from the one in place, the sandbox's default exec user, the working directory's
+owner and the user the harness is handed all switch to it (a numeric uid is resolved to its name once, as at
+seed), and switch back for a later step that sets a different one. The verifier keeps its own user (the task
+image's, or `[steps.verifier].user` when set). A step's `[steps.agent].user` or `[steps.verifier].user` that
+names a group (`name:group`, `uid:gid`) is refused at seed on every provider but Docker — the only one whose
+`--user` applies a group — naming the step, before any turn is paid for, exactly as the task's own
+`[agent].user` and `[verifier].user` are.
+
+## Episode time budget
+
+With `enforce_task_timeouts` (the default), each turn is seeded with its own step budget and the episode deadline
+sums every turn's harness setup, agent budget, `[[verifier.collect]]` hooks and verifier time. A long task's
+steps can add up to more than `default_episode_timeout_seconds` (MemoryArena's six steps budget 21 780 s of agent
+and verifier time alone, above the default 21 600). The seed sizes three figures per episode: what the turns
+need once the sandbox is ready, the nominal episode (one `sandbox_ready_timeout_s`, and the overlay's
+`build_timeout_sec`, before that), and the worst case (the ready timeout and its grace per image pull attempt,
+`image_pull_retries + 1` of them), because the episode deadline opens before the seed and a pull retry or a slow
+sidecar start must not eat the final turns' budget. Above the default, the episode deadline and the sandbox
+lifetime follow the worst-case bound, since an episode cut off at the default would be retried and never scored;
+the seed logs this once per episode at WARNING level, naming all three figures. With `enforce_task_timeouts:
+false` the default is the deadline: a task whose nominal episode does not fit it is refused at seed with a message
+naming the setting and both figures (raise `default_episode_timeout_seconds` to at least the nominal one, the
+worst-case one to cover a retried seed, or turn enforcement on), and a task that fits only without a retried seed
+runs, with a WARNING that an episode whose seed retries its image pulls may time out and be retried.
+
+## Compose sidecar sizing
+
+A multi-step task often ships a Compose sidecar (a tool server the steps share). A sidecar without
+`deploy.resources` runs at the sandbox provider's default size (under Harbor's `docker compose` it has the host's
+resources), which is often too small for a sidecar that loads a large dataset; the seed logs, once per task,
+which sidecars run at the default and where a size goes. Size a sidecar with `deploy.resources.limits`
+(`cpus`, `memory`) in the task's Compose file. A sidecar whose process dies at start fails the group with a
+bounded tail of the service's command log in the failure message, so the cause is visible rather than only
+`unhealthy: exit status 1`.
+
+## Legacy keys accepted
+
+Older multi-step generators (the MemoryArena adapters) write the pre-1.3 spellings `version` and
+`multi_step_reward_mode`. They are read the way Harbor 0.22.0 reads them: `version` is `schema_version`, and
+`multi_step_reward_mode = "aggregate"` is dropped so the task rolls up with the default `mean` (or its own
+`multi_step_reward_strategy`), as Harbor has no such field; any other value of that key is dropped too, with a
+warning naming it, never read as a strategy.
+
+## What is refused
+
+The loader refuses per-step features the server does not run yet, naming the step: `steps/<name>/workdir/`,
+`steps/<name>/setup.sh`, a per-step `[steps.*].healthcheck` or `artifacts`, and per-step separate verification
+(`[steps.verifier].environment` or `environment_mode = "separate"`). A step's `[steps.agent].user` and
+`[steps.verifier].user` are applied per turn as described above.
