@@ -63,23 +63,29 @@ def model_server(monkeypatch):
     monkeypatch.setattr(harbor, "get_global_config_dict", lambda: {})
 
 
-def harbor_config(tmp_path, **overrides):
+def harbor_config(tmp_path, job=None, **overrides):
+    """The agent's config; `job` replaces fields of its native Harbor job."""
     return PartnerIFHarborConfig.model_validate(
         {
             "name": "partner_if_markdown",
             "host": "127.0.0.1",
             "port": 8000,
             "entrypoint": "app.py",
-            "harbor_jobs_dir": str(tmp_path / "jobs"),
             "harbor_resolve_paths_from_gym_root": True,
             "harbor_reward_key": "artifact_capture",
             "task_bundles_dir": str(tmp_path),
-            "harbor_dataset": {"path": str(tmp_path / "tasks")},
-            "harbor_agent": {
-                "name": "openhands",
-                "model_name": "openai/policy",
-                "env": {"LLM_API_KEY": "gym-proxy-no-provider-secret"},
-                "kwargs": {"version": "0.62.0", "max_iterations": 30},
+            "job": {
+                "jobs_dir": str(tmp_path / "jobs"),
+                "datasets": [{"path": str(tmp_path / "tasks")}],
+                "agents": [
+                    {
+                        "name": "openhands",
+                        "model_name": "openai/policy",
+                        "env": {"LLM_API_KEY": "gym-proxy-no-provider-secret"},
+                        "kwargs": {"version": "0.62.0", "max_iterations": 30},
+                    }
+                ],
+                **(job or {}),
             },
             "model_server": {"type": "responses_api_models", "name": "partner_if_harbor_model"},
             "resources_server": {"type": "resources_servers", "name": "partner_if"},
@@ -395,7 +401,9 @@ def test_llm_base_url_points_openhands_at_the_gym_model_server(tmp_path, monkeyp
     assert openhands.env == {"LLM_API_KEY": "gym-proxy-no-provider-secret", "LLM_BASE_URL": f"{MODEL_SERVER_URL}/v1"}
     # The inherited job keeps its task, and the configured agent is not mutated.
     assert job.job_name == "t3-r1" and job.datasets[0].task_names == ["native"]
-    assert agent.config.harbor_agent.env == {"LLM_API_KEY": "gym-proxy-no-provider-secret"}
+    [configured] = agent.config.job.agents
+    assert configured.env == {"LLM_API_KEY": "gym-proxy-no-provider-secret"}
+    assert configured.kwargs == {"version": "0.62.0", "max_iterations": 30}
     # Harbor's OpenHands prefers LLM_BASE_URL over api_base, the agent's env over the worker's.
     monkeypatch.setenv("LLM_BASE_URL", "http://other-provider.example/v1")
     created = AgentFactory.create_agent_from_config(AgentConfig.model_validate(openhands), logs_dir=tmp_path)
@@ -404,9 +412,7 @@ def test_llm_base_url_points_openhands_at_the_gym_model_server(tmp_path, monkeyp
 
 def test_a_configured_llm_base_url_is_rejected(tmp_path):
     agent, _ = make_agent(tmp_path)
-    agent.config.harbor_agent = agent.config.harbor_agent.model_copy(
-        update={"env": {"LLM_BASE_URL": "http://other-provider.example/v1"}}
-    )
+    agent.config.job.agents[0].env["LLM_BASE_URL"] = "http://other-provider.example/v1"
     with pytest.raises(ValueError, match="LLM_BASE_URL"):
         agent.build_job_config(run_body(tmp_path, live_contract()))
 
@@ -422,26 +428,26 @@ def test_startup_requires_the_opensandbox_key_for_the_artifact_environment(tmp_p
     environment = {"import_path": "responses_api_agents.partner_if_harbor_agent.environment:ArtifactEnvironment"}
     monkeypatch.delenv("OPENSANDBOX_API_KEY", raising=False)
     with pytest.raises(ValueError, match="OPENSANDBOX_API_KEY"):
-        make_agent(tmp_path, harbor_environment=environment)
-    make_agent(tmp_path, harbor_environment=environment, harbor_worker_env={"OPENSANDBOX_API_KEY": "key"})
+        make_agent(tmp_path, job={"environment": environment})
+    make_agent(tmp_path, job={"environment": environment}, harbor_worker_env={"OPENSANDBOX_API_KEY": "key"})
     monkeypatch.setenv("OPENSANDBOX_API_KEY", "key")
-    make_agent(tmp_path, harbor_environment=environment)
+    make_agent(tmp_path, job={"environment": environment})
 
 
 def test_model_server_is_required_and_relative_package_paths_resolve_under_the_gym_roots(tmp_path, monkeypatch):
     with pytest.raises(ValidationError, match="model_server"):
         harbor_config(tmp_path, model_server=None)
     monkeypatch.chdir(tmp_path)
-    relative = {"task_bundles_dir": "resources_servers/partner_if/data", "harbor_dataset": {"path": "benchmarks"}}
+    relative = {"task_bundles_dir": "resources_servers/partner_if/data", "job": {"datasets": [{"path": "benchmarks"}]}}
     built_in = harbor_config(tmp_path, **relative)
     assert built_in.task_bundles_dir == PARENT_DIR / "resources_servers/partner_if/data"
-    assert built_in.harbor_dataset.path == (PARENT_DIR / "benchmarks").resolve()
+    assert built_in.job.datasets[0].path == (PARENT_DIR / "benchmarks").resolve()
     # A benchmark plugin root (--search-dir) is searched first.
     plugin = tmp_path / "plugin"
     (plugin / "benchmarks").mkdir(parents=True)
     monkeypatch.setenv("NEMO_GYM_EXTRA_ROOTS", str(plugin))
-    assert harbor_config(tmp_path, **relative).harbor_dataset.path == (plugin / "benchmarks").resolve()
-    assert harbor_config(tmp_path).harbor_dataset.path == (tmp_path / "tasks").resolve()
+    assert harbor_config(tmp_path, **relative).job.datasets[0].path == (plugin / "benchmarks").resolve()
+    assert harbor_config(tmp_path).job.datasets[0].path == (tmp_path / "tasks").resolve()
 
 
 def test_example_config_validates_as_the_agent_starts(monkeypatch):
@@ -468,15 +474,17 @@ def test_example_config_validates_as_the_agent_starts(monkeypatch):
         )
     )
     block = OmegaConf.to_container(get_first_server_config_dict(config, "partner_if_harbor_agent"), resolve=True)
+    # The Harbor settings are a native job, not the legacy harbor_* fields.
+    assert "job" in block
     agent = PartnerIFHarborConfig.model_validate(block | {"name": "partner_if_harbor_agent"})
     assert (agent.model_server.name, agent.resources_server.name) == ("partner_if_harbor_model", "partner_if")
     assert config.partner_if_harbor_model.responses_api_models.vllm_model.is_responses_native is False
-    assert agent.harbor_dataset.path == PARENT_DIR / "data/partner_if_harbor/tasks"
-    assert agent.harbor_jobs_dir == PARENT_DIR / "results/partner_if_harbor_agent/harbor_jobs"
-    assert agent.harbor_environment.kwargs["sandbox_provider"]["opensandbox"]["connection"]["api_key"] == (
+    assert agent.job.datasets[0].path == PARENT_DIR / "data/partner_if_harbor/tasks"
+    assert agent.job.jobs_dir == PARENT_DIR / "results/partner_if_harbor_agent/harbor_jobs"
+    assert agent.job.environment.kwargs["sandbox_provider"]["opensandbox"]["connection"]["api_key"] == (
         "supplied-by-worker-environment"
     )
-    assert agent.harbor_agent.env == {"LLM_API_KEY": "gym-proxy-no-provider-secret"}
+    assert agent.job.agents[0].env == {"LLM_API_KEY": "gym-proxy-no-provider-secret"}
 
 
 def test_uvicorn_workers_import_a_module_level_app(monkeypatch):

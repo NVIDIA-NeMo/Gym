@@ -19,36 +19,38 @@ partner_if_harbor_agent:
         name: partner_if
       # One TaskBundle JSON (the task's contract and actor documents) per Harbor task.
       task_bundles_dir: ${partner_if_harbor_task_bundles_dir}
-      # Trials go to a harbor/ directory beside the --output file, taking a relative --output from the Gym
-      # root; without --output, to results/partner_if_harbor_agent/harbor_jobs under the Gym root.
-      harbor_jobs_dir: ${oc.select:output_jsonl_fpath,results/partner_if_harbor_agent/harbor_jobs}
       harbor_resolve_paths_from_gym_root: true
-      harbor_dataset:
-        path: ${partner_if_harbor_tasks_dir}
-      harbor_environment:
-        import_path: responses_api_agents.partner_if_harbor_agent.environment:ArtifactEnvironment
-        kwargs:
-          workdir: /root
-          exec_shell: bash -c
-          actor_directories: {}
-          output_directory: /root/output
-          sandbox_provider:
-            opensandbox:
-              connection:
-                domain: ${oc.env:OPENSANDBOX_DOMAIN,opensandbox-server.opensandbox-system.svc.cluster.local}
-                # The Harbor worker reads OPENSANDBOX_API_KEY, so Harbor's job files never hold the key.
-                api_key: supplied-by-worker-environment
-                use_server_proxy: true
-                transport_backend: aiohttp
-      harbor_agent:
-        name: openhands
-        model_name: openai/${policy_model_name}
-        # A placeholder: OpenHands reaches the policy through the Gym model server.
-        env:
-          LLM_API_KEY: gym-proxy-no-provider-secret
-        kwargs:
-          version: "0.62.0"
-          max_iterations: 30
+      # Native harbor.models.job.config.JobConfig fields.
+      job:
+        # Trials go to a harbor/ directory beside the --output file, taking a relative --output from the
+        # Gym root; without --output, to results/partner_if_harbor_agent/harbor_jobs under the Gym root.
+        jobs_dir: ${oc.select:output_jsonl_fpath,results/partner_if_harbor_agent/harbor_jobs}
+        datasets:
+          - path: ${partner_if_harbor_tasks_dir}
+        environment:
+          import_path: responses_api_agents.partner_if_harbor_agent.environment:ArtifactEnvironment
+          kwargs:
+            workdir: /root
+            exec_shell: bash -c
+            actor_directories: {}
+            output_directory: /root/output
+            sandbox_provider:
+              opensandbox:
+                connection:
+                  domain: ${oc.env:OPENSANDBOX_DOMAIN,opensandbox-server.opensandbox-system.svc.cluster.local}
+                  # The Harbor worker reads OPENSANDBOX_API_KEY, so Harbor's job files never hold the key.
+                  api_key: supplied-by-worker-environment
+                  use_server_proxy: true
+                  transport_backend: aiohttp
+        agents:
+          - name: openhands
+            model_name: openai/${policy_model_name}
+            # A placeholder: OpenHands reaches the policy through the Gym model server.
+            env:
+              LLM_API_KEY: gym-proxy-no-provider-secret
+            kwargs:
+              version: "0.62.0"
+              max_iterations: 30
 
 # The policy over Chat Completions, as OpenHands 0.62 requires.
 partner_if_harbor_model:

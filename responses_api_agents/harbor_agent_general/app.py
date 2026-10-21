@@ -70,8 +70,9 @@ def resolve_harbor_path(path: Path, *, from_gym_root: bool) -> Path:
 
 
 def resolve_harbor_dataset_path(path: Path) -> Path:
-    """Resolve a dataset path under the first benchmark plugin root (`NEMO_GYM_EXTRA_ROOTS`, set by
-    `--search-dir`) that has it, otherwise under the Gym root."""
+    """Resolve a dataset path under the first root that has it: the benchmark plugin roots
+    (`NEMO_GYM_EXTRA_ROOTS`, set by `--search-dir`), then the Gym root. A path that no root has resolves
+    under the first root, which is the Gym root when no plugin roots are set."""
     roots = [*_extra_roots(), GYM_ROOT]
     return next((root / path for root in roots if (root / path).exists()), roots[0] / path).resolve()
 
@@ -240,8 +241,8 @@ class HarborAgent(SimpleResponsesAPIAgent):
         return metrics
 
     def build_job_config(self, body: HarborRunRequest) -> JobConfig:
-        """The Harbor job for one run. Override to add per-run settings, such as a model URL built with
-        `base_url_for_run`."""
+        """The Harbor job for one run, a copy of the configured `job`. Override to add per-run settings, such as
+        a model URL built with `base_url_for_run`."""
         return self.config.build_job_config(
             task_name=body.task_name,
             ## Stable names allow resume unless fresh jobs are configured.

@@ -157,9 +157,9 @@ repository-root resolution with `harbor_resolve_paths_from_gym_root: true`;
 absolute paths remain unchanged. With it, a relative dataset path is found first
 under a benchmark plugin root (`--search-dir`, `NEMO_GYM_EXTRA_ROOTS`).
 
-`HarborAgent.build_job_config(body)` builds each run's Harbor job from the
-config; a subclass can add per-run settings there, such as a model server URL
-with the run's rollout prefix (`base_url_for_run`).
+`HarborAgent.build_job_config(body)` builds each run's Harbor job from `job`;
+a subclass can add per-run settings there, such as a model server URL with the
+run's rollout prefix (`base_url_for_run`).
 
 Job names default to `t<task>-r<rollout>` for resuming trials. Set
 `harbor_unique_job_names: true` to append a fresh UUID for every rollout

@@ -90,7 +90,7 @@ class PartnerIFHarborAgent(HarborAgent):
         super().model_post_init(context)
         # Fail at startup rather than on every rollout.
         sandbox_server_url(self.config.model_server.name, require_reachable=True)
-        environment = self.config.harbor_environment.import_path
+        environment = self.config.job.environment.import_path
         if environment == f"{ArtifactEnvironment.__module__}:{ArtifactEnvironment.__name__}" and not (
             os.environ.get(OPENSANDBOX_API_KEY) or self.config.harbor_worker_env.get(OPENSANDBOX_API_KEY)
         ):
@@ -102,14 +102,14 @@ class PartnerIFHarborAgent(HarborAgent):
         run = body.model_dump(by_alias=True) | {ROLLOUT_ID_KEY_NAME: body.capture_rollout_id}
         url = sandbox_server_url(self.config.model_server.name, require_reachable=True)
         base_url = f"{self.base_url_for_run(url, run)}/v1"
-        agents = []
-        for agent in job.agents:
-            # Harbor's OpenHands prefers LLM_BASE_URL in its env, then in the worker's, over api_base.
-            if agent.env.get("LLM_BASE_URL", base_url) != base_url:
-                raise ValueError("LLM_BASE_URL is set by this agent: OpenHands must call the Gym model server")
-            update = {"kwargs": {**agent.kwargs, "api_base": base_url}, "env": {**agent.env, "LLM_BASE_URL": base_url}}
-            agents.append(agent.model_copy(update=update))
-        return job.model_copy(update={"agents": agents})
+        # The job is this run's own copy, with the single agent the config allows.
+        [agent] = job.agents
+        # Harbor's OpenHands prefers LLM_BASE_URL in its env, then in the worker's, over api_base.
+        if agent.env.get("LLM_BASE_URL", base_url) != base_url:
+            raise ValueError("LLM_BASE_URL is set by this agent: OpenHands must call the Gym model server")
+        agent.kwargs["api_base"] = base_url
+        agent.env["LLM_BASE_URL"] = base_url
+        return job
 
     def success_response(self, body: HarborRunRequest, trial_dir: Path) -> HarborVerifyResponse:
         validate_openhands_completion(trial_dir)
