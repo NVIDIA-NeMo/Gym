@@ -112,6 +112,7 @@ from nemo_gym.server_utils import (
 )
 from nemo_gym.single_agent_turn_types import SingleAgentTurnFailure, SingleAgentTurnResult
 from nemo_gym.tasks.harbor import DIGEST_KEY, HarborTask, load_task
+from nemo_gym.tasks.harbor.compose_overlay import ComposeOverlayError, HarborComposeOverlay, wrap_first_instruction
 from nemo_gym.tasks.harbor.dataset_config import DATASET_FILE
 from nemo_gym.tasks.harbor.errors import HarborTaskError
 from nemo_gym.tasks.harbor.image_configs import load_compose_document
@@ -306,6 +307,12 @@ class HarborEnvironmentServerConfig(BaseEnvironmentServerConfig):
     # Values for the `${NAME}` references a task's Compose file leaves to the deployment, such as a sidecar's
     # model endpoint and key. Resolved at seed; the task and Harbor's own variables take precedence.
     compose_variables: dict[str, ComposeVariable] = Field(default_factory=dict)
+    # The job-level Compose overlay, as Harbor's `extra_docker_compose`, `agents[].mcp_servers` and
+    # `prompt_template_path` together: Compose `files` merged onto every task's Compose group (a plain image task
+    # becomes the one-service group `main` first), `mcp_servers` merged by name with the task's own and granted
+    # with them, and a `prompt_template` rendered around the instruction of the episode's first turn. Prepare
+    # reads the same block, so the overlay's images are recorded and its merge checked with the tasks'.
+    compose_overlay: HarborComposeOverlay | None = None
 
 
 def min_reward_failure(rewards: dict[str, float] | None, min_reward: float | dict[str, float] | None) -> str | None:
@@ -425,6 +432,9 @@ class HarborEnvironmentServer(
         self._verifier_images_without_tests: set[str] = set()
         # Task digests whose Compose sidecars without deploy.resources were warned about once (`_warn_unsized_sidecars`).
         self._unsized_sidecars_warned: set[str] = set()
+        # Job-level `compose_overlay.mcp_servers` entries that cannot be granted (an `sse` entry), each warned about
+        # once per run rather than once per turn of every episode.
+        self._ungrantable_overlay_servers: set[str] = set()
         self._pull_retry_gate = asyncio.Semaphore(PULL_RETRY_CONCURRENCY)
         self._shutting_down = False
         artifacts = self.config.artifacts_dir
@@ -690,6 +700,14 @@ class HarborEnvironmentServer(
         cleanup.register_cleanup("harbor episode key", release_key)
         cleanup.register_cleanup("harbor sandbox", close_sandbox)
         try:
+            # The job-level prompt template wraps the first turn's instruction before anything is provisioned: the
+            # harness, the transcript export and the result all see the rendered instruction, as Harbor's agent
+            # renders it before its first turn. A template that does not render is the configuration's fault.
+            request = self._with_prompt_template(request)
+        except ComposeOverlayError as error:
+            raise self._failure(stage="seed", failure_reason=str(error), terminal=True)
+        task_input = request.task.task_input
+        try:
             session = await self._seed(request, episode_key)
             # The sandbox is seeded; the oracle alone also gets the task's solution before its session opens.
             await self._seed_solution(session)
@@ -759,6 +777,44 @@ class HarborEnvironmentServer(
             f" (masked: {result.failure_kind})" if result.mask_sample else "",
         )
         return HarborEpisodeResponse(episode_id=request.episode_id, task_id=request.task.task_id, result=result)
+
+    def _with_prompt_template(self, request: HarborEpisodeRequest) -> HarborEpisodeRequest:
+        """``request`` with the overlay's prompt template rendered around the instruction of its first turn.
+
+        Harbor's agent renders ``prompt_template_path`` around the instruction it is given
+        (``render_prompt_template``, ``{{ instruction }}`` with ``StrictUndefined``); here the environment
+        server does it once, on the first turn's user message, so every harness sees the same rendered
+        instruction and the first turn's ATIF transcript (the one its verifier reads) carries it. The template was
+        read and compiled when the block was read (``HarborComposeOverlay.compile_template``); each episode renders
+        that compiled template (``render_instruction``), with no file read or parse on the event loop. A single-turn
+        result's ``responses_create_params`` is the rendered request; a multi-step result records the last turn's
+        params, so its rendered first turn is in that turn's transcript only (recording each turn's params on the
+        turn result is a follow-up with M34). Later turns of a multi-step task are sent as written (wrapping each
+        turn is a parked follow-up). Without a template the request is returned as it is.
+        """
+        overlay = self.config.compose_overlay
+        if overlay is None or overlay.prompt_template is None:
+            return request
+        render = overlay.render_instruction
+
+        def wrapped(params: Any) -> Any:
+            # The row's params are a model here (a mapping on the wire): rendered on its JSON form, read back as one.
+            # Only the fields the row set are dumped, so the model read back has the same fields set and the request
+            # to the harness (``ServerClient.post`` serializes with ``exclude_unset=True``) carries exactly the row's
+            # keys with the rendered content, not every default (``tools: []``, ``tool_choice``, ...) made explicit.
+            if isinstance(params, BaseModel):
+                dumped = params.model_dump(mode="json", exclude_unset=True)
+                return type(params).model_validate(wrap_first_instruction(dumped, render))
+            return wrap_first_instruction(params, render)
+
+        request = request.model_copy(deep=True)
+        task_input = request.task.task_input
+        if task_input.turns:
+            first = task_input.turns[0]
+            first.responses_create_params = wrapped(first.responses_create_params)
+        else:
+            task_input.responses_create_params = wrapped(task_input.responses_create_params)
+        return request
 
     def _deadline_failure(self, task: HarborTask, budget: float, progress: "_TurnProgress") -> HandledEpisodeError:
         """The staged failure of an episode that ran past its task's time budget, with the turn's evidence so far."""
@@ -865,7 +921,7 @@ class HarborEnvironmentServer(
         agent_cleanup = cleanup.register_cleanup("agent session", close_agent)
 
         # One source for the task's MCP declarations: what is granted and what the refusal below checks.
-        mcp_servers = task.config.environment.mcp_servers
+        mcp_servers = self._task_mcp_servers(task)
         try:
             # Inside the try: a declaration the grant schema rejects is a staged terminal agent failure, not a 500.
             tool_accesses = self._task_tool_accesses(task, mcp_servers)
@@ -1160,20 +1216,35 @@ class HarborEnvironmentServer(
         return unreached
 
     def _task_tool_accesses(self, task: HarborTask, mcp_servers: list[HarborMCPServer]) -> list[ToolAccess]:
-        """``mcp_servers`` (the task's declarations) as agent tool grants, when ``task_mcp_grants`` asks for them.
+        """``mcp_servers`` (the task's, the job-level overlay's merged in by name) as agent tool grants, when
+        ``task_mcp_grants`` asks for them: one grant list, as Harbor hands its agent one ``mcp_servers`` list.
 
         Only URL entries reached over streamable HTTP can be granted; a Compose sidecar's URL names its
-        service host, which resolves inside the task's sandbox group, where the harness runs.
+        service host, which resolves inside the task's sandbox group, where the harness runs. An entry that cannot
+        be granted still reaches the harness in ``/tmp/.nemo-gym/task.json``; a task's own such entry is warned about
+        at every seed (the task author's signal), the job-level overlay's once per run, by name (the operator's
+        choice, the memory team's Redis stack being ``sse`` by design, which would otherwise print one line per turn
+        of every episode of the run).
         """
         if self.config.task_mcp_grants == "off":
             return []
+        overlay = self.config.compose_overlay
+        job_entries = {server.name for server in overlay.mcp_servers} if overlay is not None else set()
         accesses: list[ToolAccess] = []
         for server in mcp_servers:
             if server.transport != "streamable-http" or not server.url:
-                LOGGER.warning(
-                    f"{task.task_id}: MCP server {server.name!r} ({server.transport}) cannot be granted; "
-                    "only streamable-http URL entries can"
-                )
+                if server.name not in job_entries:
+                    LOGGER.warning(
+                        f"{task.task_id}: MCP server {server.name!r} ({server.transport}) cannot be granted; "
+                        "only streamable-http URL entries can"
+                    )
+                elif server.name not in self._ungrantable_overlay_servers:
+                    self._ungrantable_overlay_servers.add(server.name)
+                    LOGGER.warning(
+                        f"compose_overlay: MCP server {server.name!r} ({server.transport}) cannot be granted; only "
+                        "streamable-http URL entries can; it reaches the harness in /tmp/.nemo-gym/task.json "
+                        "(said once per run)"
+                    )
                 continue
             accesses.append(
                 MCPToolAccess(
@@ -1239,13 +1310,30 @@ class HarborEnvironmentServer(
             # A step's own agent user is installed for its turn (`_apply_turn_user`); a pair the provider cannot
             # apply is refused before the earlier turns are paid for, as the task's own `[agent].user` is.
             self._refuse_unsupported_group(task, turn.config.agent.user, where=f" step {turn.name!r}")
-        if task.needs_compose:
-            # A Compose file the deployment leaves incomplete (a variable no compose_variables entry sets) is a
-            # configuration error: refused before anything is provisioned, and not retried.
+        if self._uses_compose(task):
+            # A Compose file the deployment leaves incomplete (a variable no compose_variables entry sets), or a
+            # job-level overlay file that does not merge onto it, is a configuration error: refused before anything
+            # is provisioned, and not retried.
             try:
-                load_compose_document(task, operator_variables=self._compose_variable_values(episode_key))
+                document = load_compose_document(
+                    task,
+                    operator_variables=self._compose_variable_values(episode_key),
+                    overlay=self.config.compose_overlay,
+                )
             except ImageConfigError as exc:
                 raise HTTPException(422, f"Compose file of task {task.task_id!r}: {exc}") from exc
+            # So is a group whose images prepare did not record (a dataset prepared without this overlay): refused
+            # here, terminally, not raised from the group's start and retried.
+            recorded = self._check_compose_images(task, document)
+            # And so is a merged document this deployment cannot run (a field the group cannot run, a bind source no
+            # `volume_sources` entry maps, a service reset away that a collect hook names, extra_hosts on a non-root
+            # sidecar): every check prepare ran, on the document the group would start, here rather than inside
+            # `_create_compose`, where the failure would be retried for every episode. The overlay is a run-config
+            # value, so it changes between prepare and serve more easily than a task file.
+            try:
+                self._check_compose_group(task, document, recorded)
+            except (ImageConfigError, HarborTaskError) as exc:
+                raise HTTPException(422, f"Compose group of task {task.task_id!r}: {exc}") from exc
         if task.turns:
             # Three figures of one episode: what the steps need once the sandbox is ready (`_post_seed_budget_s`),
             # the nominal episode of one sandbox start, with the overlay build, before that (`_task_budget_s`), and
@@ -1309,7 +1397,7 @@ class HarborEnvironmentServer(
         compose: AsyncSandboxCompose | None = None
         launch: EntrypointLaunch | None = None
         try:
-            if task.needs_compose:
+            if self._uses_compose(task):
                 compose = await self._create_compose(task, episode_key)
                 self._sandboxes[episode_key] = compose
                 sandbox = compose.services["main"]
