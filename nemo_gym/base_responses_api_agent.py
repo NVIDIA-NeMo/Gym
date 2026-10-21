@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import contextvars
+import logging
 from abc import abstractmethod
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Mapping
@@ -65,13 +67,26 @@ from nemo_gym.server_utils import (
     apply_rollout_prefix,
     rollout_path_prefix,
 )
+from nemo_gym.session_routing import SessionClaims, SessionKind
 from nemo_gym.telemetry.endpoints import traced_endpoint, traced_rollout_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.tool_access import ToolAccess
 
 
+LOG = logging.getLogger(__name__)
+
+
 # Session cookie key that binds later activation and close requests to their agent session.
 AGENT_SESSION_COOKIE_KEY = "agent_session_id"
+# An agent session is named by agent_session_id, in its seed and close bodies and in the cookie after its seed
+# (see nemo_gym.session_routing).
+AGENT_SESSIONS = SessionKind(
+    cookie_key=AGENT_SESSION_COOKIE_KEY,
+    id_field="agent_session_id",
+    seed_path="/v1/agent_sessions",
+    close_path="/v1/agent_sessions/close",
+    cookie_session=False,
+)
 # Request header with an activation's index: its 1-based count within its agent session.
 # With checkpointing,
 # an agent that supports it answers an activation it already completed with the reply it gave,
@@ -212,11 +227,32 @@ class _AgentSessionRecord:
 
 class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, SimpleServer):
     config: BaseResponsesAPIAgentConfig
+    routes_sessions_to_owner = True
     _session_records: dict[str, _AgentSessionRecord] = PrivateAttr(default_factory=dict)
     _closed_session_records: OrderedDict[str, _AgentSessionRecord] = PrivateAttr(default_factory=OrderedDict)
+    # Seeds whose setup failed, kept for the caller's close until session_close_retry_window_seconds passes.
+    _failed_seed_records: OrderedDict[str, _AgentSessionRecord] = PrivateAttr(default_factory=OrderedDict)
+    _failed_seed_releases: set[asyncio.Task] = PrivateAttr(default_factory=set)
+    # With several workers, which worker claimed each agent_session_id (see nemo_gym.session_routing).
+    _agent_session_claims: Optional[SessionClaims] = PrivateAttr(default=None)
 
-    @asynccontextmanager
-    async def _locked_agent_session(self, session_id: str) -> AsyncIterator[_AgentSessionRecord]:
+    def claimed_session_routing(self) -> dict[str, Any]:
+        return {"kind": AGENT_SESSIONS, "agent_sessions": self}
+
+    def holds_agent_session(self, agent_session_id: str) -> bool:
+        """Whether this worker keeps any record of the session: open, failed and awaiting close, or closed."""
+        return agent_session_id in self._session_records
+
+    def use_agent_session_claims(self, claims: SessionClaims) -> None:
+        """Release a session's claim when this worker drops its last record (see nemo_gym.session_routing)."""
+        self._agent_session_claims = claims
+
+    def _release_agent_session_claim(self, agent_session_id: str) -> None:
+        if self._agent_session_claims is not None:
+            self._agent_session_claims.release(agent_session_id)
+
+    def expire_agent_session_records(self) -> None:
+        """Drop the close receipts whose window has passed, and release the failed seeds nobody closed."""
         now = monotonic()
         while self._closed_session_records:
             key, record = next(iter(self._closed_session_records.items()))
@@ -226,6 +262,22 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             # A retire may have freed the session, and a new one may have taken its ID since.
             if self._session_records.get(key) is record:
                 del self._session_records[key]
+                self._release_agent_session_claim(key)
+        while self._failed_seed_records:
+            key, record = next(iter(self._failed_seed_records.items()))
+            if record.expires_at > now:
+                break
+            self._failed_seed_records.pop(key)
+            if self._session_records.get(key) is record and record.close_response is None:
+                # Nobody closed the failed seed within the retry window, so release what its setup left.
+                # A fresh context: the task must not run under the rollout of the request that found it expired.
+                task = asyncio.create_task(self._release_failed_seed(key, record), context=contextvars.Context())
+                self._failed_seed_releases.add(task)
+                task.add_done_callback(self._failed_seed_releases.discard)
+
+    @asynccontextmanager
+    async def _locked_agent_session(self, session_id: str) -> AsyncIterator[_AgentSessionRecord]:
+        self.expire_agent_session_records()
         while True:
             record = self._session_records.setdefault(session_id, _AgentSessionRecord())
             async with record.lock:
@@ -242,7 +294,50 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                         and self._session_records.get(session_id) is record
                     ):
                         del self._session_records[session_id]
+                        self._release_agent_session_claim(session_id)
                 return
+
+    def _keep_failed_seed(self, agent_session_id: str, record: _AgentSessionRecord) -> None:
+        """Keep a failed seed's state for the caller's close, for as long as a close receipt would be kept."""
+        record.closing = True
+        record.expires_at = monotonic() + self.config.session_close_retry_window_seconds
+        self._failed_seed_records.pop(agent_session_id, None)
+        self._failed_seed_records[agent_session_id] = record
+
+    async def _undo_seed(self, agent_session_id: str, record: _AgentSessionRecord) -> None:
+        """Release a seeded session's state with the close hook, or keep it as a failed seed if the hook fails."""
+        try:
+            await self._close_agent_session_state(record.state)
+        except Exception:
+            LOG.exception("Could not release agent session %r after its seed failed", agent_session_id)
+            self._keep_failed_seed(agent_session_id, record)
+            return
+        record.state = None
+
+    async def _release_failed_seed(self, agent_session_id: str, record: _AgentSessionRecord) -> None:
+        """Run the close hook on a failed seed's state that no close reached, then drop the record.
+
+        The hook runs under the session's own rollout, as it would for the caller's close.
+        If it fails, the record keeps its state for a later close, and the release is tried again a window later.
+        """
+        async with self._locked_agent_session(agent_session_id) as current:
+            if current is not record or record.close_response is not None or record.state is None:
+                return
+            episode_id = record.episode_id
+            try:
+                with rollout_context(episode_id.capture_key if episode_id is not None else None):
+                    await self._close_agent_session_state(record.state)
+            except Exception:
+                LOG.exception(
+                    "Could not release agent session %r, whose seed failed and was never closed; retrying in %s s",
+                    agent_session_id,
+                    self.config.session_close_retry_window_seconds,
+                )
+                record.expires_at = monotonic() + self.config.session_close_retry_window_seconds
+                self._failed_seed_records[agent_session_id] = record
+                return
+            # The lock's exit drops the record, now that it holds no state.
+            record.state = None
 
     @staticmethod
     def _agent_session_id_from_request(request: Request | None) -> str | None:
@@ -382,8 +477,6 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         if self._restart_only is not None and response is not None:
             # This agent cannot capture the session, so the episode that seeds it starts over after a crash.
             response.headers[CHECKPOINT_RESTART_HEADER] = "1"
-        if self.config.num_workers not in (None, 1):
-            raise ValueError("Agent sessions require num_workers=1")
         current = self._agent_session_id_from_request(request)
         if current is not None and current != body.agent_session_id:
             raise HTTPException(409, "agent_session_id does not match the session cookie")
@@ -407,12 +500,18 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                     record.state = await self._seed_agent_session_state(body.model_copy(deep=True))
                 except AgentSessionSetupError as error:
                     record.state = error.state
-                    record.closing = True
+                    self._keep_failed_seed(body.agent_session_id, record)
                     raise error.error from None
-                if participant is not None:
-                    participant.open_session(body.agent_session_id, body.episode_id, seed=True)
-                elif self._restart_only is not None:
-                    self._restart_only.open_session(body.agent_session_id, body.episode_id)
+                try:
+                    if participant is not None:
+                        participant.open_session(body.agent_session_id, body.episode_id, seed=True)
+                    elif self._restart_only is not None:
+                        self._restart_only.open_session(body.agent_session_id, body.episode_id)
+                except Exception:
+                    # Nothing tracks the session, so undo the seed: release its state now,
+                    # so the lock's exit drops the record and, with several workers, its claim.
+                    await self._undo_seed(body.agent_session_id, record)
+                    raise
             elif record.state.request != body:
                 raise HTTPException(409, "agent_session_id is already bound to another seed request")
             request.session[AGENT_SESSION_COOKIE_KEY] = body.agent_session_id
@@ -449,6 +548,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             record.episode_id = body.episode_id
             record.close_response = result.model_copy(deep=True)
             record.expires_at = monotonic() + self.config.session_close_retry_window_seconds
+            self._failed_seed_records.pop(body.agent_session_id, None)
             self._closed_session_records[body.agent_session_id] = record
             # Keep the marker so a stale /responses request cannot fall back to the non-session path.
             request.session[AGENT_SESSION_COOKIE_KEY] = body.agent_session_id
@@ -514,6 +614,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         record = self._session_records.get(agent_session_id)
         if record is not None and record.close_response is None:
             self._session_records.pop(agent_session_id, None)
+            self._release_agent_session_claim(agent_session_id)
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> AgentSessionState:
         """Validate grants and initialize harness state.
