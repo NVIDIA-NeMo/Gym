@@ -28,7 +28,7 @@ gym eval run \
     --config benchmarks/terminal_bench_2_1/nooa.yaml \
     --config responses_api_models/vllm_model/configs/vllm_model.yaml \
     --config private-policy-provider.yaml \
-    --limit 1 --concurrency 1 --num-repeats 1 \
+    --split benchmark --limit 1 --concurrency 1 --num-repeats 1 \
     --output results/terminal-bench-2-1-nooa.jsonl
 ```
 
