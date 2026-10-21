@@ -457,7 +457,11 @@ class CodexAgentVerifyResponse(BaseVerifyResponse):
 
 class CodexAgent(OutcomeReportingAgent):
     def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
-        """Read Codex 0.144.4's turn.failed error; tested on that pinned version."""
+        """Read Codex 0.144.4's turn.failed error; tested on that pinned version.
+
+        Some errors retain only the provider body, without an HTTP status. Those
+        remain unknown; a provider's arbitrary error.code is not an HTTP status.
+        """
         if native_result.get("type") != "turn.failed":
             return AgentOutcome(reason="unknown")
         message = str((native_result.get("error") or {}).get("message") or "")
@@ -917,7 +921,7 @@ class CodexAgent(OutcomeReportingAgent):
             and cleanup["return_code"] == 1
             and not cleanup["timed_out"]
             and not cleanup["error"]
-            and self.classify_outcome(terminal).reason != "unknown"
+            and terminal.get("type") == "turn.failed"
             # Ignore already-recognized advisories when checking for unrelated execution errors.
             and all(message == (terminal.get("error") or {}).get("message") for message in usage.get("errors") or [])
         )

@@ -2014,3 +2014,16 @@ async def test_native_model_error_is_reported_with_classification(setup, status)
     }
     closed = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
     assert closed.agent_observations.records[0].status == "failed"
+
+
+async def test_native_failure_without_http_status_reports_unknown(setup):
+    agent, sandbox = setup
+    message = json.dumps({"error": {"message": "rejected", "code": "400"}})
+    sandbox.events = json.dumps([1.0, {"type": "turn.failed", "error": {"message": message}}])
+    sandbox.result["return_code"] = 1
+    request, session_id, task = await activate(agent, sandbox)
+    response = await task
+    assert response.status == "failed"
+    assert response.error.message == message
+    assert json.loads(response.metadata["ng_agent_outcome"]) == {"reason": "unknown"}
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
