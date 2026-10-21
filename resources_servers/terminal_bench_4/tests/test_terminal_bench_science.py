@@ -76,7 +76,7 @@ def test_manifest_pins_the_v0_1_release():
     assert (manifest["version"], manifest["ref"]) == ("v0.1", DATASET_REF)
     assert (manifest["source_tag"], manifest["source_commit"]) == (
         "v0.1.0",
-        "f81afac4f11048e77a15dfc8fb1dbfb897fea0ce",
+        "f81afac4f11048e77a15dfc8fb1dbfb897fea0ce",  # pragma: allowlist secret
     )
     assert all(task["ref"].startswith("sha256:") and len(task["ref"]) == 71 for task in manifest["tasks"])
     assert len({task["ref"] for task in manifest["tasks"]}) == 70
