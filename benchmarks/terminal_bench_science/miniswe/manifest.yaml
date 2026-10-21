@@ -24,7 +24,7 @@ datasets:
   type: benchmark
   jsonl_fpath: benchmarks/terminal_bench_science/data/benchmark.jsonl
   prepare_script: benchmarks/terminal_bench_science/prepare.py
-  num_repeats: 3
+  num_repeats: 1
 - name: example
   type: example
   jsonl_fpath: benchmarks/terminal_bench_science/data/example.jsonl

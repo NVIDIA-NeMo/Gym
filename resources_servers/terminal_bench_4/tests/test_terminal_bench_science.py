@@ -152,12 +152,13 @@ def benchmark_config(**overrides):
     return config
 
 
-def test_profile_defaults_follow_the_official_protocol():
+def test_profile_defaults_match_terminal_bench_4_and_harbor():
     config = benchmark_config()
     agent = config.terminal_bench_science_miniswe.responses_api_agents.miniswe_sandboxed_agent
     assert agent.resources_server.name == "terminal_bench_science"
     benchmark = next(dataset for dataset in agent.datasets if dataset.type == "benchmark")
-    assert benchmark.num_repeats == 3
+    # One trial per task, as terminal_bench_4/miniswe; ++num_repeats=3 runs the official protocol.
+    assert benchmark.num_repeats == 1
     # Harbor's mini-swe-agent: no step cap, 30-second command timeout, task-owned 8-hour budget.
     assert (agent.harness.step_limit, agent.harness.step_timeout_sec, agent.agent_max_timeout_sec) == (0, 30, None)
     resources = config.terminal_bench_science.resources_servers.terminal_bench_4
