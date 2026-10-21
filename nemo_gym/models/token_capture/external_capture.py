@@ -64,6 +64,10 @@ DYNAMO_CAPTURE_ANNOTATION_PREFIX = f"{NG_CAPTURE_FIELD}:"
 # Marks every request Gym sends a Dynamo frontend, so the engine can tell Gym rollout
 # traffic from the training framework's own requests.
 DYNAMO_GYM_REQUEST_ANNOTATION = "nemo_gym:rollout"
+# Without capture, a request's echoed prefix (the last tokenized assistant's
+# ``prompt_token_ids + generation_token_ids``) rides here as ``"ng_prefix:<JSON list>"``.
+# The engine splices it, as vLLM's ``required_prefix_token_ids`` extension does.
+DYNAMO_PREFIX_ANNOTATION_PREFIX = "ng_prefix:"
 # Dynamo's router reads session affinity only from this header.
 DYNAMO_SESSION_ID_HEADER = "x-dynamo-session-id"
 
