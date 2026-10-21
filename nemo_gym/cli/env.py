@@ -67,6 +67,7 @@ from nemo_gym.global_config import (
     NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
     QUERY_KEY_NAME,
     SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME,
+    SERVER_TYPE_KEYS,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     get_global_config_dict,
@@ -1325,11 +1326,10 @@ def test_all():  # pragma: no cover
     # (a user's project), and the Gym install root (built-ins, under PARENT_DIR in editable and wheel
     # installs). Entrypoints are kept relative; earlier roots shadow later ones for same-named modules. This
     # lets `gym env test` discover and run built-in and plugin servers from any cwd, not only a repo checkout.
-    server_type_dirs = ("resources_servers", "responses_api_agents", "responses_api_models", "environment_servers")
     seen_rel_paths: set[str] = set()
     candidate_dir_paths: List[str] = []
     for root in component_search_roots():
-        for server_type_dir in server_type_dirs:
+        for server_type_dir in SERVER_TYPE_KEYS:
             for module_path in sorted((root / server_type_dir).glob("*")):
                 if "pycache" in module_path.name or not module_path.is_dir():
                     continue

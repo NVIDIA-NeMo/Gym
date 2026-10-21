@@ -92,9 +92,12 @@ def needs_environment_server(instance: dict) -> bool:
     # A legacy relay would conflict with the Environment Server supplied by composition.
     # An omitted binding can inherit Resources and must still migrate.
     if (
-        agent_type in {"hermes_agent", "pi_agent", "codex_agent", "openclaw_agent", "opencode_agent"}
+        agent_type in {"hermes_agent", "pi_agent", "codex_agent", "openclaw_agent", "opencode_agent", "kilocode_agent"}
         and resources_server is None
     ):
+        return False
+    # Stirrup runs only in native sessions and has no /run for a legacy relay to call.
+    if agent_type == "stirrup_agent":
         return False
     return bool(agent.get("entrypoint") or instance.get("_inherit_from"))
 

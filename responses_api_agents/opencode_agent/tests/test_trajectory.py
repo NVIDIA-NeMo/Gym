@@ -7,7 +7,7 @@ from functools import partial
 
 import pytest
 
-from nemo_gym.base_responses_api_model import ModelCallRecord
+from nemo_gym.observability.model_calls import ModelCallRecord
 from nemo_gym.rollout_collection import _build_trajectory_record
 from nemo_gym.rollout_health import run_health_checks
 from nemo_gym.rollout_observability import AgentInvocation, TrajectoryRecord, join_model_call_observations

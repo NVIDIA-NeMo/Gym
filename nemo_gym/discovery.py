@@ -30,6 +30,7 @@ from omegaconf.errors import InterpolationKeyError, InterpolationResolutionError
 from nemo_gym import component_search_roots
 from nemo_gym.global_config import (
     POLICY_MODEL_KEY_NAME,
+    SERVER_TYPE_KEYS,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
 )
@@ -65,10 +66,6 @@ def discover_components(
 # Fills unset `???`/`${...}` values during listing: they reference runtime-only values (API keys,
 # endpoints) not needed to identify a component, so a placeholder lets the config still resolve.
 _UNSET_VALUE_PLACEHOLDER = "__unset_for_listing__"
-
-# Server groups a component's `domain`/`description` may be declared on. `domain` can sit on a
-# resources server (e.g. `aime24`), an agent (e.g. `tau2`), or in principle a model server.
-_SERVER_GROUP_KEYS = ("resources_servers", "responses_api_agents", "responses_api_models", "environment_servers")
 
 
 class _ListingConfigParser(GlobalConfigDictParser):
@@ -124,7 +121,7 @@ def iter_server_configs(container):
     for instance in container.values():
         if not isinstance(instance, (dict, DictConfig)):
             continue
-        for group_key in _SERVER_GROUP_KEYS:
+        for group_key in SERVER_TYPE_KEYS:
             servers = instance.get(group_key)
             if not isinstance(servers, (dict, DictConfig)):
                 continue

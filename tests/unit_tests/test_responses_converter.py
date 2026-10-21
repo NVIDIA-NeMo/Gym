@@ -21,7 +21,7 @@ from types import SimpleNamespace
 import pytest
 from openai.types.completion_usage import CompletionTokensDetails, CompletionUsage, PromptTokensDetails
 
-from nemo_gym.base_responses_api_model import _cache_signal
+from nemo_gym.observability.model_calls import _cache_signal
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
