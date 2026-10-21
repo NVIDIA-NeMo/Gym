@@ -1649,7 +1649,7 @@ def test_provider_report_does_not_hide_other_execution_outcomes(change):
     ],
 )
 async def test_statusless_transient_provider_failure_stays_retryable(setup, message, code):
-    from environment_servers.single_agent_turn.app import agent_outcome_policy
+    from environment_servers.single_agent_turn.app import OutcomeAction, agent_outcome_policy
 
     agent, sandbox = setup
     export = json.loads(sandbox.events)
@@ -1667,8 +1667,7 @@ async def test_statusless_transient_provider_failure_stays_retryable(setup, mess
     assert message in response.error.message
     assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "model_transport_error"}
     policy = agent_outcome_policy(response)
-    assert not policy.verifiable
-    assert policy.retryable
+    assert policy == OutcomeAction.RETRY
     closed = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
     assert closed.agent_observations is not None
 
