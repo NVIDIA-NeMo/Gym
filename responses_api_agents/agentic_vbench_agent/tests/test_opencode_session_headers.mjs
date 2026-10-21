@@ -22,6 +22,13 @@ async function harness(t) {
     messages: async () => { throw new Error("Running Task metadata is not visible before child inference"); },
   } };
   const hooks = await SessionHeaders({ client });
+  const start = async (id, callID, args = {}, parent = "ses_main") => {
+    await hooks["tool.execute.before"]({ tool: "task", sessionID: parent, callID }, { args });
+    await hooks.event({ event: { type: "message.part.updated", properties: { part: {
+      type: "tool", tool: "task", sessionID: parent, callID,
+      state: { status: "running", metadata: { sessionId: id } },
+    } } } });
+  };
   const headers = async (id, output = { headers: {} }) => {
     await hooks["chat.headers"]({ sessionID: id, agent: id === "ses_main" ? "build" : "general", provider }, output);
     return output.headers;
@@ -32,56 +39,58 @@ async function harness(t) {
     await hooks["tool.execute.after"]({ tool: "task", sessionID: "ses_main", callID, args }, output);
     assert.deepEqual(output, original);
   };
-  return { headers, after, receipts, hooks, provider, client };
+  return { headers, after, start, receipts, hooks, provider, client };
 }
 
-test("child starts despite unavailable parent tool metadata; exact native Task receipts follow", async (t) => {
-  const { headers, after, receipts } = await harness(t);
+test("independent children use exact running events despite unavailable SDK tool snapshots", async (t) => {
+  const { headers, after, start, receipts } = await harness(t);
+  await start("ses_A", "call_A", { prompt: "identical prompt" });
+  await start("ses_B", "call_B", { prompt: "identical prompt" });
   const a = await headers("ses_A"), b = await headers("ses_B");
   assert.equal(a["x-opencode-session"], "ses_A");
   assert.equal(b["x-opencode-session"], "ses_B");
   assert.equal(a["x-opencode-parent-session"], "ses_main");
-  assert.equal(a["x-opencode-task-binding"], "deferred");
-  assert.equal(a["x-opencode-spawn-call"], undefined);
+  assert.equal(a["x-opencode-task-binding"], undefined);
+  assert.equal(a["x-opencode-spawn-call"], "call_A");
+  assert.equal(b["x-opencode-spawn-call"], "call_B");
   await after("ses_B", "call_B", { prompt: "identical prompt" });
   await after("ses_A", "call_A", { prompt: "identical prompt" });
-  assert.deepEqual(receipts.map((r) => r.body), [
-    { session_id: "ses_B", parent_session_id: "ses_main", delegation_call_id: "call_B" },
-    { session_id: "ses_A", parent_session_id: "ses_main", delegation_call_id: "call_A" },
-  ]);
-  assert.ok(receipts.every((r) => r.path === "/avb/fixture/v1/session-bindings"));
+  assert.deepEqual(receipts, []);
 });
 
 test("resumes preserve native child ID, Task arguments, messages, and existing headers", async (t) => {
-  const { headers, after, receipts, hooks } = await harness(t);
+  const { headers, after, start, hooks } = await harness(t);
+  await start("ses_A", "call_A");
   await headers("ses_A");
   await after("ses_A", "call_A");
   const args = { task_id: "ses_A", prompt: "Check previous work", subagent_type: "general" };
   const original = structuredClone(args);
-  await hooks["tool.execute.before"]({ tool: "task", sessionID: "ses_main", callID: "resume_A" }, { args });
+  await start("ses_A", "resume_A", args);
   const resumed = await headers("ses_A", { headers: { existing: "preserved" } });
   await after("ses_A", "resume_A", args);
   assert.deepEqual(args, original);
   assert.equal(resumed.existing, "preserved");
-  assert.equal(receipts[1].body.session_id, "ses_A");
-  assert.equal(receipts[1].body.delegation_call_id, "resume_A");
+  assert.equal(resumed["x-opencode-session"], "ses_A");
+  assert.equal(resumed["x-opencode-spawn-call"], "call_A");
+  assert.equal(resumed["x-opencode-task-call"], "resume_A");
   await assert.rejects(hooks["tool.execute.before"](
     { tool: "task", sessionID: "ses_foreign", callID: "bad" }, { args },
   ), /another parent/);
 });
 
 test("invalid requested task_id binds actual fallback child, never the requested ID", async (t) => {
-  const { headers, after, receipts, hooks } = await harness(t);
+  const { headers, after, start } = await harness(t);
   const args = { task_id: "ses_missing", prompt: "bounded work" };
-  await hooks["tool.execute.before"]({ tool: "task", sessionID: "ses_main", callID: "fallback" }, { args });
+  await start("ses_actual", "fallback", args);
   await headers("ses_actual");
   await after("ses_actual", "fallback", args);
-  assert.equal(receipts[0].body.session_id, "ses_actual");
+  assert.equal((await headers("ses_actual"))["x-opencode-task-call"], "fallback");
 });
 
 test("missing or foreign native result identity and changed endpoints are rejected", async (t) => {
-  const { headers, hooks, provider } = await harness(t);
+  const { headers, start, hooks, provider } = await harness(t);
   await headers("ses_main");
+  await start("ses_A", "call_A");
   await assert.rejects(hooks["tool.execute.after"](
     { tool: "task", sessionID: "ses_main", callID: "orphan" }, { metadata: {} },
   ), /no native session/);
@@ -92,4 +101,40 @@ test("missing or foreign native result identity and changed endpoints are reject
     { sessionID: "ses_A", agent: "general", provider: { options: { baseURL: provider.options.baseURL + "/other" } } },
     { headers: {} },
   ), /changed capture endpoints/);
+});
+
+test("child inference waits for delayed native event dispatch without querying running messages", async (t) => {
+  const { headers, start } = await harness(t);
+  const child = headers("ses_A");
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  await start("ses_A", "call_A");
+  assert.equal((await child)["x-opencode-task-call"], "call_A");
+});
+
+test("unobserved or inconsistent Task ownership fails before child model headers are published", async (t) => {
+  const { headers, start, hooks } = await harness(t);
+  await start("ses_A", "call_A");
+  await hooks.event({ event: { type: "message.part.updated", properties: { part: {
+    type: "tool", tool: "task", sessionID: "ses_main", callID: "foreign_call",
+    state: { status: "running", metadata: { sessionId: "ses_A" } },
+  } } } });
+  await assert.rejects(headers("ses_A"), /inconsistent child ownership/);
+});
+
+test("native running Task metadata owns child calls before a timed-out Task can return", async (t) => {
+  const { headers, hooks } = await harness(t);
+  await headers("ses_main");
+  await hooks["tool.execute.before"](
+    { tool: "task", sessionID: "ses_main", callID: "call_A" },
+    { args: { prompt: "bounded work", subagent_type: "general" } },
+  );
+  await hooks.event({ event: { type: "message.part.updated", properties: { part: {
+    type: "tool", tool: "task", sessionID: "ses_main", callID: "call_A",
+    state: { status: "running", metadata: { sessionId: "ses_A" } },
+  } } } });
+  // No tool.execute.after: the benchmark terminates with this child still running.
+  const child = await headers("ses_A");
+  assert.equal(child["x-opencode-spawn-call"], "call_A");
+  assert.equal(child["x-opencode-task-call"], "call_A");
+  assert.equal(child["x-opencode-task-binding"], undefined);
 });
