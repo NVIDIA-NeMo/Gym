@@ -135,6 +135,13 @@ class SandboxHermesObserver:
             return
 
         def call(*args: Any, **kwargs: Any) -> Any:
+            # The SDK preserves this on HTTP retries, including failed attempts without a response ID.
+            api_kwargs = dict(args[0] if args else kwargs["api_kwargs"])
+            api_kwargs["extra_headers"] = {**api_kwargs.get("extra_headers", {}), "x-session-id": invocation_id}
+            if args:
+                args = (api_kwargs, *args[1:])
+            else:
+                kwargs = {**kwargs, "api_kwargs": api_kwargs}
             response = original(*args, **kwargs)
             response_id = response.get("id") if isinstance(response, dict) else getattr(response, "id", None)
             if isinstance(response_id, str) and response_id:
