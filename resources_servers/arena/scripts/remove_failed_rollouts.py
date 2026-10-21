@@ -28,6 +28,15 @@ def is_failed_rollout(row: dict) -> bool:
     incomplete_reason = ((row.get("response") or {}).get("incomplete_details") or {}).get("reason")
     if row.get("category") == "lmarena_v3" and incomplete_reason == "max_output_tokens":
         return False
+    # So is a verified, fully empty answer (no answer, no reasoning): a lost game, not a missing judgment.
+    if (
+        row.get("category") == "lmarena_v3"
+        and "policy_answer" in row
+        and not row["policy_answer"]
+        and not row.get("policy_reasoning")
+        and row.get("games") is None
+    ):
+        return False
 
     games = row.get("games") or []
     # Successful judging produces one game for each answer ordering.

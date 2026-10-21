@@ -53,7 +53,8 @@ def load_metrics(benchmark: str, max_failure_rate: float) -> ArenaMetrics:
         name=benchmark,
         max_rollout_failure_rate=max_failure_rate,
     )
-    return ArenaMetrics(ArenaResourcesServerConfig.model_validate(config))
+    # Saved evaluation rollouts are scored as evaluation scores them, not as a training server would.
+    return ArenaMetrics(ArenaResourcesServerConfig.model_validate(config), evaluation=True)
 
 
 def read_jsonl(path: Path) -> list[dict]:
@@ -208,6 +209,9 @@ def main() -> None:
         diagnostic_names.insert(0, "max_token_reached_rate")
     for name in diagnostic_names:
         print(f"{name}: {metrics[name]:.2%}")
+    if metrics.get("failed_rollout_gate"):
+        print(f"failed_rollout_gate: rate above max_rollout_failure_rate={args.max_failure_rate:.2%}; no score")
+        return
     if args.benchmark == "lmarena_v3":
         print(f"verbosity_acceptance_rate: {metrics['verbosity_acceptance_rate']:.2%}")
     print(f"mean/reward: {sum(rollout['reward'] for rollout in rollouts) / len(rollouts):.1%}")

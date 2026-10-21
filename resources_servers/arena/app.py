@@ -27,13 +27,15 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.config_types import Domain, ModelServerRef
+from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, Domain, ModelServerRef
+from nemo_gym.global_config import is_eval_mode
+from nemo_gym.judge import JudgeError
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.server_utils import get_response_json
+from nemo_gym.server_utils import get_response_json, raise_for_status
 from resources_servers.arena.arena import (
     _extract_thinking_content,
     _extract_verdict,
@@ -60,8 +62,9 @@ class ArenaResourcesServerConfig(BaseResourcesServerConfig):
     judge_model_server: ModelServerRef
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
     verdict_weight: int = Field(ge=1)  # Strong-verdict upweighting is used by lmarena_v2 only.
-    # Fraction of rollouts allowed to fail (gen_answer or gen_judgment API errors) before
-    # raising an error.
+    # Fraction of rollouts allowed to fail (gen_answer or gen_judgment API errors). Above it, evaluation
+    # aggregation logs a warning and reports failed_rollout_gate with no score; it does not raise, so a run
+    # whose failures are all retried to the attempt cap still finishes.
     max_rollout_failure_rate: float = Field(ge=0, le=1)
     # Max number of concurrent HTTP calls to the judge model. Lower this if the judge
     # endpoint returns 429 (rate limit) errors.
@@ -330,8 +333,15 @@ class ArenaResourcesServer(SimpleResourcesServer):
                     json=responses_create_params,
                     timeout=ClientTimeout(total=config.judge_timeout_secs),
                 )
+                if is_eval_mode():
+                    await raise_for_status(response)
                 judge_response = NeMoGymResponse.model_validate(await get_response_json(response))
             except Exception as exc:
+                if is_eval_mode():
+                    # A failed judge call is not a lost game: judge_failsafe routes it to the sidecar as
+                    # judge_failed, and resume retries it.
+                    raise JudgeError(f"{type(exc).__name__}: {exc}") from exc
+                # Training keeps its behaviour: the game is skipped and scores as it always did.
                 logger.warning("Judge call failed (question skipped): %s", exc)
                 return ArenaGame(
                     responses_create_params=responses_create_params,
@@ -369,6 +379,18 @@ class ArenaResourcesServer(SimpleResourcesServer):
     def get_key_metrics(self, agent_metrics: dict[str, Any]) -> dict[str, Any]:
         """NeMo Gym hook for the compact metrics summary."""
         return self._metrics.get_key_metrics(agent_metrics)
+
+    async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
+        """Past the failed-rollout gate no reward is a measurement: withhold the repeat summaries too."""
+        result = await super().aggregate_metrics(body)
+        if result.agent_metrics.get("failed_rollout_gate"):
+            for metrics in (result.agent_metrics, result.key_metrics):
+                metrics.update({key: None for key, value in metrics.items() if "reward" in key and value is not None})
+            result.repeat_level_metrics = [
+                {key: value for key, value in level.items() if "reward" not in key}
+                for level in result.repeat_level_metrics
+            ]
+        return result
 
 
 if __name__ == "__main__":

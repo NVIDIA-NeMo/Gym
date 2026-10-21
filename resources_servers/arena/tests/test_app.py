@@ -12,7 +12,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import json
+import logging
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -20,11 +22,13 @@ from unittest.mock import AsyncMock, MagicMock
 import numpy as np
 import tiktoken
 import yaml
+from aiohttp import ClientResponseError
 from openai.types.responses.response import IncompleteDetails
 from pydantic import ValidationError
 from pytest import approx, fixture, mark, raises
 
-from nemo_gym.config_types import ModelServerRef
+from nemo_gym.config_types import AggregateMetricsRequest, ModelServerRef
+from nemo_gym.judge import JudgeError, judge_failsafe
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -32,6 +36,13 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputRefusal,
     NeMoGymResponseOutputText,
     NeMoGymResponseReasoningItem,
+)
+from nemo_gym.path_utils import failures_path_for
+from nemo_gym.rollout_collection import (
+    RolloutCollectionConfig,
+    RolloutCollectionHelper,
+    _CompletedRollout,
+    is_terminal_failure,
 )
 from nemo_gym.server_utils import ServerClient
 from resources_servers.arena.app import (
@@ -548,6 +559,12 @@ class TestArenaResourcesServer:
         )
 
     @fixture
+    def eval_mode(self, monkeypatch) -> None:
+        """Serve as `gym eval run` does; tests without it see the server as training does."""
+        monkeypatch.setattr("resources_servers.arena.app.is_eval_mode", lambda: True)
+        monkeypatch.setattr("resources_servers.arena.metrics.is_eval_mode", lambda: True)
+
+    @fixture
     def server(self, config: ArenaResourcesServerConfig) -> ArenaResourcesServer:
         mock_client = MagicMock(spec=ServerClient)
         return ArenaResourcesServer(config=config, server_client=mock_client)
@@ -751,6 +768,47 @@ class TestArenaResourcesServer:
 
         result = await server.verify(self._make_verify_request("Answer."))
         assert result.reward == approx(0.5)
+
+    @mark.parametrize("status", [401, 429, 500])
+    async def test_a_failed_judge_call_is_a_retryable_judge_failure_not_a_lost_game(
+        self, server: ArenaResourcesServer, status: int, eval_mode: None
+    ):
+        """A judge 401, 429 or 500 used to score the game as a policy loss; now it reaches judge_failsafe."""
+        failed = MagicMock(ok=False, status=status)
+        failed.raise_for_status.side_effect = ClientResponseError(
+            request_info=MagicMock(), history=(), status=status, message="judge unavailable"
+        )
+        failed.content.read = AsyncMock(return_value=b'{"error": "invalid api key"}')
+        server.server_client.post = AsyncMock(return_value=failed)
+
+        with raises(JudgeError, match=str(status)):
+            await server.verify(self._make_verify_request("Answer."))
+
+        wrapped = await judge_failsafe(server.verify)(body=self._make_verify_request("Answer."))
+        row = json.loads(wrapped.body)
+        assert row["_ng_failure_class"] == "judge_failed"
+        assert not is_terminal_failure(row)
+        # The plain judge_failed kind: at the cap the row reaches arena's metric and counts against the gate.
+        assert row["failure_kind"] == "judge_failed"
+
+    @mark.parametrize("status", [401, 429, 500])
+    async def test_training_keeps_a_failed_judge_call_as_a_skipped_game(
+        self, server: ArenaResourcesServer, status: int
+    ):
+        """Outside evaluation the judge failure is handled as before: no exception, both games without a verdict."""
+        failed = MagicMock(ok=False, status=status)
+        failed.raise_for_status.side_effect = ClientResponseError(
+            request_info=MagicMock(), history=(), status=status, message="judge unavailable"
+        )
+        failed.content.read = AsyncMock(return_value=b'{"error": "invalid api key"}')
+        server.server_client.post = AsyncMock(return_value=failed)
+
+        result = await server.verify(self._make_verify_request("Answer."))
+
+        # The same skipped games and reward as before evaluation-only handling existed.
+        assert [game.verdict for game in result.games] == [None, None]
+        assert [game.response.id for game in result.games] == ["error", "error"]
+        assert result.reward == approx(0.0)
 
     async def test_verify_unparseable_judge_output(self, server: ArenaResourcesServer):
         # Judge doesn't output a valid verdict label → 0.0 for both rounds
@@ -1178,8 +1236,15 @@ class TestArenaResourcesServer:
         assert metrics["parse_failure_rate"] == approx(0.0)
         assert metrics["win_rate_no_SC"] == approx(1.0, abs=0.05)
 
-    def test_compute_metrics_raises_on_high_failure_rate(self, server: ArenaResourcesServer):
-        """Raises ValueError when failed rollouts exceed max_rollout_failure_rate — no score returned."""
+    def test_training_still_raises_on_a_high_failure_rate(self, server: ArenaResourcesServer):
+        """Outside evaluation the gate keeps raising, as before."""
+        good = self._rollout("[[A>B]]", "[[B>A]]", reward=1.0)
+        failed = {"reward": 0.0, "policy_answer": None, "policy_reasoning": "", "baseline_answer": "b", "games": None}
+        with raises(ValueError, match="max_rollout_failure_rate"):
+            server.compute_metrics([[good], [good], [failed]])
+
+    def test_a_run_past_the_gate_finishes_without_a_score(self, server: ArenaResourcesServer, caplog, eval_mode: None):
+        """Above max_rollout_failure_rate aggregation returns the diagnostics and the verdict, but no win rate."""
         good = self._rollout("[[A>B]]", "[[B>A]]", reward=1.0)
         # 2 good + 1 answer-failure = 33% failure rate, exceeds 1% default
         failed = {
@@ -1189,11 +1254,102 @@ class TestArenaResourcesServer:
             "baseline_answer": "b",
             "games": None,
         }
-        with raises(ValueError, match="max_rollout_failure_rate"):
-            server.compute_metrics([[good], [good], [failed]])
+        with caplog.at_level(logging.WARNING, logger="resources_servers.arena.metrics"):
+            metrics = server.compute_metrics([[good], [good], [failed]])
+        assert metrics["rollout_failure_rate"] == approx(1 / 3)
+        assert (metrics["failed_rollout_gate"], metrics["max_rollout_failure_rate"]) == (True, 0.01)
+        assert not any(name.startswith("win_rate") for name in metrics)
+        assert metrics["mean/reward"] is None
+        key_metrics = server.get_key_metrics(metrics)
+        assert key_metrics["failed_rollout_gate"] is True and key_metrics["mean/reward"] is None
+        assert "win_rate" not in key_metrics
+        warnings = [r for r in caplog.records if "max_rollout_failure_rate" in r.getMessage()]
+        assert len(warnings) == 1 and "33.3%" in warnings[0].getMessage()
 
-    def test_compute_metrics_raises_on_high_judge_failure_rate(self, server: ArenaResourcesServer):
-        """Judge parse failures also count toward the failure rate and trigger ValueError."""
+    async def _collect(self, server, tmp_path, monkeypatch, failure_rows: int, attempts_recorded: int) -> list:
+        """Run rollout collection to its end, with Arena's real aggregation, on a sidecar of judge failures.
+
+        Two rollouts score; ``failure_rows`` judge failures (plain ``judge_failed``, counted as 0) have
+        ``attempts_recorded`` attempts in the sidecar already, so with a cap of 2 they are settled at 2.
+        """
+        monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "2")
+        monkeypatch.setattr("nemo_gym.rollout_collection.get_global_config_dict", lambda *args, **kwargs: {})
+        output = tmp_path / "out.jsonl"
+        total = 2 + failure_rows
+        rows = [
+            {
+                "responses_create_params": {"input": []},
+                "agent_ref": {"name": "arena"},
+                "_ng_task_index": i,
+                "_ng_rollout_index": 0,
+            }
+            for i in range(total)
+        ]
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(tmp_path / "in.jsonl"),
+            output_jsonl_fpath=str(output),
+            resume_from_cache=True,
+            require_complete=True,
+            disable_health_check=True,
+        )
+        config.materialized_jsonl_fpath.write_bytes(b"".join(json.dumps(r).encode() + b"\n" for r in rows))
+        scored = [{**rows[i], **self._rollout("[[A>B]]", "[[B>A]]", reward=1.0)} for i in range(2)]
+        output.write_bytes(b"".join(json.dumps(r).encode() + b"\n" for r in scored))
+        failure = {
+            "_ng_failure_class": "judge_failed",
+            "failure_kind": "judge_failed",
+            "reward": 0.0,
+            "category": "lmarena_v2",
+        }
+        failures_path_for(output).write_bytes(
+            b"".join(
+                json.dumps({**rows[i], **failure}).encode() + b"\n"
+                for i in range(2, total)
+                for _ in range(attempts_recorded)
+            )
+        )
+        aggregated: list = []
+
+        class Helper(RolloutCollectionHelper):
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                # Resume dispatches only unsettled rows; each fails its judge again.
+                futures = []
+                for example in examples:
+                    future = asyncio.get_event_loop().create_future()
+                    future.set_result(
+                        _CompletedRollout(row=example, result={**example, **failure}, rollout_latency_ms=None)
+                    )
+                    futures.append(future)
+                return futures
+
+            async def _call_aggregate_metrics(self, results, rows, output_fpath, *, raise_on_error=True):
+                metrics = await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=results))
+                aggregated.append(metrics)
+                return None
+
+        await Helper().run_from_config(config)
+        return aggregated
+
+    async def test_a_settled_run_above_the_failure_rate_finishes_with_metrics(
+        self, server: ArenaResourcesServer, tmp_path, monkeypatch, eval_mode: None
+    ):
+        """Every judge failure is at the attempt cap: nothing is left to run, so the run must finish."""
+        aggregated = await self._collect(server, tmp_path, monkeypatch, failure_rows=3, attempts_recorded=2)
+
+        (metrics,) = aggregated
+        assert metrics.agent_metrics["rollout_failure_rate"] == approx(0.6)
+        assert metrics.agent_metrics["failed_rollout_gate"] is True
+        assert "win_rate" not in metrics.key_metrics and metrics.key_metrics["mean/reward"] is None
+
+    async def test_unsettled_judge_failures_still_leave_the_run_incomplete(
+        self, server: ArenaResourcesServer, tmp_path, monkeypatch, eval_mode: None
+    ):
+        """One attempt recorded, cap of 2: the resume attempt fails again but attempts remain only on paper."""
+        with raises(RuntimeError, match="EVAL FAILED"):
+            await self._collect(server, tmp_path, monkeypatch, failure_rows=3, attempts_recorded=0)
+
+    def test_judge_parse_failures_count_toward_the_gate(self, server: ArenaResourcesServer, eval_mode: None):
+        """Judge parse failures count toward the reported rate."""
         good = self._rollout("[[A>B]]", "[[B>A]]", reward=1.0)
         judge_fail = {
             "reward": 0.0,
@@ -1202,8 +1358,59 @@ class TestArenaResourcesServer:
             "baseline_answer": "y",
             "games": [{"verdict": None}, {"verdict": None}],
         }
-        with raises(ValueError, match="max_rollout_failure_rate"):
-            server.compute_metrics([[good], [good], [judge_fail]])
+        metrics = server.compute_metrics([[good], [good], [judge_fail]])
+        assert metrics["rollout_failure_rate"] == approx(1 / 3)
+        assert metrics["failed_rollout_gate"] is True
+        assert "win_rate" not in metrics
+
+    def test_judge_failures_counted_as_zero_by_collection_do_not_fail_aggregation(
+        self, server: ArenaResourcesServer, eval_mode: None
+    ):
+        """The metric-input copy rollout collection sends for a judge failure row: no games, a failure class."""
+        good = self._rollout("[[A>B]]", "[[B>A]]", reward=1.0)
+        counted = {
+            "reward": 0.0,
+            "mask_sample": False,
+            "_ng_failure_class": "judge_failed",
+            "failure_kind": "judge_failed",
+            "category": "lmarena_v2",
+        }
+        metrics = server.compute_metrics([[good], [counted], [counted], [counted]])
+        assert metrics["rollout_failure_rate"] == approx(0.75)
+        assert metrics["failed_rollout_gate"] is True
+
+    async def test_past_the_gate_no_repeat_level_reward_is_published(
+        self, server: ArenaResourcesServer, eval_mode: None
+    ):
+        """Repeated rollouts: the per-repeat reward summaries are a score too and must be withheld past the gate."""
+        good = self._rollout("[[A>B]]", "[[B>A]]", reward=1.0)
+        failed = {"reward": 0.0, "policy_answer": None, "policy_reasoning": "", "baseline_answer": "b", "games": None}
+        rows = [
+            {**row, "_ng_task_index": task, "_ng_rollout_index": repeat, "response": {}}
+            for task, row_pair in enumerate(([good, good], [failed, failed]))
+            for repeat, row in enumerate(row_pair)
+        ]
+
+        metrics = await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))
+
+        assert metrics.agent_metrics["failed_rollout_gate"] is True
+        published = {**metrics.agent_metrics, **metrics.key_metrics}
+        assert not [key for key, value in published.items() if "reward" in key and isinstance(value, float)]
+        assert not [
+            key
+            for level in metrics.repeat_level_metrics
+            for key, value in level.items()
+            if "reward" in key and isinstance(value, float)
+        ]
+
+    def test_below_the_gate_the_score_is_published(self, server: ArenaResourcesServer, eval_mode: None):
+        """Nothing changes below the gate: the win rate is there and the verdict is false."""
+        good = self._rollout("[[A>B]]", "[[B>A]]", reward=1.0)
+        failed = {"reward": 0.0, "policy_answer": None, "policy_reasoning": "", "baseline_answer": "b", "games": None}
+        metrics = server.compute_metrics([[good]] * 199 + [[failed]])
+        assert metrics["failed_rollout_gate"] is False
+        assert "win_rate" in metrics
+        assert "mean/reward" not in metrics
 
     def test_compute_metrics_within_failure_tolerance(self, server: ArenaResourcesServer):
         """No error when failure rate is within max_rollout_failure_rate."""
@@ -1246,6 +1453,34 @@ class TestArenaResourcesServer:
         assert metrics["win_rate_no_SC"] == approx(1.0, abs=0.05)
         assert metrics["win_rate"] == approx(0.5, abs=0.05)
         assert metrics["verbosity_acceptance_rate"] == approx(0.5)
+
+    @mark.parametrize("eval_mode", [False, True], ids=["training", "evaluation"])
+    def test_a_fully_empty_answer_is_a_lost_game_in_evaluation(
+        self, config: ArenaResourcesServerConfig, monkeypatch, eval_mode: bool
+    ):
+        """LMArena-v3 scores an empty answer as a loss; it is not left out of the win rate."""
+        monkeypatch.setattr("resources_servers.arena.metrics.is_eval_mode", lambda: eval_mode)
+        config.style_control_method = "reference_length"
+        config.style_length_ratio_range = (0.5, 1.5)
+        config.style_norm_mean = None
+        config.style_norm_std = None
+        config.style_coefs = None
+        config.max_rollout_failure_rate = 1.0
+        reference_server = ArenaResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        win = self._rollout("[[A>B]]", "[[B>A]]", reward=1.0)
+        win["style_reference_token_count"] = 10
+        empty = {**win, "policy_answer": None, "policy_reasoning": None, "games": None, "reward": 0.0}
+
+        metrics = reference_server.compute_metrics([[win], [empty]])
+
+        if eval_mode:
+            # Two games scored: one win, one loss.
+            assert metrics["win_rate_no_SC"] == approx(0.5, abs=0.05)
+            assert metrics["rollout_failure_rate"] == 0.0
+        else:
+            # Outside evaluation the empty answer is a failed rollout, left out of the win rate, as before.
+            assert metrics["win_rate_no_SC"] == approx(1.0, abs=0.05)
+            assert metrics["rollout_failure_rate"] == approx(0.5)
 
     def test_reference_length_boundaries_are_exclusive(self, config: ArenaResourcesServerConfig):
         config.style_control_method = "reference_length"

@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import json
+from pathlib import Path
 
 import numpy as np
 from pytest import raises
@@ -57,6 +58,43 @@ def test_unmatched_prompt_ids_require_explicit_partial_mode(tmp_path):
     with raises(ValueError, match="absent from the selected prompt file"):
         load_rollout_tasks(path, "lmarena_v3", prompts)
     assert len(load_rollout_tasks(path, "lmarena_v3", prompts, allow_unmatched_prompts=True)) == 1
+
+
+def test_saved_v3_rollouts_score_an_empty_answer_as_live_evaluation_does(monkeypatch):
+    """Recomputing saved evaluation rollouts runs outside any Gym server, so it must not score as training."""
+    from pytest import approx
+
+    from resources_servers.arena.scripts.compute_rollout_scores import load_metrics
+
+    # The script reads its benchmark configs from the repository root, where it is run.
+    monkeypatch.chdir(Path(__file__).resolve().parents[3])
+    win = {
+        "reward": 1.0,
+        "category": "lmarena_v3",
+        "policy_answer": "Policy answer text for style feature extraction.",
+        "policy_reasoning": "Policy reasoning text.",
+        "baseline_answer": "Baseline answer text for style feature extraction.",
+        "games": [{"verdict": "[[A>B]]"}, {"verdict": "[[B>A]]"}],
+        "style_reference_token_count": 10,
+    }
+    empty = {**win, "policy_answer": None, "policy_reasoning": None, "games": None, "reward": 0.0}
+
+    metrics = load_metrics("lmarena_v3", 1.0).compute([[win], [empty]])
+
+    # One win and one lost game, as the live evaluation server scores them; the empty answer is not a failure.
+    assert metrics["rollout_failure_rate"] == 0.0
+    assert metrics["win_rate_no_SC"] == approx(0.5, abs=0.05)
+
+
+def test_cleanup_keeps_a_verified_empty_v3_answer_and_removes_a_missing_judgment():
+    """An empty v3 answer is a scored loss; deleting it would rerun a real policy loss on resume."""
+    from resources_servers.arena.scripts.remove_failed_rollouts import is_failed_rollout
+
+    empty = {"category": "lmarena_v3", "policy_answer": None, "policy_reasoning": None, "games": None}
+    missing_judgment = {"category": "lmarena_v3", "policy_answer": "an answer", "policy_reasoning": "", "games": None}
+
+    assert not is_failed_rollout(empty)
+    assert is_failed_rollout(missing_judgment)
 
 
 def test_anchored_elo_requires_two_parsed_judge_games():
