@@ -459,3 +459,27 @@ def test_policy_stop_labels_preserve_unrelated_outer_failures(invalid_output: bo
     )
     assert trajectory.invocations[0].status == ("failed" if outer_failure else "incomplete")
     assert trajectory.invocations[0].error_type == type(error).__name__
+
+
+@pytest.mark.parametrize("invalid_output", [False, True])
+def test_later_cleanup_failure_updates_final_trace_without_changing_checkpoint(invalid_output: bool) -> None:
+    from responses_api_agents.nooa_agent.gym_llm import InvalidPolicyOutputError, PolicyCallBudgetExceeded
+
+    stop = InvalidPolicyOutputError("invalid answer") if invalid_output else PolicyCallBudgetExceeded("call limit")
+    trace = GymTraceHooks()
+    context = trace.before_agent_call(call_id="root", parent_call_id=None)
+    trace.after_agent_call(context=context, exception=stop)
+    projection = dict(
+        create_params=NeMoGymResponseCreateParamsNonStreaming(input="task"),
+        state=RolloutLLMState(max_policy_calls=1),
+        task_id="task",
+        rollout_id="0-0",
+    )
+    _, checkpoint = trace.project(**projection)
+    assert checkpoint.invocations[0].status == "incomplete"
+    # The invocation adapter finishes cleanup after NOOA emits after_agent_call.
+    stop.nooa_cleanup_errors = (ConnectionError("cleanup transport failed"),)
+    _, final = trace.project(**projection)
+    assert final.invocations[0].status == "failed"
+    assert final.invocations[0].error_type == type(stop).__name__
+    assert checkpoint.invocations[0].status == "incomplete"

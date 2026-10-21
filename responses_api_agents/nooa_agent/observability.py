@@ -85,6 +85,7 @@ class GymTraceHooks:
     def __init__(self, *, on_progress: Callable[[], None] | None = None) -> None:
         self._current: ContextVar[str] = ContextVar("gym_nooa_invocation", default="root")
         self._invocations: dict[str, AgentInvocation] = {}
+        self._invocation_errors: dict[str, BaseException] = {}
         self._events: list[GymModelCall | _ToolCall] = []
         self._on_progress = on_progress
 
@@ -97,6 +98,7 @@ class GymTraceHooks:
         self._events.append(call)
 
     def before_agent_call(self, *, call_id: str, parent_call_id: str | None, **_: Any) -> _AgentCall:
+        self._invocation_errors.pop(call_id, None)
         self._invocations[call_id] = AgentInvocation(
             invocation_id=call_id, parent_invocation_id=parent_call_id, status="incomplete"
         )
@@ -110,6 +112,8 @@ class GymTraceHooks:
             "incomplete" if is_policy_limit_stop(exception) else "failed" if exception is not None else "completed"
         )
         invocation.error_type = type(exception).__name__ if exception is not None else None
+        if exception is not None:
+            self._invocation_errors[context.invocation_id] = exception
         invocation.duration_ms = max(0.0, (perf_counter() - context.started) * 1000)
         self._current.reset(context.token)
 
@@ -225,6 +229,10 @@ class GymTraceHooks:
         """Project captured facts without interpreting the invocation adapter."""
 
         invocations = {key: record.model_copy(deep=True) for key, record in self._invocations.items()}
+        # Adapter cleanup can mark an existing exception after after_agent_call.
+        # Reevaluate each snapshot without changing earlier checkpoint evidence.
+        for identity, error in self._invocation_errors.items():
+            invocations[identity].status = "incomplete" if is_policy_limit_stop(error) else "failed"
         output: list[Any] = []
         tools: list[TrajectoryToolCall] = []
         turns: list[TrajectoryTurn] = []
