@@ -2300,10 +2300,10 @@ class TestRolloutCollection:
 
         assert [r[TASK_INDEX_KEY_NAME] for r in counted] == [2]
 
-    async def test_a_missing_native_rollout_is_scored_by_its_environment_server(
+    async def test_a_missing_taskset_rollout_is_scored_by_its_environment_server(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """A native taskset row names no agent, so its zero reaches metrics only through the server stamp."""
+        """A materialized taskset row names no agent, so its zero reaches metrics only through the server stamp."""
         planned = [
             {TASK_INDEX_KEY_NAME: task_index, ROLLOUT_INDEX_KEY_NAME: 0, NG_ENVIRONMENT_SERVER_KEY: "environment"}
             for task_index in range(2)
@@ -3155,7 +3155,7 @@ class TestRolloutCollection:
             {
                 "my_agent": {"responses_api_agents": {"impl": {}}},
                 "my_legacy_server": {"environment_servers": {"legacy_agent": {"agent_server": {"name": "my_agent"}}}},
-                "my_native_server": {
+                "my_session_server": {
                     "environment_servers": {"single_agent_turn": {"agent_server": {"name": "my_agent"}}}
                 },
             }
@@ -3164,7 +3164,7 @@ class TestRolloutCollection:
             nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
         )
 
-        with pytest.raises(AmbiguousEnvironmentServerError, match="my_legacy_server.*my_native_server"):
+        with pytest.raises(AmbiguousEnvironmentServerError, match="my_legacy_server.*my_session_server"):
             next(RolloutCollectionHelper().run_examples([row]))
         mock_server_client.post.assert_not_awaited()
 
@@ -3187,7 +3187,7 @@ class TestRolloutCollection:
                 "other_legacy_server": {
                     "environment_servers": {"legacy_agent": {"agent_server": {"name": "other_agent"}}}
                 },
-                "other_native_server": {
+                "other_session_server": {
                     "environment_servers": {"single_agent_turn": {"agent_server": {"name": "other_agent"}}}
                 },
             }
@@ -6026,6 +6026,20 @@ class TestRolloutCollection:
     async def test_call_aggregate_metrics(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """Test _call_aggregate_metrics with a mocked server client."""
 
+        provider_metrics = {
+            "requests": [
+                {
+                    "speculative_decoding": {
+                        "num_spec_steps": 2,
+                        "num_draft_tokens": 6,
+                        "num_accepted_draft_tokens": 3,
+                        "num_spec_tokens": 3,
+                        "acceptance_histogram": [1, 0, 0, 1],
+                    }
+                },
+                None,
+            ]
+        }
         agg = AggregateMetrics(
             agent_metrics={"mean/reward": 0.5},
             key_metrics={"mean/reward": 0.5},
@@ -6073,6 +6087,8 @@ class TestRolloutCollection:
                 "response": {
                     "usage": {"tokens": 10},
                     "incomplete_details": {"reason": "max_output_tokens"},
+                    "metrics": provider_metrics,
+                    "output": [{"content": "large generated text"}],
                 },
                 "ng_agent_observations": {"invocations": [{"conversation": ["large"]}]},
                 "ng_model_call_capture": {"calls": [{"request": "large"}]},
@@ -6096,7 +6112,7 @@ class TestRolloutCollection:
         assert written[0]["key_metrics"]["mean/reward"] == 0.5
         assert len(written[0]["group_level_metrics"]) == 2
 
-        # Verify server_client.post was called with stripped data (usage preserved)
+        # Provider metrics (including missing turns) must survive payload stripping.
         call_kwargs = mock_server_client.post.call_args
         sent_request = call_kwargs.kwargs["json"]
         sent_data = (
@@ -6110,7 +6126,10 @@ class TestRolloutCollection:
             assert "ng_model_call_capture" not in item
             assert "ng_trajectory" not in item
             assert "usage" in item["response"]
+            assert "output" not in item["response"]
         assert sent_data[0]["response"]["incomplete_details"] == {"reason": "max_output_tokens"}
+        assert sent_data[0]["response"]["metrics"] == provider_metrics
+        assert "metrics" not in sent_data[1]["response"]
 
     async def test_call_aggregate_metrics_includes_perf_summary_when_present(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -9468,7 +9487,7 @@ class TestEnvironmentServerRouting:
         assert rows[0][ROLLOUT_INDEX_KEY_NAME] == 0
         assert rows[0][NG_ENVIRONMENT_SERVER_KEY] == "environment"
 
-    async def test_taskset_route_builds_native_episode_request(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_taskset_route_builds_episode_request(self, monkeypatch: pytest.MonkeyPatch) -> None:
         payload = {"reward": 1.0, "agent_ref": {"name": "hermes"}}
         post = AsyncMock(return_value=FakeResponse(200, payload))
         client = install_fake_server_client(monkeypatch, post)
@@ -9639,7 +9658,7 @@ class TestEnvironmentServerRouting:
 
     @staticmethod
     def _mixed_batch_config() -> DictConfig:
-        """The native SWE Pro pairing plus a second, compatibility-routed pairing on the same server."""
+        """The materialized SWE Pro pairing plus a second, compatibility-routed pairing on the same server."""
         config = _environment_server_config()
         config["hermes_legacy"] = {
             "responses_api_agents": {
@@ -9667,7 +9686,9 @@ class TestEnvironmentServerRouting:
             },
         }
 
-    async def test_one_batch_mixes_native_and_compatibility_routed_rows(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_one_batch_mixes_materialized_and_compatibility_routed_rows(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """A materialized taskset and a legacy flat row travel in one batch, each to its own environment server."""
         post = AsyncMock(return_value=FakeResponse(200, {"reward": 1.0}))
         client = install_fake_server_client(monkeypatch, post)
@@ -9688,10 +9709,10 @@ class TestEnvironmentServerRouting:
             config,
         )
 
-        # Identity is decided once, at preprocessing, and stamped only on the native row.
-        native_row = next(row for row in rows if "task_input" in row)
+        # Identity is decided once, at preprocessing, and stamped only on the materialized row.
+        materialized_row = next(row for row in rows if "task_input" in row)
         flat_row = next(row for row in rows if "task_input" not in row)
-        assert native_row[NG_ENVIRONMENT_SERVER_KEY] == "environment"
+        assert materialized_row[NG_ENVIRONMENT_SERVER_KEY] == "environment"
         assert NG_ENVIRONMENT_SERVER_KEY not in flat_row
 
         futures = list(RolloutCollectionHelper().run_examples(rows))
@@ -9700,7 +9721,7 @@ class TestEnvironmentServerRouting:
         assert len(dispatched) == 2
         calls = {call.kwargs["server_name"]: call.kwargs["json"] for call in post.await_args_list}
         assert set(calls) == {"environment", "legacy_environment"}
-        # The native row goes to its taskset's route as an episode request.
+        # The materialized row goes to its taskset's route as an episode request.
         assert calls["environment"]["task"]["task_id"]["taskset"] == "swe_pro"
         assert calls["environment"]["episode_id"] == {"rollout_id": "0-0", "attempt": 0}
         # The flat row goes to the environment server fronting its agent, as today's flat body.
@@ -9745,13 +9766,13 @@ class TestEnvironmentServerRouting:
             config,
         )
 
-        native_row = next(row for row in rows if "task_input" in row)
+        materialized_row = next(row for row in rows if "task_input" in row)
         flat_row = next(row for row in rows if "task_input" not in row)
-        assert native_row[NG_ENVIRONMENT_SERVER_KEY] == "environment"
+        assert materialized_row[NG_ENVIRONMENT_SERVER_KEY] == "environment"
         assert flat_row[NG_ENVIRONMENT_SERVER_KEY] == "legacy_environment"
 
         # Dispatch validates the flat row against a legacy_agent server that binds no resources server,
-        # stamps the agent that server fronts, and sends today's flat body; the native row is unaffected.
+        # stamps the agent that server fronts, and sends today's flat body; the materialized row is unaffected.
         for future in list(RolloutCollectionHelper().run_examples(rows)):
             await future
 
@@ -9766,7 +9787,7 @@ class TestEnvironmentServerRouting:
         [False, {"_default": False}, {"swe_pro": False}, {"swe_pro": False, "_default": True}],
     )
     def test_materialized_row_accepts_disabled_seed_policy(self, seed_policy: bool | dict[str, bool]) -> None:
-        """Native repeats preserve task input when their effective seed setting is disabled."""
+        """Materialized repeats preserve task input when their effective seed setting is disabled."""
         materialized = self._materialized_row()
         original = deepcopy(materialized)
         config = RolloutCollectionConfig(
@@ -9795,7 +9816,7 @@ class TestEnvironmentServerRouting:
         [{"hermes_legacy": True, "_default": False}, {"hermes_legacy": True, "swe_pro": False}],
     )
     def test_mixed_rows_seed_only_the_legacy_agent(self, seed_policy: dict[str, bool]) -> None:
-        """One policy can seed legacy repeats without rejecting unseeded native repeats."""
+        """One policy can seed legacy repeats without rejecting unseeded materialized repeats."""
         materialized = self._materialized_row()
         original_task_input = deepcopy(materialized["task_input"])
         flat = {
@@ -9815,14 +9836,14 @@ class TestEnvironmentServerRouting:
             config,
         )
 
-        native_rows = [row for row in rows if "task_input" in row]
+        materialized_rows = [row for row in rows if "task_input" in row]
         legacy_rows = [row for row in rows if "task_input" not in row]
-        assert len(native_rows) == len(legacy_rows) == 2
-        for row in native_rows:
+        assert len(materialized_rows) == len(legacy_rows) == 2
+        for row in materialized_rows:
             assert row["task_input"] == original_task_input
             assert "responses_create_params" not in row
             assert row[NG_ENVIRONMENT_SERVER_KEY] == "environment"
-        assert [row[ROLLOUT_INDEX_KEY_NAME] for row in native_rows] == [0, 1]
+        assert [row[ROLLOUT_INDEX_KEY_NAME] for row in materialized_rows] == [0, 1]
         assert [row[ROLLOUT_INDEX_KEY_NAME] for row in legacy_rows] == [0, 1]
         assert [
             json.loads(row["responses_create_params"]["metadata"]["extra_body"])["seed"] for row in legacy_rows
@@ -9848,7 +9869,7 @@ class TestEnvironmentServerRouting:
                 config,
             )
 
-    def test_taskset_mode_stays_native_only(self) -> None:
+    def test_taskset_mode_stays_materialized_only(self) -> None:
         flat = self._row()
         config = RolloutCollectionConfig(
             input_jsonl_fpath="input.jsonl",
@@ -9861,17 +9882,17 @@ class TestEnvironmentServerRouting:
         with pytest.raises(ValueError, match="environment_routing_mode=agent to mix"):
             RolloutCollectionHelper._preprocess_raw_rows([(0, orjson.dumps(flat).decode(), flat)], config)
 
-    # -- Identity through native failures, retries and aggregation --------------------------------
+    # -- Identity through episode failures, retries and aggregation -------------------------------
 
     @staticmethod
-    def _native_identity(task: str) -> dict:
+    def _episode_identity(task: str) -> dict:
         return {
             "episode_id": {"rollout_id": f"0-{task}", "attempt": 0},
             "task_id": {"taskset": "swe_pro", "task_id": task},
         }
 
     def test_episode_failure_reply_becomes_a_sidecar_row(self) -> None:
-        reply = self._native_identity("a") | {
+        reply = self._episode_identity("a") | {
             "result": None,
             "failure": {
                 "failure_reason": "agent unavailable",
@@ -9895,7 +9916,7 @@ class TestEnvironmentServerRouting:
         assert "reward" not in record
 
         terminal = nemo_gym.rollout_collection._episode_record(
-            self._native_identity("a") | {"failure": {"failure_reason": "bad task", "terminal": True}}
+            self._episode_identity("a") | {"failure": {"failure_reason": "bad task", "terminal": True}}
         )
         assert terminal[NG_TERMINAL_KEY] is True
 
@@ -9910,7 +9931,7 @@ class TestEnvironmentServerRouting:
             "task_id": "dataset-task-7",
             "ng_agent_observations": observations,
         }
-        reply = self._native_identity("a") | {"failure": None, "result": result}
+        reply = self._episode_identity("a") | {"failure": None, "result": result}
 
         record = nemo_gym.rollout_collection._episode_record(reply)
 
@@ -9921,10 +9942,10 @@ class TestEnvironmentServerRouting:
     def test_episode_result_is_scored_only_through_its_top_level_reward(self) -> None:
         """Any Environment Server type is scored through top-level reward and reward_components."""
         scored = nemo_gym.rollout_collection._episode_record(
-            self._native_identity("a") | {"result": {"reward": 0.5, "reward_components": {"quality": 0.5}}}
+            self._episode_identity("a") | {"result": {"reward": 0.5, "reward_components": {"quality": 0.5}}}
         )
         nested = nemo_gym.rollout_collection._episode_record(
-            self._native_identity("b") | {"result": {"verification": {"reward": 1.0}}}
+            self._episode_identity("b") | {"result": {"verification": {"reward": 1.0}}}
         )
 
         assert (scored["reward"], scored["reward_components"]) == (0.5, {"quality": 0.5})
@@ -9933,7 +9954,7 @@ class TestEnvironmentServerRouting:
         assert nested["verification"] == {"reward": 1.0}
 
     def test_episode_result_may_not_use_collector_keys(self) -> None:
-        reply = self._native_identity("a") | {"result": {"reward": 1.0, "ng_trajectory": {}}}
+        reply = self._episode_identity("a") | {"result": {"reward": 1.0, "ng_trajectory": {}}}
 
         with pytest.raises(ValueError, match=r"reserved for rollout collection: \['ng_trajectory'\]"):
             nemo_gym.rollout_collection._episode_record(reply)
@@ -9948,32 +9969,32 @@ class TestEnvironmentServerRouting:
             NG_FAILURE_JUDGE_ERROR_KEY: "judge timed out",
         }
 
-        record = nemo_gym.rollout_collection._episode_record(self._native_identity("a") | {"result": result})
+        record = nemo_gym.rollout_collection._episode_record(self._episode_identity("a") | {"result": result})
 
         assert record[NG_FAILURE_CLASS_KEY] == "judge_failed"
         assert record[NG_FAILURE_JUDGE_ERROR_KEY] == "judge timed out"
         assert record["mask_sample"] is True
 
     def test_episode_result_may_not_pair_a_failure_class_with_another_value(self) -> None:
-        reply = self._native_identity("a") | {"result": {"reward": 0.0, NG_FAILURE_CLASS_KEY: "agent_run_error"}}
+        reply = self._episode_identity("a") | {"result": {"reward": 0.0, NG_FAILURE_CLASS_KEY: "agent_run_error"}}
         with pytest.raises(ValueError, match=rf"reserved for rollout collection: \['{NG_FAILURE_CLASS_KEY}'\]"):
             nemo_gym.rollout_collection._episode_record(reply)
 
     def test_failed_judge_result_may_not_use_other_collector_keys(self) -> None:
         result = {"reward": 0.0, NG_FAILURE_CLASS_KEY: "judge_failed", "ng_trajectory": {}}
         with pytest.raises(ValueError, match=r"reserved for rollout collection: \['ng_trajectory'\]"):
-            nemo_gym.rollout_collection._episode_record(self._native_identity("a") | {"result": result})
+            nemo_gym.rollout_collection._episode_record(self._episode_identity("a") | {"result": result})
 
     def test_episode_detection_needs_object_identities_and_an_object_failure(self) -> None:
         """An agent reply echoing identity fields as strings is not an episode reply; a bad failure is an error."""
         is_episode = nemo_gym.rollout_collection._is_episode_response
-        assert is_episode(self._native_identity("a") | {"failure": {"failure_reason": "x", "terminal": True}})
+        assert is_episode(self._episode_identity("a") | {"failure": {"failure_reason": "x", "terminal": True}})
         assert not is_episode({"episode_id": "0-a", "task_id": "a", "reward": 1.0, "failure": {"reason": "echoed"}})
-        assert not is_episode(self._native_identity("a") | {"reward": 1.0})
+        assert not is_episode(self._episode_identity("a") | {"reward": 1.0})
 
         with pytest.raises(ValueError, match="non-object failure: 'timeout'"):
             nemo_gym.rollout_collection._episode_record(
-                self._native_identity("a") | {"result": None, "failure": "timeout"}
+                self._episode_identity("a") | {"result": None, "failure": "timeout"}
             )
 
     async def test_legacy_reply_echoing_identity_fields_is_not_projected(
@@ -9998,7 +10019,7 @@ class TestEnvironmentServerRouting:
     async def test_call_aggregate_metrics_groups_by_environment_server(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """Native rows aggregate on the server stamped at dispatch; legacy rows keep their agent's server."""
+        """Materialized rows aggregate on the server stamped at dispatch; legacy rows keep their agent's server."""
         agg = AggregateMetrics(agent_metrics={"mean/reward": 1.0}, key_metrics={"mean/reward": 1.0})
         posts: dict[str, list[dict]] = {}
 
@@ -10039,14 +10060,14 @@ class TestEnvironmentServerRouting:
         assert posts["legacy_environment"][0][TASK_INDEX_KEY_NAME] == 1
         written = {entry[NG_ENVIRONMENT_SERVER_KEY]: entry for entry in json.loads(metrics_fpath.read_text())}
         assert set(written) == {"environment", "legacy_environment"}
-        # The native group is labelled by the agent its environment server binds.
+        # The materialized group is labelled by the agent its environment server binds.
         assert written["environment"][AGENT_REF_KEY_NAME] == {"name": "hermes"}
         assert written["legacy_environment"][AGENT_REF_KEY_NAME] == {"name": "hermes_legacy"}
 
     async def test_call_aggregate_metrics_labels_two_servers_of_one_agent_distinctly(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """A native server and its legacy_agent twin bind the same agent; `gym eval compare` needs distinct labels."""
+        """A single_agent_turn server and its legacy_agent twin bind the same agent; `gym eval compare` needs distinct labels."""
         agg = AggregateMetrics(agent_metrics={"mean/reward": 1.0}, key_metrics={"mean/reward": 1.0})
         client = install_fake_server_client(monkeypatch, AsyncMock(return_value=FakeResponse(200, agg.model_dump())))
         config = _environment_server_config()
@@ -10169,7 +10190,7 @@ class TestEnvironmentServerRouting:
         assert final["progress/hermes_legacy/reward"] == 100.0
         assert final["progress/hermes_legacy/reward_lower_bound"] == 100.0
 
-    async def test_run_from_config_sidecars_a_native_failure_and_retries_it_on_resume(
+    async def test_run_from_config_sidecars_an_episode_failure_and_retries_it_on_resume(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Identity persists: the stamped server is on the result, the sidecar row, and the retry.

@@ -265,7 +265,7 @@ for the legacy agent `/run` path. Sandbox-only servers install no host CLI. For
 local execution, installation happens on the first local invocation; concurrent
 calls share setup, failures propagate, and a later call can retry.
 
-The default YAML selects native composition rather than acting as an unbound
+The default YAML selects composition with an Environment Server rather than acting as an unbound
 legacy swap source. To use `--resources-server X --agent-type claude_code_agent`
 with legacy swap configurations, explicitly restore
 `resources_server: {type: resources_servers, name: "???"}` on the agent. Existing

@@ -340,3 +340,25 @@ def test_sibling_venvs_keep_independent_wheel_projects(tmp_path: Path, monkeypat
         assert (root / "nemo_gym").resolve() == package
         assert (root / "nemo_gym/__init__.py").read_text() == name
     assert restored[0][0] != restored[1][0]
+
+
+def test_environment_servers_retain_locked_local_gym_dependencies() -> None:
+    root = Path(__file__).resolve().parents[2]
+    servers = sorted((root / "environment_servers").glob("*/app.py"))
+    assert servers
+    for app in servers:
+        project = app.parent
+        manifest = tomllib.loads((project / "pyproject.toml").read_text())
+        lock = tomllib.loads((project / "uv.lock").read_text())
+        source = manifest["tool"]["uv"]["sources"]["nemo-gym"]
+        assert source["editable"]
+        assert (project / source["path"]).resolve() == root
+        assert not (project / "requirements.txt").exists()
+        packages = {package["name"]: package for package in lock["package"]}
+        component = packages[manifest["project"]["name"]]
+        assert component["source"] == {"virtual": "."}
+        gym = next(dependency for dependency in component["dependencies"] if dependency["name"] == "nemo-gym")
+        assert "dev" in gym["extra"]
+        if project.name == "harbor":
+            assert "sandbox" in gym["extra"]
+            assert {"tenacity", "opensandbox", "daytona", "e2b", "boto3"} <= packages.keys()

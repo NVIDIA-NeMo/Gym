@@ -1024,7 +1024,7 @@ class TestBenchmarkAgentResolution:
             )
 
 
-class TestNativeTasksetBenchmark:
+class TestMaterializedTasksetBenchmark:
     @pytest.fixture
     def config(self, tmp_path):
         prepare = tmp_path / "prepare.py"
@@ -1039,7 +1039,7 @@ class TestNativeTasksetBenchmark:
                             "domain": "coding",
                             "datasets": [
                                 {
-                                    "name": "native",
+                                    "name": "materialized",
                                     "type": "benchmark",
                                     "taskset": "swe:test",
                                     "jsonl_fpath": str(tmp_path / "source.jsonl"),
@@ -1136,13 +1136,13 @@ class TestNativeTasksetBenchmark:
         assert not (tmp_path / "source_prepare.jsonl").exists()
         assert not (tmp_path / "source_metrics.json").exists()
 
-    def test_native_route_resolves_the_servers_agent(self, config):
+    def test_taskset_route_resolves_the_servers_agent(self, config):
         from nemo_gym.global_config import resolve_dataset_agent
 
         assert resolve_dataset_agent(config, "resources", taskset="swe:test") == "agent"
 
     @pytest.mark.parametrize("pin", ["agent", "other"])
-    def test_native_route_rejects_any_pin(self, config, pin):
+    def test_taskset_route_rejects_any_pin(self, config, pin):
         from nemo_gym.config_types import ConfigError
         from nemo_gym.global_config import resolve_dataset_agent
 
@@ -1161,7 +1161,7 @@ class TestNativeTasksetBenchmark:
             ),
         ],
     )
-    def test_invalid_native_route_never_falls_back(self, config, change, message):
+    def test_invalid_taskset_route_never_falls_back(self, config, change, message):
         from nemo_gym.config_types import ConfigError
         from nemo_gym.global_config import resolve_dataset_agent
 

@@ -94,21 +94,19 @@ def state() -> KiloSandboxSession:
 
 
 @pytest.mark.parametrize("completion_tokens,verdict", [(2, "healthy"), (0, "unhealthy")])
-def test_native_session_capture_join_enables_health_checks(
-    tmp_path: Path, completion_tokens: int, verdict: str
-) -> None:
+def test_kilo_session_capture_join_enables_health_checks(tmp_path: Path, completion_tokens: int, verdict: str) -> None:
     session = state()
     session.session.artifacts = KiloArtifacts(
         task_environment_ready=True,
         stdout="",
         stderr="",
         exit_code=0,
-        observations=persisted("ses-native", status="completed"),
+        observations=persisted("ses-kilo", status="completed"),
     )
     observations = _make_model_server_agent()._sandbox_observations(session)
     call = ModelCallRecord(
         model_call_id="call-1",
-        client_session_id="ses-native",
+        client_session_id="ses-kilo",
         call_index=0,
         status_code=200,
         tokens_in=3,
@@ -117,7 +115,7 @@ def test_native_session_capture_join_enables_health_checks(
         response={"choices": [{"message": {"role": "assistant", "content": "answer"}}]},
     )
     joined = join_model_call_observations(observations, [call])
-    assert joined.records[0].invocation_id == "ses-native"
+    assert joined.records[0].invocation_id == "ses-kilo"
     assert joined.records[0].status == "completed"
     assert joined.records[0].model_calls[0].model_call_id == "call-1"
     assert "model_call_ownership_unavailable" not in {gap.code for gap in joined.gaps}
@@ -165,13 +163,13 @@ def test_failed_capture_reports_capture_gap() -> None:
 @pytest.mark.parametrize("exit_code,reason,status", [(1, "stop", "failed"), (0, "length", "incomplete")])
 def test_root_invocation_preserves_failure_and_length_stop(exit_code: int, reason: str, status: str) -> None:
     session = state()
-    event = {"type": "step_finish", "sessionID": "ses-native", "part": {"reason": reason}}
+    event = {"type": "step_finish", "sessionID": "ses-kilo", "part": {"reason": reason}}
     session.session.artifacts = KiloArtifacts(
         task_environment_ready=True,
         stdout=json.dumps(event),
         stderr="",
         exit_code=exit_code,
-        observations=persisted("ses-native"),
+        observations=persisted("ses-kilo"),
     )
     observations = _make_model_server_agent()._sandbox_observations(session)
     root, child, sandbox = observations.records
@@ -184,7 +182,7 @@ def test_root_invocation_preserves_failure_and_length_stop(exit_code: int, reaso
 async def test_base_seed_and_close_retry_contract_preserves_partial_output() -> None:
     agent = _make_model_server_agent()
     session = state()
-    partial = persisted("ses-native")
+    partial = persisted("ses-kilo")
     partial.records[0].conversation = [NeMoGymEasyInputMessage(role="assistant", content="partial answer")]
     session.session.artifacts = KiloArtifacts(
         task_environment_ready=True, stdout="", stderr="", exit_code=None, observations=partial
@@ -547,7 +545,7 @@ def test_timeout_and_cli_errors_have_explicit_sandbox_outcomes() -> None:
         stderr="",
         exit_code=None,
         wall_time_s=2,
-        observations=persisted("ses-native"),
+        observations=persisted("ses-kilo"),
     )
     observations = _make_model_server_agent()._sandbox_observations(session)
     assert observations.records[-1].outcome == "timeout"
@@ -559,7 +557,7 @@ def test_timeout_and_cli_errors_have_explicit_sandbox_outcomes() -> None:
         stdout=json.dumps({"type": "error", "error": {"name": "APIError"}}),
         stderr="",
         exit_code=0,
-        observations=persisted("ses-native"),
+        observations=persisted("ses-kilo"),
     )
     observations = _make_model_server_agent()._sandbox_observations(session)
     assert observations.records[-1].outcome == "failed"

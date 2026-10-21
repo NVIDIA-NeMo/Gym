@@ -1937,7 +1937,7 @@ class OpenSandboxProvider:
             timeout_s=self._connection.request_timeout_s,
         )
         # A nested shell keeps exit/exec in the command from replacing the SDK's
-        # session wrapper. The client owns the deadline: the native timeout can
+        # session wrapper. The client owns the deadline: the SDK's own timeout can
         # kill only the shell and then hang waiting for a child's output pipe.
         task = asyncio.create_task(
             commands.run_in_session(session_id, f"bash -c {shlex.quote(command)}", timeout=timedelta(0))
@@ -1974,13 +1974,16 @@ class OpenSandboxProvider:
 
         if timed_out and (task.cancelled() or task.exception() is not None):
             return SandboxExecResult(
-                None, f"Command timed out after {timeout_s:g}s; native session was deleted", 124, error_type="timeout"
+                None,
+                f"Command timed out after {timeout_s:g}s; OpenSandbox command session was deleted",
+                124,
+                error_type="timeout",
             )
         execution = task.result()
         stdout = "\n".join(msg.text for msg in execution.logs.stdout) or None
         stderr_parts = [msg.text for msg in execution.logs.stderr]
         if timed_out:
-            stderr_parts.append(f"Command timed out after {timeout_s:g}s; native session was deleted")
+            stderr_parts.append(f"Command timed out after {timeout_s:g}s; OpenSandbox command session was deleted")
             return SandboxExecResult(stdout, "\n".join(stderr_parts), 124, error_type="timeout")
         if execution.error is not None:
             stderr_parts.append(f"{execution.error.name}: {execution.error.value}")
