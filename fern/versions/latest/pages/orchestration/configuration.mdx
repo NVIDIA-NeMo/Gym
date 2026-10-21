@@ -29,9 +29,18 @@ env:
 
 ## services
 
-A mapping from service name to a service definition. The `type` field selects the kind: `vllm`, `vllm_pd`, or `ray`. Service names are free-form, but they become part of log file names and shell variable names.
+A mapping from service name to a service definition. The `type` field selects the kind, and the kinds fall into two groups:
 
-### Fields common to every service
+- **Deployed services** (`vllm`, `vllm_pd`, `ray`) run in the job, on its nodes.
+- **Declarative services** (`openai_compatible`) describe an endpoint that already exists. Nothing is deployed, so they have no container or placement.
+
+Service names are free-form, but they become part of log file names and shell variable names. Either kind can be the target of a [service reference](#service-references).
+
+### Deployed services
+
+Every deployed service takes the fields below, plus those of its type.
+
+#### Fields common to every deployed service
 
 | Field | Default | Description |
 | --- | --- | --- |
@@ -43,7 +52,7 @@ A mapping from service name to a service definition. The `type` field selects th
 | `mounts` | `[]` | Pyxis bind mounts, each `src`, `src:dst`, or `src:dst:flags` (for example `/data:/data:ro`). Source paths are checked for existence before anything is copied. |
 | `pre_command` | `""` | Shell statements run in the same shell, before the service command. Use it for `export`/`unset` or values like `$(hostname -I)` that `env` cannot express. |
 
-### type: vllm
+#### type: vllm
 
 A vLLM server, started with `vllm serve`.
 
@@ -62,7 +71,7 @@ A vLLM server, started with `vllm serve`.
 
 If `health_check` is not set, it defaults to `/health` on `port`. If it is set without a `port`, the service's `port` is used.
 
-### type: vllm_pd
+#### type: vllm_pd
 
 Prefill/decode disaggregated vLLM: two vLLM tiers behind a `vllm-router`. A single `vllm_pd` entry named `X` deploys three services: `X-prefill`, `X-decode`, and the router `X`. Set `driver.policy_model` to `X`. The router's `container` must provide `vllm-router`. See the [Prefill/Decode Disaggregation how-to](/orchestration/how-to/prefill-decode-disaggregation).
 
@@ -80,7 +89,7 @@ Prefill/decode disaggregated vLLM: two vLLM tiers behind a `vllm-router`. A sing
 | `kv_connector` | `NixlConnector` | KV-transfer connector for both tiers. |
 | `kv_load_failure_policy` | `fail` | `fail` surfaces a broken KV transfer instead of silently recomputing the prefill. |
 
-### type: ray
+#### type: ray
 
 A Ray cluster. The head starts on the driver's node and every other node of the spanned pools joins it as a worker.
 
@@ -93,6 +102,21 @@ A Ray cluster. The head starts on the driver's node and every other node of the 
 | `extra_args` | `""` | Raw flags appended to `ray start` on every node. Head-only flags (`--port`, `--redis-shard-ports`, `--include-dashboard`) are dropped for workers. |
 
 A ray service is not a model service: it cannot be `driver.policy_model` for URL injection, and it has no default health check. The head's address is exported to the job as `GYM_RAY_ADDRESS_<SERVICE>` (service name upper-cased, non-alphanumerics replaced by `_`).
+
+### Declarative services
+
+A declarative service has none of the deployed-service fields (no `container`, `node_pool`, `placement`, `env`, or `mounts`): it is only addressed through [service references](#service-references).
+
+#### type: openai_compatible
+
+An endpoint that already exists, such as a hosted judge.
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `base_url` | required | The endpoint's base URL, for example `https://judge.example.com/v1`. It must be an `http` or `https` URL with a host, and neither it nor `model` may contain whitespace or any of `$ , [ ] { } # ? = ' " \`, which cannot go into a Hydra override; the `host` and `port` fields are read from it (the port defaults to 443 for `https` and 80 for `http`). |
+| `model` | required | The model name to request. |
+
+Declarative services carry no credentials yet: their `key` field is a placeholder, so this works for endpoints that need no API key.
 
 ## compute
 
@@ -166,6 +190,46 @@ When `policy_model` names a `vllm` or `vllm_pd` service, each benchmark's `run` 
 
 If a benchmark's `run` already sets any of these keys, validation fails: remove one or the other. `policy_model` must name an existing service.
 
+### Service references
+
+A benchmark's `run` config can point a model server at any entry in `services` instead of spelling out its address. A reference is a string starting with `service:` and is resolved when the config is validated.
+
+- **Whole server:** `service:NAME` as the value of a server type replaces it with that server's settings. The type picks the field names.
+
+  | Server type | URL field | Model field | Key field |
+  | --- | --- | --- | --- |
+  | `vllm_model` | `base_url` | `model` | `api_key` |
+  | `openai_model` | `openai_base_url` | `openai_model` | `openai_api_key` |
+
+- **One field:** `service:NAME.field` fills a single value. The fields are `url`, `host`, `port`, `model`, and `key`.
+
+```yaml
+run:
+  judge_model:
+    responses_api_models:
+      vllm_model: service:judge
+  grader_model:
+    responses_api_models:
+      openai_model:
+        openai_base_url: service:grader.url
+        openai_model: service:grader.model
+```
+
+A deployed service's `model` is its `served_model_name`, or its `model`. `key` is always a placeholder, since neither vLLM nor a declarative service supplies one.
+
+Each field is either known at submit time or only once the job has nodes. A service pinned to a `node_pool` has a hostname of the second kind: submit exports it to the driver as `GYM_SERVICE_<SERVICE>_HOST` (service name upper-cased, non-alphanumerics replaced by `_`), and the reference becomes `${oc.env:GYM_SERVICE_<SERVICE>_HOST}`, which Hydra resolves when the driver runs. An unpinned service is reached on `localhost`. The variable is exported whenever any reference to that service is used, whichever field it names, so the job's environment shows which services were wired.
+
+Limits:
+
+- References apply to `run` only, not to `prepare`, and only to plain string values. A `service:` string inside a list is not resolved: it reaches `gym eval run` as the literal text.
+- Any `run` value that is a string starting with `service:` is treated as a reference, so a value that merely begins that way fails validation.
+- A service name used in a reference must not contain `.`, which separates the name from the field.
+- The exported host variable upper-cases the service name and replaces non-alphanumerics with `_`. Referencing two pinned services whose names differ only in such characters (`a-b` and `a_b`) is rejected, because they would share one variable.
+- A `ray` service cannot be referenced because it does not serve a model.
+- References do not replace `policy_model`; see [Policy wiring](#policy-wiring).
+
+See the [how-to](/orchestration/how-to/wiring-services).
+
 ## benchmarks
 
 Each key under `driver.benchmarks` is a benchmark name. It must match `^[A-Za-z0-9._-]+$`, because it is used in job names and in the line each `sbatch` reports back.
@@ -223,6 +287,7 @@ Schema validation runs when the config is composed, before anything is rendered 
   - Ray Serve gateway: the total footprint against all GPUs.
 - **Multi-node data parallelism** requires `number_of_instances` to be evenly divisible by the number of nodes, unless the Ray Serve gateway is in use.
 - **Policy wiring** conflicts, as described above.
+- **Service references** must name an existing service, use a known field, sit under a server type when written without a field, and point at a service that serves a model.
 - **Benchmark `command`** combined with `run` or `resumable` is rejected.
 - **Pool agreement** (checked at render time, not by `--resolve-only`). Pools used together by one job must agree on `partition`, tasks, GPUs, and extra directives. A mismatch fails `--dry-run` and the real submit.
 

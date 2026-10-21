@@ -18,6 +18,7 @@ import os
 import re
 import warnings
 from typing import Annotated, Any, Literal
+from urllib.parse import urlparse
 
 from pydantic import (
     BaseModel,
@@ -346,13 +347,65 @@ class RayServiceConfig(BaseServiceConfig):
         return self
 
 
+_HYDRA_UNSAFE_CHARS = frozenset("$,[]{}#?='\"\\")
+
+
+class DeclarativeServiceConfig(_StrictModel):
+    """An OpenAI-compatible endpoint that already exists (a hosted judge, say): nothing is deployed
+    for it, so it has no container, placement or node pool. It is only addressed through `service:` references."""
+
+    type: Literal["openai_compatible"]
+    base_url: str
+    model: str
+
+    @field_validator("base_url", "model")
+    @classmethod
+    def _validate_hydra_safe(cls, v: str) -> str:
+        # Both are written into a Hydra override for `gym eval run`, which rejects or interprets these.
+        bad = sorted(set(v) & _HYDRA_UNSAFE_CHARS)
+        if bad or any(c.isspace() for c in v):
+            raise ValueError(
+                f"{v!r} contains characters that cannot go into a Hydra override: {''.join(bad) or 'whitespace'}"
+            )
+        return v
+
+    @field_validator("base_url")
+    @classmethod
+    def _validate_base_url(cls, v: str) -> str:
+        parsed = urlparse(v)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            raise ValueError(f"base_url must be an http(s) URL with a host, like 'https://host/v1', got {v!r}")
+        try:
+            parsed.port
+        except ValueError:
+            raise ValueError(f"base_url has an invalid port: {v!r}") from None
+        return v
+
+
 # Discriminated union keyed on `type`; Pydantic rejects unknown type values at parse time.
 ServiceConfig = Annotated[
     Annotated[VllmNodeServiceConfig, Tag("vllm")]
     | Annotated[RayServiceConfig, Tag("ray")]
-    | Annotated[VllmPDServiceConfig, Tag("vllm_pd")],
+    | Annotated[VllmPDServiceConfig, Tag("vllm_pd")]
+    | Annotated[DeclarativeServiceConfig, Tag("openai_compatible")],
     Discriminator("type"),
 ]
+
+# `service:NAME` as a whole server value, or `service:NAME.field` as a single field of one.
+SERVICE_REF_PREFIX = "service:"
+# Server type -> the (url, model, key) field names that `service:NAME` fills in.
+SERVER_TYPE_FIELDS = {
+    "vllm_model": ("base_url", "model", "api_key"),
+    "openai_model": ("openai_base_url", "openai_model", "openai_api_key"),
+}
+SERVICE_FIELDS = ("url", "host", "port", "model", "key")
+# Placeholder for clients that require a key; neither vLLM nor a declarative service supplies one.
+_PLACEHOLDER_KEY = "dummy"  # pragma: allowlist secret
+
+
+def service_host_env_var(service_name: str) -> str:
+    """Driver env var holding a pinned service's hostname, known only once the job has nodes."""
+    return f"GYM_SERVICE_{re.sub(r'[^A-Z0-9]', '_', service_name.upper())}_HOST"
 
 
 class NodePool(_StrictModel):
@@ -585,11 +638,15 @@ class SubmitConfig(_StrictModel):
     job: JobConfig
     otel: OtelConfig = OtelConfig()
 
+    _deferred_host_services: set[str] = PrivateAttr(default_factory=set)
+
     @property
     def deployed_services(self) -> dict[str, ServiceConfig]:
-        """`services` with each vllm_pd service expanded into its two tiers and its router."""
+        """`services` that run in the job, with each vllm_pd service expanded into its two tiers and its router."""
         deployed: dict[str, ServiceConfig] = {}
         for name, service in self.services.items():
+            if isinstance(service, DeclarativeServiceConfig):
+                continue
             if isinstance(service, VllmPDServiceConfig):
                 deployed.update(service.tiers(name))
             deployed[name] = service
@@ -757,7 +814,93 @@ class SubmitConfig(_StrictModel):
                         )
                     benchmark.run.update(copy.deepcopy(policy_run))
 
+        for bench_name, benchmark in self.driver.benchmarks.items():
+            try:
+                benchmark.run = self._resolve_service_refs(benchmark.run)
+            except ValueError as e:
+                raise ValueError(f"Benchmark '{bench_name}' run config: {e}") from None
+
         return self
+
+    @property
+    def deferred_host_services(self) -> list[str]:
+        """Pinned services whose hostname a `service:` reference needs; the executor exports each one's
+        `service_host_env_var` to the driver."""
+        return sorted(self._deferred_host_services)
+
+    def _service_accessors(self, name: str) -> dict[str, str]:
+        """The values of one service's named fields. Static ones are literals; a pinned service's host
+        is only known once the job has nodes, so it is an OmegaConf reference to a driver env var."""
+        if name not in self.services:
+            raise ValueError(
+                f"'{SERVICE_REF_PREFIX}{name}' does not match any service ({', '.join(sorted(self.services))})."
+            )
+        service = self.services[name]
+        if isinstance(service, DeclarativeServiceConfig):
+            parsed = urlparse(service.base_url)
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
+            return {
+                "url": service.base_url,
+                "host": parsed.hostname or "",
+                "port": str(port),
+                "model": service.model,
+                "key": _PLACEHOLDER_KEY,
+            }
+        if not isinstance(service, BaseModelServiceConfig):
+            raise ValueError(
+                f"'{SERVICE_REF_PREFIX}{name}' is a {service.type} service, which does not serve a model."
+            )
+        if service.node_pool is None:
+            host = "localhost"
+        else:
+            var = service_host_env_var(name)
+            clash = next(
+                (o for o in self._deferred_host_services if o != name and service_host_env_var(o) == var), None
+            )
+            if clash:
+                raise ValueError(
+                    f"'{SERVICE_REF_PREFIX}{name}' and '{SERVICE_REF_PREFIX}{clash}' are both pinned services whose "
+                    f"hosts would be exported as {var}. Rename one so the names differ in more than punctuation."
+                )
+            self._deferred_host_services.add(name)
+            host = f"${{oc.env:{var}}}"
+        return {
+            "url": f"http://{host}:{service.port}/v1",
+            "host": host,
+            "port": str(service.port),
+            "model": service.served_model_name or service.model,
+            "key": _PLACEHOLDER_KEY,
+        }
+
+    def _resolve_service_refs(self, run: dict[str, Any]) -> dict[str, Any]:
+        """`run` with its `service:` references resolved, as a new dict: the input may be shared with the
+        caller, who may keep it as a record of what was submitted."""
+        resolved: dict[str, Any] = {}
+        for key, value in run.items():
+            if isinstance(value, dict):
+                resolved[key] = self._resolve_service_refs(value)
+            elif isinstance(value, str) and value.startswith(SERVICE_REF_PREFIX):
+                name, _, field = value[len(SERVICE_REF_PREFIX) :].partition(".")
+                accessors = self._service_accessors(name)
+                if field:
+                    if field not in accessors:
+                        raise ValueError(f"'{value}': unknown field '{field}' (one of {', '.join(SERVICE_FIELDS)}).")
+                    resolved[key] = accessors[field]
+                elif key in SERVER_TYPE_FIELDS:
+                    url_field, model_field, key_field = SERVER_TYPE_FIELDS[key]
+                    resolved[key] = {
+                        url_field: accessors["url"],
+                        model_field: accessors["model"],
+                        key_field: accessors["key"],
+                    }
+                else:
+                    raise ValueError(
+                        f"'{value}' is under '{key}', which is not a server type "
+                        f"({', '.join(SERVER_TYPE_FIELDS)}); name a field instead, like '{value}.url'."
+                    )
+            else:
+                resolved[key] = value
+        return resolved
 
     def _validate_pd_services(self, compute: "ComputeConfig") -> None:
         pools = list(compute.node_pools) if isinstance(compute, SlurmComputeConfig) else []
