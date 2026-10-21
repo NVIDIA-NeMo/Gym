@@ -47,6 +47,35 @@ proxy/CAPTCHA availability, judge behavior, and exact policy serving assets
 remain part of the reproducibility contract. Direct policy comparison also
 requires those inputs to be held fixed.
 
+### Instance-pool validation on 2026-10-21
+
+Nano Omni tuned checkpoint `iter_0004622` completed **418/552 = 75.72% SR**
+on frozen Gym revision `60fa5e37cb1812e2e377ac441eac371197e15e1a`.
+All 552 task IDs have valid unique scores: 418 successes and 134 scored zeros,
+with no missing tasks, duplicate valid results, masked selected results, or
+unresolved invalid tasks. This is not the public standard Nano Omni v3 checkpoint.
+
+The run used `visual_browser` with `local_instance_pool`, 16 browser instances,
+a per-site session limit of 2, and TP8 H100 serving. Temperature was 0.1,
+top_p was 0.95, and the request-level output-token cap was omitted. The task
+file was rendered for reference date 2026-10-11 and reused unchanged during
+recovery; its SHA-256 is
+`951bfe5c328bf53859a81b6d75e45943a630fb19f2d73e8f09a4aa275af8cb6d`.
+
+This was the append-only completion of the 2026-10-20 run, not a fresh
+single-pass rerun. Recovery preserved all 275 original valid outcomes,
+including 59 scored zeros, and added 265 valid results on the first recovery
+node and 12 on its successor. Only tasks without valid outcomes were retried;
+no valid scored zero was replaced. Gym code, policy prompts, task content,
+judge logic, and the model-serving recipe stayed fixed during recovery.
+
+Automatic continuation ran the final 12 invalid tasks on a queued successor
+and obtained 12 valid scores, including 9 successes. The unused standby was
+cancelled and active GPU allocations were released. This exercised handoff
+after generation completion, not a four-hour-deadline handoff. As with the
+earlier runs, execution date and live-site conditions remain part of the
+comparison contract.
+
 The [profile YAML files](configs/) and [provenance.yaml](provenance.yaml) are
 the machine-readable authority for model-specific serving behavior and immutable
 source identity. The complete setup, smoke, full-population execution, and
@@ -222,6 +251,59 @@ running for the full evaluation below. Once evaluation is finished, stop
 `gym env start` with Ctrl-C. Gym currently has no separate `env stop` command and
 does not own an external proxy, judge gateway, or externally managed model server.
 
+## Runtime limits and judge diagnostics
+
+The browser resource advertises its `action_limits` in the seed response. The
+agent uses those limits for its default Nano Omni tool schema and action
+validation; the browser validates the same limits before executing a batch.
+Historical defaults remain a maximum 30-second wait with no extra aggregate
+wait limit. To permit longer model-requested waits, configure the browser:
+
+```yaml
+webvoyager_environment:
+  resources_servers:
+    visual_browser:
+      action_limits:
+        max_wait_seconds: 120
+        max_step_wait_seconds: 120
+```
+
+Here `wait=60` is executed as requested, not silently clamped. The combined
+waits in one step cannot exceed 120 seconds. Keep the agent's resource-request
+timeout above this budget, with room for navigation and screenshot/CAPTCHA
+handling. Waits stay on the session's browser thread and check browser
+liveness between short sleep intervals; they do not block the server event
+loop. Closing a tab with another live tab remaining is not browser loss.
+
+For a new evaluation or training recipe, the judge can retry malformed verdicts
+against exactly the same evidence and mask an exhausted judge failure:
+
+```yaml
+webvoyager_judge:
+  resources_servers:
+    webvoyager_judge:
+      judge_parse_max_retries: 1
+      unparseable_verdict_policy: mask
+```
+
+Parse retries share the configured judge-call deadline. Evidence hashes and
+attempt texts are retained in verifier metadata. Defaults remain no parse
+retry and `unparseable_verdict_policy: zero`, matching the historical reference
+recipe. Record any changed waiting/judge policy with the new run; do not
+reinterpret historical scores or claim score equivalence without a rollout.
+Policy parse failures remain judged policy outcomes, not masked infrastructure
+failures. No JSON repair or extraction of actions from reasoning is performed.
+
+Site concurrency limits have **resource-process scope**. Multiple resources
+servers using the same egress do not automatically share a global limit.
+For one coordinated limit, route the run's agents through one resources
+server that leases isolated browser instances, or use an external shared
+coordinator. Logs identify observed rate-limit pages, proxy origin and runtime
+host; `direct_unverified` does not assert a public egress IP.
+The limit counts task-declared sites, not every HTTP host visited through
+external links. It cannot guarantee that a shared public egress will never
+encounter website rate limits.
+
 ## Reporting and sharded runs
 
 After a healthy smoke, run the full population from the same benchmark directory:
@@ -256,8 +338,9 @@ one global result:
 sidecars; the health check detects malformed and duplicate rollout identities.
 A reportable full result has 552 scored rows, no dropped coverage, and no
 unresolved health findings. Browser, provider, proxy/CAPTCHA, model-server, and
-judge failures are masked and routed to retry rather than silently counted as
-policy reward zero.
+judge transport failures are masked and routed to retry rather than silently
+counted as policy reward zero. Malformed judge verdicts follow the explicit
+policy described above.
 
 Cluster images, scheduler scripts, caches, checkpoint placement, and large run
 artifacts are deployment concerns and are intentionally outside this benchmark

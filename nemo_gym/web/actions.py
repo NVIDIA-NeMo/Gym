@@ -9,7 +9,7 @@ import math
 from typing import Any
 from urllib.parse import urlparse
 
-from nemo_gym.web.models import WebAction
+from nemo_gym.web.models import WebAction, WebActionLimits
 
 
 NANO_OMNI_TOOL_NAMES = frozenset({"computer", "navigate", "tabs_create", "tabs_focus", "terminate"})
@@ -47,8 +47,15 @@ MAX_SCROLL_AMOUNT = 50
 class ActionParseError(ValueError):
     """Raised when a policy adapter emits an unsafe or unsupported action."""
 
-    def __init__(self, message: str, *, validated_prefix: WebAction | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        validated_prefix: WebAction | None = None,
+        reason: str = "invalid_tool_arguments",
+    ) -> None:
         super().__init__(message)
+        self.reason = reason
         # Only complete, validated calls preceding the error may be exposed.
         # The caller chooses whether its execution policy permits this prefix.
         self.validated_prefix = validated_prefix
@@ -74,6 +81,8 @@ def _validate_native_computer_action(
     action: Any,
     index: int,
     max_scroll_amount: int | None = MAX_SCROLL_AMOUNT,
+    *,
+    limits: WebActionLimits,
 ) -> dict[str, Any]:
     if not isinstance(action, dict):
         raise ActionParseError(f"native computer action[{index}] must be an object")
@@ -100,7 +109,7 @@ def _validate_native_computer_action(
         if coordinate is not None:
             _native_coordinate(coordinate, field=f"{prefix}.coordinate")
     elif name == "wait":
-        _native_number(action.get("duration"), field=f"{prefix}.duration", minimum=0, maximum=30)
+        _native_number(action.get("duration"), field=f"{prefix}.duration", minimum=0, maximum=limits.max_wait_seconds)
     elif name == "scroll":
         coordinate = action.get("coordinate")
         if coordinate is not None:
@@ -129,6 +138,7 @@ def _validate_native_tool_arguments(
     *,
     max_computer_actions: int,
     max_scroll_amount: int | None = MAX_SCROLL_AMOUNT,
+    limits: WebActionLimits,
 ) -> tuple[dict[str, Any], int]:
     normalized = dict(arguments)
     if name == "computer":
@@ -139,7 +149,7 @@ def _validate_native_tool_arguments(
             raise ActionParseError(f"native computer tool exceeded the {max_computer_actions}-action batch limit")
         validated_actions: list[dict[str, Any]] = []
         for index, action in enumerate(actions):
-            validated_actions.append(_validate_native_computer_action(action, index, max_scroll_amount))
+            validated_actions.append(_validate_native_computer_action(action, index, max_scroll_amount, limits=limits))
         normalized["actions"] = validated_actions
         return normalized, len(actions)
     if name == "navigate":
@@ -182,15 +192,27 @@ def _nano_omni_action(calls: list[dict[str, Any]], parse_records: list[dict[str,
     )
 
 
+def _requested_wait_seconds(calls: list[dict[str, Any]]) -> float:
+    return sum(
+        float(action["duration"])
+        for call in calls
+        if call["name"] == "computer"
+        for action in call["arguments"]["actions"]
+        if action["action"] == "wait"
+    )
+
+
 def parse_nano_omni_tool_calls(
     items: list[Any],
     *,
     max_calls: int | None = 8,
     max_computer_actions: int = 20,
     max_scroll_amount: int | None = MAX_SCROLL_AMOUNT,
+    limits: WebActionLimits | None = None,
 ) -> WebAction:
     """Validate parser-produced Nano Omni calls without repairing their contents."""
 
+    limits = limits or WebActionLimits()
     calls: list[dict[str, Any]] = []
     parse_records: list[dict[str, Any]] = []
     call_count = sum(
@@ -220,12 +242,17 @@ def parse_nano_omni_tool_calls(
                 arguments,
                 max_computer_actions=max_computer_actions,
                 max_scroll_amount=max_scroll_amount,
+                limits=limits,
             )
         except ActionParseError as exc:
             if (
                 calls
                 and (max_calls is None or call_count <= max_calls)
                 and not any(call["name"] == "terminate" for call in calls)
+                and (
+                    limits.max_step_wait_seconds is None
+                    or _requested_wait_seconds(calls) <= limits.max_step_wait_seconds
+                )
             ):
                 exc.validated_prefix = _nano_omni_action(calls, parse_records)
             raise
@@ -239,9 +266,18 @@ def parse_nano_omni_tool_calls(
         )
 
     if not calls:
-        raise ActionParseError("model response did not contain a Nano Omni function call")
+        raise ActionParseError("model response did not contain a Nano Omni function call", reason="no_tool_calls")
     if max_calls is not None and len(calls) > max_calls:
-        raise ActionParseError(f"Nano Omni response exceeded the {max_calls}-call limit")
+        raise ActionParseError(
+            f"Nano Omni response exceeded the {max_calls}-call limit", reason="tool_call_limit_exceeded"
+        )
+    requested_wait = _requested_wait_seconds(calls)
+    if limits.max_step_wait_seconds is not None and requested_wait > limits.max_step_wait_seconds:
+        raise ActionParseError(
+            f"computer-use step requested {requested_wait:g}s of waiting; "
+            f"maximum is {limits.max_step_wait_seconds:g}s",
+            reason="step_wait_budget_exceeded",
+        )
     terminal_indices = [index for index, call in enumerate(calls) if call["name"] == "terminate"]
     if terminal_indices and terminal_indices != [len(calls) - 1]:
         raise ActionParseError("Nano Omni terminate must be the final tool call")

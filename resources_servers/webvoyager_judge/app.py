@@ -127,6 +127,10 @@ class WebVoyagerJudgeResourcesServer(SimpleResourcesServer):
         params = self.config.judge_responses_create_params.model_copy(deep=True)
         params.instructions = WEBVOYAGER_GEMINI_JUDGE_PROMPT
         params.input = [NeMoGymEasyInputMessage(role="user", content=content)]
+        evidence_sha256 = hashlib.sha256(
+            json.dumps(params.model_dump(mode="json"), sort_keys=True, ensure_ascii=False).encode("utf-8")
+        ).hexdigest()
+        judge_attempts: list[str] = []
         model_started = time.monotonic()
         LOG.info(
             "event=webvoyager_judge_model_start task=%s model_server=%s screenshots_used=%d",
@@ -135,18 +139,32 @@ class WebVoyagerJudgeResourcesServer(SimpleResourcesServer):
             len(screenshots),
         )
         try:
-            judge_response = await reraise_judge_errors(
-                asyncio.wait_for(
-                    call_judge(
-                        self.server_client,
-                        server_name=self.config.judge_model_server.name,
-                        url_path="/v1/responses",
-                        json=params,
-                        response_model=NeMoGymResponse,
-                    ),
-                    timeout=self.config.judge_call_timeout_secs,
-                )
-            )
+            # Retries share one deadline and exactly the same evidence. They
+            # must not rerun the policy, change the prompt, or multiply the
+            # outer agent's judge timeout.
+            async with asyncio.timeout(self.config.judge_call_timeout_secs):
+                for attempt in range(self.config.judge_parse_max_retries + 1):
+                    judge_response = await reraise_judge_errors(
+                        call_judge(
+                            self.server_client,
+                            server_name=self.config.judge_model_server.name,
+                            url_path="/v1/responses",
+                            json=params,
+                            response_model=NeMoGymResponse,
+                        )
+                    )
+                    judge_text = _extract_output_text(judge_response)
+                    judge_attempts.append(judge_text)
+                    parsed_verdict = parse_gemini_verdict(judge_text)
+                    LOG.info(
+                        "event=webvoyager_judge_attempt task=%s attempt=%d evidence_sha256=%s parsed=%s",
+                        body.task.task_id,
+                        attempt,
+                        evidence_sha256,
+                        parsed_verdict is not None,
+                    )
+                    if parsed_verdict is not None:
+                        break
         except Exception:
             LOG.exception(
                 "event=webvoyager_judge_model_failed task=%s model_server=%s elapsed_seconds=%.3f",
@@ -155,7 +173,6 @@ class WebVoyagerJudgeResourcesServer(SimpleResourcesServer):
                 time.monotonic() - model_started,
             )
             raise
-        judge_text = _extract_output_text(judge_response)
         LOG.info(
             "event=webvoyager_judge_model_complete task=%s model_server=%s output_chars=%d "
             "output_sha256=%s elapsed_seconds=%.3f",
@@ -165,7 +182,6 @@ class WebVoyagerJudgeResourcesServer(SimpleResourcesServer):
             hashlib.sha256(judge_text.encode("utf-8")).hexdigest()[:12],
             time.monotonic() - model_started,
         )
-        parsed_verdict = parse_gemini_verdict(judge_text)
         verdict = parsed_verdict[0] if parsed_verdict is not None else None
         if verdict is None:
             LOG.warning(
@@ -175,9 +191,7 @@ class WebVoyagerJudgeResourcesServer(SimpleResourcesServer):
                 hashlib.sha256(judge_text.encode("utf-8")).hexdigest()[:12],
             )
             result = WebVerifierResult(
-                # A response was received successfully; malformed verdict text
-                # is therefore a benchmark outcome rather than infrastructure.
-                valid_sample=True,
+                valid_sample=self.config.unparseable_verdict_policy == "zero",
                 failure_kind="judge_unparseable",
                 verifier_version=self.config.verifier_version,
                 metadata={"judge_text": judge_text},
@@ -198,6 +212,11 @@ class WebVoyagerJudgeResourcesServer(SimpleResourcesServer):
                     "page_urls": body.page_urls[-self.config.max_screenshots :],
                 },
             )
+        result.metadata.update(
+            judge_evidence_sha256=evidence_sha256,
+            judge_attempts=judge_attempts,
+            unparseable_verdict_policy=self.config.unparseable_verdict_policy,
+        )
         LOG.info(
             "event=webvoyager_judge_complete task=%s valid_sample=%s success=%s reward=%s "
             "failure_kind=%s screenshots_used=%d elapsed_seconds=%.3f",

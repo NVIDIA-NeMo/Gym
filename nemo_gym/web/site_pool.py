@@ -106,6 +106,7 @@ class SiteConcurrencyLimitPool:
         async with self._lock:
             return {
                 "mode": "site_limits",
+                "scope": "resource_server_process",
                 "isolated": False,
                 "max_sessions_per_site": self._limit,
                 "active_leases": len(self._active),
