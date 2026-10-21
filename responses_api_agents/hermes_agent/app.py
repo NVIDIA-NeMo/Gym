@@ -87,8 +87,27 @@ from responses_api_agents.hermes_agent.sandbox import DEFAULT_UV_CACHE_DIR, Harn
 # conversation was refused (malformed or too long for the model), so the episode is a graded zero, not an
 # infrastructure failure. Auth, routing, rate-limit and server errors stay provider failures and are masked.
 MODEL_REJECTION_STATUSES = frozenset({400, 413, 422})
-_HTTP_STATUS = re.compile(r"\bHTTP (\d{3})\b")
+_HTTP_STATUS = re.compile(r"\b(?:HTTP |Error code: )([45]\d{2})\b")
 _TRUNCATION_ERROR = "First response truncated due to output length limit"
+
+
+def _is_limit_result(result: Mapping[str, Any]) -> bool:
+    """Recognize explicit Hermes limit results; tested on Hermes 26bb847a.
+
+    `partial` alone also covers invalid model output, so require a native limit reason.
+    """
+    error = str(result.get("error") or "")
+    return (
+        result.get("stop_reason") in {"wall_time", "max_iterations"}
+        or error == _TRUNCATION_ERROR
+        or (
+            bool(result.get("partial"))
+            and (
+                error == "Response truncated due to output length limit"
+                or error.startswith(("Request payload too large", "Context length exceeded"))
+            )
+        )
+    )
 
 
 def _model_rejection_status(error: object) -> int | None:
@@ -306,7 +325,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
     def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
         """Read Hermes 26bb847a native result flags and API errors; tested on that pin."""
         error = str(native_result.get("error") or "")
-        if error == _TRUNCATION_ERROR or native_result.get("stop_reason") in {"wall_time", "max_turns"}:
+        if _is_limit_result(native_result):
             return AgentOutcome(failure_kind=AGENT_LIMIT)
         if native_result.get("failed"):
             match = _HTTP_STATUS.search(error)

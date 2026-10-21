@@ -17,7 +17,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from environment_servers.single_agent_turn.app import agent_outcome_policy
+from environment_servers.single_agent_turn.app import AgentOutcomePolicyConfig, OutcomeAction, agent_outcome_policy
 from nemo_gym.agent_utils import process_supervisor
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
 from nemo_gym.agent_utils.supervisor_client import STOP_REQUEST_FILE, SUPERVISOR_FILE, parse_cleanup_receipt
@@ -276,11 +276,12 @@ async def test_activation_replay_survives_disconnected_waiter(agent, state):
     [
         *[
             (
-                f"HTTP {status} controlled model failure",
+                f"{prefix}{status} controlled model failure",
                 {"failure_kind": "model_request_error", "status_code": status},
                 status in {429, 500},
             )
-            for status in (400, 401, 429, 500)
+            for status in (400, 401, 422, 429, 500)
+            for prefix in ("HTTP ", "Error code: ")
         ],
         ("Request timed out.", {"failure_kind": "model_transport_error"}, True),
     ],
@@ -308,8 +309,8 @@ def test_provider_failure_is_reported_and_replays_without_rerunning(agent, state
             assert json.loads(response.json()["metadata"]["ng_agent_outcome"]) == outcome
             assert response.json()["error"]["message"] == error_message
             policy = agent_outcome_policy(NeMoGymResponse.model_validate(response.json()))
-            assert policy.retryable is retryable
-            assert policy.verifiable is (outcome.get("status_code") == 400)
+            assert (policy == OutcomeAction.RETRY) is retryable
+            assert (policy == OutcomeAction.VERIFY) is (outcome.get("status_code") in {400, 422})
         state.upload_json.assert_awaited_once()
         assert state.session.cleanup is not None and state.session.cleanup["cleanup_confirmed"] is True
         close = client.post(
@@ -1496,3 +1497,45 @@ async def test_seed_allows_loopback_model_url_on_local_docker(agent, state, monk
     assert sum("use_absolute_ip" in record.getMessage() for record in caplog.records) == 1
     factory.connect.assert_awaited_once()
     assert state.session.sandbox.upload.await_count >= 3
+
+
+@pytest.mark.parametrize(
+    "result,expected_kind",
+    [
+        ({"stop_reason": "max_iterations"}, "agent_limit"),
+        ({"stop_reason": "wall_time"}, "agent_limit"),
+        ({"failed": True, "error": "First response truncated due to output length limit"}, "agent_limit"),
+        ({"partial": True, "error": "Response truncated due to output length limit"}, "agent_limit"),
+        ({"partial": True, "error": "Request payload too large (413). Cannot compress further."}, "agent_limit"),
+        (
+            {"partial": True, "error": "Request payload too large: max compression attempts (3) reached."},
+            "agent_limit",
+        ),
+        (
+            {"partial": True, "error": "Context length exceeded (200,000 tokens). Cannot compress further."},
+            "agent_limit",
+        ),
+        ({"partial": True, "error": "Context length exceeded: max compression attempts (3) reached."}, "agent_limit"),
+        ({"partial": True, "error": "Model generated invalid tool call: nonexistent"}, "agent_invalid_output"),
+    ],
+)
+def test_limit_and_invalid_output_keep_distinct_policy_routes(agent, result, expected_kind):
+    outcome = agent.classify_outcome(result)
+    assert outcome.failure_kind == expected_kind
+    response = NeMoGymResponse(
+        id="response",
+        created_at=0,
+        model="model",
+        object="response",
+        output=[],
+        tool_choice="auto",
+        tools=[],
+        parallel_tool_calls=True,
+        status="failed",
+    )
+    reported = agent.report_outcome(response, result)
+    # Distinct overrides expose misclassification that the default verify/verify policy hides.
+    policy = AgentOutcomePolicyConfig(by_failure_kind={"agent_limit": "retry", "agent_invalid_output": "fail"})
+    assert agent_outcome_policy(reported, config=policy) == (
+        OutcomeAction.RETRY if expected_kind == "agent_limit" else OutcomeAction.FAIL
+    )
