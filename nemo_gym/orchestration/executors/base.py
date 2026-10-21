@@ -21,7 +21,11 @@ from typing import ClassVar
 import yaml
 
 from nemo_gym.orchestration.api import HOST_ENV_REFS, SubmitConfig
-from nemo_gym.orchestration.jobs import MANIFEST_NAME, RESOLVED_CONFIG_NAME, SubmissionRecord
+from nemo_gym.orchestration.jobs import MANIFEST_NAME, RESOLVED_CONFIG_NAME, BenchmarkJob, SubmissionRecord
+
+
+class UnsupportedOperationError(RuntimeError):
+    """The executor does not implement this operation."""
 
 
 class BaseExecutor(ABC):
@@ -29,6 +33,8 @@ class BaseExecutor(ABC):
     # the scheduler (time limit, preemption, node failure). False means asking
     # for `resumable` on this executor is a config error, not a silent no-op.
     supports_resumable: ClassVar[bool] = False
+    # What this executor writes to `SubmissionRecord.executor`, and what a resubmit dispatches on.
+    name: ClassVar[str]
 
     @abstractmethod
     def run(self, config: SubmitConfig, *, dry_run: bool = False) -> SubmissionRecord | None:
@@ -37,6 +43,15 @@ class BaseExecutor(ABC):
         Returns None on a dry run, which renders the scripts and stops before
         anything is submitted; every other path either returns a record or
         raises.
+        """
+
+    @abstractmethod
+    def resubmit(self, record: SubmissionRecord, benchmark: str) -> BenchmarkJob:
+        """Queue `benchmark` of `record` again, in place, and return its updated entry.
+
+        Refuses while a job of that benchmark is still active, so two jobs never write one run.
+        Persists the updated record before returning. An executor that cannot do this raises
+        `UnsupportedOperationError`.
         """
 
     def persist(
@@ -81,4 +96,17 @@ class BaseExecutor(ABC):
             raise RuntimeError(
                 f"Submitted jobs but could not write the manifest/resolved config under {run_dir}: {error}. "
                 f"Already queued: {queued or 'nothing'}. Record these by hand before collecting."
+            ) from error
+
+    def persist_record(self, record: SubmissionRecord, write_manifest: Callable[..., None]) -> None:
+        """Store an updated record in the same two places `persist()` does; the resolved config is unchanged."""
+        record.write_local_index()
+        manifest = Path(record.run_dir) / MANIFEST_NAME
+        try:
+            write_manifest(manifest, record.dumps())
+        except Exception as error:
+            queued = ", ".join(f"{b.benchmark}={b.job_id}" for b in record.benchmarks if b.job_id)
+            raise RuntimeError(
+                f"Queued jobs but could not update {manifest}: {error}. The local index has the new record; "
+                f"queued: {queued or 'nothing'}."
             ) from error

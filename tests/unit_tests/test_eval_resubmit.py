@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import argparse
+import json
 import os
 import re
 import subprocess
@@ -23,11 +25,27 @@ from pathlib import Path
 import pytest
 import yaml
 
+from nemo_gym.cli.main import COMMANDS, _eval_resubmit
 from nemo_gym.orchestration.api import SubmitConfig
+from nemo_gym.orchestration.executors.base import BaseExecutor, UnsupportedOperationError
 from nemo_gym.orchestration.executors.connection import LocalConnection
+from nemo_gym.orchestration.executors.kubernetes import KubernetesExecutor
+from nemo_gym.orchestration.executors.slurm import SlurmExecutor
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
-from nemo_gym.orchestration.jobs import MANIFEST_NAME, RESOLVED_CONFIG_NAME, BenchmarkJob, SubmissionRecord
-from nemo_gym.orchestration.submit import resubmit
+from nemo_gym.orchestration.jobs import (
+    MANIFEST_NAME,
+    RESOLVED_CONFIG_NAME,
+    BenchmarkJob,
+    SubmissionRecord,
+    load_submission_record,
+    local_index_dir,
+)
+from nemo_gym.orchestration.submit import _EXECUTORS_BY_NAME, resubmit
+
+
+@pytest.fixture(autouse=True)
+def _local_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
 
 
 def _staged_run(tmp_path: Path, *, executor: str = "slurm") -> Path:
@@ -44,10 +62,23 @@ def _staged_run(tmp_path: Path, *, executor: str = "slurm") -> Path:
         cluster="c",
         executor=executor,
         submitted_by="me",
-        benchmarks=[BenchmarkJob(benchmark="gsm8k", job_dir=str(job_dir), job_id="100")],
+        benchmarks=[
+            BenchmarkJob(benchmark="gsm8k", job_dir=str(job_dir), job_id="100"),
+            BenchmarkJob(benchmark="mmlu", job_dir=str(run_dir / "mmlu"), job_id="101"),
+        ],
     )
     (run_dir / MANIFEST_NAME).write_text(record.dumps())
+    record.write_local_index()
     return job_dir
+
+
+def _handle(job_dir: Path) -> tuple[str, str]:
+    """The CLI's executor-neutral handle for a staged job dir: the submission's id and the benchmark."""
+    return job_dir.parent.name, job_dir.name
+
+
+def _record(job_dir: Path) -> SubmissionRecord:
+    return SubmissionRecord.load(json.loads((job_dir.parent / MANIFEST_NAME).read_text()))
 
 
 @pytest.fixture
@@ -63,14 +94,54 @@ def slurm_bin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return bin_dir
 
 
-def test_resubmit_queues_job_sh_from_its_job_dir_and_appends_the_id(tmp_path: Path, slurm_bin: Path) -> None:
+def test_resubmit_queues_job_sh_from_its_job_dir_and_records_the_new_id(tmp_path: Path, slurm_bin: Path) -> None:
     job_dir = _staged_run(tmp_path)
     (slurm_bin / "squeue_workdirs").write_text(f"{tmp_path / 'other'}\n")
 
-    assert resubmit(str(job_dir)) == "4242"
+    job = resubmit(*_handle(job_dir))
 
+    assert job == BenchmarkJob(benchmark="gsm8k", job_dir=str(job_dir), job_id="4242")
     assert (slurm_bin / "cwd").read_text().strip() == str(job_dir)
-    assert (job_dir / ".gym_job_chain").read_text() == "100\n4242\n"
+    # Both stores `persist()` writes now name the new job; the other benchmark is untouched.
+    index = SubmissionRecord.load(json.loads((local_index_dir() / f"{job_dir.parent.name}.json").read_text()))
+    for record in (_record(job_dir), index):
+        assert [(b.benchmark, b.job_id) for b in record.benchmarks] == [("gsm8k", "4242"), ("mmlu", "101")]
+
+
+def test_the_record_is_found_by_its_id_and_benchmark_through_the_local_index(tmp_path: Path, slurm_bin: Path) -> None:
+    job_dir = _staged_run(tmp_path)
+    # The run dir is not on this machine (a remote cluster): only the local index knows the submission.
+    (job_dir.parent / MANIFEST_NAME).unlink()
+
+    assert load_submission_record(job_dir.parent.name).benchmark_job("gsm8k").job_id == "100"
+    with pytest.raises(ValueError, match="has no benchmark 'nope'; it has: gsm8k, mmlu"):
+        resubmit(job_dir.parent.name, "nope")
+    assert not (slurm_bin / "cwd").exists()
+
+
+def test_the_cli_takes_a_gym_job_id_and_a_benchmark(
+    tmp_path: Path, slurm_bin: Path, capsys: pytest.CaptureFixture
+) -> None:
+    job_dir = _staged_run(tmp_path)
+
+    _eval_resubmit(argparse.Namespace(gym_job_id=job_dir.parent.name, benchmark="gsm8k"), [])
+
+    assert capsys.readouterr().out == "4242\n"
+    summary = COMMANDS["eval resubmit"].summary
+    assert "Slurm" not in summary
+
+
+@pytest.mark.parametrize(("executor", "supported"), [(SlurmExecutor, True), (KubernetesExecutor, False)])
+def test_which_executors_support_resubmit(tmp_path: Path, slurm_bin: Path, executor: type, supported: bool) -> None:
+    job_dir = _staged_run(tmp_path, executor=executor.name)
+
+    if supported:
+        assert resubmit(*_handle(job_dir)).job_id == "4242"
+    else:
+        with pytest.raises(UnsupportedOperationError, match="Kubernetes executor does not support resubmit"):
+            resubmit(*_handle(job_dir))
+    assert "resubmit" in BaseExecutor.__abstractmethods__
+    assert set(_EXECUTORS_BY_NAME) == {"slurm", "kubernetes"}
 
 
 def test_resubmit_starts_a_fresh_attempt_budget_and_retry_count(tmp_path: Path, slurm_bin: Path) -> None:
@@ -82,7 +153,7 @@ def test_resubmit_starts_a_fresh_attempt_budget_and_retry_count(tmp_path: Path, 
     (job_dir / "job.sh").write_text("#!/bin/bash\n# --- Auto-resume chain ---\n")
     (slurm_bin / "squeue_workdirs").write_text(f"{tmp_path / 'other'}\n")
 
-    assert resubmit(str(job_dir)) == "4242"
+    assert resubmit(*_handle(job_dir)).job_id == "4242"
 
     assert (job_dir / "artifacts" / "rollouts_failures.jsonl").read_text() == failures
     assert (job_dir / "artifacts" / "rollouts_resubmit_offset").read_text().strip() == "2"
@@ -96,22 +167,20 @@ def test_resubmit_refuses_while_a_job_runs_in_the_job_dir(tmp_path: Path, slurm_
     (slurm_bin / "squeue_workdirs").write_text(f"{job_dir}\n")
 
     with pytest.raises(RuntimeError, match="still pending or running"):
-        resubmit(str(job_dir))
+        resubmit(*_handle(job_dir))
 
     assert not (slurm_bin / "cwd").exists()
-    assert (job_dir / ".gym_job_chain").read_text() == "100\n"
+    assert _record(job_dir).benchmark_job("gsm8k").job_id == "100"
 
 
-def test_resubmit_refuses_a_job_dir_no_record_names(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
-
-    with pytest.raises(ValueError, match="No submission record"):
-        resubmit(str(tmp_path / "nowhere" / "gsm8k"))
+def test_resubmit_refuses_an_unknown_submission(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="No submission 'gym-job-nope'"):
+        resubmit("gym-job-nope", "gsm8k")
 
 
-def test_resubmit_refuses_a_non_slurm_run(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="Slurm executor only"):
-        resubmit(str(_staged_run(tmp_path, executor="kubernetes")))
+def test_resubmit_refuses_an_unknown_executor(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="unknown executor 'local'"):
+        resubmit(*_handle(_staged_run(tmp_path, executor="local")))
 
 
 def _run_args(script: str, job_dir: Path) -> list[str]:
@@ -156,7 +225,7 @@ def test_resubmit_refuses_a_populated_run_whose_job_sh_starts_fresh(tmp_path: Pa
     (slurm_bin / "squeue_workdirs").write_text("")
 
     with pytest.raises(RuntimeError, match="would delete its rollouts"):
-        resubmit(str(job_dir))
+        resubmit(*_handle(job_dir))
 
     assert not (slurm_bin / "cwd").exists()
     assert not (job_dir / "artifacts" / "rollouts_resubmit_offset").exists()
@@ -173,7 +242,7 @@ def test_two_concurrent_resubmits_queue_one_job(tmp_path: Path, slurm_bin: Path)
     def attempt() -> str:
         barrier.wait()
         try:
-            return resubmit(str(job_dir))
+            return resubmit(*_handle(job_dir)).job_id
         except RuntimeError as error:
             return str(error)
 
@@ -207,7 +276,7 @@ def test_resubmit_forwards_the_saved_telemetry_token(
         ).stdout,
     )
 
-    assert resubmit(str(job_dir)) == "4242"
+    assert resubmit(*_handle(job_dir)).job_id == "4242"
 
     assert (slurm_bin / "token").read_text() == "s3cret value\n"
 
@@ -220,7 +289,7 @@ def test_resubmit_without_the_telemetry_token_queues_nothing(
     monkeypatch.delenv("MY_INGEST_TOKEN", raising=False)
 
     with pytest.raises(ValueError, match="MY_INGEST_TOKEN"):
-        resubmit(str(job_dir))
+        resubmit(*_handle(job_dir))
 
     assert not (slurm_bin / "cwd").exists()
 
@@ -232,7 +301,7 @@ def test_resubmit_with_telemetry_off_needs_no_token(
     _save_otel(job_dir, {"enabled": False})
     monkeypatch.delenv("OTEL_TOKEN", raising=False)
 
-    assert resubmit(str(job_dir)) == "4242"
+    assert resubmit(*_handle(job_dir)).job_id == "4242"
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root can write a read-only directory")
@@ -245,7 +314,7 @@ def test_resubmit_queues_nothing_when_the_offset_cannot_be_written(tmp_path: Pat
     artifacts.chmod(0o555)
     try:
         with pytest.raises(RuntimeError, match="cannot write .*rollouts_resubmit_offset"):
-            resubmit(str(job_dir))
+            resubmit(*_handle(job_dir))
     finally:
         artifacts.chmod(0o755)
 

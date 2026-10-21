@@ -39,7 +39,7 @@ from nemo_gym.orchestration.executors.otel import (
     validate_destination,
     validate_gym_telemetry,
 )
-from nemo_gym.orchestration.executors.resume_script import JOB_CHAIN_NAME, PROLOGUE_MARKER, RETRY_FILE_NAME
+from nemo_gym.orchestration.executors.resume_script import RETRY_FILE_NAME
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
 from nemo_gym.orchestration.jobs import (
     RESOLVED_CONFIG_NAME,
@@ -175,6 +175,7 @@ class SlurmExecutor(BaseExecutor):
     """
 
     supports_resumable = True
+    name = "slurm"
 
     def run(self, config: SubmitConfig, *, dry_run: bool = False) -> SubmissionRecord | None:
         compute = next(iter(config.compute.values()))
@@ -221,13 +222,14 @@ class SlurmExecutor(BaseExecutor):
 
         return record
 
-    def resubmit(self, record: SubmissionRecord, benchmark: BenchmarkJob) -> str:
-        """Queue `benchmark`'s job.sh again from its job dir and append the new id to its job chain.
+    def resubmit(self, record: SubmissionRecord, benchmark: str) -> BenchmarkJob:
+        """Queue `benchmark`'s job.sh again from its job dir and record the new job id.
 
         Refuses while any of the caller's jobs runs in that job dir, so two jobs never write one run, and
         refuses a run with rollouts whose job.sh would start it fresh, which would delete them.
         """
-        job_dir = Path(benchmark.job_dir)
+        job = record.benchmark_job(benchmark)
+        job_dir = Path(job.job_dir)
         # Relative to the job dir, which the script enters first, so messages can name them without quoting paths.
         rollouts = Path("artifacts") / "rollouts.jsonl"
         failures = failures_path_for(rollouts)
@@ -256,18 +258,16 @@ class SlurmExecutor(BaseExecutor):
                         f"if [ -f {failures} ]; then wc -l < {failures}; else echo 0; fi > {offset}.tmp "
                         f'&& mv {offset}.tmp {offset} || fail "cannot write $PWD/{offset}"',
                         f"rm -f {RETRY_FILE_NAME} || fail 'cannot remove {RETRY_FILE_NAME}'",
-                        _sbatch_command(benchmark.benchmark, job_dir / "job.sh"),
+                        _sbatch_command(benchmark, job_dir / "job.sh"),
                     ]
                 )
             )
-            job_id, error = results.get(benchmark.benchmark, (None, "sbatch produced no result"))
+            job_id, error = results.get(benchmark, (None, "sbatch produced no result"))
             if job_id is None:
-                raise RuntimeError(f"Resubmit of {benchmark.benchmark} failed: {error}")
-            # A resumable job.sh appends its own id to the chain when it starts.
-            chain = shlex.quote(str(job_dir / JOB_CHAIN_NAME))
-            job_sh = shlex.quote(str(job_dir / "job.sh"))
-            conn.run([f"grep -qF -- {shlex.quote(PROLOGUE_MARKER)} {job_sh} || echo {job_id} >> {chain}"])
-        return job_id
+                raise RuntimeError(f"Resubmit of {benchmark} failed: {error}")
+            job = job.model_copy(update={"job_id": job_id, "error": None})
+            self.persist_record(record.with_benchmark(job), conn.write_text)
+        return job
 
     @staticmethod
     def _resubmit_token_export(conn: Connection, run_dir: Path) -> list[str]:
@@ -314,7 +314,7 @@ class SlurmExecutor(BaseExecutor):
             submitted_at=utc_timestamp(now),
             run_dir=str(remote_run_dir),
             cluster=cluster,
-            executor="slurm",
+            executor=self.name,
             hostname=compute.hostname,
             submitted_by=getpass.getuser(),
             benchmarks=benchmarks,

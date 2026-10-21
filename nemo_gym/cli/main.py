@@ -681,7 +681,7 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
     from nemo_gym.orchestration.submit import resubmit
 
     try:
-        print(resubmit(args.job_dir))
+        print(resubmit(args.gym_job_id, args.benchmark).job_id)
     except (ValueError, RuntimeError) as error:
         print(f"Error: {error}", file=sys.stderr)
         sys.exit(1)
@@ -1324,13 +1324,14 @@ COMMANDS = {
     ),
     "eval resubmit": Command(
         target=_eval_resubmit,
-        summary="Queue a submitted benchmark's job script again in place (Slurm only).",
+        summary="Queue one benchmark of a submitted run again, in place.",
         flags=(
             Flag(
                 register=lambda p: p.add_argument(
-                    "job_dir", metavar="JOB_DIR", help="A benchmark's job dir, as printed by `gym eval submit`."
+                    "gym_job_id", metavar="GYM_JOB_ID", help="The submission's id, as printed by `gym eval submit`."
                 ),
             ),
+            Flag(register=lambda p: p.add_argument("benchmark", metavar="BENCHMARK", help="The benchmark to queue.")),
         ),
     ),
     "eval compare": Command(
