@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Adapters supply bounded, visible data; grading never follows host filesystem paths."""
 
-import hashlib
 from typing import Literal
 
 from pydantic import Field, JsonValue, model_validator
@@ -28,10 +27,6 @@ class Artifact(StrictModel):
         if self.status != "error" and self.error:
             raise ValueError("Only an error artifact carries a capture error")
         return self
-
-    @property
-    def sha256(self) -> str | None:
-        return hashlib.sha256(self.text.encode()).hexdigest() if self.status == "present" else None
 
 
 class VisibleEvent(StrictModel):

@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import json
 
-from nemo_gym.judge import JudgeError, call_judge
+from nemo_gym.judge import call_judge
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
 from resources_servers.partner_if.engine import evaluate
@@ -71,10 +71,10 @@ async def grade(
             if any(item.type not in {"message", "reasoning"} for item in receipt_response.output):
                 raise ValueError("Judge returned unexpected tool output")
             return parse_verdict(receipt_response.output_text, items, evidence)
-        except (ValueError, JudgeError) as error:
-            # Preserve the actual request/reply even when validation fails. These
-            # are technical/protocol errors, never ordinary model failures or
-            # valid judge abstentions.
+        except ValueError as error:
+            # A reply that fails protocol or validation checks leaves these items
+            # unscorable and keeps the actual request/reply. A failed judge call
+            # raises JudgeError, which propagates to Gym's judge_failsafe.
             return [
                 RawJudgment(
                     id=item.id,

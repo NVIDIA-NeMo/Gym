@@ -100,8 +100,6 @@ class PartnerIFDispatcher(SimpleResponsesAPIAgent):
             raise HTTPException(422, "Expected verifier_metadata.partner_if.task_id") from None
         if not isinstance(task_id, str) or task_id not in self.config.task_routes:
             raise HTTPException(422, "Unknown benchmark task ID")
-        if "task_routes" in payload:
-            raise HTTPException(422, "Task routes are configured by the host, not by the request")
         route = self.config.task_routes[task_id]
         # The native session environment validates these two host-routing fields.
         # Only adapt the address; preserve all actor data, native extras and IDs.

@@ -1,18 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-import importlib
-import importlib.util
 import json
 
 import pytest
 
-from resources_servers.partner_if.engine import EvidenceBundle, GradingContract
-
-
-def api():
-    name = "resources_servers.partner_if.llm"
-    assert importlib.util.find_spec(name), "Shared LLM verifier is not implemented"
-    return importlib.import_module(name)
+from resources_servers.partner_if import llm
+from resources_servers.partner_if.evidence import EvidenceBundle
+from resources_servers.partner_if.grading_contract import GradingContract
 
 
 def rubric():
@@ -58,7 +52,7 @@ def test_judge_payload_preserves_surfaces_but_excludes_analogue_and_model_labels
         artifacts={"output.txt": {"status": "present", "text": "written content"}},
         trajectory=[{"kind": "tool_call", "source_index": 7, "tool_name": "write", "arguments": {"text": "x"}}],
     )
-    payload = api().payload(rubric(), bundle)
+    payload = llm.payload(rubric(), bundle)
     sources = payload["evidence_sources"]
     assert sources["context:0/role"]["lines"][0]["text"] == "user"
     assert sources["answer"]["lines"][0]["text"] == "HELLO"
@@ -71,7 +65,7 @@ def test_judge_payload_preserves_surfaces_but_excludes_analogue_and_model_labels
     "wrap", [lambda x: x, lambda x: "<think>internal</think>\n" + x, lambda x: "```json\n" + x + "\n```"]
 )
 def test_known_reasoning_and_json_envelopes_are_parsed_without_losing_verdict(wrap):
-    result = api().parse_verdict(wrap(json.dumps(verdict())), rubric(), EvidenceBundle(answer="HELLO"))
+    result = llm.parse_verdict(wrap(json.dumps(verdict())), rubric(), EvidenceBundle(answer="HELLO"))
     assert result[0].passed is True and result[0].evidence == "HELLO"
 
 
@@ -86,18 +80,17 @@ def test_known_reasoning_and_json_envelopes_are_parsed_without_losing_verdict(wr
         {"passed": "review", "references": []},
         {"passed": 1},
         {"passed": 0},
-        {"unexercised": True},
-        {"unexercised": False},
+        {"extra": True},
         {"id": "unexpected"},
     ],
 )
 def test_invalid_judge_evidence_or_verdict_rejected(change):
     with pytest.raises(ValueError):
-        api().parse_verdict(json.dumps(verdict(**change)), rubric(), EvidenceBundle(answer="HELLO"))
+        llm.parse_verdict(json.dumps(verdict(**change)), rubric(), EvidenceBundle(answer="HELLO"))
 
 
 def test_absence_failure_is_a_binary_judgment():
-    missing = api().parse_verdict(
+    missing = llm.parse_verdict(
         json.dumps(verdict(passed=False, evidence="No requested text", references=[])),
         rubric(),
         EvidenceBundle(answer=""),
@@ -110,14 +103,14 @@ def test_technical_error_judgments_can_be_null_outside_the_judge_boundary():
 
     saved = verdict(passed=None)["items"][0]
     saved.pop("references")
-    historical = RawJudgment.model_validate(saved | {"quotes": []})
-    assert historical.passed is None
+    judgment = RawJudgment.model_validate(saved | {"quotes": []})
+    assert judgment.passed is None
 
 
 def test_prohibition_pass_is_an_ordinary_evidence_backed_boolean():
     items = rubric()
     items[0].constraint = "The answer contains no emoji."
-    result = api().parse_verdict(
+    result = llm.parse_verdict(
         json.dumps(verdict(reason="The answer contains only the required plain text")),
         items,
         EvidenceBundle(answer="HELLO"),
@@ -127,7 +120,7 @@ def test_prohibition_pass_is_an_ordinary_evidence_backed_boolean():
 
 def test_duplicate_json_fields_are_not_accepted_as_a_valid_judgment():
     with pytest.raises(ValueError, match="Duplicate"):
-        api().parse_verdict('{"items": [], "items": []}', rubric(), EvidenceBundle(answer="HELLO"))
+        llm.parse_verdict('{"items": [], "items": []}', rubric(), EvidenceBundle(answer="HELLO"))
 
 
 @pytest.mark.parametrize(
@@ -142,17 +135,17 @@ def test_references_extract_literal_text_without_model_escape_roundtrip(source, 
         artifacts={"output": {"status": "present", "text": "first\n  printf '%s\\n' READY"}},
         trajectory=[{"source_index": 2, "kind": "tool_call", "arguments": {"filePath": "/workspace/plan.md"}}],
     )
-    result = api().parse_verdict(
+    result = llm.parse_verdict(
         json.dumps(verdict(references=[{"source": source, "start_line": start, "end_line": end}])), rubric(), evidence
     )
     assert result[0].passed is True
     assert result[0].quotes[0].quote == quote
 
 
-def test_live_judge_cannot_supply_an_old_protocol_quote_for_silent_repair():
+def test_judge_supplied_quotes_are_rejected():
     evidence = EvidenceBundle(artifacts={"output": {"status": "present", "text": "first\n  second"}})
     with pytest.raises(ValueError, match="quotes"):
-        api().parse_verdict(
+        llm.parse_verdict(
             json.dumps(verdict(quotes=[{"source": "artifact:output", "quote": r"first\n second"}])),
             rubric(),
             evidence,
@@ -164,7 +157,7 @@ def test_judge_requests_object_mode_through_the_real_gym_converter():
     from nemo_gym.responses_converter import ResponsesConverter
 
     request = NeMoGymResponseCreateParamsNonStreaming.model_validate(
-        api().request_payload(rubric(), EvidenceBundle(answer="HELLO"), max_tokens=2048, temperature=0)
+        llm.request_payload(rubric(), EvidenceBundle(answer="HELLO"), max_tokens=2048, temperature=0)
     )
     converted = ResponsesConverter(return_token_id_information=False).responses_to_chat_completion_create_params(
         request
@@ -187,7 +180,7 @@ def test_invalid_completion_item_does_not_discard_valid_if_judgment(change):
     items.append(items[0].model_copy(update={"id": "content", "dimension": "completion"}))
     reply = verdict()
     reply["items"].append(reply["items"][0] | {"id": "content"} | change)
-    results = api().parse_verdict(json.dumps(reply), items, EvidenceBundle(answer="HELLO"))
+    results = llm.parse_verdict(json.dumps(reply), items, EvidenceBundle(answer="HELLO"))
     assert results[0].passed is True
     assert results[0].quotes[0].quote == "HELLO"
     assert results[1].passed is None
@@ -197,7 +190,7 @@ def test_invalid_completion_item_does_not_discard_valid_if_judgment(change):
 def test_missing_completion_item_is_unavailable_not_an_if_failure():
     items = rubric()
     items.append(items[0].model_copy(update={"id": "content", "dimension": "completion"}))
-    results = api().parse_verdict(json.dumps(verdict()), items, EvidenceBundle(answer="HELLO"))
+    results = llm.parse_verdict(json.dumps(verdict()), items, EvidenceBundle(answer="HELLO"))
     assert results[0].passed is True and results[1].passed is None
 
 
@@ -205,4 +198,4 @@ def test_missing_if_item_still_rejects_incomplete_judge_response():
     items = rubric()
     items.append(items[0].model_copy(update={"id": "content", "dimension": "completion"}))
     with pytest.raises(ValueError, match="rubric ID"):
-        api().parse_verdict(json.dumps(verdict(id="content")), items, EvidenceBundle(answer="HELLO"))
+        llm.parse_verdict(json.dumps(verdict(id="content")), items, EvidenceBundle(answer="HELLO"))

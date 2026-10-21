@@ -28,10 +28,9 @@ def actor_directory(environment: Path, relative: str) -> Path:
 
 
 class ArtifactEnvironment(NemoGymSandboxEnvironment):
-    """Retain the native task bootstrap without routing on task names.
+    """Upload the configured actor directories and create the output directory before the agent starts.
 
-    Directories, packages and output directory are trusted execution-profile
-    configuration, never model-provided parameters. Only actor assets are uploaded.
+    Paths come from trusted config, never from the model.
     """
 
     def __init__(
@@ -40,7 +39,6 @@ class ArtifactEnvironment(NemoGymSandboxEnvironment):
         sandbox_provider: dict,
         actor_directories: dict[str, str],
         output_directory: str,
-        bootstrap_packages: list[str] | None = None,
         **kwargs,
     ):
         provider = deepcopy(sandbox_provider)
@@ -48,7 +46,6 @@ class ArtifactEnvironment(NemoGymSandboxEnvironment):
         provider["opensandbox"]["connection"]["api_key"] = os.environ["OPENSANDBOX_API_KEY"]
         self._actor_directories = dict(actor_directories)
         self._output_directory = output_directory
-        self._bootstrap_packages = list(bootstrap_packages or [])
         for destination in [*actor_directories.values(), output_directory]:
             if not PurePosixPath(destination).is_absolute() or ".." in PurePosixPath(destination).parts:
                 raise ValueError("Sandbox asset/output paths must be absolute without traversal")
@@ -62,7 +59,7 @@ class ArtifactEnvironment(NemoGymSandboxEnvironment):
         timeout_sec: int | None = None,
         user: str | None = None,
     ) -> ExecResult:
-        """Bridge Harbor0.24 user/scoped-env support without losing execution identity."""
+        """Pass Harbor 0.24's `user` and scoped environment through to the sandbox."""
         if self._exec_shell:
             command = f"{self._exec_shell} {shlex.quote(command)}"
         if self._cpu_pin_enabled:
@@ -93,16 +90,9 @@ class ArtifactEnvironment(NemoGymSandboxEnvironment):
             await super().start(force_build)
             for source, destination in paths:
                 await self.upload_dir(source, destination)
-            bootstrap = (
-                "python -m pip install --disable-pip-version-check "
-                + shlex.join(self._bootstrap_packages)
-                + " && python -m pip freeze > /logs/agent/partner-if-bootstrap-packages.txt && "
-                if self._bootstrap_packages
-                else ""
-            )
-            result = await self.exec(bootstrap + f"mkdir -p {shlex.quote(self._output_directory)}", timeout_sec=600)
+            result = await self.exec(f"mkdir -p {shlex.quote(self._output_directory)}", timeout_sec=600)
             if result.return_code:
-                raise RuntimeError(f"Actor bootstrap failed: {result.stderr}\n{(result.stdout or '')[-8000:]}")
+                raise RuntimeError(f"Cannot create output directory {self._output_directory}: {result.stderr}")
         except BaseException:
             await self.stop(delete=True)
             raise

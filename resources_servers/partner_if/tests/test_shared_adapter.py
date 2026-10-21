@@ -3,8 +3,6 @@
 import json
 from unittest.mock import AsyncMock, patch
 
-import pytest
-
 from resources_servers.partner_if.app import VerifyRequest
 from resources_servers.partner_if.grading_contract import GradingContract
 from resources_servers.partner_if.tests.test_app import response, server
@@ -38,13 +36,6 @@ def shared_request():
 
 async def test_normal_text_resource_dispatches_deterministic_and_llm_items_together():
     body = shared_request()
-    identity = {
-        "run_id": "text-run",
-        "policy_model": "actor",
-        "code_revision": "a" * 40,
-        "profile": "text",
-        "configuration_sha256": "b" * 64,
-    }
     judgment = {
         "items": [
             {
@@ -61,7 +52,7 @@ async def test_normal_text_resource_dispatches_deterministic_and_llm_items_toget
         new_callable=AsyncMock,
         return_value=response(json.dumps(judgment)),
     ) as call:
-        result = await server(execution_identity=identity).verify(body)
+        result = await server().verify(body)
     payload = json.loads(call.call_args.kwargs["json"]["input"][1]["content"])
     assert [r["id"] for r in payload["rubrics"]] == ["semantic"]
     assert result.grading_result.dimensions["if"].points_earned == 2
@@ -70,14 +61,6 @@ async def test_normal_text_resource_dispatches_deterministic_and_llm_items_toget
     assert result.reward == 1 and not result.mask_sample
     assert result.judge_protocol == "partner-if-evidence-v5.2"
     assert result.grading_result.items[1].quotes[0].quote == "HELLO"
-    assert result.execution_identity.model_dump() == identity
-
-
-async def test_new_text_contract_preserves_unsigned_audit_gate():
-    body = shared_request()
-    body.verifier_metadata.partner_if.audit_signoff = False
-    result = await server().verify(body)
-    assert result.mask_sample and result.if_result.status == "unscorable"
 
 
 async def test_invalid_shared_judge_output_preserves_receipts_and_remains_unscorable():
@@ -136,21 +119,7 @@ async def test_judge_abstention_is_a_protocol_error_not_a_model_failure():
     assert result.judge_response == raw
 
 
-@pytest.mark.parametrize("unexercised", [True, False])
-async def test_retired_scope_field_is_a_protocol_error_not_a_free_point(unexercised):
-    from resources_servers.partner_if.tests.test_shared_judge import verdict
-
-    body = shared_request()
-    raw = response(json.dumps(verdict(id="semantic", unexercised=unexercised)))
-    with patch("resources_servers.partner_if.grading_service.call_judge", new_callable=AsyncMock, return_value=raw):
-        result = await server().verify(body)
-    assert result.mask_sample and result.grading_result.status == "unscorable"
-    assert result.grading_result.dimensions["if"].partial_score is None
-    assert result.judge_response == raw
-    assert "unexercised" in result.grading_result.items[1].reason
-
-
-async def test_new_text_contract_does_not_accept_live_agent_evidence_without_adapter():
+async def test_text_server_does_not_accept_live_agent_evidence_without_adapter():
     body = shared_request()
     body.verifier_metadata.partner_if.evidence_mode = "live_agent"
     result = await server().verify(body)

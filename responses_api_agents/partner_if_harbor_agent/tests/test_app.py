@@ -54,7 +54,6 @@ async def test_harbor_delegates_visible_evidence_to_shared_grade_endpoint(tmp_pa
         {
             **body.model_dump(),
             "reward": 1,
-            "partner_if_trial_dir": str(tmp_path),
             "partner_if_artifact": {"exists": exists, "text": "HELLO" if exists else ""},
         }
     )
@@ -81,13 +80,6 @@ async def test_harbor_delegates_visible_evidence_to_shared_grade_endpoint(tmp_pa
         harbor_dataset={"path": str(tmp_path / "tasks")},
         model_server={"type": "responses_api_models", "name": "partner_if_harbor_model"},
         grading_server={"type": "resources_servers", "name": "common"},
-        execution_identity={
-            "run_id": "native-run",
-            "policy_model": "policy",
-            "code_revision": "a" * 40,
-            "profile": "hf",
-            "configuration_sha256": "b" * 64,
-        },
     )
     with patch("responses_api_agents.harbor_agent_general.app.get_global_config_dict", return_value={}):
         agent = PartnerIFHarborAgent(config=config, server_client=client)
@@ -100,7 +92,6 @@ async def test_harbor_delegates_visible_evidence_to_shared_grade_endpoint(tmp_pa
     assert calls[0][1].evidence.artifacts["submission"].status == ("present" if exists else "absent")
     assert result.reward == int(exists) and not result.mask_sample
     assert result.model_dump()["grading_result"]["dimensions"]["if"]["partial_score"] == int(exists)
-    assert result.model_dump()["execution_identity"] == config.execution_identity.model_dump()
 
 
 def harbor_config(tmp_path, **overrides):

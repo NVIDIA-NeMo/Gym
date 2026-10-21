@@ -90,7 +90,7 @@ SHA256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 
 
 class CurationReceipt(StrictModel):
-    """An immutable internal evidence artifact; never a curator's local path."""
+    """An immutable evidence artifact; never a curator's local path."""
 
     uri: Annotated[str, StringConstraints(pattern=r"^https://\S+$")]
     sha256: SHA256

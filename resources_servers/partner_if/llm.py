@@ -79,7 +79,6 @@ class EvidenceReference(StrictModel):
 
 
 class ReferencedJudgment(JudgeItem):
-    # Keep historical receipt fields out of the current inference boundary.
     references: list[EvidenceReference]
 
 
@@ -90,7 +89,7 @@ class Verdict(StrictModel):
 
 
 def payload(items: list[GradingItem], evidence: EvidenceBundle) -> dict:
-    """Keep analogue traces/actor identity out; preserve all authorized evidence surfaces."""
+    """Send only rubric fields and evidence sources; analogues, taxonomy and actor identity stay out."""
     return {
         "evidence_sources": {key: value.payload() for key, value in evidence_sources(evidence).items()},
         "rubrics": [

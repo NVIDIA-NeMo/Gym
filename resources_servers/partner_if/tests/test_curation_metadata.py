@@ -99,7 +99,7 @@ def test_untested_metadata_is_not_zero_of_three():
     assert parsed.curation.evaluations[0].passed is None
 
 
-def test_historical_tasks_without_curation_still_validate():
+def test_curation_is_optional():
     body = shared_request()
     parsed = VerifierMetadata.model_validate({"partner_if": body.verifier_metadata.partner_if.model_dump()})
     assert parsed.partner_if == body.verifier_metadata.partner_if

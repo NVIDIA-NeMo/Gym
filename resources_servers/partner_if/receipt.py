@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Uniform Gym scoring fields for text, submission and file-producing adapters."""
+"""Gym verify fields shared by every partner_if adapter."""
 
 from pydantic import JsonValue
 

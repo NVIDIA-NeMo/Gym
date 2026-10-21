@@ -5,8 +5,7 @@
 A package is a directory whose `snapshot-sha256.json` records every other file.
 `expected.jsonl` holds the full membership, `profiles.json` assigns each task to one
 execution profile, and `<profile>.jsonl` repeats that profile's rows for the servers
-that load them. The curation repo builds packages with these checks; benchmark
-prepare scripts repeat them after download.
+that load them. Benchmark build and prepare scripts run these checks.
 """
 
 import hashlib

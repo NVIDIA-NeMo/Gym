@@ -1,6 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Legacy OpenHands tool-message compatibility, retained from the native-harness pilot."""
+"""vLLM model server for the pinned OpenHands 0.62 agent.
+
+Chat Completions backends only; tool messages are forwarded without `name`.
+"""
 
 from copy import deepcopy
 
@@ -10,7 +13,7 @@ from responses_api_models.vllm_model.app import VLLMModel
 
 
 def normalize_openhands_tool_messages(body: dict) -> dict:
-    """Remove the redundant legacy tool name, not call IDs, output or validation."""
+    """Drop `name` from tool messages; keep call IDs and output."""
     result = deepcopy(body)
     for message in result.get("messages", []):
         if isinstance(message, dict) and message.get("role") == "tool":
@@ -19,8 +22,6 @@ def normalize_openhands_tool_messages(body: dict) -> dict:
 
 
 class OpenHandsCompatModel(VLLMModel):
-    ray_enabled = False
-
     async def chat_completions_dispatch(self, request: Request, body: dict = Body()):
         # The pinned OpenHands0.62 history cannot replay opaque native Responses
         # reasoning state. Do not quietly discard it to make a GPT rollout run.

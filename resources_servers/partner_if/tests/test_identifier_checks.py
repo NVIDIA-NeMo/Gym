@@ -14,7 +14,7 @@ from resources_servers.partner_if.task_data import VerifierSpec
     [
         ("", True),
         ("Choose REF-7 or REF-9.", True),
-        ("uuid:0f1e2d3c-4b5a-4968-8776-a5b4c3d2e1f0", False),
+        ("0f1e2d3c-4b5a-4968-8776-a5b4c3d2e1f0", False),
         ("ID <0F1E2D3C-4B5A-4968-8776-A5B4C3D2E1F0>", False),
         ("`0f1e2d3c-4b5a-4968-8776-a5b4c3d2e1f0`", False),
     ],
@@ -28,8 +28,8 @@ def test_uuid_visibility_rule_keeps_tool_identifiers_out_of_scope(answer, expect
                 "source_index": 0,
                 "kind": "tool_call",
                 "tool_name": "lookup_record",
-                "arguments": {"id": "uuid:0f1e2d3c-4b5a-4968-8776-a5b4c3d2e1f0"},
+                "arguments": {"id": "0f1e2d3c-4b5a-4968-8776-a5b4c3d2e1f0"},
             }
         ],
     )
-    assert checker.run(params, CheckContext(evidence=evidence, parsed={}))[0] is expected
+    assert checker.run(params, CheckContext(evidence=evidence))[0] is expected

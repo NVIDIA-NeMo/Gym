@@ -89,7 +89,6 @@ def package_rows():
         ("swe", live_row("swe-1", task_name="swe-1")),
         ("search_tools", live_row("search-1", tools=[SEARCH_TOOL])),
         ("text", row("text-2")),
-        ("submission", live_row("submission-1", task_name="submission-1")),
         ("build_tools", live_row("build-1", tools=[SEARCH_TOOL])),
         ("markdown", live_row("markdown-1", task_name="markdown-1")),
     ]
@@ -109,7 +108,7 @@ def record_checksums(root: Path) -> None:
 
 
 def build_package(root: Path, entries: list[tuple[str, dict]] | None = None) -> Path:
-    """A checksummed package shaped like the real one, built from synthetic (profile, row) entries."""
+    """A checksummed synthetic package, built from (profile, row) entries."""
     entries = package_rows() if entries is None else entries
     root.mkdir(parents=True)
     profiles = {}
@@ -175,7 +174,7 @@ def test_rows_with_hidden_context_are_rejected(hidden):
         validate_rows([source])
 
 
-def test_private_preparation_accepts_native_rows_but_not_arbitrary_harness_overrides():
+def test_native_rows_are_accepted_but_not_arbitrary_harness_overrides():
     data, _ = native_row()
     assert validate_rows([data]) == [data]
     bad = {**data, "agent_ref": {"name": "arbitrary"}}
@@ -284,7 +283,7 @@ def test_selection_keeps_package_order_and_unchanged_rows(tmp_path):
     selected = select_rows(root, ("text", "search_tools", "build_tools"))
     assert selected == [data for profile, data in entries if profile in {"text", "search_tools", "build_tools"}]
     assert task_ids(selected) == ["text-1", "search-1", "text-2", "build-1"]
-    assert task_ids(select_rows(root, ("submission", "markdown", "swe"))) == ["swe-1", "submission-1", "markdown-1"]
+    assert task_ids(select_rows(root, ("markdown", "swe"))) == ["swe-1", "markdown-1"]
 
 
 def test_task_ids_from_other_profiles_are_skipped_and_unknown_ids_raise(tmp_path):

@@ -1,55 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Only the explicit shared verifier contract is accepted at the runtime boundary."""
+"""The synthetic examples use registered verifiers and match their recorded receipts."""
 
-import copy
 import json
 from pathlib import Path
-
-import pytest
 
 from resources_servers.partner_if.schema import VerifierMetadata
 
 
 # CI runs this suite from the server directory, so data paths must not depend on the working directory.
 DATA_DIR = Path(__file__).parents[1] / "data"
-
-
-@pytest.mark.parametrize("legacy_rules", [False, True])
-def test_old_text_contract_requires_explicit_curation_not_runtime_migration(legacy_rules):
-    old = {
-        "task_id": "old",
-        "origin": "synthetic",
-        "source": "authored test",
-        "rubric_version": "old",
-        "audit_signoff": False,
-        "data_kind": "synthetic_smoke",
-        "rubrics": [
-            {
-                "id": "hello",
-                "category": "always",
-                "instruction_text": "Say HELLO.",
-                "source_role": "user",
-                "applicability_reason": "Explicit output instruction.",
-                "constraint": "The answer contains HELLO.",
-                "taxonomy": ["IF-FORMAT"],
-                "evidence": {
-                    "source": "synthetic",
-                    "source_id": "old",
-                    "instruction": "Say HELLO.",
-                    "similarity": "Synthetic only",
-                    "difference": "Not task data",
-                },
-            }
-        ],
-    }
-    if legacy_rules:
-        old["rubrics"][0].pop("constraint")
-        old["rubrics"][0].update(pass_rule="Say HELLO", fail_rule="Missing HELLO")
-    before = copy.deepcopy(old)
-    with pytest.raises(ValueError):
-        VerifierMetadata.model_validate({"partner_if": old})
-    assert old == before
 
 
 def test_all_synthetic_examples_use_explicit_registered_verifiers():

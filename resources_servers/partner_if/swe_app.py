@@ -16,8 +16,6 @@ from nemo_gym.config_types import ModelServerRef
 from resources_servers.partner_if.app import VerifyResponse
 from resources_servers.partner_if.checks import register_modules
 from resources_servers.partner_if.evidence import EvidenceBundle
-from resources_servers.partner_if.execution import ExecutionIdentity
-from resources_servers.partner_if.grading_contract import GradingContract
 from resources_servers.partner_if.grading_service import GradeRequest, grade
 from resources_servers.partner_if.metrics import PartnerIFMetricsMixin
 from resources_servers.partner_if.native_evidence import visible_events
@@ -39,7 +37,6 @@ class SWEIFConfig(ScaleSWEResourcesServerConfig):
     judge_temperature: float = Field(default=0.0, ge=0, le=2)
     judge_max_concurrency: int = Field(default=2, gt=0)
     allow_provisional_rubrics: bool = False
-    execution_identity: ExecutionIdentity | None = None
     tool_description_additions: dict[str, str] = Field(default_factory=dict)
     task_check_modules: list[str] = Field(default_factory=list)
 
@@ -100,7 +97,6 @@ def build_swe_evidence(
 
 
 class SWEIFResourcesServer(PartnerIFMetricsMixin, ScaleSWEResourcesServer):
-    ray_enabled = False
     config: SWEIFConfig
     _judge_semaphore: asyncio.Semaphore = PrivateAttr()
 
@@ -125,7 +121,7 @@ class SWEIFResourcesServer(PartnerIFMetricsMixin, ScaleSWEResourcesServer):
 
     async def verify(self, request: Request, body: SWEIFVerifyRequest) -> SWEIFVerifyResponse:
         contract = body.verifier_metadata.partner_if
-        if not isinstance(contract, GradingContract) or contract.evidence_mode != "live_agent":
+        if contract.evidence_mode != "live_agent":
             raise HTTPException(422, "SWE evidence requires a shared live-agent grading contract")
         if not contract.audit_signoff and not self.config.allow_provisional_rubrics:
             raise HTTPException(422, "Rubric audit unsigned; opt into provisional scoring explicitly")
@@ -152,10 +148,7 @@ class SWEIFResourcesServer(PartnerIFMetricsMixin, ScaleSWEResourcesServer):
         return SWEIFVerifyResponse.model_validate(
             body.model_dump()
             | scoring_fields(contract, receipt)
-            | {
-                "execution_identity": self.config.execution_identity,
-                "task_outcome": outcome.model_dump(mode="json", exclude={"response", "responses_create_params"}),
-            }
+            | {"task_outcome": outcome.model_dump(mode="json", exclude={"response", "responses_create_params"})}
         )
 
 

@@ -108,7 +108,7 @@ def test_description_plugin_changes_description_only(tmp_path):
     if not node:
         pytest.skip("Node required for the actual native OpenCode hook")
     plugin = tmp_path / "plugin.mjs"
-    plugin.write_text(description_plugin({"todowrite": "Only plan requested tests."}))
+    plugin.write_text(description_plugin({"todowrite": "Keep items short."}))
     script = f"""
     import {{ToolDescriptionAdditions}} from {json.dumps(plugin.as_uri())};
     const hooks = await ToolDescriptionAdditions();
@@ -120,7 +120,7 @@ def test_description_plugin_changes_description_only(tmp_path):
     """
     value = json.loads(subprocess.check_output([node, "--input-type=module", "-e", script], text=True))
     assert value["tool"] == {
-        "description": "Original.\n\nOnly plan requested tests.",
+        "description": "Original.\n\nKeep items short.",
         "jsonSchema": {"type": "object"},
     }
     assert value["untouched"] == {"description": "Read a file."}

@@ -33,8 +33,8 @@ def ref(source="answer", start=1, end=1):
 
 def test_source_context_is_addressable_without_becoming_candidate_behavior():
     bundle = EvidenceBundle(
-        context=[{"role": "tool", "content": "[34] Source fact.\n[35] Another fact."}],
-        answer="A fact <cite>citation_1:snippet_34</cite>.",
+        context=[{"role": "tool", "content": "[1] Source fact.\n[2] Another fact."}],
+        answer="A fact [1].",
     )
     sources = payload(rubric(), bundle)["evidence_sources"]
     assert sources["context:0/content"] == {
@@ -42,13 +42,13 @@ def test_source_context_is_addressable_without_becoming_candidate_behavior():
         "value_type": "string",
         "container_types": ["object"],
         "supports_candidate": False,
-        "lines": [{"number": 1, "text": "[34] Source fact.\n"}, {"number": 2, "text": "[35] Another fact."}],
+        "lines": [{"number": 1, "text": "[1] Source fact.\n"}, {"number": 2, "text": "[2] Another fact."}],
     }
     assert sources["answer"]["origin"] == "candidate"
     result = parse_verdict(referenced(ref(), ref("context:0/content")), rubric(), bundle)
     assert [(q.source, q.quote) for q in result[0].quotes] == [
-        ("answer", "A fact <cite>citation_1:snippet_34</cite>."),
-        ("context:0/content", "[34] Source fact.\n"),
+        ("answer", "A fact [1]."),
+        ("context:0/content", "[1] Source fact.\n"),
     ]
 
 
@@ -85,9 +85,9 @@ def test_registry_preserves_nested_tools_documents_and_live_event_arguments():
 
 
 def test_reference_resolution_preserves_unicode_markdown_blank_lines_and_crlf():
-    text = "**PHP\u202f8.2**\r\n\r\n  code\t\nlast"
+    text = "**Version\u202f2.0**\r\n\r\n  code\t\nlast"
     results = parse_verdict(referenced(ref(start=1, end=3)), rubric(), EvidenceBundle(answer=text))
-    assert results[0].quotes[0].quote == "**PHP\u202f8.2**\r\n\r\n  code\t\n"
+    assert results[0].quotes[0].quote == "**Version\u202f2.0**\r\n\r\n  code\t\n"
 
 
 def test_nonadjacent_lines_are_resolved_as_separate_original_quotes():

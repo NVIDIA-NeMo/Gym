@@ -15,7 +15,7 @@ class VerifierMetadata(TaskData):
 
 
 class JudgeItem(StrictModel):
-    """Current binary judge output; historical scope labels are not accepted."""
+    """Binary verdict for one rubric item."""
 
     id: Text
     passed: StrictBool

@@ -21,9 +21,9 @@ Judge = Callable[[list[GradingItem], EvidenceBundle], Awaitable[list[RawJudgment
 
 
 async def evaluate(contract: GradingContract, evidence: EvidenceBundle, *, judge: Judge) -> Evaluation:
-    """Score each item exactly once; judge errors propagate to Gym's infrastructure masking."""
+    """Score each item exactly once; errors raised by `judge`, such as a failed judge call, propagate."""
     implementations = {r.id: resolve(r.verifier) for r in contract.checks}
-    context = CheckContext(evidence=evidence, parsed={})
+    context = CheckContext(evidence=evidence)
     raw: dict[str, RawJudgment] = {}
     llm_items = []
     for item in contract.checks:

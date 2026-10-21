@@ -1,10 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Keep Harbor/OpenHands execution; send captured visible evidence to partner_if.
+"""Run a Harbor task with OpenHands and grade the captured evidence through partner_if's `/grade` endpoint.
 
-The completion-state safeguard is retained from the native task reconstruction. There
-is no local judge or task-specific score aggregation in this adapter. OpenHands
-calls the run's Gym model server, so the provider key never enters the sandbox.
+OpenHands calls the run's Gym model server, so the provider key never enters the sandbox.
 """
 
 import asyncio
@@ -20,7 +18,6 @@ from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.sandbox.agent_tools import sandbox_server_url
 from nemo_gym.server_utils import raise_for_status
 from resources_servers.partner_if.evidence import EvidenceBundle
-from resources_servers.partner_if.execution import ExecutionIdentity
 from resources_servers.partner_if.grading_service import GradeRequest, GradeResponse, contract_hash
 from resources_servers.partner_if.native_evidence import captured_artifact, visible_events
 from resources_servers.partner_if.package import RepoPath, TaskBundle, resolve_repo_path
@@ -41,7 +38,6 @@ class PartnerIFHarborConfig(HarborAgentConfig):
     model_server: ModelServerRef
     task_bundles_dir: RepoPath
     grading_server: ResourcesServerRef
-    execution_identity: ExecutionIdentity | None = None
 
     @field_validator("harbor_dataset", mode="after")
     @classmethod
@@ -91,7 +87,7 @@ class PartnerIFHarborAgent(HarborAgent):
         if capture.stat().st_size > 2_000_000:
             raise ValueError("Artifact capture receipt exceeds size limit")
         artifact = json.loads(capture.read_text())
-        return response.model_copy(update={"partner_if_trial_dir": str(trial_dir), "partner_if_artifact": artifact})
+        return response.model_copy(update={"partner_if_artifact": artifact})
 
     async def run(self, body: HarborRunRequest) -> HarborVerifyResponse:
         # Validate host-selected task identity before allocating a sandbox.
@@ -133,14 +129,7 @@ class PartnerIFHarborAgent(HarborAgent):
             )
             await raise_for_status(remote)
             receipt = GradeResponse.model_validate(await remote.json())
-            return response.model_copy(
-                update={
-                    **scoring_fields(task.contract, receipt),
-                    "execution_identity": self.config.execution_identity.model_dump()
-                    if self.config.execution_identity
-                    else None,
-                }
-            )
+            return response.model_copy(update=scoring_fields(task.contract, receipt))
         except Exception as error:
             # Boundary: capture/contract/judge failures are never an ordinary actor zero.
             logger.exception("Shared grading failed for native task %s", body.task_name)

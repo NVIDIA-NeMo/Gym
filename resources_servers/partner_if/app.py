@@ -22,7 +22,6 @@ from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.verifier_fixture import VerifierFixture
 from resources_servers.partner_if.checks import register_modules
 from resources_servers.partner_if.evidence import EvidenceBundle
-from resources_servers.partner_if.execution import ExecutionIdentity
 from resources_servers.partner_if.grading_contract import Evaluation
 from resources_servers.partner_if.grading_service import GradeRequest, GradeResponse, contract_hash, grade
 from resources_servers.partner_if.llm import PROTOCOL
@@ -40,7 +39,6 @@ class PartnerIFResourcesServerConfig(BaseResourcesServerConfig):
     judge_temperature: float = Field(default=0.0, ge=0, le=2)
     judge_max_concurrency: int = Field(default=8, gt=0)
     allow_provisional_rubrics: bool = False
-    execution_identity: ExecutionIdentity | None = None
     # Importable modules whose CHECKERS add task-specific verifier IDs (see checks.register_modules).
     task_check_modules: list[str] = Field(default_factory=list)
 
@@ -55,7 +53,6 @@ class VerifyResponse(VerifyRequest, BaseVerifyResponse):
     judge_response: NeMoGymResponse | None = None
     judge_request: dict | None = None
     grading_result: Evaluation | None = None
-    execution_identity: ExecutionIdentity | None = None
 
 
 # Simple Agent marks a provider-completed reply that has neither a message nor a call as incomplete,
@@ -120,7 +117,6 @@ def tool_response_evidence(params: dict, response: NeMoGymResponse) -> EvidenceB
 
 
 class PartnerIFResourcesServer(PartnerIFMetricsMixin, SimpleResourcesServer):
-    ray_enabled = False
     config: PartnerIFResourcesServerConfig
     _judge_semaphore: asyncio.Semaphore = PrivateAttr()
 
@@ -184,11 +180,7 @@ class PartnerIFResourcesServer(PartnerIFMetricsMixin, SimpleResourcesServer):
             )
 
         receipt = await self.grade_evidence(GradeRequest(contract=contract, evidence=bundle))
-        return VerifyResponse(
-            **body.model_dump(),
-            **scoring_fields(contract, receipt),
-            execution_identity=self.config.execution_identity,
-        )
+        return VerifyResponse(**body.model_dump(), **scoring_fields(contract, receipt))
 
 
 VERIFIER_FIXTURE = VerifierFixture(

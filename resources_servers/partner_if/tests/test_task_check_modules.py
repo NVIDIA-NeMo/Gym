@@ -43,8 +43,8 @@ def test_declared_modules_register_their_checkers_idempotently(plugin):
     register_modules([plugin.__name__])
     register_modules([plugin.__name__])  # Every server of a benchmark registers the same module.
     checker, params = resolve(VerifierSpec(id=SAYS_HELLO))
-    assert checker.run(params, CheckContext(EvidenceBundle(answer="HELLO"), {}))[0] is True
-    assert checker.run(params, CheckContext(EvidenceBundle(answer="BYE"), {}))[0] is False
+    assert checker.run(params, CheckContext(EvidenceBundle(answer="HELLO")))[0] is True
+    assert checker.run(params, CheckContext(EvidenceBundle(answer="BYE")))[0] is False
 
 
 @pytest.mark.parametrize("identifier", [SAYS_HELLO, "text_no_uuid_v1"])

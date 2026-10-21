@@ -86,32 +86,3 @@ async def test_judge_sees_recorded_tools_but_only_grades_new_answer():
     assert payload["evidence_sources"]["answer"]["lines"][0]["text"] == "HELLO"
     assert "recorded" in call.call_args.kwargs["json"]["input"][0]["content"].lower()
     assert body.model_dump() == before
-
-
-@pytest.mark.parametrize("unexercised", [True, False])
-async def test_new_text_judges_cannot_emit_the_retired_scope_field(unexercised):
-    parsed = verdict()
-    parsed["items"][1].update(unexercised=unexercised)
-    body = VerifyRequest.model_validate({**frozen_row(), "response": response().model_dump()})
-    body.verifier_metadata.partner_if.rubrics[1].constraint = "Every emitted citation is outside inline code."
-    with patch(
-        "resources_servers.partner_if.grading_service.call_judge",
-        new_callable=AsyncMock,
-        return_value=response(json.dumps(parsed)),
-    ):
-        output = await server().verify(body)
-    assert output.mask_sample and output.if_result.status == "unscorable"
-    assert "unexercised" in output.grading_result.items[0].reason
-
-
-async def test_new_text_judge_scores_boolean_items_without_scope_labels():
-    parsed = verdict()
-    body = VerifyRequest.model_validate({**frozen_row(), "response": response().model_dump()})
-    with patch(
-        "resources_servers.partner_if.grading_service.call_judge",
-        new_callable=AsyncMock,
-        return_value=response(json.dumps(parsed)),
-    ):
-        output = await server().verify(body)
-    assert output.if_result.passed == 2 and output.if_result.total == 2
-    assert output.reward == 1 and output.judge_protocol == "partner-if-evidence-v5.2"

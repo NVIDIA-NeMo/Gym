@@ -2,16 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Behavioral contracts for task-independent checks, evidence and scoring."""
 
-import importlib
-import importlib.util
-
 import pytest
 
-
-def api():
-    name = "resources_servers.partner_if.engine"
-    assert importlib.util.find_spec(name), "The shared verifier engine is not implemented"
-    return importlib.import_module(name)
+from resources_servers.partner_if.engine import evaluate
+from resources_servers.partner_if.evidence import EvidenceBundle
+from resources_servers.partner_if.grading_contract import GradingContract, RawJudgment
 
 
 def item(identifier, *, verifier="text_contains_v1", params=None, **extra):
@@ -27,7 +22,7 @@ def item(identifier, *, verifier="text_contains_v1", params=None, **extra):
 
 
 def task(items):
-    return api().GradingContract(
+    return GradingContract(
         task_id="synthetic-mixed",
         origin="synthetic",
         source="authored test",
@@ -39,7 +34,7 @@ def task(items):
 
 
 def evidence(**overrides):
-    return api().EvidenceBundle(answer="HELLO", **overrides)
+    return EvidenceBundle(answer="HELLO", **overrides)
 
 
 async def no_judge(items, bundle):
@@ -50,9 +45,9 @@ async def test_one_engine_mixes_check_types_and_separates_completion():
     async def judge(items, bundle):
         assert [r.id for r in items] == ["llm"]
         assert bundle.answer == "HELLO"
-        return [api().RawJudgment(id="llm", passed=False, reason="Required action missing", evidence="No plan")]
+        return [RawJudgment(id="llm", passed=False, reason="Required action missing", evidence="No plan")]
 
-    result = await api().evaluate(
+    result = await evaluate(
         task(
             [
                 item("literal"),
@@ -73,7 +68,7 @@ async def test_one_engine_mixes_check_types_and_separates_completion():
 
 
 async def test_if_only_task_does_not_invent_completion_score():
-    result = await api().evaluate(task([item("one")]), evidence(), judge=no_judge)
+    result = await evaluate(task([item("one")]), evidence(), judge=no_judge)
     assert set(result.dimensions) == {"if"}
     assert result.reward == 1
 
@@ -84,7 +79,7 @@ def test_completion_cannot_gate_an_if_requirement():
 
 
 async def test_failed_completion_does_not_lower_if_reward():
-    result = await api().evaluate(
+    result = await evaluate(
         task(
             [
                 item("format"),
@@ -100,7 +95,7 @@ async def test_failed_completion_does_not_lower_if_reward():
 
 
 async def test_uncaptured_completion_artifact_does_not_mask_valid_deterministic_if():
-    result = await api().evaluate(
+    result = await evaluate(
         task(
             [
                 item("format"),
@@ -118,9 +113,9 @@ async def test_uncaptured_completion_artifact_does_not_mask_valid_deterministic_
 async def test_completion_capture_error_does_not_mask_independent_llm_if(capture):
     async def judge(items, bundle):
         assert [r.id for r in items] == ["format"]
-        return [api().RawJudgment(id="format", passed=True, reason="Present", evidence="HELLO")]
+        return [RawJudgment(id="format", passed=True, reason="Present", evidence="HELLO")]
 
-    result = await api().evaluate(
+    result = await evaluate(
         task(
             [
                 item("format", verifier="llm_judge_v1", params={"artifacts": []}),
@@ -140,7 +135,7 @@ async def test_completion_capture_error_does_not_mask_independent_llm_if(capture
 
 @pytest.mark.parametrize("params", [{}, {"artifacts": None}, {"artifacts": ["deliverable"]}])
 async def test_llm_capture_dependencies_remain_conservative(params):
-    result = await api().evaluate(
+    result = await evaluate(
         task([item("file", verifier="llm_judge_v1", params=params)]),
         evidence(artifacts={"deliverable": {"status": "error", "error": "Disconnected"}}),
         judge=no_judge,
@@ -152,9 +147,9 @@ async def test_llm_capture_dependencies_remain_conservative(params):
 async def test_llm_absent_deliverable_is_gradable_not_a_capture_failure(status, passed):
     async def judge(items, bundle):
         assert bundle.artifact_text("deliverable") == ("HELLO" if passed else None)
-        return [api().RawJudgment(id="file", passed=passed, reason="Checked file", evidence=status)]
+        return [RawJudgment(id="file", passed=passed, reason="Checked file", evidence=status)]
 
-    result = await api().evaluate(
+    result = await evaluate(
         task([item("file", verifier="llm_judge_v1", params={"artifacts": ["deliverable"]})]),
         evidence(
             artifacts={
@@ -168,7 +163,7 @@ async def test_llm_absent_deliverable_is_gradable_not_a_capture_failure(status, 
 
 
 async def test_no_artifact_dependency_cannot_bypass_actor_capture_failure():
-    result = await api().evaluate(
+    result = await evaluate(
         task([item("format", verifier="llm_judge_v1", params={"artifacts": []})]),
         evidence(trajectory_error="Actor lost"),
         judge=no_judge,
@@ -177,14 +172,14 @@ async def test_no_artifact_dependency_cannot_bypass_actor_capture_failure():
 
 
 async def test_uncaptured_llm_prerequisite_masks_dependent_if():
-    contract = api().GradingContract.model_validate(
+    contract = GradingContract.model_validate(
         task([item("format")]).model_dump()
         | {
             "rubrics": [item("format", depends_on=["file"])],
             "prerequisites": [item("file", verifier="llm_judge_v1", params={"artifacts": ["deliverable"]})],
         }
     )
-    result = await api().evaluate(contract, evidence(), judge=no_judge)
+    result = await evaluate(contract, evidence(), judge=no_judge)
     assert result.reward is None
     assert result.items[0].raw_passed is True and result.items[0].passed is None
     assert result.items[0].blocked_by == ["file"]
@@ -193,7 +188,7 @@ async def test_uncaptured_llm_prerequisite_masks_dependent_if():
 @pytest.mark.parametrize("artifacts", ["deliverable", [""], ["deliverable", "deliverable"]])
 async def test_llm_artifact_dependencies_are_validated(artifacts):
     with pytest.raises(ValueError):
-        await api().evaluate(
+        await evaluate(
             task([item("file", verifier="llm_judge_v1", params={"artifacts": artifacts})]),
             evidence(),
             judge=no_judge,
@@ -202,7 +197,7 @@ async def test_llm_artifact_dependencies_are_validated(artifacts):
 
 @pytest.mark.parametrize("answer,earned", [("", 0), ("citation partial", 1), ("citation full", 2)])
 async def test_unscored_prerequisite_gates_without_adding_points_or_using_partial_coverage(answer, earned):
-    contract = api().GradingContract(
+    contract = GradingContract(
         **{
             "task_id": "citations",
             "origin": "synthetic",
@@ -217,7 +212,7 @@ async def test_unscored_prerequisite_gates_without_adding_points_or_using_partia
         },
         prerequisites=[item("has_citation", params={"source": "answer", "literal": "citation"})],
     )
-    result = await api().evaluate(contract, api().EvidenceBundle(answer=answer), judge=no_judge)
+    result = await evaluate(contract, EvidenceBundle(answer=answer), judge=no_judge)
     assert result.dimensions["if"].points_possible == 2
     assert result.dimensions["if"].points_earned == earned
     assert len(result.items) == 2 and len(result.prerequisites) == 1
@@ -225,7 +220,7 @@ async def test_unscored_prerequisite_gates_without_adding_points_or_using_partia
 
 
 async def test_dependencies_preserve_raw_verdict_and_fixed_denominator():
-    result = await api().evaluate(
+    result = await evaluate(
         task(
             [
                 item("absent", params={"source": "answer", "literal": "NOT THERE"}),
@@ -267,23 +262,23 @@ def test_invalid_dependency_graph_rejected(bad):
 )
 async def test_invalid_checker_configuration_rejected_before_inference(spec):
     with pytest.raises(ValueError):
-        await api().evaluate(task([{**item("one"), "verifier": spec}]), evidence(), judge=no_judge)
+        await evaluate(task([{**item("one"), "verifier": spec}]), evidence(), judge=no_judge)
 
 
 async def test_actor_missing_artifact_is_failure_capture_error_is_unscorable():
     rubric = task([item("file", params={"source": "artifact:deliverable", "literal": "HELLO"})])
     absent = evidence(artifacts={"deliverable": {"status": "absent"}})
-    failed = await api().evaluate(rubric, absent, judge=no_judge)
+    failed = await evaluate(rubric, absent, judge=no_judge)
     assert failed.status == "scored" and failed.reward == 0
     lost = evidence(artifacts={"deliverable": {"status": "error", "error": "capture disconnected"}})
-    masked = await api().evaluate(rubric, lost, judge=no_judge)
+    masked = await evaluate(rubric, lost, judge=no_judge)
     assert masked.status == "unscorable"
     assert masked.reward is None
     assert masked.dimensions["if"].partial_score is None
 
 
 async def test_undeclared_artifact_is_infrastructure_gap_not_empty_submission():
-    result = await api().evaluate(
+    result = await evaluate(
         task([item("file", params={"source": "artifact:deliverable", "literal": "HELLO"})]),
         evidence(),
         judge=no_judge,
@@ -294,10 +289,10 @@ async def test_undeclared_artifact_is_infrastructure_gap_not_empty_submission():
 @pytest.mark.parametrize("raw", [[], [True, True], [True]])
 async def test_invalid_judge_results_cannot_be_model_failures(raw):
     async def judge(items, bundle):
-        return [api().RawJudgment(id="wrong", passed=passed, reason="x", evidence="x") for passed in raw]
+        return [RawJudgment(id="wrong", passed=passed, reason="x", evidence="x") for passed in raw]
 
     with pytest.raises(ValueError, match="exactly once"):
-        await api().evaluate(task([item("llm", verifier="llm_judge_v1", params={})]), evidence(), judge=judge)
+        await evaluate(task([item("llm", verifier="llm_judge_v1", params={})]), evidence(), judge=judge)
 
 
 async def test_checker_exception_is_not_silently_scored_zero():
@@ -305,22 +300,14 @@ async def test_checker_exception_is_not_silently_scored_zero():
         raise RuntimeError("judge offline")
 
     with pytest.raises(RuntimeError, match="judge offline"):
-        await api().evaluate(task([item("llm", verifier="llm_judge_v1", params={})]), evidence(), judge=judge)
-
-
-async def test_active_evaluation_rejects_historical_scoped_pass_from_a_judge_callback():
-    async def judge(items, bundle):
-        return [api().RawJudgment(id="llm", passed=True, unexercised=True, reason="Absent", evidence="No action")]
-
-    with pytest.raises(ValueError, match="unexercised"):
-        await api().evaluate(task([item("llm", verifier="llm_judge_v1", params={})]), evidence(), judge=judge)
+        await evaluate(task([item("llm", verifier="llm_judge_v1", params={})]), evidence(), judge=judge)
 
 
 async def test_raw_and_effective_judgments_are_stable_in_original_order():
     async def judge(items, bundle):
-        return [api().RawJudgment(id=r.id, passed=True, reason="ok", evidence="HELLO") for r in reversed(items)]
+        return [RawJudgment(id=r.id, passed=True, reason="ok", evidence="HELLO") for r in reversed(items)]
 
-    result = await api().evaluate(
+    result = await evaluate(
         task([item("first", verifier="llm_judge_v1", params={}), item("second", verifier="llm_judge_v1", params={})]),
         evidence(),
         judge=judge,
@@ -331,9 +318,9 @@ async def test_raw_and_effective_judgments_are_stable_in_original_order():
 
 async def test_dependency_failure_does_not_hide_an_unavailable_raw_judgment():
     async def judge(items, bundle):
-        return [api().RawJudgment(id="review", passed=None, reason="Needs review", evidence="Unclear intent")]
+        return [RawJudgment(id="review", passed=None, reason="Needs review", evidence="Unclear intent")]
 
-    result = await api().evaluate(
+    result = await evaluate(
         task(
             [
                 item("absent", params={"source": "answer", "literal": "ABSENT"}),

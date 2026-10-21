@@ -8,13 +8,11 @@ verifier ID to `Checker`, which `register_modules` adds before any contract is g
 """
 
 import importlib
-import math
 import re
 from dataclasses import dataclass
 from typing import Callable
 
-import yaml
-from pydantic import JsonValue, model_validator
+from pydantic import model_validator
 
 from resources_servers.partner_if.evidence import EvidenceBundle
 from resources_servers.partner_if.grading_contract import StrictModel, Text, VerifierSpec
@@ -47,81 +45,9 @@ class TextParams(StrictModel):
         return self
 
 
-class BoundedLoader(yaml.SafeLoader):
-    """Duplicate-key and allocation protections adopted from the native source checker."""
-
-    def __init__(self, stream):
-        super().__init__(stream)
-        self.depth = 0
-        self.nodes = 0
-
-    def compose_node(self, parent, index):
-        self.depth += 1
-        self.nodes += 1
-        try:
-            if self.depth > 64 or self.nodes > 50_000:
-                raise ValueError("YAML depth/node limit exceeded")
-            return super().compose_node(parent, index)
-        finally:
-            self.depth -= 1
-
-    def construct_mapping(self, node, deep=False):
-        if any(key.tag == "tag:yaml.org,2002:merge" for key, _ in node.value):
-            raise ValueError("YAML merge keys are not supported")
-        result = {}
-        for key_node, value_node in node.value:
-            key = self.construct_object(key_node, deep=deep)
-            if not isinstance(key, str) or key in result:
-                raise ValueError("Duplicate or non-string mapping key")
-            result[key] = self.construct_object(value_node, deep=deep)
-        return result
-
-
-def parse_yaml(text: str) -> dict[str, JsonValue]:
-    if len(text) > 1_000_000:
-        raise ValueError("YAML character limit exceeded")
-    value = yaml.load(text, Loader=BoundedLoader)
-    if not isinstance(value, dict):
-        raise ValueError("YAML root must be a mapping")
-    remaining = 50_000
-
-    def check(node, ancestors=frozenset(), depth=0):
-        nonlocal remaining
-        remaining -= 1
-        if remaining < 0 or depth > 64:
-            raise ValueError("Expanded YAML limit exceeded")
-        if isinstance(node, (dict, list)):
-            if id(node) in ancestors:
-                raise ValueError("Cyclic YAML alias")
-            for child in node.values() if isinstance(node, dict) else node:
-                check(child, ancestors | {id(node)}, depth + 1)
-        elif type(node) not in (str, int, float, bool, type(None)):
-            raise ValueError("YAML values must be JSON compatible")
-        elif type(node) is float and not math.isfinite(node):
-            raise ValueError("YAML number must be finite")
-
-    check(value)
-    return value
-
-
 @dataclass
 class CheckContext:
     evidence: EvidenceBundle
-    parsed: dict[str, dict[str, JsonValue] | ValueError]
-
-    def yaml(self, name: str) -> dict[str, JsonValue]:
-        if name not in self.parsed:
-            text = self.evidence.artifact_text(name)
-            try:
-                if text is None:
-                    raise ValueError("Required artifact was not produced")
-                self.parsed[name] = parse_yaml(text)
-            except (ValueError, yaml.YAMLError, RecursionError) as error:
-                self.parsed[name] = ValueError(str(error))
-        result = self.parsed[name]
-        if isinstance(result, ValueError):
-            raise result
-        return result
 
 
 def text_contains(params: TextParams, context: CheckContext) -> tuple[bool, str]:

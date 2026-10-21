@@ -71,7 +71,6 @@ async def test_bare_ray_worker_initializes_http_without_parsing_worker_arguments
     env.environment_dir = tmp_path
     env._actor_directories = {}
     env._output_directory = "/root/output"
-    env._bootstrap_packages = []
     env.exec = AsyncMock(return_value=SimpleNamespace(return_code=0))
     env.stop = AsyncMock()
     try:

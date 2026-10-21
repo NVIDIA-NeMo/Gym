@@ -25,7 +25,7 @@ METRICS_SERVER = {"type": "resources_servers", "name": "partner_if"}
 
 def server(upstream=None):
     module = importlib.import_module("responses_api_agents.partner_if_dispatcher.app")
-    profiles = ("text", "tools", "submission", "markdown", "swe")
+    profiles = ("text", "tools", "markdown", "swe")
     routes = {f"task-{p}": {"type": "environment_servers", "name": f"env-{p}"} for p in profiles}
     client = _Client(
         head_server_config=BaseServerConfig(host="head", port=1),
@@ -53,7 +53,7 @@ def server(upstream=None):
     return module.PartnerIFDispatcher(config=config, server_client=client), client
 
 
-@pytest.mark.parametrize("profile", ["text", "tools", "submission", "markdown", "swe"])
+@pytest.mark.parametrize("profile", ["text", "tools", "markdown", "swe"])
 def test_routes_the_complete_episode_without_rewriting_native_fields(profile):
     actor = {
         "responses_create_params": {"input": "original"},
@@ -66,7 +66,7 @@ def test_routes_the_complete_episode_without_rewriting_native_fields(profile):
         "task_source": "dispatcher",
         "agent_ref": {"type": "responses_api_agents", "name": "dispatcher"},
     }
-    result = {**actor, "reward": 1, "grading_result": {"original": True}, "execution_identity": {"profile": profile}}
+    result = {**actor, "reward": 1, "grading_result": {"original": True}}
     raw = json.dumps(actor).encode()
     expected = json.dumps(result).encode()
     adapter, downstream = server(
@@ -129,7 +129,6 @@ def test_request_routing_fields_cannot_change_the_host_selected_route():
             json={
                 "verifier_metadata": {"partner_if": {"task_id": "task-text"}},
                 "agent_ref": {"type": "responses_api_agents", "name": "untrusted"},
-                "task_routes": {"task-text": "elsewhere"},
             },
         )
     assert response.status_code == 422

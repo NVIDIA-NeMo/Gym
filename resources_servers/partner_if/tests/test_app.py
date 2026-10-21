@@ -5,8 +5,10 @@ import json
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from nemo_gym.judge import JudgeError
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
 from resources_servers.partner_if.app import PartnerIFResourcesServer, PartnerIFResourcesServerConfig, VerifyRequest
@@ -151,8 +153,6 @@ async def test_fixed_denominator_and_prompt_isolation(passed, expected):
     assert payload["evidence_sources"]["context:0/content"]["lines"][0]["text"] == "Say HELLO."
     assert payload["evidence_sources"]["answer"]["lines"][0]["text"] == "<!-- scratchpad --> HELLO"
     assert payload["rubrics"][0]["constraint"] == "The answer contains HELLO."
-    assert "pass_rule" not in payload["rubrics"][0]
-    assert "fail_rule" not in payload["rubrics"][0]
     assert "actor" not in payload  # No model label or reference answer given to the judge.
     assert result.judge_response is not None
 
@@ -177,19 +177,17 @@ async def test_invalid_judge_is_not_actor_failure(bad):
     assert output.judge_response is not None
 
 
-async def test_judge_transport_failure_masks_without_awarding_an_actor_failure():
-    from nemo_gym.judge import JudgeError
-
+async def test_judge_call_failure_reaches_gyms_judge_failsafe():
     with patch(
         "resources_servers.partner_if.grading_service.call_judge",
         new_callable=AsyncMock,
         side_effect=JudgeError("unavailable"),
     ):
-        result = await server().verify(request())
-    assert result.mask_sample is True
-    assert result.grading_result.reward is None
-    assert result.judge_request is not None
-    assert result.judge_response is None
+        with pytest.raises(JudgeError):
+            await server().verify(request())
+        row = TestClient(server().setup_webserver()).post("/verify", json=request().model_dump(mode="json")).json()
+    assert row["_ng_failure_class"] == row["failure_kind"] == "judge_failed"
+    assert row["mask_sample"] is True
 
 
 @pytest.mark.parametrize(

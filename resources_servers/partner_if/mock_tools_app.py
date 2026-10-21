@@ -192,7 +192,6 @@ def _actor_input(params: dict[str, JsonValue]) -> dict[str, JsonValue]:
 
 
 class MockToolsResourcesServer(PartnerIFResourcesServer):
-    ray_enabled = False
     config: MockToolsServerConfig
     _backend: ToolBackend = PrivateAttr()
     _tasks: dict[str, dict[str, JsonValue]] = PrivateAttr(default_factory=dict)
@@ -309,7 +308,6 @@ class MockToolsResourcesServer(PartnerIFResourcesServer):
         return MockToolsVerifyResponse(
             **body.model_dump(),
             **scoring_fields(contract, receipt),
-            execution_identity=self.config.execution_identity,
             tool_calls=calls,
             environment_receipts=self._backend.receipts(episode.state) if episode else {},
         )

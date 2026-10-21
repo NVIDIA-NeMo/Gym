@@ -2,6 +2,13 @@ config_paths:
   - resources_servers/partner_if/configs/verifier.yaml
   - responses_api_models/openai_model/configs/openai_model.yaml
 
+partner_if:
+  resources_servers:
+    partner_if:
+      domain: instruction_following
+      verified: false
+      description: Versioned instruction-following rubric verification across visible evidence types.
+
 partner_if_simple_agent:
   responses_api_agents:
     simple_agent:
