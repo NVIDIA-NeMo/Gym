@@ -24,9 +24,11 @@ Agents in the task sandbox often clean up with ``pkill -f python3``, ``pkill pyt
 ``killall python3``. In a reference harness whose agent CLI is a native binary these
 commands are harmless; here they would stop the supervisor, which then ends the
 harness. So the supervisor, and a standard-library runner that opts in, run under
-interpreter links with neutral names, from files without a ``.py`` suffix. Neither
-their process names nor their command lines mention python. Gym's own stop path
-signals the recorded supervisor PID and does not depend on these names.
+interpreter links with neutral names, from files without a ``.py`` suffix. Their process
+names never mention python, and neither do their command lines when the runner opts in; a
+harness argv that keeps its own python (Hermes, Stirrup) still appears in the supervisor's
+command line. Gym's own stop path signals the recorded supervisor PID and does not depend
+on these names.
 """
 
 import json
