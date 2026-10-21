@@ -9,8 +9,7 @@ config_paths:
 use_absolute_ip: true
 
 # This flat-row recipe binds its own environment instead of the generic NOOA environment.
-nooa_environment_server:
-  _delete_key: environment_servers
+nooa_environment_server: null
 
 swebench_pro_nooa_resources_server:
   _inherit_from: swebench_pro_resources_server

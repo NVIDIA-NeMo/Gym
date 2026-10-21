@@ -155,17 +155,25 @@ tar -xzf /build/bundle/python.tar.gz -C /build/python --strip-components=1
 tar -xzf /build/source.tar.gz -C /build/source
 /build/python/bin/python3 -I -B -m pip --isolated wheel --no-cache-dir --wheel-dir /build/wheels /build/source -r /build/source/runtime-requirements.txt
 """
+        docker_run = (
+            "docker",
+            "run",
+            "--rm",
+            "--name",
+            container,
+            "--platform",
+            f"linux/{_TARGETS[target]}",
+            "--volume",
+            f"{work}:/build",
+        )
         try:
+            # Use the mount's container-visible owner: rootless Docker remaps host IDs.
+            # Creating artifacts as this owner also allows cleanup after a killed builder.
+            owner = (await _command(*docker_run, image_id, "stat", "-c", "%u:%g", "/build")).strip()
             log = await _command(
-                "docker",
-                "run",
-                "--rm",
-                "--name",
-                container,
-                "--platform",
-                f"linux/{_TARGETS[target]}",
-                "--volume",
-                f"{work}:/build",
+                *docker_run,
+                "--user",
+                owner,
                 image_id,
                 "bash",
                 "-c",

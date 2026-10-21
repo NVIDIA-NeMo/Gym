@@ -30,8 +30,8 @@ gym env resolve \
     --config private-policy-provider.yaml
 
 gym eval run \
-    --benchmark gdpval/nooa \
-    --model-type vllm_model \
+    --config benchmarks/gdpval/nooa.yaml \
+    --config responses_api_models/vllm_model/configs/vllm_model.yaml \
     --config private-policy-provider.yaml \
     --limit 1 --concurrency 1 --num-repeats 1 \
     --output results/gdpval-nooa.jsonl
