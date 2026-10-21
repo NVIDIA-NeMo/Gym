@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+opencode_multimodal_benchmarks:
+  resources_servers:
+    opencode_multimodal_benchmarks:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: Visual benchmark answer verification and rubric-based judging
+      judge_endpoint: null
+      judge_model: ???  # Supply the model identifier accepted by your judge provider.
+      judge_api_key_env: OPENAI_API_KEY
+      judge_concurrency: 1024
+      vtc_llm_fallback: true
