@@ -251,7 +251,7 @@ async def test_incomplete_episode_is_archived_and_rerun(
     monkeypatch.setattr(app, "run_process", fake_runner)
     body = request()
     endpoint, model = agent._model_endpoint(body)
-    identity = {"request": body.model_dump(), "model": model, "endpoint": endpoint}
+    identity = {"request": body.model_dump(), "model": model}
     key = app.hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
     stale = agent._output_root / f"task1-{key}"
     (stale / "jobs/trial/task1").mkdir(parents=True)
