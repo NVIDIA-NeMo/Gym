@@ -120,6 +120,8 @@ holds five synthetic examples. `configs/verifier.yaml` starts only the server an
 judge, for `gym eval reverify` of rows that are not `live_agent`. For the mock-tool
 example, use `--resources-server partner_if/mock_tools`, `--agent
 partner_if_mock_tools_simple_agent` and `data/mock_tools_example.jsonl`.
+`data/example_rollouts.jsonl` and `data/mock_tools_example_rollouts.jsonl` are rollouts of
+the two examples, with GLM 5.3 (`nvidia/zai-org/glm-5.3`) as the policy and the judge.
 
 ## Testing
 
