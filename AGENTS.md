@@ -110,6 +110,29 @@ do not install an unused copy on the agent-server host. An optional local execut
 on first use instead of startup. Document that first-call setup, share concurrent installation attempts, surface
 installation failures, and allow a later call to retry. Required host tools still follow the startup rule above.
 
+## Sandbox
+
+Servers and agent harnesses run tasks in remote sandboxes through `nemo_gym.sandbox`, which hides provider differences.
+
+- **Keep the `nemo_gym.sandbox` public API minimal and lifecycle-only**: create/start, exec, upload/download, stop
+  (and provider capabilities such as pause/resume or endpoints). Put utilities and helpers built on top of it outside
+  `nemo_gym.sandbox`, for example in `nemo_gym/agent_utils/` or the server that uses them.
+- **Resolve providers from config** with `resolve_provider_config(sandbox_provider, global_config_dict)` and merge
+  `resolve_provider_metadata(...)` into `SandboxSpec.metadata`. Do not hard-code a provider or parse provider blocks by
+  hand. Merge metadata as provider defaults, then `sandbox_config.metadata`, then per-task labels, and keep label
+  values short (truncate IDs to 63 characters).
+- **Deliver files through `SandboxSpec.files` or `start_with_setup()`**, not ad hoc writes after `start()`. Both stop
+  the sandbox if file delivery or setup fails. Send text with `upload`, not by interpolating it into an `exec` shell
+  command, and `shlex.quote` every value that does go into a command.
+- **Stop every sandbox you start, on every path.** Wrap use in `try/finally` and call `stop()`. For sandboxes kept per
+  session, key them by session ID, pop the entry only after `stop()` succeeds (so a later close can retry), and stop
+  any remaining sandboxes in the server's lifespan shutdown. Set `ttl_s` so the provider reclaims leaked sandboxes.
+- **Check `return_code` and `error_type` on every `exec` result.** A non-`None` `error_type` (for example a timeout)
+  means the sandbox did not report a process exit code. Treat `stdout`/`stderr` as optional (`result.stdout or ""`).
+- **Separate infrastructure failures from task failures.** When verification is inconclusive (sandbox start, exec,
+  or provider error), retry on a fresh sandbox a bounded, configurable number of times
+  (`inconclusive_verification_retries`), and report `evaluation_completed=False` instead of a silent reward of 0.
+
 ## Common Commands for Building & Testing Environments
 
 ```bash

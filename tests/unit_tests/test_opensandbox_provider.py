@@ -1045,8 +1045,12 @@ async def test_exec_file_operations_and_reference_validation(monkeypatch: pytest
         async def write_file(self, target_path: str, data: str | bytes) -> None:
             self.writes.append((target_path, data))
 
-        async def read_bytes(self, source_path: str) -> bytes:
-            return f"bytes:{source_path}".encode()
+        async def read_bytes_stream(self, source_path: str) -> Any:
+            async def chunks() -> Any:
+                yield b"bytes:"
+                yield source_path.encode()
+
+            return chunks()
 
     class FakeRaw:
         def __init__(self) -> None:
@@ -1103,6 +1107,54 @@ async def test_exec_file_operations_and_reference_validation(monkeypatch: pytest
     assert await provider.status(handle) == SandboxStatus.RUNNING
     bare_handle = opensandbox_provider.SandboxHandle(sandbox_id="sandbox-2", provider_name="opensandbox", raw=object())
     assert await provider.status(bare_handle) == SandboxStatus.UNKNOWN
+
+
+def _download_provider(monkeypatch: pytest.MonkeyPatch, attempts: list[list[Any]]) -> tuple[Any, Any]:
+    """A provider whose sandbox streams the given chunk lists in turn; an exception in a list is raised there."""
+    served = iter(attempts)
+
+    class FakeFiles:
+        async def read_bytes_stream(self, source_path: str) -> Any:
+            chunks = next(served)
+
+            async def stream() -> Any:
+                for chunk in chunks:
+                    if isinstance(chunk, BaseException):
+                        raise chunk
+                    yield chunk
+
+            return stream()
+
+    monkeypatch.setattr(
+        opensandbox_provider, "_require_opensandbox_sdk", lambda: (object, object, object, object, object)
+    )
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    provider = opensandbox_provider.OpenSandboxProvider(connection={"request_timeout_s": 5}, probe={"command": None})
+    handle = opensandbox_provider.SandboxHandle(
+        sandbox_id="sandbox-1", provider_name="opensandbox", raw=SimpleNamespace(files=FakeFiles())
+    )
+    return provider, handle
+
+
+async def test_download_streams_a_large_file_to_disk_in_chunks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    chunks = [bytes([i]) * 1024 for i in range(8)]
+    provider, handle = _download_provider(monkeypatch, [chunks])
+    target = tmp_path / "out" / "big.bin"
+
+    await provider.download_file(handle, "/root/big.bin", target)
+
+    assert target.read_bytes() == b"".join(chunks)
+
+
+async def test_a_retried_download_starts_the_file_again(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    provider, handle = _download_provider(monkeypatch, [[b"partial", ConnectionError("reset")], [b"whole ", b"file"]])
+    target = tmp_path / "report.docx"
+
+    await provider.download_file(handle, "/root/report.docx", target)
+
+    assert target.read_bytes() == b"whole file"
 
 
 async def _no_sleep(_seconds: float) -> None:
