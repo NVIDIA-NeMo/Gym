@@ -31,6 +31,7 @@ from nemo_gym.orchestration.executors.script_templates import (
     RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT_S,
     render_driver_entrypoint,
     render_gym_cmd,
+    render_repo_checkout,
 )
 from nemo_gym.orchestration.executors.slurm_script import (
     _RAY_SERVE_GATEWAY_SOURCE_PATH,
@@ -713,12 +714,41 @@ def test_render_driver_entrypoint_no_install_no_prepare():
     assert out == '"${GYM_CMD[@]}"'
 
 
+@pytest.mark.parametrize("ref_kind", ["branch", "tag", "pull_request", "sha"])
+def test_repo_checkout_fetches_requested_revision(tmp_path: Path, ref_kind: str) -> None:
+    """A PR ref and its SHA must work even though clone only fetches branches and tags."""
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+
+    def git(*args: str) -> str:
+        return subprocess.run(
+            ["git", "-C", str(remote), "-c", "user.name=Test", "-c", "user.email=test@example.com", *args],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    tree = git("write-tree")
+    main_sha = git("commit-tree", tree, "-m", "main")
+    review_sha = git("commit-tree", tree, "-p", main_sha, "-m", "review")
+    git("update-ref", "refs/heads/main", main_sha)
+    git("symbolic-ref", "HEAD", "refs/heads/main")
+    git("update-ref", "refs/tags/v1.0", main_sha)
+    git("update-ref", "refs/pull/7/head", review_sha)
+    git("config", "uploadpack.allowReachableSHA1InWant", "true")
+    ref = {"branch": "main", "tag": "v1.0", "pull_request": "refs/pull/7/head", "sha": review_sha}[ref_kind]
+    destination = tmp_path / "installed gym"
+    script = render_repo_checkout(remote.as_uri(), ref, dest=shlex.quote(str(destination)))
+    subprocess.run(["bash", "-c", script], check=True, capture_output=True, text=True)
+    head = subprocess.check_output(["git", "-C", str(destination), "rev-parse", "HEAD"], text=True).strip()
+    assert head == (review_sha if ref_kind in {"pull_request", "sha"} else main_sha)
+
+
 def test_render_driver_entrypoint_with_gym_install():
     out = render_driver_entrypoint("https://github.com/NVIDIA-NeMo/gym", "main", None)
     assert "git clone" in out
-    # `git -C "$GYM_SRC/gym" checkout`, not `git checkout`: the clone is
-    # out-of-tree. See test_gym_install_does_not_clone_into_the_job_directory.
-    assert "checkout main" in out
+    assert "git fetch origin main" in out
+    assert "git checkout --detach FETCH_HEAD" in out
     assert "uv venv --seed .venv" in out
     assert "source .venv/bin/activate" in out
     assert "uv pip install -e ." in out
@@ -744,7 +774,7 @@ def test_render_driver_entrypoint_with_prepare():
 def test_render_driver_entrypoint_install_and_prepare():
     out = render_driver_entrypoint("https://github.com/NVIDIA-NeMo/gym", "v1.0", "gym eval prepare")
     assert "git clone" in out
-    assert "checkout v1.0" in out
+    assert "git fetch origin v1.0" in out
     assert "gym eval prepare" in out
     assert 'exec "$@"' in out
 
