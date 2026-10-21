@@ -8,6 +8,7 @@ with a build section and the separate verifier's tests entry.
 """
 
 import hashlib
+import json
 import shutil
 
 import pytest
@@ -15,6 +16,9 @@ import pytest
 from nemo_gym.tasks.harbor.build_plan import detect_tool, needs_build, plan_builds
 from nemo_gym.tasks.harbor.digest import context_digest
 from nemo_gym.tasks.harbor.harbor_compat import environment_content_hash
+from nemo_gym.tasks.harbor.image_build import build_images
+from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE
+from nemo_gym.tasks.harbor.task import load_task
 from tests.unit_tests.harbor_build_helpers import (
     BUILD_DOCKERFILE,
     OVERLAY_DOCKERFILE,
@@ -23,6 +27,7 @@ from tests.unit_tests.harbor_build_helpers import (
     TOML,
     UBUNTU_RECORD,
     harbor_hash,
+    tagged_buildah,
     write_base_record,
     write_task,
 )
@@ -74,6 +79,60 @@ class TestContextDigest:
 
 
 class TestPlan:
+    def test_force_builds_the_dockerfile_of_a_task_that_declares_an_image(self, tmp_path):
+        # Harbor's --force-build: SWE-Interact's declared images lack what its Dockerfiles COPY in.
+        folder = tmp_path / "ds"
+        write_task(folder / "e", toml=TOML + 'docker_image = "org/prebuilt:1"\n')
+        assert plan_builds(folder) == []
+        (entry,) = plan_builds(folder, force=True)
+        assert (entry.tasks, entry.service) == (("e",), "main")
+
+    def test_a_recorded_build_wins_over_the_declared_image(self, tmp_path):
+        folder = tmp_path / "ds"
+        task_dir = write_task(folder / "e", toml=TOML + 'docker_image = "org/prebuilt:1"\n')
+        assert load_task(task_dir).image == "org/prebuilt:1"
+        built = f"{REPO}/hb__{'2' * 32}@sha256:{'f' * 64}"
+        (folder / BUILT_IMAGES_FILE).write_text(
+            json.dumps({context_digest(task_dir / "environment"): {"image": built}})
+        )
+        assert load_task(task_dir).image == built
+
+    def test_each_sidecar_build_context_is_planned_under_its_service(self, tmp_path):
+        folder = tmp_path / "ds"
+        compose = (
+            "services:\n  main:\n    image: ${MAIN_IMAGE_NAME}\n"
+            "  user-server:\n    build:\n      context: ./user-server\n"
+            "    environment:\n      - LITELLM_API_KEY=${LITELLM_API_KEY}\n"
+        )
+        extra = {"docker-compose.yaml": compose, "user-server/Dockerfile": "FROM python:3.12-slim\n"}
+        write_task(folder / "a", extra=extra)
+        write_task(folder / "b", extra=extra)  # same sidecar context content: one build
+        plan = plan_builds(folder)
+        sidecar = next(entry for entry in plan if entry.service == "user-server")
+        assert sidecar.tasks == ("a", "b")
+        assert sidecar.context == (folder / "a" / "environment" / "user-server").resolve()
+        assert sidecar.digest == harbor_hash(sidecar.context)
+
+    def test_a_sidecar_context_builds_from_its_own_dockerfile(self, tmp_path):
+        folder = tmp_path / "ds"
+        compose = "services:\n  main:\n    image: ${MAIN_IMAGE_NAME}\n  db:\n    build: ./db\n"
+        write_task(
+            folder / "a",
+            dockerfile=PULL_DOCKERFILE,
+            extra={"docker-compose.yaml": compose, "db/Dockerfile": "FROM x\n"},
+        )
+        write_base_record(folder)
+        builder, tool = tagged_buildah(tmp_path)
+        (result,) = build_images(folder, builder=builder, log=lambda _: None)
+        bud = next(call for call in tool.calls if "bud" in call)
+        assert bud[-3:] == [
+            "-f",
+            str((folder / "a" / "environment" / "db" / "Dockerfile").resolve()),
+            str((folder / "a" / "environment" / "db").resolve()),
+        ]
+        recorded = json.loads((folder / BUILT_IMAGES_FILE).read_text())
+        assert recorded[result.digest]["image"] == result.image
+
     def test_needs_build_classifies_the_three_modes(self):
         records = {"ubuntu:24.04": UBUNTU_RECORD}
         assert needs_build(BUILD_DOCKERFILE, records)

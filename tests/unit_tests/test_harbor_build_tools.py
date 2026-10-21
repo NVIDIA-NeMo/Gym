@@ -825,12 +825,15 @@ class TestDirectBuildPath:
 
     def test_the_direct_build_validates_the_compose_file_before_any_command(self, tmp_path):
         folder = tmp_path / "ds"
-        compose = "services:\n  main:\n    image: ${MAIN_IMAGE_NAME}\n  db:\n    build: ./db\n"
+        compose = (
+            "services:\n  main:\n    image: ${MAIN_IMAGE_NAME}\n"
+            "  db:\n    build:\n      context: ./db\n      ssh: [default]\n"
+        )
         write_task(folder / "a", extra={"docker-compose.yaml": compose, "db/Dockerfile": "FROM postgres:16\n"})
         fake = FakeTool("buildah")
         builder = ImageBuilder(tool="buildah", repository=REPO, storage_root=tmp_path / "store", run=fake)
         # A context the loader refuses is never built and pushed under the hb__ name.
-        with pytest.raises(BuildError, match="service 'db' has a build section"):
+        with pytest.raises(BuildError, match=r"services\.db\.build\.ssh is refused"):
             build_images(folder, builder=builder, log=lambda _: None)
         assert fake.calls == [] and not (folder / BUILT_IMAGES_FILE).exists()
 

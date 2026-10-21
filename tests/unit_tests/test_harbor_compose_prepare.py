@@ -196,13 +196,14 @@ class TestUnsupportedComposeFieldsError:
         image_configs.record_base_images(tmp_path)
         assert unsupported_compose_fields_error(load_task(task)) is None
 
-    def test_a_sidecar_build_is_still_a_refused_field(self, tmp_path):
+    def test_a_sidecar_build_starts_from_its_recorded_image(self, tmp_path):
+        # `api` builds environment/ itself, main's context: the one recorded build stands in for both sections.
         task = write_task(tmp_path, "ctr", compose=SIDECAR_BUILD, dockerfile=BUILD_DOCKERFILE)
-        record_built(tmp_path, task)
+        built = record_built(tmp_path, task)
         image_configs.record_base_images(tmp_path)
         (loaded,) = discover_tasks(tmp_path)
-        error = unsupported_compose_fields_error(loaded)
-        assert str(error) == "docker-compose.yaml: Service 'api': unsupported Compose fields ['build']" + REFUSED_NOTE
+        assert unsupported_compose_fields_error(loaded) is None
+        assert image_configs.load_compose_document(loaded)["services"]["api"] == {"image": built}
 
 
 class TestRestatedMainBuild:

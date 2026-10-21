@@ -125,6 +125,13 @@ Prepare decides one of three image modes per distinct Dockerfile.
   before the build, so a refused task's context is neither built nor pushed and a build that would fail for
   it cannot stop the preparation.
 
+A task that declares `[environment].docker_image` runs that image, unless `builds.force` is set: then its
+Dockerfile is built anyway and the recorded build wins, as Harbor's `--force-build` does (SWE-Interact's
+declared images lack the helper its Dockerfiles copy in). A Compose sidecar with a `build:` section is built
+the same way, once per distinct context, from the context's own `Dockerfile` (a sidecar build takes only
+`context`, inside `environment/`); its recorded image then stands in for the section. With docker, the
+compose build of `main` names `main` alone when a sidecar builds on its own.
+
 The image is named the way Harbor names it, `hb__<hash>`, where the hash is Harbor's 32-character content
 hash of the `environment/` folder, its environment id (vendored from Harbor v0.22.0 in
 `nemo_gym/tasks/harbor/harbor_compat.py`), so identical contexts get the same image name in Harbor and in
@@ -138,6 +145,7 @@ builds:
   repository: registry/path  # push built images under this path; default: $NEMO_GYM_BUILD_REPOSITORY
   platform: linux/amd64    # the platform asked of the tool; default linux/amd64
   enabled: true            # false never builds; tasks that need a build are skipped with a message
+  force: false             # true also builds the Dockerfile of a task that declares docker_image
 ```
 
 With `builds.repository` (or the `NEMO_GYM_BUILD_REPOSITORY` variable) the image is named

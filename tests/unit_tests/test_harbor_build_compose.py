@@ -26,7 +26,7 @@ from nemo_gym.tasks.harbor.build_plan import BuildError, BuildPlanEntry, plan_bu
 from nemo_gym.tasks.harbor.build_tools import ImageBuilder
 from nemo_gym.tasks.harbor.image_build import build_images
 from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE, IMAGE_CONFIGS_FILE
-from tests.unit_tests.harbor_build_helpers import DOCKER_INSPECT, TOML, write_task
+from tests.unit_tests.harbor_build_helpers import DOCKER_INSPECT, TOML, local_docker, write_task
 
 
 # Harbor v0.22.0's build Compose file, quoted verbatim from
@@ -188,18 +188,24 @@ class TestDockerComposeBackend:
         assert build["env"]["MAIN_IMAGE_NAME"] == result.tag and build["env"]["CONTEXT_DIR"] == str(context)
         assert lines == [f"Built {result.image} (local, docker) for task(s) a"]
 
-    @pytest.mark.parametrize(
-        ("sidecar", "message"),
-        [
-            ("  db:\n    build: ./db\n", r"service 'db' has a build section; sidecars must name a prebuilt image:"),
-            ("  db:\n    image: hb-db\n    build: ./db\n", r"service 'db' has a build section"),
-        ],
-    )
-    def test_a_sidecar_with_a_build_section_is_refused_before_any_build(self, tmp_path, fake_docker, sidecar, message):
+    def test_main_alone_is_compose_built_when_a_sidecar_builds_on_its_own(self, tmp_path):
         folder = tmp_path / "ds"
-        compose = "services:\n  main:\n    image: ${MAIN_IMAGE_NAME}\n" + sidecar
+        compose = "services:\n  main:\n    image: ${MAIN_IMAGE_NAME}\n  db:\n    build: ./db\n"
         write_task(folder / "a", extra={"docker-compose.yaml": compose, "db/Dockerfile": "FROM postgres:16\n"})
-        with pytest.raises(BuildError, match=message):
+        main = next(entry for entry in plan_builds(folder) if entry.service == "main")
+        builder, _ = local_docker()
+        assert builder.compose_build_argv(main, tmp_path / "harbor.yaml")[-2:] == ["build", "main"]
+
+    def test_a_sidecar_build_reaching_the_host_is_refused_before_any_build(self, tmp_path, fake_docker):
+        folder = tmp_path / "ds"
+        compose = (
+            "services:\n  main:\n    image: ${MAIN_IMAGE_NAME}\n"
+            "  db:\n    build:\n      context: ./db\n      ssh: [default]\n"
+        )
+        write_task(folder / "a", extra={"docker-compose.yaml": compose, "db/Dockerfile": "FROM postgres:16\n"})
+        # The sidecar is not planned (a sidecar build takes a context only); main's compose check refuses the key.
+        assert [entry.service for entry in plan_builds(folder)] == ["main"]
+        with pytest.raises(BuildError, match=r"services\.db\.build\.ssh is refused"):
             build_images(folder, builder=ImageBuilder(tool="docker"), log=lambda _: None)
         assert [c["argv"] for c in fake_docker()] == [["compose", "version"]]
         assert not (folder / BUILT_IMAGES_FILE).exists()

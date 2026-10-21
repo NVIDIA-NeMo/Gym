@@ -302,11 +302,12 @@ def load_task(path: Path, *, image_configs: Mapping[str, Any] | None = None) -> 
         try:
             parsed = parse_dockerfile(dockerfile_text)
         except DockerfileNeedsBuild as exc:
-            if image is None:
-                # Build mode: prepare built the context once and recorded the image next to the tasks.
-                built = built_image(path)
-                if built is None:
-                    raise _build_required(dockerfile, exc) from exc
+            # Build mode: prepare built the context once and recorded the image next to the tasks. A task that
+            # declares docker_image runs it, unless a build of its own Dockerfile is recorded (`builds.force`,
+            # Harbor's --force-build), which then wins as it does in Harbor.
+            built = built_image(path)
+            if built is None and image is None:
+                raise _build_required(dockerfile, exc) from exc
             parsed = None
         if built is not None:
             # The built image is pulled like a prebuilt one; its recorded configuration gives the
