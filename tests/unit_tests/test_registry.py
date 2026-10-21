@@ -135,6 +135,47 @@ class TestDiscoverEnvironments:
 
         assert _discover_environments_in_dir(envs_dir) == {}
 
+    def test_pulled_harbor_datasets_are_not_scanned(self, tmp_path: Path) -> None:
+        """A fetched dataset under environments/harbor/ is data: discovery stops at its manifest.toml."""
+        envs_dir = tmp_path / "environments"
+        _make_env(envs_dir, "real", _ENV_CONFIG.format(name="real"))
+        # A task inside the pulled dataset ships its own manifest.yaml (a Kubernetes task, say) that would
+        # be read as a catalog manifest with the wrong name if the walk descended into the dataset.
+        stray = _write_manifest(tmp_path, "environments", "harbor/terminal-bench-4.0.0/k8s-task", _manifest("k8s"))
+        with pytest.raises(registry_module.RegistryError):
+            _discover_environments_in_dir(envs_dir)
+
+        (envs_dir / "harbor" / "terminal-bench-4.0.0" / registry_module.HARBOR_DATASET_MANIFEST).write_text(
+            '[dataset]\nsource = "harbor-package-store"\n', encoding="utf-8"
+        )
+        assert set(_discover_environments_in_dir(envs_dir)) == {"real"}
+        assert stray.is_file()
+
+    def test_local_dataset_root_stays_a_catalog_entry_once_its_manifest_toml_is_written(self, tmp_path: Path) -> None:
+        """A local dataset registered by a manifest.yaml at its root keeps its entry after preparation.
+
+        Preparing an untracked local dataset writes a Harbor ``manifest.toml`` at its root
+        (``nemo_gym.tasks.harbor.manifest.check_manifest``). That file stops the walk into the task folders
+        below, which are data, but the root's own ``manifest.yaml`` is a catalog entry before and after that write.
+        """
+        envs_dir = tmp_path / "environments"
+        _make_env(envs_dir, "real", _ENV_CONFIG.format(name="real"))
+        root = _write_manifest(tmp_path, "environments", "harbor/local_dataset", _manifest("harbor/local_dataset"))
+        (root.parent / "hello-world").mkdir()
+        (root.parent / "hello-world" / "task.toml").write_text("[metadata]\n", encoding="utf-8")
+        before = _discover_environments_in_dir(envs_dir)
+        assert set(before) == {"real", "harbor/local_dataset"}
+        assert before["harbor/local_dataset"].path == root.parent
+
+        (root.parent / registry_module.HARBOR_DATASET_MANIFEST).write_text(
+            '[dataset]\nsource = "local"\n', encoding="utf-8"
+        )
+        # A task folder's own manifest.yaml below the dataset root is still never read as a catalog entry.
+        _write_manifest(tmp_path, "environments", "harbor/local_dataset/k8s-task", _manifest("k8s"))
+        after = _discover_environments_in_dir(envs_dir)
+        assert set(after) == {"real", "harbor/local_dataset"}
+        assert after["harbor/local_dataset"].path == root.parent
+
     def test_unparseable_or_metadataless_configs_still_discovered(self, tmp_path: Path) -> None:
         # Configs without a parseable resources_servers block (or malformed YAML) must still be
         # discovered by name, just with no description/domain — never crash discovery.
