@@ -68,11 +68,26 @@ The service's parallelism needs more GPUs than the node pool or allocation has. 
 
 Multi-node data parallelism places an equal share of replicas on each node. Change `number_of_instances` or the node count, or choose a shape where the [Ray Serve gateway](/orchestration/how-to/multi-node-vllm#ray-serve-gateway) is used.
 
-### Policy settings given twice
+### Policy wiring fields were removed
 
-**Error:** `Benchmark '<name>' run config already sets ['policy_base_url', ...] but driver.policy_model is also set`
+**Error:** `driver.policy_model was removed`, `driver.policy_host was removed`, or `driver.policy_model_type was removed`
 
-Remove either those keys from `run` or `driver.policy_model`. Submit does not choose between them.
+The policy is now wired like any other server. Migrate each field:
+
+| Before | Now |
+| --- | --- |
+| `driver.policy_model: NAME` | Nothing, when `services` has a single model service. Otherwise, in each benchmark's `run`: `policy_model: {responses_api_models: {openai_model: service:NAME}}`. |
+| `driver.policy_host: HOST` | Write the policy node's fields yourself, for example `openai_base_url: http://HOST:<port>/v1`, under `run.policy_model.responses_api_models.<type>`. |
+| `driver.policy_model_type: TYPE` | The key the `service:` reference sits under: `responses_api_models: {TYPE: service:NAME}`. |
+| `driver.policy_model_type: ""` | `policy_model: {}` in the benchmark's `run`. |
+
+See [Policy wiring](/orchestration/configuration#policy-wiring).
+
+### Several model services and no policy
+
+**Error:** `Benchmark '<name>' has no policy_model and services has several model services (...)`
+
+Submit binds the policy by itself only when there is one model service. Add `run.policy_model.responses_api_models.<type>: service:<name>` to the benchmark, or `run.policy_model: {}` if the benchmark's own config declares a complete policy. A `command` benchmark does not fail: it gets no `NEMO_GYM_POLICY_*` variables.
 
 ### A custom command combined with run or resumable
 

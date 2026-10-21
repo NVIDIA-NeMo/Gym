@@ -59,7 +59,6 @@ services:
     model: my-grader
 
 driver:
-  policy_model: policy_model
   container: python:3.12
   gym_install:
     ref: main
@@ -72,6 +71,13 @@ driver:
         split: benchmark
         config_paths:
           - benchmarks/aalcr/config.yaml
+
+        # The policy is the server named `policy_model`. `services` has two model services, so say which one;
+        # with a single model service it is bound without writing anything, and `policy_model: {}` opts out.
+        # The key it sits under (openai_model) is passed to `gym eval run` as `--model-type`.
+        policy_model:
+          responses_api_models:
+            openai_model: service:policy_model
 
         # String form: `service:NAME` replaces the whole server value. The server type (the key it sits
         # under) picks the field names: vllm_model -> base_url/model/api_key,

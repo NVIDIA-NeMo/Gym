@@ -133,6 +133,9 @@ GYM_CMD=(
     +output_jsonl_fpath=/jobs/swebench_pro/artifacts/rollouts.jsonl
     --model-type openai_model
     +observability_enabled=True
+    +policy_model.responses_api_models.openai_model.openai_base_url=http://localhost:8000/v1
+    +policy_model.responses_api_models.openai_model.openai_model=super35
+    +policy_model.responses_api_models.openai_model.openai_api_key=dummy
     +policy_base_url=http://localhost:8000/v1
     +policy_model_name=super35
     +policy_api_key=dummy

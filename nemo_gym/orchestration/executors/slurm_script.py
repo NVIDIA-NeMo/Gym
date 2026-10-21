@@ -856,7 +856,7 @@ def _driver_node(config: SubmitConfig, compute: SlurmComputeConfig) -> int:
     The driver reaches the policy on localhost. A multi-node policy serves its API
     from node 0, and a pinned one from its pool's first node.
     """
-    policy = config.deployed_services.get(config.driver.policy_model or "")
+    policy = config.deployed_services.get(config.policy_service or "")
     if policy is not None and policy.node_pool is not None:
         return _pool_offsets(compute)[policy.node_pool][0]
     return 0
@@ -1107,8 +1107,8 @@ def build_sbatch_script(
     # leaves nothing behind. Making the OUTPUT absolute is what keeps artifacts
     # in the job directory without constraining cwd.
     output_path = f"+output_jsonl_fpath={remote_bench_dir}/artifacts/rollouts.jsonl"
-    policy_type = config.driver.policy_model_type
-    extra_flags = [f"--model-type {shlex.quote(policy_type)}"] if config.driver.policy_model and policy_type else []
+    policy_type = benchmark.policy_model_type
+    extra_flags = [f"--model-type {shlex.quote(policy_type)}"] if policy_type else []
     driver_env = dict(config.driver.env)
     for name in config.deferred_host_services:
         # A pinned service's host is its pool's first node, which only the running job knows.

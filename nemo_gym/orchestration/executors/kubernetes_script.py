@@ -230,10 +230,8 @@ def _driver_command(
 
     if benchmark.command is None:
         output_path = f"+output_jsonl_fpath={run_dir}/{ARTIFACTS_DIRNAME}/rollouts.jsonl"
-        policy_type = config.driver.policy_model_type
-        extra_flags = (
-            [f"--model-type {shlex.quote(policy_type)}"] if config.driver.policy_model and policy_type else []
-        )
+        policy_type = benchmark.policy_model_type
+        extra_flags = [f"--model-type {shlex.quote(policy_type)}"] if policy_type else []
         gym_cmd = render_gym_cmd("eval run", "GYM_CMD", [output_path] + extra_flags + flatten_run_args(benchmark.run))
     else:
         # A command replaces `gym eval run`, so it reaches the policy/output path via env vars
