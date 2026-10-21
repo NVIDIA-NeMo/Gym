@@ -56,7 +56,7 @@ interrupted by session close returns HTTP 409 to a caller whose request was not 
 
 ## Sandbox worker supervision
 
-The worker's execution budget is capped at six hours and may be shortened by task metadata. Exhausting that
+`sandbox_runner_timeout_seconds` bounds the worker execution budget; task metadata can shorten it. Exhausting that
 budget is an ungradable, non-retryable execution failure, rather than a retryable model or provider outage.
 Partial checkpoints remain available for failure inspection; they never authorize grading. Transient artifact
 transfer failures receive one retry within the existing capture deadline. Worker startup and supervisor failures
