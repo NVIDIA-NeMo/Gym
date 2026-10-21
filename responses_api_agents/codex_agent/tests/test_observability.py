@@ -42,7 +42,7 @@ def test_native_call_ids_arguments_and_full_output_are_preserved(tmp_path: Path,
     assert not bundle.gaps
 
 
-def test_missing_native_session_is_explicit_and_preserves_failed_invocation(tmp_path: Path) -> None:
+def test_missing_codex_session_record_is_explicit_and_preserves_failed_invocation(tmp_path: Path) -> None:
     bundle = read_codex_observations(tmp_path, "invocation", returncode=1, timed_out=False)
     assert bundle.records[0].status == "failed"
     assert bundle.records[0].invocation_id == "invocation"

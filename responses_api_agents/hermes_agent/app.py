@@ -23,7 +23,7 @@ import tempfile
 from asyncio import Semaphore
 from collections.abc import Mapping
 from time import monotonic, time
-from typing import Any, Callable, Optional
+from typing import Any, Callable, ClassVar, Optional
 from uuid import uuid4
 
 import model_tools  # noqa: F401  # fail-fast if hermes-agent isn't installed  # pyright: ignore[reportMissingImports]
@@ -301,6 +301,8 @@ class HermesAgentVerifyResponse(BaseVerifyResponse):
 
 class HermesAgent(SimpleResponsesAPIAgent):
     config: HermesAgentConfig
+    # The harness runs inside the task sandbox and calls the model server from there.
+    calls_model_from_sandbox: ClassVar[bool] = True
     sem: Semaphore = None
     # Set of agents currently running run_conversation, plus a flag tracking whether the single
     # shared SIGTERM dispatcher has been installed on the event loop. See _ensure_sigterm_handler.
