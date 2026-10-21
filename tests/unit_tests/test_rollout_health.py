@@ -1827,12 +1827,27 @@ def test_run_is_healthy_when_nothing_is_missing_and_failures_stay_below_the_limi
     assert artifacts["unhealthy_reasons"] == []
 
 
+def test_failures_have_no_limit_unless_one_is_configured(tmp_path: Path) -> None:
+    """The failure limits are off by default: the counts are written, and only a configured limit judges them."""
+    artifacts = _run_with_outcomes(tmp_path, landed=20, infra=50, final=30)
+
+    assert (artifacts["expected"], artifacts["missing"]) == (100, 0)
+    assert (artifacts["failed"]["total"], artifacts["failed"]["not_final"], artifacts["failed"]["final"]) == (
+        80,
+        50,
+        30,
+    )
+    assert artifacts["failed"]["by_class"] == {"agent_run_error": 80}
+    assert artifacts["healthy"] is True
+    assert artifacts["unhealthy_reasons"] == []
+
+
 @pytest.mark.parametrize(
     ("outcomes", "reason"),
     [
         ({"landed": 99, "missing": 1}, "missing 1 of 100"),
-        ({"landed": 98, "infra": 2}, "infra failures 2 of 100 (2.0%), limit 2%"),
-        ({"landed": 97, "final": 3}, "final failures 3 of 100 (3.0%), limit 2%"),
+        ({"landed": 98, "infra": 2, "max_infra_failure_fraction": 0.02}, "infra failures 2 of 100 (2.0%), limit 2%"),
+        ({"landed": 97, "final": 3, "max_final_failure_fraction": 0.02}, "final failures 3 of 100 (3.0%), limit 2%"),
         (
             {"landed": 99, "infra": 1, "max_infra_failure_fraction": 0.005},
             "infra failures 1 of 100 (1.0%), limit 0.5%",
@@ -1891,7 +1906,8 @@ def test_failed_collection_still_writes_quality_summary_with_counts(
     assert "partial" not in artifacts  # A Python error keeps the full check.
     assert artifacts["failed"] == {"total": 1, "final": 0, "not_final": 1, "by_class": {"agent_run_error": 1}}
     assert artifacts["healthy"] is False
-    assert artifacts["unhealthy_reasons"] == ["missing 1 of 3", "infra failures 1 of 3 (33.3%), limit 2%"]
+    # No failure limit is configured, so only the missing rollout makes the run unhealthy.
+    assert artifacts["unhealthy_reasons"] == ["missing 1 of 3"]
 
 
 def _inventory(root: Path, tasks: int) -> None:

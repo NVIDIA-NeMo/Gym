@@ -47,7 +47,6 @@ from nemo_gym.health.checks import (
 )
 from nemo_gym.health.types import (
     CALL_BINDING_INPUTS,
-    DEFAULT_MAX_FAILURE_FRACTION,
     QUALITY_SUMMARY_FILENAME,
     ROLLOUT_ID_KEY,
     ROLLOUT_INDEX_KEY,
@@ -481,8 +480,8 @@ def _rollout_accounting(
     landed: set[tuple[Any, ...]],
     paths: Sequence[Path],
     *,
-    max_infra_failure_fraction: float,
-    max_final_failure_fraction: float,
+    max_infra_failure_fraction: float | None,
+    max_final_failure_fraction: float | None,
     duplicated: int,
 ) -> dict[str, Any]:
     """Count the rollouts each input owed against those that landed, failed or left no row, and judge the run.
@@ -493,7 +492,8 @@ def _rollout_accounting(
     final ones and infra ones left after retries. ``failed`` is null when no input has a sidecar.
     ``expected``, ``missing`` and ``healthy`` need the ``_materialized_inputs.jsonl`` inventory and
     are null when an input has none. A run is healthy when nothing is missing, no rollout is
-    recorded twice, and each kind of failure stays below its limit as a share of expected.
+    recorded twice, and each kind of failure with a configured limit stays below it as a share of expected.
+    The limits are off (None) by default, so failures alone never make a run unhealthy unless configured.
     """
     # Lazy: rollout_collection imports this module, and health workers need none of its dependencies.
     from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, is_terminal_failure
@@ -534,7 +534,8 @@ def _rollout_accounting(
             ("infra failures", infra, max_infra_failure_fraction),
             ("final failures", final, max_final_failure_fraction),
         ):
-            if count and count / expected >= limit:
+            # No limit is configured by default: the failures are counted, and judged only against a set limit.
+            if limit is not None and count and count / expected >= limit:
                 reasons.append(f"{name} {count} of {expected} ({count / expected:.1%}), limit {limit * 100:g}%")
     return {
         "expected": expected,
@@ -591,8 +592,8 @@ def run_health_checks(
     output_dir: Path | None = None,
     workers: int | None = None,
     ignored_checks: Sequence[str] = (),
-    max_infra_failure_fraction: float = DEFAULT_MAX_FAILURE_FRACTION,
-    max_final_failure_fraction: float = DEFAULT_MAX_FAILURE_FRACTION,
+    max_infra_failure_fraction: float | None = None,
+    max_final_failure_fraction: float | None = None,
 ) -> HealthCheckResult:
     """Run the RFC's map/group/reduce pipeline and write both reports."""
     ignored = frozenset(normalize_ignored_checks(ignored_checks))
@@ -671,8 +672,8 @@ def write_provisional_summary(
     rollout_path: Path,
     landed: set[tuple[Any, Any]],
     *,
-    max_infra_failure_fraction: float = DEFAULT_MAX_FAILURE_FRACTION,
-    max_final_failure_fraction: float = DEFAULT_MAX_FAILURE_FRACTION,
+    max_infra_failure_fraction: float | None = None,
+    max_final_failure_fraction: float | None = None,
 ) -> Path:
     """Write the run accounting of a stopped run fast: ``rollouts.jsonl`` is not read, and the per-record checks
     are skipped.

@@ -81,7 +81,6 @@ from nemo_gym.global_config import (
     pairing_override_enabled,
     resolve_dataset_agent,
 )
-from nemo_gym.health.types import DEFAULT_MAX_FAILURE_FRACTION
 from nemo_gym.observability.model_calls import (
     await_model_call_capture_quiescence,
     clear_model_call_captures_for_rollouts,
@@ -1084,17 +1083,23 @@ class SharedRolloutCollectionConfig(RemovedRolloutOptionsMixin, UploadRolloutsCo
         default_factory=list,
         description="Health-check IDs to exclude from execution and verdict derivation.",
     )
-    health_check_max_infra_failure_fraction: float = Field(
-        default=DEFAULT_MAX_FAILURE_FRACTION,
+    health_check_max_infra_failure_fraction: Optional[float] = Field(
+        default=None,
         ge=0,
         le=1,
-        description="Run health is unhealthy when non-final (infra) failures reach this share of expected rollouts.",
+        description=(
+            "Run health is unhealthy when non-final (infra) failures reach this share of expected rollouts. "
+            "Unset by default: no limit."
+        ),
     )
-    health_check_max_final_failure_fraction: float = Field(
-        default=DEFAULT_MAX_FAILURE_FRACTION,
+    health_check_max_final_failure_fraction: Optional[float] = Field(
+        default=None,
         ge=0,
         le=1,
-        description="Run health is unhealthy when final (model-caused) failures reach this share of expected rollouts.",
+        description=(
+            "Run health is unhealthy when final (model-caused) failures reach this share of expected rollouts. "
+            "Unset by default: no limit."
+        ),
     )
 
     @field_validator("health_check_ignored_checks", mode="before")
@@ -4501,17 +4506,23 @@ class RolloutAggregationConfig(BaseNeMoGymCLIConfig):
         default_factory=list,
         description="Health-check IDs to exclude from execution and verdict derivation.",
     )
-    health_check_max_infra_failure_fraction: float = Field(
-        default=DEFAULT_MAX_FAILURE_FRACTION,
+    health_check_max_infra_failure_fraction: Optional[float] = Field(
+        default=None,
         ge=0,
         le=1,
-        description="Run health is unhealthy when non-final (infra) failures reach this share of expected rollouts.",
+        description=(
+            "Run health is unhealthy when non-final (infra) failures reach this share of expected rollouts. "
+            "Unset by default: no limit."
+        ),
     )
-    health_check_max_final_failure_fraction: float = Field(
-        default=DEFAULT_MAX_FAILURE_FRACTION,
+    health_check_max_final_failure_fraction: Optional[float] = Field(
+        default=None,
         ge=0,
         le=1,
-        description="Run health is unhealthy when final (model-caused) failures reach this share of expected rollouts.",
+        description=(
+            "Run health is unhealthy when final (model-caused) failures reach this share of expected rollouts. "
+            "Unset by default: no limit."
+        ),
     )
 
     @field_validator("health_check_ignored_checks", mode="before")

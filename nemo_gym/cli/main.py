@@ -1140,12 +1140,12 @@ COMMANDS = {
             _value_flag(
                 "health-max-infra-failure-fraction",
                 "health_check_max_infra_failure_fraction",
-                "Run health limit for non-final (infra) failures, as a share of expected rollouts (default 0.02).",
+                "Run health limit for non-final (infra) failures, as a share of expected rollouts (default: no limit).",
             ),
             _value_flag(
                 "health-max-final-failure-fraction",
                 "health_check_max_final_failure_fraction",
-                "Run health limit for final (model-caused) failures, as a share of expected rollouts (default 0.02).",
+                "Run health limit for final (model-caused) failures, as a share of expected rollouts (default: no limit).",
             ),
         ),
     ),
@@ -1176,12 +1176,12 @@ COMMANDS = {
             _value_flag(
                 "health-max-infra-failure-fraction",
                 "health_check_max_infra_failure_fraction",
-                "Run health limit for non-final (infra) failures, as a share of expected rollouts (default 0.02).",
+                "Run health limit for non-final (infra) failures, as a share of expected rollouts (default: no limit).",
             ),
             _value_flag(
                 "health-max-final-failure-fraction",
                 "health_check_max_final_failure_fraction",
-                "Run health limit for final (model-caused) failures, as a share of expected rollouts (default 0.02).",
+                "Run health limit for final (model-caused) failures, as a share of expected rollouts (default: no limit).",
             ),
         ),
     ),

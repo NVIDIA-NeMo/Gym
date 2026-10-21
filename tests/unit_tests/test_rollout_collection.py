@@ -4680,8 +4680,8 @@ class TestRolloutCollection:
             output_fpath,
             workers=None,
             ignored_checks=[],
-            max_infra_failure_fraction=0.02,
-            max_final_failure_fraction=0.02,
+            max_infra_failure_fraction=None,
+            max_final_failure_fraction=None,
         )
         format_health_report.assert_called_once_with(health_result)
 
@@ -7977,7 +7977,7 @@ class TestRolloutAggregationHelper:
         await RolloutAggregationHelper().run_from_config(config)
 
         artifacts = orjson.loads((tmp_path / "quality_summary.json").read_bytes())["run"]["artifacts"]
-        assert (artifacts["expected"], artifacts["failed"]["total"], artifacts["healthy"]) == (2, 1, False)
+        assert (artifacts["expected"], artifacts["failed"]["total"], artifacts["healthy"]) == (2, 1, True)
 
     @pytest.mark.parametrize("run1_has", ["a row", "a failure"])
     async def test_runs_that_reuse_task_indices_do_not_hide_each_others_lost_rollouts(
