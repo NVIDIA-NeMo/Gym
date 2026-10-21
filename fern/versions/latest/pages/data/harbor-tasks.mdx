@@ -16,10 +16,12 @@ reads, and the three commands that work on such a dataset.
 ```
 my-dataset/
 ├── dataset.toml          # Harbor's dataset file; Gym's settings live in its [gym] table
+├── task_data.py          # optional: the TaskData model every task's fields are validated against
 ├── compose-images.json   # written by Gym at prepare: recorded image configurations (do not edit)
 └── hello/                # one task folder per task; the folder name is the task id
     ├── task.toml
     ├── instruction.md
+    ├── task_data.json    # optional: the task's own fields, carried in its row's task_data
     ├── environment/      # Dockerfile or docker-compose.yaml, plus files the task needs
     ├── tests/test.sh     # the verifier; writes /logs/verifier/reward.txt or reward.json
     └── solution/solve.sh # the reference solution `gym dataset validate` runs (optional)
@@ -110,6 +112,54 @@ manifest model, which serializes only Harbor's own tables. The `[gym]` table is 
 the multipliers and per-task overrides to their defaults without an error. Keep the dataset in git and restore the
 table from there after running one of these commands.
 </Note>
+
+## `task_data.py` and typed task fields
+
+A task may carry its own field values in `task_data.json`, a JSON object in its folder (a question and its
+expected answer, a tool subset, anything the dataset's own grading needs). The loader writes them into the task's
+row under `task_input.task_data`, beside the reserved `_ng_digest` and `_ng_dataset_digest` keys Gym adds, and the
+file is part of the task digest, so an edit after materialization is caught like any other.
+
+A dataset that ships `task_data.py` beside `dataset.toml` types those fields. The module exports one Pydantic
+model named `TaskData`:
+
+```python
+from pydantic import BaseModel, Field
+
+
+class TaskData(BaseModel):
+    question: str
+    answer: str = Field(min_length=1)
+    difficulty: int = 1
+```
+
+Every row is validated against it at the three points it crosses a boundary, with the task named in the error:
+
+- **Materialize.** `gym eval run` and `gym dataset validate` import the module once per dataset and check every
+  task folder's `task_data.json` against it before any image is recorded or built (the loaded tasks are checked
+  again before a row is written), and refuse the whole dataset when a task's fields do not satisfy the model, when
+  a field the model does not declare appears (whatever the model's `extra` setting; `TaskData` is the complete
+  description, validated with extras forbidden: the input names pydantic itself reads, aliases, `AliasChoices` and
+  `AliasPath` included, are the declared ones, and a key no field consumed, such as a field's name where only its
+  alias is accepted or a second spelling of a field already given, is refused rather than ignored), or when
+  the module does not import. Values are validated strictly, as JSON: `"3"` does not pass as an `int` nor `"no"`
+  as a `bool`, since the row and the verifier's `task_data.json` carry the file's values as written, never the
+  model's coerced ones (JSON's own spellings of a type still pass: an ISO string for a `datetime`, an integer for
+  a `float`). A validator that raises something pydantic does not wrap (a `KeyError` from a
+  lookup) is the same refusal at all three points, with the exception named. A task without `task_data.json` has
+  no fields, which is a violation only if the model requires some.
+- **Seed.** The `harbor` environment server imports each taskset's module at startup and validates the row it is
+  handed before anything is provisioned; a row the model rejects, or whose fields are not the pinned folder's
+  `task_data.json`, fails the episode at the seed stage (terminal, never retried). The pin holds for every task,
+  one without `task_data.json` included: a row that carries keys beside the reserved `_ng_*` ones for such a task,
+  which the server used to accept and ignore, is refused the same way (re-materialize it). A module that does not
+  import refuses every episode of its taskset with the import error.
+- **Collate.** `gym dataset collate` validates the taskset's rows against the server's reserved keys and the
+  dataset's `TaskData` in one report; the dataset's declared fields are not reported as unknown keys.
+
+A dataset without `task_data.py` (every hub dataset) is checked only for the reserved keys and behaves as before.
+The module is imported by Gym, so it runs on the host like `dataset.toml` is read there: keep it to the model.
+The reserved `_ng_*` keys are never task fields and are refused in `task_data.json`.
 
 ## `gym dataset init`
 

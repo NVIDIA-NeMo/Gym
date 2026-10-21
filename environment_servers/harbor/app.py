@@ -118,6 +118,12 @@ from nemo_gym.tasks.harbor.materialize import STEP_METADATA_KEY, HarborTaskInput
 from nemo_gym.tasks.harbor.models import HarborMCPServer
 from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE
 from nemo_gym.tasks.harbor.task import HarborTurn
+from nemo_gym.tasks.harbor.task_data import (
+    TaskDataError,
+    TaskDataSchema,
+    check_row_matches_folder,
+    load_task_data_schema,
+)
 from nemo_gym.tasks.harbor.verifier_env import TESTS_DOCKERFILE
 from nemo_gym.tool_access import MCPStreamableHTTPConnection, MCPToolAccess, ToolAccess
 
@@ -454,6 +460,15 @@ class HarborEnvironmentServer(
         self._ungrantable_overlay_servers: set[str] = set()
         self._pull_retry_gate = asyncio.Semaphore(PULL_RETRY_CONCURRENCY)
         self._shutting_down = False
+        # Each taskset's dataset-level TaskData (task_data.py beside its task folders), imported once here: None
+        # for a dataset that ships none, or the error that keeps every episode of the taskset from seeding.
+        self._task_data_schemas: dict[str, TaskDataSchema | TaskDataError | None] = {}
+        for name, taskset in self.config.tasksets.items():
+            try:
+                self._task_data_schemas[name] = load_task_data_schema(Path(taskset.folder))
+            except TaskDataError as exc:
+                LOGGER.error(f"Taskset {name!r}: its task_data.py does not load; its episodes will be refused: {exc}")
+                self._task_data_schemas[name] = exc
         artifacts = self.config.artifacts_dir
         if artifacts is None or not artifacts.is_absolute():
             results_root = Path(get_global_config_dict().get("results_dir", RESULTS_DIR)).resolve()
@@ -582,6 +597,23 @@ class HarborEnvironmentServer(
 
             pending.add_done_callback(remove_failed_load)
         return pending.result() if pending.done() else await asyncio.shield(pending)
+
+    def _check_task_data(self, taskset: str, task: HarborTask, task_data: dict[str, Any]) -> None:
+        """Refuse a row whose task fields the dataset's ``TaskData`` rejects, or that are not the pinned folder's.
+
+        The digest check pins the folder; this pins the row's ``task_data`` to that folder's ``task_data.json``
+        and to the dataset's ``task_data.py`` when it ships one. Both are task or row defects (422): a retry
+        would fail the same way.
+        """
+        schema = self._task_data_schemas.get(taskset)
+        if isinstance(schema, TaskDataError):
+            raise HTTPException(422, f"Taskset {taskset!r}: {schema}")
+        try:
+            if schema is not None:
+                schema.validate(task_data, task_id=task.task_id)
+            check_row_matches_folder(task_data, task)
+        except TaskDataError as exc:
+            raise HTTPException(422, str(exc)) from exc
 
     def _task_budget_s(self, task: HarborTask) -> float:
         """The task's own time budget for one episode, from its `task.toml` and this server's allowances.
@@ -1298,6 +1330,7 @@ class HarborEnvironmentServer(
         if self._shutting_down:
             raise HTTPException(503, "Environment server is shutting down")
         task = await self._resolve_task(request.task.task_id, request.task.task_input.task_data)
+        self._check_task_data(request.task.task_id.taskset, task, request.task.task_input.task_data)
         if not task.needs_sandbox:
             raise HTTPException(
                 422, f"Task {task.task_id!r} declares no image; sandbox-less tasks are not supported yet"

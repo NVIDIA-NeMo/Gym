@@ -41,6 +41,7 @@ from nemo_gym.tasks.harbor.records import (
     recorded_forced_tasks,
     recorded_service_images,
 )
+from nemo_gym.tasks.harbor.task_data import read_task_fields
 from nemo_gym.tasks.harbor.verifier_env import (
     TESTS_COMPOSE_FILE,
     _verifier_build_required,
@@ -181,6 +182,11 @@ class HarborTask:
     ``turns`` holds the task's ``[[steps]]`` in order; empty for a single-turn task. A multi-turn task
     never sends ``instruction`` to the agent: each turn sends its own, and the top-level file may hold
     material the agent must not see (SWE-Interact puts the full hidden specification there).
+
+    ``task_data`` is the task's own field values, read from ``task_data.json`` in its folder (a
+    parameterized task's rendered row), ``{}`` for a task without one. Materialize writes them into the
+    row's ``task_data`` beside the reserved ``_ng_*`` keys, and the dataset's ``task_data.py`` validates
+    them when it ships one (:mod:`nemo_gym.tasks.harbor.task_data`).
     """
 
     path: Path
@@ -207,6 +213,9 @@ class HarborTask:
     verifier_image_config: BaseImageConfig | None = None
     overlay_workdirs: tuple[OverlayWorkdir, ...] = ()
     turns: tuple[HarborTurn, ...] = ()
+    # The task's own field values (``task_data.json`` in its folder), written into the row's ``task_data``
+    # beside the reserved keys and validated against the dataset's ``task_data.py`` when it ships one.
+    task_data: Mapping[str, Any] = field(default_factory=dict)
 
     @property
     def needs_sandbox(self) -> bool:
@@ -630,6 +639,7 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
     except (OSError, ValueError) as exc:
         raise HarborTaskError(f"{path}: {exc}") from exc
     digest = task_digest(folder_digest, dataset, path.name)
+    task_data = read_task_fields(path)
 
     return HarborTask(
         path=path,
@@ -656,6 +666,7 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
         verifier_image_config=verifier_image_config,
         overlay_workdirs=overlay_workdirs,
         turns=turns,
+        task_data=task_data,
     )
 
 
