@@ -18,6 +18,7 @@ from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.rollout_correlation import current_rollout_id, rollout_context
 from nemo_gym.rollout_observability import AgentObservationBundle
 from nemo_gym.server_utils import ServerClient
 
@@ -269,3 +270,61 @@ async def test_close_receipt_expiry_does_not_expire_active_sessions(agent, monke
 def test_retry_window_must_be_positive_and_finite(window):
     with pytest.raises(ValidationError, match="session_close_retry_window_seconds"):
         BaseResponsesAPIAgentConfig(host="", port=0, entrypoint="", name="", session_close_retry_window_seconds=window)
+
+
+async def _fail_seed_and_let_its_window_pass(agent, monkeypatch, seed):
+    clock = [0.0]
+    monkeypatch.setattr("nemo_gym.base_responses_api_agent.monotonic", lambda: clock[0])
+
+    async def initialize(body):
+        raise AgentSessionSetupError(AgentSessionState(request=body), error=RuntimeError("partial setup"))
+
+    agent._seed_agent_session_state.side_effect = initialize
+    with pytest.raises(RuntimeError, match="partial setup"):
+        await agent.seed_agent_session(SimpleNamespace(session={}), seed)
+    agent._seed_agent_session_state.side_effect = None
+    clock[0] = agent.config.session_close_retry_window_seconds
+    return clock
+
+
+async def _sweep_from_another_rollout(agent):
+    """Serve another session's seed under its own rollout; it finds the expired failed seed and starts its release."""
+    with rollout_context("another-rollout"):
+        await agent.seed_agent_session(SimpleNamespace(session={}), _seed(1))
+    await asyncio.gather(*agent._failed_seed_releases)
+
+
+async def test_a_failed_seed_is_released_under_its_own_rollout(agent, monkeypatch):
+    seed = _seed()
+    rollouts = []
+
+    async def close(state):
+        rollouts.append(current_rollout_id())
+        return AgentCloseSessionResponse(agent_session_id=state.request.agent_session_id)
+
+    await _fail_seed_and_let_its_window_pass(agent, monkeypatch, seed)
+    agent._close_agent_session_state.side_effect = close
+
+    await _sweep_from_another_rollout(agent)
+
+    assert rollouts == ["episode-0"]
+    assert seed.agent_session_id not in agent._session_records
+
+
+async def test_a_failed_release_keeps_the_state_for_a_later_close(agent, monkeypatch):
+    seed = _seed()
+    clock = await _fail_seed_and_let_its_window_pass(agent, monkeypatch, seed)
+    agent._close_agent_session_state.side_effect = RuntimeError("provider unavailable")
+
+    await _sweep_from_another_rollout(agent)
+
+    record = agent._session_records[seed.agent_session_id]
+    assert record.state is not None and seed.agent_session_id in agent._failed_seed_records
+    agent._close_agent_session_state.side_effect = None
+    closed = await agent.close_agent_session(SimpleNamespace(session={}), _close(seed))
+    assert closed.agent_session_id == seed.agent_session_id
+    assert agent._close_agent_session_state.await_count == 2
+    assert seed.agent_session_id not in agent._failed_seed_records
+    clock[0] += 2 * agent.config.session_close_retry_window_seconds
+    await agent.seed_agent_session(SimpleNamespace(session={}), _seed(2))
+    assert seed.agent_session_id not in agent._session_records

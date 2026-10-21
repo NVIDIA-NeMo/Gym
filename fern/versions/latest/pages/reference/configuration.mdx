@@ -314,7 +314,10 @@ wandb_api_key: your-wandb-key
 
 - **Default:** `false` — servers use `127.0.0.1` (localhost).
 - **When to use:** Set to `true` for multi-node setups (e.g. multi-node Ray clusters) where servers must communicate across machines.
-- **Effect:** Resolves and uses the host's IP address (`gethostbyname(gethostname())`) instead of localhost.
+- **Effect:** When `default_host` is unset, resolves and uses the host's IP address (`gethostbyname(gethostname())`) instead of localhost. If lookup fails or returns a loopback or unspecified address, configuration fails with guidance to set a reachable address.
+- **Explicit address:** `default_host` takes precedence over automatic lookup, whether `use_absolute_ip` is `true` or `false`. For example, `+default_host=192.0.2.20` selects that address without consulting hostname lookup. A server's own `host` setting still takes precedence over this shared default.
+- **Scoping:** `absolute_ip_server_types` (a list of server types: `responses_api_models`, `responses_api_agents`, `resources_servers`, `environment_servers`) limits the resolved address to those types. Every other server, and the head server whose `/global_config_dict_yaml` endpoint returns the merged configuration, keeps `127.0.0.1`; a server's own `host` still wins. Unset or `null` (the default) moves every server, the head included, as before. The list only scopes the resolved address: an explicit `default_host` applies to every server regardless.
+- **Harbor runs:** `gym eval run <target> --agent <agent>` sets `use_absolute_ip: true` and `absolute_ip_server_types: [responses_api_models]` by default when the harness declares that it calls the model from inside the sandbox (`calls_model_from_sandbox = True` on its agent class, read from the agent's entrypoint source) or its configuration sets `sandbox_model_base_url`: the model server advertises the node's address, the head server, the agent server and the environment server stay on loopback. An explicit config file or command-line setting can override either default (`++absolute_ip_server_types=null` exposes every server). Oracle validation and host-side harnesses do not enable it.
 
 **`sidecar`** — Optional block that starts a local HTTP/2 PING proxy so requests to NVCF endpoints survive the 340 second idle limit.
 
@@ -340,6 +343,10 @@ uv sync --extra mlflow  # MLflow
 
 If a backend is configured but its extra isn't installed, Gym logs an error naming the missing
 extra and continues the run without that backend.
+
+Each backend writes its run id to `<output stem>_<backend>_run_id` next to `output_jsonl_fpath`, for
+example `rollouts_mlflow_run_id` or `rollouts_wandb_run_id`. A resumed or resubmitted run with the same
+output logs to that run. Delete the file to start a new one.
 
 ### Weights & Biases
 

@@ -51,6 +51,8 @@ def _make_config(**fields) -> StirrupAgentWrapperConfig:
         "gdpval_container_path",
         "system_prompt_template",
         "user_prompt_template",
+        "model_id",
+        "task",
     ],
 )
 def test_removed_options_are_rejected(option):
@@ -66,7 +68,7 @@ def _report(**fields) -> dict:
         "usages": [],
         "stop_reason": None,
         "resources_cookies": {},
-        "observations": {"status": "completed"},
+        "observations": {"status": "completed", "model_response_ids": ["chatcmpl-1"]},
         **fields,
     }
 
@@ -200,7 +202,7 @@ class TestApp:
             ],
             usages=[usage, usage],
             elapsed_seconds=1.5,
-            observations={"status": "incomplete"},
+            observations={"status": "incomplete", "model_response_ids": ["chatcmpl-1"]},
             stop_reason="cancelled",
         )
 
@@ -225,6 +227,50 @@ class TestApp:
         assert "stop_reason" not in response.metadata
 
     @pytest.mark.asyncio
+    async def test_a_run_ended_by_a_rejected_request_is_a_failed_response_that_used_no_tokens(self) -> None:
+        report = _report(
+            stop_reason="model_error",
+            model_error="Error code: 400 - rejected",
+            observations={"status": "failed", "model_response_ids": []},
+        )
+
+        response, _, _ = await _run_episode(
+            _make_config(), NeMoGymResponseCreateParamsNonStreaming(input="x", model="policy"), report
+        )
+
+        assert response.status == "failed"
+        assert (response.error.code, response.error.message) == ("server_error", "Error code: 400 - rejected")
+        assert response.metadata["stop_reason"] == "model_error"
+        assert (response.usage.input_tokens, response.usage.output_tokens, response.usage.total_tokens) == (0, 0, 0)
+        assert response.usage.input_tokens_details.cached_tokens is None
+        assert response.usage.output_tokens_details.reasoning_tokens is None
+
+    @pytest.mark.asyncio
+    async def test_a_run_killed_before_any_model_response_has_unknown_usage_and_no_error(self) -> None:
+        report = _report(observations={"status": "incomplete", "model_response_ids": []}, stop_reason="wall_time")
+
+        response, _, _ = await _run_episode(
+            _make_config(), NeMoGymResponseCreateParamsNonStreaming(input="x", model="policy"), report
+        )
+
+        assert response.error is None
+        assert response.usage is None
+
+    @pytest.mark.asyncio
+    async def test_a_rejected_request_after_responses_that_reported_no_usage_has_unknown_usage(self) -> None:
+        report = _report(
+            stop_reason="model_error",
+            model_error="Error code: 400 - rejected",
+            observations={"status": "failed", "model_response_ids": ["chatcmpl-1"]},
+        )
+
+        response, _, _ = await _run_episode(
+            _make_config(), NeMoGymResponseCreateParamsNonStreaming(input="x", model="policy"), report
+        )
+
+        assert (response.status, response.usage) == ("failed", None)
+
+    @pytest.mark.asyncio
     async def test_usage_without_detail_fields_has_no_cached_or_reasoning_counts(self) -> None:
         usage = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
 
@@ -240,7 +286,7 @@ class TestApp:
         partial = _report(
             output_items=[{"type": "function_call", "call_id": "c1", "name": "code_exec", "arguments": "{}"}],
             stop_reason="wall_time",
-            observations={"status": "incomplete"},
+            observations={"status": "incomplete", "model_response_ids": ["chatcmpl-1"]},
             resources_cookies={"session": "late"},
         )
 

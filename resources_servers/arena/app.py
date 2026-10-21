@@ -15,7 +15,7 @@
 import asyncio
 import logging
 import re
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 from aiohttp import ClientTimeout
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
@@ -25,6 +25,7 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import Domain, ModelServerRef
@@ -49,6 +50,7 @@ logger = logging.getLogger(__name__)
 
 
 class ArenaResourcesServerConfig(BaseResourcesServerConfig):
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     model_config = ConfigDict(extra="forbid")
 
     num_workers: int | None  # Number of resources-server worker processes; null uses framework behavior.
