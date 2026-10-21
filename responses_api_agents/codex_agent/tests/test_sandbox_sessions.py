@@ -2146,7 +2146,10 @@ def test_terminal_model_error_preserves_provider_and_worker_error_boundary(
         if accepted:
             body = response.json()
             assert body["status"] == "failed"
-            assert body["error"] == {"code": "server_error", "message": "model rejected request"}
+            assert body["error"] == {
+                "code": "rate_limit_exceeded" if statuses and statuses[-1] == 429 else "server_error",
+                "message": "model rejected request",
+            }
             assert body["output"] == []
             outcome = json.loads(body["metadata"]["ng_agent_outcome"])
             if statuses and statuses[-1] is None:
@@ -2359,6 +2362,11 @@ def test_post_header_failure_reaches_outcome_policy(setup, transport_error):
         ),
         ({"status": None, "error": "timed out"}, "request timed out", {"failure_kind": "model_transport_error"}),
         (
+            {"status": 429, "transport_error": "timed out"},
+            "request timed out",
+            {"failure_kind": "model_transport_error"},
+        ),
+        (
             {"status": 200, "transport_error": "timed out"},
             "request timed out",
             {"failure_kind": "model_transport_error"},
@@ -2386,6 +2394,7 @@ def test_native_errors_use_captured_attempt_facts(setup, attempt, message, expec
         result = NeMoGymResponse.model_validate(response.json())
         assert result.status == "failed"
         assert result.error.message == message
+        assert result.error.code == ("rate_limit_exceeded" if expected.get("status_code") == 429 else "server_error")
         assert json.loads(result.metadata["ng_agent_outcome"]) == expected
         assert agent_outcome_policy(result) == (
             OutcomeAction.VERIFY if attempt["status"] == 400 else OutcomeAction.RETRY
