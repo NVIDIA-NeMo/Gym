@@ -751,6 +751,13 @@ class HarborEnvironmentServer(
             ng_agent_observations=agent_observations,
             ng_trajectory=agent_trajectory,
         )
+        LOGGER.debug(
+            "%s: episode %s scored %s%s",
+            session.task.task_id,
+            episode_key,
+            result.reward,
+            f" (masked: {result.failure_kind})" if result.mask_sample else "",
+        )
         return HarborEpisodeResponse(episode_id=request.episode_id, task_id=request.task.task_id, result=result)
 
     def _deadline_failure(self, task: HarborTask, budget: float, progress: "_TurnProgress") -> HandledEpisodeError:
@@ -1332,6 +1339,14 @@ class HarborEnvironmentServer(
                 # The last look before the hand-over: an entrypoint that died during the seed's remaining steps
                 # (a setup script failing after its first lines) is a seed failure, not a rollout on an empty task.
                 await self._check_entrypoint(sandbox, task, launch)
+            LOGGER.debug(
+                "%s: episode %s seeded (workdir %s, %s verifier, %s)",
+                task.task_id,
+                episode_key,
+                session.workdir,
+                "separate" if separate else "shared",
+                "Compose group" if compose is not None else "one sandbox",
+            )
         except HTTPException as exc:
             # A seed step that judged the failure itself keeps its status: the task's `name:group` user refused on
             # a provider that switches user by name only (`HarborUserError`, a 422 the task and the deployment
