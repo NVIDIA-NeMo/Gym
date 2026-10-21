@@ -33,7 +33,6 @@ from nemo_gym.orchestration.api import (
     VllmPDTierConfig,
     VllmServiceConfig,  # used in _BUILDERS dispatch table
     effective_ray_serve,
-    service_host_env_var,
 )
 from nemo_gym.orchestration.executors.otel import (
     COLLECTOR_HEALTH_PORT,
@@ -61,6 +60,7 @@ from nemo_gym.orchestration.executors.script_templates import (
     render_write_file_from_base64,
 )
 from nemo_gym.orchestration.executors.utils import flatten_run_args
+from nemo_gym.orchestration.service_refs import service_host_env_var
 
 
 _SCRIPT_TEMPLATE = """\

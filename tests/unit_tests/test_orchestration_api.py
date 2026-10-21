@@ -628,3 +628,37 @@ def test_service_references_resolve_alongside_policy_injection():
     run = config.driver.benchmarks["gsm8k"].run
     assert run["u"] == JUDGE["base_url"]
     assert run["policy_base_url"] == "http://localhost:8000/v1"
+
+
+def test_a_deployed_model_service_describes_its_own_fields():
+    config = SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "served_model_name": "alias"}}))
+    accessors = config.services["svc"].accessors("svc")
+    assert (accessors.url, accessors.host, accessors.port, accessors.model) == (
+        "http://localhost:8000/v1",
+        "localhost",
+        "8000",
+        "alias",
+    )
+    assert not accessors.host_deferred
+
+
+def test_a_pinned_service_defers_its_host_to_the_name_derived_variable():
+    config = SubmitConfig.model_validate(
+        _config(compute=POOLS, services={"my-judge": {**SERVICE, "node_pool": "aux"}})
+    )
+    accessors = config.services["my-judge"].accessors("my-judge")
+    assert accessors.host == "${oc.env:GYM_SERVICE_MY_JUDGE_HOST}"
+    assert accessors.url == "http://${oc.env:GYM_SERVICE_MY_JUDGE_HOST}:8000/v1"
+    assert accessors.host_deferred
+
+
+def test_a_declarative_service_describes_its_own_fields():
+    config = SubmitConfig.model_validate(_config(services={"judge": JUDGE}))
+    accessors = config.services["judge"].accessors("judge")
+    assert (accessors.url, accessors.host, accessors.port, accessors.model) == (
+        "https://judge.example.com:8443/v1",
+        "judge.example.com",
+        "8443",
+        "gpt-4o",
+    )
+    assert not accessors.host_deferred

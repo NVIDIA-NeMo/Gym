@@ -32,6 +32,13 @@ from pydantic import (
     model_validator,
 )
 
+from nemo_gym.orchestration.service_refs import (
+    ServiceAccessors,
+    check_host_var_collisions,
+    resolve_service_refs,
+    service_host_env_var,
+)
+
 
 # Reject unknown fields on all config models so typos in YAML surface immediately.
 class _StrictModel(BaseModel):
@@ -153,6 +160,19 @@ class BaseModelServiceConfig(BaseServiceConfig):
     model: str
     port: int = 8000
     served_model_name: str | None = None
+
+    def accessors(self, name: str) -> ServiceAccessors:
+        """The fields `service:` references can read. Without a node pool the service shares the driver's
+        node; a pinned one is on its pool's first node, which only the running job knows."""
+        deferred = self.node_pool is not None
+        host = f"${{oc.env:{service_host_env_var(name)}}}" if deferred else "localhost"
+        return ServiceAccessors(
+            url=f"http://{host}:{self.port}/v1",
+            host=host,
+            port=str(self.port),
+            model=self.served_model_name or self.model,
+            host_deferred=deferred,
+        )
 
 
 class VllmServiceConfig(BaseModelServiceConfig):
@@ -342,6 +362,11 @@ class DeclarativeServiceConfig(_StrictModel):
             )
         return v
 
+    def accessors(self, name: str) -> ServiceAccessors:
+        parsed = urlparse(self.base_url)
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        return ServiceAccessors(url=self.base_url, host=parsed.hostname or "", port=str(port), model=self.model)
+
     @field_validator("base_url")
     @classmethod
     def _validate_base_url(cls, v: str) -> str:
@@ -363,22 +388,6 @@ ServiceConfig = Annotated[
     | Annotated[DeclarativeServiceConfig, Tag("openai_compatible")],
     Discriminator("type"),
 ]
-
-# `service:NAME` as a whole server value, or `service:NAME.field` as a single field of one.
-SERVICE_REF_PREFIX = "service:"
-# Server type -> the (url, model, key) field names that `service:NAME` fills in.
-SERVER_TYPE_FIELDS = {
-    "vllm_model": ("base_url", "model", "api_key"),
-    "openai_model": ("openai_base_url", "openai_model", "openai_api_key"),
-}
-SERVICE_FIELDS = ("url", "host", "port", "model", "key")
-# Placeholder for clients that require a key; neither vLLM nor a declarative service supplies one.
-_PLACEHOLDER_KEY = "dummy"  # pragma: allowlist secret
-
-
-def service_host_env_var(service_name: str) -> str:
-    """Driver env var holding a pinned service's hostname, known only once the job has nodes."""
-    return f"GYM_SERVICE_{re.sub(r'[^A-Z0-9]', '_', service_name.upper())}_HOST"
 
 
 class NodePool(_StrictModel):
@@ -739,13 +748,15 @@ class SubmitConfig(_StrictModel):
                     benchmark.run["policy_base_url"] = f"http://{self.driver.policy_host}:{service.port}/v1"
                     benchmark.run["policy_model_name"] = service.served_model_name or service.model
                     # vLLM doesn't require auth; dummy key satisfies clients that require the header.
-                    benchmark.run["policy_api_key"] = _PLACEHOLDER_KEY
+                    benchmark.run["policy_api_key"] = "dummy"  # pragma: allowlist secret
 
         for bench_name, benchmark in self.driver.benchmarks.items():
             try:
-                benchmark.run = self._resolve_service_refs(benchmark.run)
+                benchmark.run, deferred = resolve_service_refs(benchmark.run, self.services)
             except ValueError as e:
                 raise ValueError(f"Benchmark '{bench_name}' run config: {e}") from None
+            self._deferred_host_services |= deferred
+        check_host_var_collisions(self._deferred_host_services)
 
         return self
 
@@ -754,80 +765,6 @@ class SubmitConfig(_StrictModel):
         """Pinned services whose hostname a `service:` reference needs; the executor exports each one's
         `service_host_env_var` to the driver."""
         return sorted(self._deferred_host_services)
-
-    def _service_accessors(self, name: str) -> dict[str, str]:
-        """The values of one service's named fields. Static ones are literals; a pinned service's host
-        is only known once the job has nodes, so it is an OmegaConf reference to a driver env var."""
-        if name not in self.services:
-            raise ValueError(
-                f"'{SERVICE_REF_PREFIX}{name}' does not match any service ({', '.join(sorted(self.services))})."
-            )
-        service = self.services[name]
-        if isinstance(service, DeclarativeServiceConfig):
-            parsed = urlparse(service.base_url)
-            port = parsed.port or (443 if parsed.scheme == "https" else 80)
-            return {
-                "url": service.base_url,
-                "host": parsed.hostname or "",
-                "port": str(port),
-                "model": service.model,
-                "key": _PLACEHOLDER_KEY,
-            }
-        if not isinstance(service, BaseModelServiceConfig):
-            raise ValueError(
-                f"'{SERVICE_REF_PREFIX}{name}' is a {service.type} service, which does not serve a model."
-            )
-        if service.node_pool is None:
-            host = "localhost"
-        else:
-            var = service_host_env_var(name)
-            clash = next(
-                (o for o in self._deferred_host_services if o != name and service_host_env_var(o) == var), None
-            )
-            if clash:
-                raise ValueError(
-                    f"'{SERVICE_REF_PREFIX}{name}' and '{SERVICE_REF_PREFIX}{clash}' are both pinned services whose "
-                    f"hosts would be exported as {var}. Rename one so the names differ in more than punctuation."
-                )
-            self._deferred_host_services.add(name)
-            host = f"${{oc.env:{var}}}"
-        return {
-            "url": f"http://{host}:{service.port}/v1",
-            "host": host,
-            "port": str(service.port),
-            "model": service.served_model_name or service.model,
-            "key": _PLACEHOLDER_KEY,
-        }
-
-    def _resolve_service_refs(self, run: dict[str, Any]) -> dict[str, Any]:
-        """`run` with its `service:` references resolved, as a new dict: the input may be shared with the
-        caller, who may keep it as a record of what was submitted."""
-        resolved: dict[str, Any] = {}
-        for key, value in run.items():
-            if isinstance(value, dict):
-                resolved[key] = self._resolve_service_refs(value)
-            elif isinstance(value, str) and value.startswith(SERVICE_REF_PREFIX):
-                name, _, field = value[len(SERVICE_REF_PREFIX) :].partition(".")
-                accessors = self._service_accessors(name)
-                if field:
-                    if field not in accessors:
-                        raise ValueError(f"'{value}': unknown field '{field}' (one of {', '.join(SERVICE_FIELDS)}).")
-                    resolved[key] = accessors[field]
-                elif key in SERVER_TYPE_FIELDS:
-                    url_field, model_field, key_field = SERVER_TYPE_FIELDS[key]
-                    resolved[key] = {
-                        url_field: accessors["url"],
-                        model_field: accessors["model"],
-                        key_field: accessors["key"],
-                    }
-                else:
-                    raise ValueError(
-                        f"'{value}' is under '{key}', which is not a server type "
-                        f"({', '.join(SERVER_TYPE_FIELDS)}); name a field instead, like '{value}.url'."
-                    )
-            else:
-                resolved[key] = value
-        return resolved
 
     def _validate_pd_services(self, compute: "ComputeConfig") -> None:
         pools = list(compute.node_pools) if isinstance(compute, SlurmComputeConfig) else []
