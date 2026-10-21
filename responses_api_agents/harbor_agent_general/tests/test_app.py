@@ -628,3 +628,14 @@ async def test_a_failed_trial_names_the_phase_it_was_in(tmp_path, monkeypatch, r
     message = str(raised.value)
     assert message.startswith(f"[sandbox phase={phase} ")
     assert " reason=SandboxApiException] Harbor trial failed with SandboxApiException: sandbox ended" in message
+
+
+def test_startup_logs_the_deprecation_notice(agent: HarborAgent, caplog: pytest.LogCaptureFixture) -> None:
+    """The server says on startup that it is superseded by the Harbor task format and where that lives."""
+    with caplog.at_level("WARNING", logger="responses_api_agents.harbor_agent_general.app"):
+        agent.model_post_init(None)
+    notices = {record.getMessage() for record in caplog.records if "deprecated" in record.getMessage()}
+    assert len(notices) == 1
+    (notice,) = notices
+    assert "responses_api_agents/harbor_agent_general is deprecated" in notice
+    assert "https://github.com/NVIDIA-NeMo/Gym/pull/3674" in notice

@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import json
+import logging
 import re
 import sys
 from asyncio import Semaphore
@@ -44,6 +45,9 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
 )
 from responses_api_agents.harbor_agent.utils import HarborAgentUtils
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class HarborDatasetSourceConfig(BaseModel):
@@ -230,6 +234,11 @@ class HarborAgent(SimpleResponsesAPIAgent):
 
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
+        LOGGER.warning(
+            "responses_api_agents/harbor_agent is deprecated and will be removed soon. "
+            "New work should run Harbor tasks through the Harbor environment server "
+            "(PR stack from https://github.com/NVIDIA-NeMo/Gym/pull/3674)."
+        )
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()

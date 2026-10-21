@@ -1,5 +1,12 @@
 # Harbor Agent for NeMo Gym
 
+> [!warning]
+> **Deprecated.** This agent is superseded by the Harbor task format, where Harbor tasks run through the Harbor
+> environment server with NeMo Gym's own sandboxed harnesses and the `harbor_oracle` agent, with no Harbor
+> dependency. New work should use that path (the PR stack starting at
+> [#3674](https://github.com/NVIDIA-NeMo/Gym/pull/3674), `environments/harbor` once it lands). This agent will be
+> removed soon.
+
 This agent integrates [Harbor](https://github.com/laude-institute/harbor) into NeMo Gym.
 It runs Harbor agents (e.g., `terminus-2`) in Harbor-managed environments and returns NeMo Gym-compatible outputs.
 
