@@ -176,8 +176,10 @@ def render_repo_checkout(repo: str, ref: str, dest: str | None = None) -> str:
     repo_name = repo.rstrip("/").split("/")[-1].removesuffix(".git")
     target = dest if dest is not None else shlex.quote(repo_name)
     ensure_git = "command -v git >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq git)"
+    # A PR commit can be fetchable by SHA without belonging to a cloned branch or tag.
     return (
-        f"({ensure_git}) && git clone {shlex.quote(repo)} {target} && cd {target} && git checkout {shlex.quote(ref)}"
+        f"({ensure_git}) && git clone {shlex.quote(repo)} {target} && cd {target} "
+        f"&& git fetch origin {shlex.quote(ref)} && git checkout --detach FETCH_HEAD"
     )
 
 
@@ -194,6 +196,7 @@ def render_driver_entrypoint(
     command: str | None = None,
     *,
     extras: tuple[str, ...] = (),
+    on_host: bool = False,
 ) -> str:
     """Render the srun entrypoint for the driver step.
 
@@ -218,10 +221,24 @@ def render_driver_entrypoint(
         # the artifacts. `cd` into it because a benchmark's prepare_script and
         # jsonl_fpath resolve against cwd; the driver's output path is absolute,
         # so nothing depends on the clone being reachable afterwards.
+        if on_host:
+            # A host driver must not install tools into the user's global environment.
+            preamble += [
+                'GYM_SRC="$(mktemp -d /tmp/gym-install-XXXXXX)"',
+                # Unmanaged install also skips the receipt in ~/.config/uv.
+                'export UV_UNMANAGED_INSTALL="$GYM_SRC/bin"',
+                'export UV_CACHE_DIR="${UV_CACHE_DIR:-$GYM_SRC/cache}"',
+                'export UV_PYTHON_INSTALL_DIR="${UV_PYTHON_INSTALL_DIR:-$GYM_SRC/python}"',
+                "curl -LsSf https://astral.sh/uv/install.sh | sh",
+                'export PATH="$GYM_SRC/bin:$PATH"',
+            ]
+        else:
+            preamble += [
+                "curl -LsSf https://astral.sh/uv/install.sh | sh",
+                'source "$HOME/.local/bin/env"',
+                'GYM_SRC="$(mktemp -d /tmp/gym-install-XXXXXX)"',
+            ]
         preamble += [
-            "curl -LsSf https://astral.sh/uv/install.sh | sh",
-            'source "$HOME/.local/bin/env"',
-            'GYM_SRC="$(mktemp -d /tmp/gym-install-XXXXXX)"',
             render_repo_checkout(repo, ref, dest='"$GYM_SRC/gym"'),
             # A real venv, not --system: --system targets whatever interpreter happens to be on
             # the container's PATH, sidestepping uv's own project-aware Python selection - `uv

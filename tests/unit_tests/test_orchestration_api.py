@@ -472,3 +472,10 @@ def test_command_benchmark_without_resumable_is_accepted():
     driver = {**DRIVER, "benchmarks": {"gsm8k": {"command": "bash run.sh", "resumable": False}}}
     config = SubmitConfig.model_validate(_config(driver=driver))
     assert config.driver.benchmarks["gsm8k"].resume_config is None
+
+
+def test_host_driver_requires_slurm_compute():
+    driver = {**DRIVER, "container": None}
+    assert SubmitConfig.model_validate(_config(driver=driver)).driver.container is None
+    with pytest.raises(ValidationError, match="container: null is supported only for Slurm"):
+        SubmitConfig.model_validate(_config(driver=driver, compute=COMPUTE_K8S))
