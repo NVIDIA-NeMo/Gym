@@ -40,6 +40,8 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseInput,
     NeMoGymResponseOutputItem,
     NeMoGymResponseOutputMessage,
+    NeMoGymResponseUsage,
+    accumulate_response_usage,
 )
 from resources_servers.toolsandbox.schemas import (
     ToolSandboxNeMoGymResponse,
@@ -123,6 +125,7 @@ class ToolSandboxAgent(SimpleResponsesAPIAgent):
         env_id = seed.env_id
 
         model_response: NeMoGymResponse | None = None
+        usage: NeMoGymResponseUsage | None = None
         agent_state_history: list[NeMoGymResponseInput] = []
         all_messages: list[NeMoGymResponseOutputItem] = []
         model_server_cookies = None
@@ -152,6 +155,7 @@ class ToolSandboxAgent(SimpleResponsesAPIAgent):
                 except ValidationError as e:
                     logger.warning(f"Error validating model response: {e!r}.")
                     break
+                usage = accumulate_response_usage(usage, model_response.usage)
 
                 model_output = model_response.output
                 fn_calls: List[NeMoGymResponseFunctionToolCall] = [
@@ -206,6 +210,8 @@ class ToolSandboxAgent(SimpleResponsesAPIAgent):
             "group_id": str(req.task_idx),
             "contains_transitions": self.config.return_transitions,
             "output": agent_state_history if self.config.return_transitions else all_messages,
+            # The base response is the last model call; usage covers every call in the episode.
+            "usage": usage,
         }
         return ToolSandboxNeMoGymResponse.model_validate(model_response.model_dump() | output_overrides)
 
