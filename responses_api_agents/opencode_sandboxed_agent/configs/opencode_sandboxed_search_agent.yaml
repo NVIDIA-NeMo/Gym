@@ -59,18 +59,16 @@ opencode_sandboxed_search_agent:
       #   nemo_gym_sentinel.js            proves the plugin layer loaded
       #   nemo_gym_turn_budget.js         ends a run that exhausts its turn budget, and says why
       #   nemo_gym_web_guard.js           keeps answer-key and opted-out pages out of results
-      #   nemo_gym_compaction_continue.js stops opencode inviting the model to give up
       #   nemo_gym_tool_surface.js        repairs grep's description when bash is disabled
       #
       # tool_surface is loaded unconditionally even though it only acts when its flag is set.
       # Loading an inert plugin is free; making the list conditional is not, because OmegaConf
-      # replaces lists wholesale -- every arm wanting the plugin would restate all five entries,
+      # replaces lists wholesale -- every arm wanting the plugin would restate the whole list,
       # and a stale restatement silently drops one.
       opencode_plugins:
         - nemo_gym_sentinel.js
         - nemo_gym_turn_budget.js
         - nemo_gym_web_guard.js
-        - nemo_gym_compaction_continue.js
         - nemo_gym_tool_surface.js
 
       opencode_env:

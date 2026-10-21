@@ -57,26 +57,9 @@ opencode_sandboxed_search_agent:
       # launcher, never checked in. app.py collapses it to one EXA_API_KEY per row by hashing
       # the question, so 400 concurrent sandboxes spread over the pool instead of rate-limiting
       # one key, and a given row always lands on the same key across retries.
-      # Plugins change opencode's behaviour without rebuilding it: they are uploaded into the
-      # sandbox and imported into the opencode process, which calls them at defined hook points.
-      # The sentinel MUST stay first — app.py refuses to score a rollout whose stderr lacks its
-      # marker, because opencode swallows plugin load failures silently.
-      #   nemo_gym_sentinel.js            proves the plugin layer loaded
-      #   nemo_gym_turn_budget.js         ends a run that exhausts its turn budget, and says why
-      #   nemo_gym_web_guard.js           keeps answer-key and opted-out pages out of results
-      #   nemo_gym_compaction_continue.js stops opencode inviting the model to give up
-      #   nemo_gym_tool_surface.js        repairs grep's description when bash is disabled
-      #
-      # tool_surface is loaded unconditionally even though it only acts when
-      # NEMO_GYM_FIX_GREP_DESCRIPTION=1. Loading an inert plugin is free; making the list
-      # conditional is not, because OmegaConf replaces lists wholesale -- every arm that wanted
-      # the plugin had to restate all five entries, and a stale restatement silently drops one.
-      opencode_plugins:
-        - nemo_gym_sentinel.js
-        - nemo_gym_turn_budget.js
-        - nemo_gym_web_guard.js
-        - nemo_gym_compaction_continue.js
-        - nemo_gym_tool_surface.js
+      # The plugin list is NOT restated here. It lives in the search agent config, and
+      # OmegaConf replaces lists wholesale -- a copy in two files means a plugin added to
+      # one silently never loads via the other.
 
       opencode_env:
         OPENCODE_ENABLE_EXA: "true"
@@ -161,33 +144,21 @@ opencode_sandboxed_search_agent:
 
         agent:
           build:
-            # Replaces opencode's built-in system prompt outright (llm/request.ts prepare():
-            # `input.agent.prompt ? [input.agent.prompt] : SystemPrompt.provider(input.model)`).
-            # Without it the model runs BrowseComp under opencode's SWE prompt — "You are
-            # opencode, an interactive CLI tool that helps users with software engineering
-            # tasks" and "You MUST answer concisely with fewer than 4 lines" — which is hostile
-            # to a research task that has to explain its reasoning and emit an Exact Answer line.
+            # NO `prompt` override: the model runs on STOCK opencode's system prompt.
             #
-            # Text is the legacy harness's frankenstein_system_prompt.txt verbatim (the prompt
-            # behind every published BrowseComp number on the old stack).
-            # Kept byte-identical deliberately: any edit here is an unmeasured confound on the
-            # first run that has search at all. The dynamic <env> block (cwd, today's date) is
-            # still appended by opencode after this.
-            prompt: |
-              You are a General Agent. Your mission is to leverage a diverse set of tools to help the user conduct an in-depth investigation of their question, continuously reflect, and ultimately deliver a precise answer.
-
-              Throughout the investigation, strictly observe the following principles:
-
-              1. Whenever you encounter uncertain information, proactively invoke search tools to verify it.
-              2. Prioritize high-credibility sources (authoritative websites, academic databases, professional media) and maintain a critical stance toward low-credibility ones. Cite the source of any information you use with a format [^index^].
-              3. You should not respond to the user with a counter-question, but instead do your best to provide an accurate answer.
-              4. When providing the final answer, begin by explaining the reasoning process. Avoid presenting only the final answer, as this makes it difficult to understand.
-
-              Your response should be in the following format:
-
-              Explanation: {your explanation for your final answer}
-              Exact Answer: {your succinct, final answer}
-              Confidence: {your confidence score between 0% and 100% for your answer}
+            # This used to replace it with the legacy harness's General Agent prompt, which
+            # ended with the Explanation/Exact Answer/Confidence block. Because the prompt
+            # carried the answer format, prepare.py was able to send the bare question. Both
+            # halves move together: with stock's prompt in play nothing would state the output
+            # format, so prepare.py now appends simple-evals' QUERY_SUFFIX to the user turn --
+            # the same place and the same text benchmarks/browsecomp uses. Changing one
+            # without the other yields a run the judge cannot parse.
+            #
+            # Stock's prompt is written for software engineering and asks for answers "under
+            # 4 lines", which pulls against a research task that must show its reasoning.
+            # That tension is accepted deliberately in exchange for running unmodified
+            # opencode; it makes this a different configuration from every previously
+            # published number on the old stack, so results are not comparable across it.
             # NO `steps` on purpose, so stock's "MAXIMUM STEPS REACHED" nudge never arms.
             # nv-opencode DELETED that nudge (prompt.ts:1630): it appended an ephemeral message
             # that was never persisted, so once it started firing it re-appended at a shifting
@@ -205,9 +176,9 @@ opencode_sandboxed_search_agent:
             # because stock has no break tied to maxSteps -- it appears on exactly two lines of
             # prompt.ts, the definition and `isLastStep`.
           # NO `compaction:` block here on purpose: the summariser runs on stock's
-          # PROMPT_COMPACTION, which is what the legacy comparator ran. The key is omitted rather
-          # than set empty -- writing `compaction:` with nothing under it yields null, which
-          # REPLACES the base agent's {prompt: ""} dict instead of inheriting it.
+          # PROMPT_COMPACTION, which is what the legacy comparator ran. Omit the key rather than
+          # writing `compaction:` with nothing under it, which yields null and is NOT the same as
+          # absent.
             #
             # This used to carry a bespoke search summariser ("Preserve VERBATIM... every candidate
             # answer considered and its current status, every source URL..."). It was a port-only
@@ -218,8 +189,8 @@ opencode_sandboxed_search_agent:
             # at all, so there was no config-side injection either. It fired on every compaction of
             # the reference run — a divergence on the single path that most shapes a long rollout.
             #
-            # The base agent declares prompt: "" and _create_opencode_config drops empty leaves, so
-            # omitting it here means opencode never sees the key.
+            # _create_opencode_config drops null/empty leaves before serialising, so omitting the
+            # key here means opencode never sees it and runs its own summariser prompt.
         compaction:
           # Fire compaction at 192k instead of the default 242,144. The trigger is
           # model.limit.input - reserved, so 262144 - 70144 = 192000 exactly. Earlier compaction
@@ -235,11 +206,15 @@ opencode_sandboxed_search_agent:
           # doubled the tail and tripled the preserved tokens. Back to stock -- if we want them
           # they belong in an explicit A/B arm with a measurement behind them.
       datasets:
+        # The UPSTREAM BrowseComp dataset, not a second copy of it. Both harnesses now send
+        # the identical user turn (question + simple-evals QUERY_SUFFIX), and this agent reads
+        # only the user message -- it skips system messages and never looks at `tools` -- so
+        # the extra fields browsecomp's rows carry for its own harness are inert here.
         # OmegaConf replaces lists wholesale, so this entry is always restated in full.
-        - name: search_browsecomp
+        - name: browsecomp
           type: benchmark
-          jsonl_fpath: benchmarks/search/data/search_browsecomp_benchmark.jsonl
-          prepare_script: benchmarks/search/prepare.py
+          jsonl_fpath: benchmarks/browsecomp/data/browsecomp_benchmark.jsonl
+          prepare_script: benchmarks/browsecomp/prepare.py
           num_repeats: 1
 
 # Second half of "no output cap", and the reason it has to be stated twice. The env var removed

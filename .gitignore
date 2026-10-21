@@ -255,3 +255,15 @@ datasets/
 launch_*.sh
 runner_*.slurm
 babysit_*.sh
+
+# Generated shard entry points and their override yamls for the search/BrowseComp runs.
+# One authored generator emits them; committing dozens of near-identical derivatives makes a
+# deliberate edit indistinguishable from a stale copy.
+# Broad on purpose: any generated prepare entry point, whatever the task is called.
+benchmarks/browsecomp/prepare_*.py
+benchmarks/browsecomp/shard*_override.yaml
+benchmarks/browsecomp/smoke*_override.yaml
+
+# Local tooling for the search runs (shard generator, task wiring, generated data).
+# The benchmark itself lives in benchmarks/browsecomp; nothing here is part of it.
+benchmarks/search/
