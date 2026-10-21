@@ -1,7 +1,0 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-# Core, CLI and benchmark packages must come from the same reviewed revision.
-jsonschema>=4.25.1,<5
-nooa @ https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/051472343211914222e24ce36d8752f4e86bbe43.tar.gz
-nooa-cli @ https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/051472343211914222e24ce36d8752f4e86bbe43.tar.gz#subdirectory=packages/nooa-cli
-nooa-bench @ https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/051472343211914222e24ce36d8752f4e86bbe43.tar.gz#subdirectory=packages/nooa-bench

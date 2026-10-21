@@ -78,7 +78,7 @@ async def test_offline_runtime_failure_never_activates_or_destroys_borrowed_sand
     staging.side_effect = ValueError("Offline runtime source fingerprint mismatch")
     with pytest.raises(ValueError, match="source fingerprint mismatch"):
         await instance.seed_agent_session(request(), seed(sandbox_access=access()))
-    staging.assert_awaited_once_with(sandbox, requirements_path=None, wheelhouse_path=Path("/prepared/nooa"))
+    staging.assert_awaited_once_with(sandbox, wheelhouse_path=Path("/prepared/nooa"))
     connect.assert_awaited_once()
     sandbox.exec.assert_not_awaited()
     with pytest.raises(HTTPException, match="closing"):
