@@ -626,7 +626,7 @@ def _wrap_seed_session(app: FastAPI, mint_metadata: Callable[[Request, dict], di
         if isinstance(result, ResourcesSeedSessionResponse):
             # An Environment Server reads MCP access only from the typed field, which forbids other keys.
             if result.resources_tools is None:
-                # The session hook sees the task's fields, as it does for an Agent's legacy seed body.
+                # The session hook sees the task's fields, as it does for the flat seed body of an agent's own /run.
                 task_data = (await _seed_body(request)).get("task_data")
                 payload["resources_tools"] = mint_metadata(request, task_data if isinstance(task_data, dict) else {})
         elif isinstance(payload, dict) and NEMO_GYM_MCP_METADATA_KEY not in payload:

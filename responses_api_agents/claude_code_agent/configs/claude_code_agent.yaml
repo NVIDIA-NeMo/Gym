@@ -2,7 +2,7 @@ claude_code_agent:
   responses_api_agents:
     claude_code_agent:
       entrypoint: app.py
-      resources_server: null  # set a ResourcesServerRef for the legacy /run endpoint
+      resources_server: null  # set a ResourcesServerRef for the agent's own /run endpoint
       model_server: null  # Gym model-server ref, or use anthropic_base_url directly
       concurrency: 32
       model: claude-sonnet-4-6

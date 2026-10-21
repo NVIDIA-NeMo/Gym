@@ -46,6 +46,8 @@ class Agent:
 
 <Note>
 The pseudocode shows an agent that runs the whole episode itself through its `/run` endpoint. Most agents, including Remote Agent, still run this way: rollout collection reaches them through a `legacy_agent` Environment Server that relays `/run` unchanged. Agents that implement agent sessions, such as SimpleAgent and the [sandboxed harnesses](/main/agent-server/integrate-existing-agents#sandboxed-harnesses), can instead run under an [Environment Server](/main/about/architecture#environment-server) that drives agent sessions, such as `single_agent_turn`. It calls `seed_session` and `verify` on the Resources server and drives the agent through session endpoints, so the agent does not decide when to verify.
+
+`legacy_agent` is the legacy path. Gym plans to deprecate `legacy_agent` and remove support for it over time, so new agents should implement agent sessions.
 </Note>
 
 ## Choose a Path

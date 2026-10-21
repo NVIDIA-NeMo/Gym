@@ -968,7 +968,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             )
             # OpenClaw uses this provider request deadline for its stream-idle
             # watchdog too. Gym may buffer a long reasoning call before SSE delivery.
-            # Preserve explicit provider settings on the legacy local CLI path.
+            # Preserve explicit provider settings on the local CLI path.
             nemo.setdefault("timeoutSeconds", self.config.model_timeout_seconds)
         self._merge_headless_tool_denies(cfg)
         return cfg

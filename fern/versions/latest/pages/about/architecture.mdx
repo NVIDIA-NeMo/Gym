@@ -69,6 +69,8 @@ When an Environment Server drives agent sessions, the Agent Server does not deci
 
 Most shipped configurations still use the `legacy_agent` Environment Server, which Gym also generates by default for any agent that no Environment Server names. It relays `/run` to the agent, and the agent runs the whole episode itself, including any `seed_session` and `verify` calls. Cleanup then depends on the agent, so Resources Servers on this path usually release per-task state in `verify()` (see [Session Cleanup](/main/environment-tutorials/resources-server-apis#session-cleanup)). For that request flow, see [System Design](/main/infrastructure/engineering-notes/system-design).
 
+`legacy_agent` is the legacy path. Gym plans to deprecate `legacy_agent` and remove support for it over time, so new agents should implement agent sessions and run under an Environment Server that drives them.
+
 ## Server Types
 
 ### Environment Server

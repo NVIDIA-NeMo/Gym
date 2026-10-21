@@ -3,8 +3,11 @@
 
 """Compatibility environment server for agent servers that still own their episode through `/run`.
 
-`single_agent_turn_legacy` translates a legacy row for a migrated pairing. This one translates nothing:
+`single_agent_turn_legacy` translates a flat row for a migrated pairing. This one translates nothing:
 it relays `/run` to an agent that has not been migrated, so the agent's own contract still applies.
+
+This is the legacy path for running an episode.
+Gym plans to deprecate this server and remove support for it over time.
 """
 
 import warnings

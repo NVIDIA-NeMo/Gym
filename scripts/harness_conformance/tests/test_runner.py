@@ -94,10 +94,10 @@ def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, use_agent_
 def test_session_detection_distinguishes_base_stubs_and_inherited_implementations():
     from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
 
-    class LegacyAgent(SimpleResponsesAPIAgent):
+    class RunOnlyAgent(SimpleResponsesAPIAgent):
         pass
 
-    class SeedOnlyAgent(LegacyAgent):
+    class SeedOnlyAgent(RunOnlyAgent):
         async def _seed_agent_session_state(self, body):
             raise RuntimeError("setup failed")
 
@@ -108,14 +108,14 @@ def test_session_detection_distinguishes_base_stubs_and_inherited_implementation
     class InheritedSessionAgent(SessionAgent):
         pass
 
-    class PublicSessionAgent(LegacyAgent):
+    class PublicSessionAgent(RunOnlyAgent):
         async def seed_agent_session(self, body, request):
             raise RuntimeError("setup failed")
 
         async def close_agent_session(self, body, request):
             raise RuntimeError("cleanup failed")
 
-    assert not _supports_agent_sessions(LegacyAgent)
+    assert not _supports_agent_sessions(RunOnlyAgent)
     assert not _supports_agent_sessions(SeedOnlyAgent)
     assert _supports_agent_sessions(SessionAgent)
     assert _supports_agent_sessions(InheritedSessionAgent)
@@ -132,7 +132,7 @@ def test_session_runtime_does_not_require_host_cli(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "interface", ["legacy", "session", "session_setup_error", "session_response_error", "session_close_error"]
+    "interface", ["run", "session", "session_setup_error", "session_response_error", "session_close_error"]
 )
 async def test_episode_selects_interface_and_collects_through_environment(tmp_path, monkeypatch, interface):
     from types import SimpleNamespace
@@ -172,15 +172,15 @@ async def test_episode_selects_interface_and_collects_through_environment(tmp_pa
         tools=[],
     )
 
-    class LegacyAgent(SimpleResponsesAPIAgent):
+    class RunOnlyAgent(SimpleResponsesAPIAgent):
         async def responses(self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
-            raise AssertionError("legacy responses should be called by the agent's run")
+            raise AssertionError("responses should be called by the agent's own run")
 
         async def run(self, request: Request, body: BaseRunRequest) -> BaseVerifyResponse:
             calls.append("run")
             return BaseVerifyResponse(**body.model_dump(), response=response, reward=1.0)
 
-    class SessionAgent(LegacyAgent):
+    class SessionAgent(RunOnlyAgent):
         async def _seed_agent_session_state(self, body):
             calls.append("seed")
             assert body.sandbox_access is None
@@ -206,7 +206,7 @@ async def test_episode_selects_interface_and_collects_through_environment(tmp_pa
             )
 
     module = SimpleNamespace(
-        TestAgent=LegacyAgent if interface == "legacy" else SessionAgent, TestAgentConfig=BaseResponsesAPIAgentConfig
+        TestAgent=RunOnlyAgent if interface == "run" else SessionAgent, TestAgentConfig=BaseResponsesAPIAgentConfig
     )
     monkeypatch.setitem(episode.HARNESSES, "codex", "TestAgent")
     monkeypatch.setattr(episode, "importlib", SimpleNamespace(import_module=lambda _: module))
@@ -223,7 +223,7 @@ async def test_episode_selects_interface_and_collects_through_environment(tmp_pa
 
     runtime = json.loads((tmp_path / "runtime.json").read_text())
     witness = json.loads((tmp_path / "witness.json").read_text())
-    if interface == "legacy":
+    if interface == "run":
         assert calls == ["run"]
         assert runtime["agent_interface"] == "legacy_run"
     else:

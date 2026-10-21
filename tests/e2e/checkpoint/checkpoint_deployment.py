@@ -449,7 +449,7 @@ def weather_episode(rollout_id: str, attempt: int = 0) -> dict:
 
 
 def weather_row(rollout_id: str, attempt: int = 0) -> dict:
-    """A legacy ``/run`` row."""
+    """A flat row for an agent's own ``/run``."""
     return {
         "responses_create_params": {
             "input": [{"role": "user", "content": "what's it like in sf?"}],
@@ -461,7 +461,7 @@ def weather_row(rollout_id: str, attempt: int = 0) -> dict:
 
 
 def counter_row(rollout_id: str, attempt: int = 0) -> dict:
-    """A legacy ``/run`` row that increments a counter from 3 by 1 and then by 2."""
+    """A flat row for an agent's own ``/run`` that increments a counter from 3 by 1 and then by 2."""
     return {
         "responses_create_params": {
             "input": [{"role": "user", "content": "add 1 then add 2"}],

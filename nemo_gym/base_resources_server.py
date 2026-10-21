@@ -560,7 +560,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         """Seed per-rollout state; the default keeps none.
 
         An Environment Server seeds with a ``ResourcesSeedSessionRequest`` and gets its caller-assigned
-        ``resources_session_id`` back. An Agent's ``/run`` seeds with its legacy body and gets an empty
+        ``resources_session_id`` back. An agent's own ``/run`` seeds with a flat body and gets an empty
         response. Servers that keep per-rollout state override this method.
         """
         if isinstance(body, ResourcesSeedSessionRequest):

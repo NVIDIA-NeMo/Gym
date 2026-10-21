@@ -75,7 +75,9 @@ def test_permission_profile_is_not_a_standalone_agent_variant(monkeypatch: pytes
         ("terminal_bench_2_1", "terminal_bench_2_1"),
     ],
 )
-def test_existing_benchmarks_keep_legacy_bindings(recipe: str, prefix: str, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_existing_benchmarks_keep_agent_resources_bindings(
+    recipe: str, prefix: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     config = _resolve_config(f"benchmarks/{recipe}/opencode.yaml", monkeypatch)
     agent_name = f"{prefix}_opencode_sandboxed_agent"
     assert f"{prefix}_opencode_agent" not in config

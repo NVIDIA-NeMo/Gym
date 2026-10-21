@@ -1273,7 +1273,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
         if self._session_marker(request) is not None:
             raise HTTPException(409, "Use the agent session responses and close routes")
         if self.config.resources_server is None:
-            raise HTTPException(422, "Legacy /run requires resources_server")
+            raise HTTPException(422, "The agent's own /run requires resources_server")
         async with self.sem:
             cookies = request.cookies
 

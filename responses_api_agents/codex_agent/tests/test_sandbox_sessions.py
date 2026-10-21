@@ -620,11 +620,11 @@ def test_metadata_overrides_rejected_without_consuming_activation(setup, metadat
 
 def test_no_session_keeps_existing_local_path(setup):
     agent, sandbox = setup
-    with patch.object(agent, "_create_response", AsyncMock(side_effect=RuntimeError("legacy path reached"))) as legacy:
+    with patch.object(agent, "_create_response", AsyncMock(side_effect=RuntimeError("local path reached"))) as local:
         with TestClient(agent.setup_webserver()) as client:
-            with pytest.raises(RuntimeError, match="legacy path reached"):
+            with pytest.raises(RuntimeError, match="local path reached"):
                 client.post("/v1/responses", json={"input": "task"})
-        legacy.assert_awaited_once()
+        local.assert_awaited_once()
     sandbox.launch.assert_not_awaited()
 
 
@@ -1070,7 +1070,7 @@ def test_model_boundary_options_are_rejected_before_activation(setup, field, val
 async def test_malformed_session_markers_cannot_fall_back_to_host(setup, marker):
     agent, sandbox = setup
     request = Request({"type": "http", "session": {"agent_session_id": marker}})
-    with patch.object(agent, "_create_response", AsyncMock(side_effect=AssertionError("host fallback"))) as legacy:
+    with patch.object(agent, "_create_response", AsyncMock(side_effect=AssertionError("host fallback"))) as local:
         with pytest.raises(HTTPException) as error:
             await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
         assert error.value.status_code == 409
@@ -1079,7 +1079,7 @@ async def test_malformed_session_markers_cannot_fall_back_to_host(setup, marker)
         with pytest.raises(HTTPException) as error:
             await agent.run(request, CodexAgentRunRequest(responses_create_params={"input": "task"}))
         assert error.value.status_code == 409
-        legacy.assert_not_awaited()
+        local.assert_not_awaited()
     with pytest.raises(HTTPException) as error:
         await agent.seed_agent_session(request, seed())
     assert error.value.status_code == 409
