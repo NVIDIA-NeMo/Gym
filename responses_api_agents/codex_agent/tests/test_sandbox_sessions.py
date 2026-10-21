@@ -2036,21 +2036,32 @@ def native_transcript(items):
     )
 
 
-def test_session_uses_native_call_identity_arguments_and_results(setup):
+@pytest.mark.parametrize("custom", [False, True])
+def test_session_uses_native_call_identity_arguments_and_results(setup, custom):
     agent, sandbox = setup
     native_output = "Process exited with code 7\nOutput:\noriginal result"
     transcript = native_transcript(
         [
             {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "task"}]},
             {
-                "type": "function_call",
+                "type": "custom_tool_call" if custom else "function_call",
                 "call_id": "provider-call",
-                "name": "exec_command",
-                "arguments": '{"cmd":"exit 7"}',
+                "name": "apply_patch" if custom else "exec_command",
+                ("input" if custom else "arguments"): "*** Begin Patch\n*** End Patch"
+                if custom
+                else '{"cmd":"exit 7"}',
             },
-            {"type": "function_call_output", "call_id": "provider-call", "output": native_output},
+            {
+                "type": "custom_tool_call_output" if custom else "function_call_output",
+                "call_id": "provider-call",
+                "output": native_output,
+            },
         ]
     )
+    if custom:
+        transcript += "\n" + json.dumps(
+            {"type": "event_msg", "payload": {"type": "patch_apply_end", "call_id": "provider-call", "success": False}}
+        )
     original_publish = sandbox.publish
 
     def publish():
@@ -2073,9 +2084,11 @@ def test_session_uses_native_call_identity_arguments_and_results(setup):
     bundle = closed["agent_observations"]
     invocation, tool = bundle["records"]
     assert invocation["conversation"][1]["call_id"] == tool["tool_call_id"] == "provider-call"
-    assert invocation["conversation"][1]["arguments"] == '{"cmd":"exit 7"}'
+    assert invocation["conversation"][1]["input" if custom else "arguments"] == (
+        "*** Begin Patch\n*** End Patch" if custom else '{"cmd":"exit 7"}'
+    )
     assert invocation["conversation"][2]["output"] == native_output
-    assert tool["status"] == "failed" and tool["error_type"] == "nonzero_exit"
+    assert tool["status"] == "failed" and tool["error_type"] == ("tool_error" if custom else "nonzero_exit")
     assert not any(gap["code"] == "model_call_join_key_unavailable" for gap in bundle["gaps"])
 
 

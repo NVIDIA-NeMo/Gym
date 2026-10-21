@@ -76,12 +76,20 @@ def parse_codex_observations(
     """Parse a retained native transcript from either local or sandbox execution."""
     conversation = []
     tools = {}
+    patch_outcomes = {}
     gaps = []
     for line in (transcript or "").splitlines():
         try:
             event = json.loads(line)
             if not isinstance(event, dict):
                 raise ValueError("expected a Codex CLI session record")
+            if event.get("type") == "event_msg":
+                payload = event.get("payload") or {}
+                if not isinstance(payload, dict):
+                    raise ValueError("expected a native event payload")
+                if payload.get("type") == "patch_apply_end" and type(payload.get("success")) is bool:
+                    patch_outcomes[payload["call_id"]] = payload["success"]
+                continue
             if event.get("type") != "response_item":
                 continue
             item = dict(event["payload"])
@@ -92,7 +100,7 @@ def parse_codex_observations(
         except (ValueError, TypeError, KeyError, ValidationError):
             gaps.append(ObservationGap(code="agent_artifact_record_unparseable", invocation_id=invocation_id))
             continue
-        if item.get("type") == "function_call":
+        if item.get("type") in {"function_call", "custom_tool_call"}:
             tools[item["call_id"]] = ToolCallObservation(
                 invocation_id=invocation_id,
                 tool_call_id=item["call_id"],
@@ -101,7 +109,16 @@ def parse_codex_observations(
                 timing_source="artifact",
                 status="incomplete",
             )
-        elif item.get("type") == "function_call_output" and item.get("call_id") in tools:
+        elif item.get("type") == "web_search_call":
+            tools[item["id"]] = ToolCallObservation(
+                invocation_id=invocation_id,
+                tool_call_id=item["id"],
+                tool_name="web_search",
+                status=item["status"] if item["status"] in {"completed", "failed"} else "incomplete",
+                completed_at=timestamp if item["status"] in {"completed", "failed"} else None,
+                timing_source="artifact",
+            )
+        elif item.get("type") in {"function_call_output", "custom_tool_call_output"} and item.get("call_id") in tools:
             tool = tools[item["call_id"]]
             tool.completed_at = max(timestamp, tool.started_at)
             tool.duration_ms = (tool.completed_at - tool.started_at) * 1000
@@ -115,11 +132,15 @@ def parse_codex_observations(
                 tool.error_type = "nonzero_exit" if tool.status == "failed" else None
             else:
                 tool.status = "unknown"
-                gaps.append(
-                    ObservationGap(
-                        code="tool_outcome_unavailable", invocation_id=invocation_id, detail=tool.tool_call_id
-                    )
-                )
+    # Patch success is in native execution events, not in the model-visible output text.
+    for tool in tools.values():
+        if tool.tool_name == "apply_patch" and tool.tool_call_id in patch_outcomes:
+            tool.status = "completed" if patch_outcomes[tool.tool_call_id] else "failed"
+            tool.error_type = "tool_error" if tool.status == "failed" else None
+        if tool.status == "unknown":
+            gaps.append(
+                ObservationGap(code="tool_outcome_unavailable", invocation_id=invocation_id, detail=tool.tool_call_id)
+            )
     if transcript is None:
         gaps.append(ObservationGap(code="agent_artifact_unavailable", invocation_id=invocation_id))
     return AgentObservationBundle(

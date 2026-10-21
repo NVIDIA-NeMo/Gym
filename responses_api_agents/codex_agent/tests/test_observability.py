@@ -7,7 +7,11 @@ from pathlib import Path
 import pytest
 
 from nemo_gym.rollout_observability import AgentInvocation, ToolCallObservation
-from responses_api_agents.codex_agent.observability import parse_codex_usage, read_codex_observations
+from responses_api_agents.codex_agent.observability import (
+    parse_codex_observations,
+    parse_codex_usage,
+    read_codex_observations,
+)
 
 
 @pytest.mark.parametrize("exit_code", [0, 7])
@@ -49,7 +53,10 @@ def test_missing_codex_session_record_is_explicit_and_preserves_failed_invocatio
     assert bundle.gaps[0].code == "agent_artifact_unavailable"
 
 
-@pytest.mark.parametrize("record", [None, [], "unexpected", {"type": "response_item", "payload": {}}])
+@pytest.mark.parametrize(
+    "record",
+    [None, [], "unexpected", {"type": "response_item", "payload": {}}, {"type": "event_msg", "payload": ["invalid"]}],
+)
 def test_malformed_native_record_reports_gap_without_losing_invocation(tmp_path: Path, record: object) -> None:
     folder = tmp_path / "sessions"
     folder.mkdir()
@@ -114,3 +121,54 @@ def test_native_usage_uses_latest_cumulative_total_without_adding_details() -> N
 def test_missing_or_invalid_native_usage_is_unknown(usage: object) -> None:
     record = {"type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": usage}}}
     assert parse_codex_usage(json.dumps(record)) is None
+
+
+@pytest.mark.parametrize("success", [True, False, None])
+def test_native_patch_retains_call_and_output_with_execution_outcome(success: bool | None) -> None:
+    items = [
+        {
+            "type": "custom_tool_call",
+            "call_id": "patch-1",
+            "name": "apply_patch",
+            "input": "*** Begin Patch\n*** End Patch",
+        },
+        {"type": "custom_tool_call_output", "call_id": "patch-1", "output": "Untrusted output claiming success"},
+    ]
+    events = [
+        {"type": "response_item", "timestamp": f"2026-10-21T10:00:0{index}Z", "payload": item}
+        for index, item in enumerate(items)
+    ]
+    if success is not None:
+        events.insert(
+            1, {"type": "event_msg", "payload": {"type": "patch_apply_end", "call_id": "patch-1", "success": success}}
+        )
+    bundle = parse_codex_observations("\n".join(map(json.dumps, events)), "invocation", returncode=0, timed_out=False)
+    invocation, tool = bundle.records
+    assert tool.tool_call_id == invocation.conversation[0].call_id == "patch-1"
+    assert invocation.conversation[0].input == items[0]["input"]
+    assert invocation.conversation[1].output == items[1]["output"]
+    assert tool.tool_name == "apply_patch"
+    assert tool.status == ("unknown" if success is None else "completed" if success else "failed")
+    assert tool.error_type == ("tool_error" if success is False else None)
+    assert tool.duration_ms == 1000
+    assert [gap.code for gap in bundle.gaps] == (["tool_outcome_unavailable"] if success is None else [])
+
+
+@pytest.mark.parametrize("status", ["completed", "failed", "searching"])
+def test_native_web_search_retains_identity_action_and_status(status: str) -> None:
+    item = {
+        "type": "web_search_call",
+        "id": "search-1",
+        "status": status,
+        "action": {"type": "search", "query": "Gym"},
+    }
+    event = {"type": "response_item", "timestamp": "2026-10-21T10:00:00Z", "payload": item}
+    bundle = parse_codex_observations(json.dumps(event), "invocation", returncode=0, timed_out=False)
+    invocation, tool = bundle.records
+    assert tool.tool_call_id == invocation.conversation[0].id == "search-1"
+    assert invocation.conversation[0].action.query == "Gym"
+    assert tool.tool_name == "web_search"
+    assert tool.status == ("incomplete" if status == "searching" else status)
+    assert tool.started_at is None
+    assert (tool.completed_at is None) == (status == "searching")
+    assert not bundle.gaps
