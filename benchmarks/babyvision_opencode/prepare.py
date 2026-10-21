@@ -5,6 +5,9 @@
 Reads $BABYVISION_TSV, else $LMUData/BabyVision.tsv. Each row is one user message: the
 image as a data URL, then Python_call_gen's opencode prompt (prompts/input_prompt.txt),
 "---", the question and the boxed-answer suffix, the exact text that harness gives OpenCode.
+With question_only (benchmarks/babyvision_opencode_question_only) the message is only the
+question and the suffix, as Python_call_gen's `question_only: true` gives it to models trained
+on OpenCode's own system prompt.
 The gold answer stays out of the prompt (expected_answer).
 """
 
@@ -41,10 +44,11 @@ def tsv_path() -> Path:
     raise FileNotFoundError("set BABYVISION_TSV or LMUData (the directory holding BabyVision.tsv)")
 
 
-def convert(row: dict) -> dict:
+def convert(row: dict, question_only: bool = False) -> dict:
     image = base64.b64decode(row["image"])
     mime = "image/png" if image[:8] == b"\x89PNG\r\n\x1a\n" else "image/jpeg"
     question = row["question"].strip()
+    text = f"{question}{SUFFIX}" if question_only else f"{INSTRUCTION}\n\n---\n\n{question}{SUFFIX}"
     return {
         "responses_create_params": {
             "input": [
@@ -53,7 +57,7 @@ def convert(row: dict) -> dict:
                     "type": "message",
                     "content": [
                         {"type": "input_image", "image_url": f"data:{mime};base64,{row['image']}", "detail": "auto"},
-                        {"type": "input_text", "text": f"{INSTRUCTION}\n\n---\n\n{question}{SUFFIX}"},
+                        {"type": "input_text", "text": text},
                     ],
                 }
             ]
@@ -67,7 +71,7 @@ def convert(row: dict) -> dict:
     }
 
 
-def prepare() -> Path:
+def prepare(output_fpath: Path = OUTPUT_FPATH, question_only: bool = False) -> Path:
     path = tsv_path()
     md5 = hashlib.md5(path.read_bytes()).hexdigest()
     if md5 not in KNOWN_MD5:
@@ -77,12 +81,12 @@ def prepare() -> Path:
         rows = list(csv.DictReader(f, delimiter="\t"))
     if len(rows) != NUM_ROWS:
         raise ValueError(f"{path} has {len(rows)} rows, expected {NUM_ROWS}")
-    OUTPUT_FPATH.parent.mkdir(parents=True, exist_ok=True)
-    with OUTPUT_FPATH.open("w") as f:
+    output_fpath.parent.mkdir(parents=True, exist_ok=True)
+    with output_fpath.open("w") as f:
         for row in rows:
-            f.write(json.dumps(convert(row)) + "\n")
-    print(f"Wrote {len(rows)} rows to {OUTPUT_FPATH}")
-    return OUTPUT_FPATH
+            f.write(json.dumps(convert(row, question_only)) + "\n")
+    print(f"Wrote {len(rows)} rows to {output_fpath}")
+    return output_fpath
 
 
 if __name__ == "__main__":

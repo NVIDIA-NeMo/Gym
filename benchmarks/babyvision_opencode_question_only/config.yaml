@@ -1,0 +1,16 @@
+# BabyVision (388 rows) under OpenCode with a Python shell, the bare question as the user message
+# (no Python_call_gen prompt): OpenCode's own system prompt is all the instruction the model gets,
+# as Python_call_gen's `question_only: true` evaluates models trained on that prompt.
+# Otherwise identical to benchmarks/babyvision_opencode. Data: $LMUData/BabyVision.tsv (or $BABYVISION_TSV).
+config_paths:
+  - resources_servers/visual_coding_opencode/configs/visual_coding_opencode.yaml
+
+visual_coding_opencode_agent:
+  responses_api_agents:
+    opencode_vision_agent:
+      datasets:
+      - name: babyvision_opencode_question_only
+        type: benchmark
+        jsonl_fpath: benchmarks/babyvision_opencode_question_only/data/babyvision_opencode_question_only_benchmark.jsonl
+        prepare_script: benchmarks/babyvision_opencode_question_only/prepare.py
+        num_repeats: 1
