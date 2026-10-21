@@ -671,15 +671,27 @@ loopback exactly as on a run without a sandboxed harness. The oracle (`gym datas
 mini-SWE run their commands in the sandbox but call the model from the host, so nothing moves for them. A
 deployment that needs more servers reachable sets `absolute_ip_server_types` (or `default_host`, which applies
 to every server) explicitly; a config file or command-line override wins over the generated default.
-A registry fetch (`harbor:<dataset>`, below) reuses a task folder already in Gym's datasets folder when its
+
+A registry fetch (`harbor:<dataset>`, below) reuses a task folder already in Gym's pulled datasets folder (`environments/harbor/`) when its
 `manifest.toml` pin names the registry's `git_url` and `path` with a full commit SHA, the folder has a
 `task.toml`, and no symlink in it leaves the folder. The recorded commit is kept on purpose when the registry's
 entry moves (a deleted folder is fetched again at that commit), and the fetch does not hash the folder's content
 (Harbor's own download reuses any non-empty folder without a check). Move the folder aside to fetch the
 registry's current copy.
 
+The default pulled datasets folder was `datasets/` in the working directory before it moved to `environments/harbor/`.
+A folder pulled there keeps its `dataset.toml` and the `manifest.toml` that records which task versions it holds,
+and a fresh pull at the new default inherits neither; `datasets/` stays gitignored for a checkout that keeps it.
+To move the folder, with those files, run `mv datasets/<dataset> environments/harbor/<dataset>` (or
+`mv datasets/* environments/harbor/` for every pulled dataset at once) before the next fetch or run; to leave it
+where it is, set `NEMO_GYM_DATASETS_DIR=datasets`, which keeps the old root for every pulled dataset. A later
+fetch reads the moved folder's `manifest.toml` as it read the old one and keeps every task folder it records,
+fetching only a task folder that is missing or new to the dataset; a task folder edited by hand is not fetched
+again over the edit but refused (by the fetch when it rewrites the manifest, and by `gym dataset validate`), and
+a changed `dataset.toml` fetches nothing: the pull only refreshes the digests the manifest records for it.
+
 `harbor:<dataset>[@<version>]` resolves the Harbor registry and fetches task folders into Gym's shared
-datasets folder (`$NEMO_GYM_DATASETS_DIR`, default `./datasets`). `harbor:<org>/<name>[@<tag> | @sha256:<digest>]`
+datasets folder (`$NEMO_GYM_DATASETS_DIR`, default `environments/harbor/` in the Gym checkout, or under the working directory when Gym is installed as a package). `harbor:<org>/<name>[@<tag> | @sha256:<digest>]`
 fetches a package-store dataset instead (for example `harbor:terminal-bench/terminal-bench@4.0.0`): every task
 package is downloaded by content hash into `<name>/` (`latest`), `<name>-<tag>/` or `<name>-<12 digest chars>/` (a digest pin), checked against the content hash Harbor published for it and recorded in
 `manifest.toml`, whose per-task pins carry the task's package and that content hash, so a later fetch never mixes another package or a moved `latest` into the folder. A local task folder, or a folder of task folders, works the same way; task folders may be
@@ -760,7 +772,7 @@ gym eval run environment_servers/harbor/data/tasks --agent hermes_agent --sandbo
 The loader generates the task mapping and dataset rows for that run.
 
 `harbor:<dataset>[@<version>]` resolves the Harbor registry and fetches the task folders into Gym's shared
-datasets folder (`$NEMO_GYM_DATASETS_DIR`, default `./datasets`). `harbor:<org>/<name>[@<tag> | @sha256:<digest>]`
+datasets folder (`$NEMO_GYM_DATASETS_DIR`, default `environments/harbor/` in the Gym checkout, or under the working directory when Gym is installed as a package). `harbor:<org>/<name>[@<tag> | @sha256:<digest>]`
 fetches a package-store dataset instead (for example `harbor:terminal-bench/terminal-bench@4.0.0`): every task
 package is downloaded by content hash into `<name>/` (`latest`), `<name>-<tag>/` or `<name>-<12 digest chars>/` (a digest pin), checked against Gym's task digest and recorded in
 `manifest.toml`. A local task folder, or a folder of task folders, works the same way.

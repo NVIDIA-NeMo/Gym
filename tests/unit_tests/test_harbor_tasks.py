@@ -3481,3 +3481,52 @@ class TestComposeVolumeSourcesAtPrepare:
             prepare_target(str(folder), output_root=tmp_path / "out", volume_sources=mapped, gpu_volume_sources={})
         prepared = prepare_target(str(folder), output_root=tmp_path / "out", gpu_volume_sources=mapped)
         assert [task.task_id for task in prepared.tasks] == ["pg"]
+
+
+def test_pulled_datasets_default_to_the_working_directory_for_a_package_install(tmp_path) -> None:
+    """A package install has no checkout: ``PARENT_DIR`` is site-packages, so pulls go under the working directory.
+
+    The installed layout is rebuilt in a subprocess: the package reached through a ``site/`` folder with no
+    ``pyproject.toml`` beside it (what tells the two installs apart in ``nemo_gym/__init__.py``), run from a
+    working directory elsewhere. The default must follow that directory, never the install location, which is
+    shared and often read-only.
+    """
+    import os
+    import sys
+
+    from nemo_gym import ROOT_DIR
+
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "nemo_gym").symlink_to(ROOT_DIR, target_is_directory=True)
+    work = tmp_path / "work"
+    work.mkdir()
+    probe = (
+        "import sys\n"
+        f"sys.path = [{str(site)!r}, *(p for p in sys.path if '__editable__' not in p and p != '')]\n"
+        "sys.meta_path = [f for f in sys.meta_path if 'editable' not in getattr(f, '__module__', '').lower()]\n"
+        "import nemo_gym\n"
+        "from nemo_gym.tasks.harbor.hub import datasets_dir\n"
+        "print(nemo_gym.PARENT_DIR)\n"
+        "print(datasets_dir())\n"
+    )
+    env = {key: value for key, value in os.environ.items() if key != "NEMO_GYM_DATASETS_DIR"}
+    completed = subprocess.run(
+        [sys.executable, "-c", probe], cwd=work, env=env, capture_output=True, text=True, check=True, timeout=300
+    )
+    parent_dir, pulled = completed.stdout.splitlines()[-2:]
+    assert Path(parent_dir) == site  # the probe ran the installed layout, not this checkout
+    assert Path(pulled) == (work / "environments" / "harbor").resolve()
+
+
+def test_pulled_datasets_default_to_environments_harbor_in_the_checkout(monkeypatch, tmp_path) -> None:
+    """Fetched datasets land in environments/harbor/ of the Gym checkout unless NEMO_GYM_DATASETS_DIR says otherwise."""
+    from nemo_gym import PARENT_DIR
+    from nemo_gym.tasks.harbor.hub import datasets_dir
+
+    monkeypatch.delenv("NEMO_GYM_DATASETS_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)  # in an editable install (this checkout) the working directory plays no part
+    assert datasets_dir() == (PARENT_DIR / "environments" / "harbor").resolve()
+
+    monkeypatch.setenv("NEMO_GYM_DATASETS_DIR", str(tmp_path / "elsewhere"))
+    assert datasets_dir() == (tmp_path / "elsewhere").resolve()
