@@ -232,7 +232,7 @@ MAVEN_SETTINGS_PATH = "/root/.m2/settings.xml"
 GRADLE_INIT_PATH = "/root/.gradle/init.d/nemo_gym_mirror.gradle"
 
 
-def _mirror_files() -> dict[str, str]:
+def _mirror_files(*, maven_settings: bool = True) -> dict[str, str]:
     """Redirect Maven Central to its Google-hosted mirror.
 
     Measured on a 200-row pass: every JVM row that failed did so on
@@ -248,14 +248,14 @@ def _mirror_files() -> dict[str, str]:
     files: dict[str, str] = {}
     settings = mirror_dir / "settings.xml"
     init_gradle = mirror_dir / "init.gradle"
-    if settings.exists():
+    if maven_settings and settings.exists():
         files[MAVEN_SETTINGS_PATH] = settings.read_text()
     if init_gradle.exists():
         files[GRADLE_INIT_PATH] = init_gradle.read_text()
     return files
 
 
-def verification_files(inputs: VerificationInputs) -> dict[str, str]:
+def verification_files(inputs: VerificationInputs, *, overwrite_maven_settings: bool = True) -> dict[str, str]:
     """Files the sandbox must be created with.
 
     Delivered through ``SandboxSpec.files`` rather than written after start: the patches can be
@@ -263,7 +263,7 @@ def verification_files(inputs: VerificationInputs) -> dict[str, str]:
     """
     files = {"/tmp/nemo_gym_eval.sh": build_eval_script(inputs)}
     # Harmless for non-JVM rows, which never read them.
-    files.update(_mirror_files())
+    files.update(_mirror_files(maven_settings=overwrite_maven_settings))
     if inputs.patch.strip():
         files["/tmp/nemo_gym_patch.diff"] = inputs.patch
     if inputs.test_patch.strip():

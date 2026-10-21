@@ -51,6 +51,8 @@ def _make_config(**fields) -> StirrupAgentWrapperConfig:
         "gdpval_container_path",
         "system_prompt_template",
         "user_prompt_template",
+        "model_id",
+        "task",
     ],
 )
 def test_removed_options_are_rejected(option):
