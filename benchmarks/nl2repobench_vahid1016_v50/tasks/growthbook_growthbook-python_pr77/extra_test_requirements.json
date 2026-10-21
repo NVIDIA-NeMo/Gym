@@ -1,0 +1,8 @@
+{
+ "req_files": [
+  "requirements_dev.txt"
+ ],
+ "pkgs": [],
+ "ceiling_before": 1.0,
+ "ceiling_after": 1.0
+}

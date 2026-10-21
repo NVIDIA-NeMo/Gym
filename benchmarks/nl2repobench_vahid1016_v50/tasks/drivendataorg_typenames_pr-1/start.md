@@ -1,0 +1,39 @@
+## typenames Project Introduction and Goals
+
+**typenames** is a small, zero-dependency Python library for producing string representations of type annotations. Python's built-in string rendering of type objects is inconsistent and verbose (e.g., `str(int)` yields `<class 'int'>`, and typing forms carry module prefixes like `typing.Optional[int]`). typenames renders type annotations as clean, configurable strings — `int`, `Optional[str]`, `Callable[[int], tuple[str, ...]]` — by parsing the annotation into a tree of node objects and then rendering that tree.
+
+The library's goals are:
+
+- Provide a single main function, `typenames(...)`, that returns a string representation of any runtime type annotation or typing special form.
+- Expose the intermediate parse tree via `parse_type_tree(...)` so callers can inspect or reuse the node structure (nodes render via `str(...)`).
+- Support configuration of: union syntax (`typing.Union` vs. `|` operator), optional syntax (`typing.Optional` vs. `|` operator vs. `Union`), standard collection generic syntax (`typing.List` vs. `list`), module-name removal (via strings or compiled regex patterns), and whether `typing.Annotated` extras are rendered.
+- Handle special cases correctly: `None`/`NoneType`, `Ellipsis`, `typing.Any`, `typing.ForwardRef`, enum members inside `typing.Literal`, `Callable`'s parameter list, nested unions flattened by Python at runtime, and the Python 3.14 unification of `typing.Union` and `types.UnionType`.
+- Ship as a PEP 561 typed package (`py.typed` marker) with no runtime dependencies, supporting Python 3.9+.
+
+## Natural Language Instructions (Prompt)
+
+1. Create a Python package named `typenames` containing a single public module `typenames/__init__.py`, plus a `typenames/py.typed` empty marker file for PEP 561 typed-package compliance.
+
+2. Define the module-level constant `OR_OPERATOR_SUPPORTED`, a boolean flag that is `True` when the running Python version is at least `(3, 10)`, indicating support for PEP 604's `|` operator between types.
+
+3. Define a module-level `_TypeForm` typing.TypeVar: on Python 3.10+ it is bound to `type | types.UnionType | object`; on earlier versions it is bound to `typing.Union[type, object]`. This TypeVar is used to annotate the type parameters accepted by the node classes and public functions.
+
+4. Define three string-valued `Enum` subclasses (each inheriting `str, Enum`):
+   - `UnionSyntax` with members `AS_GIVEN = "as_given"`, `OR_OPERATOR = "or_operator"`, `SPECIAL_FORM = "special_form"`.
+   - `OptionalSyntax` with members `AS_GIVEN = "as_given"`, `OR_OPERATOR = "or_operator"`, `OPTIONAL_SPECIAL_FORM = "optional_special_form"`, `UNION_SPECIAL_FORM = "union_special_form"`.
+   - `StandardCollectionSyntax` with members `AS_GIVEN = "as_given"`, `STANDARD_CLASS = "standard_class"`, `TYPING_MODULE = "typing_module"`.
+
+5. Define `DEFAULT_REMOVE_MODULES: List[Union[str, re.Pattern]]` exactly as: `["__main__", "builtins", re.compile(r"^collections\.(abc\.)?"), "contextlib", "re", "types", "typing"]`. This is the default list of standard-library module prefixes removed from rendered output.
+
+6. Define `REMOVE_ALL_MODULES` as a list containing the single compiled pattern `re.compile(r"^(<?\w+>?\.)+")`, which removes any module prefix.
+
+7. Define `TypenamesConfig` as a dataclass with fields: `union_syntax: UnionSyntax = UnionSyntax.AS_GIVEN`, `optional_syntax: OptionalSyntax = OptionalSyntax.AS_GIVEN`, `standard_collection_syntax: StandardCollectionSyntax = StandardCollectionSyntax.STANDARD_CLASS`, `remove_modules: List[Union[str, re.Pattern]]` (default: a fresh copy of `DEFAULT_REMOVE_MODULES` via a default factory), and `include_extras: bool = False`. Its `__post_init__` coerces the three syntax values by passing them through their respective enum constructors (so plain strings like `"or_operator"` are accepted). Add a `remove_modules_patterns` property that is a generator yielding each `remove_modules` entry as a compiled `re.Pattern`: entries already of type `re.Pattern` pass through; strings are compiled as `re.compile(r"^{}\.".format(module.replace(".", r"\.")))`.
+
+8. Define an abstract node hierarchy, all dataclasses with `repr=False`:
+   - `BaseNode(abc.ABC, typing.Generic[_TypeForm])` with fields `tp: _TypeForm` and `config: TypenamesConfig`. It declares the abstract property `is_none_type` (whether the node's type is `NoneType`), provides `process_module_prefix(module_prefix: str) -> str` which applies each configured remove-module pattern via `pattern.sub("", module_prefix)`, and defines `__repr__` as `f"<{type(self).__name__} {repr(self.tp)}>"`
+   - `TypeNode(BaseNode)` for singleton types. `is_none_type` returns `self.tp is type(None)`. Its `__str__` builds a module prefix from `__module__` (empty if absent) and resolves the type name: `Ellipsis` renders as `...`; `type(None)` renders as `None`; `typing.Any` renders as `Any`; a `typing.ForwardRef` renders using its `__forward_arg__`, treating a dotted forward arg as a module path (split at the last dot) and otherwise blanking the module prefix (since ForwardRef's `__module__` is `typing` pre-3.14 or `annotationlib` on 3.14+); otherwise the name is `__qualname__` if present, falling back to `repr(self.tp)`. Configured patterns are applied both to the type name and to the module prefix (via `process_module_prefix`), and the result is `module_prefix + type_name`.
+   - `GenericNode(BaseNode)` with extra fields `origin: Union[Any, None]` and `arg_nodes: List[BaseNode]`; `is_none_type` is always `False`. Its `__str__` dispatches on the kind of generic (union special form, `|`-operator union, standard collection class alias, typing module collection alias, `Annotated`, or other generic) applying the configuration rules described in the README sections on union syntax, optional syntax, and standard collection syntax. Key behaviors: unions configured for the `|` operator render as `" | ".join(...)` of argument strings; `Optional` special form with multiple non-None args wraps an inner `Union` GenericNode; `Annotated` renders only its first argument unless `include_extras=True`, in which case it renders `Annotated[<arg>, <extras...>]`; the origin name/operator choice otherwise follows the configuration enums, and the final string is `f"{origin_module_prefix}{origin_name}[{args_string}]"` where `origin_module_prefix` passes through `process_module_prefix` and `args_string` joins argument strings with `", "`. Its `__repr__` is `<GenericNode repr(origin)[args...]>` joining argument reprs with ", ".
+   - `ParamsListNode(BaseNode)` with an extra field `arg_nodes: List[BaseNode]`, used for `Callable`'s parameter list; its `__str__` returns `f"[{args_string}]"`. Its `is_none_type` raises `NotImplementedError` (should never be called).
+   - `LiteralNode(BaseNode)` for literal values; `is_none_type` raises `NotImplementedError`; `__str__` returns `f"{self.tp.__class__.__name__}.{self.tp.name}"` for an `Enum` instance, otherwise `repr(self.tp)`.
+
+9. Define the public function `parse_type_tree(tp, config=None, **kwargs) -> BaseNode`. If `config` is `None`, instantiate `TypenamesConfig(**kwargs)`; otherwise use `dataclasses.replace(config, **kwargs)`. Build the node recursively: if `typing.get_origin(tp)` is truthy, produce a `GenericNode` with `origin = get_origin(tp)`, `arg_nodes` parsed from `typing.get_args(tp)`, and the shared config; if `tp` is a plain `list` (the `Callable` parameter-list case), produce a `ParamsListNode` whose `arg_nodes` parse each element (note: recursive calls for the elements use default config); if `tp` is an

@@ -1,0 +1,202 @@
+{
+ "balthazarneveu_interactive_pipe_pr-1": {
+  "test_case_count": 268,
+  "ceiling_reward": 1.0
+ },
+ "contentful_rich-text-renderer.py_pr13": {
+  "test_case_count": 39,
+  "ceiling_reward": 1.0
+ },
+ "drivendataorg_typenames_pr-1": {
+  "test_case_count": 119,
+  "ceiling_reward": 1.0
+ },
+ "dungdm93_sqlalchemy-trino_pr37": {
+  "test_case_count": 85,
+  "ceiling_reward": 1.0
+ },
+ "en0_dnry-config_pr-1": {
+  "test_case_count": 15,
+  "ceiling_reward": 1.0
+ },
+ "exxamalte_python-georss-qld-bushfire-alert-client_pr-1": {
+  "test_case_count": 3,
+  "ceiling_reward": 1.0
+ },
+ "genotrance_fru-tool_pr-1": {
+  "test_case_count": 85,
+  "ceiling_reward": 1.0
+ },
+ "globalfishingwatch_ais-tools_pr-1": {
+  "test_case_count": 423,
+  "ceiling_reward": 1.0
+ },
+ "gogoair_lavatory_pr-1": {
+  "test_case_count": 21,
+  "ceiling_reward": 1.0
+ },
+ "googlefonts_ufomerge_pr-1": {
+  "test_case_count": 20,
+  "ceiling_reward": 1.0
+ },
+ "growthbook_growthbook-python_pr77": {
+  "test_case_count": 622,
+  "ceiling_reward": 1.0
+ },
+ "hackebrot_pytest-cookies_pr63": {
+  "test_case_count": 16,
+  "ceiling_reward": 1.0
+ },
+ "justintime50_github-archive_pr-1": {
+  "test_case_count": 57,
+  "ceiling_reward": 1.0
+ },
+ "kiwicom_structlog-sentry_pr109": {
+  "test_case_count": 28,
+  "ceiling_reward": 1.0
+ },
+ "koaning_fh-altair_pr-1": {
+  "test_case_count": 9,
+  "ceiling_reward": 1.0
+ },
+ "liang2kl_mkdocs-blogging-plugin_pr-1": {
+  "test_case_count": 7,
+  "ceiling_reward": 1.0
+ },
+ "marshmallow-code_marshmallow-oneofschema_pr212": {
+  "test_case_count": 31,
+  "ceiling_reward": 1.0
+ },
+ "microsoft_sarif-tools_pr103": {
+  "test_case_count": 53,
+  "ceiling_reward": 1.0
+ },
+ "modscripps_mixsea_pr-1": {
+  "test_case_count": 14,
+  "ceiling_reward": 1.0
+ },
+ "ofek_pypinfo_pr-1": {
+  "test_case_count": 91,
+  "ceiling_reward": 1.0
+ },
+ "osoken_sqlitecollections_pr-1": {
+  "test_case_count": 198,
+  "ceiling_reward": 1.0
+ },
+ "passah2o_dorado_pr-1": {
+  "test_case_count": 94,
+  "ceiling_reward": 1.0
+ },
+ "patrick-kidger_wadler_lindig_pr5": {
+  "test_case_count": 29,
+  "ceiling_reward": 1.0
+ },
+ "priorlabs_tabpfn_common_utils_pr48": {
+  "test_case_count": 138,
+  "ceiling_reward": 1.0
+ },
+ "pyca_bcrypt_pr-1": {
+  "test_case_count": 147,
+  "ceiling_reward": 1.0
+ },
+ "pygfx_pylinalg_pr-1": {
+  "test_case_count": 93,
+  "ceiling_reward": 1.0
+ },
+ "pyper-dev_pyper_pr-1": {
+  "test_case_count": 39,
+  "ceiling_reward": 1.0
+ },
+ "pythonspeed_profila_pr-1": {
+  "test_case_count": 5,
+  "ceiling_reward": 1.0
+ },
+ "pzelasko_kaldialign_pr21": {
+  "test_case_count": 7,
+  "ceiling_reward": 1.0
+ },
+ "qiskit_qiskit-qasm3-import_pr-1": {
+  "test_case_count": 187,
+  "ceiling_reward": 1.0
+ },
+ "realpython_codetiming_pr50": {
+  "test_case_count": 32,
+  "ceiling_reward": 1.0
+ },
+ "renatopp_liac-arff_pr91": {
+  "test_case_count": 140,
+  "ceiling_reward": 1.0
+ },
+ "rosscdh_mkdocs-markdownextradata-plugin_pr-1": {
+  "test_case_count": 1,
+  "ceiling_reward": 1.0
+ },
+ "s4v4g3_otel-extensions-python_pr7": {
+  "test_case_count": 33,
+  "ceiling_reward": 1.0
+ },
+ "samuelcolvin_watchfiles_pr136": {
+  "test_case_count": 61,
+  "ceiling_reward": 1.0
+ },
+ "scitokens_scitokens_pr193": {
+  "test_case_count": 46,
+  "ceiling_reward": 1.0
+ },
+ "sorend_sshconf_pr21": {
+  "test_case_count": 19,
+  "ceiling_reward": 1.0
+ },
+ "sphinx-toolbox_sphinx-pyproject_pr36": {
+  "test_case_count": 23,
+  "ceiling_reward": 1.0
+ },
+ "spyoungtech_json-five_pr45": {
+  "test_case_count": 177,
+  "ceiling_reward": 1.0
+ },
+ "stphivos_django-mock-queries_pr187": {
+  "test_case_count": 230,
+  "ceiling_reward": 1.0
+ },
+ "sunset1995_py360convert_pr47": {
+  "test_case_count": 25,
+  "ceiling_reward": 1.0
+ },
+ "supadata-ai_py_pr-1": {
+  "test_case_count": 56,
+  "ceiling_reward": 1.0
+ },
+ "tacgomes_investir_pr-1": {
+  "test_case_count": 249,
+  "ceiling_reward": 1.0
+ },
+ "vlasovskikh_funcparserlib_pr77": {
+  "test_case_count": 57,
+  "ceiling_reward": 1.0
+ },
+ "wheerd_multiset_pr138": {
+  "test_case_count": 344,
+  "ceiling_reward": 1.0
+ },
+ "wimglenn_pytest-structlog_pr40": {
+  "test_case_count": 51,
+  "ceiling_reward": 1.0
+ },
+ "xente_loki-logger-handler_pr43": {
+  "test_case_count": 15,
+  "ceiling_reward": 1.0
+ },
+ "yukihiko-shinoda_pytest-resource-path_pr27": {
+  "test_case_count": 7,
+  "ceiling_reward": 1.0
+ },
+ "yuma-m_pychord_pr-1": {
+  "test_case_count": 80,
+  "ceiling_reward": 1.0
+ },
+ "zheller_flake8-quotes_pr103": {
+  "test_case_count": 28,
+  "ceiling_reward": 1.0
+ }
+}

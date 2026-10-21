@@ -1,0 +1,9 @@
+{
+ "req_files": [],
+ "pkgs": [
+  "hypothesis",
+  "scipy"
+ ],
+ "ceiling_before": 0.0,
+ "ceiling_after": 1.0
+}

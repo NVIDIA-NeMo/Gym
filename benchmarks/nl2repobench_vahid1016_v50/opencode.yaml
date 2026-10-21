@@ -1,0 +1,102 @@
+# VERIFIED-50 variant (2026-10-21): the 50 vahid1016 tasks whose reference code passes 100% of its held-out tests in the per-task image
+# (sft_runs/lightning_vahid1016/testset/verified_tasks_50.json), graded with the fixed commands (reference implementation purged,
+# extra test deps installed) in the per-task image for every network mode. Derived from opencode.yaml; regenerate the same way if that changes.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Held-out test split of the vahid_1016 nl2repo SFT data (75/89 raw instances - 14 skipped at
+# prep time for missing metadata/no start.md/no tests-or-test dir at repo root, see
+# sft_runs/lightning_vahid1016/testset/prepare_testset.py's log), run through the SAME
+# resources server as upstream NL2RepoBench (resources_servers/nl2repobench), reusing its
+# task-store/sandbox/verify machinery entirely unmodified except for two knobs this corpus
+# needs that upstream doesn't:
+#   - tasks_dir/expected_task_count: ours (75), not upstream's pinned 104.
+#   - verify_image_override: we have no pinned, deps-preinstalled per-task grading image for
+#     this corpus (upstream ships one per task; derived here from raw GitHub repos instead) -
+#     point the verifier at a generic image and let test_commands install deps itself
+#     (`pip install -e .`) over the verify sandbox's already-open network. Explicitly accepted:
+#     this is NOT network-hardened (no block_target/no_internet_preinstalled guard here), same
+#     as upstream's own "official" mode - fine for a quick held-out eval, not for a leak-proof one.
+
+# Uses the SAME top-level block names as benchmarks/nl2repobench/opencode.yaml
+# (nl2repobench_opencode_resources_server / nl2repobench_opencode_sandboxed_agent /
+# nl2repobench_environment_server), not a renamed variant - so it's a drop-in
+# BENCHMARK_CONFIG override for the existing model launcher scripts
+# (scripts/launchers/run_*.sh), whose "++nl2repobench_opencode_resources_server...
+# .agent_network_mode=$AGENT_NETWORK_MODE" overrides are hardcoded to these names.
+# Only one of these two opencode.yaml files is ever loaded per launch (config_paths
+# replaces, not merges), so reusing the names is intentional, not a collision risk.
+config_paths:
+  - responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml
+  - resources_servers/nl2repobench/configs/nl2repobench.yaml
+
+nl2repobench_opencode_resources_server:
+  _inherit_from: nl2repobench_resources_server
+  resources_servers:
+    nl2repobench:
+      tasks_dir: benchmarks/nl2repobench_vahid1016_v50/tasks
+      expected_task_count: 50
+      # verify_image_override intentionally UNSET (v50): the verifier uses the per-task image (task_image_registry_template) in every
+      # agent_network_mode, so all modes are graded in the validated, deps-complete environment (ceiling 1.0 on all 50 tasks).
+      enforce_agent_no_network: false
+      # All 75 per-task images built+pushed to the internal GitLab registry (see
+      # sft_runs/lightning_vahid1016/testset/task_images/CLUSTER_SETUP.md). Only consulted when
+      # agent_network_mode=no_internet_preinstalled (set that at the CLI, e.g.
+      # ++nl2repobench_opencode_resources_server.resources_servers.nl2repobench.agent_network_mode=no_internet_preinstalled)
+      # - inert otherwise, so this is safe to leave set for official/block_target runs too.
+      # verify_image_override above is unaffected: the verify sandbox never restricts network
+      # regardless of agent_network_mode (see app.py's _provider_options), so it keeps installing
+      # fresh against the generic image as before.
+      task_image_registry_template: gitlab-master.nvidia.com:5005/fjia/nl2repo_images/vahid1016/{name}:1.1
+      # gitlab-master.nvidia.com:5005/fjia/nl2repo_images/vahid1016 is a PRIVATE GitLab registry
+      # project - pulling the task_image_registry_template images above needs auth. Deep-merges
+      # with nl2repobench_resources_server's own sandbox_config (ttl_s/resources/metadata), does
+      # NOT replace it - config inheritance here uses OmegaConf.merge (confirmed in
+      # nemo_gym/global_config.py). Set GITLAB_REGISTRY_USERNAME/GITLAB_REGISTRY_PASSWORD before
+      # launch (password = a GitLab Deploy Token with read_registry scope, or a PAT with
+      # read_registry - see task_images/CLUSTER_SETUP.md). Only affects image pulls - inert for
+      # agent_network_mode values other than no_internet_preinstalled (no images are pulled from
+      # this registry otherwise). Defaults are empty strings, NOT "???" (OmegaConf-mandatory) -
+      # a mandatory default would fail config resolution for every run of this benchmark,
+      # including official/block_target ones that never touch this registry at all. Leaving the
+      # vars unset only surfaces as an error later, at the actual authenticated pull, scoped to
+      # when no_internet_preinstalled is actually used.
+      sandbox_config:
+        provider_options:
+          image_auth:
+            username: ${oc.env:GITLAB_REGISTRY_USERNAME,}
+            password: ${oc.env:GITLAB_REGISTRY_PASSWORD,}
+      sandbox_model_server:
+        type: responses_api_models
+        name: policy_model
+      # Overridable at the CLI exactly like the real nl2repobench benchmark, e.g.:
+      #   ++nl2repobench_opencode_resources_server.resources_servers.nl2repobench.agent_network_mode=block_target
+
+nl2repobench_opencode_sandboxed_agent:
+  _inherit_from: opencode_sandboxed_agent
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      sandbox_timeout: 21600
+      opencode_model_call_timeout: 14400000
+      opencode_max_context_window: 524288
+
+      remote_opencode_install_script_path: /mnt/s3-data/data/bxyu/opencode/install.sh
+      remote_opencode_binary_path: /mnt/s3-data/data/bxyu/opencode/opencode-linux-x64
+
+      resources_server:
+        type: resources_servers
+        name: nl2repobench_opencode_resources_server
+      datasets:
+        - name: nl2repobench_vahid1016_verified50
+          type: benchmark
+          jsonl_fpath: benchmarks/nl2repobench_vahid1016_v50/benchmark.jsonl
+          prepare_script: benchmarks/nl2repobench_vahid1016_v50/prepare.py
+          num_repeats: 1
+
+nl2repobench_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: nl2repobench_opencode_sandboxed_agent

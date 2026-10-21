@@ -1,0 +1,38 @@
+## Profila Project Introduction and Goals
+
+Profila is a sampling profiler for Numba-compiled Python code on Linux. Because Nuba compiles Python to native machine code, standard Python profilers cannot see it. Profila works around this by launching (or attaching to) the target process under a custom GDB (gdb v12 installed under `~/.profila-gdb`), repeatedly interrupting it via GDB's machine interpreter (MI3), and reading stack frames. When Numba compiles with `NUMBA_DEBUGINFO=1`, the resulting debug information exposes original Python file names and line numbers, allowing Profila to attribute samples back to the Python source lines of the jitted functions.
+
+The package provides two user interfaces:
+- a command-line tool, `python -m profila annotate -- script.py ...`, that runs a Python program and prints per-line percentage annotations of Numba sample counts; and
+- a Jupyter/IPython cell magic, `%%profila`, provided by the `profila` IPython extension (`%load_ext profila`), that profiles the execution of a single notebook cell by attaching to the notebook's own kernel process.
+
+A third CLI subcommand, `python -m profila setup`, downloads micromamba and uses it to install the pinned gdb v12 into `~/.profila-gdb`, since newer gdb versions interact poorly with Numba.
+
+The goal of this reconstruction is to produce a fully working importable Python 3 package named `profila` (src-layout, built with setuptools/setuptools-scm) with the modules, dataclasses, async GDB interaction, stats aggregation, text rendering, IPython magic, and CLI behavior described below, without copying any vendored or installed implementation of the target.
+
+## Natural Language Instructions (Prompt)
+
+1. Create a Python package `profila` using a `src/` layout: all source lives under `src/profila/`, and build metadata (`pyproject.toml`) uses the setuptools build backend with `setuptools-scm` for versioning. The project name is `profila`, description "A profiler for Numba", license Apache-2.0, minimum Python 3.9, with a runtime dependency on `pygdbmi` and no hard dependency on numba, IPython, or gdb at import time of the top-level package.
+
+2. Provide a public module interface consisting of: importable top-level package `profila` (implemented as a package `__init__.py` exposing the IPython extension entry point), an executable CLI in `profila.__main__`, and internal modules `profila._gdb`, `profila._stats`, `profila._render`, and `profila._ipython`.
+
+3. In `profila.__init__.py`, implement `load_ipython_extension(ipython: object) -> None`. It must import IPython pieces lazily (inside the function): raise `IPython.core.error.UsageError` if `numba` was already imported (the extension must be loaded before importing numba), raise the same error if `sys.platform != "linux"`, and raise it again if the custom gdb binary path (from `profila._gdb.GDB_PATH`) does not exist on disk. On success, set environment variable `NUMBA_DEBUGINFO` to `"1"`, register the `ProfilaMagics` class from `profila._ipython` on the given ipython shell, and display a Markdown note warning that loading the extension may impact Numba performance. Importing the top-level package itself must have no side effects beyond defining `load_ipython_extension` and importing only `os` and `sys` at module top level.
+
+4. In `profila._gdb`, implement GDB interaction over the MI3 text protocol using `pygdbmi.gdbmiparser.parse_response` to decode each line read from the subprocess stdout. Key public API:
+   - `GDB_PATH`: filesystem path to the custom gdb, equal to `os.path.expanduser("~/.profila-gdb/bin/gdb")`.
+   - `Frame`: a (non-frozen) dataclass with fields `file: str` and `line: int`.
+   - `ProcessExited(Exception)`: raised when the profiled process exits.
+   - `run_subprocess(python_cli_args: list[str]) -> Process` (async): launch `GDB_PATH` with `--interpreter=mi3`, piped stdout/stdin, in a copy of the environment with `NUMBA_DEBUGINFO=1` and `PYTHONUNBUFFERED=1`; configure `-gdb-set mi-async`; set the executable file to `sys.executable`; pass the CLI args (each shell-quoted via `shlex.quote`, with newline characters escaped) as `-exec-arguments`; `-exec-run`; then return the process.
+   - `attach_subprocess(pid: str) -> Process` (async): same MI3 launch without env tweaks, `-gdb-set mi-async`, `-target-attach <pid>`, `-exec-continue`, return the process.
+   - `read_samples(process) -> AsyncIterable[Optional[list[Frame]]]` (async generator): yield samples forever until the process exits, then `await process.wait()` and stop cleanly. Each sample is `None` on a bad stack read, otherwise a list of `Frame`s.
+   - `exit_subprocess(process) -> None` (async): write `-gdb-exit` and await process termination.
+   Sampling loop behavior: every iteration sends `-exec-interrupt`, then `-stack-list-frames --no-frame-filters 0 10`; if the result payload lacks a `"stack"` key (or is `None`), yield `None` as a bad sample, otherwise build `Frame(file=f["fullname"], line=int(f["line"]))` for each frame dict having both `"fullname"` and `"line"` keys (skipping frames without them). Then send `-exec-continue` and sleep for the remainder of a 10 ms interval (never negative). A shared helper reads lines until a MI `"result"` record arrives (printing `"output"`-type payloads to stdout, and, on a `"notify"` message `"thread-group-exited"`, calling `exit_subprocess` and raising `ProcessExited`); lines that fail to parse are reported to stderr and skipped.
+
+5. In `profila._stats`, implement aggregation:
+   - `Stats`: a dataclass with `path_to_line_counts: defaultdict[str, Counter[int]]` (default factory `defaultdict(Counter)`), `bad_samples: int = 0`, `other_samples: int = 0`; methods `total_samples() -> int` (sum of bad, other, and all per-line counts), `add_sample(sample: Optional[list[Frame]]) -> None` (a `None` sample counts as bad; a sample whose stack contains at least one frame whose file ends with `.py` counts that first such frame's file and line, incrementing its counter, and returns; a sample with no `.py` frame counts as "other"), and `finalize() -> FinalStats` which converts counts to percentages (`round(count/total*100, 1)`, or 0.0 when total is zero), includes an internal assertion that summed percentages stay within 5 of 100, and returns the final dataclass.
+   - `FinalStats`: a frozen dataclass with `total_samples: int`, `percent_bad_samples: float`, `percent_other_samples: float`, and `numba_samples: dict[str, dict[int, float]]` mapping file path to line number to percentage; method `total_percent() -> float` sums the bad/other percentages plus all line percentages, returning 100.0 if the sum is exactly 0.0.
+
+6. In `profila._render`, implement `render_text(stats: FinalStats) -> str`. The first line is `**Total samples:** {total} ({percent_other}% non-Numba samples, {percent_bad}% bad samples)`. Then, for each filename in `stats.numba_samples` (insertion order), compute min and max line number among its keys, write the header `{filename} (lines {min} to {max}):` followed by a fenced code block (lines delimited with triple backticks) in which each line number from min to max inclusive appears as `{usage} | {code}` where `code` is the source line from `linecache.getline` right-stripped and `usage` is six spaces when the percentage is 0 (or missing) and otherwise a right-aligned 5-character percentage followed by `%` (e.g. `f"{percent:>5}%"`).
+
+7. In `profila.__main__`, build an argparse-based CLI with prog `profila` and description "A profiler for Numba.", with subcommands:
+   - `annotate` (default command name `annotate`): accepts `rest` with `nargs=REMAI

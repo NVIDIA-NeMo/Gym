@@ -1,0 +1,39 @@
+## otel-extensions Project Introduction and Goals
+
+`otel-extensions` is a small helper library built on top of the OpenTelemetry Python API and SDK. Its goal is to make common OpenTelemetry tasks easier: initializing a global tracer provider from a settings object or environment variables, decorating functions and coroutine functions so they automatically emit spans, propagating trace context across process and thread boundaries (including via the `TRACEPARENT` environment variable), and turning log messages into span events.
+
+The library exposes a single flat package, `otel_extensions`, containing a pydantic-based settings class (`TelemetryOptions`), context-propagation helpers (`TraceContextCarrier`, `ContextInjector`, `inject_context_to_env`), a decorator factory (`instrumented`), a log handler (`TraceEventLogHandler`), plus `init_telemetry_provider`, `get_tracer`, and `flush_telemetry_data`.
+
+## Natural Language Instructions (Prompt)
+
+1. Create a single importable Python package named `otel_extensions` (a package `__init__.py` only; no submodules are required) that re-exports the public API described below.
+2. Define `TelemetryOptions` as a pydantic `BaseSettings` subclass with the following optional/typed fields, each readable from the environment when not supplied explicitly: `OTEL_EXPORTER_OTLP_ENDPOINT` (Optional[str], default None), `OTEL_EXPORTER_OTLP_CERTIFICATE` (Optional[str], default None), `OTEL_EXPORTER_OTLP_PROTOCOL` (str, default "http/protobuf"), `OTEL_EXPORTER_CUSTOM_SPAN_EXPORTER_TYPE` (str, default ""), `OTEL_SERVICE_NAME` (str, default ""), `OTEL_PROCESSOR_TYPE` (str, default "batch"), and `TRACEPARENT` (Optional[str], default None).
+3. Define `TraceContextCarrier`, a helper class for context propagation:
+   - Constructor takes an optional `carrier` dict. If None, initialize it to an empty dict and inject the current context into it using `TraceContextTextMapPropagator`.
+   - Store the Otel attach `token` as an instance attribute initialized to None.
+   - Support context-manager use (`__enter__`/`__exit__`): `__enter__` attaches only if no token is set; `__exit__` detaches.
+   - Provide instance methods `attach()` (extract the carrier with `TraceContextTextMapPropagator`, attach the extracted context, and record the returned token) and `detach()` (detach and clear the token if set).
+   - Provide class method `attach_from_env()` that builds a carrier from the `TRACEPARENT` environment variable (a dict with key `"traceparent"` if the variable is set, else an empty dict), attaches it, and returns the resulting `TraceContextCarrier` instance.
+   - Provide class method `inject_to_env()` that creates a fresh `TraceContextCarrier` and, if the key `"traceparent"` is in its carrier, writes its value to the `TRACEPARENT` environment variable.
+   - Provide an `__eq__` comparing the `carrier` attributes.
+   - The environment-variable name is a class attribute `traceparent_var = "TRACEPARENT"`.
+4. Define `TraceEventLogHandler`, a subclass of `logging.StreamHandler` that streams into itself (constructed via `super().__init__(stream=self)`) with `name` set to `"TraceEventLogHandler"`. Its `write(msg)` method adds a span event with the message text on the currently active span, but only when `msg` differs from the handler's terminator. Its `flush` is a no-op.
+5. Define `get_tracer(module_name: str, service_name: str = None)` which returns a `Tracer` obtained from `trace.get_tracer(module_name, tracer_provider=...)`, where the provider is the module-level global provider when `service_name` is None, otherwise the provider registered under that service name (looked up in a module-level dict; may be None). Suppress `DeprecationWarning` while calling `trace.get_tracer`.
+6. Define `init_telemetry_provider(options: TelemetryOptions = None, **resource_attrs)`: if `options` is None, construct a default `TelemetryOptions()`; if the OTLP endpoint option is truthy, attempt to load the trace provider; then, only if the current Otel context is empty, attach the context from the `TRACEPARENT` environment variable via `TraceContextCarrier.attach_from_env()`.
+7. Implement provider loading in a private helper (e.g. `_try_load_trace_provider`) that:
+   - Imports the SDK pieces (`Resource`, `SERVICE_NAME`, `TracerProvider`, `SimpleSpanProcessor`, `BatchSpanProcessor`); if the SDK is not installed, silently do nothing (catch ImportError).
+   - Defaults the service name to `"otel_extensions"` with a logged warning when `OTEL_SERVICE_NAME` is empty, and builds a `Resource` from `SERVICE_NAME` plus any extra resource attributes passed as keyword arguments.
+   - Chooses `BatchSpanProcessor` when `OTEL_PROCESSOR_TYPE == "batch"`, otherwise `SimpleSpanProcessor`.
+   - If `OTEL_EXPORTER_OTLP_CERTIFICATE` is set and absent from the environment, copies it into the `OTEL_EXPORTER_OTLP_CERTIFICATE` environment variable.
+   - Selects the exporter by protocol: `"grpc"` uses the gRPC OTLP span exporter; `"http/protobuf"` uses the HTTP OTLP span exporter; `"custom"` imports the class named by `OTEL_EXPORTER_CUSTOM_SPAN_EXPORTER_TYPE` (a `module.Class` string; raise `RuntimeError` if it contains no dot) and instantiates it with `options=options`; any other protocol value raises `ValueError`.
+   - Derives the OTLP endpoint URL by appending `"v1/traces"` when the configured endpoint ends with `/`, otherwise `"/v1/traces"`.
+   - Records the constructed span processor on the new `TracerProvider`, sets the first-created provider as the module-level global provider and registers it with `trace.set_tracer_provider`, and stores the provider in a dict keyed by service name.
+8. Define `flush_telemetry_data()` which calls `force_flush()` on the global provider (if set) and on every per-service provider registered.
+9. Define `inject_context_to_env(wrapped_function)` — a decorator that temporarily sets `TRACEPARENT` from the current context for the duration of the call and restores the previous value (or leaves it unset) afterwards — and the equivalent callable `ContextInjector` class whose `__call__` returns such a wrapped function; both must preserve function metadata via `functools.wraps`.
+10. Define `instrumented`, a decorator usable bare (`@instrumented`) or with keyword arguments (`span_name`, `service_name`, `span_attributes`). Implementation may use a private `Instrumented` helper class. It must:
+    - Handle both sync functions and coroutine functions (`async def`), returning a wrapped function of the matching kind that awaits correctly.
+    - Determine the span name as the explicit `span_name`, or the wrapped function's `__qualname__` when not given.
+    - Resolve the tracer using the wrapped function's module `__name__` (falling back to this package's name when the module cannot be determined), the optionally supplied service name, and the `get_tracer` function.
+    - Start a current span with that name and, inside the span, set the attributes in the `span_attributes` dict (empty by default) before/while invoking the wrapped function.
+11. Export the following `__all__` list from the package: `TelemetryOptions`, `TraceEventLogHandler`, `init_telemetry_provider`, `instrumented`, `TraceContextCarrier`, `get_tracer`, `flush_telemetry_data`, `ContextInjector`, `inject_context_to_env`.
+12. Provide packaging metadata so the package installs as distribution `otel-extensions` version 0.2.5: a `setup.py` invoking `setuptools.setup()`, a `setup.cfg` with the metadata (name `otel-extensions`, description "Python extensions for OpenTelemetry", long description read from README.md as markdown, maintai

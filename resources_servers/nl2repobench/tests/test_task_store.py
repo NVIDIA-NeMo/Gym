@@ -50,6 +50,44 @@ def test_task_count_mismatch_raises(task_assets: Path) -> None:
         NL2RepoBenchTaskStore(task_assets, expected_task_count=2)
 
 
+def test_task_image_registry_template_overrides_default(task_assets: Path) -> None:
+    store = NL2RepoBenchTaskStore(task_assets, expected_task_count=1)
+    task = store.get("example-task")
+
+    image = task_image(task, registry_template="my-registry.example.com/org/{name}:1.0")
+
+    assert image == "my-registry.example.com/org/example-task:1.0"
+
+
+def test_task_image_registry_template_lowercases_name(tmp_path: Path) -> None:
+    # Not using the shared _write_task helper from conftest.py here: importing it via
+    # `from tests.conftest import ...` collides with Gym's own root-level tests/conftest.py (both
+    # packages are named "tests") when the full suite is run from the Gym repo root rather than
+    # scoped to this directory - confirmed the hard way (ImportError under `pytest tests/`, passed
+    # under `pytest resources_servers/nl2repobench/tests/test_task_store.py`).
+    task_dir = tmp_path / "tasks" / "MixedCase_Task-1"
+    task_dir.mkdir(parents=True)
+    (task_dir / "start.md").write_text("# MixedCase_Task-1\n", encoding="utf-8")
+    (task_dir / "test_case_count.txt").write_text("5", encoding="utf-8")
+    (task_dir / "test_commands.json").write_text(
+        json.dumps(["pip install -e .", "pytest --continue-on-collection-errors -n 0 tests -v -s"]),
+        encoding="utf-8",
+    )
+    (task_dir / "test_files.json").write_text(json.dumps(["tests"]), encoding="utf-8")
+
+    tasks_dir = tmp_path / "tasks"
+    store = NL2RepoBenchTaskStore(tasks_dir, expected_task_count=1)
+    task = store.get("MixedCase_Task-1")
+
+    # Docker/OCI image references must be lowercase - a custom registry_template must not emit
+    # an uppercase reference, which would fail to pull.
+    image = task_image(task, registry_template="my-registry.example.com/org/{name}:1.0")
+
+    assert image == "my-registry.example.com/org/mixedcase_task-1:1.0"
+    # The default (upstream) registry is left untouched by this - task.name itself is unaffected.
+    assert task.name == "MixedCase_Task-1"
+
+
 def test_two_task_store(two_task_assets: Path) -> None:
     store = NL2RepoBenchTaskStore(two_task_assets, expected_task_count=2)
 
