@@ -799,7 +799,9 @@ async def test_transient_terminal_download_retries_once_and_preserves_completed_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("error_type,attempts", [(ConnectionError, 2), (PermissionError, 1), (ValueError, 1)])
+@pytest.mark.parametrize(
+    "error_type,attempts", [(ConnectionError, 2), (PermissionError, 1), (ValueError, 1), (RuntimeError, 1)]
+)
 async def test_terminal_download_failure_keeps_exception_class_and_checkpoint(error_type, attempts) -> None:
     from responses_api_agents.nooa_agent.result import is_transient_infrastructure_error
 
@@ -915,3 +917,84 @@ async def test_cancel_without_any_artifact_preserves_bare_cancellation() -> None
     assert {gap.code for gap in r.observations.gaps} == {"sandbox_result_unavailable"}
     await r.close()
     s.disconnect.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "receipt,message",
+    [
+        (cleanup_receipt(return_code=137), "worker did not exit successfully (exit 137)"),
+        (cleanup_receipt(timed_out=True), "worker exceeded its execution deadline"),
+        (cleanup_receipt(error="startup failed"), "supervisor failed: startup failed"),
+    ],
+)
+@pytest.mark.parametrize("capture_error_type", [RuntimeError, ConnectionError])
+@pytest.mark.parametrize("provider_return_code", [0, 1])
+@pytest.mark.parametrize("has_checkpoint", [False, True])
+async def test_capture_error_does_not_hide_confirmed_worker_failure(
+    receipt: CleanupReceipt,
+    message: str,
+    capture_error_type: type[Exception],
+    provider_return_code: int,
+    has_checkpoint: bool,
+) -> None:
+    from responses_api_agents.nooa_agent.result import is_transient_infrastructure_error
+
+    r, s = runner()
+    s.files[r.directory + "/cleanup.json"] = json.dumps(receipt)
+    s.files[r.directory + "/output.log"] = "ImportError: worker could not start"
+    if has_checkpoint:
+        s.files[r.directory + "/checkpoint.json"] = checkpoint_artifact().model_dump_json()
+    download = s.download
+    capture_error = capture_error_type("docker cp download failed: artifact unavailable")
+
+    async def download_artifact(source: str, destination: Path) -> None:
+        if source.endswith("/result.json") or (not has_checkpoint and source.endswith("/checkpoint.json")):
+            raise capture_error
+        await download(source, destination)
+
+    s.download = download_artifact
+    s.exec.return_value = SandboxExecResult("", "", provider_return_code)
+    with pytest.raises(RuntimeError) as caught:
+        await r.run(payload().request)
+    assert message in str(caught.value)
+    assert not is_transient_infrastructure_error(caught.value)
+    assert r.session.capture_error is capture_error
+    assert r.diagnostics == "ImportError: worker could not start"
+    gaps = {gap.code: gap.detail for gap in r.observations.gaps}
+    assert gaps["sandbox_worker_diagnostics"] == r.diagnostics
+    assert str(capture_error) in gaps["sandbox_capture_failed"]
+    if has_checkpoint:
+        assert isinstance(caught.value, NOOARunFailure)
+        assert caught.value.result.episode.response.output == checkpoint_artifact().response.output
+        assert caught.value.result.termination_reason is NOOATerminationReason.INFRASTRUCTURE_ERROR
+    s.exec.return_value = SandboxExecResult("", "", 0)
+    await r.close()
+    s.disconnect.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_provider_execution_failure_is_not_replaced_by_a_capture_error() -> None:
+    r, s = runner()
+    s.files[r.directory + "/cleanup.json"] = json.dumps(cleanup_receipt(timed_out=True))
+    s.files[r.directory + "/checkpoint.json"] = checkpoint_artifact().model_dump_json()
+    download = s.download
+    provider_error = ConnectionError("provider execution transport disconnected")
+
+    async def download_artifact(source: str, destination: Path) -> None:
+        if source.endswith("/result.json"):
+            raise RuntimeError("docker cp download failed")
+        await download(source, destination)
+
+    async def execute(command: str, **kwargs) -> SandboxExecResult:
+        if "process_supervisor.py" in command:
+            raise provider_error
+        return SandboxExecResult("", "", 0)
+
+    s.download = download_artifact
+    s.exec.side_effect = execute
+    with pytest.raises(NOOARunFailure) as caught:
+        await r.run(payload().request)
+    assert caught.value.__cause__ is provider_error
+    assert "sandbox_capture_failed" in {gap.code for gap in r.observations.gaps}
+    await r.close()
