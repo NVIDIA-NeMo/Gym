@@ -3154,7 +3154,7 @@ class TestRolloutCollection:
         mock_server_client.global_config_dict = OmegaConf.create(
             {
                 "my_agent": {"responses_api_agents": {"impl": {}}},
-                "my_legacy_server": {"environment_servers": {"legacy_agent": {"agent_server": {"name": "my_agent"}}}},
+                "my_relay_server": {"environment_servers": {"legacy_agent": {"agent_server": {"name": "my_agent"}}}},
                 "my_session_server": {
                     "environment_servers": {"single_agent_turn": {"agent_server": {"name": "my_agent"}}}
                 },
@@ -3164,7 +3164,7 @@ class TestRolloutCollection:
             nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
         )
 
-        with pytest.raises(AmbiguousEnvironmentServerError, match="my_legacy_server.*my_session_server"):
+        with pytest.raises(AmbiguousEnvironmentServerError, match="my_relay_server.*my_session_server"):
             next(RolloutCollectionHelper().run_examples([row]))
         mock_server_client.post.assert_not_awaited()
 
@@ -3184,7 +3184,7 @@ class TestRolloutCollection:
                 "my_environment_server": {
                     "environment_servers": {"legacy_agent": {"agent_server": {"name": "my_agent"}}}
                 },
-                "other_legacy_server": {
+                "other_relay_server": {
                     "environment_servers": {"legacy_agent": {"agent_server": {"name": "other_agent"}}}
                 },
                 "other_session_server": {
@@ -9571,7 +9571,7 @@ class TestEnvironmentServerRouting:
 
         assert nemo_gym.rollout_collection._environment_server_for_config_row(row, config) == "environment"
 
-    async def test_routes_legacy_row_to_selected_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_routes_flat_row_to_selected_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
         payload = {
             "reward": 1.0,
             "model_patch": "patch",
@@ -9660,17 +9660,17 @@ class TestEnvironmentServerRouting:
     def _mixed_batch_config() -> DictConfig:
         """The materialized SWE Pro pairing plus a second, compatibility-routed pairing on the same server."""
         config = _environment_server_config()
-        config["hermes_legacy"] = {
+        config["hermes_flat"] = {
             "responses_api_agents": {
                 "hermes_agent": {
                     "resources_server": {"type": "resources_servers", "name": "swe"},
                 }
             }
         }
-        config["legacy_environment"] = {
+        config["flat_environment"] = {
             "environment_servers": {
                 "legacy_agent": {
-                    "agent_server": {"type": "responses_api_agents", "name": "hermes_legacy"},
+                    "agent_server": {"type": "responses_api_agents", "name": "hermes_flat"},
                 }
             }
         }
@@ -9689,12 +9689,12 @@ class TestEnvironmentServerRouting:
     async def test_one_batch_mixes_materialized_and_compatibility_routed_rows(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A materialized taskset and a legacy flat row travel in one batch, each to its own environment server."""
+        """A materialized taskset and a flat row travel in one batch, each to its own environment server."""
         post = AsyncMock(return_value=FakeResponse(200, {"reward": 1.0}))
         client = install_fake_server_client(monkeypatch, post)
         client.global_config_dict = self._mixed_batch_config()
         materialized = self._materialized_row()
-        flat = self._row() | {AGENT_REF_KEY_NAME: {"name": "hermes_legacy"}}
+        flat = self._row() | {AGENT_REF_KEY_NAME: {"name": "hermes_flat"}}
         del flat[ATTEMPT_INDEX_KEY_NAME]
         config = RolloutCollectionConfig(
             input_jsonl_fpath="input.jsonl",
@@ -9720,13 +9720,13 @@ class TestEnvironmentServerRouting:
 
         assert len(dispatched) == 2
         calls = {call.kwargs["server_name"]: call.kwargs["json"] for call in post.await_args_list}
-        assert set(calls) == {"environment", "legacy_environment"}
+        assert set(calls) == {"environment", "flat_environment"}
         # The materialized row goes to its taskset's route as an episode request.
         assert calls["environment"]["task"]["task_id"]["taskset"] == "swe_pro"
         assert calls["environment"]["episode_id"] == {"rollout_id": "0-0", "attempt": 0}
         # The flat row goes to the environment server fronting its agent, as today's flat body.
-        assert calls["legacy_environment"] is flat_row
-        assert calls["legacy_environment"][AGENT_REF_KEY_NAME] == {"name": "hermes_legacy"}
+        assert calls["flat_environment"] is flat_row
+        assert calls["flat_environment"][AGENT_REF_KEY_NAME] == {"name": "hermes_flat"}
 
     def test_materialized_row_requires_a_route_in_agent_mode(self) -> None:
         materialized = self._materialized_row()
@@ -9745,7 +9745,7 @@ class TestEnvironmentServerRouting:
     async def test_legacy_mode_routes_flat_rows_to_one_server_and_materialized_rows_by_taskset(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Legacy mode: every flat row to the named server, materialized rows still by taskset, through dispatch."""
+        """`legacy` routing mode: every flat row to the named server, materialized rows still by taskset, through dispatch."""
         post = AsyncMock(return_value=FakeResponse(200, {"reward": 1.0}))
         client = install_fake_server_client(monkeypatch, post)
         client.global_config_dict = self._mixed_batch_config()
@@ -9756,7 +9756,7 @@ class TestEnvironmentServerRouting:
             input_jsonl_fpath="input.jsonl",
             output_jsonl_fpath="output.jsonl",
             environment_routing_mode="legacy",
-            environment_server_name="legacy_environment",
+            environment_server_name="flat_environment",
             environment_server_routes={"swe_pro": "environment"},
             num_repeats=1,
         )
@@ -9769,7 +9769,7 @@ class TestEnvironmentServerRouting:
         materialized_row = next(row for row in rows if "task_input" in row)
         flat_row = next(row for row in rows if "task_input" not in row)
         assert materialized_row[NG_ENVIRONMENT_SERVER_KEY] == "environment"
-        assert flat_row[NG_ENVIRONMENT_SERVER_KEY] == "legacy_environment"
+        assert flat_row[NG_ENVIRONMENT_SERVER_KEY] == "flat_environment"
 
         # Dispatch validates the flat row against a legacy_agent server that binds no resources server,
         # stamps the agent that server fronts, and sends today's flat body; the materialized row is unaffected.
@@ -9777,10 +9777,10 @@ class TestEnvironmentServerRouting:
             await future
 
         calls = {call.kwargs["server_name"]: call.kwargs["json"] for call in post.await_args_list}
-        assert set(calls) == {"environment", "legacy_environment"}
+        assert set(calls) == {"environment", "flat_environment"}
         assert calls["environment"]["task"]["task_id"]["taskset"] == "swe_pro"
-        assert calls["legacy_environment"] is flat_row
-        assert flat_row[AGENT_REF_KEY_NAME] == {"name": "hermes_legacy"}
+        assert calls["flat_environment"] is flat_row
+        assert flat_row[AGENT_REF_KEY_NAME] == {"name": "hermes_flat"}
 
     @pytest.mark.parametrize(
         "seed_policy",
@@ -9813,14 +9813,14 @@ class TestEnvironmentServerRouting:
 
     @pytest.mark.parametrize(
         "seed_policy",
-        [{"hermes_legacy": True, "_default": False}, {"hermes_legacy": True, "swe_pro": False}],
+        [{"hermes_flat": True, "_default": False}, {"hermes_flat": True, "swe_pro": False}],
     )
-    def test_mixed_rows_seed_only_the_legacy_agent(self, seed_policy: dict[str, bool]) -> None:
-        """One policy can seed legacy repeats without rejecting unseeded materialized repeats."""
+    def test_mixed_rows_seed_only_the_flat_row_agent(self, seed_policy: dict[str, bool]) -> None:
+        """One policy can seed flat-row repeats without rejecting unseeded materialized repeats."""
         materialized = self._materialized_row()
         original_task_input = deepcopy(materialized["task_input"])
         flat = {
-            AGENT_REF_KEY_NAME: {"name": "hermes_legacy"},
+            AGENT_REF_KEY_NAME: {"name": "hermes_flat"},
             "responses_create_params": {"input": "fix it"},
         }
         config = RolloutCollectionConfig(
@@ -9837,18 +9837,19 @@ class TestEnvironmentServerRouting:
         )
 
         materialized_rows = [row for row in rows if "task_input" in row]
-        legacy_rows = [row for row in rows if "task_input" not in row]
-        assert len(materialized_rows) == len(legacy_rows) == 2
+        flat_rows = [row for row in rows if "task_input" not in row]
+        assert len(materialized_rows) == len(flat_rows) == 2
         for row in materialized_rows:
             assert row["task_input"] == original_task_input
             assert "responses_create_params" not in row
             assert row[NG_ENVIRONMENT_SERVER_KEY] == "environment"
         assert [row[ROLLOUT_INDEX_KEY_NAME] for row in materialized_rows] == [0, 1]
-        assert [row[ROLLOUT_INDEX_KEY_NAME] for row in legacy_rows] == [0, 1]
-        assert [
-            json.loads(row["responses_create_params"]["metadata"]["extra_body"])["seed"] for row in legacy_rows
-        ] == [0, 1]
-        assert all(row[AGENT_REF_KEY_NAME] == {"name": "hermes_legacy"} for row in legacy_rows)
+        assert [row[ROLLOUT_INDEX_KEY_NAME] for row in flat_rows] == [0, 1]
+        assert [json.loads(row["responses_create_params"]["metadata"]["extra_body"])["seed"] for row in flat_rows] == [
+            0,
+            1,
+        ]
+        assert all(row[AGENT_REF_KEY_NAME] == {"name": "hermes_flat"} for row in flat_rows)
         assert "metadata" not in flat["responses_create_params"]
 
     @pytest.mark.parametrize("seed_policy", [True, {"_default": True}, {"swe_pro": True, "_default": False}])
@@ -9997,15 +9998,13 @@ class TestEnvironmentServerRouting:
                 self._episode_identity("a") | {"result": None, "failure": "timeout"}
             )
 
-    async def test_legacy_reply_echoing_identity_fields_is_not_projected(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_flat_reply_echoing_identity_fields_is_not_projected(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Projection is decided by the request the collector sent, not by sniffing the reply."""
         echoed = {"episode_id": {"rollout_id": "0-0", "attempt": 0}, "task_id": {"taskset": "t", "task_id": "x"}}
         post = AsyncMock(return_value=FakeResponse(200, echoed | {"reward": 1.0, "failure": {"reason": "echoed"}}))
         client = install_fake_server_client(monkeypatch, post)
         client.global_config_dict = self._mixed_batch_config()
-        flat = self._row() | {AGENT_REF_KEY_NAME: {"name": "hermes_legacy"}}
+        flat = self._row() | {AGENT_REF_KEY_NAME: {"name": "hermes_flat"}}
         del flat[ATTEMPT_INDEX_KEY_NAME]
         flat[TASK_INDEX_KEY_NAME] = 0
         flat[ROLLOUT_INDEX_KEY_NAME] = 0
@@ -10019,7 +10018,7 @@ class TestEnvironmentServerRouting:
     async def test_call_aggregate_metrics_groups_by_environment_server(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """Materialized rows aggregate on the server stamped at dispatch; legacy rows keep their agent's server."""
+        """Materialized rows aggregate on the server stamped at dispatch; flat rows keep their agent's server."""
         agg = AggregateMetrics(agent_metrics={"mean/reward": 1.0}, key_metrics={"mean/reward": 1.0})
         posts: dict[str, list[dict]] = {}
 
@@ -10039,30 +10038,30 @@ class TestEnvironmentServerRouting:
             "reward": 1.0,
             "response": {"usage": {"tokens": 3}},
         }
-        legacy_result = {
+        flat_result = {
             TASK_INDEX_KEY_NAME: 1,
             ROLLOUT_INDEX_KEY_NAME: 0,
-            AGENT_REF_KEY_NAME: {"name": "hermes_legacy"},
+            AGENT_REF_KEY_NAME: {"name": "hermes_flat"},
             "reward": 0.0,
         }
         rows = [
             {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, NG_ENVIRONMENT_SERVER_KEY: "environment"},
-            {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, AGENT_REF_KEY_NAME: {"name": "hermes_legacy"}},
+            {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, AGENT_REF_KEY_NAME: {"name": "hermes_flat"}},
         ]
 
         metrics_fpath = await RolloutCollectionHelper()._call_aggregate_metrics(
-            [episode_result, legacy_result], rows, tmp_path / "output.jsonl"
+            [episode_result, flat_result], rows, tmp_path / "output.jsonl"
         )
 
-        assert set(posts) == {"environment", "legacy_environment"}
+        assert set(posts) == {"environment", "flat_environment"}
         # An episode record is sent as stored; it already has the verify-response shape.
         assert posts["environment"] == [episode_result]
-        assert posts["legacy_environment"][0][TASK_INDEX_KEY_NAME] == 1
+        assert posts["flat_environment"][0][TASK_INDEX_KEY_NAME] == 1
         written = {entry[NG_ENVIRONMENT_SERVER_KEY]: entry for entry in json.loads(metrics_fpath.read_text())}
-        assert set(written) == {"environment", "legacy_environment"}
+        assert set(written) == {"environment", "flat_environment"}
         # The materialized group is labelled by the agent its environment server binds.
         assert written["environment"][AGENT_REF_KEY_NAME] == {"name": "hermes"}
-        assert written["legacy_environment"][AGENT_REF_KEY_NAME] == {"name": "hermes_legacy"}
+        assert written["flat_environment"][AGENT_REF_KEY_NAME] == {"name": "hermes_flat"}
 
     async def test_call_aggregate_metrics_labels_two_servers_of_one_agent_distinctly(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -10117,14 +10116,14 @@ class TestEnvironmentServerRouting:
         """A flat row routed by its agent is stamped with the relay that ran it, so readers need not use agent_ref."""
         input_jsonl_fpath = tmp_path / "input.jsonl"
         input_jsonl_fpath.write_bytes(
-            orjson.dumps({"responses_create_params": {"input": []}, AGENT_REF_KEY_NAME: {"name": "hermes_legacy"}})
+            orjson.dumps({"responses_create_params": {"input": []}, AGENT_REF_KEY_NAME: {"name": "hermes_flat"}})
             + b"\n"
         )
         output_jsonl_fpath = tmp_path / "output.jsonl"
 
         async def post(server_name: str, url_path: str, json, **kwargs):
             if url_path == "/run":
-                assert server_name == "legacy_environment"
+                assert server_name == "flat_environment"
                 return FakeResponse(200, {"reward": 1.0, "response": {"usage": {"total_tokens": 3}}})
             return FakeResponse(200, compute_aggregate_metrics([dict(r) for r in json.verify_responses]).model_dump())
 
@@ -10141,9 +10140,9 @@ class TestEnvironmentServerRouting:
         )
 
         [record] = [orjson.loads(line) for line in output_jsonl_fpath.read_bytes().splitlines()]
-        assert record[NG_ENVIRONMENT_SERVER_KEY] == "legacy_environment"
+        assert record[NG_ENVIRONMENT_SERVER_KEY] == "flat_environment"
         assert record[nemo_gym.rollout_collection.NG_RESULT_TYPE_KEY] == "legacy_agent"
-        assert record[AGENT_REF_KEY_NAME] == {"name": "hermes_legacy"}
+        assert record[AGENT_REF_KEY_NAME] == {"name": "hermes_flat"}
 
     async def test_progress_reward_averages_only_results_that_report_a_reward(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -10155,7 +10154,7 @@ class TestEnvironmentServerRouting:
                 orjson.dumps(
                     {
                         "responses_create_params": {"input": [{"role": "user", "content": str(i)}]},
-                        AGENT_REF_KEY_NAME: {"name": "hermes_legacy"},
+                        AGENT_REF_KEY_NAME: {"name": "hermes_flat"},
                     }
                 )
                 + b"\n"
@@ -10186,9 +10185,9 @@ class TestEnvironmentServerRouting:
             )
         )
 
-        final = [m for m in exported if "progress/hermes_legacy/reward" in m][-1]
-        assert final["progress/hermes_legacy/reward"] == 100.0
-        assert final["progress/hermes_legacy/reward_lower_bound"] == 100.0
+        final = [m for m in exported if "progress/hermes_flat/reward" in m][-1]
+        assert final["progress/hermes_flat/reward"] == 100.0
+        assert final["progress/hermes_flat/reward_lower_bound"] == 100.0
 
     async def test_run_from_config_sidecars_an_episode_failure_and_retries_it_on_resume(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

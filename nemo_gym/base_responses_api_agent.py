@@ -641,7 +641,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         return (
             self._model_call_capture_enabled()
             or self._token_id_capture_enabled()
-            # Checkpointing keys a legacy /run by its rollout, so its self-dispatch must carry the rollout.
+            # Checkpointing keys an agent's own /run by its rollout, so its self-dispatch must carry the rollout.
             or self._checkpoint_participant is not None
             or self._restart_only is not None
         )

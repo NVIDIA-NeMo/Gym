@@ -1746,7 +1746,7 @@ class TestCheckpointContinuation:
         assert len(resumed_from) == 4
 
     async def test_restored_legacy_run_skips_resources_seeding(self) -> None:
-        # Observability is off: checkpointing alone must key the legacy /run by its rollout.
+        # Observability is off: checkpointing alone must key the agent's own /run by its rollout.
         server, server_client = _make_agent(False)
         participant = AgentSessionParticipant(server)
         server._checkpoint_participant = participant
@@ -2209,7 +2209,7 @@ def _legacy_run_request(attempt: int) -> SimpleAgentRunRequest:
 
 
 def _route_legacy_run(server: SimpleAgent, server_client: MagicMock, calls: list[str], after_turn_loop=None) -> None:
-    """Answer a legacy /run's calls, sending its self-dispatch to ``server.responses``.
+    """Answer the calls of an agent's own /run, sending its self-dispatch to ``server.responses``.
 
     The turn loop asks the model, calls one tool, and asks the model again.
     ``after_turn_loop`` runs once the self-dispatched activation has replied, before /run reads the reply.
@@ -2424,7 +2424,7 @@ class _RestartOnlySimpleAgent(SimpleAgent):
 async def test_a_direct_responses_call_is_a_restart_and_one_without_a_rollout_is_refused(
     agent_type: type[SimpleAgent], tmp_path
 ) -> None:
-    """A /v1/responses call with neither an agent session nor a legacy /run, on both kinds of agent."""
+    """A /v1/responses call with neither an agent session nor a /run, on both kinds of agent."""
     server, server_client = _make_agent(False, agent_type)
     server_client.global_config_dict = {"checkpoint": {"enabled": True, "control_auth_token": "t"}}
     calls, _ = _held_model(server_client, _FINAL_RESPONSE)
@@ -3038,7 +3038,7 @@ async def test_a_skip_verification_run_parks_at_its_return_boundary_until_resume
 
     await _until(lambda: running.done() or parked_at_return())
     assert prepared[0]["phase"] == "prepared"
-    # Parked, so its legacy session is still exported.
+    # Parked, so its /run session is still exported.
     assert not running.done() and participant.has_session("run:0-0")
     commit = await controller.commit(
         CommitRequest(**_checkpoint("c1", checkpoint_dir=str(tmp_path), episode_ids=[{"rollout_id": "0-0"}]))

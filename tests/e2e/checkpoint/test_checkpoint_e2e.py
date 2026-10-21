@@ -281,17 +281,17 @@ async def test_a_checkpoint_restores_again_after_its_replacement_made_calls(
     assert not manifest.get("failures")
 
 
-async def test_legacy_run_continues_from_its_last_boundary_after_a_crash(deploy, tmp_path: Path) -> None:
+async def test_agent_run_continues_from_its_last_boundary_after_a_crash(deploy, tmp_path: Path) -> None:
     deployment = deploy("relay")
     deployment.backend("/_ctl/hold", {"after_calls": 1})
     async with GymHTTP(deployment.url("environment"), timeout=120) as http:
-        first = asyncio.create_task(http.post("/run", json=weather_row("legacy-1")))
+        first = asyncio.create_task(http.post("/run", json=weather_row("run-1")))
         await wait_for_calls(deployment, 2)
-        await checkpoint(deployment, tmp_path / "ckpt", ["legacy-1"])
-        await crash_and_restore(deployment, tmp_path / "ckpt", ["legacy-1"])
+        await checkpoint(deployment, tmp_path / "ckpt", ["run-1"])
+        await crash_and_restore(deployment, tmp_path / "ckpt", ["run-1"])
         first.cancel()
 
-        replacement = await http.post("/run", json=weather_row("legacy-1", attempt=1))
+        replacement = await http.post("/run", json=weather_row("run-1", attempt=1))
 
     assert [call["n_messages"] for call in deployment.backend_calls()] == [1, 3, 3]
     assert replacement.json()["reward"] == 1.0

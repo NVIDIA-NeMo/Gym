@@ -513,11 +513,11 @@ def test_rejected_request_does_not_consume_activation(setup):
 
 def test_no_session_keeps_existing_local_path(setup):
     agent, sandbox = setup
-    with patch.object(agent, "_create_episode", AsyncMock(side_effect=RuntimeError("legacy path reached"))) as legacy:
+    with patch.object(agent, "_create_episode", AsyncMock(side_effect=RuntimeError("local path reached"))) as local:
         with TestClient(agent.setup_webserver()) as client:
-            with pytest.raises(RuntimeError, match="legacy path reached"):
+            with pytest.raises(RuntimeError, match="local path reached"):
                 client.post("/v1/responses", json={"input": "task"})
-        legacy.assert_awaited_once()
+        local.assert_awaited_once()
     sandbox.launch.assert_not_awaited()
 
 
@@ -1391,7 +1391,7 @@ async def test_malformed_session_marker_never_runs_host_pi(setup, marker, endpoi
     sandbox.launch.assert_not_awaited()
 
 
-async def test_session_marker_blocks_legacy_run(setup):
+async def test_session_marker_blocks_agent_run(setup):
     agent, _ = setup
     request = Request({"type": "http", "session": {"agent_session_id": "expired-session"}})
     with pytest.raises(HTTPException, match="EnvironmentServer /run"):

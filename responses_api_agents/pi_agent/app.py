@@ -1338,7 +1338,7 @@ class PiAgent(SimpleResponsesAPIAgent):
             return (await asyncio.shield(state.task)).model_copy(deep=True)
         # AnySWE, AnyTerminal and HarnessAgent pass generic Responses fields here.
         # Preserve their local CLI contract; only agent sessions enforce the new
-        # request boundary. Legacy model selection and caps remain config-owned.
+        # request boundary. On the other paths, model selection and caps remain config-owned.
         path_params = getattr(request, "path_params", None)
         rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
         episode = await self._create_episode(

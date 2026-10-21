@@ -140,7 +140,7 @@ class PrepareResult:
 async def discover(client: ServerClient, *, auth_token: str) -> Participants:
     """Find every server in the deployment that takes part in checkpoints.
 
-    A server without the control routes, such as an auxiliary model or the legacy agent relay, is not a participant.
+    A server without the control routes, such as an auxiliary model or the ``legacy_agent`` relay, is not a participant.
     Every other failure is raised: a participant the controller cannot reach would make every later checkpoint unsafe.
     """
     names = [

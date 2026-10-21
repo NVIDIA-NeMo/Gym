@@ -90,7 +90,7 @@ RESOURCE_ONLY_METADATA_KEYS = frozenset(
     {"baseline_response", "baseline_model", "baseline_dataset_file", "baseline_row_index"}
 )
 
-# Legacy /run episodes are checkpointed under their logical rollout ID so a replacement attempt finds them.
+# Episodes on the agent's own /run are checkpointed under their logical rollout ID so a replacement attempt finds them.
 _LEGACY_SESSION_PREFIX = "run:"
 _INPUT_ITEMS_ADAPTER = TypeAdapter(NeMoGymResponseInput)
 
@@ -150,7 +150,7 @@ def _dump_reply(reply: dict[str, Any] | None) -> dict[str, Any] | None:
 
 @dataclass
 class _LegacyLoopReply:
-    """The reply of a legacy /run's turn loop, the /run's one activation, kept while the /run runs.
+    """The reply of the turn loop of the agent's own /run, the /run's one activation, kept while the /run runs.
 
     A checkpoint after the loop replied, and before /run recorded its next boundary, exports it with the session.
     The replacement /run continues at the loop step and gets this reply instead of running the loop again.
@@ -188,7 +188,7 @@ class SimpleAgentVerifyResponse(BaseVerifyResponse):
 class SimpleAgent(SimpleResponsesAPIAgent):
     checkpoint_sessions_supported = True
     config: SimpleAgentConfig
-    # With checkpointing, each legacy /run's loop reply, by its session key.
+    # With checkpointing, each /run's loop reply, by its session key.
     # An entry leaves with its /run, or with a retire.
     _legacy_replies: dict[str, _LegacyLoopReply] = PrivateAttr(default_factory=dict)
 
@@ -230,7 +230,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
     def _export_agent_session(self, session_key: str) -> dict[str, JsonValue]:
         if session_key.startswith(_LEGACY_SESSION_PREFIX):
-            # A legacy /run keeps everything else it needs in its own boundaries.
+            # The agent's own /run keeps everything else it needs in its own boundaries.
             loop = self._legacy_replies.get(session_key)
             if loop is None or loop.completed_reply is None:
                 return {}
@@ -524,7 +524,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                         if self.config.resources_server is None:
                             raise RuntimeError(
                                 "Simple Agent received a tool call without direct HTTP tool access "
-                                "or a legacy resources_server configuration"
+                                "or a resources_server configuration"
                             )
                         api_response = await self.server_client.post(
                             server_name=self.config.resources_server.name,
@@ -676,7 +676,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                         gaps=[*(previous.gaps if previous else []), *trajectory.gaps],
                     )
 
-            # Legacy self-dispatch propagates resources cookies for its later verification call.
+            # Self-dispatch from the agent's own /run propagates resources cookies for its later verification call.
             if state is None:
                 downstream_cookies = (*resources_server_cookies.items(), *model_server_cookies.items())
             else:
@@ -685,7 +685,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 response.set_cookie(k, v)
             # A session caller that sends the activation index takes the session's evidence at close,
             # so its reply carries no trajectory, and neither does the copy kept to replay it.
-            # Other callers, and a legacy /run, read the trajectory from the reply.
+            # Other callers, and the agent's own /run, read the trajectory from the reply.
             if trajectory is not None and (state is None or index is None):
                 model_response = model_response.model_copy(
                     update={_INTERNAL_TRAJECTORY_KEY: trajectory.model_dump(mode="json")}
@@ -730,7 +730,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
     ) -> tuple[str, EpisodeId, SimpleAgentSessionState | _LegacyLoopReply] | None:
         """The checkpointed session a request activates, the attempt it runs as, and where its reply is kept.
 
-        ``None`` without checkpointing, and for a direct call, which has neither an agent session nor a legacy /run.
+        ``None`` without checkpointing, and for a direct call, which has neither an agent session nor a /run.
         With checkpointing, an activation of an agent session must name its attempt in its rollout path.
         """
         participant = self.checkpoint_participant
@@ -751,7 +751,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             return state.request.agent_session_id, path_episode, state
         if path_episode is None:
             return None
-        # Only a legacy /run opens this session.
+        # Only the agent's own /run opens this session.
         session_key = f"{_LEGACY_SESSION_PREFIX}{path_episode.rollout_id}"
         if not participant.has_session(session_key):
             return None
@@ -761,10 +761,10 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         if not self.config.execute_tools:
             raise ValueError(
                 "Simple Agent execute_tools=false is supported only for agent-session requests; "
-                "the legacy /run route requires execute_tools=true"
+                "the agent's own /run route requires execute_tools=true"
             )
         if self.config.resources_server is None:
-            raise ValueError("resources_server is required when invoking the legacy Simple Agent /run route")
+            raise ValueError("resources_server is required when invoking the Simple Agent's own /run route")
         participant = self.checkpoint_participant
         capture_key = self.rollout_id_from_run(body)
         if participant is None:
@@ -942,14 +942,14 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
     @staticmethod
     def _closes_after_verify(legacy_run: LegacyRun | None, verify_mode: StepMode) -> bool:
-        """Whether a legacy /run closes its resources session after a verification a checkpoint does not wait for."""
+        """Whether a /run closes its resources session after a verification a checkpoint does not wait for."""
         return legacy_run is not None and verify_mode == "replay"
 
     async def _close_legacy_resources_session(self, body: SimpleAgentRunRequest, cookies: Any) -> None:
-        """Close the resources session a legacy /run seeded, keeping the run's verdict if the close fails.
+        """Close the resources session the agent's own /run seeded, keeping the run's verdict if the close fails.
 
         The session cookie names the session.
-        A legacy seed assigns no resources session ID, so the close names the /run's own session key.
+        A flat seed assigns no resources session ID, so the close names the /run's own session key.
         """
         episode_id = EpisodeId.from_capture_key(require_rollout(self.rollout_id_from_run(body)))
         try:

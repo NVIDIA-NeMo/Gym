@@ -68,7 +68,7 @@ benchmark's declared `allowed_agents` before running a new pairing.
 
 Use this explicit composition for now. `--agent` selects a configured agent; it does not
 install or rebind one. The existing `--agent-type` swap and automatic benchmark-data lookup
-still depend on legacy Agent-to-Resources bindings; they are not equivalent to this workflow.
+still depend on the agent's own `resources_server` binding; they are not equivalent to this workflow.
 Existing [Hermes SWE-Pro recipes](../../benchmarks/swebench/pro/hermes.yaml) remain supported
 for compatibility; a new pairing does not need another combined preset.
 
@@ -144,8 +144,8 @@ Calls without an agent session run Hermes on the agent-server host. They do not 
 a Resources-owned task sandbox. The agent's compatibility `/run` requires an explicit
 `resources_server`; agent sessions and direct `/v1/responses` do not.
 
-The default YAML now selects composition with an Environment Server rather than acting as an unbound legacy
-swap source. Legacy swap configurations must explicitly restore
+The default YAML now selects composition with an Environment Server rather than acting as an unbound
+`--agent-type` swap source. `--agent-type` swap configurations must explicitly restore
 `resources_server: {type: resources_servers, name: "???"}` on the agent. Existing bound
 recipes, including `hermes_math` and `swebench/pro/hermes`, keep their bindings.
 

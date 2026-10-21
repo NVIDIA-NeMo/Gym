@@ -306,7 +306,7 @@ def _environment_server_for_config_row(row: Mapping[str, Any], config: Any) -> s
     it is already an episode request and no agent-server ``/run`` accepts it. A flat row follows
     ``environment_routing_mode``: ``agent`` keeps today's routing (its agent's environment server
     is resolved at dispatch), ``legacy`` sends every flat row to ``environment_server_name``, and
-    ``taskset`` refuses flat rows so a run of materialized rows cannot silently pick up legacy input.
+    ``taskset`` refuses flat rows so a run of materialized rows cannot silently pick up flat input.
 
     One batch may therefore hold both kinds of rows in ``agent`` and ``legacy`` mode. The chosen
     server is stamped on the row as ``_ng_environment_server`` and travels with it through the
@@ -4159,7 +4159,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         they ran on. A row that already names an agent is left alone; the name is validated
         against the environment server by ``_validate_environment_servers``. Materialized tasks are
         skipped: they carry no agent by design, and their result projection is not the
-        legacy shape this key belongs to.
+        flat-row shape this key belongs to.
         """
         for row in examples:
             if NG_ENVIRONMENT_SERVER_KEY not in row or _materialized_taskset(row) is not None:

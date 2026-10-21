@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Legacy flat-row adapter for the single-agent-turn environment server."""
+"""Flat-row adapter for the single-agent-turn environment server."""
 
 from typing import Any
 

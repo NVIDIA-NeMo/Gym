@@ -68,7 +68,7 @@ benchmark's declared `allowed_agents` before running a new pairing.
 
 Use this explicit composition for now. `--agent` selects a configured agent; it does not
 install or rebind one. The existing `--agent-type` swap and automatic benchmark-data lookup
-still depend on legacy Agent-to-Resources bindings; they are not equivalent to this workflow.
+still depend on the agent's own `resources_server` binding; they are not equivalent to this workflow.
 A new pairing does not need another combined preset.
 
 ## Runtime and model requirements
@@ -169,7 +169,7 @@ Known model-metadata/compaction warnings remain visible as gaps after clean comp
 both must be finite and positive. Measure setup time, supervisor process/memory cost, and close
 latency before scaling. Inference support does not establish training token-ID/logprob support.
 
-## Legacy direct-agent quick start
+## Direct-agent quick start
 
 ### env.yaml
 
@@ -255,7 +255,7 @@ Codex talks to the model via the OpenAI Responses API over SSE (`wire_api = "cha
 
 Each request gets a fresh `CODEX_HOME` with a generated `config.toml` that pins a Gym-owned model provider (no `codex login` needed — the `openai_api_key` config value is handed to the subprocess as `OPENAI_API_KEY`, the provider's `env_key`), sets `approval_policy = "never"`, and disables everything that would make a rollout depend on ambient host state or phone home: analytics, update checks, on-disk history, server-side web search, and the multi-agent tool. Session persistence is disabled via `--ephemeral`. The `CODEX_HOME` and scratch working directory are removed after the run, so rollouts cannot contaminate one another.
 
-For legacy callers, Codex is auto-installed lazily on the first local invocation via npm or a local Node.js binary if not already on PATH.
+For callers that do not use agent sessions, Codex is auto-installed lazily on the first local invocation via npm or a local Node.js binary if not already on PATH.
 
 ## Configuration
 
@@ -315,7 +315,7 @@ gym eval run --agent reasoning_gym_codex_agent \
 
 Each rollout result is stamped with a `skills_ref` for provenance and grouping during reward profiling, exactly as for the Claude Code agent (see its README for the full workflow).
 
-## Legacy direct-agent limitations
+## Direct-agent limitations
 
 - Eval only for now. Token IDs and logprobs are not wired up yet.
 - Token counts come from Codex's own usage reporting (`turn.completed`).
