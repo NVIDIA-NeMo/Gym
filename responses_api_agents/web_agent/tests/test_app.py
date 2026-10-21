@@ -402,8 +402,22 @@ def _seed(task_id="0"):
 
 
 @pytest.mark.asyncio
-async def test_seeded_wait_limits_control_schema_and_validation_without_parse_retry() -> None:
+@pytest.mark.parametrize("max_scroll_amount", [50, None])
+async def test_seeded_wait_limits_control_schema_and_validation_without_parse_retry(
+    max_scroll_amount: int | None,
+) -> None:
     agent = _agent(judge=True, max_steps=2)
+    agent.config.nano_omni_max_scroll_amount = max_scroll_amount
+    actions = [
+        {"action": "wait", "duration": 60},
+        {
+            "action": "scroll",
+            "scroll_parameters": {
+                "scroll_direction": "down",
+                "scroll_amount": 100000 if max_scroll_amount is None else 50,
+            },
+        },
+    ]
     seed = _seed("Allrecipes--0")
     seed["info"]["action_limits"] = {"max_wait_seconds": 120, "max_step_wait_seconds": 120}
     calls = _wire(
@@ -411,7 +425,7 @@ async def test_seeded_wait_limits_control_schema_and_validation_without_parse_re
         {
             "/seed_session": [seed],
             "/v1/responses": [
-                _native_model_response("computer", '{"actions":[{"action":"wait","duration":60}]}'),
+                _native_model_response("computer", json.dumps({"actions": actions})),
                 _native_model_response("terminate", '{"status":"success","answer":"done"}'),
             ],
             "/step": [
@@ -439,8 +453,15 @@ async def test_seeded_wait_limits_control_schema_and_validation_without_parse_re
     computer = next(tool for tool in model_body.tools if tool["name"] == "computer")
     duration = computer["parameters"]["properties"]["actions"]["items"]["properties"]["duration"]
     assert duration["anyOf"][0]["maximum"] == 120
+    amount = computer["parameters"]["properties"]["actions"]["items"]["properties"]["scroll_parameters"]["anyOf"][0][
+        "properties"
+    ]["scroll_amount"]
+    if max_scroll_amount is None:
+        assert "maximum" not in amount
+    else:
+        assert amount["maximum"] == max_scroll_amount
     step = next(value for _, path, value in calls if path == "/step")
-    assert step["action"]["arguments"]["calls"][0]["arguments"]["actions"][0]["duration"] == 60
+    assert step["action"]["arguments"]["calls"][0]["arguments"]["actions"] == actions
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Nano Omni model transport layered over the model-neutral WebArena profile.
+config_paths:
+  - benchmarks/webarena/config.yaml
+  - responses_api_models/vllm_model/configs/vllm_model.yaml
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      chat_template_kwargs:
+        truncate_history_thinking: false

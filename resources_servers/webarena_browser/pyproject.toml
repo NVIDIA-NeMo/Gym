@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nemo-gym-webarena-browser"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+  # Reuse Gym's browser-session, lifecycle, action, and artifact contracts.
+  # Install the parent closure without its dev extra so this component cannot
+  # upgrade browser packages independently of the qualified image.
+  "nemo-gym",
+  "httpx",
+  "pillow",
+  # The qualified WebArena evaluation image contains the Playwright 1.55
+  # browser bundle (Chromium 1187).  Python and browser revisions must match.
+  "playwright==1.55.0",
+  "pyautogui",
+  # `gym env test` runs pytest inside this component's isolated venv.
+  "pytest",
+  "pytest-asyncio",
+]
+
+[tool.setuptools.packages.find]
+where = ["../.."]
+include = [
+  "resources_servers.webarena_browser*",
+]
+
+[tool.uv.sources]
+nemo-gym = { path = "../..", editable = true }
