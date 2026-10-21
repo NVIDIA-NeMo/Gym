@@ -82,6 +82,16 @@ FORK_NOT_FOUND_BACKOFF_S = 5.0
 _UNRESTORED_PROVIDER_OPTIONS = ("image_auth", "snapshot_id")
 
 
+class SandboxCheckpointConfig(BaseModel):
+    """How a server checkpoints the sandboxes its sessions own: the ``sandbox_checkpoint`` block of its config."""
+
+    # Concurrent snapshot, re-create, and stop calls against the sandbox backend during a commit or restore.
+    parallelism: int = 16
+    # What happens to the agents' sandboxes when the controller stops after a commit: "kill" frees them (the
+    # restore forks from the snapshots), "none" leaves them to their TTL.
+    on_stop: OnStop = "kill"
+
+
 class SandboxCheckpointState(BaseModel):
     """What a restore needs to rebuild one session's sandbox as of a checkpoint: its snapshot and its spec.
 

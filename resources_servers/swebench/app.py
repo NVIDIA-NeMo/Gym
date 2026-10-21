@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import sys
+from functools import partial
 from glob import glob
 from pathlib import Path
 from shutil import rmtree
@@ -28,17 +29,16 @@ from swebench.harness.test_spec.test_spec import LATEST, TestSpec
 
 from docker.models.containers import ExecResult
 from nemo_gym.base_resources_server import (
-    BaseResourcesServerConfig,
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    SimpleResourcesServer,
 )
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.rollout_observability import SandboxObservation
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
-from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
+from nemo_gym.sandbox.config import resolve_provider_metadata
+from nemo_gym.sandbox.owner import SandboxOwnerConfig, SandboxOwnerResourcesServer
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import SESSION_ID_KEY
 from resources_servers.swebench.swebench_patches import (
@@ -50,7 +50,7 @@ from resources_servers.swebench.swebench_patches import (
 )
 
 
-class SwebenchResourcesServerConfig(BaseResourcesServerConfig):
+class SwebenchResourcesServerConfig(SandboxOwnerConfig):
     is_verifying_golden_patch: bool = False
     apply_anti_cheating: bool = True
     # Write the Maven Central mirror to ~/.m2/settings.xml in the eval sandbox. Turn off for providers
@@ -59,8 +59,7 @@ class SwebenchResourcesServerConfig(BaseResourcesServerConfig):
 
     evaluation_timeout: Optional[int] = None
 
-    # Sandbox config
-    sandbox_provider: str
+    # Sandbox config; sandbox_provider and sandbox_checkpoint come from SandboxOwnerConfig.
     sandbox_config: Dict[str, Any]
 
     clear_swebench_debug_logs: bool = True
@@ -241,18 +240,21 @@ class SWEBenchSeedSessionResponse(BaseSeedSessionResponse):
     sandbox_handle: str  # @bxyu-nvidia: Just a plain string URI for now for OpenSandbox backend.
 
 
-class SwebenchResourcesServer(SimpleResourcesServer):
+class SwebenchResourcesServer(SandboxOwnerResourcesServer):
+    """Each session owns the sandbox the agent works in, from /seed_session until /verify extracts the patch."""
+
     config: SwebenchResourcesServerConfig
 
-    def model_post_init(self, context: Any, /) -> None:
-        super().model_post_init(context)
-
-        self._session_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
+    def lends_sandboxes(self) -> bool:
+        # A golden-patch instance grades the dataset's own patch and never seeds: it lends no sandbox.
+        return not self.config.is_verifying_golden_patch
 
     async def _create_sandbox(self, test_spec: TestSpec) -> AsyncSandbox:
+        return await self._start_sandbox(self._sandbox_spec(test_spec), test_spec)
+
+    def _sandbox_spec(self, test_spec: TestSpec) -> SandboxSpec:
         # TODO @bxyu-nvidia: Refactor this after Hemil's swap from Python dataclass to Pydantic BaseModel
         global_config_dict = get_global_config_dict()
-        resolved_sandbox_provider = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
         provider_default_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
         resources = dict(self.config.sandbox_config.get("resources", {}))
 
@@ -282,19 +284,22 @@ class SwebenchResourcesServer(SimpleResourcesServer):
             entrypoint=None,
             provider_options=self.config.sandbox_config.get("provider_options", {}),
         )
-        eval_sandbox = AsyncSandbox(resolved_sandbox_provider)
+        return eval_sandbox_spec
 
-        async def _run_setup(sandbox: AsyncSandbox) -> None:
-            await patch_swebench_multilingual_sandbox(
-                test_spec.repo,
-                test_spec.instance_id,
-                sandbox,
-                overwrite_maven_settings=self.config.overwrite_maven_settings,
-            )
+    async def _start_sandbox(self, spec: SandboxSpec, test_spec: TestSpec) -> AsyncSandbox:
+        eval_sandbox = AsyncSandbox(self.shared_provider(), spec, owns_provider=False)
 
-        await eval_sandbox.start_with_setup(eval_sandbox_spec, _run_setup)
+        await eval_sandbox.start_with_setup(spec, partial(self._patch_multilingual, test_spec))
 
         return eval_sandbox
+
+    async def _patch_multilingual(self, test_spec: TestSpec, sandbox: AsyncSandbox) -> None:
+        await patch_swebench_multilingual_sandbox(
+            test_spec.repo,
+            test_spec.instance_id,
+            sandbox,
+            overwrite_maven_settings=self.config.overwrite_maven_settings,
+        )
 
     def _make_test_spec(self, body: SWEBenchVerifyRequest) -> TestSpec:
         return make_test_spec(
@@ -306,26 +311,38 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         )
 
     async def seed_session(self, request: Request, body: SWEBenchSeedSessionRequest) -> SWEBenchSeedSessionResponse:
-        test_spec = self._make_test_spec(body)
-        eval_sandbox = await self._create_sandbox(test_spec)
-        self._session_id_to_sandbox[request.session[SESSION_ID_KEY]] = eval_sandbox
-
-        if self.config.apply_anti_cheating:
-            # Remove the current Git repo's future history beyond the current commit to prevent the model from cheating.
-            wd = (await eval_sandbox.exec("pwd")).stdout.strip()
-            anti_cheat_setup_fpath = Path(__file__).parent / "anti_cheat_setup.sh"
-            await eval_sandbox.upload(anti_cheat_setup_fpath, f"{wd}/anti_cheat_setup.sh")
-            result = await eval_sandbox.exec(
-                f"""git reset --hard && WORKING_DIRECTORY={wd} bash anti_cheat_setup.sh && rm anti_cheat_setup.sh"""
+        session_id = request.session[SESSION_ID_KEY]
+        sandbox = self.session_sandbox(session_id)
+        if sandbox is None:
+            test_spec = self._make_test_spec(body)
+            sandbox = await self.start_session_sandbox(
+                session_id, self._sandbox_spec(test_spec), setup=partial(self._setup_agent_sandbox, test_spec)
             )
-            if result.return_code != 0:
-                print(f"""Failed to setup anti-cheating for {test_spec.instance_id}. Return code: {result.return_code}
+        # Otherwise a replacement attempt re-seeds the session a checkpoint restored: it continues in the restored
+        # sandbox, the fork of the checkpoint's snapshot, whose setup already ran.
+        return SWEBenchSeedSessionResponse(sandbox_handle=sandbox.handle.sandbox_id)
+
+    async def _setup_agent_sandbox(self, test_spec: TestSpec, sandbox: AsyncSandbox) -> None:
+        """The agent's sandbox before the agent starts: the multilingual patch, then the anti-cheat scrub.
+
+        Verify diffs the working tree in the sandbox, so the session needs no data beyond the sandbox itself.
+        """
+        await self._patch_multilingual(test_spec, sandbox)
+        if not self.config.apply_anti_cheating:
+            return
+        wd = (await sandbox.exec("pwd")).stdout.strip()
+        # Remove the current Git repo's future history beyond the current commit to prevent the model from cheating.
+        anti_cheat_setup_fpath = Path(__file__).parent / "anti_cheat_setup.sh"
+        await sandbox.upload(anti_cheat_setup_fpath, f"{wd}/anti_cheat_setup.sh")
+        result = await sandbox.exec(
+            f"""git reset --hard && WORKING_DIRECTORY={wd} bash anti_cheat_setup.sh && rm anti_cheat_setup.sh"""
+        )
+        if result.return_code != 0:
+            print(f"""Failed to setup anti-cheating for {test_spec.instance_id}. Return code: {result.return_code}
 Stdout:
 {result.stdout}
 Stderr:
 {result.stderr}""")
-
-        return SWEBenchSeedSessionResponse(sandbox_handle=eval_sandbox._handle.sandbox_id)
 
     async def verify(self, request: Request, body: SWEBenchVerifyRequest) -> SWEBenchVerifyResponse:
         """
@@ -351,6 +368,12 @@ Stderr:
 
         test_spec = self._make_test_spec(body)
 
+        session_id = request.session[SESSION_ID_KEY]
+        original_sandbox = None
+        if not self.config.is_verifying_golden_patch:
+            # 409 for a session without a sandbox: an empty patch would grade as reward 0.
+            original_sandbox = self.require_session_sandbox(session_id)
+
         verifier_sandbox_lifecycle_started_at = monotonic()
         eval_sandbox = await self._create_sandbox(test_spec)
         eval_sandbox_start_time_taken = monotonic() - verifier_sandbox_lifecycle_started_at
@@ -359,17 +382,14 @@ Stderr:
         if self.config.is_verifying_golden_patch:
             model_patch = body.patch
         else:
-            original_sandbox = self._session_id_to_sandbox.pop(request.session[SESSION_ID_KEY])
             try:
                 original_workdir = (await eval_sandbox.exec("pwd")).stdout.strip()
                 model_patch_result = await original_sandbox.exec(f"cd {original_workdir} && git --no-pager diff")
                 model_patch = model_patch_result.stdout
-            except:
+            except Exception:
                 print("Failed to extract patch from container", format_exc(), file=sys.stderr)
-            try:
-                await original_sandbox.stop()
-            except:
-                print("Failed to stop original sandbox", format_exc(), file=sys.stderr)
+            # The episode is over; its snapshots stay until a release drops the checkpoints that name them.
+            await self.end_session_sandbox(session_id)
 
         run_id = request.session[SESSION_ID_KEY]
         mock_container = DockerContainer(id=run_id, instance_id=test_spec.instance_id)
