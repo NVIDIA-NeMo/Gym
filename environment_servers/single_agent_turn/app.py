@@ -3,12 +3,12 @@
 
 """Resources-backed single-agent environment server."""
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import uuid4
 
 from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError
 from fastapi import Body
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from nemo_gym._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER, StepMode, seed_restarts, seed_verify_mode
 from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
@@ -37,7 +37,7 @@ from nemo_gym.config_types import (
     AggregateMetricsRequest,
     ResourcesServerRef,
 )
-from nemo_gym.failure_kinds import AGENT_INVALID_OUTPUT, AGENT_LIMIT, MODEL_REQUEST_ERROR, MODEL_TRANSPORT_ERROR
+from nemo_gym.failure_kinds import AGENT_INVALID_OUTPUT, AGENT_LIMIT, FAILURE_KINDS, MODEL_TRANSPORT_ERROR
 from nemo_gym.global_config import (
     TOKEN_ID_CAPTURE_BLOCK,
     get_first_server_config_dict,
@@ -86,6 +86,43 @@ class SessionHandles(BaseModel):
         )
 
 
+OutcomeAction = Literal["verify", "retry", "fail"]
+
+
+class AgentOutcomePolicyConfig(BaseModel):
+    """Route classified failed responses; HTTP status rules take precedence over failure-kind rules.
+
+    Each supplied mapping replaces its default mapping. Unmatched failures use default_action.
+    Retry means an ungraded episode failure eligible for the collector's bounded retries.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    by_failure_kind: dict[str, OutcomeAction] = Field(
+        default_factory=lambda: {
+            AGENT_INVALID_OUTPUT: "verify",
+            AGENT_LIMIT: "verify",
+            MODEL_TRANSPORT_ERROR: "retry",
+        }
+    )
+    by_status_code: dict[Annotated[int, Field(ge=400, le=599)], OutcomeAction] = Field(
+        default_factory=lambda: {
+            **dict.fromkeys((400, 413, 422), "verify"),
+            **dict.fromkeys((408, 425, 429, *range(500, 600)), "retry"),
+        }
+    )
+    default_action: OutcomeAction = "fail"
+
+    @field_validator("by_failure_kind")
+    @classmethod
+    def require_registered_kinds(cls, value: dict[str, OutcomeAction]) -> dict[str, OutcomeAction]:
+        """Reject misspelled failure names at configuration load, before starting an evaluation."""
+        invalid = value.keys() - FAILURE_KINDS - {"unknown"}
+        if invalid:
+            raise ValueError(f"Unregistered failure kinds: {sorted(invalid)}")
+        return value
+
+
 class SingleAgentTurnEnvironmentServerConfig(BaseEnvironmentServerConfig):
     """Bind Resources and Agent Servers for one agent turn."""
 
@@ -93,6 +130,7 @@ class SingleAgentTurnEnvironmentServerConfig(BaseEnvironmentServerConfig):
 
     resources_server: ResourcesServerRef
     agent_server: AgentServerRef
+    agent_outcome_policy: AgentOutcomePolicyConfig = Field(default_factory=AgentOutcomePolicyConfig)
     resources_tool_transports: list[Literal["direct_http", "mcp"]] = Field(default_factory=list)
 
 
@@ -227,7 +265,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             return trajectory.model_dump(mode="json") if trajectory else None
 
         if stage == "verify":
-            policy = agent_outcome_policy(agent_response)
+            policy = agent_outcome_policy(agent_response, config=self.config.agent_outcome_policy)
             if not policy.verifiable:
                 raise self._failure(
                     stage="agent",
@@ -525,12 +563,13 @@ class AgentOutcomePolicy(BaseModel):
     retryable: bool
 
 
-def agent_outcome_policy(response: NeMoGymResponse) -> AgentOutcomePolicy:
-    """Grade model mistakes and limits; exclude provider failures from scores.
+def agent_outcome_policy(
+    response: NeMoGymResponse, *, config: AgentOutcomePolicyConfig | None = None
+) -> AgentOutcomePolicy:
+    """Apply configured grading/retry rules to a classified failed response.
 
-    Preserve existing behavior for adapters without classified outcomes. For
-    migrated adapters, unclassified failures remain eligible for episode retry.
-    The 400/413/422 request-rejection convention matches existing Hermes behavior.
+    Unclassified legacy responses retain their existing grading behavior; malformed
+    metadata is an ungraded, nonretryable failure regardless of configuration.
     """
     raw = (response.metadata or {}).get(AGENT_OUTCOME_METADATA_KEY)
     if response.status != "failed" or raw is None:
@@ -540,11 +579,11 @@ def agent_outcome_policy(response: NeMoGymResponse) -> AgentOutcomePolicy:
     except ValidationError:
         # Keep malformed classification in the partial response for diagnosis, not scoring.
         return AgentOutcomePolicy(verifiable=False, retryable=False)
-    verifiable = outcome.failure_kind in {AGENT_INVALID_OUTPUT, AGENT_LIMIT} or outcome.status_code in {400, 413, 422}
-    return AgentOutcomePolicy(
-        verifiable=verifiable,
-        retryable=not verifiable and outcome.failure_kind in {MODEL_REQUEST_ERROR, MODEL_TRANSPORT_ERROR, "unknown"},
+    config = config or AgentOutcomePolicyConfig()
+    action = config.by_status_code.get(
+        outcome.status_code, config.by_failure_kind.get(outcome.failure_kind, config.default_action)
     )
+    return AgentOutcomePolicy(verifiable=action == "verify", retryable=action == "retry")
 
 
 def _cookies(response: Any) -> dict[str, str]:

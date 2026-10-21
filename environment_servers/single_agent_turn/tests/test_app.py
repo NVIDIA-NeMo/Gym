@@ -15,10 +15,11 @@ import orjson
 import pytest
 from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError
 from omegaconf import OmegaConf
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 import nemo_gym.server_utils
 from environment_servers.single_agent_turn.app import (
+    AgentOutcomePolicyConfig,
     SingleAgentTurnEnvironmentServer,
     SingleAgentTurnEnvironmentServerConfig,
     SingleAgentTurnResult,
@@ -1125,23 +1126,81 @@ async def test_verify_says_that_the_resources_session_is_closed_afterwards() -> 
         ({"failure_kind": "model_request_error", "status_code": 400}, True, False),
         ({"failure_kind": "model_request_error", "status_code": 413}, True, False),
         ({"failure_kind": "model_request_error", "status_code": 422}, True, False),
-        ({"failure_kind": "model_request_error", "status_code": 401}, False, True),
-        ({"failure_kind": "model_request_error", "status_code": 403}, False, True),
-        ({"failure_kind": "model_request_error", "status_code": 404}, False, True),
+        ({"failure_kind": "model_request_error", "status_code": 401}, False, False),
+        ({"failure_kind": "model_request_error", "status_code": 403}, False, False),
+        ({"failure_kind": "model_request_error", "status_code": 404}, False, False),
         ({"failure_kind": "model_request_error", "status_code": 429}, False, True),
         ({"failure_kind": "model_request_error", "status_code": 500}, False, True),
         ({"failure_kind": "model_request_error", "status_code": 503}, False, True),
         ({"failure_kind": "model_transport_error"}, False, True),
-        ({"failure_kind": "unknown"}, False, True),
-        ({"failure_kind": "model_request_error", "status_code": 402}, False, True),
-        ({"failure_kind": "model_request_error", "status_code": 409}, False, True),
+        ({"failure_kind": "unknown"}, False, False),
+        ({"failure_kind": "model_request_error", "status_code": 402}, False, False),
+        ({"failure_kind": "model_request_error", "status_code": 409}, False, False),
         ({"failure_kind": "agent_run_error"}, False, False),
     ],
 )
 async def test_classified_agent_failure_policy(outcome: dict, verifiable: bool, retryable: bool) -> None:
+    await _assert_classified_agent_failure_policy(outcome, verifiable, retryable)
+
+
+@pytest.mark.parametrize(
+    "config, outcome, verifiable, retryable",
+    [
+        (
+            {"by_failure_kind": {"model_request_error": "retry", "unknown": "retry"}},
+            {"failure_kind": "model_request_error", "status_code": 401},
+            False,
+            True,
+        ),
+        (
+            {"by_failure_kind": {"model_request_error": "retry", "unknown": "retry"}},
+            {"failure_kind": "unknown"},
+            False,
+            True,
+        ),
+        (
+            {"by_failure_kind": {"model_request_error": "retry"}},
+            {"failure_kind": "model_request_error", "status_code": 400},
+            True,
+            False,
+        ),
+        ({"by_status_code": {400: "retry"}}, {"failure_kind": "model_request_error", "status_code": 400}, False, True),
+        ({"by_status_code": {503: "fail"}}, {"failure_kind": "model_request_error", "status_code": 503}, False, False),
+        ({"by_failure_kind": {"unknown": "verify"}}, {"failure_kind": "unknown"}, True, False),
+        ({"default_action": "retry"}, {"failure_kind": "agent_run_error"}, False, True),
+        ({"by_failure_kind": {}, "by_status_code": {}}, {"failure_kind": "model_transport_error"}, False, False),
+    ],
+)
+async def test_configured_agent_failure_policy(config: dict, outcome: dict, verifiable: bool, retryable: bool) -> None:
+    await _assert_classified_agent_failure_policy(outcome, verifiable, retryable, config=config)
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"by_failure_kind": {"typo": "retry"}},
+        {"by_failure_kind": {"unknown": "typo"}},
+        {"by_status_code": {399: "retry"}},
+        {"by_status_code": {600: "retry"}},
+        {"default_action": "typo"},
+        {"typo": "retry"},
+    ],
+)
+def test_invalid_agent_policy_config_rejected(config: dict) -> None:
+    with pytest.raises(ValidationError):
+        AgentOutcomePolicyConfig.model_validate(config)
+
+
+async def _assert_classified_agent_failure_policy(
+    outcome: dict, verifiable: bool, retryable: bool, *, config: dict | None = None
+) -> None:
     from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
 
     environment, client = _environment_server()
+    if config is not None:
+        environment.config = SingleAgentTurnEnvironmentServerConfig.model_validate(
+            {**environment.config.model_dump(), "agent_outcome_policy": config}
+        )
     response = _agent_response().model_dump(mode="json")
     response.update(
         status="failed",

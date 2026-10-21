@@ -607,13 +607,13 @@ not retry or grading policy.
 
 The helper writes JSON to `response.metadata.ng_agent_outcome`; `status_code` is the
 upstream model request's status, not the agent endpoint's HTTP status. The
-`single_agent_turn` Environment Server applies this policy after closing the agent:
+`single_agent_turn` Environment Server applies this default policy after closing the agent:
 
 | Reported cause | Verify | Eligible for episode retry |
 | --- | --- | --- |
 | `agent_invalid_output`, `agent_limit`, or model request rejection 400/413/422 | Yes | No |
-| Other model request errors (including 401/403/404), `model_transport_error`, or `unknown` | No | Yes |
-| Other registered kinds or malformed metadata | No | No |
+| Model request errors 408/425/429/5xx or `model_transport_error` | No | Yes |
+| Other failures, including 401/403/404, `unknown`, or malformed metadata | No | No |
 
 Excluded attempts retain their partial response and observations in the existing
 failure flow. Retry eligibility does not force a retry; the collector's retry budget
@@ -621,6 +621,15 @@ still applies. Responses without this metadata keep the existing grading behavio
 and completed or incomplete responses remain gradable. These decisions do not change
 native harness retries or model-adapter retries.
 
+Configure `agent_outcome_policy` inside the `single_agent_turn` Environment Server's
+config to choose `verify`, `retry`, or `fail` (ungraded and nonretryable). HTTP status
+rules take precedence over failure-kind rules; unmatched failures use `default_action`
+(default: `fail`). Each supplied mapping replaces that mapping's defaults; omitted
+mappings retain their defaults. Failure names must be registered or `unknown`, and
+HTTP status keys must be 400–599. Malformed outcome metadata always fails without retry.
+
+It applies to `single_agent_turn` and its legacy-response wrapper, not other
+Environment Server implementations or agents' own legacy `/run` methods.
 
 ## Make retries and close safe
 
