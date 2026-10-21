@@ -43,7 +43,13 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.rollout_collection import _build_trajectory_record
 from nemo_gym.rollout_observability import AgentObservationBundle, TrajectoryRecord
-from responses_api_agents.nooa_agent.gym_llm import GymModelCall, GymResponsesLLM, RolloutLLMState, _responses_input
+from responses_api_agents.nooa_agent.gym_llm import (
+    GymModelCall,
+    GymResponsesLLM,
+    PolicyCallBudgetExceeded,
+    RolloutLLMState,
+    _responses_input,
+)
 from responses_api_agents.nooa_agent.observability import (
     GymTraceHooks,
     _json_output,
@@ -225,6 +231,101 @@ async def test_native_codeact_history_keeps_prefills_and_actual_cell_feedback(fa
         await agent.aclose()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("capture_rerender", [False, True])
+@pytest.mark.parametrize("change_format", [False, True])
+async def test_native_feedback_keeps_latest_captured_render_after_mutation(
+    capture_rerender: bool, change_format: bool
+) -> None:
+    trace = GymTraceHooks()
+    budget = 3 if capture_rerender else 2
+    state = RolloutLLMState(max_policy_calls=budget)
+    codes = ["values = ['first']\nvalues", "values.append('second')\nprint('mutated')"]
+    if change_format:
+        codes = [
+            "values = {'long_value': 'x' * 100}\nvalues",
+            "for event in self.events.query(type='PythonOutput'):\n"
+            "    if event.tool_call_id == 'call-1':\n"
+            "        event.metadata['truncation_event_format'] = {'max_string': 10}\n"
+            "print('format updated')",
+        ]
+    if capture_rerender:
+        codes.append("return_result('done')")
+    client = MagicMock(
+        post=AsyncMock(
+            side_effect=[
+                FakeHTTPResponse(
+                    model_response(
+                        NeMoGymResponseFunctionToolCall(
+                            id=f"fc-{index}",
+                            call_id=f"call-{index}",
+                            name="python_cell",
+                            arguments=json.dumps({"code": code}),
+                        ),
+                        response_id=f"resp-{index}",
+                    )
+                )
+                for index, code in enumerate(codes, 1)
+            ]
+        )
+    )
+    llm = GymResponsesLLM(
+        server_client=client,
+        model_server_name="policy",
+        model_url_path="/v1/responses",
+        state=state,
+        cookies={},
+        on_call=trace.on_model_call,
+    )
+    agent = NativeHistoryAgent(llm=llm)
+    try:
+        with hooks_scope(trace):
+            if capture_rerender:
+                assert await agent.answer("test mutable feedback") == "done"
+            else:
+                with pytest.raises(Exception, match="policy call budget exhausted") as caught:
+                    await agent.answer("test mutable feedback")
+                assert isinstance(caught.value.__cause__, PolicyCallBudgetExceeded)
+        assert len(state.calls) == client.post.await_count == state.used == budget
+        before = [call.request.model_dump_json() for call in state.calls]
+        native_output = next(
+            event for event in agent.events.query(type="PythonOutput") if event.tool_call_id == "call-1"
+        )
+        captured = [
+            item.content
+            for call in state.calls
+            for item in call.request.input
+            if getattr(item, "role", None) == "user"
+            and isinstance(item.content, str)
+            and item.content.startswith(f'<sys tag="{native_output.tag}">')
+        ]
+        assert len(captured) == budget - 1
+        if capture_rerender:
+            assert captured[0] != captured[1]
+        elif change_format:
+            assert native_output.metadata["truncation_event_format"] == {"max_string": 10}
+            assert "x" * 100 in captured[0]
+        else:
+            assert native_output.value == ["first", "second"]
+            assert "second" not in captured[0]
+        episode, trajectory = trace.project(
+            create_params=NeMoGymResponseCreateParamsNonStreaming(input="test mutable feedback"),
+            state=state,
+            task_id="task",
+            rollout_id="rollout",
+        )
+        assert before == [call.request.model_dump_json() for call in state.calls]
+        assert next(tool.output for tool in trajectory.tool_calls if tool.tool_call_id == "call-1") == captured[-1]
+        assert trajectory.gaps == []
+        persisted = _build_trajectory_record(
+            {"task_id": "task", "_ng_task_index": 0, "_ng_rollout_index": 0},
+            {"ng_agent_observations": episode.observations.model_dump(mode="json")},
+        )
+        assert next(tool.output for tool in persisted.tool_calls if tool.tool_call_id == "call-1") == captured[-1]
+    finally:
+        await agent.aclose()
+
+
 def _native_messages(agent: Agent) -> list[object]:
     return render_context(
         _phase_events([], agent.event_manager),
@@ -383,6 +484,31 @@ def test_later_context_filtering_does_not_erase_verified_native_feedback() -> No
         rollout_id="rollout",
     )
     assert trajectory.tool_calls[0].output == visible
+    assert trajectory.gaps == []
+
+
+def test_uncaptured_return_to_an_older_render_does_not_replace_latest_capture() -> None:
+    trace = GymTraceHooks()
+    state = RolloutLLMState(max_policy_calls=None)
+    agent = Agent(llm=make_llm(model_response())[0])
+    output = _record_native_cell(trace, agent, invocation_id="root", call_id="call-1", stdout="feedback")
+    captured = []
+    for index, event_format in enumerate(({}, {"max_string": 10}, {})):
+        output.metadata["truncation_event_format"] = event_format
+        messages = _native_messages(agent)
+        trace.on_messages_built(agent=agent, messages=messages)
+        if index < 2:
+            _record_request(trace, state, messages)
+            captured.append(next(item["content"] for item in messages if item.get("role") == "user"))
+    assert captured[0] != captured[1]
+    assert next(item["content"] for item in messages if item.get("role") == "user") == captured[0]
+    _, trajectory = trace.project(
+        create_params=NeMoGymResponseCreateParamsNonStreaming(input="task"),
+        state=state,
+        task_id="task",
+        rollout_id="rollout",
+    )
+    assert trajectory.tool_calls[0].output == captured[-1]
     assert trajectory.gaps == []
 
 

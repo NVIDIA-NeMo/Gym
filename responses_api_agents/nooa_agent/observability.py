@@ -91,6 +91,7 @@ class GymTraceHooks:
         self._invocations: dict[str, AgentInvocation] = {}
         self._events: list[GymModelCall | _ToolCall] = []
         self._python_outputs: dict[tuple[str, str], str] = {}
+        self._captured_python_outputs: dict[tuple[str, str], str] = {}
         self._python_output_gaps: set[tuple[str, str]] = set()
         self._on_progress = on_progress
 
@@ -101,6 +102,18 @@ class GymTraceHooks:
         call.invocation_id = self._current.get()
         self._invocation(call.invocation_id)
         self._events.append(call)
+        # A message build can be rejected by the policy budget before capture.
+        # Promote feedback only here so an unsent rerender cannot erase it.
+        visible_text = {
+            item.content
+            for item in _input_items(call.request.input)
+            if getattr(item, "role", None) == "user" and isinstance(getattr(item, "content", None), str)
+        }
+        self._captured_python_outputs.update(
+            (key, value)
+            for key, value in self._python_outputs.items()
+            if key[0] == call.invocation_id and value in visible_text
+        )
 
     def before_agent_call(self, *, call_id: str, parent_call_id: str | None, **_: Any) -> _AgentCall:
         self._invocations[call_id] = AgentInvocation(
@@ -294,23 +307,15 @@ class GymTraceHooks:
         # Requests preserve native history; responses cover final calls that have
         # not been replayed yet. Prefer the latest captured request for each call.
         call_items = {}
-        visible_messages: dict[str, set[str]] = {}
         for call in state.calls:
             items = _input_items(call.request.input)
             for item in [*(call.response.output if call.response is not None else []), *items]:
                 if isinstance(item, NeMoGymResponseFunctionToolCall):
                     call_items[(call.invocation_id, item.call_id)] = item
-            visible_messages.setdefault(call.invocation_id, set()).update(
-                item.content
-                for item in items
-                if getattr(item, "role", None) == "user" and isinstance(getattr(item, "content", None), str)
-            )
         # Python tool results acknowledge acceptance; execution feedback arrives
         # separately as a PythonOutput user event. Only use verified feedback that
         # reached a captured request, not a prompt stopped by the policy-call budget.
-        python_outputs = {
-            key: value for key, value in self._python_outputs.items() if value in visible_messages.get(key[0], set())
-        }
+        python_outputs = self._captured_python_outputs
         visible_outputs = {
             (call.invocation_id, item.call_id): item.output
             for call in state.calls
