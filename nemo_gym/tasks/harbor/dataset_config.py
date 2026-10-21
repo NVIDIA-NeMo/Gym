@@ -6,7 +6,8 @@
 ``task.toml`` is the task author's file and, once fetched, read-only. What a dataset needs on top
 of it goes here, as data: the facts Harbor has no field for (``license`` and ``type``, which say
 which split the rows may enter; ``allowed_agents``, the harnesses admitted to run it; ``domain`` and
-``verified``, catalog metadata), defaults that scale every task or set how many rollouts an
+``verified``, catalog metadata; ``source``, the hub reference a committed entry under ``environments/harbor/``
+is pulled from), defaults that scale every task or set how many rollouts an
 evaluation takes per task, and per-task overrides expressed with Harbor's own ``[environment]``
 fields. The loader applies the task-shaping settings before anything else sees a task, so servers,
 agents and rows only ever see the effective ``task.toml``; the other keys flow into the generated
@@ -87,6 +88,11 @@ class GymDatasetConfig(BaseModel):
     # (one of Gym's domain values) and whether its rewards were baselined and reviewed.
     domain: Domain | None = None
     verified: bool = Field(default=False, strict=True)
+    # Where a committed entry's tasks come from: a `harbor:<org>/<name>@<tag | sha256:digest>` or
+    # `harbor:<dataset>@<version>` hub reference (:mod:`nemo_gym.tasks.harbor.hub`). `gym dataset pull <entry>`
+    # fetches it into the entry's folder, and a pull of the reference itself lands there too, so one dataset never
+    # lives in two sibling folders. Unset for a dataset whose task folders are its own (the usual authored dataset).
+    source: str | None = None
     defaults: GymDatasetDefaults = Field(default_factory=GymDatasetDefaults)
     tasks: dict[str, GymTaskOverride] = Field(default_factory=dict)
     # The dataset.toml this table was read from, so that errors in applying it name the file.
@@ -105,6 +111,20 @@ class GymDatasetConfig(BaseModel):
         duplicates = sorted({name for name in value if value.count(name) > 1})
         if duplicates:
             raise ValueError(f"allowed_agents lists {', '.join(duplicates)} more than once")
+        return value
+
+    @field_validator("source")
+    @classmethod
+    def _source_is_a_hub_reference(cls, value: str | None) -> str | None:
+        """Refuse a source that is not a well-formed ``harbor:`` reference, in the hub's own words."""
+        if value is None:
+            return value
+        from nemo_gym.tasks.harbor.hub import HubError, HubRef  # hub imports the manifest, which imports this module
+
+        try:
+            HubRef.parse(value)
+        except HubError as exc:
+            raise ValueError(f"source: {exc}") from exc
         return value
 
     @field_validator("domain", mode="before")
@@ -155,6 +175,7 @@ class GymDatasetConfig(BaseModel):
             and self.allowed_agents is None
             and self.domain is None
             and not self.verified
+            and self.source is None
         )
 
     @property
