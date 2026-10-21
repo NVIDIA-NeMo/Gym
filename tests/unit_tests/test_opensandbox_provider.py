@@ -106,6 +106,74 @@ async def test_session_execution_releases_session_before_cancelling(outcome: str
     assert unhandled_errors == []
 
 
+@pytest.mark.parametrize("user", [None, "root", "runner 'quoted'", 1000])
+async def test_session_execution_preserves_env_and_user(tmp_path, user):
+    import os
+    import shlex
+
+    from nemo_gym.sandbox import AsyncSandbox
+
+    value = "spaces 'quotes' $HOME $(touch should-not-exist)\nsecond line"
+    calls = []
+
+    class Commands:
+        async def create_session(self, **kwargs):
+            assert kwargs == {"working_directory": str(tmp_path)}
+            return "session-1"
+
+        async def run_in_session(self, session_id, command, **kwargs):
+            calls.append("run")
+            assert session_id == "session-1"
+            assert kwargs == {"timeout": timedelta(0)}
+            shell, flag, inner = shlex.split(command)
+            assert (shell, flag) == ("bash", "-c")
+            if user is not None:
+                # Check the account-switch boundary, then execute its payload as
+                # the test user; this test does not require host root privileges.
+                su, shell_flag, login_shell, command_flag, inner, separator, account = shlex.split(inner)
+                assert (su, shell_flag, login_shell, command_flag, separator) == ("su", "-s", "/bin/sh", "-c", "--")
+                assert account == ("$(id -nu -- 1000)" if user == 1000 else user)
+            proc = await asyncio.create_subprocess_exec(
+                "bash",
+                "-c",
+                inner,
+                cwd=tmp_path,
+                env={**os.environ, "GREETING": "wrong default"},
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate()
+            return SimpleNamespace(
+                logs=SimpleNamespace(
+                    stdout=[SimpleNamespace(text=stdout.decode())], stderr=[SimpleNamespace(text=stderr.decode())]
+                ),
+                exit_code=proc.returncode,
+                error=None,
+            )
+
+        async def delete_session(self, session_id):
+            assert session_id == "session-1"
+            calls.append("delete")
+
+    provider = opensandbox_provider.OpenSandboxProvider(connection={"request_timeout_s": 1})
+    sandbox = AsyncSandbox(provider)
+    sandbox._handle = opensandbox_provider.SandboxHandle(
+        "sandbox-1", "opensandbox", SimpleNamespace(commands=Commands())
+    )
+    sandbox._stopped = False
+    result = await sandbox.exec(
+        'printf "%s" "$GREETING"',
+        cwd=str(tmp_path),
+        env={"GREETING": value},
+        user=user,
+        timeout_s=10,
+        preserve_background_services=True,
+    )
+    assert result.return_code == 0 and result.stdout == value
+    assert not (tmp_path / "should-not-exist").exists()
+    assert calls == ["run", "delete"]
+
+
 @pytest.mark.parametrize("recovers", [True, False])
 @pytest.mark.parametrize("timeout_kind", ["client", "server", "readiness"])
 async def test_tb4_create_timeout_retries_with_jitter(monkeypatch, recovers, timeout_kind):
@@ -1045,8 +1113,12 @@ async def test_exec_file_operations_and_reference_validation(monkeypatch: pytest
         async def write_file(self, target_path: str, data: str | bytes) -> None:
             self.writes.append((target_path, data))
 
-        async def read_bytes(self, source_path: str) -> bytes:
-            return f"bytes:{source_path}".encode()
+        async def read_bytes_stream(self, source_path: str) -> Any:
+            async def chunks() -> Any:
+                yield b"bytes:"
+                yield source_path.encode()
+
+            return chunks()
 
     class FakeRaw:
         def __init__(self) -> None:
@@ -1103,6 +1175,54 @@ async def test_exec_file_operations_and_reference_validation(monkeypatch: pytest
     assert await provider.status(handle) == SandboxStatus.RUNNING
     bare_handle = opensandbox_provider.SandboxHandle(sandbox_id="sandbox-2", provider_name="opensandbox", raw=object())
     assert await provider.status(bare_handle) == SandboxStatus.UNKNOWN
+
+
+def _download_provider(monkeypatch: pytest.MonkeyPatch, attempts: list[list[Any]]) -> tuple[Any, Any]:
+    """A provider whose sandbox streams the given chunk lists in turn; an exception in a list is raised there."""
+    served = iter(attempts)
+
+    class FakeFiles:
+        async def read_bytes_stream(self, source_path: str) -> Any:
+            chunks = next(served)
+
+            async def stream() -> Any:
+                for chunk in chunks:
+                    if isinstance(chunk, BaseException):
+                        raise chunk
+                    yield chunk
+
+            return stream()
+
+    monkeypatch.setattr(
+        opensandbox_provider, "_require_opensandbox_sdk", lambda: (object, object, object, object, object)
+    )
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    provider = opensandbox_provider.OpenSandboxProvider(connection={"request_timeout_s": 5}, probe={"command": None})
+    handle = opensandbox_provider.SandboxHandle(
+        sandbox_id="sandbox-1", provider_name="opensandbox", raw=SimpleNamespace(files=FakeFiles())
+    )
+    return provider, handle
+
+
+async def test_download_streams_a_large_file_to_disk_in_chunks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    chunks = [bytes([i]) * 1024 for i in range(8)]
+    provider, handle = _download_provider(monkeypatch, [chunks])
+    target = tmp_path / "out" / "big.bin"
+
+    await provider.download_file(handle, "/root/big.bin", target)
+
+    assert target.read_bytes() == b"".join(chunks)
+
+
+async def test_a_retried_download_starts_the_file_again(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    provider, handle = _download_provider(monkeypatch, [[b"partial", ConnectionError("reset")], [b"whole ", b"file"]])
+    target = tmp_path / "report.docx"
+
+    await provider.download_file(handle, "/root/report.docx", target)
+
+    assert target.read_bytes() == b"whole file"
 
 
 async def _no_sleep(_seconds: float) -> None:

@@ -676,6 +676,71 @@ class TestFriendlyValidationError:
 
         self._run_real_cli_with_a_malformed_head_server(monkeypatch, tmp_path, capsys, ["env", "start"])
 
+    # #4710: the `gym dataset` entrypoints wear @exit_cleanly_on_config_error and the prompt loader raises
+    # ConfigErrors, so a mistyped path or a broken prompt file is one `Error:` line and exit 1, not a traceback.
+
+    @pytest.mark.parametrize(
+        ("argv", "expected"),
+        [
+            (
+                ["dataset", "collate", "--config", "missing_config.yaml", "--output-dir", "out"],
+                "config_paths entry 'missing_config.yaml' was not found",
+            ),
+            (
+                ["dataset", "render", "-i", "in.jsonl", "--prompt-config", "missing_prompt.yaml", "-o", "out.jsonl"],
+                "Prompt config 'missing_prompt.yaml' was not found",
+            ),
+            (
+                ["dataset", "render", "-i", "in.jsonl", "--prompt-config", "no_user.yaml", "-o", "out.jsonl"],
+                "and an optional `system` string (user: Field required)",
+            ),
+            (
+                ["dataset", "render", "-i", "in.jsonl", "--prompt-config", "bad.yaml", "-o", "out.jsonl"],
+                "is not valid YAML",
+            ),
+            (
+                ["dataset", "render", "-i", "missing.jsonl", "--prompt-config", "good.yaml", "-o", "out.jsonl"],
+                "Input file not found: 'missing.jsonl' (--input)",
+            ),
+        ],
+        ids=[
+            "collate-missing-config",
+            "render-missing-prompt-config",
+            "render-prompt-without-user",
+            "render-invalid-yaml",
+            "render-missing-input",
+        ],
+    )
+    def test_dataset_config_mistake_is_a_clean_error_not_a_traceback(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path, capsys, request, argv: list[str], expected: str
+    ) -> None:
+        from nemo_gym.prompt import load_prompt_config
+
+        # The loader caches by the path string, and these relative names would otherwise outlive this tmp_path.
+        load_prompt_config.cache_clear()
+        request.addfinalizer(load_prompt_config.cache_clear)
+        monkeypatch.setenv("COLUMNS", "1000")  # rich soft-wraps at 80 columns off-TTY, splitting the message
+        (tmp_path / "env.yaml").write_text("")  # shadows a developer's own env.yaml, which is read from cwd first
+        (tmp_path / "in.jsonl").write_text(json.dumps({"question": "1+1?"}) + "\n")
+        (tmp_path / "good.yaml").write_text('user: "{question}"\n')
+        (tmp_path / "no_user.yaml").write_text("system: hi\n")
+        (tmp_path / "bad.yaml").write_text("user: [unclosed\n")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, raising=False)
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr(gc, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(sys, "argv", ["gym", *argv])
+
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "Error:" in captured.out
+        assert expected in captured.out
+        assert "Traceback" not in captured.out + captured.err
+        assert not (tmp_path / "out.jsonl").exists()
+
 
 class TestDispatch:
     """Exercise the real `dispatch` (every router test above stubs it), so argv rewriting and
