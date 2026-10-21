@@ -2,8 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Convert the completed MMRB v1 download to self-contained Gym judge inputs.
 
-The judging prompt is pinned in Gym's benchmarks/genrm_mmrb1/llm_as_a_judge_prompt.yaml.
-Data and prompt: Meta, CC BY-NC.
+The published judging prompt is downloaded from the same revision as the upstream data downloader.
 """
 
 import argparse
@@ -16,9 +15,21 @@ from tempfile import NamedTemporaryFile
 
 import yaml
 
+from resources_servers.genrm_eval.upstream_prompt import download_prompt
 
-def load_prompt(config: Path) -> str:
-    return yaml.safe_load(config.read_text())["judge_prompt"]
+
+def load_prompt(config: Path | None = None) -> str:
+    if config is not None:
+        return yaml.safe_load(config.read_text())["judge_prompt"]
+    from benchmarks.genrm_mmrb1.prepare import UPSTREAM_REVISION
+
+    return download_prompt(
+        repo="facebookresearch/multimodal_rewardbench",
+        revision=UPSTREAM_REVISION,
+        filename="scripts/1_run_model_as_judge_gpt4o.py",
+        name="judge_prompt",
+        cache_dir=Path(__file__).parent / ".cache",
+    )
 
 
 def subcategory(row: dict) -> str:
@@ -79,7 +90,7 @@ def prepare(
     output: Path,
     *,
     genrm: bool = False,
-    prompt_config: Path = Path(__file__).with_name("llm_as_a_judge_prompt.yaml"),
+    prompt_config: Path | None = None,
 ) -> None:
     source = source_dir / "data/all_data.json"
     if not source.is_file():
@@ -117,8 +128,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--judge-prompt-config",
         type=Path,
-        default=Path(__file__).with_name("llm_as_a_judge_prompt.yaml"),
-        help="Pinned YAML judging prompt (used in LLM as a judge mode)",
+        help="Optional YAML prompt override; otherwise download the pinned upstream prompt",
     )
     args = parser.parse_args()
     prepare(args.source_dir, args.output, genrm=args.judge_mode == "genrm", prompt_config=args.judge_prompt_config)

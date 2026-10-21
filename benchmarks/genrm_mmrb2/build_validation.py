@@ -2,9 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Convert the MMRB2 reasoning Parquet split into self-contained Gym judge inputs.
 
-Prompt and wrapper: facebookresearch/MMRB2 revision 7ff0552cf298441af5ebbabea634b682ef04afee,
-evaluate/generate_judgements/evaluator_apis/llm_judges/{evaluation_prompts,api_pairwise_evaluator}.py.
-Prompt copyright Meta Platforms, Inc. and affiliates; CC BY-NC 4.0.
+The published reasoning prompt is downloaded from a pinned upstream repository revision.
 """
 
 import argparse
@@ -18,20 +16,20 @@ from tempfile import NamedTemporaryFile
 import pyarrow.parquet as pq
 from PIL import Image
 
+from resources_servers.genrm_eval.upstream_prompt import download_prompt
 
-PROMPT = """Please act as an impartial judge and evaluate the quality of the responses provided by two AI assistants to the user question displayed below.
-    You should choose the assistant that follows the user's instructions and answers the user's question better.
-    Your evaluation should consider factors such as the helpfulness, relevance, accuracy, depth, and level of detail of their responses.
-    Begin your evaluation by comparing the two responses and provide a short explanation.
-    Avoid any position biases and ensure that the order in which the responses were presented does not influence your decision.
-    Do not allow the length of the responses to influence your evaluation. Do not favor certain names of the assistants. Be as objective as possible.
 
-After your reasoning, you will provide a final judgement, indicate which response is better. You must always output your response in the following structured JSON format:
+UPSTREAM_REVISION = "7ff0552cf298441af5ebbabea634b682ef04afee"
 
-{
-    "reasoning": "YOUR REASONING HERE",
-    "better_response": "A" or "B"
-}"""
+
+def load_prompt() -> str:
+    return download_prompt(
+        repo="facebookresearch/MMRB2",
+        revision=UPSTREAM_REVISION,
+        filename="evaluate/generate_judgements/evaluator_apis/llm_judges/evaluation_prompts.py",
+        name="get_reasoning_prompt",
+        cache_dir=Path(__file__).parent / ".cache",
+    )
 
 
 def text_part(text):
@@ -66,7 +64,7 @@ def interleave(text, images):
     return parts
 
 
-def convert(row, genrm=False):
+def convert(row, genrm=False, *, judge_prompt=None):
     if row["response_a_images"] or row["response_b_images"]:
         raise ValueError("Only text-only candidate responses are supported")
     chosen = row["chosen"].upper()
@@ -76,9 +74,6 @@ def convert(row, genrm=False):
     candidates = [interleave(row[f"response_{side}_text"], row[f"response_{side}_images"]) for side in ("a", "b")]
     for order in ("forward", "reverse"):
         first, second = candidates if order == "forward" else candidates[::-1]
-        content = [text_part(PROMPT), text_part("[ORIGINAL PROMPT TO MODEL:]")]
-        content += prompt + [text_part("[RESPONSE A:]")] + first + [text_part("[RESPONSE B:]")] + second
-        params = {"input": [{"role": "user", "content": content}]}
         if genrm:
             # The checkpoint's chat template supplies judging instructions; no MMRB2 wrapper.
             params = {
@@ -88,6 +83,12 @@ def convert(row, genrm=False):
                     "response_2": row["response_b_text"] if order == "forward" else row["response_a_text"],
                 },
             }
+        else:
+            if judge_prompt is None:
+                judge_prompt = load_prompt()
+            content = [text_part(judge_prompt), text_part("[ORIGINAL PROMPT TO MODEL:]")]
+            content += prompt + [text_part("[RESPONSE A:]")] + first + [text_part("[RESPONSE B:]")] + second
+            params = {"input": [{"role": "user", "content": content}]}
         yield {
             "id": f"{row['pair_id']}:{order}",
             "responses_create_params": params,
@@ -112,6 +113,7 @@ def prepare(source_dir, output, genrm=False, *, task="reasoning", response_modal
     files = sorted(source_dir.glob("test-*.parquet"))
     if not files:
         raise FileNotFoundError(f"No test Parquet files in {source_dir}")
+    judge_prompt = "" if genrm else load_prompt()
     output.parent.mkdir(parents=True, exist_ok=True)
     seen = set()
     selected = 0
@@ -127,7 +129,7 @@ def prepare(source_dir, output, genrm=False, *, task="reasoning", response_modal
                     if row["response_a_images"] or row["response_b_images"]:
                         continue
                     selected += 1
-                    for task in convert(row, genrm=genrm):
+                    for task in convert(row, genrm=genrm, judge_prompt=judge_prompt):
                         stream.write(json.dumps(task, ensure_ascii=False) + "\n")
             if len(seen) != 1000:
                 raise ValueError(f"Expected the full 1,000-pair reasoning split, got {len(seen)}")

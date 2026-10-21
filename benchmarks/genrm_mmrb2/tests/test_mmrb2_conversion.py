@@ -14,6 +14,15 @@ Image = pytest.importorskip("PIL.Image")
 from benchmarks.genrm_mmrb2.build_validation import convert, interleave, prepare
 
 
+@pytest.fixture(autouse=True)
+def mock_upstream_prompt(monkeypatch):
+    from unittest.mock import Mock
+
+    prompt = Mock(return_value="Synthetic judging instructions")
+    monkeypatch.setattr("benchmarks.genrm_mmrb2.build_validation.load_prompt", prompt)
+    return prompt
+
+
 def image():
     stream = BytesIO()
     Image.new("RGB", (1, 1)).save(stream, format="PNG")
@@ -21,7 +30,7 @@ def image():
 
 
 @pytest.mark.parametrize("genrm", [False, True])
-def test_orders_and_content(genrm):
+def test_orders_and_content(genrm, mock_upstream_prompt):
     row = {
         "pair_id": "pair",
         "chosen": "A",
@@ -41,12 +50,15 @@ def test_orders_and_content(genrm):
     assert forward["verifier_metadata"]["response_modality"] == "text_only"
     params = forward["responses_create_params"]
     if genrm:
+        mock_upstream_prompt.assert_not_called()
         assert params["metadata"]["response_1"] == "Correct"
         assert reverse["responses_create_params"]["metadata"]["response_1"] == "Wrong"
         assert forward["verifier_metadata"]["ground_truth_label"] == 3
         assert reverse["verifier_metadata"]["ground_truth_label"] == 4
     else:
+        mock_upstream_prompt.assert_called_once()
         content = params["input"][0]["content"]
+        assert content[0]["text"] == "Synthetic judging instructions"
         assert sum(part["type"] == "input_image" for part in content) == 1
         assert "verifier_metadata" not in json.dumps(params)
 
