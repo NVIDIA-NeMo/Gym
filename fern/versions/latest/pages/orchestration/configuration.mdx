@@ -105,8 +105,29 @@ A mapping with exactly one entry; its key is a name you choose (the examples use
 | `account` | required | Slurm account (`--account`). |
 | `hostname` | `null` | Login node to submit through over SSH. `null`, or the name of the machine you are on, means run `sbatch` locally with no SSH. |
 | `walltime` | `null` | Job time limit (`--time`). |
+| `forward_env` | `[]` | Environment variable names to forward from the submitting shell to `sbatch`. Missing variables fail submission before staging. Values are sent over SSH stdin and are not stored in job artifacts. |
 | `node_pools` | `{}` | Named groups of nodes. See below. |
 | `extra_args` | `{}` | Extra job-level `#SBATCH` directives, written without leading dashes: `{comment: my-run}` becomes `#SBATCH --comment=my-run`. |
+
+Use `forward_env` with `runtime:` for credentials needed by a remote job:
+
+```yaml
+compute:
+  cluster:
+    type: slurm
+    hostname: login.example.com
+    account: my-account
+    forward_env: [HF_TOKEN, INFERENCE_API_KEY]
+driver:
+  env:
+    HF_TOKEN: runtime:HF_TOKEN
+    INFERENCE_API_KEY: runtime:INFERENCE_API_KEY
+```
+
+Only listed names are forwarded. Leave scheduler-provided values such as
+`CUDA_VISIBLE_DEVICES` out of this list. `--resolve-only` and dry runs do not
+require forwarded values to be set. Slurm must export the submission environment
+to the job; an explicit `--export=NONE` prevents that inheritance.
 
 #### Node pools
 

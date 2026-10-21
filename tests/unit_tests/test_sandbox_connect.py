@@ -130,6 +130,7 @@ def test_connectable_provider_isinstance() -> None:
 
 def test_serialize_then_connect_round_trip(tmp_path: Path) -> None:
     async def _run() -> None:
+        assert AsyncSandbox(FakeConnectableProvider(), SandboxSpec(workdir="/w")).sandbox_id is None
         sandbox = await AsyncSandbox(FakeConnectableProvider(), SandboxSpec(workdir="/w")).start()
         payload = tmp_path / "f.txt"
         payload.write_text("hello-connect")
@@ -142,6 +143,7 @@ def test_serialize_then_connect_round_trip(tmp_path: Path) -> None:
 
         # A separate provider instance rebuilds a working handle from the descriptor.
         reattached = await AsyncSandbox.connect(descriptor, provider=FakeConnectableProvider())
+        assert reattached.sandbox_id == sandbox.sandbox_id == descriptor["sandbox_id"]
         result = await reattached.exec("cat /w/f.txt")
         assert result.return_code == 0
         assert result.stdout == "hello-connect"
