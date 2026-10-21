@@ -543,7 +543,7 @@ def test_dispatch_span_takes_its_identity_from_the_collector_row(recorded_spans,
     (span,) = [s for s in recorded_spans() if s.name == "gym.rollout.dispatch"]
     assert span.attributes["nemo.gym.rollout.id"] == expected
     assert span.attributes["nemo.gym.rollout.dispatch.name"] == "alpha"
-    assert span.attributes["nemo.gym.rollout.dispatch.server"] == "alpha_environment_server"
+    assert span.attributes["nemo.gym.http.destination.server.name"] == "alpha_environment_server"
 
 
 def test_dispatch_span_omits_the_id_for_a_row_without_identity(recorded_spans):
@@ -662,7 +662,7 @@ async def test_standalone_run_gives_each_rollout_its_own_trace_linked_to_the_job
         (link,) = dispatch.links
         assert (link.context.trace_id, link.context.span_id) == (job.context.trace_id, job.context.span_id)
         assert dispatch.attributes["nemo.gym.rollout.dispatch.name"] == "alpha"
-        assert dispatch.attributes["nemo.gym.rollout.dispatch.server"] == "alpha_environment_server"
+        assert dispatch.attributes["nemo.gym.http.destination.server.name"] == "alpha_environment_server"
     # Each /run is sent under its rollout's dispatch span, so the agent joins that trace.
     by_span_id = {d.context.span_id: d for d in dispatches}
     assert len(sent) == 3
@@ -714,3 +714,38 @@ async def test_dispatch_span_is_skipped_while_traces_are_off(tmp_path, monkeypat
     sent = _install_recording_post(monkeypatch)
     await RolloutCollectionHelper().run_from_config(_collection_config(tmp_path, _write_rollout_input(tmp_path, 2)))
     assert len(sent) == 2
+
+
+@pytest.mark.asyncio
+async def test_materialized_dispatch_takes_its_id_from_the_row_not_the_episode_body(
+    monkeypatch, recorded_spans, driver_telemetry
+):
+    """The posted episode body carries the identity only as `episode_id`; the dispatch span still gets the id.
+
+    Pins the call site, not the helper: `_dispatch_span` must receive the collector row, because
+    `maybe_rollout_id_from_run_body` cannot read an id out of the posted body of a materialized row.
+    """
+    import json as _json
+    from unittest.mock import AsyncMock
+
+    from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+    from tests.unit_tests import test_rollout_collection as collection_tests
+
+    post = AsyncMock(return_value=collection_tests.FakeResponse(200, {"reward": 1.0}))
+    client = collection_tests.install_fake_server_client(monkeypatch, post)
+    client.global_config_dict = collection_tests.TestEnvironmentServerRouting._mixed_batch_config()
+    row = collection_tests.TestEnvironmentServerRouting._materialized_row()
+    config = RolloutCollectionConfig(
+        input_jsonl_fpath="input.jsonl",
+        output_jsonl_fpath="output.jsonl",
+        environment_server_routes={"swe_pro": "environment"},
+        num_repeats=1,
+    )
+    rows = RolloutCollectionHelper._preprocess_raw_rows([(0, _json.dumps(row), row)], config)
+
+    for future in RolloutCollectionHelper().run_examples(rows):
+        await future
+
+    (dispatch,) = [s for s in recorded_spans() if s.name == "gym.rollout.dispatch"]
+    assert dispatch.attributes["nemo.gym.rollout.id"] == "0-0"
+    assert "episode_id" in post.call_args.kwargs["json"]

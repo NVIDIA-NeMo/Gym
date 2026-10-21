@@ -109,6 +109,7 @@ from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span
 from nemo_gym.telemetry.endpoints import ROLLOUT_ID_ATTRIBUTE
 from nemo_gym.telemetry.gym_metrics import (
     DISPATCH_NAME_ATTRIBUTE,
+    HTTP_DESTINATION_SERVER_NAME_ATTRIBUTE,
     UNREGISTERED_FAILURE_KIND,
     record_rollout_completed,
     record_rollout_health,
@@ -1912,9 +1913,6 @@ _SERVER_DID_NOT_RUN_STATUSES = frozenset({429, 502, 503, 504})
 _MAX_FAILURE_BODY_CHARS = 2000
 
 
-#: The server a dispatch is posted to; differs from the dispatch name for a row routed by agent.
-DISPATCH_SERVER_ATTRIBUTE = "nemo.gym.rollout.dispatch.server"
-
 #: ``SpanContext`` of the ``gym.job`` span the driver opened as a standalone trace root, for the
 #: duration of that run. None under an embedder's trace or when the ``job`` group is off. With
 #: traces off it holds the *invalid* context of a non-recording span rather than None;
@@ -1949,7 +1947,10 @@ def _dispatch_span(row: Mapping[str, Any], dispatch_name: str, *, server_name: s
     """
     from nemo_gym.telemetry.spans import linked_root_span
 
-    attributes: Dict[str, Any] = {DISPATCH_NAME_ATTRIBUTE: dispatch_name, DISPATCH_SERVER_ATTRIBUTE: server_name}
+    attributes: Dict[str, Any] = {
+        DISPATCH_NAME_ATTRIBUTE: dispatch_name,
+        HTTP_DESTINATION_SERVER_NAME_ATTRIBUTE: server_name,
+    }
     try:
         rollout_id = maybe_rollout_id_from_run_body(row)
     except (TypeError, ValueError):
