@@ -206,6 +206,11 @@ class HarborAgent(SimpleResponsesAPIAgent):
 
     def model_post_init(self, context) -> None:
         self._sem = asyncio.Semaphore(get_global_config_dict().get(NUM_SAMPLES_IN_PARALLEL_KEY_NAME) or 1)
+        logger.warning(
+            "responses_api_agents/harbor_agent_general is deprecated and will be removed soon. "
+            "New work should run Harbor tasks through the Harbor environment server "
+            "(PR stack from https://github.com/NVIDIA-NeMo/Gym/pull/3674)."
+        )
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
         ## Harbor owns the full run() lifecycle.

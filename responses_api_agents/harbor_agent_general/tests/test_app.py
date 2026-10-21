@@ -308,3 +308,14 @@ def test_failure_response_uses_native_agent_model(agent: HarborAgent, tmp_path: 
     response = agent.failure_response(body, RuntimeError("trial failed"))
     assert response.response.model == "native-model"
     assert response.response.status == "failed"
+
+
+def test_startup_logs_the_deprecation_notice(agent: HarborAgent, caplog: pytest.LogCaptureFixture) -> None:
+    """The server says on startup that it is superseded by the Harbor task format and where that lives."""
+    with caplog.at_level("WARNING", logger="responses_api_agents.harbor_agent_general.app"):
+        agent.model_post_init(None)
+    notices = {record.getMessage() for record in caplog.records if "deprecated" in record.getMessage()}
+    assert len(notices) == 1
+    (notice,) = notices
+    assert "responses_api_agents/harbor_agent_general is deprecated" in notice
+    assert "https://github.com/NVIDIA-NeMo/Gym/pull/3674" in notice
