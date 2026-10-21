@@ -163,11 +163,3 @@ def test_the_check_requires_a_422_with_a_string_detail() -> None:
 
     with pytest.raises(AssertionError, match="must carry a string detail"):
         check_agent_seed_rejected(invalid, _seed_request())
-
-
-def test_sessions_on_several_workers_fail_with_a_final_422() -> None:
-    agent = _GrantCheckingAgent.model_construct(config=MagicMock(num_workers=2), server_client=MagicMock())
-
-    detail = check_agent_seed_rejected(agent.setup_webserver(), _seed_request())
-
-    assert detail == "Agent sessions require num_workers=1"

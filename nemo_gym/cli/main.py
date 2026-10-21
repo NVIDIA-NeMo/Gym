@@ -675,6 +675,18 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
         sys.exit(1)
 
 
+def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
+    if overrides:
+        args._parser.error("resubmit does not accept Hydra overrides")
+    from nemo_gym.orchestration.submit import resubmit
+
+    try:
+        print(resubmit(args.gym_job_id, args.benchmark).job_id)
+    except (ValueError, RuntimeError) as error:
+        print(f"Error: {error}", file=sys.stderr)
+        sys.exit(1)
+
+
 def _eval_run(args: argparse.Namespace, overrides: list[str]) -> None:
     target = getattr(args, "target", None)
     if target:
@@ -1308,6 +1320,18 @@ COMMANDS = {
                     help="Emit the submission record (or, with --resolve-only, the resolved config) as JSON.",
                 ),
             ),
+        ),
+    ),
+    "eval resubmit": Command(
+        target=_eval_resubmit,
+        summary="Queue one benchmark of a submitted run again, in place.",
+        flags=(
+            Flag(
+                register=lambda p: p.add_argument(
+                    "gym_job_id", metavar="GYM_JOB_ID", help="The submission's id, as printed by `gym eval submit`."
+                ),
+            ),
+            Flag(register=lambda p: p.add_argument("benchmark", metavar="BENCHMARK", help="The benchmark to queue.")),
         ),
     ),
     "eval compare": Command(

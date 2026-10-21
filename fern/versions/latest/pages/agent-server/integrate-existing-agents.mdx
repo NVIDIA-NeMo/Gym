@@ -34,7 +34,7 @@ An experiment is a few composable YAML files: the model and provider, the benchm
 
 ### Configure an experiment
 
-The following evaluation example pairs SWE-bench Pro with Hermes. Before you start, install a current Gym checkout with the native-session adapters, Gym's development environment, and the benchmark's preparation dependencies. Save the four files below under `experiments/onboarding/`, and run all commands from the repository root. Entries in `config_paths` are relative to the root.
+The following evaluation example pairs SWE-bench Pro with Hermes. Before you start, install a current Gym checkout with the agent session adapters, Gym's development environment, and the benchmark's preparation dependencies. Save the four files below under `experiments/onboarding/`, and run all commands from the repository root. Entries in `config_paths` are relative to the root.
 
 You also need a running vLLM-compatible model endpoint and an OpenSandbox deployment. Export the following variables in your shell:
 
@@ -136,7 +136,7 @@ gym eval prepare --config experiments/onboarding/run.yaml
 gym env resolve --config experiments/onboarding/run.yaml
 ```
 
-Then run one task. This command collates the declared benchmark data into native task rows, starts the servers, collects rollouts, and shuts the servers down:
+Then run one task. This command collates the declared benchmark data into materialized task rows, starts the servers, collects rollouts, and shuts the servers down:
 
 ```bash
 gym eval run \

@@ -3420,7 +3420,7 @@ class TestComposeUnboundAgent:
         assert "no other agent instance to rehost it on" in str(exc_info.value)
 
     def test_real_benchmark_composes_onto_real_harness(self) -> None:
-        # Native Hermes has no Resources binding; legacy harness swaps explicitly leave it unbound.
+        # Hermes for agent sessions has no Resources binding; harness swaps on the agent's own /run explicitly leave it unbound.
         resolved = self._parse(
             DictConfig(
                 {
