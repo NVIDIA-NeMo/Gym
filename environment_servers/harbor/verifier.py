@@ -21,6 +21,7 @@ import math
 import posixpath
 import shlex
 import tarfile
+import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
@@ -64,6 +65,7 @@ from nemo_gym.sandbox.transfer import (
 from nemo_gym.tasks.harbor import HarborTask
 from nemo_gym.tasks.harbor.digest import is_ignored
 from nemo_gym.tasks.harbor.models import HarborArtifact
+from nemo_gym.tasks.harbor.python_verifier import VerifierShim, write_shim
 from nemo_gym.tasks.harbor.task import HarborTurn
 
 
@@ -125,6 +127,18 @@ def verifier_command(budget: int) -> str:
         f"timeout -s KILL {budget} bash {TESTS_DIR}/test.sh > {VERIFIER_STDOUT} 2>&1; rc=$?; "
         f'echo "$rc $start $(date +%s)" > {VERIFIER_LOGS_DIR}/{EXIT_RECORD_NAME}; exit $rc'
     )
+
+
+def _uploads_task_tests(task: HarborTask) -> bool:
+    """Whether the task's own ``tests/`` must reach ``/tests``: a ``test.sh`` task's, and a Python verifier's when the
+    task's ``tests/`` carries the module (the shim's ``test.sh`` names ``/tests/verifier.py``, which only that upload
+    provides). A dataset-level verifier travels in the shim alone: a task it grades has no ``tests/`` of its own.
+
+    Decided from where the loaded task's verifier is, not from whether the folder is on disk now: a snapshot whose
+    ``tests/`` disappeared under the episode then fails its upload and masks the sample, as a ``test.sh`` task's does,
+    instead of running the shim against a missing module and scoring the missing reward as a zero.
+    """
+    return task.python_verifier is None or task.python_verifier.parent == task.path / "tests"
 
 
 async def _make_test_script_executable(sandbox: AsyncSandbox) -> None:
@@ -387,15 +401,44 @@ class HarborVerificationMixin:
 
     """
 
-    async def _run_verifier(self, session: HarborSession, trajectory: bytes) -> dict[str, Any]:
+    async def _run_verifier(
+        self, session: HarborSession, trajectory: bytes, *, response: NeMoGymResponse | None = None
+    ) -> dict[str, Any]:
         """Run ``tests/test.sh`` and read the reward it wrote, in the agent's sandbox or a separate one.
 
         ``trajectory`` is the exported ATIF transcript, written to ``/logs/agent/trajectory.json`` in the
-        sandbox that runs ``test.sh`` before it starts.
+        sandbox that runs ``test.sh`` before it starts. ``response`` is the agent's final response, handed to a
+        Python verifier that declares it (:meth:`_verifier_shim`).
         """
         if self._separate_verifier(session.task):
-            return await self._run_separate_verifier(session, trajectory) | {"verifier_mode": "separate"}
-        return await self._run_shared_verifier(session, trajectory) | {"verifier_mode": "shared"}
+            return await self._run_separate_verifier(session, trajectory, response=response) | {
+                "verifier_mode": "separate"
+            }
+        return await self._run_shared_verifier(session, trajectory, response=response) | {"verifier_mode": "shared"}
+
+    async def _upload_verifier_shim(
+        self, sandbox: AsyncSandbox, session: HarborSession, response: NeMoGymResponse | None
+    ) -> bool:
+        """Upload the shim over ``/tests``, after the task's own ``tests/``, when a Python verifier grades the task.
+
+        It holds the ``test.sh`` that runs ``verify()`` inside the sandbox with the workspace path, the runner,
+        a vendored ``nemo_gym.verifiers``, the task's fields and the agent's final response; no verifier code
+        runs on this host (:mod:`nemo_gym.tasks.harbor.python_verifier`). The shim is per episode (it embeds the
+        response), so it is written to a folder that lives only for the upload. ``False`` for a ``test.sh`` task.
+        """
+        task = session.task
+        if task.python_verifier is None:
+            return False
+        shim = VerifierShim(
+            verifier=task.python_verifier,
+            in_task_tests=task.python_verifier.parent == task.path / "tests",
+            workspace=session.workdir,
+            task_data=task.task_data,
+            response=response.model_dump(mode="json") if response is not None else None,
+        )
+        with tempfile.TemporaryDirectory(prefix="verifier-shim-", dir=self._snapshots.name) as folder:
+            await upload_dir(sandbox, write_shim(Path(folder), shim), TESTS_DIR, ignore=is_ignored)
+        return True
 
     def _reserve_logs_dir(self) -> Path:
         """A fresh host directory for one verification's logs.
@@ -506,7 +549,9 @@ class HarborVerificationMixin:
             await self._collect_entrypoint_log(sandbox, task, logs_dir / entrypoint_log)
         return exit_record, rewards, problem
 
-    async def _run_separate_verifier(self, session: HarborSession, trajectory: bytes) -> dict[str, Any]:
+    async def _run_separate_verifier(
+        self, session: HarborSession, trajectory: bytes, *, response: NeMoGymResponse | None = None
+    ) -> dict[str, Any]:
         """Harbor's separate mode: collect the agent's artifacts, stop its sandbox, verify in a fresh one.
 
         The verifier sandbox comes from ``[verifier.environment]``, the image prepare built from
@@ -600,8 +645,13 @@ class HarborVerificationMixin:
             # A prebuilt verifier image usually ships /tests already, with the modes its tests expect, and one
             # built from tests/Dockerfile owns /tests the way its file copied it (Harbor uploads nothing into it,
             # `skip_tests_upload`). Only upload the package's tests when the image has none, as the old server did.
-            if await remote_kind(verifier, f"{TESTS_DIR}/test.sh") is None:
-                if task.verifier_image and task.verifier_image not in self._verifier_images_without_tests:
+            # A task graded by a Python verifier has no test.sh of its own: a test.sh the image ships is not its
+            # grader, so its tests/ (the module and its helpers) is uploaded regardless and the shim's test.sh,
+            # uploaded last, is the one that runs.
+            image_has_tests = await remote_kind(verifier, f"{TESTS_DIR}/test.sh") is not None
+            if not image_has_tests or task.python_verifier is not None:
+                unseen = task.verifier_image and task.verifier_image not in self._verifier_images_without_tests
+                if not image_has_tests and unseen:
                     self._verifier_images_without_tests.add(task.verifier_image)
                     LOGGER.warning(
                         "%s: verifier image %s has no %s/test.sh; uploading the task's tests/ into it (Harbor uploads "
@@ -610,7 +660,9 @@ class HarborVerificationMixin:
                         task.verifier_image,
                         TESTS_DIR,
                     )
-                await upload_dir(verifier, task.path / "tests", TESTS_DIR, ignore=is_ignored)
+                if task.python_verifier is None or (task.path / "tests").is_dir():
+                    await upload_dir(verifier, task.path / "tests", TESTS_DIR, ignore=is_ignored)
+            await self._upload_verifier_shim(verifier, session, response)
             for archive, kind, source in restored:
                 await self._restore_artifact(verifier, task, archive, kind, source)
                 # The staged tree stays as the diagnostic; the archive served its purpose.
@@ -813,6 +865,7 @@ class HarborVerificationMixin:
         *,
         settings: VerifierSettings | None = None,
         test_dirs: tuple[Path, ...] | None = None,
+        response: NeMoGymResponse | None = None,
     ) -> dict[str, Any]:
         """Run ``test.sh`` in the agent's sandbox and read the reward it wrote.
 
@@ -839,7 +892,8 @@ class HarborVerificationMixin:
         # uploaded whatever the host says, so a snapshot removed under the episode fails the upload and masks.
         optional_tests = test_dirs is not None
         if test_dirs is None:
-            test_dirs = (task.path / "tests",)
+            # A task graded by the dataset's verifier.py has no tests/ of its own: the shim below is its /tests.
+            test_dirs = (task.path / "tests",) if _uploads_task_tests(task) else ()
         started = asyncio.get_running_loop().time()
         try:
             logs_dir = self._reserve_logs_dir()
@@ -861,6 +915,7 @@ class HarborVerificationMixin:
                 if optional_tests and not tests.is_dir():
                     continue
                 await upload_dir(sandbox, tests, TESTS_DIR, ignore=is_ignored)
+            await self._upload_verifier_shim(sandbox, session, response)
             await _make_test_script_executable(sandbox)
             await self._upload_trajectory(sandbox, trajectory, logs_dir)
             # One plain exec for the whole run. The provider keeps it alive for as long as

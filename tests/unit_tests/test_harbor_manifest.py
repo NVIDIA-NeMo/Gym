@@ -34,6 +34,7 @@ from nemo_gym.tasks.harbor.manifest import (
     check_manifest,
     check_task_manifest,
     dataset_digest,
+    dataset_files_digest,
     dataset_toml_digest,
     task_differences,
 )
@@ -227,6 +228,59 @@ class TestManifestFormat:
         with_edit = Manifest.build(folder, source="local")
         assert with_edit.digest not in (base.digest, with_toml.digest)
         assert with_edit.tasks["a"]["digest"] != base.tasks["a"]["digest"]
+
+    def test_dataset_level_verifier_and_task_data_modules_enter_the_dataset_digest(self, tmp_path, capsys):
+        # A dataset-level verifier.py grades every task without tests/ and task_data.py types every row: two runs
+        # that differ only in one of them are not one dataset. Without them nothing changes: same digest, same text.
+        folder = tmp_path / "ds"
+        write_task(folder / "a")
+        base = Manifest.build(folder, source="local")
+        assert base.dataset_files_digest == dataset_files_digest(folder) == dataset_toml_digest(folder)
+        assert "dataset_files_digest" not in base.text()
+        assert base.digest == dataset_digest({"a": content_hash(folder / "a")}, base.dataset_toml_digest)
+
+        (folder / "verifier.py").write_text("def verify(workspace):\n    return 1.0\n")
+        with_grader = Manifest.build(folder, source="local")
+        assert with_grader.digest != base.digest and with_grader.tasks == base.tasks
+        assert with_grader.digest == dataset_digest(
+            {"a": content_hash(folder / "a")},
+            base.dataset_toml_digest,
+            with_grader.dataset_files_digest,
+        )
+        assert f"dataset_files_digest = {json.dumps(with_grader.dataset_files_digest)}" in with_grader.text()
+        with_grader.write(folder)
+        assert Manifest.read(folder) == with_grader
+        assert set(tomllib.loads(with_grader.text())["dataset"]) == {
+            "source",
+            "digest",
+            "dataset_toml_digest",
+            "dataset_files_digest",
+        }
+
+        (folder / "verifier.py").write_text("def verify(workspace):\n    return 0.0\n")
+        edited = Manifest.build(folder, source="local")
+        assert edited.digest != with_grader.digest and edited.dataset_files_digest != with_grader.dataset_files_digest
+        (folder / "task_data.py").write_text("from pydantic import BaseModel\nclass TaskData(BaseModel):\n    pass\n")
+        with_model = Manifest.build(folder, source="local")
+        assert with_model.digest not in (base.digest, with_grader.digest, edited.digest)
+
+        # A fetched dataset: the Gym layer moved, the task folders did not, so the manifest is rewritten (not
+        # refused, as for dataset.toml), the pins kept, and the rewrite says which file moved.
+        before = fetched_manifest(folder, ["a"])
+        (folder / "verifier.py").write_text("def verify(workspace):\n    return 0.5\n")
+        after = check_manifest(folder)
+        assert after.source == "harbor-registry" and after.pins == before.pins and after.digest != before.digest
+        assert after.tasks["a"]["digest"] == before.tasks["a"]["digest"]
+        assert "a dataset-level task_data.py or verifier.py changed" in capsys.readouterr().out
+        assert Manifest.read(folder) == after
+
+        # A single task folder prepared on its own: its identity covers the files beside it the same way.
+        prepared = prepare_target(str(folder / "a"), output_root=tmp_path / "out")
+        assert prepared.dataset_digest == dataset_digest(
+            {"a": prepared.tasks[0].folder_digest},
+            dataset_toml_digest(folder),
+            dataset_files_digest(folder),
+        )
 
     def test_names_round_trip_through_toml_and_pins_survive_absent_folders(self, tmp_path):
         folder = tmp_path / "ds"

@@ -38,6 +38,10 @@ DATASET_DIGEST_KEY = "_ng_dataset_digest"
 _SINGLE_FILES = ("task.toml", "instruction.md", "README.md", "trajectory.json", "task_data.json")
 _DIRECTORIES = ("environment", "tests", "solution", "steps")
 _IGNORED = ("__pycache__", "*.pyc", ".DS_Store", "*.swp", "*.swo", "*~")
+# The one root file outside the digest that Harbor's packager reads: its ignore rules at `harbor add` and `harbor
+# publish` (`harbor task init` writes one into every task). The renderer and publish keep it where they leave the
+# other hidden root entries behind; it is not part of a task's identity.
+GITIGNORE = ".gitignore"
 
 
 def is_ignored(relative: str) -> bool:

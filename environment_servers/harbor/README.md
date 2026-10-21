@@ -765,12 +765,15 @@ when its session is closed.
 
 `manifest.toml` beside the task folders holds derived facts only, never a copy of the name or version
 (those live in `dataset.toml`): `[dataset]` `source` (`harbor-registry`, `harbor-package-store`, `git` or
-`local`), `digest` (the dataset's identity: a hash over the sorted per-task digests and `dataset.toml`),
-`dataset_toml_digest` on its own, and per task
+`local`), `digest` (the dataset's identity: a hash over the sorted per-task digests, `dataset.toml` and, when the
+dataset ships them, the dataset-level `task_data.py` and `verifier.py`), `dataset_toml_digest` on its own,
+`dataset_files_digest` (the two Gym files, written only
+when at least one is present, so a dataset without them hashes and reads as before), and per task
 `[tasks."<id>"]` `digest` (the folder digest rows carry as `_ng_digest`) with its upstream pin (`git_url`,
 `git_commit_id`, `path`, or `package`, `content_hash`). The output is deterministic: fixed key order,
 sorted tasks, no timestamps, so equal manifests mean identical inputs and two runs compare by `digest`.
-Two datasets that differ only in a `[gym]` timeout override are different datasets, on purpose.
+Two datasets that differ only in a `[gym]` timeout override, or only in the shared grader, are different datasets,
+on purpose.
 
 Fetches write the manifest and record only the tasks they fetched; a task folder beside them that neither the
 source names nor a previous fetch recorded stops the fetch (move it aside). Prepare writes a manifest for a
@@ -795,8 +798,9 @@ dataset folder and select the task. A registry fetch
 re-hashes the folders it keeps only when it also adds tasks (a package-store fetch compares every folder it finds
 on each run), while prepare recomputes every task digest on each run, so a hand-edited folder a re-fetch kept is
 caught at prepare. A manifest naming a
-source this Gym does not know is refused too, never read as local. When only `dataset.toml` moved, the derived
-facts are rewritten without a fetch. A `latest` package-store folder whose manifest was written for another
+source this Gym does not know is refused too, never read as local. When only `dataset.toml` or a
+dataset-level `task_data.py` / `verifier.py` moved (Gym's layer, not fetched content), the derived facts are
+rewritten without a fetch and the rewrite says which. A `latest` package-store folder whose manifest was written for another
 version of the dataset is refused the same way: the error names the version difference and says to delete the
 folder, or move it aside, and run again to fetch the store's `latest`, or to pin the version you have with
 `harbor:<org>/<name>@<tag>`. A manifest written by a newer Gym (a `schema_version` this Gym does not read) is
@@ -891,6 +895,121 @@ accept and ignore, is refused; re-materialize it), and a module
 that does not import refuses every episode of its taskset with the import error (logged once at startup). `gym dataset
 collate` validates the rows against this server's `task_data.py` (the reserved keys) and the dataset's model in one
 report. A dataset without the module is checked for the reserved keys only, as before.
+
+## Authoring Gym datasets
+
+Three authoring shapes sit on top of Harbor's task folder, all rendered to plain files before any server reads them
+(`nemo_gym.tasks.harbor.parameterized`, `python_verifier`, `publish`):
+
+- **Parameterized tasks.** A template folder is a task folder with `tasks.jsonl` beside its `task.toml`, one row per
+  task (`{"task_id": "...", "task_data": {...}}`, or the fields flat beside `task_id`). Prepare renders it into
+  `results/harbor/<taskset>/rendered/<task_id>/`, `gym dataset validate` included (its rows and results live under
+  `results/harbor/validation/`, but the rendered folder is the dataset root prepare records into, so one render,
+  one manifest and one built image serve both commands): files named `<stem>.template<suffix>` (`instruction.template.md`,
+  `solution/solve.template.sh`, `solution/answer.template.md`) have their `{{ task_data.key }}` / `{{ key }}`
+  placeholders filled from the row and are written as `<stem><suffix>` (those two spellings only: a placeholder that
+  names no field, any other `{{ ... }}` left in a rendered file, such as `{{ q | upper }}` or `{{ task-data.q }}`,
+  or a `{{` that never closes (`{{ a }{{ q }}`),
+  fails prepare naming the task and file rather than reaching the agent as text; a literal `{{ ... }}` belongs in a
+  file without the `.template` marker); every other file is copied, hidden files
+  under `environment/`, `tests/`, `solution/` and `steps/` included (`environment/.env`, `.dockerignore`: they enter
+  the task digest and reach the sandbox). Left out are the names the digest skips (`__pycache__`, `*.pyc`, editor
+  leftovers), the template root's hidden entries (`.git`, `.venv`), `tasks.jsonl`, the dataset-level files, prepare's
+  records and the root `README.md`, which describes the template (a per-task README is `README.template.md`). Two
+  entries that would land under one name (`instruction.md` beside `instruction.template.md`) fail prepare naming
+  both, and so does a `task_data.json` or `task_data.template.json` at the template root: the rendered task's
+  `task_data.json` is written from its row, never from a file of the template (a `tests/task_data.json` fixture
+  below the root is copied like any other file). The row's fields
+  become `task_data.json`, typed by the template's `task_data.py` when it ships one. The rendered `task.toml` is the
+  template's with `[task].name` rewritten to `<org>/<task_id>` (the template's org): Harbor keys a dataset on that
+  name (`harbor add` keeps one folder per name, trial results and the viewer label by it), so every rendered task
+  needs its own. A template without a `[task]` table renders without one (Harbor then names the task after its
+  folder, and `harbor add --scan` asks for `harbor task update --scan` to add names); a template name that is not
+  `org/name`, a name spelled some other way than a `[task]` table with `name = "..."` on its own line, or a `task_id`
+  outside the characters Harbor admits in a name or longer than 255 bytes (a folder name's limit) fails prepare with
+  the row named. The rendered folder is the
+  taskset this server loads, with the dataset-level files beside it. Rendering is deterministic, so digests are
+  stable across prepares; a re-render lands in a hidden sibling first and is swapped in entry by entry, so a task
+  folder whose content did not change is left in place (a server still seeding from an earlier prepare of the same
+  template never meets a folder being deleted and rewritten), a changed one is replaced by rename, a stale one
+  removed, and a render that fails leaves the previous one as it was. Placeholders are inserted verbatim, so a value
+  that must survive shell quoting belongs in a
+  rendered text file (`solution/answer.template.md`), not inside a quoted literal of a `solve.template.sh`.
+  `gym dataset init <name> --parameterized` scaffolds the shape, with the reference answer as `answer.template.md`.
+- **Python verifiers.** `tests/verifier.py` grades a task that has no `tests/test.sh`; a
+  `verifier.py` beside `dataset.toml` grades every task without a `tests/` folder (its content enters those tasks'
+  digests). `tests/test.sh` wins whenever it exists: on the hub a `tests/verifier.py` beside it is the helper that
+  `test.sh` runs (whole datasets ship that shape), so such a task is a plain `test.sh` task and the module an ordinary
+  test file, uploaded with `tests/`. `verify` declares what it reads, `workspace` (the working directory, a `Path`), `task_data`, `response`
+  (the agent's final response) or `state` (`{"workspace": Path}`), and returns a number or a dict with `reward`.
+  Helpers live in `nemo_gym.verifiers` (`final_text`, `exact_match`, `numeric_match`) and `nemo_gym.verifiers.files`
+  (`read_text`, `file_exists`, `text_file_equals`), standard library only; in the sandbox they always resolve to the
+  vendored copy under `/tests/.ng`, which the runner ranks ahead of the verifier's own folder, `/tests` and the
+  image's packages (a `nemo_gym` shipped in, or planted into, the task's `tests/` never replaces them). No verifier code runs on the host: at
+  verification this server uploads a shim folder over `/tests` after the task's own `tests/` (a `test.sh` that finds
+  a Python 3.8 or newer in the image, refusing an older one with the version named, exit 127 and no reward; the
+  runner and the vendored helpers keep to 3.8, `.ng/run_verifier.py`, a vendored `nemo_gym/verifiers`, `.ng/task_data.json`,
+  `.ng/response.json` and, for a dataset-level module, `.ng/verifier.py`) and runs it under the usual `test.sh`
+  wrapper, in shared or separate mode, with the session's working directory as the workspace. In separate mode the
+  verifier sandbox is a fresh container, so a verifier that reads `workspace` (or `state`) needs the task's top-level
+  `artifacts` to include the working directory (`artifacts = ["/workspace"]`), as any separate-mode `test.sh` that
+  reads the agent's files does; without it the workspace is empty there and the task scores 0. The runner writes
+  `reward.txt` or `reward.json`; a verifier that raises, asks for an argument the runner does not know or returns
+  something else leaves no reward (the usual missing-reward outcome, with its stderr in the verifier log). The shim
+  removes any `reward.json` or `reward.txt` already in `/logs/verifier` before the runner starts, and the runner again
+  before `verify` runs: Harbor shares that folder with the agent's container for the whole run and reads
+  `reward.json` first, so a file planted there would otherwise be the verdict of a published task (this server
+  empties the folder before every upload; Harbor does not). An
+  `async def verify` is awaited. Separate mode is Gym-only for a Python verifier: Harbor uploads nothing into a
+  separate verifier container (`skip_tests_upload`), so the published shim could never reach it, and
+  `gym dataset publish --harbor` refuses such a task (below).
+- **`solution/answer.md`.** A task verified by its answer rather than by a script ships the reference answer as
+  `solution/answer.md` (or `answer.template.md` in a template). The oracle writes the file's text to `answer.md` in
+  the working directory, as the task user, with the command the published `solve.sh` runs under Harbor's oracle
+  (`printf '%s' <answer> > answer.md`, `nemo_gym.tasks.harbor.publish.answer_write_command`), and submits the same
+  text as its response. The oracle reads the file as bytes (`base64 /solution/answer.md` over the sandbox exec, decoded
+  on the host), not as the exec's raw stdout: a provider may rebuild stdout from per-line messages (OpenSandbox's
+  foreground exec, its default when `operations.background_exec` is unset, drops a trailing newline, doubles blank
+  lines and loses CR characters), and the written file must be the answer byte for byte. An image without `base64`,
+  or an `answer.md` that is not UTF-8 text, is `oracle: failed` with `oracle_error_type: answer`, like a working
+  directory that refuses the write. The publishable shape is a verifier that reads `workspace / "answer.md"`: it grades the same
+  file under `gym dataset validate` and under Harbor. A verifier that reads `response` grades in Gym only (publish
+  refuses it). `has_solution` counts the file, so `gym dataset validate` plays it.
+
+`gym dataset publish --harbor <target> --output <dir>` writes the dataset as plain Harbor task folders: the rows
+expanded and checked against the dataset's `task_data.py` first (the check prepare runs, so a row `gym eval run`
+refuses is refused here too, with the task named, before anything is written), every Python verifier wrapped in a
+`tests/test.sh` shim (the same files as above, without the response,
+the module itself under `tests/.ng/verifier.py` whether it was task-level or dataset-level, so the published `tests/`
+holds one grader and the folder loads back into Gym as a plain `test.sh` task), every `answer.md` wrapped in a
+`solution/solve.sh` that writes it to `answer.md` in the working directory (the file Gym's oracle leaves too), and
+`dataset.toml` written without its `[gym]` table (Harbor's own tables byte for byte: the license, the defaults and the
+per-task overrides are Gym's and stay with the source); what remains has to be a manifest Harbor reads, since
+`harbor add` takes the dataset branch as soon as the file exists: a `[dataset]` table with an `org/name` `name` is
+required (refused otherwise, with or without the `harbor` package), Harbor's own `DatasetManifest` reads the published
+text as part of the format check, and a `dataset.toml` that held `[gym]` alone is not published at all (the report says
+so; the output is then a plain folder of task folders). `tasks.jsonl`,
+`task_data.py` and a dataset-level `verifier.py` stay behind. A task folder holding a symbolic link is refused naming
+the link: publish does not follow links (a copy would ship the target's bytes, host files outside the dataset
+included), as the renderer and the hub fetcher refuse them. Two Python-verifier shapes are refused with the task
+named, since they could not grade under Harbor: a `verify` that declares `response` (Harbor's `test.sh` sees only the
+container), and a task whose verifier runs in separate mode (`[verifier] environment_mode = "separate"`, or a
+`[verifier.environment]` table, which implies it): Harbor uploads nothing into a separate verifier container, so the
+shim would never run there. Both stay Gym-only; a `test.sh` task in separate mode publishes as it is. A multi-step
+task (`[[steps]]`) is copied as it is, with no shim even under a dataset-level `verifier.py`: Gym grades each step by
+a `test.sh` (its own or the task's), never by a Python verifier, and a shim `tests/test.sh` would become Harbor's
+fallback grader for every step without its own script. Two folders that share a `[task].name` are refused naming
+both (Harbor would keep one of them). The folders
+are written into a hidden staging folder beside `<dir>`, Harbor's own loader (`harbor.models.task.task.Task`) checks
+every one of them there when the `harbor` package is installed, and they are moved into `<dir>` only once every task
+published and passed: a publish refused by Gym or by Harbor leaves nothing under `<dir>`, so a retry into the same
+folder needs no cleanup. Gym does not depend on Harbor, and the report says how to install it otherwise. A
+`harbor` that is installed but does not import (or a module of that name that is not Harbor, such as
+`environment_servers/harbor` when that folder is on `sys.path`) is an error naming the import problem, not a skipped
+check, and nothing is published. The
+command exits 1 when Harbor refuses a folder (the report names each one with Harbor's message), 2 for a publish error. Six worked examples live under `environments/hello_*` (a task,
+a dataset, an MCP tool, a Python verifier, verifier reuse and a parameterized dataset with `task_data.py` and
+`dataset.toml`), each with a `solution/` that `gym dataset validate` plays.
 
 ## Example data
 

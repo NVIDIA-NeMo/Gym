@@ -11,10 +11,18 @@ result the same way it scores a model's work, so ``gym dataset validate`` is an 
 with this agent selected. The oracle never reads a task folder itself: the task, its digest and
 its solution are the environment server's.
 
-A task without ``solution/solve.sh`` is not failed: the oracle returns a response tagged
-``oracle=unvalidated`` and does nothing in the sandbox.
+A task with ``solution/answer.md`` instead of ``solve.sh`` (one verified by its answer rather than by a
+script) gets that file copied to ``answer.md`` in the working directory (``ANSWER_WRITE_COMMAND``: the file the
+published ``solve.sh`` writes there under Harbor's oracle, byte for byte) and its text submitted as the oracle's
+response. The file is read as bytes (``base64`` over the sandbox exec, decoded on the host), never as
+the exec's raw stdout: a provider may rebuild stdout from per-line messages (OpenSandbox's foreground exec does),
+which drops a trailing newline, doubles blank lines and loses CR characters, and the answer the oracle writes and
+submits must be the file byte for byte. A Python verifier that reads ``workspace / "answer.md"`` therefore grades the
+same here and under Harbor; one that reads ``response`` grades here only. A task without either file is not failed:
+the oracle returns a response tagged ``oracle=unvalidated`` and does nothing in the sandbox.
 """
 
+import base64
 import logging
 import math
 from dataclasses import dataclass
@@ -55,6 +63,21 @@ from nemo_gym.sandbox.transfer import SandboxTransferError, SandboxUnavailableEr
 LOGGER = logging.getLogger(__name__)
 
 SOLVE_SCRIPT = f"{SOLUTION_DIR}/solve.sh"
+# A task verified by its answer rather than by a script ships this instead of solve.sh: the oracle writes its
+# text to answer.md in the working directory, as the published solve.sh does, and submits it as the response.
+ANSWER_FILE = f"{SOLUTION_DIR}/answer.md"
+# How the oracle reads the answer: as base64 text, decoded on the host. Exec stdout is not a byte-safe channel on
+# every provider (OpenSandbox's foreground exec joins per-line log messages with "\n", so `cat` of "72\n" comes back
+# as "72" and blank lines double); a base64 payload survives any re-joining because the decoder skips whitespace.
+# `base64` is in GNU coreutils and BusyBox alike; an image without it is a failed oracle naming the fact, below.
+ANSWER_READ_COMMAND = f"base64 {ANSWER_FILE}"
+# How the oracle leaves the answer in the working directory: a copy of the file inside the sandbox, run as the task
+# user in the session's working directory, so the file is the answer byte for byte whatever its size. The published
+# solve.sh writes the same file with `printf` (`nemo_gym.tasks.harbor.publish.answer_write_command`), which is fine
+# in a script bash reads from a file; an exec's command, though, is one argument to the provider's shell (the Docker
+# provider runs `docker exec ... sh -c <command>`), and Linux caps a single argument at MAX_ARG_STRLEN (128 KiB on
+# 4 KiB pages), so a command carrying a long answer fails with E2BIG before anything is written.
+ANSWER_WRITE_COMMAND = f"cat {ANSWER_FILE} > answer.md"
 SOLVE_LOG_DIR = "/logs/agent"
 # Harbor's oracle writes its output under this name, so tools written for Harbor find the log.
 SOLVE_LOG = f"{SOLVE_LOG_DIR}/oracle.txt"
@@ -66,6 +89,9 @@ ORACLE_STATUS_UNVALIDATED = "unvalidated"
 ORACLE_STATUS_FAILED = "failed"
 # `oracle_error_type` when solve.sh never started: the image has no `timeout` or `bash`.
 ORACLE_ERROR_WRAPPER = "wrapper"
+# `oracle_error_type` when the reference answer could not be read (no `base64` in the image, not UTF-8 text) or
+# could not be written to the working directory.
+ORACLE_ERROR_ANSWER = "answer"
 
 
 class OracleAgentConfig(BaseResponsesAPIAgentConfig):
@@ -167,12 +193,19 @@ class OracleAgent(SimpleResponsesAPIAgent):
                 f"The sandbox could not probe {SOLVE_SCRIPT}: {present.error_type}: {present.stderr or present.stdout or ''}"
             )
         if present.return_code != 0:
+            answer = await session.sandbox.exec(f"test -f {ANSWER_FILE}", cwd="/", timeout_s=60, user=session.user)
+            if answer.error_type:
+                raise SandboxUnavailableError(
+                    f"The sandbox could not probe {ANSWER_FILE}: {answer.error_type}: {answer.stderr or answer.stdout or ''}"
+                )
+            if answer.return_code == 0:
+                return await self._submit_answer(session, body)
             return self._response(
                 body,
                 ORACLE_STATUS_UNVALIDATED,
-                f"No solution/solve.sh in the task ({SOLVE_SCRIPT} is absent). Either the task ships no solution/, or the "
-                "environment server did not recognise this agent as harbor_oracle_agent and placed none (its log says "
-                "which).",
+                f"No solution/solve.sh or solution/answer.md in the task ({SOLVE_SCRIPT} and {ANSWER_FILE} are absent). "
+                "Either the task ships no solution/, or the environment server did not recognise this agent as "
+                "harbor_oracle_agent and placed none (its log says which).",
                 {},
             )
 
@@ -241,6 +274,58 @@ class OracleAgent(SimpleResponsesAPIAgent):
             extra["oracle_error_type"] = ORACLE_ERROR_WRAPPER
             output = output or "solve.sh could not be started: timeout wrapper or bash missing (exit 127)"
         return self._response(body, status, output or f"solve.sh exited with {result.return_code}", extra)
+
+    async def _submit_answer(
+        self, session: OracleSession, body: NeMoGymResponseCreateParamsNonStreaming
+    ) -> NeMoGymResponse:
+        """Read ``solution/answer.md`` byte for byte, leave it as ``answer.md`` in the working directory, then submit
+        it as the response.
+
+        The read goes through ``base64`` (``ANSWER_READ_COMMAND``) and is decoded here, so the text is the file's
+        bytes whatever the provider does to exec stdout. The write copies the file inside the sandbox
+        (``ANSWER_WRITE_COMMAND``), as the task user in the session's working directory: the same ``answer.md`` the
+        published ``solve.sh`` leaves under Harbor's oracle, byte for byte and whatever its size (a command carrying
+        the text would hit the exec argument limit), so a verifier that reads the workspace sees the same file in both
+        places. An answer that cannot be read (no ``base64`` in the image, a file that is not UTF-8 text) is a failed
+        oracle with ``oracle_error_type=answer``, like one the workdir refuses.
+        """
+        encoded = await session.sandbox.exec(ANSWER_READ_COMMAND, cwd="/", timeout_s=60, user=session.user)
+        if encoded.error_type:
+            raise SandboxUnavailableError(
+                f"The sandbox could not read {ANSWER_FILE}: {encoded.error_type}: {encoded.stderr or encoded.stdout or ''}"
+            )
+        extra = {"oracle_solution": "answer", "oracle_return_code": str(encoded.return_code)}
+        if encoded.return_code != 0:
+            extra["oracle_error_type"] = ORACLE_ERROR_ANSWER
+            output = encoded.stderr or encoded.stdout or f"reading {ANSWER_FILE} exited with {encoded.return_code}"
+            if encoded.return_code == 127:
+                output = f"{ANSWER_FILE} could not be read: the image has no `base64` (exit 127): {output}"
+            return self._response(body, ORACLE_STATUS_FAILED, output, extra)
+        try:
+            # The decoder skips whitespace, so a payload the provider re-joined line by line decodes all the same.
+            text = base64.b64decode(encoded.stdout or "").decode("utf-8")
+        except ValueError as exc:
+            # binascii.Error (not base64) and UnicodeDecodeError (not UTF-8 text) are both ValueErrors.
+            extra["oracle_error_type"] = ORACLE_ERROR_ANSWER
+            return self._response(
+                body, ORACLE_STATUS_FAILED, f"{ANSWER_FILE} is not UTF-8 text that could be decoded: {exc}", extra
+            )
+        written = await session.sandbox.exec(
+            ANSWER_WRITE_COMMAND, cwd=session.workdir, timeout_s=60, user=session.user
+        )
+        if written.error_type:
+            raise SandboxUnavailableError(
+                f"The sandbox could not write answer.md in {session.workdir}: {written.error_type}: "
+                f"{written.stderr or written.stdout or ''}"
+            )
+        extra["oracle_return_code"] = str(written.return_code)
+        if written.return_code != 0:
+            # The task's own working directory refused the file (not writable by the task user, say): the row
+            # stays scored, and the reason is visible, as for a solve.sh that fails.
+            extra["oracle_error_type"] = ORACLE_ERROR_ANSWER
+            output = written.stderr or written.stdout or f"writing answer.md exited with {written.return_code}"
+            return self._response(body, ORACLE_STATUS_FAILED, output, extra)
+        return self._response(body, ORACLE_STATUS_SOLVED, text, extra)
 
     @staticmethod
     def _response(

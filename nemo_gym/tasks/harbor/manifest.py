@@ -11,9 +11,13 @@ appears in both files. Nobody edits the manifest by hand.
 
 The output is deterministic: a fixed key order, sorted tasks and no timestamps, so equal manifests
 mean identical inputs and two runs compare by ``[dataset].digest``. The dataset digest is a hash over
-the sorted per-task digests, then the ``dataset.toml`` digest. Two
-datasets that differ only in a timeout override in ``dataset.toml`` are therefore different datasets,
-on purpose: the override can change a score.
+the sorted per-task digests, then the ``dataset.toml`` digest, then, when the
+dataset ships them, the digest of the dataset-level Gym files that shape every task (``task_data.py``, the
+row model, and ``verifier.py``, the shared grader; ``dataset_files_digest``, recorded only when present, so a
+dataset without them hashes and reads as before). Two datasets that differ only in a timeout override in
+``dataset.toml``, or only in the shared grader, are therefore different datasets, on purpose: either can
+change a score. Like ``dataset.toml``, those files are Gym's layer, not fetched content: an edit rewrites the
+manifest and is reported, while an edited task folder of a fetched dataset is refused.
 
 Fetchers write the manifest (:mod:`nemo_gym.tasks.harbor.hub`, :mod:`nemo_gym.tasks.harbor.package_store`)
 and record only the tasks they fetched, so a folder nobody fetched is never blessed; prepare writes it for a
@@ -42,13 +46,17 @@ from pathlib import Path
 from nemo_gym.tasks.harbor import task as harbor_task
 from nemo_gym.tasks.harbor.dataset_config import DATASET_FILE
 from nemo_gym.tasks.harbor.digest import content_hash
+from nemo_gym.tasks.harbor.python_verifier import VERIFIER_FILE
 from nemo_gym.tasks.harbor.task import iter_task_folders
+from nemo_gym.tasks.harbor.task_data import TASK_DATA_MODULE
 
 
 logger = logging.getLogger(__name__)
 
 MANIFEST_FILE = "manifest.toml"
 MANIFEST_SCHEMA_VERSION = 1
+# The Gym files beside dataset.toml that shape every task: the row model and the dataset-level grader.
+DATASET_FILES = (TASK_DATA_MODULE, VERIFIER_FILE)
 TASK_FILE = "task.toml"
 # Where the task folders came from. `local` is a folder prepare met on disk with no fetch record.
 SOURCES = ("harbor-registry", "harbor-package-store", "git", "local")
@@ -112,12 +120,26 @@ def dataset_toml_digest(folder: Path) -> str:
     return _file_digest(path) if path.is_file() else _EMPTY_DIGEST
 
 
-def dataset_digest(task_digests: dict[str, str], dataset_toml: str) -> str:
-    """The dataset's identity: sorted per-task digests, then ``dataset.toml``."""
+def dataset_files_digest(folder: Path) -> str:
+    """Digest of the dataset-level Gym files that shape tasks (:data:`DATASET_FILES`): name and content of each one
+    present, in order; the digest of nothing when the dataset ships none (every hub dataset)."""
+    root = Path(folder)
+    digest = hashlib.sha256()
+    for name in DATASET_FILES:
+        if (root / name).is_file():
+            digest.update(f"{name}\0{_file_digest(root / name)}\n".encode())
+    return digest.hexdigest()
+
+
+def dataset_digest(task_digests: dict[str, str], dataset_toml: str, dataset_files: str = _EMPTY_DIGEST) -> str:
+    """The dataset's identity: sorted per-task digests, then ``dataset.toml``, then the dataset-level files when
+    there are any (``dataset_files`` other than the digest of nothing)."""
     digest = hashlib.sha256()
     for name in sorted(task_digests):
         digest.update(f"{name}\0{task_digests[name]}\n".encode())
     digest.update(f"{DATASET_FILE}\0{dataset_toml}\n".encode())
+    if dataset_files != _EMPTY_DIGEST:
+        digest.update(f"dataset-files\0{dataset_files}\n".encode())
     return digest.hexdigest()
 
 
@@ -129,6 +151,8 @@ class Manifest:
     digest: str
     dataset_toml_digest: str
     tasks: dict[str, dict[str, str]] = field(default_factory=dict)
+    # The dataset-level Gym files (:data:`DATASET_FILES`); the digest of nothing, and not written, without them.
+    dataset_files_digest: str = _EMPTY_DIGEST
     # The task folders :meth:`build` could not hash (recorded by name, no digest): computed, never written or read.
     unhashable: frozenset[str] = field(default_factory=frozenset)
 
@@ -199,11 +223,13 @@ class Manifest:
             entry.update({k: v for k, v in (pins or {}).get(name, {}).items() if k in TASK_KEYS and k != "digest"})
             tasks[name] = entry
         toml_digest = dataset_toml_digest(folder)
+        files_digest = dataset_files_digest(folder)
         return cls(
             source=source,
-            digest=dataset_digest(present, toml_digest),
+            digest=dataset_digest(present, toml_digest, files_digest),
             dataset_toml_digest=toml_digest,
             tasks=tasks,
+            dataset_files_digest=files_digest,
             unhashable=frozenset(unhashable),
         )
 
@@ -233,6 +259,7 @@ class Manifest:
             source=str(dataset.get("source", "")),
             digest=str(dataset.get("digest", "")),
             dataset_toml_digest=str(dataset.get("dataset_toml_digest", "")),
+            dataset_files_digest=str(dataset.get("dataset_files_digest", _EMPTY_DIGEST)),
             tasks={
                 str(name): {
                     # The package-store fetcher wrote `digest = "sha256:<hex>"` before the schema was numbered; the
@@ -270,8 +297,10 @@ class Manifest:
             f"source = {_quote(self.source)}",
             f"digest = {_quote(self.digest)}",
             f"dataset_toml_digest = {_quote(self.dataset_toml_digest)}",
-            "",
         ]
+        if self.dataset_files_digest != _EMPTY_DIGEST:
+            lines.append(f"dataset_files_digest = {_quote(self.dataset_files_digest)}")
+        lines.append("")
         for name in sorted(self.tasks):
             lines.append(f"[tasks.{_quote(name)}]")
             entry = self.tasks[name]
@@ -531,8 +560,9 @@ def check_manifest(folder: Path, *, digests: dict[str, str] | None = None) -> Ma
       ``local`` and shadow the fetched manifest for the single-task check.
     - Task folders differ from a fetched manifest: the folder was edited by hand, or its source
       moved since the fetch. :class:`ManifestError` says which tasks and what to do.
-    - Only ``dataset.toml`` moved: the Gym layer changed on purpose, the task folders
-      are the same, so the derived facts are rewritten without a fetch.
+    - Only ``dataset.toml`` or a dataset-level ``task_data.py`` / ``verifier.py`` moved: the Gym
+      layer changed on purpose, the task folders are the same, so the derived facts are rewritten without a fetch,
+      and the rewrite says which.
 
     ``digests`` are folder digests a loader already computed, extended in place with the rest.
     Returns the manifest now on disk.
@@ -596,6 +626,8 @@ def check_manifest(folder: Path, *, digests: dict[str, str] | None = None) -> Ma
         why = "it recorded no dataset digest"
     elif differences is not None:
         why = f"task folders changed ({differences})"
+    elif previous.dataset_files_digest != fresh.dataset_files_digest:
+        why = f"a dataset-level {' or '.join(DATASET_FILES)} changed"
     else:
         why = f"{DATASET_FILE} changed"
     if _write_or_warn(fresh, folder):

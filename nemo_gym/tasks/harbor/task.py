@@ -31,6 +31,7 @@ from nemo_gym.tasks.harbor.dockerfile import (
 )
 from nemo_gym.tasks.harbor.errors import HarborTaskError
 from nemo_gym.tasks.harbor.models import HarborStep, HarborTaskConfig
+from nemo_gym.tasks.harbor.python_verifier import VERIFIER_FILE, python_verifier_for
 from nemo_gym.tasks.harbor.records import (
     BUILT_IMAGES_FILE,
     IMAGE_CONFIGS_FILE,
@@ -216,6 +217,9 @@ class HarborTask:
     # The task's own field values (``task_data.json`` in its folder), written into the row's ``task_data``
     # beside the reserved keys and validated against the dataset's ``task_data.py`` when it ships one.
     task_data: Mapping[str, Any] = field(default_factory=dict)
+    # The Python verifier that grades the task (``tests/verifier.py``, or the dataset root's ``verifier.py`` for a
+    # task without ``tests/``), run inside the sandbox through the test.sh shim; ``None`` when ``tests/test.sh`` does.
+    python_verifier: Path | None = None
 
     @property
     def needs_sandbox(self) -> bool:
@@ -229,12 +233,17 @@ class HarborTask:
 
     @property
     def has_solution(self) -> bool:
-        """Whether the oracle can run this task: ``solution/solve.sh`` for a single-turn task; for a multi-step
-        task a ``solve.sh`` for every step, its own under ``steps/<name>/solution/`` or the task's top-level one
-        (:meth:`turn_solution_dir`), as Harbor 0.22.0's oracle resolves each step's solution (``agents/oracle.py``)."""
+        """Whether the oracle can run this task: ``solution/solve.sh``, or ``solution/answer.md`` it submits as its
+        response, for a single-turn task; for a multi-step task a ``solve.sh`` for every step, its own under
+        ``steps/<name>/solution/`` or the task's top-level one (:meth:`turn_solution_dir`), as Harbor 0.22.0's
+        oracle resolves each step's solution (``agents/oracle.py``)."""
         if self.turns:
             return all((self.turn_solution_dir(turn) / "solve.sh").is_file() for turn in self.turns)
-        return (self.path / "solution" / "solve.sh").is_file()
+        return (self.path / "solution" / "solve.sh").is_file() or self.has_answer
+
+    @property
+    def has_answer(self) -> bool:
+        return (self.path / "solution" / "answer.md").is_file()
 
     def turn_solution_dir(self, turn: HarborTurn) -> Path:
         """The folder the oracle gets at ``/solution`` for ``turn``: the step's own ``steps/<name>/solution/`` when
@@ -409,8 +418,9 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
     # Harbor reads a multi-step task's instructions from its steps; the top-level file is then optional.
     if not turns and not instruction_path.is_file():
         raise HarborTaskError(f"{path} has no {INSTRUCTION_FILE}")
-    if not turns and not (path / "tests").is_dir():
-        raise HarborTaskError(f"{path} has no tests/ folder")
+    python_verifier = python_verifier_for(path, root) if not turns else None
+    if not turns and python_verifier is None and not (path / "tests").is_dir():
+        raise HarborTaskError(f"{path} has no tests/ folder (and the dataset has no {VERIFIER_FILE} to grade it with)")
     try:
         instruction = read_instruction(instruction_path) if instruction_path.is_file() else ""
     except (OSError, UnicodeDecodeError) as exc:
@@ -638,7 +648,13 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
         folder_digest = content_hash(path)
     except (OSError, ValueError) as exc:
         raise HarborTaskError(f"{path}: {exc}") from exc
-    digest = task_digest(folder_digest, dataset, path.name)
+    # A dataset-level verifier grades the task from outside its folder, so its content enters the task's digest.
+    shared_verifier = python_verifier if python_verifier is not None and python_verifier.parent == root else None
+    try:
+        verifier_digest = hashlib.sha256(shared_verifier.read_bytes()).hexdigest() if shared_verifier else None
+    except OSError as exc:
+        raise HarborTaskError(f"{shared_verifier}: {exc}") from exc
+    digest = task_digest(folder_digest, dataset, path.name, shared_verifier_digest=verifier_digest)
     task_data = read_task_fields(path)
 
     return HarborTask(
@@ -667,10 +683,13 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
         overlay_workdirs=overlay_workdirs,
         turns=turns,
         task_data=task_data,
+        python_verifier=python_verifier,
     )
 
 
-def task_digest(folder_digest: str, dataset: GymDatasetConfig, task_id: str) -> str:
+def task_digest(
+    folder_digest: str, dataset: GymDatasetConfig, task_id: str, *, shared_verifier_digest: str | None = None
+) -> str:
     """The digest a task is materialized and served under: its folder's content hash plus the dataset slice applied to it.
 
     ``dataset.toml``'s ``[gym]`` table can change the effective task without touching the folder, so the
@@ -679,15 +698,19 @@ def task_digest(folder_digest: str, dataset: GymDatasetConfig, task_id: str) -> 
     declares only identity, run and catalog keys (``license``, ``type``, ``allowed_agents``, ``domain``,
     ``verified``, ``[gym.defaults].num_repeats``), keeps the plain folder hash, which is also what the
     package store checks: none of those keys says what the task is, so none enters its digest.
+    ``shared_verifier_digest`` is the digest of the dataset root's ``verifier.py`` when it grades the task:
+    grading code outside the folder is part of the task's identity too.
     """
-    if not dataset.shapes_tasks:
+    if not dataset.shapes_tasks and shared_verifier_digest is None:
         return folder_digest
     # `num_repeats` is how often a run plays the task, not what the task is: left out of the slice too, so a
     # shaping table with a repeat count hashes the same as one without.
-    applied = {
+    applied: dict[str, Any] = {
         "defaults": dataset.defaults.model_dump(mode="json", exclude={"num_repeats"}),
         "task": (dataset.tasks.get(task_id) or GymTaskOverride()).model_dump(mode="json"),
     }
+    if shared_verifier_digest is not None:
+        applied[VERIFIER_FILE] = shared_verifier_digest
     return hashlib.sha256(f"{folder_digest}\n{json.dumps(applied, sort_keys=True)}".encode()).hexdigest()
 
 
