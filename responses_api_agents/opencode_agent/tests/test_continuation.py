@@ -279,6 +279,64 @@ async def test_close_recovery_preserves_cancelled_activation(setup, tmp_path, mo
     assert stop.await_count == 2
 
 
+@pytest.mark.parametrize("cancelled", [False, True])
+@pytest.mark.parametrize("artifact_failure", ["download", "parse"])
+@pytest.mark.parametrize("prior_success", [False, True])
+async def test_close_without_recovered_root_preserves_activation(
+    setup, tmp_path, monkeypatch, cancelled, artifact_failure, prior_success
+):
+    agent, sandbox = setup
+    install_artifact_runner(sandbox, tmp_path)
+    request = Request({"type": "http", "session": {}, "headers": [], "path_params": {}})
+    body = seed().model_copy(update={"continuation": AgentContinuationRequirements()})
+    await agent.seed_agent_session(request, body)
+    state = agent._require_agent_session(body.agent_session_id)
+    if prior_success:
+        request = Request({**request.scope, "headers": [(AGENT_ACTIVATION_HEADER.encode(), b"1")]})
+        await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="first task"))
+    index = 2 if prior_success else 1
+    request = Request({**request.scope, "headers": [(AGENT_ACTIVATION_HEADER.encode(), str(index).encode())]})
+    error = asyncio.CancelledError() if cancelled else RuntimeError("temporary receipt unavailable")
+    stop = AsyncMock(side_effect=[error, dict(sandbox.result)])
+    monkeypatch.setattr("nemo_gym.agent_utils.sandbox_session.stop_and_confirm_cleanup", stop)
+    with pytest.raises(asyncio.CancelledError if cancelled else RuntimeError):
+        await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="next task"))
+    retained = state.observations.model_dump(mode="json")
+    trajectory = state.trajectory.model_dump(mode="json") if state.trajectory is not None else None
+    [original] = [r for r in roots(retained) if r["activation_id"] == index]
+    assert original["status"] == ("incomplete" if cancelled else "failed")
+    download = sandbox.download
+
+    async def broken_observations(source, destination):
+        if source.endswith("/observations.db"):
+            if artifact_failure == "download":
+                raise OSError("observations unavailable")
+            Path(destination).write_bytes(b"not a SQLite database")
+        else:
+            await download(source, destination)
+
+    sandbox.download = broken_observations
+    close_body = AgentCloseSessionRequest(agent_session_id=body.agent_session_id, episode_id=body.episode_id)
+    receipt = await agent.close_agent_session(request, close_body)
+    observations = receipt.agent_observations.model_dump(mode="json")
+    assert observations["records"] == retained["records"]
+    assert all(gap in observations["gaps"] for gap in retained["gaps"])
+    assert {gap["code"] for gap in observations["gaps"]} >= {
+        "agent_artifact_unavailable",
+        "observation_capture_failed",
+    }
+    assert observations["gaps"] == [
+        *retained["gaps"],
+        {"code": "agent_artifact_unavailable", "invocation_id": None, "detail": None},
+    ]
+    assert (receipt.trajectory.model_dump(mode="json") if receipt.trajectory is not None else None) == trajectory
+    assert receipt.cleanup_confirmed is True
+    state.retain_activation()
+    assert state.observations.model_dump(mode="json") == observations
+    assert await agent.close_agent_session(request, close_body) == receipt
+    assert stop.await_count == 2
+
+
 def test_plain_http_delta_replay_and_cumulative_close(setup, tmp_path):
     agent, sandbox = setup
     payloads = install_artifact_runner(sandbox, tmp_path)

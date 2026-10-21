@@ -134,6 +134,18 @@ class OpenCodeSandboxSession(AgentSessionState):
                 None,
             )
             if original is not None:
+                if not any(
+                    isinstance(record, AgentInvocation) and record.parent_invocation_id is None
+                    for record in self.activation_observations.records
+                ):
+                    # Failed artifact recovery must not erase the activation's outcome
+                    # or previously captured evidence. Only add the new capture gaps.
+                    gaps = list(previous[0].gaps)
+                    for gap in self.activation_observations.gaps:
+                        if gap not in gaps:
+                            gaps.append(gap)
+                    self.activation_observations = previous[0].model_copy(update={"gaps": gaps})
+                    self.activation_trajectory = previous[1]
                 # A close retry can discover the OpenCode session ID and transcript after
                 # a failed activation retained only a synthetic root invocation.
                 recovered = list(self.activation_observations.records)
