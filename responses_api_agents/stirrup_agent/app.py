@@ -66,6 +66,7 @@ from nemo_gym.trajectory import (
     ObservationGap,
     ToolCallObservation,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.stirrup_agent.sandbox import StirrupSessionState
 from responses_api_agents.stirrup_agent.stirrup_utils import messages_from_input
 
@@ -483,3 +484,6 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     StirrupAgentWrapper.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = StirrupAgentWrapper.run_webserver()  # noqa: F401
