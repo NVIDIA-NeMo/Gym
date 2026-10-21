@@ -382,11 +382,21 @@ class TestRunHelperDryRunSpinup:
         runner._processes = processes
         return runner
 
-    def test_server_process_uses_resolved_component_root(self, monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("source_checkout", [True, False], ids=["source-checkout", "wheel-install"])
+    def test_server_process_uses_resolved_component_root(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path, source_checkout: bool
+    ) -> None:
         server_dir = tmp_path / "responses_api_agents" / "example"
         server_dir.mkdir(parents=True)
         (server_dir / "requirements.txt").write_text("nemo-gym\n", encoding="utf-8")
         monkeypatch.chdir(tmp_path)
+        # A source checkout has pyproject.toml beside nemo_gym/; a wheel install's PARENT_DIR is
+        # site-packages, whose component root must not be put ahead of a server venv's own packages.
+        parent_dir = tmp_path / "gym-install"
+        parent_dir.mkdir()
+        if source_checkout:
+            (parent_dir / "pyproject.toml").write_text("[project]\nname = 'nemo-gym'\n", encoding="utf-8")
+        monkeypatch.setattr(nemo_gym.cli.env, "PARENT_DIR", parent_dir)
 
         process = MagicMock(pid=123)
         process.poll.return_value = 0
@@ -424,7 +434,7 @@ class TestRunHelperDryRunSpinup:
         runner = RunHelper()
         runner.start(MagicMock())
 
-        assert run.call_args.kwargs["project_root"] == tmp_path
+        assert run.call_args.kwargs["project_root"] == (tmp_path if source_checkout else None)
         extra_env = run.call_args.kwargs["extra_env"]
         assert extra_env[NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME] == "example"
         assert OmegaConf.create(extra_env[NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME]) == config
