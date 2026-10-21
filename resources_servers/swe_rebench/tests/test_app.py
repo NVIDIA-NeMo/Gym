@@ -579,3 +579,82 @@ class TestMavenMirror:
 
         merged = JVM_MIRROR_ENV | {"GRADLE_USER_HOME": "/custom"}
         assert merged["GRADLE_USER_HOME"] == "/custom"
+
+
+class _RecordingAsyncSandbox:
+    def __init__(self, provider_config) -> None:
+        self.spec = None
+        self.setup = None
+
+    async def start(self, spec) -> None:
+        self.spec = spec
+
+    async def start_with_setup(self, spec, setup) -> None:
+        self.spec = spec
+        self.setup = setup
+
+
+class TestAgentNetworkPolicy:
+    """enforce_agent_no_network denies all egress from the agent's sandbox except the policy
+    model server's host; the evaluation sandbox keeps its network."""
+
+    @staticmethod
+    async def _create(
+        monkeypatch,
+        *,
+        enforce: bool,
+        for_agent: bool,
+        provider: str = "opensandbox",
+        model_url: str = "http://10.1.2.3:8000",
+        sandbox_config: dict | None = None,
+    ):
+        import nemo_gym.sandbox.agent_tools as agent_tools
+        import resources_servers.swe_rebench.app as app
+        from nemo_gym.config_types import ModelServerRef
+
+        monkeypatch.setattr(app, "AsyncSandbox", _RecordingAsyncSandbox)
+        monkeypatch.setattr(app, "get_global_config_dict", lambda: {})
+        monkeypatch.setattr(app, "resolve_provider_config", lambda *_: {provider: {}})
+        monkeypatch.setattr(app, "resolve_provider_metadata", lambda *_: {})
+        monkeypatch.setattr(agent_tools, "get_server_url", lambda name: model_url)
+        server = SimpleNamespace(
+            config=SimpleNamespace(
+                sandbox_config=sandbox_config or {},
+                sandbox_provider="sandbox",
+                enforce_agent_no_network=enforce,
+                sandbox_model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+                name="swe_rebench",
+            )
+        )
+        body = app.SWERebenchInstanceRequest(instance_id="o__r-1", repo="o/r", base_commit="abc", image_name="img")
+        return await app.SWERebenchResourcesServer._create_sandbox(server, body, for_agent=for_agent)
+
+    async def test_off_by_default(self, monkeypatch) -> None:
+        sandbox = await self._create(monkeypatch, enforce=False, for_agent=True)
+        assert "network_policy" not in sandbox.spec.provider_options
+
+    async def test_agent_sandbox_allows_only_the_model_host(self, monkeypatch) -> None:
+        sandbox = await self._create(monkeypatch, enforce=True, for_agent=True)
+        assert sandbox.spec.provider_options["network_policy"] == {
+            "defaultAction": "deny",
+            "egress": [{"action": "allow", "target": "10.1.2.3"}],
+        }
+
+    async def test_eval_sandbox_keeps_its_network(self, monkeypatch) -> None:
+        sandbox = await self._create(monkeypatch, enforce=True, for_agent=False)
+        assert "network_policy" not in sandbox.spec.provider_options
+
+    async def test_other_provider_options_are_kept(self, monkeypatch) -> None:
+        sandbox = await self._create(
+            monkeypatch, enforce=True, for_agent=True, sandbox_config={"provider_options": {"platform": "linux/amd64"}}
+        )
+        assert sandbox.spec.provider_options["platform"] == "linux/amd64"
+        assert sandbox.spec.provider_options["network_policy"]["defaultAction"] == "deny"
+
+    @pytest.mark.parametrize(
+        ("provider", "model_url"),
+        [("opensandbox", "http://127.0.0.1:8000"), ("docker", "http://10.1.2.3:8000")],
+    )
+    async def test_fails_closed(self, monkeypatch, provider: str, model_url: str) -> None:
+        with pytest.raises(ValueError):
+            await self._create(monkeypatch, enforce=True, for_agent=True, provider=provider, model_url=model_url)
