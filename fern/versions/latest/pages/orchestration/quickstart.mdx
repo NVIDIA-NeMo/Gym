@@ -44,7 +44,6 @@ compute:
         gpus_per_node: 8
 
 driver:
-  policy_model: policy            # wires the service into each benchmark run
   gym_install:
     ref: main                     # git tag or commit of NeMo Gym to install in the driver
   env:
@@ -65,7 +64,7 @@ otel:
 Things worth knowing about this file:
 
 - Every `env` value needs a prefix: `lit:` (literal), `host:VAR` (read from the submitting shell), or `runtime:VAR` (read from the job's environment when it runs). See [env values](/orchestration/configuration#env-values).
-- `driver.policy_model` names a service. Submit fills in `policy_base_url`, `policy_model_name`, and `policy_api_key` for every benchmark, so you do not repeat the address.
+- With one model service, submit binds it as the policy of every benchmark: it adds a `policy_model` node that points at the service, so you do not repeat the address. See [Policy wiring](/orchestration/configuration#policy-wiring).
 - `gpus_per_node` lets submit check that `tensor_parallel_size x number_of_instances` fits the node (2 x 4 = 8 here). A footprint larger than the GPUs available is an error; a smaller one is a warning about idle GPUs.
 - `gym_install` makes the driver clone Gym at that ref and install it before running. Without it, the driver container must already contain Gym.
 
