@@ -21,7 +21,7 @@ from itertools import chain, count
 from math import sqrt
 from pathlib import Path
 from shutil import copyfileobj
-from typing import Any, Dict, List, Literal, Optional, Self, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Self, Tuple, Union
 
 from devtools import pprint
 from omegaconf import DictConfig, OmegaConf
@@ -70,6 +70,10 @@ from nemo_gym.task_data import (
     load_task_data_schema,
 )
 from nemo_gym.task_materialization import materialize_task
+
+
+if TYPE_CHECKING:
+    from nemo_gym.tasks.harbor.task_data import TaskDataSchema
 
 
 def _ref_name(ref: Any) -> Optional[str]:
@@ -1042,10 +1046,10 @@ This could be due to a change in how metrics are calculated, leading to outdated
         return None
 
     @staticmethod
-    def _owning_environment_server_impl(
+    def _owning_environment_server(
         c: ServerInstanceConfig, server_instance_configs: List[ServerInstanceConfig]
-    ) -> Optional[str]:
-        """The environment-server implementation that drives a self-contained agent's episodes.
+    ) -> Optional[ServerInstanceConfig]:
+        """The environment-server instance that drives a self-contained agent's episodes.
 
         An environment server that names the agent as its ``agent_server`` owns the rows the agent
         declares (the Harbor layout: the agent block carries ``datasets`` so rollout collection
@@ -1058,8 +1062,44 @@ This could be due to a change in how metrics are calculated, leading to outdated
             if other.SERVER_TYPE != "environment_servers":
                 continue
             if _ref_name(getattr(other.get_inner_run_server_config(), "agent_server", None)) == c.name:
-                return next(iter(other.environment_servers))
+                return other
         return None
+
+    @classmethod
+    def _owning_environment_server_impl(
+        cls, c: ServerInstanceConfig, server_instance_configs: List[ServerInstanceConfig]
+    ) -> Optional[str]:
+        """The implementation key of :meth:`_owning_environment_server`, or None."""
+        owner = cls._owning_environment_server(c, server_instance_configs)
+        return next(iter(owner.environment_servers)) if owner is not None else None
+
+    @classmethod
+    def _dataset_task_data_schema(
+        cls,
+        c: ServerInstanceConfig,
+        d: Union[DatasetConfig, BenchmarkDatasetConfig],
+        server_instance_configs: List[ServerInstanceConfig],
+    ) -> Optional["TaskDataSchema"]:
+        """The dataset-level ``TaskData`` of a Harbor taskset: ``task_data.py`` beside its task folders.
+
+        The owning environment server's ``tasksets.<dataset name>.folder`` is where the loader read the
+        tasks from (the generated run config names the agent's dataset after the taskset). A module that
+        does not import is a dataset defect and fails the collation with the file named.
+        """
+        from nemo_gym.tasks.harbor.task_data import load_task_data_schema
+
+        owner = cls._owning_environment_server(c, server_instance_configs)
+        if owner is None:
+            return None
+        inner = owner.get_inner_run_server_config()
+        tasksets = inner.get("tasksets") if isinstance(inner, Mapping) else getattr(inner, "tasksets", None)
+        if not isinstance(tasksets, Mapping):
+            return None
+        entry = tasksets.get(d.taskset or d.name)
+        folder = entry.get("folder") if isinstance(entry, Mapping) else getattr(entry, "folder", None)
+        if not isinstance(folder, (str, Path)):
+            return None
+        return load_task_data_schema(Path(folder))
 
     @classmethod
     def _schema_home_for(
@@ -1109,6 +1149,16 @@ This could be due to a change in how metrics are calculated, leading to outdated
             return None
         if adapter is None:
             return None
+        if base_folder == "environment_servers":
+            # A Harbor taskset's rows carry the dataset's own fields under the server's reserved keys: the
+            # dataset's TaskData, when it ships one, validates them in the same report.
+            schema = cls._dataset_task_data_schema(c, d, server_instance_configs)
+            if schema is not None:
+                from nemo_gym.tasks.harbor.task_data import DatasetRowValidator
+
+                return DatasetRowValidator(
+                    server_name=impl_key, adapter=adapter, dataset_fpath=str(d.jsonl_fpath), schema=schema
+                )
         return TaskDataValidator(server_name=impl_key, adapter=adapter, dataset_fpath=str(d.jsonl_fpath))
 
     @classmethod

@@ -80,7 +80,8 @@ from nemo_gym.tasks.harbor.registry import (
     platform_pair,
 )
 from nemo_gym.tasks.harbor.run_summary import output_signatures, write_run_summary
-from nemo_gym.tasks.harbor.task import HarborTask, discover_tasks, is_task_folder
+from nemo_gym.tasks.harbor.task import HarborTask, discover_tasks, is_task_folder, iter_task_folders
+from nemo_gym.tasks.harbor.task_data import check_task_folders, check_tasks, load_task_data_schema
 from nemo_gym.tasks.harbor.validation_report import (
     _task_digests,
     _validation_key,
@@ -367,7 +368,10 @@ def prepare_target(
     A task folder that does not load is skipped with a warning (and listed in
     ``PreparedTaskset.skipped``) so the rest of the dataset still prepares; so is a task whose
     image fails to build or whose Compose file does not resolve, with the build's or the
-    resolver's reason.
+    resolver's reason. A dataset that ships ``task_data.py`` is refused as a whole, with the task
+    named, when a task's ``task_data.json`` does not satisfy its ``TaskData`` or when the module does
+    not import (:mod:`nemo_gym.tasks.harbor.task_data`); both are checked before any image is
+    recorded or built, and the loaded tasks are checked again before a row is written.
 
     Tasks matching an ``exclude`` glob, or not matching an ``only`` glob, are left out of the
     rows and listed on stdout. Dockerfiles outside pull and overlay mode are built once and
@@ -431,6 +435,14 @@ def prepare_target(
     # built, pushed or recorded. A single task folder has no manifest of its own (see _dataset_identity).
     digests: dict[str, str] = {}
     identity = check_manifest(folder, digests=digests) if folder.is_dir() and not is_task_folder(folder) else None
+    # The dataset's TaskData (task_data.py beside dataset.toml) is imported once here, before any image is
+    # recorded or built: a module that does not import refuses the dataset now, and so does a task folder whose
+    # task_data.json the model refuses (the fields need no loaded task, and a dataset refused as a whole should not
+    # first resolve, build and push every image). Every loaded task's fields are checked again below, before a row
+    # is written. Duplicate task IDs are rejected by the folder walk itself, as they are for the image records.
+    task_data_schema = load_task_data_schema(dataset_root) if dataset_root.is_dir() else None
+    if task_data_schema is not None and folder.is_dir():
+        check_task_folders(task_data_schema, [folder] if is_task_folder(folder) else iter_task_folders(folder))
 
     def selected(task_id: str) -> bool:
         return selection_reason(task_id, exclude, only) is None
@@ -494,6 +506,9 @@ def prepare_target(
         print(f"Skipping {task_id}: {reason}")
     if not tasks:
         raise _no_runnable_task(folder, errors)
+    # A task whose fields do not satisfy the dataset's TaskData refuses the whole dataset, named: the rows would
+    # carry data the dataset's own verifier cannot read. Selection does not narrow the check; the dataset is one unit.
+    check_tasks(task_data_schema, loaded)
     # A Compose file that does not resolve, a field the sandbox Compose adapter would refuse at seed, or volumes the
     # group cannot run, leaves its task out the same way, with the field named, as an unloadable task is, not as a
     # seed failure of every episode; the others' images are still recorded.
