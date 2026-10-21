@@ -33,7 +33,7 @@ from pydantic import ValidationError
 from nemo_gym.config_types import ConfigError
 from nemo_gym.episode_types import EpisodeId
 from nemo_gym.global_config import ATTEMPT_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-from nemo_gym.path_utils import failures_path_for
+from nemo_gym.path_utils import failures_path_for, resubmit_offset_path_for
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_outcomes import RolloutFailure
 from nemo_gym.rollout_recovery import (
@@ -41,6 +41,7 @@ from nemo_gym.rollout_recovery import (
     _digest,
     _get_max_rollout_attempts,
     is_terminal_failure,
+    load_resubmit_offset,
     manifest_path_for,
     observed_elapsed,
 )
@@ -70,7 +71,13 @@ def resolve_rollout_path(output: Path, *, read_only: bool = False) -> Path:
     Derived coverage reports do not establish ownership of a run.
     """
     resolved = output.resolve()
-    companions = (manifest_path_for, journal_path_for, materialized_path_for, failures_path_for)
+    companions = (
+        manifest_path_for,
+        journal_path_for,
+        materialized_path_for,
+        failures_path_for,
+        resubmit_offset_path_for,
+    )
     misplaced = [
         companion(output)
         for companion in companions
@@ -308,19 +315,21 @@ class RolloutRecords:
             raise ConfigError(f"Conflicting outcomes for rollout attempt {key!r}.")
         return key
 
-    def _payload(self, row: dict, record: RolloutRecord, *, legacy: bool = False) -> None:
+    def _payload(self, row: dict, record: RolloutRecord, *, legacy: bool = False, count_failure: bool = True) -> None:
         key = self.check_outcome(row, legacy=legacy)
         self.latest[key[0]] = max(key[1], self.latest.get(key[0], -1))
         interruption = is_interruption_failure(row)
         if (
-            key not in self.payloads
+            count_failure
+            and key not in self.payloads
             and row.get("_ng_failure_class") is not None
             and not interruption
             and not row.get("_ng_failure_terminal")
         ):
             self.attempt_counts[key[0]] += 1
         if (
-            key not in self.payloads
+            count_failure
+            and key not in self.payloads
             and row.get("_ng_failure_class") is not None
             and not interruption
             and row.get("_ng_failure_terminal")
@@ -362,6 +371,8 @@ class RolloutRecords:
         # Legacy files lacked an attempt id on some rows. Import once in their
         # recorded order, preserving the old failure-count-based numbering.
         legacy_counts: Counter = Counter()
+        resubmit_offset = load_resubmit_offset(output)
+        resubmitted = resubmit_offset_path_for(output).exists()
         for path in (failures_path_for(output), output):
             for record, payload in _indexed_records(
                 path, end_offset=outcome_limits[path] if outcome_limits is not None else None
@@ -382,7 +393,17 @@ class RolloutRecords:
                     import_legacy and RUN_ID_KEY not in payload
                 ):
                     raise ConfigError(f"Outcome in the wrong artifact: {path}.")
-                state._payload(payload, record, legacy=import_legacy and RUN_ID_KEY not in payload)
+                state._payload(
+                    payload,
+                    record,
+                    legacy=import_legacy and RUN_ID_KEY not in payload,
+                    # Legacy imports can contain failures in the main file.
+                    # All of those precede the reset: managed writers append
+                    # subsequent failures exclusively to the sidecar.
+                    count_failure=(record.line_number > resubmit_offset)
+                    if path == failures_path_for(output)
+                    else not resubmitted,
+                )
         return state
 
     def disposition(self, identity: str) -> str:

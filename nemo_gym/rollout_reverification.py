@@ -54,7 +54,7 @@ from nemo_gym.global_config import (
     rollout_run_key,
     rollout_run_labels,
 )
-from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for
+from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for, resubmit_offset_path_for
 from nemo_gym.rollout_collection import (
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,
@@ -1079,6 +1079,7 @@ class RolloutReverificationHelper(BaseModel):
                             manifest_path_for(source),
                             journal_path_for(source),
                             coverage_path_for(source),
+                            resubmit_offset_path_for(source),
                             aggregate_metrics_path_for(source),
                             source.with_name(source.stem + "_run.lock"),
                         )

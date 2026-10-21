@@ -1836,6 +1836,7 @@ def test_run_lock_refusal_names_owner_and_releases_after_exit(tmp_path, monkeypa
 @pytest.mark.parametrize(
     ("field", "before", "after"),
     [
+        ("resubmit", False, True),
         ("dispatch_start_report_within_s", 60, 30),
         ("dispatch_start_report_min_fraction", 0.99, 0.9),
         ("dispatch_all_started_within_s", 60, 90),

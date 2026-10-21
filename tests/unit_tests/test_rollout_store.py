@@ -809,3 +809,143 @@ def test_judge_recovery_does_not_promote_diagnostics_to_saved_answers(saved):
 
     with pytest.raises(ConfigError, match="has no `response`"):
         _rollout_response(saved)
+
+
+@pytest.mark.parametrize("stop_after_reset", [False, True])
+def test_resubmit_budget_survives_reopen_without_reusing_attempt_ids(prepared_run, stop_after_reset):
+    from nemo_gym.path_utils import resubmit_offset_path_for
+
+    output, prepare = prepared_run
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        first, second = store.pending(2)
+        store.record_dispatch(first)
+        store.record_outcome(first | {"reward": 1.0})
+        for attempt in (0, 1):
+            row = second | {"_ng_attempt_index": attempt}
+            store.record_dispatch(row)
+            store.record_outcome(row | {"_ng_failure_class": "agent_run_error"})
+    before = snapshot(output)
+    assert RolloutStore.read(output).pending(2) == []
+    store = RolloutStore.start_or_resume(output, prepare, resume=False, resubmit=True)
+    assert all(
+        path.read_bytes() == before[path.name]
+        for path in (output, failures_path_for(output), manifest_path_for(output))
+    )
+    if stop_after_reset:
+        store = RolloutStore.start_or_resume(output, prepare, resume=True)
+    for attempt in (2, 3):
+        with store:
+            (row,) = store.pending(2)
+            assert row["_ng_task_index"] == 1
+            assert row["_ng_attempt_index"] == attempt
+            store.record_dispatch(row)
+            store.record_outcome(row | {"_ng_failure_class": "agent_run_error"})
+        store = RolloutStore.start_or_resume(output, prepare, resume=True)
+        offline = RolloutStore.read(output)
+        assert offline.coverage() == store.coverage()
+        assert offline.coverage()["counted_failures"] == attempt - 1
+    assert store.pending(2) == []
+    assert resubmit_offset_path_for(output).read_text() == "2\n"
+    assert len(list(read_records(failures_path_for(output)))) == 4
+    assert len(store.selected("success")) == 1
+    assert store.coverage()["attempts"] == 5
+
+
+@pytest.mark.parametrize("tail", [b"", b"\n\n", b'{"interrupted":'])
+def test_resubmit_repaired_tail_does_not_exempt_new_failures(prepared_run, tail):
+    from nemo_gym.path_utils import resubmit_offset_path_for
+
+    output, prepare = prepared_run
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        for row in store.pending(1):
+            store.record_dispatch(row)
+            store.record_outcome(
+                row | {"_ng_failure_class": "agent_run_error", "_ng_failure_terminal": row["_ng_task_index"] == 0}
+            )
+    with failures_path_for(output).open("ab") as file:
+        file.write(tail)
+    with RolloutStore.start_or_resume(output, prepare, resume=True, resubmit=True) as store:
+        (row,) = store.pending(1)
+        assert row["_ng_task_index"] == 1
+        assert row["_ng_attempt_index"] == 1
+        assert int(resubmit_offset_path_for(output).read_text()) == (4 if tail == b"\n\n" else 2)
+        store.record_dispatch(row)
+        store.record_outcome(row | {"_ng_failure_class": "agent_run_error"})
+    offline = RolloutStore.read(output)
+    assert offline.pending(1) == []
+    assert offline.coverage()["counted_failures"] == 1
+    assert offline.selected("failure")[0]["_ng_failure_terminal"] is True
+
+
+def test_resubmit_identity_refusal_does_not_reset_budget(prepared_run):
+    output, prepare = prepared_run
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        row = store.pending(1)[0]
+        store.record_dispatch(row)
+        store.record_outcome(row | {"_ng_failure_class": "agent_run_error"})
+    source = output.parent / "source.jsonl"
+    source.write_bytes(source.read_bytes() + b"\n")
+    before = snapshot(output)
+    with pytest.raises(ConfigError, match="incompatible source dataset"):
+        RolloutStore.start_or_resume(output, prepare, resume=True, resubmit=True)
+    assert snapshot(output) == before
+
+
+def test_resubmit_offset_is_part_of_alias_ownership(prepared_run):
+    from nemo_gym.path_utils import resubmit_offset_path_for
+
+    output, prepare = prepared_run
+    RolloutStore.start_or_resume(output, prepare, resume=False)
+    alias = output.with_name("alias.jsonl")
+    alias.symlink_to(output)
+    resubmit_offset_path_for(alias).write_text("0\n")
+    before = snapshot(output)
+    with pytest.raises(ConfigError, match="beside the rollout alias"):
+        RolloutStore.start_or_resume(alias, prepare, resume=True, resubmit=True)
+    assert snapshot(output) == before
+
+
+def test_resubmit_legacy_main_file_failures_match_offline_budget(prepared_run):
+    output, prepare = prepared_run
+    rows, _ = prepare()
+    materialized_path_for(output).write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
+    output.write_bytes(
+        orjson.dumps(rows[0] | {"_ng_failure_class": "agent_run_error"})
+        + b"\n"
+        + orjson.dumps(rows[1] | {"reward": 1.0})
+        + b"\n"
+    )
+    with RolloutStore.start_or_resume(output, prepare, resume=True, allow_unsafe=True, resubmit=True) as store:
+        assert store.coverage()["counted_failures"] == 0
+        assert RolloutStore.read(output).coverage() == store.coverage()
+        (row,) = store.pending(1)
+        assert row["_ng_task_index"] == 0 and row["_ng_attempt_index"] == 1
+        store.record_dispatch(row)
+        store.record_outcome(row | {"_ng_failure_class": "agent_run_error"})
+    offline = RolloutStore.read(output)
+    assert offline.coverage()["counted_failures"] == 1
+    assert offline.pending(1) == []
+
+
+@pytest.mark.parametrize("value", ["-1", "broken"])
+def test_resubmit_invalid_offset_is_actionable_and_preserves_history(prepared_run, value):
+    from nemo_gym.path_utils import resubmit_offset_path_for
+
+    output, prepare = prepared_run
+    RolloutStore.start_or_resume(output, prepare, resume=False)
+    resubmit_offset_path_for(output).write_text(value)
+    before = snapshot(output)
+    with pytest.raises(ConfigError, match="resubmit budget offset"):
+        RolloutStore.start_or_resume(output, prepare, resume=True)
+    assert snapshot(output) == before
+
+
+def test_resubmit_offset_helper_keeps_existing_public_contract(tmp_path):
+    from nemo_gym.rollout_collection import load_resubmit_offset, record_resubmit_offset
+
+    output = tmp_path / "new" / "run.jsonl"
+    assert load_resubmit_offset(output) == 0
+    assert record_resubmit_offset(output) == 0
+    failures_path_for(output).write_bytes(b'{"failure": 1}\n\n')
+    assert record_resubmit_offset(output) == 2
+    assert load_resubmit_offset(output) == 2

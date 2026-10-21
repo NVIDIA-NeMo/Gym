@@ -39,6 +39,7 @@ from omegaconf.errors import InterpolationResolutionError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from nemo_gym.config_types import ConfigError
+from nemo_gym.path_utils import failures_path_for, resubmit_offset_path_for
 
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,7 @@ logger = logging.getLogger(__name__)
 _COLLECTION_OPTIONS = frozenset(
     {
         "resume_from_cache",
+        "resubmit",
         "checkpoint_dir",
         "checkpoint_every_s",
         "checkpoint_timeout_s",
@@ -137,6 +139,38 @@ def _get_max_rollout_attempts() -> int:
             flush=True,
         )
         return _DEFAULT_MAX_ROLLOUT_ATTEMPTS
+
+
+def load_resubmit_offset(output_fpath: str | Path) -> int:
+    """Read the number of sidecar lines excluded from the current failure budget."""
+    path = resubmit_offset_path_for(Path(output_fpath))
+    if not path.exists():
+        return 0
+    try:
+        offset = int(path.read_text())
+        if offset < 0:
+            raise ValueError("negative offset")
+    except (ValueError, OSError) as error:
+        raise ConfigError(f"Cannot read resubmit budget offset {path}: {error}") from error
+    return offset
+
+
+def record_resubmit_offset(output_fpath: str | Path) -> int:
+    """Reset the failure budget without altering outcomes or execution identities.
+
+    The caller must hold the run lock and validate/repair history first. The
+    line-based format is shared with GDPVal's existing resubmit implementation.
+    """
+    output = Path(output_fpath)
+    failures = failures_path_for(output)
+    offset = 0
+    if failures.exists():
+        with failures.open("rb") as file:
+            offset = sum(1 for _ in file)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with atomic_output_file(resubmit_offset_path_for(output)) as file:
+        file.write(f"{offset}\n".encode())
+    return offset
 
 
 def _plain(value: Any) -> Any:

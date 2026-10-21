@@ -90,6 +90,12 @@ intentional omissions stop retrying independently of the budget. The explicit te
 otherwise terminal failures eligible and counted under its existing opt-in policy.
 
 When the cap is reached, Gym reports the exhausted count and failure sidecar path. Raising the cap allows more retries.
+An explicit `gym eval resubmit <gym_job_id> <benchmark>` also gives retryable failures a fresh budget.
+Completed results and terminal failures remain selected, all history is kept, and execution numbers keep increasing.
+The collector records the reset in `<stem>_resubmit_offset` beside the output; keep this companion with the run.
+Ordinary automatic restarts reuse that boundary and do not reset the budget again. Resubmission still validates
+that the tasks and model configuration match the saved experiment; it does not enable unsafe resume.
+
 Coverage includes `counted_failures`, `failure_budget_exhausted`, and `max_rollout_attempts`. Its `attempts` field counts reserved
 execution numbers, including reservations made immediately before an interruption; it is not the retry-budget counter.
 For example, three interruptions can reserve executions 0, 1, and 2 while consuming zero failures. The next resume can

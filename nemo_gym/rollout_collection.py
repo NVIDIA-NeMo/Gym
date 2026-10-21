@@ -136,12 +136,16 @@ from nemo_gym.rollout_recovery import (
     atomic_write_json,
     has_only_intentional_gaps,
     is_terminal_failure,
+    load_resubmit_offset,
     manifest_path_for,
     observed_elapsed,
     run_lock,
 )
 from nemo_gym.rollout_recovery import (
     _get_max_rollout_attempts as _get_max_rollout_attempts,
+)
+from nemo_gym.rollout_recovery import (
+    record_resubmit_offset as record_resubmit_offset,
 )
 from nemo_gym.rollout_store import RolloutStore
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span
@@ -1049,31 +1053,6 @@ def _attach_ng_perf(
 
 
 get_max_rollout_attempts = _get_max_rollout_attempts  # Public compatibility alias
-
-
-def load_resubmit_offset(output_fpath: str | Path) -> int:
-    """Failures-sidecar lines before this index predate the last `gym eval resubmit` and do not count to the cap."""
-    offset_fpath = resubmit_offset_path_for(Path(output_fpath))
-    return int(offset_fpath.read_text()) if offset_fpath.exists() else 0
-
-
-def record_resubmit_offset(output_fpath: str | Path) -> int:
-    """Start a fresh attempt budget: failures already in the sidecar stop counting to the cap.
-
-    Written atomically, so a run never reads a partial offset. The sidecar itself is not changed.
-    """
-    output_fpath = Path(output_fpath)
-    failures_fpath = failures_path_for(output_fpath)
-    offset = 0
-    if failures_fpath.exists():
-        with failures_fpath.open("rb") as f:
-            offset = sum(1 for _ in f)
-    offset_fpath = resubmit_offset_path_for(output_fpath)
-    offset_fpath.parent.mkdir(parents=True, exist_ok=True)
-    partial = offset_fpath.with_name(offset_fpath.name + ".tmp")
-    partial.write_text(f"{offset}\n")
-    partial.replace(offset_fpath)
-    return offset
 
 
 def _normalize_health_check_ignored_checks(value) -> List[str]:
@@ -3311,6 +3290,7 @@ class RolloutCollectionHelper(BaseModel):
             prepare_inputs,
             resume=config.resume_from_cache,
             allow_unsafe=config.allow_unsafe_resume,
+            resubmit=config.resubmit,
         )
         input_rows = store.pending(
             _get_max_rollout_attempts(),
@@ -4985,6 +4965,7 @@ class RolloutAggregationHelper(BaseModel):
                     materialized_path_for(Path(path)),
                     failures_path_for(Path(path)),
                     coverage_path_for(Path(path)),
+                    resubmit_offset_path_for(Path(path)),
                 )
             }
             if any(
@@ -5017,6 +4998,7 @@ class RolloutAggregationHelper(BaseModel):
                 materialized_path_for(Path(source)),
                 failures_path_for(Path(source)),
                 coverage_path_for(Path(source)),
+                resubmit_offset_path_for(Path(source)),
             ):
                 if report_path.resolve() == artifact.resolve() or (
                     report_path.exists() and artifact.exists() and report_path.samefile(artifact)

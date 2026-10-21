@@ -1284,7 +1284,7 @@ async def test_reverify_writes_unambiguous_legacy_alias_layout(prepared_run, fak
 
 
 @pytest.mark.parametrize(
-    "artifact", ["output", "failures", "inputs", "manifest", "journal", "coverage", "metrics", "lock"]
+    "artifact", ["output", "failures", "inputs", "manifest", "journal", "coverage", "metrics", "lock", "resubmit"]
 )
 @pytest.mark.parametrize("mode", ["resume", "append", "overwrite"])
 @pytest.mark.parametrize("source_alias", [False, True])
@@ -1313,6 +1313,7 @@ async def test_reverify_failure_source_protects_entire_parent_run(
         "coverage": coverage_path_for(output),
         "metrics": aggregate_metrics_path_for(output),
         "lock": output.with_name(output.stem + "_run.lock"),
+        "resubmit": output.with_name(output.stem + "_resubmit_offset"),
     }[artifact]
     copied_inputs = output.with_name("copied_inputs.jsonl")
     copied_inputs.write_bytes(materialized_path_for(output).read_bytes())

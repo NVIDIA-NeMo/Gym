@@ -31,7 +31,7 @@ from pydantic import ValidationError
 
 from nemo_gym.config_types import ConfigError
 from nemo_gym.global_config import ATTEMPT_INDEX_KEY_NAME
-from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for
+from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for, resubmit_offset_path_for
 from nemo_gym.rollout_records import (
     RUN_ID_KEY,
     RolloutRecord,
@@ -47,7 +47,13 @@ from nemo_gym.rollout_records import (
     resolve_rollout_owner,
     resolve_rollout_path,
 )
-from nemo_gym.rollout_recovery import RunManifest, atomic_write_json, manifest_path_for, validate_resume
+from nemo_gym.rollout_recovery import (
+    RunManifest,
+    atomic_write_json,
+    manifest_path_for,
+    record_resubmit_offset,
+    validate_resume,
+)
 from nemo_gym.telemetry.observer import driver_metrics
 
 
@@ -131,8 +137,10 @@ class RolloutStore:
         *,
         resume: bool,
         allow_unsafe: bool = False,
+        resubmit: bool = False,
     ) -> "RolloutStore":
         """Prepare or validate a run while its controller holds the run lock."""
+        resume = resume or resubmit
         output = resolve_rollout_path(output)
         manifest_path = manifest_path_for(output)
         materialized = materialized_path_for(output)
@@ -193,6 +201,14 @@ class RolloutStore:
                 state.manifest = manifest
             if manifest.identity_overridden or manifest.legacy_import or not manifest_path.exists():
                 manifest.write(manifest_path)
+            if resubmit:
+                # Validate before resetting anything, and repair an interrupted
+                # final write before counting physical sidecar lines.
+                prepare_append(failures_path_for(output))
+                offset = record_resubmit_offset(output)
+                state.attempt_counts.clear()
+                state.overridden_terminal_counts.clear()
+                print(f"Resubmitted: a fresh failure budget after sidecar line {offset}.")
             return cls(output, state)
 
         materialize_started = perf_counter()
@@ -207,6 +223,7 @@ class RolloutStore:
         for path in (
             output,
             failures_path_for(output),
+            resubmit_offset_path_for(output),
             journal_path_for(output),
             coverage_path_for(output),
             aggregate_metrics_path_for(output),
