@@ -100,18 +100,34 @@ class SandboxNOOARunner:
     async def run(self, request: NOOARunRequest) -> NOOARunResult:
         """Execute once, preserving evidence without allowing it to override failure."""
         try:
-            await self.session.execute(
-                stage_activation=lambda: self._stage_activation(request),
-                collect=self._collect_artifacts,
-                timeout=resolve_agent_timeout(request.responses_create_params.metadata, ceiling=self.timeout),
-                close_timeout=self.close_timeout,
-            )
+            capture_failure: Exception | None = None
+            try:
+                await self.session.execute(
+                    stage_activation=lambda: self._stage_activation(request),
+                    collect=self._collect_artifacts,
+                    timeout=resolve_agent_timeout(request.responses_create_params.metadata, ceiling=self.timeout),
+                    close_timeout=self.close_timeout,
+                )
+            except Exception as error:
+                # Some providers report absent artifacts as generic transfer errors.
+                # Inspect the confirmed worker outcome before propagating capture errors;
+                # independent execution/transport failures still retain precedence.
+                capture_error = self.session.capture_error
+                if capture_error is None or (error is not capture_error and error.__cause__ is not capture_error):
+                    raise
+                capture_failure = error
             if self.session.closing:
                 raise asyncio.CancelledError("NOOA sandbox session closed during execution")
             cleanup = self.session.cleanup
             if cleanup is None:
                 raise RuntimeError("NOOA worker termination is unconfirmed")
-            if cleanup["timed_out"] or cleanup["error"] or cleanup["return_code"] != 0 or self.artifact is None:
+            if (
+                cleanup["timed_out"]
+                or cleanup["error"]
+                or cleanup["return_code"] != 0
+                or self.artifact is None
+                or capture_failure is not None
+            ):
                 await self._collect_diagnostics()
             if cleanup["timed_out"]:
                 # Exhausting the worker budget is not a retryable dependency outage.
@@ -120,6 +136,8 @@ class SandboxNOOARunner:
                 raise RuntimeError(f"NOOA sandbox supervisor failed: {cleanup['error']}")
             if cleanup["return_code"] != 0:
                 raise RuntimeError(f"NOOA sandbox worker did not exit successfully (exit {cleanup['return_code']})")
+            if capture_failure is not None:
+                raise capture_failure
             if self.artifact is None:
                 raise RuntimeError(f"NOOA sandbox result is missing or malformed: {self.diagnostics}")
             request.model_cookies.update(self.artifact.model_cookies)
