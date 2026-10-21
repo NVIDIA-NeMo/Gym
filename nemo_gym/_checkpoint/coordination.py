@@ -64,6 +64,7 @@ from nemo_gym._checkpoint.control import CHECKPOINT_ROUTE_PREFIX, next_attempt
 from nemo_gym._checkpoint.telemetry import OperationSpan, checkpoint_span
 from nemo_gym._checkpoint.telemetry import operation as checkpoint_operation
 from nemo_gym.episode_types import EpisodeId
+from nemo_gym.global_config import SERVER_TYPE_KEYS
 from nemo_gym.server_utils import ServerClient
 
 
@@ -78,7 +79,6 @@ RETIRE_ORDER: tuple[tuple[ParticipantKind, ...], ...] = (("environment",), ("age
 # and one that accepts a connection but never replies fails discovery after this many seconds.
 _DISCOVER_TRIES = 3
 _DISCOVER_TIMEOUT_SECONDS = 60.0
-_SERVER_TYPES = ("environment_servers", "responses_api_models", "responses_api_agents", "resources_servers")
 
 
 class CoordinationError(RuntimeError):
@@ -146,7 +146,7 @@ async def discover(client: ServerClient, *, auth_token: str) -> Participants:
     names = [
         name
         for name, entry in client.global_config_dict.items()
-        if isinstance(entry, Mapping) and any(server_type in entry for server_type in _SERVER_TYPES)
+        if isinstance(entry, Mapping) and any(server_type in entry for server_type in SERVER_TYPE_KEYS)
     ]
     members: list[Participant] = []
     failures: dict[str, str] = {}

@@ -98,16 +98,18 @@ def install_runtime(harness: str) -> None:
     import yaml
 
     adapter = ROOT / "responses_api_agents" / f"{harness}_agent"
-    subprocess.run(["uv", "pip", "install", "-r", "requirements.txt"], cwd=adapter, check=True)
-    if harness == "hermes":
-        return  # The Python requirements contain its pinned runtime.
+    override_flag = ["--override", "overrides.txt"] if (adapter / "overrides.txt").exists() else []
+    subprocess.run(["uv", "pip", "install", *override_flag, "-r", "requirements.txt"], cwd=adapter, check=True)
+    if harness in ("hermes", "stirrup"):
+        return  # Hermes' pinned runtime is in its requirements; Stirrup installs its runtime in the task sandbox.
     defaults = yaml.safe_load((adapter / "configs" / f"{harness}_agent.yaml").read_text())
     config = defaults[f"{harness}_agent"]["responses_api_agents"][f"{harness}_agent"]
     if harness == "opencode":
         from responses_api_agents.opencode_agent.runtime import OPENCODE_VERSION
 
         config.setdefault("opencode_version", OPENCODE_VERSION)
-    version = config[f"{harness}_version"]
+    version_key = "kilo_version" if harness == "kilocode" else f"{harness}_version"
+    version = config[version_key]
     if not version:
         raise ValueError(f"{harness} needs a pinned runtime version")
     setup = importlib.import_module(f"responses_api_agents.{harness}_agent.setup_{harness}")

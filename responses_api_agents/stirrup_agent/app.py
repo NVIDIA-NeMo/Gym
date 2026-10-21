@@ -84,6 +84,17 @@ def _usage(usages: list[dict[str, Any]]) -> Optional[NeMoGymResponseUsage]:
     return total
 
 
+def _zero_usage() -> NeMoGymResponseUsage:
+    """The usage of an episode whose only model request was rejected, so nothing was processed."""
+    return NeMoGymResponseUsage(
+        input_tokens=0,
+        input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=None),
+        output_tokens=0,
+        output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=None),
+        total_tokens=0,
+    )
+
+
 def _observations(output: Optional[dict[str, Any]], model_server: ModelServerRef) -> AgentObservationBundle:
     """Validate the evidence the sandbox runner reported into an observation bundle.
 
@@ -364,6 +375,11 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                 raise
             state.resources_cookies = artifacts["resources_cookies"]
             output = artifacts
+        usage = _usage(output["usages"])
+        if usage is None and output.get("model_error") and not output["observations"]["model_response_ids"]:
+            # The only request was rejected before any processing: a known zero. A request killed in flight may
+            # have used tokens, so that case stays unknown.
+            usage = _zero_usage()
         return NeMoGymResponse(
             id=f"stirrup-{state.request.episode_id.capture_key}",
             created_at=int(time.time()),
@@ -378,7 +394,8 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                 **({"stop_reason": output["stop_reason"]} if output["stop_reason"] else {}),
             },
             status=output["observations"]["status"],
-            usage=_usage(output["usages"]),
+            error={"code": "server_error", "message": output["model_error"]} if output.get("model_error") else None,
+            usage=usage,
         )
 
     async def responses(
