@@ -2316,3 +2316,29 @@ def test_native_model_error_is_reported_with_classification(setup, message, stat
         "status_code": status,
     }
     assert observations["records"][0]["status"] == "failed"
+
+
+@pytest.mark.parametrize("message,retryable", [("Request timed out.", True), ("Unrecognized failure", False)])
+def test_terminal_request_timeout_preserves_episode_retry(setup, message, retryable):
+    from environment_servers.single_agent_turn.app import agent_outcome_policy
+    from nemo_gym.openai_utils import NeMoGymResponse
+
+    agent, sandbox = setup
+    native = {"role": "assistant", "stopReason": "error", "errorMessage": message, "content": []}
+    response, observations = sandbox_event_response(
+        agent,
+        sandbox,
+        [
+            {"type": "message_end", "message": native},
+            {"type": "agent_end", "messages": [native]},
+        ],
+    )
+    assert response["status"] == "failed"
+    assert response["error"]["message"] == message
+    assert json.loads(response["metadata"]["ng_agent_outcome"]) == {
+        "failure_kind": "model_transport_error" if retryable else "unknown"
+    }
+    assert observations["records"][0]["status"] == "failed"
+    policy = agent_outcome_policy(NeMoGymResponse.model_validate(response))
+    assert policy.verifiable is False
+    assert policy.retryable is retryable

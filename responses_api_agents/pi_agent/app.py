@@ -627,7 +627,7 @@ class PiAgent(SimpleResponsesAPIAgent):
         match = re.match(r"^(?:HTTP )?([45]\d{2})(?::|\s|$)", message)
         if match:
             return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=int(match[1]))
-        if message in {"Connection error.", "Connection error", "fetch failed"}:
+        if message in {"Connection error.", "Connection error", "fetch failed", "Request timed out."}:
             return AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
         return AgentOutcome(failure_kind="unknown")
 
