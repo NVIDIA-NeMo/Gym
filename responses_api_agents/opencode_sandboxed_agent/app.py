@@ -1077,7 +1077,14 @@ class OpenCodeSandboxedAgent(SandboxedHarnessAgent):
                     timeout_s=self.config.sandbox_timeout,
                 )
                 if snapshot_result.return_code != 0 or snapshot_result.error_type is not None:
-                    raise RuntimeError(f"OpenCode database snapshot failed: {snapshot_result.stderr}")
+                    # Background execution combines command streams in stdout; stderr may contain only status.
+                    raise RuntimeError(
+                        "OpenCode database snapshot failed: "
+                        f"destination={snapshot_remote_fpath!r}, "
+                        f"return_code={snapshot_result.return_code}, error_type={snapshot_result.error_type}; "
+                        f"stdout={str(snapshot_result.stdout or '')[-4096:]!r}; "
+                        f"stderr={str(snapshot_result.stderr or '')[-4096:]!r}"
+                    )
                 await sandbox.download(snapshot_remote_fpath, observations_local_fpath)
                 if session_id is not None:
                     child_messages = await asyncio.to_thread(
