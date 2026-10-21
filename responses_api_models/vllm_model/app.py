@@ -168,24 +168,6 @@ _TRANSPORT_LOG_CONTEXT_HEADERS = {
 }
 
 
-def _emit_vllm_proxy_purpose_marker(
-    *,
-    metadata_rollout_purpose: Any,
-    forwarded_rollout_purpose: Any,
-    temperature: Any,
-    top_p: Any,
-) -> None:
-    """Emit a payload-free trace for the final vLLM proxy request contract."""
-
-    print(
-        "NEMO_GYM_VLLM_PROXY_PURPOSE|"
-        f"metadata={metadata_rollout_purpose or 'none'}|"
-        f"forwarded={forwarded_rollout_purpose or 'none'}|"
-        f"temperature={temperature}|top_p={top_p}",
-        flush=True,
-    )
-
-
 def _transport_log_context(request: Request) -> Dict[str, Any]:
     """Read opt-in Gym trace headers without changing the model body."""
 
@@ -970,15 +952,6 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         if extra_body:
             body_dict = extra_body | body_dict
-
-        metadata_rollout_purpose = extra_body.get("nemo_rl_rollout_purpose")
-        forwarded_rollout_purpose = body_dict.get("nemo_rl_rollout_purpose")
-        _emit_vllm_proxy_purpose_marker(
-            metadata_rollout_purpose=metadata_rollout_purpose,
-            forwarded_rollout_purpose=forwarded_rollout_purpose,
-            temperature=body_dict.get("temperature"),
-            top_p=body_dict.get("top_p"),
-        )
 
         self._splice_audio_from_metadata(body_dict, metadata)
 

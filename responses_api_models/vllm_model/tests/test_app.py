@@ -20,7 +20,6 @@ import os
 import time
 from contextlib import nullcontext
 from copy import deepcopy
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Union
 from unittest.mock import AsyncMock, MagicMock
@@ -33,7 +32,6 @@ from pytest import MonkeyPatch, mark, raises
 from yarl import URL
 
 import nemo_gym.server_utils
-import responses_api_models.vllm_model.app as vllm_model_app
 from nemo_gym import PARENT_DIR
 from nemo_gym._checkpoint.control import CheckpointRequest
 from nemo_gym._checkpoint.generation_cut import GenerationCutInventory, GenerationCutPrefixAck, GenerationCutReceipt
@@ -4444,13 +4442,6 @@ class TestVLLMConverter:
         assert captured_kwargs["chat_template_kwargs"]["new_param"] == "new"
 
     def test_metadata_extra_body_override(self, monkeypatch: MonkeyPatch):
-        assert Path(vllm_model_app.__file__).resolve() == (Path(__file__).resolve().parents[1] / "app.py")
-        marker_calls: list[dict[str, Any]] = []
-        monkeypatch.setattr(
-            vllm_model_app,
-            "_emit_vllm_proxy_purpose_marker",
-            lambda **values: marker_calls.append(values),
-        )
         config = VLLMModelConfig(
             host="0.0.0.0",
             port=8081,
@@ -4502,15 +4493,7 @@ class TestVLLMConverter:
                     content="hello",
                 )
             ],
-            metadata={
-                "extra_body": json.dumps(
-                    {
-                        "min_tokens": 20,
-                        "new_param": "value",
-                        "nemo_rl_rollout_purpose": "evaluation",
-                    }
-                )
-            },
+            metadata={"extra_body": json.dumps({"min_tokens": 20, "new_param": "value"})},
         )
 
         client = TestClient(app)
@@ -4523,15 +4506,6 @@ class TestVLLMConverter:
         assert captured_kwargs["guided_json"] == '{"type": "object"}'
         assert captured_kwargs["min_tokens"] == 20
         assert captured_kwargs["new_param"] == "value"
-        assert captured_kwargs["nemo_rl_rollout_purpose"] == "evaluation"
-        assert marker_calls == [
-            {
-                "metadata_rollout_purpose": "evaluation",
-                "forwarded_rollout_purpose": "evaluation",
-                "temperature": None,
-                "top_p": None,
-            }
-        ]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -6503,6 +6477,51 @@ class TestSamplingOverrides:
         server = self._server({"temperature": 1.0}, is_responses_native=True)
         body = {"model": "dummy_model", "temperature": 0.2}
         assert server._apply_sampling_overrides(body)["temperature"] == 1.0
+
+    def test_transport_log_records_the_request_the_engine_receives(
+        self, monkeypatch: MonkeyPatch, tmp_path, capsys
+    ) -> None:
+        """The opt-in transport log is the request trace: it records the body after overrides."""
+        log_path = tmp_path / "model-io-transport.jsonl"
+        monkeypatch.setenv("NEMO_GYM_VLLM_TRANSPORT_LOG", str(log_path))
+        server = self._server({"temperature": 1.0, "top_p": 1.0})
+        sent: dict[str, Any] = {}
+
+        async def create_chat_completion(**kwargs: Any) -> dict[str, Any]:
+            sent.update(kwargs)
+            return {
+                "id": "chatcmpl",
+                "object": "chat.completion",
+                "created": FIXED_TIME,
+                "model": "dummy_model",
+                "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "ok"}}],
+            }
+
+        provider = MagicMock(spec=NeMoGymAsyncOpenAI)
+        provider.create_chat_completion = AsyncMock(side_effect=create_chat_completion)
+        server._clients = [provider]
+        request = NeMoGymResponseCreateParamsNonStreaming(
+            input=[NeMoGymEasyInputMessage(type="message", role="user", content="hello")],
+            temperature=0.2,
+            top_p=0.5,
+            metadata={"extra_body": json.dumps({"new_param": "value"})},
+        )
+
+        response = TestClient(server.setup_webserver()).post(
+            "/v1/responses", json=request.model_dump(exclude_unset=True, mode="json")
+        )
+
+        assert response.status_code == 200
+        (event,) = [
+            json.loads(line)
+            for line in log_path.read_text(encoding="utf-8").splitlines()
+            if json.loads(line)["event"] == "transport_request"
+        ]
+        assert event["request_payload"]["temperature"] == sent["temperature"] == 1.0
+        assert event["request_payload"]["top_p"] == sent["top_p"] == 1.0
+        assert event["request_payload"]["new_param"] == sent["new_param"] == "value"
+        # Nothing is printed per request; the trace exists only when the log is enabled.
+        assert capsys.readouterr().out == ""
 
 
 class TestEndpointFile:
