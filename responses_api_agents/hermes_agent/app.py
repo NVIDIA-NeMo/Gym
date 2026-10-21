@@ -54,7 +54,7 @@ from nemo_gym.failure_kinds import (
     MODEL_TRANSPORT_ERROR,
 )
 from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.model_sampling import ModelCallSampling
+from nemo_gym.model_sampling import ModelCallSampling, model_sampling_base_url
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -670,10 +670,9 @@ class HermesAgent(SimpleResponsesAPIAgent):
             "max_turns": self.config.max_turns,
             "model": self._model_name(),
             # The sandbox reaches the Model Server directly; the rollout prefix keeps its calls correlated.
-            "model_base_url": self.resolve_model_base_url(
-                self.config.model_server.name,
-                state.request.episode_id.capture_key,
-                sampling=ModelCallSampling.from_request(body),
+            "model_base_url": model_sampling_base_url(
+                self.resolve_model_base_url(self.config.model_server.name, state.request.episode_id.capture_key),
+                ModelCallSampling.from_request(body),
             ),
             "terminal_timeout": self.config.terminal_timeout,
         }
@@ -918,8 +917,9 @@ class HermesAgent(SimpleResponsesAPIAgent):
             LOG.warning("Hermes host execution does not bound the run by %s", AGENT_TIMEOUT_METADATA_KEY)
         params = self._conversation_params(body)
 
-        base_url = self.resolve_model_base_url(
-            self.config.model_server.name, rollout_id, sampling=ModelCallSampling.from_request(body)
+        base_url = model_sampling_base_url(
+            self.resolve_model_base_url(self.config.model_server.name, rollout_id),
+            ModelCallSampling.from_request(body),
         )
         model_name = self._model_name()
 

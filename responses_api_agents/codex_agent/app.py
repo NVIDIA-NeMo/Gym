@@ -50,7 +50,7 @@ from nemo_gym.base_responses_api_agent import (
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.failure_kinds import MODEL_REQUEST_ERROR, MODEL_TRANSPORT_ERROR
 from nemo_gym.global_config import SKILLS_REF_KEY_NAME, get_first_server_config_dict
-from nemo_gym.model_sampling import ModelCallSampling
+from nemo_gym.model_sampling import ModelCallSampling, model_sampling_base_url
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -668,9 +668,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
 
     def _sandbox_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
         """Validate and normalize input before consuming the session's activation."""
-        sampling = ModelCallSampling.from_request(body)
-        if sampling.model_dump(exclude_none=True) and self.config.model_server is None:
-            raise HTTPException(422, "Codex request sampling requires a Gym model_server")
+        ModelCallSampling.from_request(body)
         unsupported = (
             "reasoning",
             "max_tool_calls",
@@ -761,10 +759,9 @@ class CodexAgent(SimpleResponsesAPIAgent):
         system: str,
     ) -> NeMoGymResponse:
         invocation_id = state.request.episode_id.capture_key
-        base_url = self.resolve_model_base_url(
-            self.config.model_server.name,
-            invocation_id,
-            sampling=ModelCallSampling.from_request(body),
+        base_url = model_sampling_base_url(
+            self._resolve_call_base_url(invocation_id),
+            ModelCallSampling.from_request(body),
         )
         config = self._build_config(base_url, developer_instructions=system)
         config["model_providers"]["gym"]["http_headers"] = {"x-session-id": invocation_id}

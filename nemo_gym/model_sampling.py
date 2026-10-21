@@ -3,10 +3,11 @@
 
 """Per-model-call sampling carried by a harness's immutable Model Server URL.
 
-The prefix lets unmodified harnesses inherit the same controls for ordinary turns,
-summaries and delegated calls. It adds no request registry or network hop. These
-controls are caller settings; a Model Server's configured sampling overrides still
-take precedence when it builds the provider request.
+Calls using the URL inherit the same controls, including summaries and delegated
+calls that retain it. Separate auxiliary-provider routes are unaffected. This adds
+no request registry or network hop. These controls are caller settings; a Model
+Server's configured sampling overrides still take precedence when it builds the
+provider request.
 """
 
 import base64
@@ -29,6 +30,10 @@ MODEL_SAMPLING_PATH_PREFIX = "ng-sampling"
 _MAX_ENCODED_LENGTH = 1024
 _ENCODED_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 _GENERATION_PATHS = frozenset({"/v1/chat/completions", "/v1/responses"})
+_SAMPLING_PATH = re.compile(
+    rf"^(?P<routing>(?:/{ROLLOUT_PATH_PREFIX}/[^/]+(?:/{TOKEN_CAPTURE_PATH_SEGMENT})?)?)"
+    rf"/{MODEL_SAMPLING_PATH_PREFIX}(?:/(?P<encoded>[^/]*)(?P<api_path>/.*)?)?$"
+)
 
 
 class ModelCallSampling(BaseModel):
@@ -38,7 +43,7 @@ class ModelCallSampling(BaseModel):
 
     temperature: float | None = Field(default=None, ge=0, le=2, allow_inf_nan=False)
     top_p: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
-    max_output_tokens: int | None = Field(default=None, gt=0)
+    max_output_tokens: int | None = Field(default=None, gt=0, le=2**53 - 1)
 
     @classmethod
     def from_request(cls, body: Any) -> "ModelCallSampling":
@@ -50,14 +55,17 @@ class ModelCallSampling(BaseModel):
 
 
 def model_sampling_base_url(base_url: str, sampling: ModelCallSampling | None) -> str:
-    """Prefix a Gym endpoint while retaining its rollout, capture and API path."""
+    """Insert controls before /v1, preserving relay, rollout and capture prefixes."""
     if sampling is None or not (controls := sampling.model_dump(exclude_none=True)):
         return base_url
     encoded = base64.urlsafe_b64encode(json.dumps(controls, separators=(",", ":")).encode()).decode().rstrip("=")
     if len(encoded) > _MAX_ENCODED_LENGTH:
         raise ValueError("Model-call sampling exceeds the supported URL length")
     parts = urlsplit(base_url)
-    return urlunsplit(parts._replace(path=f"/{MODEL_SAMPLING_PATH_PREFIX}/{encoded}{parts.path}"))
+    path = parts.path.rstrip("/")
+    if not path.endswith("/v1"):
+        raise ValueError("Model-call sampling requires a model base URL ending in /v1")
+    return urlunsplit(parts._replace(path=f"{path[:-3]}/{MODEL_SAMPLING_PATH_PREFIX}/{encoded}/v1"))
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -76,16 +84,6 @@ def _decode_sampling(encoded: str) -> ModelCallSampling:
     return ModelCallSampling.model_validate(json.loads(raw, object_pairs_hook=_unique_object))
 
 
-def _generation_path(path: str) -> str:
-    """Recognize generation without consuming the rollout prefix needed by capture."""
-    if path.startswith(f"/{ROLLOUT_PATH_PREFIX}/"):
-        parts = path.split("/", 3)
-        path = f"/{parts[3]}" if len(parts) == 4 and parts[2] else ""
-        if path.startswith(f"/{TOKEN_CAPTURE_PATH_SEGMENT}/"):
-            path = path[len(TOKEN_CAPTURE_PATH_SEGMENT) + 1 :]
-    return path
-
-
 class ModelSamplingMiddleware:
     """Normalize sampling before policy admission and capture observe a model call.
 
@@ -98,21 +96,35 @@ class ModelSamplingMiddleware:
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         path = scope.get("path", "")
-        prefix = f"/{MODEL_SAMPLING_PATH_PREFIX}"
-        if scope["type"] != "http" or not (path == prefix or path.startswith(f"{prefix}/")):
+        # A mounted relay owns root_path; an identically named mount or rollout
+        # must not be mistaken for our segment.
+        root_path = scope.get("root_path", "").rstrip("/")
+        mounted = bool(root_path and (path == root_path or path.startswith(f"{root_path}/")))
+        route_path = path[len(root_path) :] if mounted else path
+        match = _SAMPLING_PATH.fullmatch(route_path) if scope["type"] == "http" else None
+        if match is None:
             await self.app(scope, receive, send)
             return
 
         try:
-            _, _, encoded, remainder = path.split("/", 3)
-            sampling = _decode_sampling(encoded)
+            generation_path = match["api_path"] or ""
+            # Generation must follow this segment directly. Reject the obsolete
+            # front-prefix layout rather than silently dropping its controls.
+            if not generation_path or ("/v1/" in generation_path and not generation_path.startswith("/v1/")):
+                raise ValueError("Invalid model-call sampling route")
+            sampling = _decode_sampling(match["encoded"] or "")
         except (ValueError, UnicodeDecodeError, binascii.Error):
             await JSONResponse({"detail": "Invalid model-call sampling URL"}, status_code=422)(scope, receive, send)
             return
 
-        scope = scope_with_routed_path(scope, f"/{remainder}")
+        route_prefix = f"{root_path if mounted else ''}{match['routing']}"
+        scope = scope_with_routed_path(scope, f"{route_prefix}{generation_path}")
         controls = sampling.model_dump(exclude_none=True)
-        generation_path = _generation_path(scope["path"])
+        if scope["method"] == "POST" and generation_path == "/v1/messages" and controls:
+            await JSONResponse({"detail": "Model-call sampling is not supported for /v1/messages"}, status_code=422)(
+                scope, receive, send
+            )
+            return
         if scope["method"] != "POST" or generation_path not in _GENERATION_PATHS or not controls:
             await self.app(scope, receive, send)
             return

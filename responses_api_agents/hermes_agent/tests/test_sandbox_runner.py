@@ -423,7 +423,11 @@ def test_iteration_limit_summary_reaches_the_model_server(
                     },
                 ),
             )
-            monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *_args, **_kwargs: model_server.base_url)
+            monkeypatch.setattr(
+                HermesAgent,
+                "resolve_model_base_url",
+                lambda self, model_server_name, rollout_id=None: model_server.base_url,
+            )
             observations = []
             output = asyncio.run(
                 agent._create_response(

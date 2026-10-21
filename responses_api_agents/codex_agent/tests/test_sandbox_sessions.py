@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import base64
 import json
 import os
 import shlex
@@ -28,6 +27,7 @@ from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.tasks.harbor.materialize import materialize_task
 from nemo_gym.tasks.harbor.task import load_task
+from nemo_gym.testing.model_sampling import assert_model_sampling
 from responses_api_agents.codex_agent.app import CodexAgent, CodexAgentConfig
 
 
@@ -2423,18 +2423,8 @@ def test_session_sampling_reaches_model_route_and_preserves_retry_binding(setup,
         assert result.status_code == 200, result.text
         config = tomllib.loads(sandbox.files[f"{sandbox.directory}/home/.codex/config.toml"])
         base_url = config["model_providers"]["gym"]["base_url"]
-        encoded = base_url.split("/ng-sampling/", 1)[1].split("/", 1)[0]
-        assert json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))) == controls
-        assert base_url.endswith(path.removesuffix("/responses"))
+        assert_model_sampling(base_url, controls, routed_base_path=path.removesuffix("/responses"))
         assert client.post(path, json=body).json() == result.json()
         assert client.post(path, json={**body, "top_p": 0.8}).status_code == 409
     sandbox.launch.assert_awaited_once()
     assert agent.config.model_dump() == original_config
-
-
-def test_request_sampling_requires_gym_model_server(setup):
-    agent, sandbox = setup
-    agent.config.model_server = None
-    with pytest.raises(HTTPException, match="requires a Gym model_server"):
-        agent._sandbox_input(NeMoGymResponseCreateParamsNonStreaming(input="task", temperature=0))
-    sandbox.launch.assert_not_awaited()

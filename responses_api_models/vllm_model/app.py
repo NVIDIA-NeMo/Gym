@@ -681,6 +681,31 @@ class VLLMModel(SimpleResponsesAPIModel):
             preserve_envelope_id=self._preserve_envelope_id(),
         )
 
+    def _warn_sampling_override_conflicts(self, request_values: Dict[str, Any]) -> None:
+        """Compare request fields before configured defaults are merged in."""
+        overrides = self.config.sampling_overrides or {}
+        conflicts = {}
+        for name, value in overrides.items():
+            request_name = name
+            if name in ("max_tokens", "max_completion_tokens"):
+                # Chat uses max_completion_tokens when both spellings are present.
+                if name == "max_tokens" and overrides.get("max_completion_tokens") is not None:
+                    continue
+                request_name = (
+                    "max_completion_tokens"
+                    if request_values.get("max_completion_tokens") is not None
+                    else "max_tokens"
+                )
+            requested = request_values.get(request_name)
+            if requested is not None and requested != value:
+                conflicts[name] = {"requested": requested, "effective": value}
+        if conflicts:
+            LOG.warning(
+                "Model Server `%s`: sampling_overrides replaces request sampling values: %s",
+                self.config.name,
+                conflicts,
+            )
+
     def _apply_sampling_overrides(self, body_dict: Dict[str, Any]) -> Dict[str, Any]:
         """Force ``config.sampling_overrides`` onto an outbound body, in place.
 
@@ -691,6 +716,11 @@ class VLLMModel(SimpleResponsesAPIModel):
         sampling is pinned.
         """
         if self.config.sampling_overrides:
+            # A caller's Chat alias must not take precedence over the configured
+            # token limit just because the override uses the other spelling.
+            if {"max_tokens", "max_completion_tokens"} & self.config.sampling_overrides.keys():
+                body_dict.pop("max_tokens", None)
+                body_dict.pop("max_completion_tokens", None)
             body_dict.update(self.config.sampling_overrides)
         return body_dict
 
@@ -712,6 +742,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             raise ValueError("metadata.audio_ref requires is_responses_native=false and the chat-completions backend.")
 
         body_dict = body.model_dump(exclude_unset=True)
+        self._warn_sampling_override_conflicts(body_dict)
         body_dict["model"] = self.config.model
         if self.config.chat_template_kwargs:
             body_dict["chat_template_kwargs"] = deepcopy(self.config.chat_template_kwargs)
@@ -850,6 +881,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             The (possibly mutated) ``body_dict`` that will be forwarded to
             ``client.create_chat_completion``.
         """
+        self._warn_sampling_override_conflicts(body_dict)
         self._strip_hosted_only_tool_fields(body_dict)
 
         if self.config.replace_developer_role_with_system:
@@ -1759,6 +1791,8 @@ class VLLMModel(SimpleResponsesAPIModel):
         if "max_tokens" not in out and "max_completion_tokens" in chat_body_dict:
             out["max_tokens"] = chat_body_dict["max_completion_tokens"]
 
+        self._warn_sampling_override_conflicts(out)
+
         # /v1/completions ``logprobs`` is an int (top-N), not a bool. We mainly
         # need ``logprobs=0`` (just the sampled token's logprob) when the
         # operator wants generation-token-id metadata for RL training.
@@ -1786,9 +1820,12 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         # This path never runs _preprocess_chat_completion_create_params;
         # chat_completions() branches here before preprocessing, so the pin has to be applied again.
-        # vLLM accepts the same sampling field names on /v1/completions, and the body is forwarded as raw JSON,
-        # so params without a first-class OpenAI completion field (top_k, min_p) pass through.
-        return self._apply_sampling_overrides(out)
+        # Raw-JSON sampling extensions (top_k, min_p) pass through, but this backend
+        # only accepts max_tokens. Normalize after overrides so either pin spelling wins.
+        self._apply_sampling_overrides(out)
+        if (limit := out.pop("max_completion_tokens", None)) is not None:
+            out["max_tokens"] = limit
+        return out
 
     def _completion_dict_to_chat_completion(self, completion_dict: Dict[str, Any]) -> NeMoGymChatCompletion:
         """Wrap a /v1/completions response as a NeMoGymChatCompletion.

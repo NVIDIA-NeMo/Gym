@@ -26,6 +26,7 @@ from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.testing.model_sampling import assert_model_sampling
 from responses_api_agents.hermes_agent import sandbox as hermes_sandbox
 from responses_api_agents.hermes_agent.app import (
     AGENT_TIMEOUT_METADATA_KEY,
@@ -54,7 +55,9 @@ def agent(monkeypatch):
     )
 
     monkeypatch.setattr(
-        HermesAgent, "resolve_model_base_url", lambda *args, **kwargs: "http://model:8000/ng-rollout/episode-a1/v1"
+        HermesAgent,
+        "resolve_model_base_url",
+        lambda self, model_server_name, rollout_id=None: "http://model:8000/ng-rollout/episode-a1/v1",
     )
     return result
 
@@ -955,7 +958,7 @@ async def test_session_prompt_and_limits_reach_runner(agent, state, overrides, t
     assert payload["system_message"] == "Configured instruction\n\nRequest instruction"
     assert payload["max_tokens"] == overrides.get("max_output_tokens", 500)
     assert payload["temperature"] == overrides.get("temperature", 0.7)
-    assert resolve_url.call_args.kwargs["sampling"].model_dump(exclude_none=True) == overrides
+    assert_model_sampling(payload["model_base_url"], overrides)
     assert agent.config.max_tokens == 500
     assert agent.config.temperature == 0.7
     assert body.input == "Fix the bug"  # Do not mutate the caller's request.
@@ -1130,9 +1133,8 @@ async def test_host_and_sandbox_prepare_the_same_request(agent, state, monkeypat
         payload["max_tokens"] == constructor.call_args.kwargs["max_tokens"] == controls.get("max_output_tokens", 500)
     )
     assert resolve_url.call_count == 2
-    assert all(
-        call.kwargs["sampling"].model_dump(exclude_none=True) == controls for call in resolve_url.call_args_list
-    )
+    assert_model_sampling(payload["model_base_url"], controls)
+    assert_model_sampling(constructor.call_args.kwargs["base_url"], controls)
     assert body.model_dump() == original
     assert len(validations) == 2  # Exactly once per incoming request, not again in the runner.
 

@@ -382,8 +382,8 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         )
 
         self.setup_policy_checkpoint(app, capture_ledger)
-        # Run before admission and capture, so both see the original rollout path
-        # and capture records the sampling controls actually sent to the model.
+        # Normalize routing and caller controls before admission and capture.
+        # Model-specific overrides can still change the eventual provider request.
         app.add_middleware(ModelSamplingMiddleware)
         return app
 

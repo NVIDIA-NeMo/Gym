@@ -46,7 +46,7 @@ from nemo_gym.base_responses_api_agent import (
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.failure_kinds import MODEL_REQUEST_ERROR, MODEL_TRANSPORT_ERROR
-from nemo_gym.model_sampling import ModelCallSampling
+from nemo_gym.model_sampling import ModelCallSampling, model_sampling_base_url
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -760,11 +760,7 @@ class PiAgent(SimpleResponsesAPIAgent):
         """Validate the supported controls for a sandbox session activation."""
         if body.model is not None and body.model != self.config.model:
             raise HTTPException(422, "Pi model must match the configured model")
-        sampling = ModelCallSampling.from_request(body)
-        if sampling.model_dump(exclude_none=True) and self.config.model_server is None:
-            raise HTTPException(422, "Pi request sampling requires a Gym model_server")
-        if body.max_output_tokens is not None and body.max_output_tokens > 2**53 - 1:
-            raise HTTPException(422, "Pi max_output_tokens must be a positive JavaScript-safe integer")
+        ModelCallSampling.from_request(body)
         supported = {"input", "instructions", "temperature", "top_p", "max_output_tokens", "model"}
         for name, field in type(body).model_fields.items():
             if name in supported:
@@ -1120,12 +1116,10 @@ class PiAgent(SimpleResponsesAPIAgent):
         env.update({k: v for k, v in self.config.env.items() if v})
         return env
 
-    def _resolve_model_base_url(
-        self, rollout_id: Optional[str] = None, *, sampling: ModelCallSampling | None = None
-    ) -> str:
+    def _resolve_model_base_url(self, rollout_id: Optional[str] = None) -> str:
         if self.config.model_server is None:
             return ""
-        return self.resolve_model_base_url(self.config.model_server.name, rollout_id, sampling=sampling)
+        return self.resolve_model_base_url(self.config.model_server.name, rollout_id)
 
     def _effective_model(self) -> str:
         return f"nemo/{self.config.model}" if self.config.model_server else self.config.model
@@ -1148,7 +1142,7 @@ class PiAgent(SimpleResponsesAPIAgent):
             return config
         providers = config.setdefault("providers", {})
         providers["nemo"] = {
-            "baseUrl": self._resolve_model_base_url(rollout_id, sampling=sampling),
+            "baseUrl": model_sampling_base_url(self._resolve_model_base_url(rollout_id), sampling),
             "api": "openai-completions",
             "apiKey": "EMPTY",  # pragma: allowlist secret
             "compat": {"supportsDeveloperRole": False, "supportsReasoningEffort": False},

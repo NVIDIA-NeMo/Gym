@@ -28,6 +28,16 @@ These adapters run a coding harness inside a task sandbox that a Resources serve
 
 The `allowed_agents` lists also name older adapters, such as `opencode_sandboxed_agent` and `terminus_2_sandboxed_agent`. They run the whole episode themselves behind a `legacy_agent` Environment Server, and shipped recipes such as `terminal_bench_2_1/opencode` use them. To run them or swap one for another, see [Compare Harnesses](/main/evaluation/harness).
 
+<Note>
+Request-level `temperature`, `top_p`, and `max_output_tokens` controls cover the five agent session implementations listed above, plus Hermes host execution. They do not add request-control support to other agent adapters or to the older local entrypoints of Pi, Codex, OpenCode, and OpenClaw.
+
+For Hermes, Pi, OpenCode, and OpenClaw sessions, the agent's configured output-token limit is a default, not a hard ceiling: `max_tokens` for Hermes and `max_output_tokens` for the other three. An explicit request `max_output_tokens` replaces that default, whether higher or lower; omitting it retains the configured value. For example, config `1024` plus request `2048` selects a per-call request cap of `2048`. Model context restrictions and smaller per-call limits chosen by the harness still apply.
+
+The current Hermes integration does not automatically route context-compression calls through Gym: those calls use a separate auxiliary-provider resolver. The request controls described here do not cover that separate route. This differs from the final summary at the turn limit, which uses the normal Gym model route.
+
+The pinned Codex 0.144.4 treats an incomplete response caused by `max_output_tokens` as a retryable stream error. Its default policy allows five retries, for up to six model requests total. The output-token cap applies separately to each request, not to the combined output across retries.
+</Note>
+
 ## Run an integrated agent on a benchmark
 
 An experiment is a few composable YAML files: the model and provider, the benchmark, the agent, and the Environment Server that binds them. To change the agent or the benchmark, replace one file; the others stay as they are.

@@ -432,7 +432,7 @@ class TestModelServer:
         assert provider["models"][0]["id"] == "Qwen3.6-35B-A3B"
         assert provider["models"][0]["maxTokens"] == 131072
         assert agent.config.models_config == models_config
-        resolve.assert_called_once_with("policy_model", "1-2", sampling=None)
+        resolve.assert_called_once_with("policy_model", "1-2")
 
     def test_preserves_explicit_provider_without_model_server(self) -> None:
         config = {"providers": {"custom": {"baseUrl": "https://example.test"}}}

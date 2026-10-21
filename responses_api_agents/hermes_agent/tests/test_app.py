@@ -14,6 +14,9 @@
 # limitations under the License.
 import asyncio
 import json
+import os
+import runpy
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -45,6 +48,7 @@ from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle
 from nemo_gym.sandbox import SandboxExecResult, SandboxSpec
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.testing.model_sampling import assert_model_sampling
 from nemo_gym.tool_access import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
 from responses_api_agents.hermes_agent.app import (
     HermesAgent,
@@ -958,7 +962,11 @@ class TestResultClassification:
     @pytest.mark.parametrize("totals", [None, (0, 0), (20, 10)])
     async def test_host_path_retains_provider_failure_for_masked_verification(self, monkeypatch, totals) -> None:
         hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient, global_config_dict={}))
-        monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *args, **kwargs: "http://model:8000/v1")
+        monkeypatch.setattr(
+            HermesAgent,
+            "resolve_model_base_url",
+            lambda self, model_server_name, rollout_id=None: "http://model:8000/v1",
+        )
         monkeypatch.setattr(HermesAgent, "_ensure_sigterm_handler", lambda *_: None)
         runner = MagicMock()
         runner.run_conversation.return_value = {"failed": True, "error": "HTTP 500", "messages": []}
@@ -977,6 +985,49 @@ class TestResultClassification:
             assert response.usage.input_tokens == totals[0]
             assert response.usage.output_tokens == totals[1]
             assert response.usage.total_tokens == sum(totals)
+
+
+@pytest.mark.parametrize("controls", [{}, {"temperature": 0.0, "top_p": 0.9, "max_output_tokens": 128}])
+def test_cvdp_entrypoint_model_resolver_override_remains_compatible(tmp_path, monkeypatch, controls):
+    """CVDP replaces the resolver with a callable using its original two-argument contract."""
+    runner = MagicMock()
+    runner.run_conversation.return_value = {
+        "completed": True,
+        "messages": [{"role": "user", "content": "Fix the code"}, {"role": "assistant", "content": "done"}],
+    }
+    constructor = MagicMock(return_value=runner)
+    monkeypatch.setattr("run_agent.AIAgent", constructor)
+    monkeypatch.setattr(HermesAgent, "_ensure_sigterm_handler", lambda *_: None)
+    monkeypatch.setattr(sys, "path", sys.path.copy())
+    for key, value in {
+        "NV_AGENT_HOME": str(tmp_path / "home"),
+        "NV_AGENT_DEPS_DIR": str(tmp_path / "deps"),
+        "NV_MODEL_URL": "http://model:8000/relay/model",
+        "NV_MODEL_NAME": "model",
+        "NV_TRAJ_DIR": str(tmp_path),
+        "NV_AGENT_MODULE": "responses_api_agents.hermes_agent.app",
+        "NV_AGENT_CLASS": "HermesAgent",
+        "NV_AGENT_CFG_CLASS": "HermesAgentConfig",
+        "NV_AGENT_KWARGS": "{}",
+        "NV_SAMPLING": json.dumps(controls),
+        # Restore the entrypoint's process-wide environment changes after this test.
+        "HOME": str(tmp_path / "home"),
+        "XDG_CACHE_HOME": str(tmp_path / "cache"),
+        "XDG_CONFIG_HOME": str(tmp_path / "config"),
+        "XDG_DATA_HOME": str(tmp_path / "data"),
+        "PATH": os.environ["PATH"],
+    }.items():
+        monkeypatch.setenv(key, value)
+    (tmp_path / "instruction.txt").write_text("Fix the code")
+    runpy.run_path(str(Path(__file__).parents[2] / "cvdp_agent" / "sandbox_entrypoint.py"), run_name="__main__")
+    response = json.loads((tmp_path / "response.json").read_text())
+    assert response["output"][0]["content"][0]["text"] == "done"
+    assert_model_sampling(
+        constructor.call_args.kwargs["base_url"],
+        controls,
+        routed_base_path="/relay/model/v1",
+        mount_path="/relay/model",
+    )
 
 
 class TestSandboxHermesInstall:
