@@ -909,18 +909,21 @@ async def test_slow_inventory_does_not_block_scrapes_and_is_cancelled(monkeypatc
     assert collector._inventory_task is None
 
 
-def prefill_counter_payload(values: dict[str, int]) -> str:
+def prefill_counter_payload(values: dict[str, int], *, reason: str = "mamba_alignment") -> str:
     registry = CollectorRegistry()
     for name, value in values.items():
         Counter(f"vllm:prefill_{name}_total", "Batching interval inputs", registry=registry).inc(value)
     reasons = Counter(
         "vllm:prefill_underfilled_batches_by_reason_total", "Overlapping constraints", ["reason"], registry=registry
     )
-    reasons.labels(reason="mamba_alignment").inc(values.get("underfilled_batches", 0))
+    reasons.labels(reason=reason).inc(values.get("underfilled_batches", 0))
     return generate_latest(registry).decode()
 
 
-def test_prefill_interval_averages_use_deltas_and_omit_idle_or_reset_intervals():
+@pytest.mark.parametrize(
+    "reason", ["mamba_alignment", "mamba_alignment_budget_too_small", "mamba_alignment_shared_prefix"]
+)
+def test_prefill_interval_averages_use_deltas_and_omit_idle_or_reset_intervals(reason: str):
     collector = InferenceMetricsCollector(config())
     values = dict(
         completed_requests=2,
@@ -934,20 +937,20 @@ def test_prefill_interval_averages_use_deltas_and_omit_idle_or_reset_intervals()
         underfilled_batches=2,
     )
     prefix = "vllm/replica0/"
-    first = collector.parse("replica0", prefill_counter_payload(dict.fromkeys(values, 0)), 10)
+    first = collector.parse("replica0", prefill_counter_payload(dict.fromkeys(values, 0), reason=reason), 10)
     assert prefix + "prefill_forwards_per_request" not in first
-    result = collector.parse("replica0", prefill_counter_payload(values), 20)
+    result = collector.parse("replica0", prefill_counter_payload(values, reason=reason), 20)
     assert result[prefix + "prefill_forwards_per_request"] == pytest.approx(3)
     assert result[prefix + "prefill_tokens_per_request_forward"] == pytest.approx(620 / 6)
     assert result[prefix + "prefill_tokens_per_forward"] == 160
     assert result[prefix + "prefill_requests_per_forward"] == pytest.approx(1.75)
     assert result[prefix + "prefill_batch_token_fill_ratio"] == 0.625
     assert result[prefix + "prefill_underfilled_batch_fraction"] == 0.5
-    assert result[prefix + "prefill_underfill_reason_fraction/reason/mamba_alignment"] == 0.5
+    assert result[prefix + f"prefill_underfill_reason_fraction/reason/{reason}"] == 0.5
     assert not any("bucket" in key for key in result)
-    idle = collector.parse("replica0", prefill_counter_payload(values), 30)
+    idle = collector.parse("replica0", prefill_counter_payload(values, reason=reason), 30)
     assert prefix + "prefill_tokens_per_forward" not in idle
-    reset = collector.parse("replica0", prefill_counter_payload(dict.fromkeys(values, 0)), 40)
+    reset = collector.parse("replica0", prefill_counter_payload(dict.fromkeys(values, 0), reason=reason), 40)
     assert prefix + "prefill_tokens_per_forward" not in reset
 
 
