@@ -47,7 +47,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ResourcesServerRef
-from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
 
 
 logger = logging.getLogger(__name__)
@@ -132,6 +132,14 @@ class NSToolsResourcesServer(SimpleResourcesServer):
     _python_tool_process: Optional[subprocess.Popen] = None
     _timing_by_session: Dict[str, list] = {}  # session_id -> list of timing records
     _uses_python_tool_sidecar: bool = False
+
+    def multiple_workers_unsupported_reason(self) -> Optional[str]:
+        if not any(self._tool_uses_python_tool_sidecar(tool_spec) for tool_spec in self.config.nemo_skills_tools):
+            return None
+        return (
+            "the HTTP PythonTool starts a sidecar on the fixed python_tool_port in every worker, "
+            "so a second worker cannot bind it"
+        )
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -485,3 +493,6 @@ class NSToolsResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     NSToolsResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = NSToolsResourcesServer.run_webserver()  # noqa: F401

@@ -413,7 +413,7 @@ elif is_nemo_gym_fastapi_entrypoint(__file__):
     app = StatefulServer.run_webserver()  # noqa: F401
 ```
 
-A server whose state routing cannot reach, such as a registry keyed by another ID in the request body, overrides `multiple_workers_unsupported_reason()` instead and returns why it needs one worker. `run_webserver` then refuses `num_workers` above 1 with that reason before Uvicorn starts, and a dry run reports it too.
+A server whose state routing cannot reach, such as a registry keyed by another ID in the request body, overrides `multiple_workers_unsupported_reason()` instead and returns why it needs one worker. `run_webserver` then refuses `num_workers` above 1 with that reason before Uvicorn starts, and a dry run reports it too. A unit test checks that every server does one or the other.
 
 A server that keeps no per-session state, or shares it outside the process, can opt out of routing with `routes_sessions_to_owner = False` on its class.
 

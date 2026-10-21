@@ -32,7 +32,7 @@ from app import (
 )
 
 from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.server_utils import ServerClient, refuse_unsupported_num_workers
 
 
 def _make_response(text: str) -> NeMoGymResponse:
@@ -1152,3 +1152,13 @@ class TestBuildCometActorClass:
 
         with pytest.raises(RuntimeError, match="sys.executable doesn't exist"):
             _build_comet_actor_class()
+
+
+def test_several_workers_are_refused_only_with_comet() -> None:
+    comet = _make_server(compute_comet=True)
+    comet.config.num_workers = 2
+    with pytest.raises(ValueError, match="needs num_workers=1: with compute_comet"):
+        refuse_unsupported_num_workers(comet)
+    no_comet = _make_server(compute_comet=False)
+    no_comet.config.num_workers = 2
+    refuse_unsupported_num_workers(no_comet)

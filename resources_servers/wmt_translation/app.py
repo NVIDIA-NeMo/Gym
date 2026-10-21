@@ -53,6 +53,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 
 
 LOG = logging.getLogger(__name__)
@@ -316,6 +317,15 @@ def _build_comet_actor_class(use_worker_python: bool = False):
 class WmtTranslationResourcesServer(SimpleResourcesServer):
     ray_enabled = True
     config: WmtTranslationResourcesServerConfig
+
+    def multiple_workers_unsupported_reason(self) -> Optional[str]:
+        # Without COMET, scoring builds no actor pool and keeps nothing between requests.
+        if not self.config.compute_comet:
+            return None
+        return (
+            "with compute_comet, each worker builds its own Ray GPU actor pool for COMET scoring, "
+            "so several workers multiply the GPU actors and can fail to schedule them"
+        )
 
     # COMET actor pool state — populated lazily during compute_metrics() so
     # actor creation happens after Ray is fully up and `extra_gpu` is
@@ -917,3 +927,6 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     WmtTranslationResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = WmtTranslationResourcesServer.run_webserver()  # noqa: F401
