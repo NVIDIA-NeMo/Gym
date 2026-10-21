@@ -98,7 +98,7 @@ class NOOAAgent(SimpleResponsesAPIAgent):
         else:
             if body.sandbox_access is None:
                 raise HTTPException(422, "Sandboxed NOOA requires Resources-provided sandbox_access")
-            model_base_url = self.server_client._resolve_base_url(self.config.model_server.name)
+            model_base_url = self.resolve_model_base_url(self.config.model_server.name).removesuffix("/v1")
             connection = body.sandbox_access.connection
             provider = create_provider(
                 resolve_provider_config(connection.provider_config_ref, self.server_client.global_config_dict)
@@ -156,7 +156,13 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                 state.activation_key = key
                 state.execution = asyncio.create_task(self._execute_session(state, body, route))
             execution = state.execution
-        return await asyncio.shield(execution)
+        try:
+            return await asyncio.shield(execution)
+        except asyncio.CancelledError:
+            request_task = asyncio.current_task()
+            if state.closing and request_task is not None and not request_task.cancelling():
+                raise HTTPException(409, "Agent session is closing") from None
+            raise
 
     async def _execute_session(
         self, state: NOOASessionState, body: NeMoGymResponseCreateParamsNonStreaming, route: str

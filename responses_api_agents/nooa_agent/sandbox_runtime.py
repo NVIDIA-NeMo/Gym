@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Package and stage a private NOOA runtime for the target sandbox."""
 
+import asyncio
 import gzip
 import hashlib
 import io
@@ -111,7 +112,7 @@ async def prepare_nooa_runtime(sandbox: AsyncSandbox, *, wheelhouse_path: Path |
     A healthy preinstalled or mounted runtime is reused without writing into it.
     """
     root = Path(__file__).resolve().parents[2]
-    source, fingerprint = _runtime_archive(root)
+    source, fingerprint = await asyncio.to_thread(_runtime_archive, root)
     scratch = f"/tmp/nemo-gym-nooa-setup-{uuid4().hex}"
     script = scratch + ".sh"
     completed = False
