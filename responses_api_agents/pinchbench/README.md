@@ -144,6 +144,14 @@ make single-run scores noisy; trust aggregates / `num_repeats`.)
 - **Reward is continuous** (hybrid = weighted automated + judge). For RL training, threshold it.
 - **Reproduce-first:** baseline against the standalone harness before trusting Gym numbers.
 
+## Failures
+
+A failed task is recorded in the failures sidecar with a routing class. In evaluation (`gym eval run`), a
+sandbox that cannot start, an Apptainer exec that fails or writes no result archive, and a host-side
+`FileNotFoundError` (a missing `apptainer` binary, staging directory or archive) are `provider_unavailable`,
+which Gym retries: the host side of a run reads only harness files, and the task's grader runs inside the
+sandbox. Outside evaluation they stay `legitimate`, as before.
+
 ## Licensing
 
 - Integration code: Apache 2.0.

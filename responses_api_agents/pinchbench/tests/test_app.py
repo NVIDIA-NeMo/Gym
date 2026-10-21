@@ -24,8 +24,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.rollout_collection import is_terminal_failure
 from nemo_gym.rollout_observability import AgentInvocation, ToolCallObservation
 from nemo_gym.sandbox import SandboxExecResult
+from nemo_gym.sandbox.providers.apptainer.provider import ApptainerCreateVerificationError
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.pinchbench.app import (
     NG_FAILURE_CLASS_KEY,
@@ -34,7 +36,9 @@ from responses_api_agents.pinchbench.app import (
     PinchBenchAgent,
     PinchBenchAgentConfig,
     PinchBenchRunRequest,
+    SandboxExecError,
     SandboxKilledError,
+    SandboxNoOutputError,
     _classify_task_failure,
 )
 
@@ -457,7 +461,7 @@ async def test_observation_failure_does_not_change_result(tmp_path, monkeypatch)
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "error_type,exception_type",
-    [("timeout", TimeoutError), ("sandbox", RuntimeError)],
+    [("timeout", TimeoutError), ("sandbox", SandboxExecError)],
 )
 async def test_managed_sandbox_exec_errors_skip_download(tmp_path, monkeypatch, error_type, exception_type):
     agent = make_agent(sandbox_provider={"opensandbox": {}})
@@ -491,11 +495,52 @@ async def test_managed_sandbox_exec_errors_skip_download(tmp_path, monkeypatch, 
         (SandboxKilledError("rc=-15"), "kill_shaped"),
         (TimeoutError("timed out"), "timeout_exceeded"),
         (RuntimeError("exec failed"), "legitimate"),
-        (FileNotFoundError("apptainer"), "legitimate"),
+        # The host has no apptainer binary: the sandbox could not run at all.
+        (FileNotFoundError("apptainer"), "provider_unavailable"),
+        # A real failure: every task of a run failed at once with a bare host-side error and no model call.
+        (FileNotFoundError(2, "No such file or directory"), "provider_unavailable"),
+        # Real failures: the container image was gone, and the container stalled in setup (stderr kept).
+        (
+            SandboxExecError(
+                "direct apptainer exec failed for task task_csv_finance_report: FATAL:   While checking container "
+                "encryption: could not open image <path>: failed to retrieve path for <path>: lstat <path>: no such "
+                "file or directory"
+            ),
+            "provider_unavailable",
+        ),
+        (
+            SandboxExecError(
+                "direct apptainer exec failed for task task_csv_finance_report: INFO:    Terminating squashfuse_ll "
+                "after timeout\nINFO:    Cleanup error: while stopping driver for <path>: squashfuse_ll exited: "
+                "fuse: failed to unmount <path>: Invalid argument"
+            ),
+            "provider_unavailable",
+        ),
+        # A real failure: the sandbox failed its readiness probe.
+        (
+            ApptainerCreateVerificationError(
+                "sandbox 'nemo-gym-<hex>' failed readiness probe: return_code=1, "
+                "stderr='ERROR  : Failed to enter in user namespace: Invalid argument'"
+            ),
+            "provider_unavailable",
+        ),
+        # A real failure: the exec exited cleanly but wrote no archive.
+        (
+            SandboxNoOutputError("direct apptainer exec did not produce <path> for task task_todo_list_cleanup"),
+            "provider_unavailable",
+        ),
     ],
 )
-def test_classify_task_failure(exc, expected):
+@pytest.mark.parametrize("eval_mode", [False, True], ids=["training", "evaluation"])
+def test_classify_task_failure(exc, expected, eval_mode, monkeypatch):
+    monkeypatch.setattr("responses_api_agents.pinchbench.app.is_eval_mode", lambda: eval_mode)
+    # Outside evaluation every one of these keeps the class it always had: legitimate.
+    if not eval_mode and expected == "provider_unavailable":
+        expected = "legitimate"
     assert _classify_task_failure(exc) == expected
+    row = {"_ng_failure_class": _classify_task_failure(exc), "grading_notes": f"run failed: {exc}"}
+    if expected == "provider_unavailable":
+        assert not is_terminal_failure(row)
 
 
 # --- _task_env optional injections ---
@@ -573,6 +618,20 @@ async def test_signal_killed_apptainer_raises_sandbox_killed_error(tmp_path, ret
     proc.kill = MagicMock()
     with patch("asyncio.create_subprocess_exec", return_value=proc):
         with pytest.raises(SandboxKilledError):
+            await agent._run_in_apptainer_direct("task_x", tmp_path, {"direct_exec": True})
+
+
+@pytest.mark.asyncio
+async def test_a_failed_apptainer_exec_with_no_archive_raises_sandbox_exec_error(tmp_path):
+    agent = make_agent(
+        sandbox_spec={"image": "docker://test"},
+        sandbox_provider={"apptainer": {"direct_exec": True}},
+    )
+    proc = MagicMock()
+    proc.returncode = 255
+    proc.wait = AsyncMock(return_value=None)
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        with pytest.raises(SandboxExecError, match="direct apptainer exec failed"):
             await agent._run_in_apptainer_direct("task_x", tmp_path, {"direct_exec": True})
 
 

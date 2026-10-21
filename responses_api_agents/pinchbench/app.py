@@ -38,6 +38,8 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.failure_kinds import PROVIDER_UNAVAILABLE
+from nemo_gym.global_config import is_eval_mode
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -54,7 +56,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY
 from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap
-from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, get_provider_class
+from nemo_gym.sandbox import AsyncSandbox, SandboxCreateError, SandboxResources, SandboxSpec, get_provider_class
 from responses_api_agents.openclaw_agent.app import openclaw_session_conversation
 from responses_api_agents.openclaw_agent.observability import (
     OPENCLAW_OBSERVATION_SOURCE,
@@ -156,12 +158,35 @@ class SandboxKilledError(RuntimeError):
     """Sandbox process died by signal (walltime SIGTERM / preemption / OOM kill)."""
 
 
+class SandboxNoOutputError(RuntimeError):
+    """The sandbox exited cleanly but wrote no result archive: the harness, not the task, failed."""
+
+
+class SandboxExecError(RuntimeError):
+    """The sandbox exec exited non-zero and wrote no result archive: the container or the harness failed.
+
+    The task's grader writes the archive inside the sandbox, so a deliverable the model did not write is
+    graded there as 0 and still yields an archive; it never reaches this error.
+    """
+
+
 def _classify_task_failure(exc: BaseException) -> str:
-    """Map a task failure onto the dispatcher's routing classes."""
+    """Map a task failure onto the dispatcher's routing classes.
+
+    A sandbox that could not start, whose exec failed, or that produced no archive, is ``provider_unavailable``:
+    Gym retries it. So is a ``FileNotFoundError``: the host side of a run reads only harness files (the
+    apptainer binary, the staging directory, the archive and the transcripts), never a deliverable, which is
+    graded inside the sandbox. ``legitimate`` stays for a failure of the task's own run. The
+    ``provider_unavailable`` routing applies only in evaluation; outside it these stay ``legitimate``, as before.
+    """
     if isinstance(exc, SandboxKilledError):
         return "kill_shaped"
     if isinstance(exc, TimeoutError):
         return "timeout_exceeded"
+    if is_eval_mode() and isinstance(
+        exc, (SandboxCreateError, SandboxNoOutputError, SandboxExecError, FileNotFoundError)
+    ):
+        return PROVIDER_UNAVAILABLE
     return "legitimate"
 
 
@@ -284,7 +309,7 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
                 raise TimeoutError("PinchBench sandbox execution timed out")
             if exec_result.error_type:
                 detail = exec_result.stderr or exec_result.stdout or "unknown sandbox error"
-                raise RuntimeError(f"PinchBench sandbox execution failed ({exec_result.error_type}): {detail}")
+                raise SandboxExecError(f"PinchBench sandbox execution failed ({exec_result.error_type}): {detail}")
             await sb.download(archive, out_dir / "out.tgz")
         finally:
             await sb.stop()
@@ -474,9 +499,9 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
                 raise SandboxKilledError(
                     f"direct apptainer exec killed (rc={proc.returncode}) for task {task_id}: {detail[:1000]}"
                 )
-            raise RuntimeError(f"direct apptainer exec failed for task {task_id}: {detail[:4000]}")
+            raise SandboxExecError(f"direct apptainer exec failed for task {task_id}: {detail[:4000]}")
         if not archive.exists():
-            raise RuntimeError(f"direct apptainer exec did not produce {archive} for task {task_id}")
+            raise SandboxNoOutputError(f"direct apptainer exec did not produce {archive} for task {task_id}")
 
         if proc.returncode != 0:
             print(
