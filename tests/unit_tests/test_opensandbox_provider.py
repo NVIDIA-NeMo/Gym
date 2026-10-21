@@ -17,7 +17,6 @@ import asyncio
 import builtins
 import gc
 import logging
-import re
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -129,7 +128,6 @@ async def test_tb4_create_timeout_retries_with_jitter(monkeypatch, recovers, tim
     provider._create_once = AsyncMock(
         side_effect=[errors[timeout_kind]] * 5 + [handle if recovers else errors[timeout_kind]]
     )
-    provider._delete_create_leftovers = AsyncMock()
     sleep = AsyncMock()
     monkeypatch.setattr(
         opensandbox_provider,
@@ -156,15 +154,6 @@ async def test_tb4_create_timeout_retries_with_jitter(monkeypatch, recovers, tim
     assert provider._create_once.await_count == 6
     assert [call.args[0] for call in sleep.await_args_list] == [2.5, 5, 10, 20, 30]
     assert bounds[:5] == [(0, 5), (0, 10), (0, 20), (0, 40), (0, 60)]
-    # Every attempt carries the same create id; after a recovery, whatever an earlier attempt left is deleted.
-    create_ids = {
-        call.args[0].metadata["nemo-gym.nvidia.com/create-id"] for call in provider._create_once.await_args_list
-    }
-    assert len(create_ids) == 1
-    if recovers:
-        provider._delete_create_leftovers.assert_awaited_once_with(create_ids.pop(), keep="ready")
-    else:
-        provider._delete_create_leftovers.assert_not_awaited()
 
 
 async def test_create_does_not_retry_rejected_credentials():
@@ -1832,165 +1821,6 @@ async def test_create_once_and_connect_after_create_error_paths(
     assert cleanup_calls == ["sandbox-1"]
 
 
-CREATE_ID_KEY = "nemo-gym.nvidia.com/create-id"
-
-
-class FakeCell:
-    """The OpenSandbox server: a sandbox exists once its create request arrives, whatever the client sees."""
-
-    def __init__(self) -> None:
-        self.sandboxes: dict[str, dict[str, str]] = {"other-run": {CREATE_ID_KEY: "someone-else"}}
-        self.created = 0
-        self.kills: list[str] = []
-        self.filters: list[dict[str, Any]] = []
-        self.list_error: Exception | None = None
-
-    def make(self, metadata: dict[str, str]) -> str:
-        self.created += 1
-        sandbox_id = f"sandbox-{self.created}"
-        self.sandboxes[sandbox_id] = dict(metadata)
-        return sandbox_id
-
-    def manager(self) -> Any:
-        cell = self
-
-        class Manager:
-            @classmethod
-            async def create(cls, connection_config: Any = None) -> "Manager":
-                return cls()
-
-            async def list_sandbox_infos(self, sandbox_filter: Any) -> Any:
-                cell.filters.append(sandbox_filter)
-                if cell.list_error is not None:
-                    raise cell.list_error
-                # Returns every sandbox, as a server that ignored the filter would.
-                return SimpleNamespace(
-                    sandbox_infos=[
-                        SimpleNamespace(id=sandbox_id, metadata=metadata, status=SimpleNamespace(state="Running"))
-                        for sandbox_id, metadata in cell.sandboxes.items()
-                    ]
-                )
-
-            async def kill_sandbox(self, sandbox_id: str) -> None:
-                cell.kills.append(sandbox_id)
-                del cell.sandboxes[sandbox_id]
-
-            async def close(self) -> None:
-                return None
-
-        return Manager
-
-
-@pytest.fixture
-def fake_cell(fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch) -> FakeCell:
-    cell = FakeCell()
-    monkeypatch.setattr(
-        opensandbox_provider,
-        "_require_opensandbox_manager",
-        lambda: (cell.manager(), lambda **kwargs: kwargs),
-    )
-    return cell
-
-
-def _cell_sandbox(cell: FakeCell, *, hang_on: set[int], late: bool = False) -> type[FakeSandbox]:
-    """SDK create against the cell; attempts in ``hang_on`` never get a response (a client-side timeout)."""
-
-    class CellSandbox(FakeSandbox):
-        attempts = 0
-
-        @classmethod
-        async def create(cls, **kwargs: Any) -> FakeSandbox:
-            cls.attempts += 1
-            if cls.attempts in hang_on:
-                if not late:
-                    cell.make(kwargs["metadata"])
-                cls.hung_metadata = kwargs["metadata"]
-                await asyncio.get_running_loop().create_future()
-            if late and cls.attempts == max(hang_on) + 1:
-                # The server finishes the timed-out request only after its attempt was cleaned up.
-                cell.make(cls.hung_metadata)
-            return cls(cell.make(kwargs["metadata"]))
-
-    return CellSandbox
-
-
-@pytest.mark.parametrize("late", [False, True])
-async def test_create_deletes_the_sandbox_a_timed_out_attempt_left(
-    fake_cell: FakeCell, monkeypatch: pytest.MonkeyPatch, late: bool
-) -> None:
-    """The 2026-10-09 oracle leak: a create timed out client-side, its sandbox kept running, and the
-    retry made a second one. The leftover is deleted, whether it appears before or after the retry."""
-    sandbox_class = _cell_sandbox(fake_cell, hang_on={1}, late=late)
-    monkeypatch.setattr(
-        opensandbox_provider,
-        "_require_opensandbox_sdk",
-        lambda: (sandbox_class, FakeConnectionConfig, object, FakePlatformSpec, object),
-    )
-    provider = opensandbox_provider.OpenSandboxProvider(
-        create={"timeout_s": 0.05, "retries": 2, "retry_delay_s": 0}, probe={"command": None}
-    )
-
-    handle = await provider.create(SandboxSpec(image="image:tag", metadata={"tb4-session": "tb4-1"}))
-
-    assert sandbox_class.attempts == 2
-    assert set(fake_cell.sandboxes) == {"other-run", handle.sandbox_id}
-    assert fake_cell.kills == ["sandbox-1"]
-    create_id = fake_cell.sandboxes[handle.sandbox_id][CREATE_ID_KEY]
-    assert re.fullmatch(r"[0-9a-f]{32}", create_id)
-    assert fake_cell.sandboxes[handle.sandbox_id]["tb4-session"] == "tb4-1"
-    # One cleanup after the failed attempt, one after the retry succeeded; both ask the server to filter.
-    assert fake_cell.filters == [{"metadata": {CREATE_ID_KEY: create_id}, "page_size": 100}] * 2
-
-
-async def test_create_deletes_leftovers_when_every_attempt_times_out_or_is_cancelled(
-    fake_cell: FakeCell, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    sandbox_class = _cell_sandbox(fake_cell, hang_on={1, 2, 3})
-    monkeypatch.setattr(
-        opensandbox_provider,
-        "_require_opensandbox_sdk",
-        lambda: (sandbox_class, FakeConnectionConfig, object, FakePlatformSpec, object),
-    )
-    provider = opensandbox_provider.OpenSandboxProvider(
-        create={"timeout_s": 0.05, "retries": 1, "retry_delay_s": 0}, probe={"command": None}
-    )
-    with pytest.raises(opensandbox_provider.OpenSandboxCreateTimeoutError):
-        await provider.create(SandboxSpec(image="image:tag"))
-    assert fake_cell.kills == ["sandbox-1", "sandbox-2"]
-    assert set(fake_cell.sandboxes) == {"other-run"}
-
-    # A caller's own deadline (e.g. TB4's environment build timeout) cancels a create in flight.
-    provider = opensandbox_provider.OpenSandboxProvider(create={"retries": 0}, probe={"command": None})
-    task = asyncio.create_task(provider.create(SandboxSpec(image="image:tag")))
-    while fake_cell.created < 3:
-        await asyncio.sleep(0)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    assert fake_cell.kills == ["sandbox-1", "sandbox-2", "sandbox-3"]
-    assert set(fake_cell.sandboxes) == {"other-run"}
-
-
-async def test_create_leftover_cleanup_failure_does_not_fail_the_create(
-    fake_cell: FakeCell, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    sandbox_class = _cell_sandbox(fake_cell, hang_on={1})
-    monkeypatch.setattr(
-        opensandbox_provider,
-        "_require_opensandbox_sdk",
-        lambda: (sandbox_class, FakeConnectionConfig, object, FakePlatformSpec, object),
-    )
-    fake_cell.list_error = RuntimeError("list unavailable")
-    provider = opensandbox_provider.OpenSandboxProvider(
-        create={"timeout_s": 0.05, "retries": 1, "retry_delay_s": 0}, probe={"command": None}
-    )
-    with caplog.at_level(logging.WARNING):
-        handle = await provider.create(SandboxSpec(image="image:tag"))
-    assert handle.sandbox_id == "sandbox-2"
-    assert fake_cell.kills == []
-    assert "Could not delete OpenSandbox sandboxes left by failed create attempts" in caplog.text
-
-
 async def test_retry_classification_and_await_sdk_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     provider = opensandbox_provider.OpenSandboxProvider(
         operations={"retries": 0},
@@ -2076,13 +1906,6 @@ def clean_attribution_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(var, raising=False)
 
 
-def _created_metadata() -> dict[str, str]:
-    """The metadata the fake SDK received, minus the per-create id that labels every create."""
-    metadata = dict(FakeSandbox.created_kwargs["metadata"])
-    assert re.fullmatch(r"[0-9a-f]{32}", metadata.pop("nemo-gym.nvidia.com/create-id"))
-    return metadata
-
-
 async def test_create_injects_attribution_metadata(
     fake_opensandbox_sdk: None,
     clean_attribution_env: None,
@@ -2099,7 +1922,7 @@ async def test_create_injects_attribution_metadata(
 
     await provider.create(SandboxSpec(image="image:tag", metadata={"purpose": "test"}))
 
-    assert _created_metadata() == {
+    assert FakeSandbox.created_kwargs["metadata"] == {
         "nemo-gym.nvidia.com/team": "gym_team",
         "nemo-gym.nvidia.com/user": "alice",
         "nemo-gym.nvidia.com/workload": "swe-gym",
@@ -2122,7 +1945,7 @@ async def test_create_spec_metadata_and_config_win_over_attribution_detection(
 
     await provider.create(SandboxSpec(image="image:tag", metadata={"nemo-gym.nvidia.com/team": "explicit-team"}))
 
-    assert _created_metadata() == {
+    assert FakeSandbox.created_kwargs["metadata"] == {
         "nemo-gym.nvidia.com/team": "explicit-team",
         "nemo-gym.nvidia.com/user": "cfg-user",
         "nemo-gym.nvidia.com/workload": "cfg-workload",
@@ -2142,7 +1965,7 @@ async def test_create_attribution_disabled(
 
     await provider.create(SandboxSpec(image="image:tag"))
 
-    assert _created_metadata() == {}
+    assert FakeSandbox.created_kwargs["metadata"] == {}
 
 
 @pytest.mark.parametrize(

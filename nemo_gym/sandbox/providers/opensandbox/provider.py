@@ -27,7 +27,6 @@ from datetime import timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any, Awaitable, Callable, Literal
 from urllib.parse import urlsplit
-from uuid import uuid4
 
 from nemo_gym.sandbox.attribution import RUN_KEY, log_attribution_once, resolve_attribution, resolve_run_id
 from nemo_gym.sandbox.providers.base import (
@@ -132,9 +131,6 @@ METADATA_VALUE_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 DEFAULT_ATTRIBUTION_KEY_PREFIX = "nemo-gym.nvidia.com/"
 # Kubernetes label-key prefixes must be DNS-1123 subdomains (max 253 chars).
 ATTRIBUTION_KEY_PREFIX_RE = re.compile(r"(?=.{1,253}$)[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*")
-# Metadata key (after the attribution key prefix) whose value is shared by every attempt of one
-# create() call, so sandboxes that failed attempts left on the server can be found and deleted.
-CREATE_ID_METADATA_KEY = "create-id"
 DEFAULT_IMAGE_PULL_POLICY = "IfNotPresent"
 IMAGE_PULL_POLICY_EXTENSION_KEY = "imagePullPolicy"
 IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY = "opensandbox.extensions.image-pull-policy"
@@ -164,14 +160,6 @@ def _require_opensandbox_sdk() -> tuple[Any, Any, Any, Any, Any]:
         ) from e
 
     return Sandbox, ConnectionConfig, RunCommandOpts, PlatformSpec, Volume
-
-
-def _require_opensandbox_manager() -> tuple[Any, Any]:
-    """Return the SDK's lifecycle manager and list filter (the SDK is installed once a create ran)."""
-    from opensandbox.manager import SandboxManager
-    from opensandbox.models.sandboxes import SandboxFilter
-
-    return SandboxManager, SandboxFilter
 
 
 def _require_tenacity() -> tuple[Any, Any, Any, Any]:
@@ -1570,21 +1558,13 @@ class OpenSandboxProvider:
         sandbox_id: str | None = None
         sandbox: Any | None = None
         try:
-            try:
-                if timeout_s is None:
-                    sandbox = await Sandbox.create(**kwargs)
-                else:
-                    sandbox = await asyncio.wait_for(
-                        Sandbox.create(**kwargs),
-                        timeout=timeout_s,
-                    )
-            except (Exception, asyncio.CancelledError):
-                # The server may have made the sandbox even though the client never learned its id
-                # (a timed-out or cancelled create request), and the SDK's own cleanup can fail.
-                create_id = spec.metadata.get(self._create_id_key)
-                if create_id is not None:
-                    await self._delete_create_leftovers(create_id)
-                raise
+            if timeout_s is None:
+                sandbox = await Sandbox.create(**kwargs)
+            else:
+                sandbox = await asyncio.wait_for(
+                    Sandbox.create(**kwargs),
+                    timeout=timeout_s,
+                )
             if sandbox is None:
                 raise RuntimeError("OpenSandbox SDK create returned no sandbox handle")
             sandbox_id = str(sandbox.id)
@@ -1614,57 +1594,6 @@ class OpenSandboxProvider:
             self._start_renewal(handle, spec.ttl_s)
         return handle
 
-    @property
-    def _create_id_key(self) -> str:
-        return f"{self._attribution.key_prefix}{CREATE_ID_METADATA_KEY}"
-
-    async def _delete_create_leftovers(self, create_id: str, *, keep: str | None = None) -> None:
-        """Delete the sandboxes labelled with one create call's id, except ``keep``.
-
-        A create request that times out client-side can still make its sandbox, which then runs
-        untracked until its TTL while the retry makes another. Best effort: a failure is logged.
-        """
-        SandboxManager, SandboxFilter = _require_opensandbox_manager()
-        key = self._create_id_key
-        timeout_s = self._operations.close_timeout_s
-        manager = None
-        try:
-            manager = await SandboxManager.create(connection_config=self._connection_config())
-            page = await self._await_sdk_call(
-                manager.list_sandbox_infos(SandboxFilter(metadata={key: create_id}, page_size=100)),
-                operation="list create leftovers",
-                sandbox_id=create_id,
-                timeout_s=timeout_s,
-            )
-            for info in page.sandbox_infos:
-                state = getattr(getattr(info, "status", None), "state", None)
-                if (
-                    (info.metadata or {}).get(key) != create_id
-                    or str(info.id) == keep
-                    or _to_sandbox_status(state) == SandboxStatus.STOPPED
-                ):
-                    continue
-                try:
-                    await self._await_sdk_call(
-                        manager.kill_sandbox(str(info.id)),
-                        operation="kill create leftover",
-                        sandbox_id=str(info.id),
-                        timeout_s=timeout_s,
-                    )
-                except Exception as e:
-                    if not _is_missing_sandbox_delete_error(e):
-                        raise
-                LOGGER.warning(
-                    "Deleted OpenSandbox sandbox %s left by a failed create attempt (%s=%s)", info.id, key, create_id
-                )
-        except Exception as e:
-            LOGGER.warning(
-                "Could not delete OpenSandbox sandboxes left by failed create attempts (%s=%s): %r", key, create_id, e
-            )
-        finally:
-            if manager is not None:
-                await manager.close()
-
     async def _create_with_retries(
         self,
         spec: SandboxSpec,
@@ -1680,23 +1609,11 @@ class OpenSandboxProvider:
             before_sleep=_log_create_retry,
             reraise=True,
         )
-        create_id = uuid4().hex
-        spec = replace(spec, metadata={**spec.metadata, self._create_id_key: create_id})
-        handle: SandboxHandle | None = None
-        failed_attempts = 0
         async for attempt in retry_policy:
             with attempt:
-                try:
-                    handle = await self._create_once(spec)
-                except (Exception, asyncio.CancelledError):
-                    failed_attempts += 1
-                    raise
-        if handle is None:
-            raise OpenSandboxCreateError("OpenSandbox create retry loop did not run")
-        if failed_attempts:
-            # A timed-out attempt's sandbox can appear after its own cleanup listed nothing.
-            await self._delete_create_leftovers(create_id, keep=handle.sandbox_id)
-        return handle
+                return await self._create_once(spec)
+
+        raise OpenSandboxCreateError("OpenSandbox create retry loop did not run")
 
     def _attribution_metadata(self) -> dict[str, str]:
         if not self._attribution.enabled:
