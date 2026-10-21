@@ -69,6 +69,7 @@ from nemo_gym.global_config import (
     TOKEN_ID_CAPTURE_BLOCK,
     get_first_server_config_dict,
 )
+from nemo_gym.model_sampling import ModelCallSampling, model_sampling_base_url
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -957,11 +958,18 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         token_capture = f"/{TOKEN_CAPTURE_PATH_SEGMENT}/" in request_path
         return f"{rollout_path_prefix(rollout_id, token_capture=token_capture)}{url_path}"
 
-    def resolve_model_base_url(self, model_server_name: str, rollout_id: Optional[str] = None) -> str:
-        """Resolve a model-server URL with an optional rollout prefix."""
+    def resolve_model_base_url(
+        self,
+        model_server_name: str,
+        rollout_id: Optional[str] = None,
+        *,
+        sampling: ModelCallSampling | None = None,
+    ) -> str:
+        """Resolve a model-server URL with optional rollout identity and per-call sampling."""
         server_config = get_first_server_config_dict(self.server_client.global_config_dict, model_server_name)
         base_url = self.server_client._build_server_base_url(server_config)
-        return f"{apply_rollout_prefix(base_url, rollout_id, token_capture=self._token_id_capture_enabled())}/v1"
+        endpoint = f"{apply_rollout_prefix(base_url, rollout_id, token_capture=self._token_id_capture_enabled())}/v1"
+        return model_sampling_base_url(endpoint, sampling)
 
     def model_endpoint(
         self,

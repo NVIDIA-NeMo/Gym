@@ -52,6 +52,7 @@ from nemo_gym.base_responses_api_agent import (
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.failure_kinds import MODEL_CONTEXT_LIMIT, MODEL_REQUEST_ERROR, MODEL_TRANSPORT_ERROR
 from nemo_gym.global_config import get_global_config_dict
+from nemo_gym.model_sampling import ModelCallSampling
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -792,7 +793,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         )
 
     def _session_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
-        supported = {"input", "instructions", "model"}
+        sampling = ModelCallSampling.from_request(body)
+        if sampling.model_dump(exclude_none=True) and self.config.model_server is None:
+            raise HTTPException(422, "OpenCode request sampling requires a Gym model_server")
+        if body.max_output_tokens is not None and body.max_output_tokens > self.config.context_window:
+            raise HTTPException(422, "OpenCode request max_output_tokens must not exceed context_window")
+        supported = {"input", "instructions", "temperature", "top_p", "max_output_tokens", "model"}
         for key, field in type(body).model_fields.items():
             if key in supported:
                 continue
@@ -1072,7 +1078,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         timeout = timeout if timeout is not None else resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
         started = monotonic()
         previous_session_id = state.harness_session_id
-        base_url = self.resolve_model_base_url(self.config.model_server.name, state.request.episode_id.capture_key)
+        sampling = ModelCallSampling.from_request(body)
+        base_url = self.resolve_model_base_url(
+            self.config.model_server.name, state.request.episode_id.capture_key, sampling=sampling
+        )
+        output_limit = body.max_output_tokens if body.max_output_tokens is not None else self.config.max_output_tokens
         config = {
             "model": "nemo_gym/dummy_model",
             "small_model": "nemo_gym/dummy_model",
@@ -1093,7 +1103,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                             "limit": {
                                 "context": self.config.context_window,
                                 "input": self.config.context_window,
-                                "output": self.config.max_output_tokens,
+                                "output": output_limit,
                             },
                         }
                     },
@@ -1132,7 +1142,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 "OPENCODE_DISABLE_PROJECT_CONFIG": "true",
                 "OPENCODE_DISABLE_AUTOUPDATE": "true",
                 "OPENCODE_DISABLE_MODELS_FETCH": "true",
-                "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": str(self.config.max_output_tokens),
+                "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": str(output_limit),
             },
         }
         error = None

@@ -139,14 +139,17 @@ extra-argument, and environment overrides; those remain available on the local p
 
 Sandbox session input is one text user message, optionally preceded by a system message. Both sandbox
 and local execution combine the configured system prompt, request `instructions`, and input
-system message in that order. Sampling and chat-template settings belong on the Gym Model Server.
-Sandbox sessions reject unsupported request controls before execution.
+system message in that order. Sandbox sessions accept request `temperature`, `top_p`, and
+`max_output_tokens` through the Gym Model Server. The token limit caps each model call,
+including summaries, preserving any smaller harness limit; it is not an episode-wide budget.
+Omitted controls retain existing defaults; configured Model Server `sampling_overrides` take precedence.
+Chat-template settings belong on the Model Server. Other unsupported request controls
+are rejected before execution.
 
 Set the agent configuration's `max_output_tokens` for a per-model-call output cap, including
 reasoning tokens. An adapter-owned Pi extension applies it as `max_tokens`, preserving any
-smaller upstream cap. Limits must be positive JavaScript-safe integers. Request-level
-`max_output_tokens` is rejected in sandbox sessions because a total-response budget is not implemented. Model Server
-configuration must not replace the agent's cap with a larger value. Enforcement is tested with Pi 0.80.2.
+smaller upstream cap. Limits must be positive JavaScript-safe integers. In sandbox sessions,
+request `max_output_tokens` overrides this config value. Enforcement is tested with Pi 0.80.2.
 
 ## Lifecycle and ownership
 

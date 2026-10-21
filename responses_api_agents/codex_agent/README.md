@@ -31,8 +31,8 @@ single_agent_turn_legacy:
 
 Supply the `policy_model` Gym Model Server, `policy_model_name`, and `sandbox` provider in
 `model-provider.yaml`. The agent's `model` defaults to `${policy_model_name}` and remains
-overridable. The sandbox must be able to reach the Model Server. Keep model sampling and
-per-call output limits on the Model Server.
+overridable. The sandbox must be able to reach the Model Server, which applies request
+sampling controls and per-call output limits.
 
 ```bash
 python benchmarks/swebench/pro/prepare.py
@@ -109,11 +109,12 @@ Configured `system_prompt`, request `instructions`, and that preceding message b
 developer instructions in that order. Unsupported conversation/multimodal input, required
 external tools, provider overrides, and extra host config are rejected before activation.
 
-Request `max_output_tokens`, `temperature`, `top_p`, reasoning controls, and unsupported tool
-policies are rejected rather than ignored. Codex cannot enforce these request-level controls
-for a custom Gym provider. Set per-call generation settings on the Model Server and inspect
-captured requests to verify the effective values. A configured `reasoning_effort` is likewise
-rejected in sandbox sessions. An explicit request model must match the configured model.
+Sandbox sessions accept request `temperature`, `top_p`, and `max_output_tokens` through the
+Gym Model Server. The token limit caps each model call, including summaries, preserving
+any smaller harness limit; it is not an episode-wide budget. Omitted controls retain existing
+defaults; configured Model Server `sampling_overrides` take precedence. Reasoning controls and unsupported tool policies are
+rejected rather than ignored. A configured `reasoning_effort` is likewise rejected in sandbox
+sessions. An explicit request model must match the configured model.
 
 Session identity, immutable seed binding, seed/close locking, and close receipts use Gym's
 shared agent-session implementation. Setup returns a session cookie only after installation

@@ -205,12 +205,16 @@ Sandbox request support is deliberately explicit:
   Configured `system_prompt`, request `instructions`, and the optional system message are joined
   and prepended to OpenClaw's user prompt. The harness retains its own system prompt.
 - The request `model`, when supplied, must match the configured model.
-- `max_output_tokens`, `temperature`, `top_p`, reasoning overrides, tool-selection controls, output
+- Request `temperature`, `top_p`, and `max_output_tokens` apply through the Gym Model Server
+  to each model call, including summaries. The token limit overrides the configured output
+  limit and preserves smaller limits chosen by the harness; it is not an episode-wide budget.
+  Omitted controls retain existing defaults; configured Model Server `sampling_overrides` take precedence.
+- Reasoning overrides, tool-selection controls, output
   schemas, history replay, request `metadata`, and other unsupported Responses options are rejected before activation.
   This includes `metadata.extra_body.seed` added by `num_repeats_add_seed`; disable that option
   for sandbox sessions. Request `metadata.chat_template_kwargs` is also rejected; configure it
   on the Gym model server instead.
-  To limit output, set the agent config field `max_output_tokens` instead. It is written as
+  To set the default output limit, use the agent config field `max_output_tokens`. It is written as
   `maxTokens` of the generated model entry, so it is the most output OpenClaw requests per call. Set
   `context_window` as well (see [Config fields](#config-fields)); a `max_output_tokens` that is not
   positive or exceeds `context_window` is rejected. Model metadata does not prove an effective

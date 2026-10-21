@@ -70,6 +70,7 @@ from nemo_gym._checkpoint.settings import checkpoint_settings
 from nemo_gym.anthropic_converter import AnthropicConverter
 from nemo_gym.chat_streaming import SSE_KEEPALIVE, sanitize_streaming_chat_body, synthesize_chat_completion_sse
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT
+from nemo_gym.model_sampling import ModelSamplingMiddleware
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -381,6 +382,9 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         )
 
         self.setup_policy_checkpoint(app, capture_ledger)
+        # Run before admission and capture, so both see the original rollout path
+        # and capture records the sampling controls actually sent to the model.
+        app.add_middleware(ModelSamplingMiddleware)
         return app
 
     def setup_policy_checkpoint(self, app: FastAPI, capture_ledger: CaptureLedger | None) -> None:

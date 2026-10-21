@@ -48,6 +48,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.model_sampling import ModelCallSampling
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -623,7 +624,16 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             )
         if "chat_template_kwargs" in (body.metadata or {}):
             raise HTTPException(422, "Configure chat_template_kwargs on the Gym model server for OpenClaw")
-        supported = {"input", "instructions", "model"}
+        sampling = ModelCallSampling.from_request(body)
+        if sampling.model_dump(exclude_none=True) and self.config.model_server is None:
+            raise HTTPException(422, "OpenClaw request sampling requires a Gym model_server")
+        if (
+            body.max_output_tokens is not None
+            and self.config.context_window is not None
+            and body.max_output_tokens > self.config.context_window
+        ):
+            raise HTTPException(422, "OpenClaw request max_output_tokens must not exceed context_window")
+        supported = {"input", "instructions", "temperature", "top_p", "max_output_tokens", "model"}
         for name, field in type(body).model_fields.items():
             if name in supported:
                 continue
@@ -663,7 +673,9 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         # The pinned CLI reads configuration directly; onboarding would create
         # workspace bootstrap files and unrelated provider/channel state.
-        session_config = self._build_openclaw_config({}, state.request.episode_id.capture_key)
+        session_config = self._build_openclaw_config(
+            {}, state.request.episode_id.capture_key, sampling=ModelCallSampling.from_request(body)
+        )
         # OpenClaw conservatively disables stream usage for custom origins. Gym
         # supports it; request the final usage chunk instead of retaining zero counters.
         session_config["models"]["providers"]["nemo"]["models"][0]["compat"] = {
@@ -943,7 +955,9 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         merged = list(dict.fromkeys([item for item in deny if isinstance(item, str)] + list(self._HEADLESS_TOOL_DENY)))
         tools["deny"] = merged
 
-    def _build_openclaw_config(self, base: dict[str, Any], rollout_id: Optional[str] = None) -> dict[str, Any]:
+    def _build_openclaw_config(
+        self, base: dict[str, Any], rollout_id: Optional[str] = None, *, sampling: ModelCallSampling | None = None
+    ) -> dict[str, Any]:
         cfg = copy.deepcopy(base)
         self._deep_merge(cfg, copy.deepcopy(self.config.openclaw_config))
         if self.config.model_server:
@@ -958,12 +972,17 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             }
             if self.config.context_window is not None:
                 model_entry["contextWindow"] = self.config.context_window
-            if self.config.max_output_tokens is not None:
-                model_entry["maxTokens"] = self.config.max_output_tokens
+            output_limit = (
+                sampling.max_output_tokens
+                if sampling is not None and sampling.max_output_tokens is not None
+                else self.config.max_output_tokens
+            )
+            if output_limit is not None:
+                model_entry["maxTokens"] = output_limit
             nemo.update(
                 {
                     "api": "openai-completions",
-                    "baseUrl": self._resolve_model_base_url(rollout_id),
+                    "baseUrl": self._resolve_model_base_url(rollout_id, sampling=sampling),
                     "apiKey": "EMPTY",  # pragma: allowlist secret
                     "models": [model_entry],
                 }
@@ -975,10 +994,12 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         self._merge_headless_tool_denies(cfg)
         return cfg
 
-    def _resolve_model_base_url(self, rollout_id: Optional[str] = None) -> str:
+    def _resolve_model_base_url(
+        self, rollout_id: Optional[str] = None, *, sampling: ModelCallSampling | None = None
+    ) -> str:
         if self.config.model_server is None:
             return ""
-        return self.resolve_model_base_url(self.config.model_server.name, rollout_id)
+        return self.resolve_model_base_url(self.config.model_server.name, rollout_id, sampling=sampling)
 
     def _effective_model(self) -> str:
         return f"nemo/{self.config.model}" if self.config.model_server else self.config.model
