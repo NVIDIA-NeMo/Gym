@@ -37,8 +37,7 @@ Agent and resource sessions use Gym's existing `single_agent_turn` environment. 
 Resources cookies before verification; Resources closes its sandbox afterward.
 
 `sandbox_runner_timeout_seconds` sets a finite worker ceiling (default: 21600 seconds). Request metadata
-`agent_timeout_sec` can shorten that ceiling. This is separate from the environment's episode timeout;
-for example, the Terminal-Bench recipe's 30000-second episode timeout does not extend the worker ceiling.
+`agent_timeout_sec` can shorten that ceiling. This is separate from the environment's episode timeout.
 `session_close_timeout_seconds` budgets each cleanup/capture phase and the remaining activation join
 (default: 30 seconds per phase). Both settings must be positive and finite.
 

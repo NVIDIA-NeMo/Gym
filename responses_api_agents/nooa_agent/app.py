@@ -124,7 +124,6 @@ class NOOAAgent(SimpleResponsesAPIAgent):
             try:
                 runner.python = await prepare_nooa_runtime(
                     sandbox,
-                    requirements_path=self.config.runtime_requirements_file,
                     wheelhouse_path=self.config.runtime_wheelhouse,
                 )
                 await runner.prepare()

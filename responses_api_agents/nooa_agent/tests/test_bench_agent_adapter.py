@@ -127,35 +127,3 @@ async def test_default_summarizer_calls_share_gym_budget_and_capture(tmp_path):
         assert len(captured) == 1
     finally:
         await agent.aclose()
-
-
-def test_benchagent_runtime_profile_matches_default_packages():
-    import io
-    import re
-    import tarfile
-    from pathlib import Path
-
-    from responses_api_agents.nooa_agent.sandbox_runtime import _runtime_archive
-
-    root = Path(__file__).resolve().parents[3]
-    default, first = _runtime_archive(root)
-    selected, second = _runtime_archive(
-        root, requirements_path=Path("responses_api_agents/nooa_agent/runtime/benchagent-requirements.txt")
-    )
-
-    def requirements(blob):
-        with tarfile.open(fileobj=io.BytesIO(blob)) as archive:
-            return archive.extractfile("runtime-requirements.txt").read().decode()
-
-    actual = requirements(default)
-    assert actual == requirements(selected)
-    assert first == second
-    assert {line.split(" @ ")[0] for line in actual.splitlines() if " @ " in line} == {
-        "nooa",
-        "nooa-cli",
-        "nooa-bench",
-    }
-    pins = re.findall(r"/archive/([0-9a-f]{40})\.tar\.gz", actual)
-    assert len(pins) == 3 and len(set(pins)) == 1
-    assert "subdirectory=packages/nooa-cli" in actual
-    assert "subdirectory=packages/nooa-bench" in actual

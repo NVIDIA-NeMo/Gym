@@ -3,6 +3,8 @@ title: "NOOA sessions and SWE-bench Pro"
 description: "Run NOOA through single_agent_turn and a Resources-owned sandbox."
 ---
 
+# NOOA sessions and SWE-bench Pro
+
 NOOA uses Gym's agent sessions and existing `single_agent_turn` Environment Server. It seeds Resources,
 opens and invokes NOOA, closes the agent to collect evidence and final Resources cookies, asks Resources to
 verify, and closes Resources. Call the Environment Server's `/run`; NOOA
@@ -85,14 +87,10 @@ SWE tasks require an OpenSandbox deployment with `dns+nft` enforcement; unsuppor
 The policy allows all ports and routes on the model-server host, including any cohosted services.
 Preparation preserves upstream grading metadata in the shared flat dataset. The existing
 `single_agent_turn_legacy` adapter separates that metadata from the Responses request before invoking NOOA. See [NOOA SWE-bench Pro restricted networking](/main/agent-server/nooa-swe-networking) for offline build
-prerequisites, the baseline canary command, and required live isolation and grading checks. NOOA Terminal-Bench,
-GDPval, and other SWE harnesses keep their existing network behavior.
+prerequisites and live isolation checks. Other SWE harnesses keep their existing network behavior.
 
 The overall deadline belongs to the Environment Server (`default_episode_timeout_seconds`). The standard
 task contract has no separate NOOA agent deadline.
-The Terminal-Bench NOOA recipe uses a 30,000-second whole-episode deadline and retains task-specific
-verifier timeouts. It does not reproduce Terminal-Bench's separate per-task agent deadlines, so
-results must record this timing difference.
 NOOA has no model-call limit by default (`max_policy_calls: null`). Set a positive `max_policy_calls` to opt into a
 shared model-call budget for the rollout. The optional `resources_server` agent reference identifies the Resources
 server that owns the dataset and its schema. Runtime tool and sandbox access comes from the standard environment's

@@ -53,10 +53,6 @@ class NOOAAgentConfig(BaseResponsesAPIAgentConfig):
         description="Controller-prepared offline runtime bundle; when set, task setup uses no package-network access.",
     )
     nooa: NOOAInvocationConfig
-    runtime_requirements_file: Path | None = Field(
-        default=None,
-        description="Explicit task-runtime requirements profile; default retains the agent's original NOOA pin.",
-    )
     max_policy_calls: int | None = Field(
         default=None, gt=0, description="Optional shared model-call limit per rollout; null disables the limit."
     )
