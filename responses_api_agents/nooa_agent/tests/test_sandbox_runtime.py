@@ -546,3 +546,37 @@ async def test_offline_runtime_revalidates_private_wheel_snapshot(
         await sandbox_runtime.prepare_nooa_runtime(sandbox, wheelhouse_path=wheelhouse)
     portable_download.assert_not_awaited()
     sandbox.upload.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_runtime_packaging_does_not_block_other_requests(
+    monkeypatch: pytest.MonkeyPatch, sandbox: AsyncMock, runtime_package: tuple[bytes, str]
+) -> None:
+    import threading
+
+    started = threading.Event()
+    release = threading.Event()
+    timed_out = threading.Event()
+
+    def slow_archive(root: Path) -> tuple[bytes, str]:
+        started.set()
+        if not release.wait(timeout=2):
+            timed_out.set()
+        return runtime_package
+
+    monkeypatch.setattr(sandbox_runtime, "_runtime_archive", slow_archive)
+    sandbox.exec.side_effect = [
+        SandboxExecResult("x86_64/gnu", "", 0),
+        SandboxExecResult("", "", 0),
+        SandboxExecResult("", "", 0),
+    ]
+    preparation = asyncio.create_task(sandbox_runtime.prepare_nooa_runtime(sandbox))
+    try:
+        assert await asyncio.to_thread(started.wait, 3)
+        assert not preparation.done()
+        assert not timed_out.is_set()
+        # Other requests reach the loop while packaging is still blocked.
+        await asyncio.sleep(0)
+    finally:
+        release.set()
+        await preparation

@@ -2,6 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import signal
+import stat
+import sys
+import textwrap
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import ModuleType
@@ -240,11 +244,69 @@ async def test_main_initializes_shared_transport_and_always_closes_it(monkeypatc
     else:
         await entrypoint._main(source, destination)
         assert entrypoint.SandboxResult.model_validate_json(destination.read_text()).observations.source == "nooa"
-        assert not destination.with_suffix(".tmp").exists()
+        assert sorted(path.name for path in tmp_path.iterdir()) == ["checkpoint.json", "input.json", "result.json"]
     assert events == ["open", "execute", "close"]
     checkpoint = entrypoint.SandboxCheckpoint.model_validate_json((tmp_path / "checkpoint.json").read_text())
     assert checkpoint.partial is True
     assert checkpoint.response.status == "incomplete"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform == "win32", reason="The sandbox worker requires POSIX signal handlers")
+async def test_sigterm_writes_cancelled_result_from_real_main(tmp_path) -> None:
+    source, destination = tmp_path / "input.json", tmp_path / "result.json"
+    source.write_text(payload().model_dump_json())
+    script = textwrap.dedent(
+        """
+        import asyncio
+        import sys
+        from pathlib import Path
+        from responses_api_agents.nooa_agent import sandbox_entrypoint as entrypoint
+
+        class WaitingRunner:
+            def __init__(self, **kwargs):
+                pass
+
+            async def run(self, request):
+                print("ready", flush=True)
+                await asyncio.Event().wait()
+
+        entrypoint.InProcessNOOARunner = WaitingRunner
+        asyncio.run(entrypoint._main(Path(sys.argv[1]), Path(sys.argv[2])))
+        """
+    )
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        script,
+        str(source),
+        str(destination),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        assert await asyncio.wait_for(process.stdout.readline(), timeout=30) == b"ready\n"
+        process.send_signal(signal.SIGTERM)
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
+        assert process.returncode == 0, (stdout.decode(errors="replace"), stderr.decode(errors="replace"))
+        result = entrypoint.SandboxResult.model_validate_json(destination.read_text())
+        assert result.error.kind == "cancelled"
+        assert result.response is None
+        assert sorted(path.name for path in tmp_path.iterdir()) == ["input.json", "result.json"]
+    finally:
+        if process.returncode is None:
+            process.kill()
+            await process.communicate()
+
+
+def test_worker_artifacts_are_private_and_readable_by_the_worker_uid(tmp_path) -> None:
+    path = tmp_path / "result.json"
+    result = entrypoint.SandboxResult(
+        observations=AgentObservationBundle(source="nooa"), model_cookies={}, resource_cookies={}
+    )
+    entrypoint._write_json(path, result)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert entrypoint.SandboxResult.model_validate_json(path.read_text()) == result
 
 
 def test_checkpoint_is_explicit_partial_evidence_and_excludes_python_return_values(tmp_path) -> None:
