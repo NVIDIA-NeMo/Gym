@@ -12,6 +12,9 @@ artifacts.
 This benchmark reuses the pinned Harbor-package runtime in
 [`resources_servers/terminal_bench_4`](../../resources_servers/terminal_bench_4/README.md).
 Only the dataset pin, the task images and the run directories differ from Terminal-Bench 4.
+It does not use [`environment_servers/harbor`](../../environment_servers/harbor/README.md):
+that server rejects a separate verifier environment and restricted networking when it seeds a
+task, and every verifier here runs in its own container with no network.
 
 ## Measurement contract
 
@@ -278,6 +281,13 @@ a version, so pin it when you compare against Harbor runs.
 
 The public leaderboard uses the Codex, Claude Code and mini-SWE-agent harnesses; there are no
 Terminus-2 entries.
+
+## Known issues
+
+- On OpenSandbox, `rdkit-ic-constraints` is reported as an infrastructure error. Its verifier
+  empties `/tmp` between worker calls, which deletes the file where the sandbox keeps the
+  command's output, and the provider fails to read it after the command finished. #PR3 fixes the
+  provider.
 
 ## Run
 
