@@ -779,7 +779,21 @@ class HarborEnvironmentServer(
             ng_agent_observations=agent_observations,
             ng_trajectory=agent_trajectory,
         )
+        self._trace_score(session.task.task_id, episode_key, result)
         return HarborEpisodeResponse(episode_id=request.episode_id, task_id=request.task.task_id, result=result)
+
+    @staticmethod
+    def _trace_score(task_id: str, episode_key: str, result: HarborEpisodeResult) -> None:
+        """The episode's final score, at DEBUG (a ``--verbose`` run): one line for both execution paths, the single
+        turn's and the multi-step roll-up's (:meth:`_run_turns`), so a verbose trace ends every scored episode the
+        same way."""
+        LOGGER.debug(
+            "%s: episode %s scored %s%s",
+            task_id,
+            episode_key,
+            result.reward,
+            f" (masked: {result.failure_kind})" if result.mask_sample else "",
+        )
 
     def _deadline_failure(self, task: HarborTask, budget: float, progress: "_TurnProgress") -> HandledEpisodeError:
         """The staged failure of an episode that ran past its task's time budget, with the turn's evidence so far."""
@@ -1107,6 +1121,7 @@ class HarborEnvironmentServer(
             stopped_after_turn=stopped_after,
             **roll_up_turns(results, strategy, task_id=request.task.task_id),
         )
+        self._trace_score(task.task_id, request.episode_id.capture_key, episode)
         return HarborEpisodeResponse(episode_id=request.episode_id, task_id=request.task.task_id, result=episode)
 
     async def _prepare_turn(self, session: HarborSession, turn: HarborTurn, access: SandboxAccess) -> SandboxAccess:
@@ -1382,6 +1397,14 @@ class HarborEnvironmentServer(
                 # The last look before the hand-over: an entrypoint that died during the seed's remaining steps
                 # (a setup script failing after its first lines) is a seed failure, not a rollout on an empty task.
                 await self._check_entrypoint(sandbox, task, launch)
+            LOGGER.debug(
+                "%s: episode %s seeded (workdir %s, %s verifier, %s)",
+                task.task_id,
+                episode_key,
+                session.workdir,
+                "separate" if separate else "shared",
+                "Compose group" if compose is not None else "one sandbox",
+            )
         except HTTPException as exc:
             # A seed step that judged the failure itself keeps its status: the task's `name:group` user refused on
             # a provider that switches user by name only (`HarborUserError`, a 422 the task and the deployment

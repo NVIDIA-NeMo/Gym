@@ -609,6 +609,46 @@ with `failure_kind: persistence_failed` and identify the affected path.
 Measured outcomes include an absolute `verifier_logs_dir` naming the collection location; that directory
 can be empty if optional log collection fails.
 
+Every run through this server (`gym dataset validate` and `gym eval run <task target>`) also leaves one
+per-run summary beside its rollouts, `<rollouts stem>_run_summary.json` (`rollouts_run_summary.json` by
+default; `nemo_gym.tasks.harbor.run_summary`), so a results folder explains itself: the command, target,
+taskset and agent; the dataset's folder, source and digests; the `task_source` the run config declares for the
+taskset (`harbor_<taskset>_agent`, known before dispatch) and, as a cross-check, the one the result rows carry
+(`rows_task_source`, `null` without rows or when they disagree); the files of the run under `files` (rollouts,
+failures, materialized inputs, aggregate metrics, the health check's `quality_summary.json` and
+`rollout_verdicts.jsonl`; the rows with the data processor's `_prepare.jsonl` and `_metrics.json` beside them;
+the collator's `<rollouts stem>/preprocessed_datasets/` folder with the `<split>.jsonl` the collector
+dispatched and its `_metrics.json`; run config, `skipped.json`, `images.json`, the verifier root), each `null`
+when the run did not write it (the aggregate metrics and the two health reports follow a completed collection,
+so they are listed only when at least as new as the rollouts file: a run that stops early leaves an earlier
+run's, and the health reports keep one name per folder whatever the `--output` stem; a fresh start, the
+default `resume_from_cache=false`, clears the rollouts, failures and materialized inputs only once its servers
+are up, so a file under those names that is unchanged since before dispatch, as after servers that failed to
+start, is an earlier run's too, its rows are not this run's and its tasks are `missing`); the files found under
+the run's names that are not its own are listed under `stale_files`, so a `null` beside a file by that name is
+explained; and, per selected task
+and repeat, its status
+(`result`, `failed` or `missing`), reward, mask and `failure_kind`, the verifier's mode, wall time, network
+and return code, the paths of its verifier log folder, `test-stdout.txt`, `trajectory.json`,
+`entrypoint-stdout.txt` and collected `artifacts/` (per turn for a multi-step task), and the input the row
+carried: its task and dataset digests and the `responses_create_params` metadata (`agent_timeout_sec`,
+`harbor_step`). Every path is relative to the summary's own folder, so a results folder moved as a whole
+still resolves (`--output` outside it gives `../` paths); a folder a row names that is not on disk is listed
+under that task's `missing_paths`, never dropped. The summary is written whatever the run did: after
+collection, and also when `gym dataset validate` dispatches nothing because no selected task has a
+`solution/` (then with no run config and no tasks, beside the `--output` the command asked for). A summary
+that cannot be written is logged without
+touching the run's outcome; a fresh `gym eval run` reads its selected rows for the summary only after the
+collector has run, inside that same guard. No judge runs on this path outside the task's own `test.sh`: a
+task that calls one inside the sandbox leaves whatever the judge wrote under `/logs/verifier`, which is the
+verifier log folder the summary names.
+
+`gym -v` / `--verbose` (the `verbose` config key, forwarded to every spun-up server) raises the log level to
+DEBUG in the CLI, this server and the oracle agent alike. At that level the server traces each episode
+(seeded, `test.sh` exit code, wall time, rewards and log folder, final score) and the oracle its `solve.sh`
+run (budget, the task user or `the sandbox default user` when the task names none, exit code); without it
+both stay quiet below WARNING.
+
 The task's `[agent].timeout_sec` reaches the harness twice: in the agent-session seed as
 `agent_timeout_sec`, next to `sandbox_access` (which also names the task's `[agent].user` as `user`, and
 for the oracle the resolved `[solution].env` as `env`; the oracle's solve budget is that `agent_timeout_sec`),
@@ -791,14 +831,21 @@ task's `_ng_digest`: a table that declares only them leaves every task at its ba
 table does; only `[gym.defaults]` scaling and `[gym.tasks]` overrides fold a slice in. A `domain` outside Gym's
 values is refused with the values named, like a `license` outside Gym's, so the dataset does not load until it
 is fixed (the generated entry carries the same enum). A benchmark entry names no `prepare_script`; the rows are
-written by the run that generates the entry. Gym's data preparation records the entry in a metrics sidecar
-beside the rows (`results/harbor/<taskset>/tasks_<agent>_metrics.json`, under `results/harbor/validation/` for
-`gym dataset validate`) and refuses a later run whose entry differs from it. `domain`, `verified` and
-`allowed_agents` are catalog declarations, not properties of the rows, so the sidecar leaves them out: flipping
-`verified = true` after baselining, widening `allowed_agents` or changing `domain` between two runs of one taskset
-and harness does not conflict. `type` and `license` are recorded, as for every Gym dataset; editing either between
-two runs of the same taskset and harness fails data preparation with "Found conflicting aggregate metrics", and
-the message names the sidecar to delete before running again.
+written by the run that generates the entry. Gym's data preparation records the entry, with the rows' metrics,
+in a sidecar beside the rows (`results/harbor/<taskset>/tasks_<agent>_metrics.json`, under
+`results/harbor/validation/` for `gym dataset validate`) and in the collated split's
+(`<rollouts stem>/preprocessed_datasets/<split>_metrics.json`). For a committed source dataset such a sidecar is a
+source of truth, and a later preparation that computes something else fails with "Found conflicting aggregate
+metrics". On this path it is not: the rows are regenerated from the task folder on every command and the output
+folder is reused per taskset, so each run removes the previous selection's sidecars before data preparation
+(prepare the one beside the rows as it rewrites them, a fresh start the collated one right before it dispatches)
+and the processor writes them anew. Growing the dataset, narrowing it with `--only-tasks`/`--exclude-tasks` or
+editing `type` or `license` between two runs of one taskset and harness therefore never fails, and
+`overwrite_metrics_conflicts` is never needed. A resumed run (`--resume`) keeps the collated sidecar, as its rows
+must be unchanged to resume at all; so does a run with `reuse_existing_data_preparation=true` and the collated
+input present, which skips data preparation (that run has no rows sidecar of its own: prepare removed the earlier
+one and no processor rewrote it). `domain`, `verified` and `allowed_agents` are catalog declarations,
+not properties of the rows, and the sidecar leaves them out.
 
 `allowed_agents` lists the harnesses the dataset admits, by implementation name (`responses_api_agents/<name>`,
 what `--agent` resolves to); unset admits any. `gym eval run` with another harness fails as soon as

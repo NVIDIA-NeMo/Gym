@@ -170,6 +170,11 @@ def write_rows(
     a trainer read, and nothing the collector routes by: a materialized row reaches its environment server
     by its taskset, ``agent_map`` and ``fan_out`` do not apply to it, and a per-dataset ``num_repeats`` dict
     keys on the taskset.
+
+    The metrics sidecars the data processor leaves beside the rows (:func:`rows_metrics_sidecars`) go with the
+    rows they described: they are derived from one selection of the task folder, and the processor would refuse
+    a changed selection against them ("Found conflicting aggregate metrics"), a check meant for a committed
+    source dataset, not for rows regenerated on every command. Removed here, they are rewritten by the run.
     """
     _validate_task_ids(tasks)
     label = task_source or taskset
@@ -182,7 +187,16 @@ def write_rows(
     with path.open("w") as stream:
         for row in rows:
             stream.write(json.dumps(row) + "\n")
+    for sidecar in rows_metrics_sidecars(path):
+        sidecar.unlink(missing_ok=True)
     return rows
+
+
+def rows_metrics_sidecars(rows_path: Path) -> tuple[Path, Path]:
+    """The data processor's per-dataset metrics beside the rows and the conflict file it writes on a mismatch:
+    ``<rows stem>_metrics.json`` and ``<rows stem>_metrics_conflict.json`` (``nemo_gym.train_data_utils``)."""
+    metrics = rows_path.with_name(f"{rows_path.stem}_metrics.json")
+    return metrics, metrics.with_name(f"{metrics.stem}_conflict.json")
 
 
 def taskset_mapping(tasks: list[HarborTask], folder: Path) -> dict[str, Any]:
