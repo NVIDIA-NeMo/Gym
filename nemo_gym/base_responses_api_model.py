@@ -291,6 +291,21 @@ class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
             "so a backend with free-form tool support keeps them."
         ),
     )
+    custom_tool_strategy: Literal["passthrough", "function_bridge"] = Field(
+        default="passthrough",
+        description=(
+            "How a Responses ``custom`` (free-form) tool reaches a backend whose chat schema admits "
+            "function tools only. ``passthrough`` sends the converted request unchanged and the backend "
+            "decides (``drop_custom_tools`` remains the kill switch). ``function_bridge`` lowers each "
+            "custom tool to a function tool with one required plain-string parameter, replays "
+            "``custom_tool_call``/``custom_tool_call_output`` history in the lowered form, lifts a "
+            "returned call whose name the request declared as custom back into a ``custom_tool_call`` "
+            "item, and hoists custom entries from a streaming harness's ``additional_tools`` carrier "
+            "instead of dropping them. The Responses-to-Chat conversion implements it (``vllm_model`` "
+            "and subclasses); a server that passes Responses through natively carries custom tools "
+            "already and never consults this."
+        ),
+    )
     # Only the policy instance drains during a partial-rollout checkpoint.
     # Judge and simulator instances keep serving so accepted tool and verifier calls can finish.
     checkpoint_policy: bool = False
@@ -499,6 +514,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             body,
             drop_custom_tools=self.config.drop_custom_tools,
             drop_hosted_tools=self.config.drop_hosted_tools,
+            carry_custom_tools=self.config.custom_tool_strategy == "function_bridge",
         )
         try:
             params = validate_streaming_responses_params(cleaned)

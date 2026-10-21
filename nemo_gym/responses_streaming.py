@@ -55,7 +55,13 @@ NamespaceMap = dict[str, tuple[str, str]]
 
 
 def flatten_namespace_tools(tools: Any) -> tuple[list[Any], NamespaceMap]:
-    """Flatten ``namespace`` tool specs into plain function tools with joined names."""
+    """Flatten ``namespace`` tool specs into plain tools with joined names.
+
+    A sub-tool keeps its own type when it declares one (codex's code-mode
+    namespace carries a ``custom`` free-form tool beside function tools);
+    an untyped sub-tool is a function tool, the namespace spec's only
+    pre-custom member kind.
+    """
     flat: list[Any] = []
     ns_map: NamespaceMap = {}
     for tool in tools or []:
@@ -67,7 +73,7 @@ def flatten_namespace_tools(tools: Any) -> tuple[list[Any], NamespaceMap]:
             if not isinstance(sub, dict) or not sub.get("name"):
                 continue
             joined = f"{namespace}{NAMESPACE_TOOL_DELIMITER}{sub['name']}"
-            flat.append({**sub, "type": "function", "name": joined})
+            flat.append({**sub, "type": sub.get("type") or "function", "name": joined})
             ns_map[joined] = (namespace, str(sub["name"]))
     return flat, ns_map
 
@@ -142,7 +148,11 @@ def _input_message_text(item: dict[str, Any]) -> str:
 
 
 def sanitize_streaming_responses_body(
-    body: dict[str, Any], *, drop_custom_tools: bool = False, drop_hosted_tools: bool = False
+    body: dict[str, Any],
+    *,
+    drop_custom_tools: bool = False,
+    drop_hosted_tools: bool = False,
+    carry_custom_tools: bool = False,
 ) -> tuple[dict[str, Any], NamespaceMap]:
     """Map a streaming-dialect request body onto the strict non-streaming params shape.
 
@@ -152,6 +162,9 @@ def sanitize_streaming_responses_body(
     flattening are dropped with a warning rather than failing the whole request, since a
     harness's exotic tool is better lost than the rollout. ``drop_custom_tools`` and
     ``drop_hosted_tools`` drop valid tool specs the backend cannot honor (see ``_tool_kept``).
+    ``carry_custom_tools`` hoists ``custom`` (free-form) entries from an ``additional_tools``
+    carrier item into ``tools`` instead of dropping them; the serving side enables it when a
+    bridge lowers custom tools for the backend (``custom_tool_strategy=function_bridge``).
     """
     body = deepcopy(body)
     # The params model only admits `stream: false` (Gym responses are non-streaming internally);
@@ -205,7 +218,11 @@ def sanitize_streaming_responses_body(
                 item.setdefault("id", f"rs_{uuid4().hex}")
                 kept_items.append(item)
                 continue
-            if isinstance(item, dict) and item.get("type") == "function_call" and item.get("namespace"):
+            if (
+                isinstance(item, dict)
+                and item.get("type") in ("function_call", "custom_tool_call")
+                and item.get("namespace")
+            ):
                 item["name"] = f"{item.pop('namespace')}{NAMESPACE_TOOL_DELIMITER}{item.get('name')}"
             # Codex's code mode ships tools inside an `additional_tools` input item instead of the
             # `tools` param. Hoist what a Gym backend can express (plain and namespaced function
@@ -230,13 +247,21 @@ def sanitize_streaming_responses_body(
         if carrier_tools:
             flat, carrier_map = flatten_namespace_tools(carrier_tools)
             ns_map.update(carrier_map)
-            usable = [t for t in flat if isinstance(t, dict) and t.get("type") == "function" and _tool_valid(t)]
-            skipped = [t.get("name") for t in flat if not (isinstance(t, dict) and t.get("type") == "function")]
+            carried_types = {"function", "custom"} if carry_custom_tools else {"function"}
+            usable = [
+                t
+                for t in flat
+                if isinstance(t, dict)
+                and t.get("type") in carried_types
+                and _tool_valid(t)
+                and _tool_kept(t, drop_custom_tools=drop_custom_tools, drop_hosted_tools=drop_hosted_tools)
+            ]
+            skipped = [t.get("name") for t in flat if not (isinstance(t, dict) and t.get("type") in carried_types)]
             if skipped:
                 LOG.warning(
-                    "Dropping non-function tools %s from an additional_tools item; a Gym backend can only "
-                    "express function calls. Configure the harness with an explicit unknown model name so "
-                    "it advertises classic function tools instead.",
+                    "Dropping tools %s from an additional_tools item; this backend carries function calls "
+                    "(and, under a function-bridge model server, custom tools) only. Configure the harness "
+                    "with an explicit unknown model name so it advertises classic function tools instead.",
                     skipped,
                 )
             if usable:
@@ -322,7 +347,11 @@ def restore_namespace_tool_calls(items: list[dict], ns_map: NamespaceMap) -> lis
     """Restore the client-visible tool names before capture finalization and SSE output."""
     restored = []
     for item in items:
-        if isinstance(item, dict) and item.get("type") == "function_call" and item.get("name") in ns_map:
+        if (
+            isinstance(item, dict)
+            and item.get("type") in ("function_call", "custom_tool_call")
+            and item.get("name") in ns_map
+        ):
             namespace, name = ns_map[item["name"]]
             item = {**item, "namespace": namespace, "name": name}
         restored.append(item)

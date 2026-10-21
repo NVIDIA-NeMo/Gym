@@ -19,9 +19,10 @@ and the Chat Completions API format. It is used by model servers that need to
 convert between the two formats (e.g. vllm_model, inference_provider).
 """
 
+import json
 import logging
 import re
-from typing import Any, ClassVar, Dict, List, Optional, Tuple
+from typing import Any, ClassVar, Collection, Dict, List, Literal, Optional, Tuple
 from uuid import uuid4
 
 from openai.types.responses.response_create_params import ToolParam
@@ -47,6 +48,7 @@ from nemo_gym.openai_utils import (
     NeMoGymFunctionDefinition,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseCustomToolCall,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputItem,
@@ -203,11 +205,28 @@ def _align_logprobs_to_text(
     return kept or None
 
 
+# The single parameter of a function-bridged custom tool. It is declared
+# exactly `"type": "string"`: schema coercion returns a string-typed value
+# byte-verbatim, and tool-call markup carries it as raw text, so the free-form
+# payload crosses the engine with no JSON-escaping burden on the model.
+CUSTOM_TOOL_BRIDGE_PARAMETER = "input"
+
+
 class ResponsesConverter(BaseModel):
     """Converts between OpenAI Responses API and Chat Completions API formats."""
 
     return_token_id_information: bool
     uses_reasoning_parser: bool = True
+    # How a Responses `custom` (free-form) tool crosses a Chat Completions
+    # backend that admits function tools only (vLLM's chat schema).
+    # "passthrough" keeps the historical behavior: the definition converts to a
+    # Chat custom tool and the backend's own validation decides, while replayed
+    # `custom_tool_call` history items refuse the conversion. "function_bridge"
+    # lowers each custom tool to a function tool with one required plain-string
+    # parameter (CUSTOM_TOOL_BRIDGE_PARAMETER), replays custom-tool history in
+    # that lowered form, and the response lift turns a returned call whose name
+    # the request declared as custom back into a `custom_tool_call` item.
+    custom_tool_strategy: Literal["passthrough", "function_bridge"] = "passthrough"
 
     THINK_TAG_PATTERN: ClassVar = re.compile(r"<think>(.*?)</think>", re.DOTALL)
 
@@ -313,6 +332,14 @@ class ResponsesConverter(BaseModel):
                 case "function_call":
                     self._format_function_call(m, state)
                 case "function_call_output":
+                    self._format_function_call_output(
+                        m, state, drop_unrepresentable_request_fields=drop_unrepresentable_request_fields
+                    )
+                case "custom_tool_call" if self.custom_tool_strategy == "function_bridge":
+                    self._format_custom_tool_call(m, state)
+                case "custom_tool_call_output" if self.custom_tool_strategy == "function_bridge":
+                    # The wire shape matches a function result: a call_id plus a
+                    # string or structured-content output.
                     self._format_function_call_output(
                         m, state, drop_unrepresentable_request_fields=drop_unrepresentable_request_fields
                     )
@@ -431,6 +458,11 @@ class ResponsesConverter(BaseModel):
                     converted_tool = NeMoGymChatCompletionToolParam(
                         type="function",
                         function=NeMoGymFunctionDefinition(**tool_dict),
+                    )
+                elif self.custom_tool_strategy == "function_bridge":
+                    converted_tool = NeMoGymChatCompletionToolParam(
+                        type="function",
+                        function=self.bridged_custom_tool_function(tool_dict),
                     )
                 else:
                     converted_tool = {
@@ -594,6 +626,25 @@ class ResponsesConverter(BaseModel):
                 state.content_buffer += final_content
                 # Chat-shaped turns carry tool calls inline, not as separate `function_call` items.
                 for tool_call in m.get("tool_calls") or []:
+                    if tool_call.get("type") == "custom":
+                        if self.custom_tool_strategy != "function_bridge":
+                            raise NotImplementedError(
+                                "A chat-shaped custom tool call has no function-only Chat Completions "
+                                "representation. Route it to a backend with free-form tool support, or "
+                                "serve it with custom_tool_strategy=function_bridge."
+                            )
+                        custom_call = tool_call["custom"]
+                        state.tool_calls_buffer.append(
+                            NeMoGymChatCompletionMessageToolCallParam(
+                                id=tool_call["id"],
+                                function=NeMoGymChatCompletionMessageToolCallFunctionParam(
+                                    arguments=self.bridge_custom_tool_arguments(custom_call.get("input") or ""),
+                                    name=custom_call["name"],
+                                ),
+                                type="function",
+                            )
+                        )
+                        continue
                     state.tool_calls_buffer.append(
                         NeMoGymChatCompletionMessageToolCallParam(
                             id=tool_call["id"],
@@ -685,6 +736,34 @@ class ResponsesConverter(BaseModel):
         )
         state.tool_calls_buffer.append(tool_call)
 
+    def _format_custom_tool_call(
+        self,
+        m: dict,
+        state: ResponsesConverterState,
+    ) -> None:
+        """Replay a custom tool call in its function-bridged form.
+
+        The bridged arguments re-encode the item's free-form input the same way
+        the engine's tool parser serialized the one-parameter object on the turn
+        that generated the call, so a replayed turn re-renders to the call the
+        model produced.
+        """
+        state.assistant_item_buffered = True
+        assert "call_id" in m
+        if m.get("namespace") is not None:
+            # The streaming sanitizer folds a namespaced call into its flattened
+            # name before the conversion, exactly like a function call's.
+            raise NotImplementedError("Responses custom tool call namespace has no Chat Completions representation.")
+        tool_call = NeMoGymChatCompletionMessageToolCallParam(
+            id=m["call_id"],
+            function=NeMoGymChatCompletionMessageToolCallFunctionParam(
+                arguments=self.bridge_custom_tool_arguments(m.get("input") or ""),
+                name=m["name"],
+            ),
+            type="function",
+        )
+        state.tool_calls_buffer.append(tool_call)
+
     # =======================================================
     # Chat Completion create params to Response create params
     # =======================================================
@@ -721,6 +800,53 @@ class ResponsesConverter(BaseModel):
                 "grammar": {key: value for key, value in tool_format.items() if key != "type"},
             }
         return converted
+
+    @staticmethod
+    def bridged_custom_tool_function(tool_dict: dict) -> NeMoGymFunctionDefinition:
+        """The function-tool lowering of a Responses custom tool definition.
+
+        The free-form payload becomes the one required string parameter. A
+        grammar ``format`` is dropped: no vLLM tool parser enforces a grammar
+        through function calling, so the constraint falls back to the model's
+        own behavior, the same as a hosted model that ignores the grammar.
+        """
+        return NeMoGymFunctionDefinition(
+            name=tool_dict["name"],
+            description=tool_dict.get("description"),
+            parameters={
+                "type": "object",
+                "properties": {
+                    CUSTOM_TOOL_BRIDGE_PARAMETER: {
+                        "type": "string",
+                        "description": "The raw text payload of this free-form tool.",
+                    }
+                },
+                "required": [CUSTOM_TOOL_BRIDGE_PARAMETER],
+            },
+        )
+
+    @staticmethod
+    def bridge_custom_tool_arguments(input_value: str) -> str:
+        """Encode a custom tool call's free-form input as bridged function arguments."""
+        return json.dumps({CUSTOM_TOOL_BRIDGE_PARAMETER: input_value or ""}, ensure_ascii=False)
+
+    @staticmethod
+    def unbridge_custom_tool_arguments(arguments: Optional[str]) -> str:
+        """Recover the free-form input from bridged function arguments.
+
+        Malformed arguments, not JSON or missing the bridge parameter, return
+        the raw string: the model's payload is better delivered unwrapped than
+        lost, and the harness then sees exactly what was generated.
+        """
+        if not arguments:
+            return ""
+        try:
+            parsed = json.loads(arguments)
+        except (TypeError, ValueError):
+            return arguments
+        if isinstance(parsed, dict) and isinstance(parsed.get(CUSTOM_TOOL_BRIDGE_PARAMETER), str):
+            return parsed[CUSTOM_TOOL_BRIDGE_PARAMETER]
+        return arguments
 
     def _chat_to_responses_tool_choice(self, tool_choice: Any) -> Any:
         if tool_choice is None or isinstance(tool_choice, str):
@@ -810,14 +936,17 @@ class ResponsesConverter(BaseModel):
     # Chat Completion to Response
     # =======================================================
 
-    def postprocess_chat_response(self, choice: NeMoGymChoice) -> List[NeMoGymResponseOutputItem]:
+    def postprocess_chat_response(
+        self, choice: NeMoGymChoice, *, custom_tool_names: Collection[str] = ()
+    ) -> List[NeMoGymResponseOutputItem]:
         return self.postprocess_assistant_message_dict(
             choice.message.model_dump(exclude_none=True),
             logprobs=_chat_logprobs_to_responses(choice.logprobs),
+            custom_tool_names=custom_tool_names,
         )
 
     def postprocess_assistant_message_dict(
-        self, message_dict: Dict[str, Any], *, logprobs: Any = None
+        self, message_dict: Dict[str, Any], *, logprobs: Any = None, custom_tool_names: Collection[str] = ()
     ) -> List[NeMoGymResponseOutputItem]:
         response_output = []
 
@@ -875,16 +1004,44 @@ class ResponsesConverter(BaseModel):
 
         for tc in tool_calls_raw:
             assert "id" in tc
-            response_output.append(
-                NeMoGymResponseFunctionToolCall(
-                    name=tc["function"]["name"],
-                    arguments=tc["function"]["arguments"],
-                    call_id=tc["id"],
-                    type="function_call",
-                    status="completed",
-                    id=tc["id"],
+            if tc.get("type") == "custom":
+                # A backend with free-form tool support returns the chat custom
+                # tool call shape; lift it regardless of the bridge.
+                custom_call = tc.get("custom") or {}
+                response_output.append(
+                    NeMoGymResponseCustomToolCall(
+                        name=custom_call.get("name") or "",
+                        input=custom_call.get("input") or "",
+                        call_id=tc["id"],
+                        type="custom_tool_call",
+                        status="completed",
+                        id=tc["id"],
+                    )
                 )
-            )
+            elif tc["function"]["name"] in custom_tool_names:
+                # The request declared this name as a custom tool, so the call
+                # is the function bridge's lowering; lift it back.
+                response_output.append(
+                    NeMoGymResponseCustomToolCall(
+                        name=tc["function"]["name"],
+                        input=self.unbridge_custom_tool_arguments(tc["function"].get("arguments")),
+                        call_id=tc["id"],
+                        type="custom_tool_call",
+                        status="completed",
+                        id=tc["id"],
+                    )
+                )
+            else:
+                response_output.append(
+                    NeMoGymResponseFunctionToolCall(
+                        name=tc["function"]["name"],
+                        arguments=tc["function"]["arguments"],
+                        call_id=tc["id"],
+                        type="function_call",
+                        status="completed",
+                        id=tc["id"],
+                    )
+                )
 
         token_information = _token_information_from_mapping(message_dict) if self.return_token_id_information else None
         if token_information is not None:
@@ -946,7 +1103,14 @@ class ResponsesConverter(BaseModel):
     ) -> NeMoGymResponse:
         choice = chat_completion.choices[0]
 
-        response_output = self.postprocess_chat_response(choice)
+        custom_tool_names: frozenset[str] = frozenset()
+        if self.custom_tool_strategy == "function_bridge":
+            custom_tool_names = frozenset(
+                str(tool.get("name"))
+                for tool in (responses_create_params.tools or [])
+                if isinstance(tool, dict) and tool.get("type") == "custom" and tool.get("name")
+            )
+        response_output = self.postprocess_chat_response(choice, custom_tool_names=custom_tool_names)
         response_output_dicts = [item.model_dump() for item in response_output]
 
         usage = None
