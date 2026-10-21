@@ -1,0 +1,11 @@
+config_paths:
+  - benchmarks/genrm_mmrb1/dataset.yaml
+  - resources_servers/genrm_eval/configs/policy_model.yaml
+
+policy_model:
+  responses_api_models:
+    genrm_model:
+      base_url: ${policy_base_url}
+      api_key: ${policy_api_key}
+      supports_principle_role: false
+      propagate_context_overflow_errors: true
