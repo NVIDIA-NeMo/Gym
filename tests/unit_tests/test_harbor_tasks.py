@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 import yaml
+from omegaconf import OmegaConf
 
 import nemo_gym.tasks.harbor.build_options as build_options
 import nemo_gym.tasks.harbor.hub as hub_module
@@ -54,7 +55,7 @@ from nemo_gym.tasks.harbor.hub import (
     validate_git_url,
     validate_task_name,
 )
-from nemo_gym.tasks.harbor.materialize import materialize_task, run_config, write_rows
+from nemo_gym.tasks.harbor.materialize import TASK_SOURCE_KEY, dataset_entry, materialize_task, run_config, write_rows
 from nemo_gym.tasks.harbor.package_store import PackageStoreError
 from nemo_gym.tasks.harbor.records import IMAGE_CONFIGS_FILE
 from nemo_gym.tasks.harbor.task import task_digest
@@ -901,8 +902,13 @@ class TestMaterialize:
         tasks = [load_task(write_task(folder / "a")), load_task(write_task(folder / "b"))]
         rows_path = tmp_path / "out" / "tasks.jsonl"
         rows = write_rows(tasks, "ds", rows_path)
-        assert [json.loads(line)["task_id"]["task_id"] for line in rows_path.read_text().splitlines()] == ["a", "b"]
+        written = [json.loads(line) for line in rows_path.read_text().splitlines()]
+        assert [row["task_id"]["task_id"] for row in written] == ["a", "b"]
         assert len(rows) == 2
+        # Every row names its dataset (the taskset) under the key rollout collection copies onto results rows,
+        # beside the task folder digest.
+        assert all(row[TASK_SOURCE_KEY] == "ds" for row in written)
+        assert [row["task_input"]["task_data"][DIGEST_KEY] for row in written] == [tasks[0].digest, tasks[1].digest]
 
         config = run_config(
             taskset="ds",
@@ -925,8 +931,14 @@ class TestMaterialize:
         agent = config["harbor_ds_agent"]
         assert agent["_inherit_from"] == "hermes_agent"
         # Rollout collection finds datasets on agent and resources blocks, so the rows are declared on the agent.
-        assert agent["responses_api_agents"]["hermes_agent"]["datasets"][0]["jsonl_fpath"] == str(rows_path.resolve())
-        assert agent["responses_api_agents"]["hermes_agent"]["datasets"][0]["type"] == "validation"
+        entry = agent["responses_api_agents"]["hermes_agent"]["datasets"][0]
+        assert entry["jsonl_fpath"] == str(rows_path.resolve())
+        # Without a dataset.toml the rows are a benchmark: no license, not verified, one rollout per task, and
+        # no prepare script (the rows were just written). The entry is what Gym's config types accept.
+        assert entry == {"name": "ds", "type": "benchmark", "verified": False, "jsonl_fpath": str(rows_path.resolve())}
+        from nemo_gym.config_types import BenchmarkDatasetConfig
+
+        assert BenchmarkDatasetConfig.model_validate(entry).prepare_script is None
         assert "resources_server" not in agent["responses_api_agents"]["hermes_agent"]
         assert agent["responses_api_agents"]["hermes_agent"]["enabled_toolsets"] == ["terminal"]
         assert "resources_servers" not in " ".join(config)
@@ -3530,3 +3542,464 @@ def test_pulled_datasets_default_to_environments_harbor_in_the_checkout(monkeypa
 
     monkeypatch.setenv("NEMO_GYM_DATASETS_DIR", str(tmp_path / "elsewhere"))
     assert datasets_dir() == (tmp_path / "elsewhere").resolve()
+
+
+TRAINING_TOML = """[gym]
+license = "Apache 2.0"
+type = "validation"
+domain = "coding"
+verified = true
+allowed_agents = ["terminus_2_sandboxed_agent", "hermes_agent"]
+
+[gym.defaults]
+num_repeats = 3
+"""
+
+
+class TestTrainingMetadata:
+    """The `[gym]` keys of M37 flow from dataset.toml into the generated `datasets:` entry, the rows and the run."""
+
+    def test_task_source_key_is_the_collectors(self):
+        from nemo_gym.global_config import TASK_SOURCE_KEY_NAME
+
+        assert TASK_SOURCE_KEY == TASK_SOURCE_KEY_NAME
+
+    def test_entry_carries_the_gym_table(self, tmp_path):
+        from nemo_gym.config_types import DatasetConfig
+        from nemo_gym.tasks.harbor.dataset_config import read_dataset_config
+
+        folder = tmp_path / "ds"
+        write_task(folder / "a")
+        (folder / "dataset.toml").write_text(TRAINING_TOML)
+        dataset = read_dataset_config(folder)
+        tasks = [load_task(folder / "a")]
+        rows_path = tmp_path / "out" / "tasks.jsonl"
+        write_rows(tasks, "ds", rows_path, dataset_digest="d" * 64)
+
+        config = run_config(
+            taskset="ds",
+            folder=folder,
+            tasks=tasks,
+            rows_path=rows_path,
+            agent_instance_name="hermes_agent",
+            agent_impl="hermes_agent",
+            dataset=dataset,
+        )
+        entry = config["harbor_ds_agent"]["responses_api_agents"]["hermes_agent"]["datasets"][0]
+        assert entry == {
+            "name": "ds",
+            "type": "validation",
+            "license": "Apache 2.0",
+            "domain": "coding",
+            "verified": True,
+            "allowed_agents": ["terminus_2_sandboxed_agent", "hermes_agent"],
+            "jsonl_fpath": str(rows_path.resolve()),
+        }
+        # The entry round-trips through Gym's dataset config type with the metadata kept, and is written
+        # back without it when unset (existing metrics sidecars dump dataset entries). The repeat count is
+        # not the entry's (collate would duplicate by it): build_run puts it on the run config.
+        parsed = DatasetConfig.model_validate(entry)
+        assert (parsed.domain, parsed.verified, parsed.allowed_agents, parsed.num_repeats) == (
+            "coding",
+            True,
+            ["terminus_2_sandboxed_agent", "hermes_agent"],
+            1,
+        )
+        plain = DatasetConfig(name="x", type="validation", jsonl_fpath="x.jsonl", license="MIT").model_dump(
+            mode="json"
+        )
+        assert not {"domain", "verified", "allowed_agents"} & set(plain)
+        # The rows carry the dataset label and both digests.
+        row = json.loads(rows_path.read_text().splitlines()[0])
+        assert row[TASK_SOURCE_KEY] == "ds"
+        assert row["task_input"]["task_data"] == {DIGEST_KEY: tasks[0].digest, "_ng_dataset_digest": "d" * 64}
+
+    def test_entry_defaults_follow_the_rfc(self, tmp_path):
+        from nemo_gym.tasks.harbor.dataset_config import GymDatasetConfig
+
+        rows = tmp_path / "tasks.jsonl"
+        # A license alone makes a validation set; a type alone (benchmark) needs none; domain is the enum's value.
+        assert dataset_entry("ds", rows, GymDatasetConfig(license="MIT"))["type"] == "validation"
+        assert dataset_entry("ds", rows, GymDatasetConfig(license="MIT"))["license"] == "MIT"
+        assert "license" not in dataset_entry("ds", rows, GymDatasetConfig(type="benchmark"))
+        assert dataset_entry("ds", rows, GymDatasetConfig(domain="math"))["domain"] == "math"
+        assert dataset_entry("ds", rows, None)["verified"] is False
+        assert "allowed_agents" not in dataset_entry("ds", rows, None)
+
+    @pytest.mark.parametrize(
+        "table",
+        [
+            {"defaults": {"num_repeats": 4}},
+            {"domain": "coding"},
+            {"verified": True},
+            {"allowed_agents": ["hermes_agent"]},
+            {"license": "MIT"},
+            {"type": "benchmark"},
+            {"license": "MIT", "type": "train", "domain": "math", "verified": True, "defaults": {"num_repeats": 2}},
+        ],
+    )
+    def test_keys_that_shape_no_task_never_enter_its_digest(self, table):
+        """Each key alone, against the empty table: the digest stays the bare folder hash, because nothing about
+        the task changed. Only a table that shapes tasks folds a slice in, and the repeat count stays out of it."""
+        from nemo_gym.tasks.harbor.dataset_config import GymDatasetConfig
+
+        config = GymDatasetConfig.model_validate(table)
+        assert not config.is_empty and not config.shapes_tasks
+        assert task_digest("f" * 64, config, "a") == task_digest("f" * 64, GymDatasetConfig(), "a") == "f" * 64
+        shaping = GymDatasetConfig.model_validate(table | {"defaults": {"timeout_multiplier": 2.0}})
+        with_repeats = GymDatasetConfig.model_validate(
+            table | {"defaults": {"timeout_multiplier": 2.0, "num_repeats": 7}}
+        )
+        assert shaping.shapes_tasks and task_digest("f" * 64, shaping, "a") != "f" * 64
+        assert task_digest("f" * 64, with_repeats, "a") == task_digest("f" * 64, shaping, "a")
+
+    def test_prepare_refuses_a_harness_the_dataset_does_not_admit(self, tmp_path):
+        folder = tmp_path / "ds"
+        write_task(folder / "a")
+        (folder / "dataset.toml").write_text(TRAINING_TOML)
+        with pytest.raises(ValueError) as exc:
+            prepare_target(str(folder), output_root=tmp_path / "out", agent="openhands_agent")
+        message = str(exc.value)
+        assert str(folder / "dataset.toml") in message
+        assert "terminus_2_sandboxed_agent, hermes_agent" in message and "`--agent openhands_agent`" in message
+        # Nothing was prepared: the refusal comes before the rows, the image records and the manifest.
+        assert not (tmp_path / "out").exists() and not (folder / "manifest.toml").exists()
+
+        prepared = prepare_target(str(folder), output_root=tmp_path / "out", agent="hermes_agent")
+        assert prepared.dataset.allowed_agents == ["terminus_2_sandboxed_agent", "hermes_agent"]
+        assert prepared.dataset.defaults.num_repeats == 3
+        # The oracle (gym dataset validate) passes no agent and is always admitted.
+        assert prepare_target(str(folder), output_root=tmp_path / "out2").dataset.verified is True
+
+    def test_a_single_task_folder_is_checked_against_its_datasets_table(self, tmp_path):
+        """A task folder target is prepared against its parent's `[gym]` table, and its rows name the parent:
+        `task_source` is the dataset folder's name while the taskset (routing, output paths, instance names)
+        stays the target's, so two single-task runs of one dataset carry one dataset label."""
+        folder = tmp_path / "ds"
+        write_task(folder / "a")
+        (folder / "dataset.toml").write_text('[gym]\nallowed_agents = ["hermes_agent"]\n')
+        with pytest.raises(ValueError, match="allowed_agents admits hermes_agent, not `--agent terminus_2"):
+            prepare_target(str(folder / "a"), output_root=tmp_path / "out", agent="terminus_2_sandboxed_agent")
+        prepared = prepare_target(str(folder / "a"), output_root=tmp_path / "out", agent="hermes_agent")
+        assert prepared.tasks and (prepared.taskset, prepared.task_source) == ("a", "ds")
+        (row,) = [json.loads(line) for line in prepared.rows_path.read_text().splitlines()]
+        assert row["task_id"] == {"taskset": "a", "task_id": "a"} and row[TASK_SOURCE_KEY] == "ds"
+        whole = prepare_target(str(folder), output_root=tmp_path / "out2", agent="hermes_agent")
+        assert (whole.taskset, whole.task_source) == ("ds", "ds")
+        assert json.loads(whole.rows_path.read_text().splitlines()[0])[TASK_SOURCE_KEY] == "ds"
+
+    def test_a_standalone_task_folder_is_labelled_by_its_own_name(self, tmp_path):
+        """A task folder whose parent is no dataset (no `dataset.toml`, no `manifest.toml`: a scratch directory
+        that happens to hold it) is labelled by its own name, as a hand-built taskset is, so two unrelated task
+        folders prepared from one parent do not share the parent's arbitrary name as their label. Once the parent
+        is a dataset (a `dataset.toml` appears, or a manifest was written for it), the label is the parent's."""
+        parent = tmp_path / "scratch_dir"
+        write_task(parent / "hello-task")
+        write_task(parent / "other-task")
+        labels = {}
+        for name in ("hello-task", "other-task"):
+            prepared = prepare_target(str(parent / name), output_root=tmp_path / "out", agent="hermes_agent")
+            (row,) = [json.loads(line) for line in prepared.rows_path.read_text().splitlines()]
+            assert (prepared.taskset, prepared.task_source, row[TASK_SOURCE_KEY]) == (name, name, name)
+            labels[name] = prepared.task_source
+        assert labels == {"hello-task": "hello-task", "other-task": "other-task"}
+        # The image records the first preparation wrote beside the task folders do not make the parent a dataset.
+        assert not (parent / "dataset.toml").exists() and not (parent / "manifest.toml").exists()
+        # A dataset.toml in the parent, even an empty table, makes it the dataset the task belongs to.
+        (parent / "dataset.toml").write_text("[gym]\n")
+        prepared = prepare_target(str(parent / "hello-task"), output_root=tmp_path / "out2", agent="hermes_agent")
+        (row,) = [json.loads(line) for line in prepared.rows_path.read_text().splitlines()]
+        assert (prepared.taskset, prepared.task_source, row[TASK_SOURCE_KEY]) == (
+            "hello-task",
+            "scratch_dir",
+            "scratch_dir",
+        )
+        # So does a manifest alone: a dataset folder prepared as a whole writes one, and its task folders then name it.
+        (parent / "dataset.toml").unlink()
+        whole = prepare_target(str(parent), output_root=tmp_path / "out3", agent="hermes_agent")
+        assert (parent / "manifest.toml").is_file() and whole.task_source == "scratch_dir"
+        prepared = prepare_target(str(parent / "other-task"), output_root=tmp_path / "out4", agent="hermes_agent")
+        assert (prepared.taskset, prepared.task_source) == ("other-task", "scratch_dir")
+
+    def test_build_run_takes_split_and_repeats_from_the_dataset(self, tmp_path):
+        folder = tmp_path / "ds"
+        write_task(folder / "a")
+        (folder / "dataset.toml").write_text(TRAINING_TOML)
+        prepared = prepare_target(str(folder), output_root=tmp_path / "out")
+        agent = AgentSelection(tmp_path / "agent.yaml", "hermes_agent", "hermes_agent")
+
+        def run_repeats(path: Path) -> int:
+            config = yaml.safe_load(path.read_text())
+            # The count is the run's, not the entry's: collate would duplicate rows by an entry count and the
+            # collector would multiply on top, and the metrics sidecar beside the rows records the entry.
+            entry = config["harbor_ds_agent"]["responses_api_agents"]["hermes_agent"]["datasets"][0]
+            assert "num_repeats" not in entry
+            return config["num_repeats"]
+
+        config_path, tokens = build_run(prepared, agent, sandbox=None, overrides=[])
+        assert run_repeats(config_path) == 3 and "+split=validation" in tokens
+
+        # Command-line tokens pass through (they outrank the run config at parse time, see the real-parser
+        # test below) and no default split is appended when one is given.
+        for override in ("+num_repeats=5", "++num_repeats=5"):
+            config_path, tokens = build_run(prepared, agent, sandbox=None, overrides=[override, "+split=train"])
+            assert run_repeats(config_path) == 3 and override in tokens
+            assert [token for token in tokens if token.startswith("+split=")] == ["+split=train"]
+
+        # Without a table the rows are a benchmark run once.
+        (folder / "dataset.toml").unlink()
+        plain = prepare_target(str(folder), output_root=tmp_path / "out2")
+        config_path, tokens = build_run(plain, agent, sandbox=None, overrides=[])
+        assert run_repeats(config_path) == 1 and "+split=benchmark" in tokens
+
+    def test_example_datasets_do_not_run(self, tmp_path):
+        """An `example` dataset is refused where the harness is admitted, before the manifest, the image records
+        and the rows (`gym eval run` passes the harness, `gym dataset validate` none; both prepare first), and
+        `build_run` refuses a hand-built taskset of that type as a backstop."""
+        from dataclasses import replace
+
+        from nemo_gym.tasks.harbor.dataset_config import GymDatasetConfig
+
+        folder = tmp_path / "ds"
+        write_task(folder / "a")
+        (folder / "dataset.toml").write_text('[gym]\ntype = "example"\n')
+        for agent_name in ("hermes_agent", None):
+            with pytest.raises(HarborTaskError, match='type = "example" marks smoke-test samples') as exc:
+                prepare_target(str(folder), output_root=tmp_path / "out", agent=agent_name)
+            assert str(folder / "dataset.toml") in str(exc.value)
+        # Nothing was prepared: no output folder (rows, images.json, skipped.json), no manifest, no image records.
+        assert not (tmp_path / "out").exists()
+        assert sorted(path.name for path in folder.iterdir()) == ["a", "dataset.toml"]
+
+        (folder / "dataset.toml").write_text('[gym]\ntype = "benchmark"\n')
+        prepared = prepare_target(str(folder), output_root=tmp_path / "out", agent="hermes_agent")
+        agent = AgentSelection(tmp_path / "agent.yaml", "hermes_agent", "hermes_agent")
+        with pytest.raises(HarborTaskError, match='dataset.toml \\[gym\\] type = "example" marks smoke-test samples'):
+            build_run(replace(prepared, dataset=GymDatasetConfig(type="example")), agent, sandbox=None, overrides=[])
+        assert not list(prepared.output_dir.glob("run_config_*.yaml"))
+
+    @pytest.mark.parametrize("command", [["eval", "run"], ["dataset", "validate"]])
+    def test_run_and_validate_refuse_an_example_dataset_before_any_work(self, tmp_path, monkeypatch, capsys, command):
+        """Through the real parser, both commands exit with the refusal and leave the dataset folder and the
+        results root untouched: no manifest, no image records, no rows, no run config, nothing dispatched."""
+        import sys
+
+        import nemo_gym.cli.main as main_module
+        import nemo_gym.global_config as global_config
+
+        folder = tmp_path / "ds"
+        write_task(folder / "a")
+        (folder / "dataset.toml").write_text('[gym]\ntype = "example"\n')
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(global_config, "_GLOBAL_CONFIG_DICT", None)
+        dispatched = []
+        monkeypatch.setattr(main_module, "dispatch", lambda *args: dispatched.append(args))
+        argv = ["gym", *command, str(folder)]
+        if command[0] == "eval":
+            argv += ["--agent", "hermes_agent", "--model-type", "vllm_model", "+policy_model_name=test-model"]
+            argv += ["+policy_base_url=http://localhost:1", "+policy_api_key=none"]
+        monkeypatch.setattr(sys, "argv", argv)
+        with pytest.raises(SystemExit) as exc:
+            main_module.main()
+        assert exc.value.code == 2
+        error = capsys.readouterr().err
+        assert f'{folder / "dataset.toml"} [gym] type = "example" marks smoke-test samples' in error
+        assert "`gym eval run` and `gym dataset validate` do not run" in error and "Traceback" not in error
+        assert not dispatched
+        assert sorted(path.name for path in folder.iterdir()) == ["a", "dataset.toml"]
+        assert not (tmp_path / "results").exists()
+
+    @pytest.mark.parametrize("override", [None, "+num_repeats=5"])
+    def test_eval_run_inherits_the_datasets_repeats_unless_overridden(self, tmp_path, monkeypatch, override):
+        """Through the real parser: the run's `num_repeats` is the dataset's, a `+num_repeats=` on the command
+        line replaces it, and the entry carries none (so collate duplicates nothing and the count applies once)."""
+        import sys
+
+        import nemo_gym.cli.main as main_module
+        import nemo_gym.global_config as global_config
+
+        folder = tmp_path / "ds"
+        write_task(folder / "good")
+        (folder / "dataset.toml").write_text(TRAINING_TOML)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(global_config, "_GLOBAL_CONFIG_DICT", None)
+        # A fixed address: use_absolute_ip resolves the host name, which not every host answers.
+        monkeypatch.setattr(global_config, "gethostbyname", lambda _: "192.0.2.20")
+        dispatched = []
+        monkeypatch.setattr(main_module, "dispatch", lambda *args: dispatched.append(args))
+        argv = ["gym", "eval", "run", str(folder), "--agent", "hermes_agent", "--model-type", "vllm_model"]
+        argv += ["+policy_model_name=test-model", "+policy_base_url=http://localhost:1", "+policy_api_key=none"]
+        if override:
+            argv.append(override)
+        monkeypatch.setattr(sys, "argv", argv)
+        main_module.main()
+        assert len(dispatched) == 1
+        resolved = global_config.get_global_config_dict()
+        entry = resolved["harbor_ds_agent"]["responses_api_agents"]["hermes_agent"]["datasets"][0]
+        assert resolved["num_repeats"] == (5 if override else 3) and "num_repeats" not in entry
+        assert resolved["split"] == "validation"
+        assert entry["type"] == "validation" and entry["license"] == "Apache 2.0" and entry["verified"] is True
+
+    @pytest.mark.parametrize(
+        "table",
+        [None, '[gym]\ndomain = "coding"\nallowed_agents = ["hermes_agent"]\n'],
+        ids=["no-dataset-toml", "metadata-without-a-license"],
+    )
+    def test_eval_run_runs_a_dataset_without_a_license_as_a_benchmark(self, tmp_path, monkeypatch, table):
+        """Through the real parser, the default of every hub dataset without a license: a benchmark entry (no
+        `prepare_script`, `verified` false), the benchmark split, one rollout per task, and the typed entry keeps
+        the metadata that was declared."""
+        import sys
+
+        import nemo_gym.cli.main as main_module
+        import nemo_gym.global_config as global_config
+        from nemo_gym.config_types import BenchmarkDatasetConfig
+
+        folder = tmp_path / "ds"
+        write_task(folder / "good")
+        if table is not None:
+            (folder / "dataset.toml").write_text(table)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(global_config, "_GLOBAL_CONFIG_DICT", None)
+        # A fixed address: use_absolute_ip resolves the host name, which not every host answers.
+        monkeypatch.setattr(global_config, "gethostbyname", lambda _: "192.0.2.20")
+        dispatched = []
+        monkeypatch.setattr(main_module, "dispatch", lambda *args: dispatched.append(args))
+        argv = ["gym", "eval", "run", str(folder), "--agent", "hermes_agent", "--model-type", "vllm_model"]
+        argv += ["+policy_model_name=test-model", "+policy_base_url=http://localhost:1", "+policy_api_key=none"]
+        monkeypatch.setattr(sys, "argv", argv)
+        main_module.main()
+        assert len(dispatched) == 1
+        resolved = global_config.get_global_config_dict()
+        entry = resolved["harbor_ds_agent"]["responses_api_agents"]["hermes_agent"]["datasets"][0]
+        assert (resolved["split"], resolved["num_repeats"]) == ("benchmark", 1)
+        assert entry["type"] == "benchmark" and entry["verified"] is False and "license" not in entry
+        parsed = BenchmarkDatasetConfig.model_validate(OmegaConf.to_container(entry))
+        assert parsed.prepare_script is None and parsed.verified is False and parsed.num_repeats == 1
+        if table is None:
+            assert parsed.domain is None and parsed.allowed_agents is None
+        else:
+            assert parsed.domain == "coding" and parsed.allowed_agents == ["hermes_agent"]
+        row = json.loads(Path(entry["jsonl_fpath"]).read_text().splitlines()[0])
+        assert row[TASK_SOURCE_KEY] == "ds"
+
+    @pytest.mark.parametrize("how", ["flag", "env"])
+    def test_eval_run_honors_the_pairing_override_at_the_early_admission_check(self, tmp_path, monkeypatch, how):
+        """Review (Yu He, M37): the early refusal ignored `--allow-unsupported-pairing`, so an explicit experimental
+        run exited 2 before the collector could honor the flag it accepts. The override (the flag, or the
+        environment variable the collector's guard reads) lets preparation proceed; the entry still carries the
+        list, and the run config carries the override for the guard at dispatch."""
+        import sys
+
+        import nemo_gym.cli.main as main_module
+        import nemo_gym.global_config as global_config
+        from nemo_gym.tasks.harbor.cli import pairing_override_from_overrides
+
+        folder = tmp_path / "ds"
+        write_task(folder / "good")
+        (folder / "dataset.toml").write_text(TRAINING_TOML)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(global_config, "gethostbyname", lambda _: "192.0.2.20")
+        monkeypatch.delenv(global_config.ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME, raising=False)
+        assert pairing_override_from_overrides([]) is False
+        dispatched = []
+        monkeypatch.setattr(main_module, "dispatch", lambda *args: dispatched.append(args))
+        argv = ["gym", "eval", "run", str(folder), "--agent", "codex", "--model-type", "vllm_model"]
+        argv += ["+policy_model_name=test-model", "+policy_base_url=http://localhost:1", "+policy_api_key=none"]
+        if how == "flag":
+            argv.append("--allow-unsupported-pairing")
+        else:
+            monkeypatch.setenv(global_config.ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME, "1")
+        monkeypatch.setattr(sys, "argv", argv)
+        main_module.main()
+        assert len(dispatched) == 1
+        resolved = global_config.get_global_config_dict()
+        entry = resolved["harbor_ds_agent"]["responses_api_agents"]["codex_agent"]["datasets"][0]
+        assert list(entry["allowed_agents"]) == ["terminus_2_sandboxed_agent", "hermes_agent"]
+        assert global_config.pairing_override_enabled(resolved) is True
+
+    def test_dispatch_refuses_a_run_config_edited_to_another_harness(self, tmp_path):
+        """The entry's `allowed_agents` is not inert: the collector's pairing guard reads it from the generated
+        agent block, so a run config edited to another harness after `gym eval run` admitted one is refused at
+        dispatch too, naming the harness and the dataset."""
+        from nemo_gym.rollout_collection import NG_ENVIRONMENT_SERVER_KEY, RolloutCollectionHelper
+        from nemo_gym.tasks.harbor.dataset_config import read_dataset_config
+        from nemo_gym.tasks.harbor.materialize import environment_server_instance
+
+        folder = tmp_path / "ds"
+        write_task(folder / "a")
+        (folder / "dataset.toml").write_text(TRAINING_TOML)
+        tasks = [load_task(folder / "a")]
+        config = run_config(
+            taskset="ds",
+            folder=folder,
+            tasks=tasks,
+            rows_path=tmp_path / "tasks.jsonl",
+            agent_instance_name="hermes_agent",
+            agent_impl="hermes_agent",
+            dataset=read_dataset_config(folder),
+        )
+        row = {NG_ENVIRONMENT_SERVER_KEY: environment_server_instance("ds")}
+        RolloutCollectionHelper._validate_environment_servers([row], OmegaConf.create(config))
+
+        edited = OmegaConf.create(config)
+        block = edited["harbor_ds_agent"]["responses_api_agents"]
+        block["codex_agent"] = block.pop("hermes_agent")
+        with pytest.raises(ValueError) as exc:
+            RolloutCollectionHelper._validate_environment_servers([row], edited)
+        assert (
+            "rows routed to 'harbor_ds_agent' run 'codex_agent', but its dataset 'ds' admits only: "
+            "terminus_2_sandboxed_agent, hermes_agent"
+        ) in str(exc.value)
+
+    def test_the_oracles_run_config_passes_the_dispatch_guard_and_an_admitted_harness_too(self, tmp_path):
+        """`gym dataset validate` is always admitted: the oracle's run config carries the entry without
+        `allowed_agents` (the list speaks of model harnesses), so the collector's guard lets the oracle through,
+        while an admitted harness's run config keeps the list and passes the same guard."""
+        from nemo_gym.rollout_collection import NG_ENVIRONMENT_SERVER_KEY, RolloutCollectionHelper
+        from nemo_gym.tasks.harbor.cli import ORACLE_AGENT
+        from nemo_gym.tasks.harbor.materialize import environment_server_instance
+
+        folder = tmp_path / "ds"
+        write_task(folder / "a")
+        (folder / "dataset.toml").write_text(TRAINING_TOML)
+        prepared = prepare_target(str(folder), output_root=tmp_path / "out")
+        row = {NG_ENVIRONMENT_SERVER_KEY: environment_server_instance("ds")}
+
+        def resolved_entry(agent: AgentSelection) -> tuple[OmegaConf, dict]:
+            config_path, _ = build_run(prepared, agent, sandbox=None, overrides=[])
+            config = OmegaConf.create(yaml.safe_load(config_path.read_text()))
+            RolloutCollectionHelper._validate_environment_servers([row], config)
+            return config["harbor_ds_agent"]["responses_api_agents"][agent.impl_name]["datasets"][0]
+
+        oracle = resolved_entry(AgentSelection(tmp_path / "oracle.yaml", ORACLE_AGENT, ORACLE_AGENT))
+        assert "allowed_agents" not in oracle and oracle["type"] == "validation" and oracle["verified"] is True
+        hermes = resolved_entry(AgentSelection(tmp_path / "agent.yaml", "hermes_agent", "hermes_agent"))
+        assert list(hermes["allowed_agents"]) == ["terminus_2_sandboxed_agent", "hermes_agent"]
+        # The dataset the preparation read is untouched: the next build_run for a harness sees the list.
+        assert prepared.dataset.allowed_agents == ["terminus_2_sandboxed_agent", "hermes_agent"]
+
+    def test_eval_run_refuses_a_disallowed_agent_before_any_work(self, tmp_path, monkeypatch, capsys):
+        import sys
+
+        import nemo_gym.cli.main as main_module
+        import nemo_gym.global_config as global_config
+
+        folder = tmp_path / "ds"
+        write_task(folder / "good")
+        (folder / "dataset.toml").write_text(TRAINING_TOML)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(global_config, "_GLOBAL_CONFIG_DICT", None)
+        dispatched = []
+        monkeypatch.setattr(main_module, "dispatch", lambda *args: dispatched.append(args))
+        argv = ["gym", "eval", "run", str(folder), "--agent", "codex", "--model-type", "vllm_model"]
+        argv += ["+policy_model_name=test-model", "+policy_base_url=http://localhost:1", "+policy_api_key=none"]
+        monkeypatch.setattr(sys, "argv", argv)
+        with pytest.raises(SystemExit) as exc:
+            main_module.main()
+        assert exc.value.code == 2
+        err = capsys.readouterr().err
+        assert "allowed_agents admits terminus_2_sandboxed_agent, hermes_agent, not `--agent codex_agent`" in err
+        # No servers were started and nothing was prepared or recorded for the run.
+        assert dispatched == [] and not (tmp_path / "results").exists() and not (folder / "manifest.toml").exists()

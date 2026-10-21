@@ -64,7 +64,9 @@ from environment_servers.harbor.verifier import (
     _verifier_start,
     parse_exit_record,
     parse_reward_file,
+    reward_components,
     select_reward,
+    summing_components,
     verifier_command,
 )
 from nemo_gym import failure_kinds
@@ -126,9 +128,22 @@ class TestRewardFile:
         (tmp_path / "reward.json").write_text(json.dumps({"accuracy": 1, "speed": 0.25}))
         rewards, problem = parse_reward_file(tmp_path)
         assert problem is None and rewards == {"accuracy": 1.0, "speed": 0.25}
-        assert select_reward(rewards) is None
-        assert select_reward({"accuracy": 0.25}) == 0.25
+        # Without a `reward` key every key is a component and the reward is their sum; with one, the other keys
+        # are metrics and there are no components to name.
+        assert select_reward(rewards) == 1.25 and reward_components(rewards) == rewards
+        assert select_reward({"accuracy": 0.25}) == 0.25 and reward_components({"accuracy": 0.25}) == {
+            "accuracy": 0.25
+        }
         assert select_reward({"reward": 1.0, "other": 0.0}) == 1.0
+        assert reward_components({"reward": 1.0, "other": 0.0}) is None
+        # Finite keys whose sum is not: no reward.
+        assert select_reward({"a": 1e308, "b": 1e308}) is None
+
+    def test_components_must_sum_to_the_reward(self):
+        assert summing_components(1.0, {"a": 0.5, "b": 0.5}) == {"a": 0.5, "b": 0.5}
+        assert summing_components(0.3, {"a": 0.1, "b": 0.2}) == {"a": 0.1, "b": 0.2}  # within tolerance
+        assert summing_components(1.0, {"a": 0.5}) is None
+        assert summing_components(1.0, None) is None
 
     @pytest.mark.parametrize(
         ("name", "text", "fragment"),
@@ -1530,20 +1545,43 @@ class TestVerify:
         run = next(call for call in sandbox.execs if "test.sh" in call["command"])
         assert task.config.verifier.user is None and run["user"] == "app"
 
-    async def test_json_reward_with_components(self, tmp_path, monkeypatch):
+    async def test_json_reward_key_makes_the_other_keys_metrics(self, tmp_path, monkeypatch):
         sandbox = FakeSandbox(verifier_files={"reward.json": json.dumps({"reward": 0.5, "tests_passed": 3})})
         _, _, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
         assert response.result.reward == 0.5
         assert response.result.verifier_rewards == {"reward": 0.5, "tests_passed": 3.0}
+        # `tests_passed` does not sum to the reward, so the row names no components at all (not a null).
+        assert response.result.reward_components is None
+        assert "reward_components" not in response.result.model_dump(mode="json")
 
-    async def test_ambiguous_reward_is_a_terminal_verification_failure(self, tmp_path, monkeypatch):
-        sandbox = FakeSandbox(verifier_files={"reward.json": json.dumps({"a": 1, "b": 0})})
+    async def test_several_keys_without_reward_are_summed_components(self, tmp_path, monkeypatch):
+        sandbox = FakeSandbox(verifier_files={"reward.json": json.dumps({"a": 0.75, "b": 0.25})})
         _, _, sandbox, response = await self.verified(tmp_path, monkeypatch, sandbox)
-        failure = response.failure
-        assert failure.stage == "verification" and failure.terminal
-        assert "several keys" in failure.failure_reason
-        assert failure.partial_response.id == "response"
+        result = response.result
+        assert response.failure is None and result.reward == 1.0 and result.failure_kind is None
+        assert result.reward_components == {"a": 0.75, "b": 0.25}
+        assert result.verifier_rewards == {"a": 0.75, "b": 0.25}
+        dumped = result.model_dump(mode="json")
+        assert sum(dumped["reward_components"].values()) == dumped["reward"]
         assert sandbox.stopped
+
+    async def test_one_key_without_reward_is_its_own_component(self, tmp_path, monkeypatch):
+        sandbox = FakeSandbox(verifier_files={"reward.json": json.dumps({"accuracy": 0.25})})
+        _, _, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
+        assert response.result.reward == 0.25 and response.result.reward_components == {"accuracy": 0.25}
+        # reward.txt is a `reward` key.
+        _, _, _, response = await self.verified(tmp_path, monkeypatch, FakeSandbox(verifier_files={"reward.txt": "1"}))
+        assert response.result.reward == 1.0 and response.result.reward_components is None
+
+    async def test_components_that_overflow_are_an_invalid_reward(self, tmp_path, monkeypatch):
+        sandbox = FakeSandbox(verifier_files={"reward.json": json.dumps({"a": 1e308, "b": 1e308})})
+        _, _, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
+        result = response.result
+        assert result.reward == 0.0 and result.mask_sample is False
+        assert (
+            result.failure_kind == "harbor:invalid_reward" and "do not sum to a finite reward" in result.failure_reason
+        )
+        assert result.reward_components is None and result.verifier_return_code == 0
 
     async def test_missing_reward_scores_zero_and_is_measured(self, tmp_path, monkeypatch):
         sandbox = FakeSandbox(

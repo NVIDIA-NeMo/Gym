@@ -13,6 +13,7 @@ from typing_extensions import Self
 
 from nemo_gym.episode_types import MaterializedTask, TaskId
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.tasks.harbor.dataset_config import GymDatasetConfig
 from nemo_gym.tasks.harbor.digest import DATASET_DIGEST_KEY, DIGEST_KEY
 from nemo_gym.tasks.harbor.errors import HarborTaskError
 from nemo_gym.tasks.harbor.task import HarborTask, is_task_folder
@@ -21,6 +22,11 @@ from nemo_gym.tasks.harbor.task import HarborTask, is_task_folder
 AGENT_TIMEOUT_METADATA_KEY = "agent_timeout_sec"
 # The Harbor step a turn's request belongs to, in its `responses_create_params.metadata`.
 STEP_METADATA_KEY = "harbor_step"
+# The dataset a row came from, on every row: the dataset folder's name (the taskset, unless the target is a single
+# task folder, whose dataset is its parent). The same string as `nemo_gym.global_config.TASK_SOURCE_KEY_NAME`,
+# which this module does not import; rollout collection copies the key from a row onto the record it writes, so
+# every results row names its dataset.
+TASK_SOURCE_KEY = "task_source"
 
 
 class HarborTurnInput(BaseModel):
@@ -148,12 +154,28 @@ def _validate_task_ids(tasks: list[HarborTask]) -> None:
 
 
 def write_rows(
-    tasks: list[HarborTask], taskset: str, path: Path, *, dataset_digest: str | None = None
+    tasks: list[HarborTask],
+    taskset: str,
+    path: Path,
+    *,
+    dataset_digest: str | None = None,
+    task_source: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Write one materialized row per task as JSONL and return the rows."""
+    """Write one materialized row per task as JSONL and return the rows.
+
+    Beside the task's identity and input, every row carries ``task_source``: the dataset folder's name,
+    ``task_source`` when given (a single task folder target inside a dataset passes its parent's name; a
+    standalone task folder, whose parent holds no ``dataset.toml`` or ``manifest.toml``, passes its own) and
+    the taskset otherwise (a dataset folder target's taskset is that name). It is the dataset label a results row and
+    a trainer read, and nothing the collector routes by: a materialized row reaches its environment server
+    by its taskset, ``agent_map`` and ``fan_out`` do not apply to it, and a per-dataset ``num_repeats`` dict
+    keys on the taskset.
+    """
     _validate_task_ids(tasks)
+    label = task_source or taskset
     rows = [
         materialize_task(task, taskset, dataset_digest=dataset_digest).model_dump(mode="json", exclude_unset=True)
+        | {TASK_SOURCE_KEY: label}
         for task in tasks
     ]
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -189,6 +211,34 @@ def taskset_mapping(tasks: list[HarborTask], folder: Path) -> dict[str, Any]:
     return mapping
 
 
+def dataset_entry(taskset: str, rows_path: Path, dataset: GymDatasetConfig | None = None) -> dict[str, Any]:
+    """The ``datasets:`` entry that declares a taskset's rows, from the dataset's ``[gym]`` table.
+
+    ``type`` is the split the rows enter (``GymDatasetConfig.effective_type``: the declared one, else
+    ``validation`` with a license, else ``benchmark``) and ``license`` the declared one, so a hub dataset
+    without a license is a benchmark that evaluates and never trains, and a ``train`` or ``validation``
+    dataset carries the license Gym requires of one. ``verified`` is the dataset's declaration (``false``
+    unless it says otherwise, as the pre-commit hook starts a new resources server), and ``domain`` and
+    ``allowed_agents`` are carried when declared. The entry sets no ``num_repeats``: collate would duplicate
+    the rows by it and the collector's run-level count would multiply on top, and the metrics sidecar beside
+    the rows records the entry, so a count that moved with the command line would conflict run to run.
+    ``[gym.defaults].num_repeats`` is the run config's top-level ``num_repeats`` instead (see
+    ``nemo_gym.tasks.harbor.cli.build_run``). A benchmark entry names no ``prepare_script``: the rows are
+    written by the preparation that generates this entry.
+    """
+    dataset = dataset or GymDatasetConfig()
+    entry: dict[str, Any] = {"name": taskset, "type": dataset.effective_type}
+    if dataset.license is not None:
+        entry["license"] = dataset.license
+    if dataset.domain is not None:
+        entry["domain"] = dataset.domain.value
+    entry["verified"] = dataset.verified
+    if dataset.allowed_agents is not None:
+        entry["allowed_agents"] = list(dataset.allowed_agents)
+    entry["jsonl_fpath"] = str(Path(rows_path).resolve())
+    return entry
+
+
 def run_config(
     *,
     taskset: str,
@@ -201,13 +251,15 @@ def run_config(
     sandbox_provider: str = "sandbox",
     dataset_digest: str | None = None,
     dataset_toml_digest: str | None = None,
+    dataset: GymDatasetConfig | None = None,
 ) -> dict[str, Any]:
     """The run-config blocks that bind one taskset to the ``harbor`` environment server.
 
     The environment server block inherits the shipped ``harbor_environment_server`` config and
     names the taskset's agent. The agent block inherits the selected harness config and declares
-    the taskset's rows as its validation dataset, which is where rollout collection looks for
-    datasets. Rows route to the environment server by taskset. The taskset mapping records the
+    the taskset's rows as its dataset (:func:`dataset_entry`, from the ``[gym]`` table of
+    ``dataset.toml``: split, license, repeats and catalog metadata), which is where rollout collection
+    looks for datasets. Rows route to the environment server by taskset. The taskset mapping records the
     dataset digest and the ``dataset.toml`` digest, so the run config says which dataset ran and
     whether the Gym layer or upstream moved between two runs.
     """
@@ -225,16 +277,7 @@ def run_config(
             "_inherit_from": agent_instance_name,
             "responses_api_agents": {
                 agent_impl: {
-                    "datasets": [
-                        {
-                            "name": taskset,
-                            "type": "validation",
-                            # Harbor task folders carry no dataset-level license; the run config
-                            # needs one for a validation split, so it is left to be determined.
-                            "license": "TBD",
-                            "jsonl_fpath": str(Path(rows_path).resolve()),
-                        }
-                    ],
+                    "datasets": [dataset_entry(taskset, rows_path, dataset)],
                     **(agent_overrides or {}),
                 }
             },

@@ -78,8 +78,12 @@ it).
 
 The episode's reward comes from the turns by `multi_step_reward_strategy` (Harbor's field):
 
-- **`mean`** (the default): the mean reward over the turns that produced a verifier result, and per-key means for
-  `verifier_rewards`, counting a key a turn lacks as 0.
+- **`mean`** (the default): the mean reward over every turn that ran, and per-key means for `verifier_rewards`,
+  counting a key a turn lacks as 0. A turn whose `test.sh` timed out or wrote no valid reward file counts 0 under
+  every key (it also ends the episode), and the episode carries its `failure_kind` and `failure_reason`, measured,
+  as the single-turn path scores such a verifier run. Harbor's `_aggregate_step_rewards` leaves such a step out of
+  its denominator; Gym counts it, so a later verifier the agent broke cannot lift the mean to the earlier turns'
+  score.
 - **`final`**: the reward of the last turn that ran.
 
 The result lists every turn under `turns`; `response` and `ng_agent_observations` are the last turn's. A turn

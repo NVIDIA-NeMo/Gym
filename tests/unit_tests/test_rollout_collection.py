@@ -10702,6 +10702,123 @@ class TestMultiAgentEnvironmentServers:
             RolloutCollectionHelper._validate_environment_servers([row], self._config())
 
 
+class TestDatasetAdmittedAgentsAtDispatch:
+    """A dataset an agent declares may name the harnesses it admits (`allowed_agents` on the entry, as a Harbor
+    dataset's `[gym]` table writes it); the pairing guard checks the agent's own type against it, for rows an
+    environment server runs (which binds no resources server) and for rows routed to the agent directly."""
+
+    @staticmethod
+    def _config(agent_type: str, admitted: object, **top: object) -> DictConfig:
+        entry = {"name": "tb21", "type": "benchmark", "verified": False, "jsonl_fpath": "tb21.jsonl"}
+        if admitted is not None:
+            entry["allowed_agents"] = admitted
+        return OmegaConf.create(
+            {
+                "harbor_tb21_agent": {"responses_api_agents": {agent_type: {"datasets": [entry]}}},
+                "harbor_tb21_environment": {
+                    "environment_servers": {
+                        "harbor": {"agent_server": {"type": "responses_api_agents", "name": "harbor_tb21_agent"}}
+                    }
+                },
+                **top,
+            }
+        )
+
+    ROW = {NG_ENVIRONMENT_SERVER_KEY: "harbor_tb21_environment"}
+
+    def test_an_agent_the_dataset_does_not_admit_is_refused_naming_both(self) -> None:
+        config = self._config("codex_agent", ["terminus_2_sandboxed_agent", "hermes_agent"])
+        with pytest.raises(ValueError) as exc:
+            RolloutCollectionHelper._validate_environment_servers([self.ROW], config)
+        message = str(exc.value)
+        assert "Rows would be scored by a verifier that does not accept the agent running them" in message
+        assert (
+            "rows routed to 'harbor_tb21_agent' run 'codex_agent', but its dataset 'tb21' admits only: "
+            "terminus_2_sandboxed_agent, hermes_agent"
+        ) in message
+        assert "--allow-unsupported-pairing" in message
+
+    @pytest.mark.parametrize("admitted", [None, ["hermes_agent"], "hermes_agent"], ids=["unset", "list", "bare"])
+    def test_an_admitted_agent_passes(self, admitted: object) -> None:
+        RolloutCollectionHelper._validate_environment_servers([self.ROW], self._config("hermes_agent", admitted))
+
+    def test_the_pairing_override_waives_it(self) -> None:
+        config = self._config("codex_agent", ["hermes_agent"], allow_unsupported_pairing=True)
+        RolloutCollectionHelper._validate_environment_servers([self.ROW], config)
+
+    def test_directly_routed_rows_meet_the_same_guard(self) -> None:
+        config = self._config("codex_agent", ["hermes_agent"])
+        rows = [{AGENT_REF_KEY_NAME: {"name": "harbor_tb21_agent"}}]
+        with pytest.raises(ValueError, match="its dataset 'tb21' admits only: hermes_agent"):
+            RolloutCollectionHelper._validate_agent_pairings(rows, config)
+
+    @staticmethod
+    def _materialized(taskset: str) -> dict:
+        return {
+            NG_ENVIRONMENT_SERVER_KEY: "harbor_tb21_environment",
+            "task_id": {"taskset": taskset, "task_id": "hello"},
+            "task_input": {"responses_create_params": {"input": []}},
+        }
+
+    def test_only_the_dataset_declaring_the_dispatched_rows_is_checked(self) -> None:
+        """Review (Yu He, M37): the guard read every dataset the agent declares, so an unrelated entry on the agent
+        refused rows of another dataset. A materialized row is matched to its entry by taskset: the unrestricted
+        dataset's rows pass, the restricted dataset's rows are refused naming it."""
+        config = self._config("codex_agent", ["hermes_agent"])
+        datasets = config["harbor_tb21_agent"]["responses_api_agents"]["codex_agent"]["datasets"]
+        datasets.append({"name": "other", "type": "benchmark", "verified": False, "jsonl_fpath": "other.jsonl"})
+        RolloutCollectionHelper._validate_environment_servers([self._materialized("other")], config)
+        with pytest.raises(ValueError, match="its dataset 'tb21' admits only: hermes_agent"):
+            RolloutCollectionHelper._validate_environment_servers([self._materialized("tb21")], config)
+        # The entry may route by an explicit taskset under another name; the match follows that key.
+        datasets[0]["taskset"] = "routed"
+        RolloutCollectionHelper._validate_environment_servers([self._materialized("tb21")], config)
+        with pytest.raises(ValueError, match="its dataset 'tb21' admits only: hermes_agent"):
+            RolloutCollectionHelper._validate_environment_servers([self._materialized("routed")], config)
+
+    def test_an_environment_server_rebound_to_another_agent_still_meets_the_datasets_list(self) -> None:
+        """Review (Yu He, M37): the entry sits on the agent block `gym eval run` generated; a run config edited to
+        route the taskset's environment server to another agent block, one that declares no datasets, must still
+        meet the dataset's list, so the lookup is by taskset over every agent block and not the executing agent's."""
+        config = self._config(
+            "hermes_agent", ["hermes_agent"], codex_runner={"responses_api_agents": {"codex_agent": {}}}
+        )
+        environment = config["harbor_tb21_environment"]["environment_servers"]["harbor"]
+        environment["agent_server"] = {"type": "responses_api_agents", "name": "codex_runner"}
+        with pytest.raises(ValueError) as exc:
+            RolloutCollectionHelper._validate_environment_servers([self._materialized("tb21")], config)
+        assert "rows routed to 'codex_runner' run 'codex_agent', but its dataset 'tb21' admits only: hermes_agent" in (
+            str(exc.value)
+        )
+        # Rebound to a block running an admitted harness, the rows pass.
+        config["codex_runner"] = {"responses_api_agents": {"hermes_agent": {}}}
+        RolloutCollectionHelper._validate_environment_servers([self._materialized("tb21")], config)
+
+    def test_an_entry_listing_the_rows_under_another_name_is_still_the_executing_agents_dataset(self) -> None:
+        """Review (Yu He, M37), follow-up: a hand-written entry may list pre-materialized rows under a name of its
+        own without a `taskset` key, so no entry declares the rows' taskset. The guard then checks the executing
+        agent's entries that set no taskset, as it did before the match by taskset, instead of checking nothing;
+        an entry that sets another taskset materializes its rows as that taskset and is not these rows' dataset."""
+        config = self._config("codex_agent", ["hermes_agent"])
+        entry = config["harbor_tb21_agent"]["responses_api_agents"]["codex_agent"]["datasets"][0]
+        entry["name"] = "tb21_eval"
+        rows = [self._materialized("terminal_bench_2_1")]
+        with pytest.raises(ValueError, match="its dataset 'tb21_eval' admits only: hermes_agent"):
+            RolloutCollectionHelper._validate_environment_servers(rows, config)
+        entry["taskset"] = "routed"
+        RolloutCollectionHelper._validate_environment_servers(rows, config)
+        del entry["taskset"]
+        # The same rows routed to the agent directly, without the environment server key.
+        routed = [{AGENT_REF_KEY_NAME: {"name": "harbor_tb21_agent"}, **rows[0]}]
+        del routed[0][NG_ENVIRONMENT_SERVER_KEY]
+        with pytest.raises(ValueError, match="its dataset 'tb21_eval' admits only: hermes_agent"):
+            RolloutCollectionHelper._validate_agent_pairings(routed, config)
+        # An admitted harness passes the renamed entry.
+        config = self._config("hermes_agent", ["hermes_agent"])
+        config["harbor_tb21_agent"]["responses_api_agents"]["hermes_agent"]["datasets"][0]["name"] = "tb21_eval"
+        RolloutCollectionHelper._validate_environment_servers(rows, config)
+
+
 class TestLiveHealthEvaluation:
     """The driver evaluates trajectory health as each rollout finishes, gated on telemetry and last in the loop."""
 

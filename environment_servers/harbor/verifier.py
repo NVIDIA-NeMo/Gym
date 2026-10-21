@@ -4,13 +4,13 @@
 """Grade an episode: the test.sh wrapper protocol, the reward files and the verifier sandbox.
 
 The verifier runs Harbor's tests/test.sh under a timeout wrapper that writes an exit record,
-reads reward.json or reward.txt, applies Harbor's reward selection rule and turns the exit into
-a measured or masked sample. Module level are the in-sandbox paths the protocol uses, the
-failure kinds, the wrapper command, the reward and exit record parsers, the timeout rule, and
-the choice of image and user the verifier runs as in shared and separate mode. The mixin holds
-the shared and separate verification choreography unchanged, the reward and log collection,
-the collect hooks and artifact download, and the scoring methods. Creating the verifier
-sandbox stays with the other provisioning code in sandboxes.py.
+reads reward.json or reward.txt, applies the reward rule (``reward`` key, else the keys summed as
+``reward_components``) and turns the exit into a measured or masked sample. Module level are the
+in-sandbox paths the protocol uses, the failure kinds, the wrapper command, the reward and exit
+record parsers, the timeout rule, and the choice of image and user the verifier runs as in shared
+and separate mode. The mixin holds the shared and separate verification choreography unchanged,
+the reward and log collection, the collect hooks and artifact download, and the scoring methods.
+Creating the verifier sandbox stays with the other provisioning code in sandboxes.py.
 """
 
 import asyncio
@@ -173,11 +173,42 @@ def verifier_timed_out(result: SandboxExecResult, exit_record: tuple[int, int | 
 
 
 def select_reward(rewards: dict[str, float]) -> float | None:
-    """Harbor's rule: the ``reward`` key, else the only key. Several keys and none named ``reward`` is ambiguous."""
+    """The score a parsed reward file gives: the ``reward`` key when present, else the sum of every key.
+
+    Gym's reading of ``reward.json``: a ``reward`` key is the score and the other keys are metrics; without
+    one every key is a component of the reward (:func:`reward_components`), which is their sum. One key
+    without ``reward`` is Harbor's own rule too. ``None`` when the components do not sum to a finite number.
+    """
     if "reward" in rewards:
         return rewards["reward"]
-    if len(rewards) == 1:
-        return next(iter(rewards.values()))
+    try:
+        total = math.fsum(rewards.values())
+    except OverflowError:
+        return None
+    return total if math.isfinite(total) else None
+
+
+def reward_components(rewards: dict[str, float]) -> dict[str, float] | None:
+    """The keys that sum to the reward, or ``None`` when the file names the reward itself.
+
+    With a ``reward`` key the other keys are metrics, not parts of the score, so there are no components to
+    name; without one every key is a component and :func:`select_reward` is their sum.
+    """
+    if "reward" in rewards:
+        return None
+    return dict(rewards)
+
+
+def summing_components(reward: float, components: dict[str, float] | None) -> dict[str, float] | None:
+    """``components`` when their values sum to ``reward`` (within floating-point tolerance), else ``None``.
+
+    A results row may name ``reward_components`` only when they sum to its ``reward``, the contract a
+    trainer asserts; this is the check at the point a verifier result becomes a result.
+    """
+    if components is None:
+        return None
+    if math.isclose(math.fsum(components.values()), reward, rel_tol=1e-9, abs_tol=1e-9):
+        return components
     return None
 
 
@@ -346,13 +377,13 @@ class HarborVerificationMixin:
     """Grade an episode: the test.sh wrapper protocol, the reward files and the verifier sandbox.
 
     The verifier runs Harbor's tests/test.sh under a timeout wrapper that writes an exit record,
-    reads reward.json or reward.txt, applies Harbor's reward selection rule and turns the exit into
-    a measured or masked sample. Module level are the in-sandbox paths the protocol uses, the
-    failure kinds, the wrapper command, the reward and exit record parsers, the timeout rule, and
-    the choice of image and user the verifier runs as in shared and separate mode. The mixin holds
-    the shared and separate verification choreography unchanged, the reward and log collection,
-    the collect hooks and artifact download, and the scoring methods. Creating the verifier
-    sandbox stays with the other provisioning code in sandboxes.py.
+    reads reward.json or reward.txt, applies the reward rule (``reward`` key, else the keys summed as
+    ``reward_components``) and turns the exit into a measured or masked sample. Module level are the
+    in-sandbox paths the protocol uses, the failure kinds, the wrapper command, the reward and exit
+    record parsers, the timeout rule, and the choice of image and user the verifier runs as in shared
+    and separate mode. The mixin holds the shared and separate verification choreography unchanged,
+    the reward and log collection, the collect hooks and artifact download, and the scoring methods.
+    Creating the verifier sandbox stays with the other provisioning code in sandboxes.py.
 
     """
 
@@ -908,11 +939,17 @@ class HarborVerificationMixin:
             return self._measured(0.0, kind, f"{problem}; tail: {_stdout_tail(logs_dir)}") | extras
         reward = select_reward(rewards)
         if reward is None:
-            raise HTTPException(
-                422,
-                f"reward.json for {task.task_id!r} has several keys and none named 'reward': {sorted(rewards)}",
+            # Finite components whose sum overflows: a reward file no trainer can use, measured like any other
+            # invalid reward file.
+            reason = (
+                f"reward.json keys {sorted(rewards)} do not sum to a finite reward; tail: {_stdout_tail(logs_dir)}"
             )
-        return {"reward": reward, "verifier_rewards": rewards} | extras
+            return self._measured(0.0, INVALID_REWARD_KIND, reason) | extras
+        outcome = {"reward": reward, "verifier_rewards": rewards}
+        components = summing_components(reward, reward_components(rewards))
+        if components is not None:
+            outcome["reward_components"] = components
+        return outcome | extras
 
     def _refuse_verifier_group(self, task: HarborTask) -> None:
         """Refuse at seed the ``name:group`` ``test.sh`` would run as, in either verifier mode.

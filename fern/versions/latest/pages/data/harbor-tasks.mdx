@@ -34,15 +34,32 @@ task whose digest no longer matches, so edits after materialization are caught r
 ## `dataset.toml` and the `[gym]` table
 
 Harbor's own tables (`[dataset]`) are left to Harbor. What a dataset needs on top of its tasks goes in a `[gym]`
-table, as data: defaults that scale every task, and per-task overrides written with Harbor's own
-`[environment]` fields.
+table, as data: the facts Harbor has no field for (which split the rows enter and under which license, which
+harnesses may run them, catalog metadata), defaults that scale every task or set how often an evaluation plays
+each one, and per-task overrides written with Harbor's own `[environment]` fields.
 
 ```toml
 [dataset]
 name = "local/my-dataset"   # Harbor requires org/name here
 version = "0.1.0"
 
+[gym]
+# The split the rows enter: train, validation, example or benchmark. Unset means validation with a license,
+# else benchmark, which needs no license and never enters a training split. A license (one of Gym's dataset
+# license values) is required for train and validation.
+type = "validation"
+license = "Apache 2.0"
+# The harnesses admitted to run the dataset, by implementation name (responses_api_agents/<name>, what --agent
+# resolves to). Unset admits any. The oracle of `gym dataset validate` is always admitted.
+allowed_agents = ["terminus_2_sandboxed_agent", "hermes_agent"]
+# Catalog metadata, carried into the generated run config: one of Gym's domain values (any other value is refused
+# with the values named), and whether the rewards were baselined and reviewed (false unless declared).
+domain = "coding"
+verified = false
+
 [gym.defaults]
+# Rollouts per task for an evaluation. `+num_repeats=` on the command line replaces it; it never enters a task's digest.
+num_repeats = 1
 # Scales every task's [agent] and [verifier] timeout_sec.
 timeout_multiplier = 1.0
 # Scales cpus, memory_mb and storage_mb of the agent's and the verifier's environments. GPUs never scale.
@@ -56,6 +73,29 @@ resource_multiplier = 1.0
 env = { EXAMPLE = "1" }
 memory_mb = 4096
 ```
+
+The generated run config's `datasets:` entry carries `type`, `license`, `domain`, `verified` and `allowed_agents`
+as declared, its top-level `num_repeats` is `[gym.defaults].num_repeats`, and `gym eval run` starts from that split
+and repeat count (`+split=` and `+num_repeats=` on the command line replace them); `gym dataset validate` plays each
+reference solution once unless `+num_repeats=` says otherwise. None of these keys enters a task's `_ng_digest`; only
+`[gym.defaults]` scaling and `[gym.tasks]` overrides do. Every materialized row carries
+`task_source` (the dataset folder's name: the parent's for a single task folder target inside a dataset, one whose
+parent holds a `dataset.toml` or a `manifest.toml`; a standalone task folder is labelled by its own name) and
+`_ng_digest` (the task
+folder's digest), and every results row carries them too, with `reward` and, when the verifier's `reward.json`
+named no `reward` key, `reward_components`:
+the keys that sum to the reward. That mapping is Harbor's optional, task-specific reading of the file, not the shared
+multi-reward contract of `BaseMultiRewardVerifyResponse` (a required mapping with the same objective keys on every
+task): tasks of one dataset may name different keys and a measured row may name none, so a trainer reads it row by
+row and takes the scalar `reward` alone where a row has none; a dataset meant for a fixed-objective trainer such as
+GDPO must have every task write the same keys without a `reward` key, which Gym does not pad or check across tasks.
+`gym eval run` with a harness outside `allowed_agents` fails before any image is
+recorded or built or any server started, naming the harness and the admitted list, and a run config edited to
+another harness afterwards is refused at dispatch by the collector's pairing guard. An `example` dataset is not
+runnable: that type marks committed smoke-test samples, and both commands refuse it at the same early point, before
+any image is recorded or built. `domain`, `verified` and `allowed_agents` stay out of the
+metrics sidecar Gym writes beside the rows, so editing them between two runs of one taskset and harness does not
+conflict with it; a `type` or `license` edit does, and the error names the sidecar to delete.
 
 Deployment settings (which sandbox provider, registry credentials, image mirrors) do not belong here: a dataset
 must run unchanged on every deployment. Those live in the sandbox provider block of the run configuration. See
@@ -126,7 +166,7 @@ gym eval run harbor:terminal-bench/terminal-bench@4.0.0 --agent hermes_agent --s
 | Option | Description |
 | --- | --- |
 | `TARGET` | A task folder, a folder of task folders, or `harbor:<dataset>[@<version>]`. `harbor:<org>/<name>[@<tag>]` fetches a package-store dataset. Fetched datasets land in `$NEMO_GYM_DATASETS_DIR` (default `environments/harbor/` in the Gym checkout); the fetch stages its clone in a hidden `.nemo-gym-harbor-*` directory there, which discovery skips. An unhidden `nemo-gym-harbor-*` directory left by a fetch interrupted under a `main` build from before this change is refused as a duplicate task ID: delete it once. |
-| `--agent`, `-a` | The harness that works in the task sandbox. It must accept `sandbox_access` in its session seed. |
+| `--agent`, `-a` | The harness that works in the task sandbox. It must accept `sandbox_access` in its session seed, and the dataset's `[gym] allowed_agents`, when set, must name it; otherwise the run stops before any image is built or server started. |
 | `--sandbox PROVIDER` | Sandbox provider for the task containers. |
 | `--only-tasks`, `--exclude-tasks` | Select tasks by name or glob. Left-out tasks are listed on stdout. |
 | `--skip-unloadable` | Run the loadable subset when some tasks do not load. Without it the run lists them and stops. |

@@ -50,8 +50,22 @@ Diagnostic logs are best effort: unsafe archive entries are skipped securely, an
 transfer failure cannot discard an already measured reward. Verifier timeouts score zero and retain
 available logs. An existing `reward.json`
 takes precedence even if malformed; `reward.txt` is read only when JSON is absent. Boolean JSON rewards
-are numeric, as in Harbor. Gym selects the `reward` key or the only key; multiple keys without `reward`
-are an authoring error (a terminal `stage: verification` failure) because Gym requires one scalar score.
+are numeric, as in Harbor. In `reward.json` a `reward` key is the score and the other keys are metrics, kept in
+`verifier_rewards`; without one every key is a component of the score, which is their sum, and the result names
+them as `reward_components` (only keys that sum to `reward`, the contract a trainer asserts; a `reward` key with
+other keys names none, since those do not sum to it). Components whose sum is not a finite number are an invalid
+reward file: measured 0 with `harbor:invalid_reward`. A multi-step task averages components as it averages rewards
+when every measured turn named some, else names none. On the single-turn path the check cannot fail (the reward is
+the sum of the same keys); when a roll-up's components do not sum to its reward, the episode names none and the
+server logs a warning naming the task, the keys and both numbers.
+
+`reward_components` here is Harbor's optional, task-specific reading of `reward.json`, not the shared multi-reward
+contract of `BaseMultiRewardVerifyResponse` (a required mapping with the same objective keys on every task of an
+environment): a task names whatever keys its `test.sh` wrote, two tasks of one dataset may name different ones, and a
+measured row may name none. It is for per-row inspection and for a trainer that reads the mapping row by row and
+takes the scalar `reward` alone where a row has none. Gym pads no missing component and renames no key, so a dataset
+meant for a fixed-objective trainer (GDPO and the like) must have every task write the same keys without a `reward`
+key; that is the dataset's contract to keep, not the server's.
 
 ## Supported task behavior
 
@@ -132,7 +146,9 @@ and is listed unvalidated otherwise.
 
 The episode stops after a turn that is masked, writes no valid reward file, or misses the step's
 `min_reward` (a number gates `reward`, a table gates each named key). `multi_step_reward_strategy` rolls the
-turns up: `mean` (the default) averages the turns with a verifier result, and `final` takes the last turn that
+turns up: `mean` (the default) averages every turn that ran, a turn whose `test.sh` produced no result counting 0
+with its failure kind on the episode (Harbor leaves such a step out of its denominator; Gym scores a verifier run
+that produced nothing, so a broken later verifier cannot lift the mean), and `final` takes the last turn that
 ran. The pre-1.3 spellings `version` and `multi_step_reward_mode` (what older multi-step generators such as the
 MemoryArena adapters write) are read as Harbor 0.22.0 reads them: `version` is `schema_version`, and
 `multi_step_reward_mode = "aggregate"` is dropped and the task rolls up with the default `mean` (or its own
@@ -698,7 +714,8 @@ package is downloaded by content hash into `<name>/` (`latest`), `<name>-<tag>/`
 grouped in subfolders (the search is recursive, `task_id` stays the task folder's own name and must be unique
 across the dataset, and `dataset.toml` and the recorded image configurations sit at the dataset root). The
 taskset mapping records the relative path of a task found below the first level under `paths`. The fetch stages its clone in a hidden `.nemo-gym-harbor-*` directory inside the dataset folder, which the search skips. A fetch interrupted under a `main` build from before this change staged under an unhidden `nemo-gym-harbor-*` name; the recursive search sees that clone and refuses the dataset (a duplicate task ID, or a task the manifest does not record) rather than running it. Delete those directories once; nothing in them is needed. The generated run config declares the materialized rows as the agent's
-validation dataset and binds the per-taskset environment server to that agent. `gym dataset validate` reports,
+dataset, with the split, license, repeats and catalog metadata of the dataset's `[gym]` table (see
+[Training metadata](#training-metadata)), and binds the per-taskset environment server to that agent. `gym dataset validate` reports,
 per task, the verifier's wall time (`verify_s`) and the network it ran under (`network`). Running model episodes
 requires a harness that accepts `sandbox_access` in its session seed and leaves the sandbox to the server
 when its session is closed.
@@ -746,7 +763,63 @@ refused untouched, by fetch and prepare alike, until Gym is upgraded or the fold
 recorded in the run config (`tasksets.<name>.dataset_digest` and `dataset_toml_digest`), in every materialized
 row as `task_data._ng_dataset_digest`, and, because rollout collection copies a row's `_ng_*` task data onto the
 record it writes, in every `rollouts.jsonl` row as `_ng_dataset_digest` (beside `_ng_digest`), so every results
-file says which dataset ran.
+file says which dataset ran. Every materialized row also carries `task_source`, the dataset folder's name (the
+parent's, when the target is a single task folder inside a dataset, one whose parent holds a `dataset.toml` or a
+`manifest.toml`: its table, images and manifest are the parent's; a standalone task folder, whose parent holds
+neither, is labelled by its own name, so two unrelated task folders prepared from one scratch directory do not
+share its name), which the collector copies onto the results row as well. It is the label a results row and a
+trainer read, not a routing key: a materialized row reaches its environment server by its taskset (the target
+folder's name), `agent_map` and `fan_out` do not apply to it, and a per-dataset `num_repeats` dict keys on the
+taskset.
+
+### Training metadata
+
+The `[gym]` table also declares what a trainer and the catalog need to know about the dataset, and the generated
+`datasets:` entry carries it: `type` is the split the rows enter (the declared one, else `validation` with a
+`license`, else `benchmark`, which needs no license and never enters a training split; `example` marks committed
+smoke-test samples and is refused by `gym eval run` and `gym dataset validate` as soon as `dataset.toml` is read,
+before any manifest check, image record, build or rows file, where a harness outside `allowed_agents` is refused
+too), `license` the declared one,
+`domain` (one of Gym's domain values) and `verified` (a boolean, `false` unless declared, as the pre-commit hook
+starts a new resources server) are carried as declared. `[gym.defaults].num_repeats` becomes the run config's
+top-level `num_repeats` (not the entry's: collate would duplicate the rows by an entry count and the collector
+would multiply on top, and the metrics sidecar beside the rows records the entry). `gym eval run` inherits that
+split and repeat count: `+split=` and `+num_repeats=` on the command line replace them. `gym dataset validate`
+inherits the split but plays each reference solution once (it adds `+num_repeats=1` unless the command line sets
+a count): validation is not an evaluation, and the oracle's result does not vary. None of these keys enters a
+task's `_ng_digest`: a table that declares only them leaves every task at its bare folder hash, exactly as no
+table does; only `[gym.defaults]` scaling and `[gym.tasks]` overrides fold a slice in. A `domain` outside Gym's
+values is refused with the values named, like a `license` outside Gym's, so the dataset does not load until it
+is fixed (the generated entry carries the same enum). A benchmark entry names no `prepare_script`; the rows are
+written by the run that generates the entry. Gym's data preparation records the entry in a metrics sidecar
+beside the rows (`results/harbor/<taskset>/tasks_<agent>_metrics.json`, under `results/harbor/validation/` for
+`gym dataset validate`) and refuses a later run whose entry differs from it. `domain`, `verified` and
+`allowed_agents` are catalog declarations, not properties of the rows, so the sidecar leaves them out: flipping
+`verified = true` after baselining, widening `allowed_agents` or changing `domain` between two runs of one taskset
+and harness does not conflict. `type` and `license` are recorded, as for every Gym dataset; editing either between
+two runs of the same taskset and harness fails data preparation with "Found conflicting aggregate metrics", and
+the message names the sidecar to delete before running again.
+
+`allowed_agents` lists the harnesses the dataset admits, by implementation name (`responses_api_agents/<name>`,
+what `--agent` resolves to); unset admits any. `gym eval run` with another harness fails as soon as
+`dataset.toml` is at hand, after a hub fetch and before any image is recorded or built or any server or sandbox
+started, with a message naming the harness and the admitted list. The oracle (`gym dataset validate`) plays the
+reference solution, not a model, and is always admitted. The list is carried into the entry as declared, and the
+collector's pairing guard reads it there: a run config edited to another harness afterwards is refused at dispatch
+as well, naming the harness and the dataset (`--allow-unsupported-pairing` waives it, as for a resources server's
+`allowed_agents`).
+
+```toml
+[gym]
+type = "validation"
+license = "Apache 2.0"
+domain = "coding"
+verified = true
+allowed_agents = ["terminus_2_sandboxed_agent", "hermes_agent"]
+
+[gym.defaults]
+num_repeats = 3
+```
 
 ## Example data
 
@@ -958,7 +1031,7 @@ deployment wants the same value; a unit test pins that list.
 | Home | File | Owner | Holds |
 |---|---|---|---|
 | Task | `task.toml` | task author | image, resources, timeouts, env, verifier, agent user (read-only once fetched) |
-| Dataset | `dataset.toml`, `[gym]` table | dataset author | `[gym]` `license` (one of Gym's dataset license values, required for `train` and `validation`) and `type` (`train`, `validation`, `example` or `benchmark`; unset means `validation` with a license, else `benchmark`); `[gym.defaults]` `timeout_multiplier`, `resource_multiplier`; `[gym.tasks."<id>"]` `environment` and `verifier` overrides in Harbor's own fields (`env` merges, other fields replace) and `artifacts` additions appended to the task's own |
+| Dataset | `dataset.toml`, `[gym]` table | dataset author | `[gym]` `license` (one of Gym's dataset license values, required for `train` and `validation`), `type` (`train`, `validation`, `example` or `benchmark`; unset means `validation` with a license, else `benchmark`), `allowed_agents` (harness implementation names the dataset admits; unset admits any), `domain` (one of Gym's domain values) and `verified` (boolean); `[gym.defaults]` `timeout_multiplier`, `resource_multiplier`, `num_repeats` (rollouts per task, below `+num_repeats=`); `[gym.tasks."<id>"]` `environment` and `verifier` overrides in Harbor's own fields (`env` merges, other fields replace) and `artifacts` additions appended to the task's own |
 | Deployment | the `sandbox:` provider block | operator | image rewrites and registry credentials (`images`), root setup commands (`setup`), networking, shared-memory labels, shared storage and `volume_sources` for Compose volumes |
 | Run | run config | the run | provider selection, GPU routing, repeats, output paths, `sandbox_resources_override` for parity runs |
 

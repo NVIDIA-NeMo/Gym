@@ -6,6 +6,7 @@
 import asyncio
 import io
 import json
+import logging
 import posixpath
 import tarfile
 import threading
@@ -57,12 +58,12 @@ def multi_turn_server(tmp_path, monkeypatch, steps_toml: str, steps: dict[str, s
     return make_server(tmp_path, monkeypatch, toml=head + TASK_TOML + steps_toml, **config)
 
 
-def rewards_per_turn(server, sandbox: FakeSandbox, rewards: list[str]) -> None:
+def rewards_per_turn(server, sandbox: FakeSandbox, rewards: list[str], *, name: str = "reward.txt") -> None:
     """Make the verifier of the n-th turn write ``rewards[n]``: each activation sets what its verify reads."""
     pending = list(rewards)
 
     def next_reward():
-        sandbox.verifier_files = {"reward.txt": pending.pop(0)}
+        sandbox.verifier_files = {name: pending.pop(0)}
 
     server.server_client.turn_hooks.append(next_reward)
 
@@ -216,6 +217,19 @@ async def test_mean_averages_the_turns_that_produced_a_result(tmp_path, monkeypa
 
     assert result.turn_reward_strategy == "mean"
     assert result.reward == 0.75 and result.verifier_rewards == {"reward": 0.75}
+    assert result.reward_components is None and all(turn.reward_components is None for turn in result.turns)
+
+
+async def test_mean_averages_the_components_every_turn_named(tmp_path, monkeypatch):
+    steps = '[[steps]]\nname = "a"\n[[steps]]\nname = "b"\n'
+    server, task, sandbox, _ = multi_turn_server(tmp_path, monkeypatch, steps, {"a": "A", "b": "B"})
+    rewards_per_turn(server, sandbox, [json.dumps({"x": 1.0, "y": 0.0}), json.dumps({"x": 0.0})], name="reward.json")
+
+    result = (await server.run_request(request_for(task))).result
+
+    assert [turn.reward_components for turn in result.turns] == [{"x": 1.0, "y": 0.0}, {"x": 0.0}]
+    assert result.reward == 0.5 and result.reward_components == {"x": 0.5, "y": 0.0}
+    assert sum(result.reward_components.values()) == result.reward
 
 
 async def test_the_harness_trajectory_rides_on_each_turn_and_the_last_one_on_the_result(tmp_path, monkeypatch):
@@ -264,6 +278,36 @@ async def test_a_missed_min_reward_stops_the_remaining_turns(tmp_path, monkeypat
     assert [turn.name for turn in result.turns] == ["plan"]
     assert result.stopped_after_turn == "plan" and result.reward == 0.0
     assert sum(path.endswith("/v1/responses") for path in server.server_client.paths()) == 1
+
+
+async def test_a_later_turn_whose_verifier_times_out_counts_as_zero_in_the_mean(tmp_path, monkeypatch):
+    """A turn whose test.sh produced no result is a measured 0 of the mean, as the single-turn path and `final` score
+    it, and the episode carries its failure kind: a later verifier the agent broke (a hung test.sh, a reward file never
+    written) cannot lift the mean to the earlier turns' score. Harbor's `_aggregate_step_rewards` leaves such a step
+    out of its denominator; Gym scores a turn whose verifier ran, so the turn counts."""
+    steps = '[[steps]]\nname = "plan"\n[[steps]]\nname = "build"\n[[steps]]\nname = "ship"\n'
+    server, task, sandbox, _ = multi_turn_server(
+        tmp_path, monkeypatch, steps, {"plan": "P", "build": "B", "ship": "S"}
+    )
+    passed = SandboxExecResult(stdout="", stderr="", return_code=0)
+    timed_out = SandboxExecResult(stdout="", stderr="", return_code=124, error_type="timeout")
+    per_turn = [({"reward.txt": "1\n"}, passed), ({}, timed_out), ({"reward.txt": "1\n"}, passed)]
+
+    def next_verifier():
+        sandbox.verifier_files, sandbox.test_result = per_turn.pop(0)
+
+    server.server_client.turn_hooks.append(next_verifier)
+
+    result = (await server.run_request(request_for(task))).result
+
+    # The third step never ran: the mean is over the two turns that ran, the second counting 0.
+    assert [turn.verifier_rewards for turn in result.turns] == [{"reward": 1.0}, None]
+    assert result.turns[1].failure_kind == "harbor:verifier_timeout"
+    assert (result.reward, result.verifier_rewards) == (0.5, {"reward": 0.5})
+    assert (result.mask_sample, result.stopped_after_turn, result.turns_without_verifier_result) == (False, "build", 1)
+    assert sum(path.endswith("/v1/responses") for path in server.server_client.paths()) == 2
+    assert result.failure_kind == "harbor:verifier_timeout"
+    assert result.failure_reason.startswith("turn 'build': test.sh exceeded [verifier].timeout_sec=")
 
 
 async def test_a_turn_without_a_reward_file_ends_the_episode_measured(tmp_path, monkeypatch):
@@ -1108,12 +1152,21 @@ async def test_task_mcp_servers_are_granted_on_request(tmp_path, monkeypatch, gr
         ]
 
 
-def turn(name: str, rewards: dict[str, float] | None, *, masked: bool = False) -> HarborTurnResult:
-    reward = (rewards or {}).get("reward", 0.0)
+def turn(
+    name: str,
+    rewards: dict[str, float] | None,
+    *,
+    masked: bool = False,
+    components: dict[str, float] | None = None,
+    reward: float | None = None,
+) -> HarborTurnResult:
+    if reward is None:
+        reward = (rewards or {}).get("reward", 0.0)
     return HarborTurnResult(
         name=name,
         reward=reward,
         verifier_rewards=rewards,
+        reward_components=components,
         mask_sample=masked,
         failure_kind="provider_unavailable" if masked else None if rewards else "harbor:missing_reward",
         failure_reason="lost" if masked else None if rewards else "no reward.json or reward.txt was written",
@@ -1130,6 +1183,24 @@ class TestRollUp:
         rolled = roll_up_turns([turn("a", {"reward": 1.0, "x": 1.0}), turn("b", {"reward": 0.0})], "mean")
         assert rolled == {"reward": 0.5, "verifier_rewards": {"reward": 0.5, "x": 0.5}}
 
+    def test_mean_counts_a_turn_without_a_result_as_zero_and_keeps_its_cause(self):
+        # Turn 1 scored 1.0, turn 2's test.sh wrote nothing: the episode is 0.5, measured, with turn 2's cause, not
+        # 1.0 with no failure kind (the turn would then be out of the denominator, and a broken later verifier a win).
+        rolled = roll_up_turns([turn("a", {"reward": 1.0, "x": 1.0}), turn("b", None)], "mean")
+        assert rolled == {
+            "reward": 0.5,
+            "verifier_rewards": {"reward": 0.5, "x": 0.5},
+            "mask_sample": False,
+            "failure_kind": "harbor:missing_reward",
+            "failure_reason": "turn 'b': no reward.json or reward.txt was written",
+        }
+        unexplained = turn("b", None).model_copy(update={"failure_kind": None})
+        assert roll_up_turns([turn("a", {"reward": 1.0}), unexplained], "mean")["failure_kind"] == NO_TURN_RESULT_KIND
+        # Components every measured turn named are averaged over every turn too, so they still sum to the mean.
+        first = turn("a", {"x": 1.0, "y": 0.5}, components={"x": 1.0, "y": 0.5}, reward=1.5)
+        rolled = roll_up_turns([first, turn("b", None)], "mean")
+        assert rolled["reward"] == 0.75 and rolled["reward_components"] == {"x": 0.5, "y": 0.25}
+
     def test_mean_without_any_result_is_measured_zero_with_the_turns_cause(self):
         rolled = roll_up_turns([turn("a", None)], "mean")
         assert (rolled["reward"], rolled["mask_sample"], rolled["failure_kind"]) == (
@@ -1143,6 +1214,45 @@ class TestRollUp:
     def test_final_takes_the_last_turn_that_ran(self):
         assert roll_up_turns([turn("a", {"reward": 0.0}), turn("b", {"reward": 1.0})], "final")["reward"] == 1.0
         assert roll_up_turns([turn("a", {"reward": 1.0}), turn("b", None)], "final")["reward"] == 0.0
+
+    def test_final_keeps_the_last_turns_components(self, caplog):
+        parts = {"x": 0.5, "y": 0.5}
+        last = turn("b", parts, components=parts, reward=1.0)
+        with caplog.at_level(logging.WARNING, logger="environment_servers.harbor.app"):
+            rolled = roll_up_turns([turn("a", {"reward": 0.0}), last], "final", task_id="t")
+        assert rolled == {"reward": 1.0, "verifier_rewards": parts, "reward_components": parts}
+        assert not caplog.records
+        # Components that do not sum to the reward are never named, and the drop is said, not silent: the
+        # warning names the task, the keys, their sum and the reward.
+        off = turn("b", parts, components={"x": 0.5}, reward=1.0)
+        with caplog.at_level(logging.WARNING, logger="environment_servers.harbor.app"):
+            assert "reward_components" not in roll_up_turns([off], "final", task_id="t")
+        [record] = caplog.records
+        assert record.levelno == logging.WARNING
+        message = record.getMessage()
+        assert "task 't'" in message and "['x']" in message and "turn 'b'" in message
+        assert "sum to 0.5, not to the episode reward 1.0" in message
+
+    def test_mean_names_components_only_when_every_turn_did(self):
+        first = turn("a", {"x": 1.0}, components={"x": 1.0}, reward=1.0)
+        second = turn("b", {"x": 0.0, "y": 0.5}, components={"x": 0.0, "y": 0.5}, reward=0.5)
+        rolled = roll_up_turns([first, second], "mean")
+        assert rolled["reward"] == 0.75 and rolled["reward_components"] == {"x": 0.5, "y": 0.25}
+        # A turn that named its reward directly has no components, so the episode names none either.
+        mixed = roll_up_turns([first, turn("b", {"reward": 0.5})], "mean")
+        assert mixed["reward"] == 0.75 and "reward_components" not in mixed
+
+    def test_mean_drops_components_that_do_not_sum_with_a_warning(self, caplog):
+        first = turn("a", {"x": 1.0}, components={"x": 1.0}, reward=1.0)
+        # A turn whose components do not sum to its reward (nothing on the verifier path builds one) pulls the
+        # per-key means off the mean reward; the episode then names none and says so.
+        off = turn("b", {"x": 0.0, "y": 0.5}, components={"x": 0.0}, reward=0.5)
+        with caplog.at_level(logging.WARNING, logger="environment_servers.harbor.app"):
+            rolled = roll_up_turns([first, off], "mean", task_id="t")
+        assert rolled["reward"] == 0.75 and "reward_components" not in rolled
+        [record] = caplog.records
+        assert "task 't'" in record.getMessage() and "the mean over turns" in record.getMessage()
+        assert "sum to 0.5, not to the episode reward 0.75" in record.getMessage()
 
 
 @pytest.mark.parametrize(
