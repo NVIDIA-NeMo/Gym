@@ -116,6 +116,7 @@ class MLflowExporter(BaseExporter):
     CONFIG_ARTIFACT_FILE: ClassVar[str] = "global_config.json"
     # Can't write .jsonl: `log_table` accepts only .json/.parquet, and writes one table document.
     ROLLOUTS_ARTIFACT_FILE: ClassVar[str] = "rollouts.json"
+    RESUME_COUNT_TAG: ClassVar[str] = "gym_resume_count"
 
     def __init__(self, global_config_dict: DictConfig) -> None:
         super().__init__(global_config_dict)
@@ -138,6 +139,9 @@ class MLflowExporter(BaseExporter):
         self.run_id = self._recorded_run_id()
         if self.run_id is not None:
             self.client.update_run(self.run_id, status="RUNNING")
+            # Counts the times this run was reopened, so a reader knows its metrics span several jobs.
+            resumes = int(self.client.get_run(self.run_id).data.tags.get(self.RESUME_COUNT_TAG, 0))
+            self.client.set_tag(self.run_id, self.RESUME_COUNT_TAG, str(resumes + 1))
             return
         self.run_id = self.client.create_run(
             experiment_id, run_name=self.config.mlflow_run_name, tags=tags or None

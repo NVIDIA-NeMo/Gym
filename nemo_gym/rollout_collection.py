@@ -2237,6 +2237,42 @@ async def _read_jsonl(path: Path) -> List[Dict]:
     return rows
 
 
+def _failure_export_metrics(
+    failures_fpaths: List[Path], identity: Callable[[Mapping[str, Any]], Any], landed: set
+) -> Dict[str, int]:
+    """Failure and retry counts for exporters, read from the failures sidecars.
+
+    The sidecars hold every failed attempt of the run, across resumes, so these are run totals rather
+    than one job's. ``identity`` keys a sidecar row the way ``landed`` keys the rollouts that have a row.
+    ``coverage/failed/<class>`` counts the rollouts with no row, by the class of their last attempt.
+    ``retries/attempts`` counts failed attempts, ``retries/rollouts_retried`` the rollouts dispatched
+    more than once, and ``retries/at_cap`` the rollouts with no row that used all ``retries/max_attempts``.
+    """
+    attempts: Counter = Counter()
+    latest: Dict[Any, Dict[str, Any]] = {}
+    for fpath in failures_fpaths:
+        if not fpath.exists():
+            continue
+        with fpath.open("rb") as f:
+            for line_no, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                row = loads_jsonl_line(line, fpath, line_no)
+                attempts[identity(row)] += 1
+                latest[identity(row)] = row
+    max_attempts = get_max_rollout_attempts()
+    failed = Counter(row.get(NG_FAILURE_CLASS_KEY) or "unknown" for key, row in latest.items() if key not in landed)
+    return {
+        "retries/attempts": sum(attempts.values()),
+        # A rollout that landed after n failed attempts was dispatched n + 1 times.
+        "retries/rollouts_retried": sum(1 for key, n in attempts.items() if n + (key in landed) > 1),
+        "retries/at_cap": sum(1 for key, n in attempts.items() if key not in landed and n >= max_attempts),
+        "retries/max_attempts": max_attempts,
+        **{f"coverage/failed/{name}": count for name, count in sorted(failed.items())},
+    }
+
+
 def _count_lines(path: Path) -> int:
     with path.open("rb") as f:
         return sum(1 for _ in f)
@@ -3692,13 +3728,20 @@ class RolloutCollectionHelper(BaseModel):
         coverage = _coverage_report(
             expected_rollouts, scored_rollouts, failure_counts, failures_fpath, imputed=len(imputed)
         )
-        if get_exporters():  # pragma: no cover
+        if get_exporters():
+            failure_metrics = await asyncio.to_thread(
+                _failure_export_metrics,
+                [failures_fpath],
+                lambda row: (row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME)),
+                persisted_success_keys,
+            )
             export_metrics(
                 {
                     "coverage/expected": expected_rollouts,
                     "coverage/scored": scored_rollouts,
                     "coverage/missing": expected_rollouts - scored_rollouts,
                     **({"coverage/imputed": len(imputed)} if config.count_missing_rollouts_as_zero else {}),
+                    **failure_metrics,
                 }
             )
 
@@ -4659,13 +4702,20 @@ class RolloutAggregationHelper(BaseModel):
             "the shards' _failures.jsonl sidecars",
             imputed=len(missing),
         )
-        if get_exporters():  # pragma: no cover
+        if get_exporters():
+            failure_metrics = await asyncio.to_thread(
+                _failure_export_metrics,
+                failures_fpaths,
+                lambda row: _identity_key(row, group),
+                {_identity_key(r, group) for r in results},
+            )
             export_metrics(
                 {
                     "coverage/expected": scored_rollouts + sum(dropped.values()),
                     "coverage/scored": scored_rollouts,
                     "coverage/missing": sum(dropped.values()),
                     **({"coverage/imputed": len(missing)} if config.count_missing_rollouts_as_zero else {}),
+                    **failure_metrics,
                 }
             )
 

@@ -15,7 +15,7 @@
 import math
 from pathlib import Path
 from typing import Any, ClassVar, Optional
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 import orjson
 import pytest
@@ -486,6 +486,25 @@ class TestMLflowExporter:
         assert (first.run_id, second.run_id) == ("run-1", "run-1")
         client.create_run.assert_not_called()
         client.update_run.assert_called_once_with("run-1", status="RUNNING")
+
+    def test_each_reopen_counts_one_more_resume(
+        self, monkeypatch: MonkeyPatch, mlflow_config: DictConfig, tmp_path
+    ) -> None:
+        mlflow_config["output_jsonl_fpath"] = str(tmp_path / "rollouts.jsonl")
+        first, created = _open_mlflow_exporter(monkeypatch, mlflow_config)
+        created.set_tag.assert_not_called()
+
+        client = MagicMock()
+        client.get_run.return_value = MagicMock(data=MagicMock(tags={}))
+        monkeypatch.setattr(mlflow_module, "MlflowClient", MagicMock(return_value=client))
+        MLflowExporter(mlflow_config).setup()
+        client.get_run.return_value = MagicMock(data=MagicMock(tags={"gym_resume_count": "1"}))
+        MLflowExporter(mlflow_config).setup()
+
+        assert client.set_tag.call_args_list == [
+            call("run-1", "gym_resume_count", "1"),
+            call("run-1", "gym_resume_count", "2"),
+        ]
 
     def test_setup_without_a_token_leaves_the_env_var_unset(
         self, monkeypatch: MonkeyPatch, mlflow_config: DictConfig
