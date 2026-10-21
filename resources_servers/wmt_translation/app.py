@@ -166,7 +166,7 @@ class WmtTranslationVerifyResponse(WmtTranslationVerifyRequest, BaseVerifyRespon
     # Per-sample sentence-spBLEU, reported alongside chrF for comparison.
     sentence_spbleu: float
     # Per-rollout xCOMET-XXL score (0–1). verify() leaves this unset;
-    # compute_metrics() fills it in bulk for non-empty generations.
+    # compute_metrics() fills it in bulk for every generation, empty ones included.
     comet_score: Optional[float] = None
     # Per-rollout language-consistency score (0–1): fraction of the
     # generation attributed to the target language. 0.0 for empty or
@@ -528,8 +528,8 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
         need = []
         for task_rollouts in tasks:
             for rollout in task_rollouts:
-                generation = (rollout.get("generation") or "").strip()
-                if generation and rollout.get("comet_score") is None:
+                # Empty generations are scored too, so they stay in the COMET mean as in spBLEU/chrF.
+                if rollout.get("comet_score") is None:
                     need.append(rollout)
         if not need:
             return

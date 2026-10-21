@@ -1208,7 +1208,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 if observation_collector is not None:
                     try:
                         session_events = parse_openclaw_session_events(session_text)
-                        native_session_id = next(
+                        openclaw_session_id = next(
                             (
                                 event.get("id")
                                 for event in session_events
@@ -1218,9 +1218,9 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                         )
                         session_tree, tree_gaps = discover_openclaw_session_tree(
                             home / ".openclaw" / "agents",
-                            native_session_id,
+                            openclaw_session_id,
                         )
-                        observation_collector(native_session_id, session_events, session_tree, tree_gaps)
+                        observation_collector(openclaw_session_id, session_events, session_tree, tree_gaps)
                     except Exception:
                         LOG.exception("failed to record OpenClaw session artifact")
             if not output_items:
