@@ -146,8 +146,10 @@ class HarborTask:
     ``environment/`` build (:func:`load_task`).
 
     ``context_id`` is Harbor's environment id of ``environment/`` (:func:`~nemo_gym.tasks.harbor.digest.context_digest`,
-    the key of ``built-images.json`` and the body of the ``hb__<hash>`` image names), computed once here when the
-    task needs it (a Dockerfile that needs a build, or a Compose file) and ``None`` otherwise; ``built_images`` is
+    the key of ``built-images.json`` and the body of the ``hb__<hash>`` image names), computed once here for every
+    task with an ``environment/`` folder (the build-mode branches read it, and the Compose loader needs it at every
+    seed, for a Compose file or for the one-service group a job-level overlay extends) and ``None`` for a task
+    without one; ``built_images`` is
     every image that record holds for the context, by Compose service name (``main`` and the sidecars with a
     ``build:`` section, :func:`recorded_service_images`), ``{}`` when none is recorded. The Compose loader
     substitutes them at prepare and at seed without hashing the folder again; ``main``'s entry is applied only
@@ -561,8 +563,12 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
         sandbox_user = dockerfile_user
     else:
         sandbox_user = user
-    if has_compose_file(path):
-        # The Compose loader needs the context id (COMPOSE_PROJECT_NAME) and the built sidecars at every seed.
+    if dockerfile.parent.is_dir():
+        # The Compose loader needs the context id (COMPOSE_PROJECT_NAME) and the built sidecars at every seed: for a
+        # task with a Compose file, and for a plain image task when the deployment's job-level compose_overlay names
+        # Compose files, a run-config value the loader cannot see here. So every task with an environment/ folder
+        # pays the hash once, at load, as Harbor computes its environment id at every trial start (``environment_id``
+        # in harbor/environments/base.py, the ``hb__<id>`` main image name of ``docker.py``), never per seed.
         recorded_builds()
 
     # The separate verifier's image, by Harbor's rules (effective_verifier_environment, verifier_build_context): a

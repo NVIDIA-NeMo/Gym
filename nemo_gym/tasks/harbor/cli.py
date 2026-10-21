@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import yaml
+from pydantic import ValidationError
 
 from nemo_gym import component_search_roots
 from nemo_gym.cli.utils import exit_cleanly_on_config_error
@@ -46,6 +47,7 @@ from nemo_gym.tasks.harbor.build_plan import (
     DEFAULT_PLATFORM,
     BuildError,
 )
+from nemo_gym.tasks.harbor.compose_overlay import HarborComposeOverlay
 from nemo_gym.tasks.harbor.dataset_config import DATASET_FILE, GymDatasetConfig, read_dataset_config
 from nemo_gym.tasks.harbor.errors import HarborTaskError
 from nemo_gym.tasks.harbor.hub import HubError, datasets_dir, fetch_ref, is_hub_ref
@@ -117,6 +119,9 @@ SANDBOX_BLOCK_KEY = "sandbox"
 HARBOR_SERVER_KEY = f"{ENVIRONMENT_SERVER_INSTANCE}.environment_servers.{ENVIRONMENT_SERVER_IMPL}"
 GPU_SANDBOX_PROVIDER_KEY = f"{HARBOR_SERVER_KEY}.gpu_sandbox_provider"
 SANDBOX_PROVIDER_OPTIONS_KEY = f"{HARBOR_SERVER_KEY}.sandbox_provider_options"
+# The job-level Compose overlay (extra Compose files, MCP entries, prompt template), read at prepare so the
+# overlay's images are recorded and its merge checked with the tasks', exactly as the server reads it at seed.
+COMPOSE_OVERLAY_KEY = f"{HARBOR_SERVER_KEY}.compose_overlay"
 # Harness-specific settings a Harbor run needs; keyed by the agent implementation folder.
 AGENT_OVERRIDES: dict[str, dict[str, Any]] = {
     # Hermes borrows the task sandbox and drives it through its terminal toolset. vLLM-only
@@ -224,6 +229,25 @@ def compose_platform_from_overrides(overrides: list[str]) -> str:
     configuration validation names the malformed block at dispatch."""
     platform = _block_from_overrides(overrides, f"{SANDBOX_PROVIDER_OPTIONS_KEY}.platform")
     return deployment_platform({"platform": platform} if platform is not None else None)
+
+
+def compose_overlay_from_overrides(overrides: list[str]) -> HarborComposeOverlay | None:
+    """The environment server's ``compose_overlay`` block in the configuration the command names
+    (``COMPOSE_OVERLAY_KEY``), validated as the server validates it, or ``None`` when the block is absent or null.
+    Prepare merges its files onto every task's Compose document and records their images, so the document the
+    server starts is the one prepare checked; a block that does not validate is a configuration error here."""
+    block = _block_from_overrides(overrides, COMPOSE_OVERLAY_KEY)
+    if block is None:
+        return None
+    if not isinstance(block, Mapping):
+        raise ValueError(
+            f"`{COMPOSE_OVERLAY_KEY}` must be a mapping (files, mcp_servers, prompt_template); got {block!r}"
+        )
+    try:
+        overlay = HarborComposeOverlay.model_validate(block)
+    except ValidationError as exc:
+        raise ValueError(f"`{COMPOSE_OVERLAY_KEY}`: {exc}") from exc
+    return overlay if overlay.configured else None
 
 
 def volume_sources_from_overrides(overrides: list[str], sandbox: str | None) -> dict[str, str] | None:
@@ -347,6 +371,7 @@ def prepare_target(
     gpu_volume_sources: dict[str, str] | None = None,
     shared_storage: bool | None = None,
     gpu_shared_storage: bool | None = None,
+    compose_overlay: HarborComposeOverlay | None = None,
     rows_name: str = "tasks.jsonl",
     registry_credentials: Mapping[str, tuple[str, str]] | None = None,
     agent: str | None = None,
@@ -371,7 +396,9 @@ def prepare_target(
     declares GPUs is checked against ``gpu_volume_sources`` when given, the mapping of the block the server runs
     such tasks on; ``shared_storage`` and ``gpu_shared_storage`` say whether each block's provider has the shared
     storage named volumes and shared logs binds need, so a task that needs it is left out at prepare, naming the
-    setting, when the block has none (``None``: unknown, decided at seed). ``rows_name`` names the rows file inside the taskset's output folder: a run scopes it to its
+    setting, when the block has none (``None``: unknown, decided at seed). ``compose_overlay`` is the job-level Compose overlay (the server's ``compose_overlay`` block):
+    its files are merged onto every task's Compose document, a plain image task included, and its images recorded
+    with the tasks'. ``rows_name`` names the rows file inside the taskset's output folder: a run scopes it to its
     agent, so two agents prepared with different selections on one taskset keep their own rows. ``registry_credentials``
     (registry host to username and password, :func:`registry_credentials_from_overrides`) are what the base images
     and the Compose images are read from their registries with; without them a private image stops the
@@ -502,6 +529,7 @@ def prepare_target(
         gpu_volume_sources=gpu_volume_sources,
         shared_storage=shared_storage,
         gpu_shared_storage=gpu_shared_storage,
+        overlay=compose_overlay,
     )
     if unresolved:
         for task_id, reason in unresolved.items():
@@ -521,7 +549,7 @@ def prepare_target(
     print(f"Dataset digest {identity.digest} ({identity.source})")
     # Every distinct image a run starts, for pre-pulling onto the sandbox hosts before it: the task images, the
     # Compose sidecars' (as recorded, the pinned reference the sandbox gets) and the separate verifiers'.
-    distinct = run_images(tasks, read_image_configs(tasks[0].path.parent))
+    distinct = run_images(tasks, read_image_configs(tasks[0].path.parent), overlay=compose_overlay)
     (output_dir / IMAGES_FILE).write_text(json.dumps(list(distinct), indent=2) + "\n")
     if distinct:
         print(f"Images: {len(distinct)} distinct, listed in {output_dir / IMAGES_FILE}")
@@ -597,11 +625,13 @@ def refuse_disallowed_agent(dataset: GymDatasetConfig, agent: str) -> None:
     )
 
 
-def run_images(tasks: list[HarborTask], image_configs: Mapping[str, Any]) -> tuple[str, ...]:
+def run_images(
+    tasks: list[HarborTask], image_configs: Mapping[str, Any], *, overlay: HarborComposeOverlay | None = None
+) -> tuple[str, ...]:
     """Every distinct image a run of ``tasks`` starts, sorted: each task's image, the image of a separate
-    verifier (``[verifier.environment].docker_image``) and every Compose service image, the last as the
-    recorded configuration pins it (``compose-images.json``, what ``resolve_compose`` hands the sandbox),
-    else as written when it has no record."""
+    verifier (``[verifier.environment].docker_image``) and every Compose service image (the job-level
+    ``overlay``'s services included), the last as the recorded configuration pins it (``compose-images.json``,
+    what ``resolve_compose`` hands the sandbox), else as written when it has no record."""
     images: set[str] = set()
     for task in tasks:
         if task.image:
@@ -618,7 +648,7 @@ def run_images(tasks: list[HarborTask], image_configs: Mapping[str, Any]) -> tup
             and verifier_environment.docker_image
         ):
             images.add(verifier_environment.docker_image)
-        document = load_compose_document(task) if task.needs_compose else None
+        document = load_compose_document(task, overlay=overlay)
         for service in ((document or {}).get("services") or {}).values():
             reference = (service or {}).get("image")
             if reference:
@@ -903,6 +933,7 @@ def run_target(args: argparse.Namespace, overrides: list[str]) -> None:
             gpu_volume_sources=gpu_volume_sources_from_overrides(overrides, sandbox),
             shared_storage=shared_storage_from_overrides(overrides, sandbox),
             gpu_shared_storage=gpu_shared_storage_from_overrides(overrides, sandbox),
+            compose_overlay=compose_overlay_from_overrides(overrides),
             rows_name=_rows_name(agent),
             registry_credentials=registry_credentials_from_overrides(overrides, sandbox),
             agent=agent.impl_name,
@@ -1107,6 +1138,7 @@ def validate_target(args: argparse.Namespace, overrides: list[str], *, agent: Ag
             gpu_volume_sources=gpu_volume_sources_from_overrides(overrides, sandbox),
             shared_storage=shared_storage_from_overrides(overrides, sandbox),
             gpu_shared_storage=gpu_shared_storage_from_overrides(overrides, sandbox),
+            compose_overlay=compose_overlay_from_overrides(overrides),
             rows_name=_rows_name(agent),
             registry_credentials=registry_credentials_from_overrides(overrides, sandbox),
         )

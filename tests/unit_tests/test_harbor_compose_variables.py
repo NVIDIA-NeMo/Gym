@@ -171,8 +171,10 @@ def test_env_file_parse_errors_name_the_service_the_file_and_the_line(tmp_path):
     (tmp_path / "a.env").write_text("A=1\n")
     (tmp_path / "b.env").write_text("B=1\nsk-live-abcdef is not a pair\n")
     document = {"services": {"api": {"env_file": ["a.env", "b.env"]}}}
+    # The file is named by its resolved path, as Compose names an env file it cannot read.
     with pytest.raises(
-        ComposeSubstitutionError, match=r"^service 'api' env_file 'b.env': env_file line 2 is not KEY=value$"
+        ComposeSubstitutionError,
+        match=rf"^service 'api' env_file '{tmp_path}/b.env': env_file line 2 is not KEY=value$",
     ) as info:
         inline_env_files(document, tmp_path)
     assert "sk-live" not in str(info.value)
