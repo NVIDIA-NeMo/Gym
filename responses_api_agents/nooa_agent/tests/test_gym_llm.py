@@ -13,12 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import json
 from copy import deepcopy
 from http.cookies import SimpleCookie
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiohttp import ClientResponseError
 from nooa.context_blocks.formatter import OpenAIProviderFormatter
 from nooa.context_blocks.models import RenderedMessage, Role, ToolCallInfo
 from nooa.llm_types import AssistantReasoning, AssistantText
@@ -840,3 +843,176 @@ async def test_successful_response_after_output_limit_recovers_normally() -> Non
     assert state.used == len(state.calls) == 2
     assert state.calls[0].response.incomplete_details.reason == "max_output_tokens"
     assert state.calls[1].response.incomplete_details is None
+
+
+class RejectedHTTPResponse(FakeHTTPResponse):
+    def __init__(self, status: int, payload: dict | None = None) -> None:
+        super().__init__(payload or {"error": {"message": "controlled provider rejection"}})
+        self.status = status
+        self.ok = False
+        self.error = ClientResponseError(
+            request_info=SimpleNamespace(
+                url="http://model/v1/responses", real_url="http://model/v1/responses", method="POST", headers={}
+            ),
+            history=(),
+            status=status,
+            message="provider rejected request",
+        )
+
+    def raise_for_status(self) -> None:
+        raise self.error
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_retries_preserve_native_request_and_all_http_captures(tmp_path) -> None:
+    from fastapi import FastAPI
+    from fastapi.responses import JSONResponse
+    from fastapi.testclient import TestClient
+    from nooa.runtime.hooks import hooks_scope
+
+    from nemo_gym.base_responses_api_model import CaptureStore, ModelCallCaptureConfig, install_model_call_capture
+    from nemo_gym.observability.model_calls import read_model_call_records
+    from responses_api_agents.nooa_agent.observability import GymTraceHooks
+    from responses_api_agents.nooa_agent.tests.test_observability import NativeHistoryAgent
+
+    raw = model_response(
+        NeMoGymResponseFunctionToolCallForTraining(
+            id="fc-final",
+            call_id="call-final",
+            name="python_cell",
+            arguments=json.dumps({"code": "return_result('done')"}),
+            prompt_token_ids=[1, 2],
+            generation_token_ids=[3],
+            generation_log_probs=[-0.1],
+        )
+    )
+    raw["usage"] = output_limit_response()["usage"]
+    rejected = {"error": {"message": "controlled rate limit"}}
+    app = FastAPI()
+    attempts = 0
+
+    @app.post("/v1/responses")
+    async def respond(body: dict) -> JSONResponse:
+        nonlocal attempts
+        attempts += 1
+        return JSONResponse(rejected if attempts < 3 else raw, status_code=429 if attempts < 3 else 200)
+
+    install_model_call_capture(
+        app,
+        ModelCallCaptureConfig(observability_enabled=True, model_call_capture_dir=tmp_path),
+        model_server_name="policy_model",
+    )
+    trace = GymTraceHooks()
+    llm, client, state = make_llm(raw, max_policy_calls=1)
+    llm._on_call = trace.on_model_call
+    llm._on_response = MagicMock()
+    with TestClient(app) as transport:
+
+        async def post(*, json, url_path, cookies, headers, **kwargs):
+            response = transport.post(url_path, json=json.model_dump(exclude_unset=True), headers=headers)
+            if response.status_code == 429:
+                return RejectedHTTPResponse(429, response.json())
+            return FakeHTTPResponse(response.json(), SimpleCookie("model_state=updated"))
+
+        client.post.side_effect = post
+        agent = NativeHistoryAgent(llm=llm)
+        try:
+            with hooks_scope(trace):
+                assert await agent.answer("test rate limit retry") == "done"
+            assert not list(agent.events.query(type="Error"))
+            assert any(event.metadata.get("prefill") for event in agent.events.query(type="ToolCallEvent"))
+        finally:
+            await agent.aclose()
+
+    captured = read_model_call_records(CaptureStore(tmp_path), "rollout-1")
+    assert [record.status_code for record in captured] == [429, 429, 200]
+    assert [record.response for record in captured] == [rejected, rejected, raw]
+    assert len({record.client_session_id for record in captured}) == 1
+    assert captured[0].client_session_id == state.calls[0].invocation_id
+    assert all(record.request == captured[0].request for record in captured)
+    bodies = [attempt.kwargs["json"] for attempt in client.post.await_args_list]
+    assert len(bodies) == 3 and all(body is bodies[0] for body in bodies)
+    assert captured[0].request == bodies[0].model_dump(mode="json", exclude_unset=True)
+    assert state.used == llm.calls == len(state.calls) == 1
+    assert state.calls[0].response.model_dump(mode="json") == raw
+    assert state.fatal_error is None
+    assert llm._cookies == {"model_state": "updated"}
+    llm._on_response.assert_called_once()
+    with pytest.raises(PolicyCallBudgetExceeded):
+        await llm.acall([{"role": "user", "content": "one more"}])
+    assert client.post.await_count == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raised_by_post", [False, True])
+async def test_rate_limit_exhaustion_keeps_original_fatal_error_and_bounded_attempts(
+    monkeypatch, raised_by_post: bool
+) -> None:
+    llm, client, state = make_llm(model_response())
+    failures = [RejectedHTTPResponse(429) for _ in range(3)]
+    client.post.side_effect = [response.error if raised_by_post else response for response in failures]
+    sleep = AsyncMock()
+    monkeypatch.setattr("responses_api_agents.nooa_agent.gym_llm.asyncio.sleep", sleep)
+    with pytest.raises(ClientResponseError) as caught:
+        await llm.acall([{"role": "user", "content": "task"}])
+    assert caught.value is state.fatal_error is failures[-1].error
+    if not raised_by_post:
+        assert json.loads(caught.value.response_content) == {"error": {"message": "controlled provider rejection"}}
+        assert "controlled provider rejection" in caught.value.message
+    assert client.post.await_count == 3
+    assert [call.args for call in sleep.await_args_list] == [(1,), (2,)]
+    assert state.used == llm.calls == len(state.calls) == 1
+    assert state.calls[0].response is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("summary", [False, True])
+async def test_recovered_rate_limit_preserves_prior_evidence_and_summary_fatal_state(
+    monkeypatch, summary: bool
+) -> None:
+    from nooa.agents.summarization import _in_summary_fork
+
+    llm, client, state = make_llm(model_response(), max_policy_calls=3)
+    earlier = FakeHTTPResponse(model_response(response_id="earlier") | {"usage": output_limit_response()["usage"]})
+    failure = ConnectionError("earlier failure")
+    client.post.side_effect = [earlier, failure, RejectedHTTPResponse(429).error, FakeHTTPResponse(model_response())]
+    monkeypatch.setattr("responses_api_agents.nooa_agent.gym_llm.asyncio.sleep", AsyncMock())
+    await llm.acall([{"role": "user", "content": "first"}])
+    with pytest.raises(ConnectionError):
+        await llm.acall([{"role": "user", "content": "second"}])
+    token = _in_summary_fork.set(summary)
+    try:
+        await llm.acall([{"role": "user", "content": "recover"}])
+    finally:
+        _in_summary_fork.reset(token)
+    assert state.fatal_error is (failure if summary else None)
+    assert state.used == len(state.calls) == 3
+    assert state.calls[0].response.usage.total_tokens == 3
+    assert state.calls[1].response is None
+    assert state.calls[2].response.id == "resp-1"
+    assert [call.response_id for call in state.model_calls] == ["earlier", "resp-1"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_at", ["post", "backoff"])
+async def test_rate_limit_retry_cancellation_propagates_through_runner(monkeypatch, cancel_at: str) -> None:
+    from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+    from responses_api_agents.nooa_agent.runner import NOOARunRequest
+    from responses_api_agents.nooa_agent.tests.test_runner import invoke_model_directly, make_runner
+
+    runner, _ = make_runner()
+    runner._invocation_adapter = invoke_model_directly
+    cancelled = asyncio.CancelledError()
+    runner._server_client.post = AsyncMock(side_effect=[RejectedHTTPResponse(429), cancelled])
+    sleep = AsyncMock(side_effect=cancelled if cancel_at == "backoff" else None)
+    monkeypatch.setattr("responses_api_agents.nooa_agent.gym_llm.asyncio.sleep", sleep)
+    with pytest.raises(asyncio.CancelledError) as caught:
+        await runner.run(
+            NOOARunRequest(
+                responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="question"),
+                model_url_path="/v1/responses",
+            )
+        )
+    assert caught.value is cancelled
+    assert caught.value.nooa_result.termination_reason is None
+    assert runner._server_client.post.await_count == (1 if cancel_at == "backoff" else 2)
