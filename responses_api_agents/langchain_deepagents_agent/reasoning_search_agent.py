@@ -25,6 +25,7 @@ from deepagents import create_deep_agent
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_tavily import TavilySearch
 
+from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.langchain_deepagents_agent.app import DeepAgentsAgent, DeepAgentsAgentConfig
 
 
@@ -55,3 +56,6 @@ class ReasoningSearchDeepAgent(DeepAgentsAgent):
 
 if __name__ == "__main__":
     ReasoningSearchDeepAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = ReasoningSearchDeepAgent.run_webserver()  # noqa: F401

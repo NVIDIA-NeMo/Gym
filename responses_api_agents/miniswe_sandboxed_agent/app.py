@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic, time
-from typing import Literal
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -66,7 +65,6 @@ class MiniSWESession:
 
 
 class MiniSWESandboxedConfig(BaseResponsesAPIAgentConfig):
-    num_workers: Literal[1] = 1
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
     sandbox_model_base_url: str | None = None

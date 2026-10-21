@@ -41,7 +41,7 @@ from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.providers.apptainer import ApptainerProvider
 from nemo_gym.sandbox.providers.docker import DockerCreateConfig, DockerProvider
-from nemo_gym.server_utils import apply_rollout_prefix
+from nemo_gym.server_utils import apply_rollout_prefix, is_nemo_gym_fastapi_entrypoint
 
 
 def _format_container(container_formatter: str | list[str], task_name: str, docker_image: str) -> str:
@@ -755,6 +755,9 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
         if remote_provider and runtime_source == "auto":
             agent_deps_archive = workspace / f".{agent_deps_dir.name}.tar.gz"
             sentinel = agent_deps_dir / ".installed"
+            # Packing takes no lock across processes and writes through one fixed temporary file name.
+            # With num_workers > 1, the main process builds this server before uvicorn starts the workers,
+            # so the archive is already newer than the sentinel when the workers get here, and they skip packing.
             if not agent_deps_archive.exists() or agent_deps_archive.stat().st_mtime < sentinel.stat().st_mtime:
                 temporary = agent_deps_archive.with_suffix(".tmp")
                 with tarfile.open(temporary, "w:gz", compresslevel=1) as archive:
@@ -956,3 +959,6 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     AnyTerminalAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = AnyTerminalAgent.run_webserver()  # noqa: F401

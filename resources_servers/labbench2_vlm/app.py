@@ -47,6 +47,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 
 
 # ---------------------------------------------------------------------------
@@ -292,3 +293,6 @@ class LabbenchVLMResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     LabbenchVLMResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = LabbenchVLMResourcesServer.run_webserver()  # noqa: F401

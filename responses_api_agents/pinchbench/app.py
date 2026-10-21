@@ -55,6 +55,7 @@ from nemo_gym.openai_utils import (
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY
 from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, get_provider_class
+from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.openclaw_agent.app import openclaw_session_conversation
 from responses_api_agents.openclaw_agent.observability import (
     OPENCLAW_OBSERVATION_SOURCE,
@@ -917,3 +918,6 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     PinchBenchAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = PinchBenchAgent.run_webserver()  # noqa: F401

@@ -18,6 +18,7 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verifier_fixture import VerifierFixture
 from resources_servers.chemcotbench.scoring_pool import ScoringPool, ScoringWorkerError
 from resources_servers.chemcotbench.setup_molopt import ensure_molopt_runtime
@@ -174,3 +175,6 @@ VERIFIER_FIXTURE = VerifierFixture(
 
 if __name__ == "__main__":
     ChemCoTBenchResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = ChemCoTBenchResourcesServer.run_webserver()  # noqa: F401

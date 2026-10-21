@@ -404,12 +404,14 @@ def test_shutdown_cleans_seeded_sandbox_and_legacy_seed_shape_stays_unchanged(se
     sandbox.stop.assert_awaited_once()
 
 
-def test_process_local_sessions_reject_multiple_workers(setup) -> None:
+def test_several_workers_are_allowed(setup) -> None:
+    """Session routing sends a seed and close by resources_session_id to the worker that holds the sandbox."""
     server, _, _, _ = setup
-    with pytest.raises(ValueError, match="num_workers=1"):
+    server_utils.refuse_unsupported_num_workers(
         TerminalBench21ResourcesServer(
             config=server.config.model_copy(update={"num_workers": 2}), server_client=server.server_client
         )
+    )
 
 
 @pytest.mark.parametrize("invalid_image", [None, 42])

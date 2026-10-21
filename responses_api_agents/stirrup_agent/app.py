@@ -59,6 +59,7 @@ from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.agent_tools import sandbox_server_url
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.sandbox.providers import create_provider
+from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.tool_access import DirectHTTPToolAccess, MCPToolAccess
 from responses_api_agents.stirrup_agent.sandbox import StirrupSessionState
 from responses_api_agents.stirrup_agent.stirrup_utils import messages_from_input
@@ -441,3 +442,6 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     StirrupAgentWrapper.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = StirrupAgentWrapper.run_webserver()  # noqa: F401

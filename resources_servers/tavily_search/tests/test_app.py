@@ -17,6 +17,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, call
 
 import orjson
+from fastapi.testclient import TestClient
 from pytest import approx, fixture
 
 from nemo_gym.server_utils import SESSION_ID_KEY
@@ -32,6 +33,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputText,
 )
 from nemo_gym.server_utils import ServerClient
+from resources_servers.tavily_search import app as tavily_search_app
 from resources_servers.tavily_search.app import (
     FindInPageRequest,
     ScrollPageRequest,
@@ -398,3 +400,19 @@ class TestApp:
         expected_metrics_length = 5
         actual_metrics_length = len(server._session_id_to_metrics["abcd"].async_tavily_calls)
         assert expected_metrics_length == actual_metrics_length
+
+    def test_each_worker_dumps_its_own_session_metrics_on_exit(
+        self, config: TavilySearchResourcesServerConfig, tmp_path, monkeypatch
+    ) -> None:
+        """With several workers, each holds only its own sessions, so a shared file would keep only the last dump."""
+        monkeypatch.setattr(tavily_search_app, "__file__", str(tmp_path / "app.py"))
+        monkeypatch.setattr(tavily_search_app, "is_nemo_gym_fastapi_worker", lambda: True)
+        config.dump_session_id_to_metrics_on_exit = True
+        server = TavilySearchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        server._session_id_to_metrics["abcd"]
+
+        with TestClient(server.setup_webserver()):
+            pass
+
+        assert not (tmp_path / "session_id_metrics.json").exists()
+        assert list(orjson.loads((tmp_path / f"session_id_metrics.{os.getpid()}.json").read_bytes())) == ["abcd"]

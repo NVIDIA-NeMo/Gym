@@ -75,6 +75,8 @@ import zipfile
 from ctypes import wintypes
 from pathlib import Path
 
+from nemo_gym.install_lock import adopt_recorded_install, install_lock, record_install
+
 
 LOG = logging.getLogger(__name__)
 
@@ -421,11 +423,13 @@ def _install_node_locally(node_version: str) -> Path:
     reports *node_version*; anything else (a leftover from an older pin or a
     corrupt partial extraction) is wiped and re-provisioned so the runtime
     always matches the resolved request.
+    A marker written after the extraction tells a finished toolchain from a partial one.
     """
     bin_dir = _node_bin_dir(_LOCAL_PREFIX)
+    complete = _LOCAL_PREFIX / ".complete"
     cached = shutil.which("node", path=str(bin_dir))
     if cached is not None:
-        reported = _node_reported_version(cached)
+        reported = _node_reported_version(cached) if complete.is_file() else None
         if reported == node_version:
             LOG.info("reusing cached Node.js %s in %s", node_version, _LOCAL_PREFIX)
             return bin_dir
@@ -447,6 +451,7 @@ def _install_node_locally(node_version: str) -> Path:
         archive.unlink(missing_ok=True)
 
     _flatten_extracted_node(_LOCAL_PREFIX)
+    complete.touch()
     return bin_dir
 
 
@@ -575,6 +580,24 @@ def ensure_openclaw(version: str | None = None, *, node_bin_dir: str | None = No
             install the selected ``openclaw`` is missing or reports another version.
     """
     requested = resolve_openclaw_version(version)
+    if _requested_openclaw_installed(requested, node_bin_dir):
+        return
+
+    # With num_workers > 1, every worker installs on its own first local call, and those calls can arrive together.
+    # One worker installs, or replaces a cached toolchain, while the others wait here.
+    # They then reuse the install it recorded.
+    with install_lock(_LOCAL_PREFIX.with_name(_LOCAL_PREFIX.name + ".lock")):
+        record = _LOCAL_PREFIX.with_name(_LOCAL_PREFIX.name + ".installed")
+        if adopt_recorded_install(record, _OPENCLAW_PKG) and _requested_openclaw_installed(requested, node_bin_dir):
+            return
+        found = _install_openclaw(requested, node_bin_dir)
+        record_install(record, Path(found).parent)
+
+    LOG.info("openclaw %s is ready at %s", requested, found)
+
+
+def _requested_openclaw_installed(requested: str, node_bin_dir: str | None) -> bool:
+    """Return whether the ``openclaw`` the agent would run reports exactly *requested*."""
     existing = _which(_OPENCLAW_PKG, node_bin_dir)
     if existing is None and _adopt_user_local_bin():
         existing = _which(_OPENCLAW_PKG, node_bin_dir)
@@ -582,9 +605,13 @@ def ensure_openclaw(version: str | None = None, *, node_bin_dir: str | None = No
         reported = _openclaw_reported_version(existing, node_bin_dir)
         if reported == requested:
             LOG.info("openclaw %s already installed at %s", requested, existing)
-            return
+            return True
         LOG.info("openclaw at %s reports %s, not %s; reinstalling", existing, reported or "nothing", requested)
+    return False
 
+
+def _install_openclaw(requested: str, node_bin_dir: str | None) -> str:
+    """Install the *requested* ``openclaw`` and return the launcher that reports it."""
     npm = _ensure_npm(requested, node_bin_dir)
     _npm_install(npm, requested, node_bin_dir)
 
@@ -597,5 +624,4 @@ def ensure_openclaw(version: str | None = None, *, node_bin_dir: str | None = No
             f"installed openclaw {requested}, but the selected launcher {found} reports "
             f"{reported or 'no version'}; remove the other install or fix PATH"
         )
-
-    LOG.info("openclaw %s is ready at %s", requested, found)
+    return found

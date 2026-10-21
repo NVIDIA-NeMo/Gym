@@ -34,7 +34,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, raise_for_status
+from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
 from resources_servers.nemo_user_sim.episode_contracts import (
     UserSimSeedResponse,
     UserSimSimulationResult,
@@ -76,6 +76,9 @@ class UserSimResourcesServerConfig(BaseResourcesServerConfig):
     model_call_timeout_seconds: float = Field(300.0, gt=0)
     evaluation_timeout_seconds: float = Field(1200.0, gt=0)
     session_ttl_seconds: float = Field(1980.0, gt=0)
+    # A closed session's tombstone lasts session_ttl_seconds,
+    # so with several workers its routing claim lasts as long and a delayed seed reaches the worker that refuses it.
+    session_close_retry_window_seconds: float = Field(1980.0, gt=0, allow_inf_nan=False)
 
 
 class SeededUserSimEpisode(BaseModel):
@@ -558,3 +561,6 @@ def _response_text(response: NeMoGymResponse) -> str:
 
 if __name__ == "__main__":
     UserSimResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = UserSimResourcesServer.run_webserver()  # noqa: F401
