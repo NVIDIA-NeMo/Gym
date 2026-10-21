@@ -14,6 +14,7 @@
 # limitations under the License.
 """Gym, not the agent, decides whether a failure is retried (infra) or final (the model's, scored 0)."""
 
+import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -41,11 +42,14 @@ from nemo_gym.failure_kinds import (
 )
 from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.rollout_collection import (
+    MASKED_SAMPLE_FAILURE_CLASS,
     NG_FAILURE_CAUSE_KEY,
     NG_FAILURE_CLASS_KEY,
     RolloutCollectionConfig,
     RolloutCollectionHelper,
     _agent_request_failure_row,
+    _CompletedRollout,
+    _counted_failure_row,
     _failure_rows_counted_as_zero,
     failure_cause_of_row,
     failures_path_for,
@@ -362,6 +366,60 @@ class TestHarnessFailurePaths:
     def test_terminal_bench_exits_split_by_who_failed(self, failure_type: str, final: bool) -> None:
         row = {NG_FAILURE_CLASS_KEY: "infrastructure_error", "_ng_failure_type": failure_type}
         assert is_terminal_failure(row) is final
+
+
+class TestMaskedRowsInTheCollector:
+    async def test_a_masked_result_goes_to_the_sidecar_and_is_dispatched_again(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("nemo_gym.rollout_collection.get_global_config_dict", lambda *args, **kwargs: {})
+        output = tmp_path / "out.jsonl"
+        rows = [{"responses_create_params": {"input": []}, "agent_ref": {"name": "agent"}, "x": i} for i in range(3)]
+        (tmp_path / "in.jsonl").write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
+
+        class Helper(RolloutCollectionHelper):
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                futures = []
+                for row in examples:
+                    future = asyncio.get_event_loop().create_future()
+                    result = {
+                        0: {"reward": 1.0},
+                        # A provider failure: the mask names infra.
+                        1: {
+                            "reward": 0.0,
+                            "mask_sample": True,
+                            "failure_kind": "agent_request_failed",
+                            "failure_reason": "APIConnectionError: Connection error.",
+                        },
+                        # swe_agents' resolved rollout at max_iteration: the model's budget.
+                        2: {"reward": 1.0, "mask_sample": True},
+                    }[row["x"]]
+                    future.set_result(_CompletedRollout(row=row, result=result, rollout_latency_ms=None))
+                    futures.append(future)
+                return futures
+
+            async def _call_aggregate_metrics(self, results, rows, output_fpath, *, raise_on_error=True):
+                return None
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(tmp_path / "in.jsonl"),
+            output_jsonl_fpath=str(output),
+            disable_health_check=True,
+        )
+        await Helper().run_from_config(config)
+
+        scored = [orjson.loads(line) for line in output.read_bytes().splitlines()]
+        failed = [orjson.loads(line) for line in failures_path_for(output).read_bytes().splitlines()]
+        # The budget mask keeps the benchmark's own treatment: a scored row, masked, never retried.
+        assert [(row["reward"], row.get("mask_sample", False)) for row in scored] == [(1.0, False), (1.0, True)]
+        assert [row[NG_FAILURE_CLASS_KEY] for row in failed] == [MASKED_SAMPLE_FAILURE_CLASS]
+        assert _failure_rows_counted_as_zero([failures_path_for(output)], [], set()) == []
+        # After the cap, an infra mask counts as 0, even when the verifier left a reward on it.
+        assert _counted_failure_row({**failed[0], "reward": 1.0})["reward"] == 0.0
+
+        config.resume_from_cache = True
+        input_rows, *_ = RolloutCollectionHelper()._load_from_cache(config)
+        assert [row["x"] for row in input_rows] == [1]
 
 
 class TestScoringDefaults:

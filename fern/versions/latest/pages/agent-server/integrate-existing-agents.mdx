@@ -121,8 +121,8 @@ experiment:
       resources_tool_transports: []
       max_concurrent_episodes: 1
       queue_timeout_seconds: 60
-      # Above Hermes installation (900) + runner (21600) + SWE-bench Pro verification (2700), plus seed and agent close.
-      default_episode_timeout_seconds: 28800
+      # Above Hermes installation (900) + runner (21600) + SWE-bench Pro verification (7200), plus seed and agent close.
+      default_episode_timeout_seconds: 36000
       # Each cleanup callback, such as agent close: Pi needs up to 5 x 60 + 60 = 360 seconds, Hermes 5 x 30 + 30.
       cleanup_timeout_seconds: 360
 ```

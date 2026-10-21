@@ -32,6 +32,8 @@ from verifiers.clients import NeMoRLChatCompletionsClient
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.failure_kinds import INFRA, PROVIDER_UNAVAILABLE, failure_cause_of
+from nemo_gym.global_config import is_eval_mode
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -212,9 +214,17 @@ class _ResponseIdRecordingClient(NeMoRLChatCompletionsClient):
         super().__init__(*args, **kwargs)
         self.recorded_response_ids: list[str] = []
         self.recorded_usage: Optional[NeMoGymResponseUsage] = None
+        # The last policy-call error that was infra (a dead or overloaded endpoint). verifiers catches it and
+        # still scores the rollout, so the agent reads it here to mark that row as an infra failure.
+        self.infra_error: Optional[BaseException] = None
 
     async def get_native_response(self, *args: Any, **kwargs: Any) -> Any:
-        response = await super().get_native_response(*args, **kwargs)
+        try:
+            response = await super().get_native_response(*args, **kwargs)
+        except Exception as error:
+            if failure_cause_of(error) == INFRA:
+                self.infra_error = error
+            raise
         response_id = getattr(response, "id", None)
         if isinstance(response_id, str) and response_id:
             self.recorded_response_ids.append(response_id)
@@ -235,6 +245,8 @@ class VerifiersNeMoGymResponse(NeMoGymResponse):
     reward: float
     metrics: dict[str, Any] = Field(default_factory=dict)
     exported_state: dict[str, Any] = Field(default_factory=dict, exclude_if=lambda value: not value)
+    # The policy-call infra error verifiers swallowed, if any; never serialized.
+    policy_infra_error: Optional[str] = Field(default=None, exclude=True)
     parallel_tool_calls: bool = True
     tool_choice: str = "auto"
     tools: list = Field(default_factory=list)
@@ -430,7 +442,9 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
         shared_client = self.client_cache[cache_key]
         rollout_id = self._rollout_id_for(body, request)
         if rollout_id is None:
-            return shared_client
+            # Evaluation reads a swallowed policy outage from a per-rollout recording client; training keeps
+            # the shared one.
+            return _ResponseIdRecordingClient(shared_client.client.copy()) if is_eval_mode() else shared_client
 
         model_server_url = self.resolve_model_base_url(self.config.model_server.name, rollout_id)
         headers = {"x-session-id": invocation_id} if invocation_id else {}
@@ -636,6 +650,11 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
                 reward=reward,
                 metrics=metrics,
                 exported_state=exported_state,
+                policy_infra_error=(
+                    f"{type(client.infra_error).__name__}: {client.infra_error}"[:2000]
+                    if getattr(client, "infra_error", None) is not None
+                    else None
+                ),
             )
         except Exception as e:
             logger.error(f"Exception in responses(): {type(e).__name__}: {e}")
@@ -650,12 +669,22 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
     ) -> VerifiersAgentVerifyResponse:
         resp = await self.responses(request, response, body)
 
+        # A policy outage that verifiers caught still comes back scored; its reward is not a measurement.
+        infra = {}
+        # Evaluation only: training keeps the rollout's reward and mask as verifiers returned them.
+        if resp.policy_infra_error is not None and is_eval_mode():
+            infra = {
+                "mask_sample": True,
+                "failure_kind": PROVIDER_UNAVAILABLE,
+                "failure_reason": resp.policy_infra_error,
+            }
         return VerifiersAgentVerifyResponse(
             ng_trajectory=resp.ng_trajectory,
             ng_agent_observations=resp.ng_agent_observations,
             responses_create_params=body.responses_create_params,
             response=resp,
             reward=resp.reward,
+            **infra,
         )
 
 

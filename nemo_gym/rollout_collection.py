@@ -235,6 +235,7 @@ NG_FAILURE_CAUSE_KEY = "_ng_failure_cause"
 NG_FAILURE_JUDGE_ERROR_KEY = "_ng_failure_judge_error"
 AGENT_REQUEST_FAILED_FAILURE_CLASS = "agent_request_failed"
 AGENT_RUN_ERROR_FAILURE_CLASS = "agent_run_error"
+MASKED_SAMPLE_FAILURE_CLASS = "masked_sample"
 ENVIRONMENT_SERVER_FAILURE_CLASS = "environment_server_failed"
 NG_ENVIRONMENT_SERVER_KEY = ENVIRONMENT_SERVER_STAMP_KEY_NAME
 # Implementation name under `environment_servers:`, so readers know which result type a record holds.
@@ -1633,9 +1634,15 @@ def observed_elapsed(record: Dict[str, Any]) -> Optional[float]:
 
 
 def _rule_kind(record: Mapping[str, Any]) -> Optional[str]:
-    """The name Gym's rule reads: the row's ``failure_kind`` when it has a rule, otherwise its class."""
+    """The name Gym's rule reads: the row's ``failure_kind`` when it has a rule, otherwise its class.
+
+    ``masked_sample`` always wins: the collector gives a masked result that class only when the result named
+    an infra cause, so the masking verifier's own kind (``verifier_error``) must not decide it again.
+    """
     failure_class = record.get(NG_FAILURE_CLASS_KEY)
     failure_kind = record.get("failure_kind")
+    if failure_class == MASKED_SAMPLE_FAILURE_CLASS:
+        return failure_class
     return failure_kind if failure_kind in FAILURE_RULES else failure_class
 
 
@@ -1655,6 +1662,23 @@ _FAILURE_TEXT_KEYS = (
 
 def _failure_text(record: Mapping[str, Any]) -> str:
     return " ".join(str(record.get(key) or "") for key in _FAILURE_TEXT_KEYS)
+
+
+def _masked_result_names_infra(result: Mapping[str, Any]) -> bool:
+    """Whether a masked verifier result says the mask comes from infra, not from the model's own budget.
+
+    A mask for the model's budget (max_iteration, the context window, the agent's time limit) is not retried:
+    the row stays in the rollouts file with ``mask_sample`` set, and aggregation leaves it out of the score as
+    before. Only a mask that names infra, by an explicit cause, a retried ``failure_kind`` or infra error text,
+    becomes a retryable failure.
+    """
+    cause = result.get(NG_FAILURE_CAUSE_KEY)
+    if cause in (INFRA, MODEL):
+        return cause == INFRA
+    rule = FAILURE_RULES.get(result.get("failure_kind"))
+    if rule in (RETRY, FINAL):
+        return rule == RETRY
+    return failure_cause_of_text(_failure_text(result)) == INFRA
 
 
 def failure_cause_of_row(record: Mapping[str, Any]) -> str:
@@ -2219,6 +2243,9 @@ def _counted_failure_row(row: Dict[str, Any]) -> Dict[str, Any]:
     # This metrics-only copy honors the explicit denominator policy. The original
     # answer, failure diagnostics, and training mask remain untouched in the sidecar.
     scored["mask_sample"] = False
+    # A masked row's reward is one its verifier called unusable, so it counts as 0, never as it stands.
+    if row.get(NG_FAILURE_CLASS_KEY) == MASKED_SAMPLE_FAILURE_CLASS:
+        scored["reward"] = 0.0
     scored.setdefault("reward", 0.0)
     return scored
 
@@ -3463,6 +3490,15 @@ class RolloutCollectionHelper(BaseModel):
                 # Set below for a rollout whose trajectory is health-evaluated once the bookkeeping is done.
                 health_outcome: Optional[str] = None
                 no_persist = bool(result.get(NG_NO_PERSIST_KEY))
+                # A mask that names infra makes the row a retryable failure. Any other mask (the model's own
+                # budget) is not retried: the row stays in the rollouts file with mask_sample set.
+                if (
+                    result.get(MASK_SAMPLE_KEY)
+                    and not no_persist
+                    and result.get(NG_FAILURE_CLASS_KEY) is None
+                    and _masked_result_names_infra(result)
+                ):
+                    result[NG_FAILURE_CLASS_KEY] = MASKED_SAMPLE_FAILURE_CLASS
                 failure_class = result.get(NG_FAILURE_CLASS_KEY)
                 # No rollout happened, so there is nothing to capture, tokenize or average.
                 no_result = failure_class in _NO_RESULT_FAILURE_CLASSES or bool(result.get(NG_DISPATCH_DRAINED_KEY))

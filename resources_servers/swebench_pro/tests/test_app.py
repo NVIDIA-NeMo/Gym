@@ -34,6 +34,7 @@ from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.swebench_pro.app import (
+    SandboxPatchExtractionError,
     SWEBenchProInstanceRequest,
     SWEBenchProResourcesServer,
     SWEBenchProResourcesServerConfig,
@@ -162,7 +163,14 @@ def test_normal_verify_extracts_agent_patch(monkeypatch: MonkeyPatch, tests: lis
     verify.assert_awaited_once()
 
 
-def test_verify_reports_sandbox_failure(monkeypatch: MonkeyPatch) -> None:
+@pytest.fixture(params=[False, True], ids=["training", "evaluation"])
+def eval_mode(request, monkeypatch: MonkeyPatch) -> bool:
+    """Run a test once as training sees the server and once as `gym eval run` does."""
+    monkeypatch.setattr("resources_servers.swebench_pro.app.is_eval_mode", lambda: request.param)
+    return request.param
+
+
+def test_verify_reports_sandbox_failure(monkeypatch: MonkeyPatch, eval_mode: bool) -> None:
     server = make_server(golden=True)
     monkeypatch.setattr(server, "_create_sandbox", AsyncMock(side_effect=RuntimeError("sandbox unavailable")))
 
@@ -170,9 +178,57 @@ def test_verify_reports_sandbox_failure(monkeypatch: MonkeyPatch) -> None:
 
     assert response.status_code == 200
     assert response.json()["evaluation_completed"] is False
-    assert response.json()["mask_sample"] is False
+    # No verdict: in evaluation the verify sandbox failure is a retryable infra failure; training keeps the
+    # unmasked 0 it always got.
+    assert response.json()["mask_sample"] is eval_mode
+    assert response.json()["failure_kind"] == ("provider_unavailable" if eval_mode else None)
     assert response.json()["reward"] == 0.0
     assert "sandbox unavailable" in response.json()["error"]
+
+
+def test_a_patch_the_task_sandbox_could_not_return_is_masked_as_infra(
+    monkeypatch: MonkeyPatch, eval_mode: bool
+) -> None:
+    # A real failure: the task sandbox was OOM-killed, so the patch command never ran.
+    server = make_server(golden=False, inconclusive_verification_retries=0)
+    monkeypatch.setattr(
+        server,
+        "_extract_model_patch",
+        AsyncMock(
+            side_effect=SandboxPatchExtractionError(
+                "Failed to run command failed: Sandbox <uuid> has ended (OOMKilled) | [SANDBOX::ENDED]"
+            )
+        ),
+    )
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=SimpleNamespace(stop=AsyncMock())))
+    monkeypatch.setattr(
+        "resources_servers.swebench_pro.app.run_verification",
+        AsyncMock(
+            return_value=VerificationResult(
+                completed=True, resolved=False, patch_applied=False, test_results={"tests": []}, test_output=""
+            )
+        ),
+    )
+
+    result = TestClient(server.setup_webserver()).post("/verify", json=request_body()).json()
+
+    assert result["mask_sample"] is eval_mode
+    if eval_mode:
+        assert result["failure_kind"] == "provider_unavailable"
+        assert result["failure_reason"].startswith("Failed to extract model patch: Failed to run command failed")
+    else:
+        assert result["failure_kind"] is None
+
+
+async def test_extract_model_patch_names_a_failed_sandbox_call() -> None:
+    server = make_server(golden=False)
+    sandbox = SimpleNamespace(
+        exec=AsyncMock(side_effect=RuntimeError("working directory does not exist: /app")), stop=AsyncMock()
+    )
+    server._session_id_to_sandbox["session"] = sandbox
+
+    with pytest.raises(SandboxPatchExtractionError, match="working directory does not exist"):
+        await server._extract_model_patch("session", "base")
 
 
 @pytest.mark.parametrize(
@@ -194,8 +250,9 @@ def test_verify_reports_sandbox_failure(monkeypatch: MonkeyPatch) -> None:
         ),
     ],
 )
-def test_verify_keeps_failures_unmasked_and_reports_error(
+def test_verify_masks_only_verdictless_failures_and_reports_error(
     monkeypatch: MonkeyPatch,
+    eval_mode: bool,
     test_output: str,
     extraction_error: str | None,
     completed: bool,
@@ -222,10 +279,64 @@ def test_verify_keeps_failures_unmasked_and_reports_error(
     response = TestClient(server.setup_webserver()).post("/verify", json=request_body())
     assert response.status_code == 200
     assert response.json()["reward"] == 0.0
-    assert response.json()["mask_sample"] is False
+    # A model compile failure or a missing patch is the model's 0; in evaluation a DNS failure before any test is
+    # infra. Training never masks here.
+    assert response.json()["mask_sample"] is (eval_mode and not completed)
     assert response.json()["evaluation_completed"] is completed
     assert response.json()["error"] == expected_error
     assert response.json()["model_patch"] == (None if extraction_error else "agent patch")
+
+
+def test_a_test_run_that_timed_out_is_the_models_unresolved_zero(monkeypatch: MonkeyPatch, eval_mode: bool) -> None:
+    server = make_server(golden=False, inconclusive_verification_retries=2)
+    monkeypatch.setattr(server, "_extract_model_patch", AsyncMock(return_value="agent patch"))
+    create = AsyncMock(return_value=SimpleNamespace(stop=AsyncMock()))
+    monkeypatch.setattr(server, "_create_sandbox", create)
+    verify = AsyncMock(
+        return_value=VerificationResult(
+            completed=False,
+            resolved=False,
+            patch_applied=True,
+            test_results=None,
+            test_output="",
+            error="Evaluation execution timeout (limit: 600s); no conclusive test verdict",
+            timed_out=True,
+        )
+    )
+    monkeypatch.setattr("resources_servers.swebench_pro.app.run_verification", verify)
+
+    result = TestClient(server.setup_webserver()).post("/verify", json=request_body()).json()
+
+    # Scored 0, unmasked and with no retryable kind, in both modes. Evaluation does not rerun it on a new
+    # sandbox; training keeps its inconclusive-verification retries.
+    assert (result["reward"], result["mask_sample"], result["eval_timed_out"]) == (0.0, False, True)
+    assert result.get("failure_kind") is None
+    expected_attempts = 1 if eval_mode else 3
+    assert verify.await_count == create.await_count == expected_attempts
+
+
+def test_a_verification_sandbox_that_failed_stays_retryable(monkeypatch: MonkeyPatch, eval_mode: bool) -> None:
+    # The sandbox, not the tests, broke: no timed_out flag, so it stays an infra mask.
+    server = make_server(golden=False, inconclusive_verification_retries=0)
+    monkeypatch.setattr(server, "_extract_model_patch", AsyncMock(return_value="agent patch"))
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=SimpleNamespace(stop=AsyncMock())))
+    monkeypatch.setattr(
+        "resources_servers.swebench_pro.app.run_verification",
+        AsyncMock(
+            return_value=VerificationResult(
+                completed=False,
+                resolved=False,
+                patch_applied=False,
+                test_results=None,
+                error="Evaluation execution failed: sandbox connection lost",
+            )
+        ),
+    )
+
+    result = TestClient(server.setup_webserver()).post("/verify", json=request_body()).json()
+
+    expected = (True, "provider_unavailable") if eval_mode else (False, None)
+    assert (result["mask_sample"], result["failure_kind"]) == expected
 
 
 def test_schema_rejects_missing_evaluator_asset() -> None:
@@ -453,7 +564,7 @@ async def test_episode_close_retains_state_when_sandbox_stop_fails() -> None:
 @pytest.mark.parametrize("verdict", ["resolved", "unresolved", "infrastructure_failure"])
 @pytest.mark.parametrize("agent_status", ["completed", "failed"])
 def test_environment_server_episode_http_lifecycle_preserves_verdict_and_private_task_data(
-    monkeypatch: MonkeyPatch, verdict: str, agent_status: str
+    monkeypatch: MonkeyPatch, verdict: str, agent_status: str, eval_mode: bool
 ) -> None:
     server = make_server(golden=False, apply_anti_cheating=False, inconclusive_verification_retries=0)
     events: list[str] = []
@@ -561,8 +672,9 @@ def test_environment_server_episode_http_lifecycle_preserves_verdict_and_private
         assert response.status_code == 200
         result = response.json()
         assert result["reward"] == float(resolved)
-        # Completion diagnostics do not change whether SWE Pro includes the sample in scoring.
-        assert result["mask_sample"] is False
+        # In evaluation a verification that gave no verdict is an infra failure: masked, so Gym retries it instead
+        # of scoring 0. Training keeps the unmasked 0.
+        assert result["mask_sample"] is (eval_mode and not completed)
         assert result["evaluation_completed"] is completed
         assert result["resolved"] is resolved
         assert result["model_patch"] == "agent patch"
@@ -1096,3 +1208,26 @@ def test_close_session_accepts_cookie_and_typed_bodies_over_http() -> None:
     assert typed_close.status_code == 200
     assert typed_close.json()["resources_session_id"] == "session"
     assert malformed_close.status_code == 422
+
+
+@pytest.mark.parametrize("source", ["defaults", "shipped config"])
+def test_a_hung_test_reaches_its_own_deadline_inside_the_verification_ceilings(source: str) -> None:
+    """Review finding 4339108862: the test command's own timeout must fire before any surrounding ceiling.
+
+    Otherwise a hung test is cancelled by the attempt or total ceiling, reported as provider_unavailable and
+    retried, instead of scoring unresolved as the official harness's single per-instance timeout does.
+    """
+    from omegaconf import OmegaConf
+
+    from resources_servers.swebench_pro.app import SWEBenchProResourcesServerConfig
+
+    shipped = OmegaConf.to_container(
+        OmegaConf.load(Path(__file__).resolve().parents[1] / "configs" / "swebench_pro.yaml")
+    )["swebench_pro_resources_server"]["resources_servers"]["swebench_pro"]
+    defaults = SWEBenchProResourcesServerConfig.model_fields
+    value = (lambda key: defaults[key].default) if source == "defaults" else shipped.get
+    evaluation_timeout = shipped["evaluation_timeout"]
+    # One attempt: sandbox creation, the test command, then the 60 s parser run that follows a timeout.
+    attempt = shipped["sandbox_config"]["ready_timeout_s"] + evaluation_timeout + 60
+    assert value("verification_attempt_timeout") > attempt
+    assert value("verification_total_timeout") >= value("verification_attempt_timeout")

@@ -1401,7 +1401,9 @@ def test_build_response_rejects_partial_caller_identity() -> None:
         _build_response(request, DEFAULT_RUN_RESULT, "test-policy", 1.0, 0.9)
 
 
-def test_empty_response_reports_runtime_admission() -> None:
+@pytest.mark.parametrize("eval_mode", [False, True], ids=["training", "evaluation"])
+def test_empty_response_reports_runtime_admission(monkeypatch: pytest.MonkeyPatch, eval_mode: bool) -> None:
+    monkeypatch.setattr("responses_api_agents.osworld_agent.app.is_eval_mode", lambda: eval_mode)
     request = OSWorldRunRequest.model_validate(
         {
             "responses_create_params": {"input": []},
@@ -1427,6 +1429,10 @@ def test_empty_response_reports_runtime_admission() -> None:
     assert response.runtime_admission_reason == "rollout_error"
     assert response.runtime_admission_policy_id == RUNTIME_ADMISSION_POLICY_ID
     assert response.verifier_metadata["osworld_termination_reason"] == "rollout_error"
+    # In evaluation a masked OSWorld row is named as an infra failure, so Gym retries it. Training sees the same
+    # mask and reward as before, with no failure kind.
+    assert response.failure_kind == ("provider_unavailable" if eval_mode else None)
+    assert response.failure_reason == ("rollout_error" if eval_mode else None)
 
 
 def test_exact_trace_keeps_parser_retries_as_distinct_model_calls() -> None:
@@ -2228,3 +2234,44 @@ class TestApp:
         assert response.reward == 0.0
         assert response.verifier_metadata["osworld_score"] == 0.4
         assert response.verifier_metadata["osworld_finished"] is False
+
+
+@pytest.mark.parametrize(
+    ("policy_stop_reason", "failure_kind"),
+    [("model_context_overflow", None), ("model_call_failed", "provider_unavailable")],
+    ids=["context-budget-exhausted", "transport-failure"],
+)
+def test_a_context_overflow_mask_is_not_named_infra_in_evaluation(
+    monkeypatch: pytest.MonkeyPatch, policy_stop_reason: str, failure_kind: Optional[str]
+) -> None:
+    """Review finding 4339108867: an exhausted context budget is the model's, so evaluation does not retry it."""
+    from nemo_gym.rollout_collection import _masked_result_names_infra
+
+    monkeypatch.setattr("responses_api_agents.osworld_agent.app.is_eval_mode", lambda: True)
+    request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
+    result = {
+        **DEFAULT_RUN_RESULT,
+        "reward": 0.0,
+        "score": 0.0,
+        "finished": False,
+        "runtime_eligible": False,
+        "runtime_admission_reason": "model_call_failed",
+        "mask_sample": True,
+        "error": "Error code: 400 - maximum context length exceeded",
+        "termination_reason": "model_call_failed",
+        "policy_stop_reason": policy_stop_reason,
+    }
+
+    response = _build_response(request, result, "test-policy", 1.0, 0.9)
+
+    assert response.mask_sample is True
+    assert response.policy_stop_reason == policy_stop_reason
+    assert response.failure_kind == failure_kind
+    assert _masked_result_names_infra(response.model_dump()) is (failure_kind is not None)
+
+
+def test_the_context_overflow_stop_reason_is_the_adapters() -> None:
+    from responses_api_agents.osworld_agent.adapter_agents import MODEL_FAILURE_OUTCOMES
+    from responses_api_agents.osworld_agent.app import CONTEXT_OVERFLOW_STOP_REASON
+
+    assert MODEL_FAILURE_OUTCOMES["context_overflow"] == CONTEXT_OVERFLOW_STOP_REASON

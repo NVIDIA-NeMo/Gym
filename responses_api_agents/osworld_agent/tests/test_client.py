@@ -1353,6 +1353,8 @@ def test_nemotron_model_transport_failure_stops_and_masks(monkeypatch, agent_out
     assert result.runtime_eligible is False
     assert result.mask_sample is True
     assert result.termination_reason == "model_call_failed"
+    # The agent's own stop reason is kept apart from the mask's reason, so a context overflow stays the model's.
+    assert result.policy_stop_reason == agent_outcome
     assert "policy endpoint unreachable" in (result.error or "")
     assert FakeEnv.instances[0].actions == []
 

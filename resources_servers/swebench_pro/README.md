@@ -10,6 +10,10 @@ it starts the task image identified by `dockerhub_tag`, resets `/app` to the bas
 patch, runs the task-specific script, parses its JSON output, and requires every fail-to-pass and pass-to-pass
 test to pass.
 
+A test run that outlives `evaluation_timeout` scores 0 as unresolved, as in the upstream harness: it is
+neither retried nor masked. A verification that produced no verdict because the sandbox failed, and a patch
+the task sandbox could not return, are masked as `provider_unavailable`, so Gym retries the rollout.
+
 ## Prepare data
 
 For a Hermes rollout using this resources server, see the

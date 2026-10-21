@@ -31,15 +31,44 @@ from nemo_gym.failure_kinds import (
 )
 from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.rollout_collection import (
+    MASKED_SAMPLE_FAILURE_CLASS,
     NG_FAILURE_CLASS_KEY,
     RolloutCollectionConfig,
+    _counted_failure_row,
     _failure_rows_counted_as_zero,
+    _masked_result_names_infra,
     _settled_failure_keys,
     failure_cause_of_row,
     is_terminal_failure,
     is_unscored_failure,
 )
 from nemo_gym.sandbox.providers.base import SandboxOperationTimeoutError
+
+
+class TestMaskedRows:
+    """A mask naming infra is retried; a budget mask keeps its treatment."""
+
+    def test_a_masked_row_with_an_evidence_kind_and_infra_text_is_retried(self) -> None:
+        row = {
+            NG_FAILURE_CLASS_KEY: MASKED_SAMPLE_FAILURE_CLASS,
+            "failure_kind": "verifier_error",
+            "failure_reason": "grader timed out: Connection refused",
+        }
+        assert not is_terminal_failure(row)
+
+    def test_a_budget_mask_does_not_name_infra(self) -> None:
+        # swe_agents and anyswe mask a resolved rollout at max_iteration or the context window.
+        assert not _masked_result_names_infra({"mask_sample": True, "reward": 1.0})
+
+    def test_a_counted_masked_row_scores_zero_not_its_reward(self) -> None:
+        row = {NG_FAILURE_CLASS_KEY: MASKED_SAMPLE_FAILURE_CLASS, "reward": 1.0, "mask_sample": True}
+        counted = _counted_failure_row(row)
+        assert (counted["reward"], counted["mask_sample"]) == (0.0, False)
+
+    def test_an_osworld_infra_mask_is_retried(self) -> None:
+        # An OSWorld evaluator browser timeout, as OSWorld now names it.
+        result = {"mask_sample": True, "failure_kind": "provider_unavailable", "failure_reason": "evaluator_error"}
+        assert _masked_result_names_infra(result)
 
 
 class TestCheckCompletion:

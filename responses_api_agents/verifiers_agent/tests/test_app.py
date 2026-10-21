@@ -15,9 +15,10 @@
 import asyncio
 import json
 import logging
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 from openai import DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT, AsyncOpenAI, Timeout
 
@@ -27,7 +28,9 @@ from nemo_gym.server_utils import ServerClient
 from responses_api_agents.verifiers_agent.app import (
     VerifiersAgent,
     VerifiersAgentConfig,
+    VerifiersNeMoGymResponse,
     _NoStoreCookieJar,
+    _ResponseIdRecordingClient,
 )
 from responses_api_agents.verifiers_agent.app import (
     logger as agent_app_logger,
@@ -578,3 +581,94 @@ class TestExportStateColumns:
             _, body = self._run(export_state_columns=["assertion_result"])
         assert "exported_state" not in body["response"]
         assert "['assertion_result'] not on the verifiers State" in caplog.text
+
+
+class TestPolicyOutage:
+    """A policy outage verifiers swallows must not come back as a scored 0."""
+
+    def _client(self, error: BaseException) -> _ResponseIdRecordingClient:
+        client = _ResponseIdRecordingClient.__new__(_ResponseIdRecordingClient)
+        client.recorded_response_ids = []
+        client.recorded_usage = None
+        client.infra_error = None
+        return client
+
+    @pytest.mark.parametrize("eval_mode", [False, True], ids=["training", "evaluation"])
+    def test_with_capture_off_evaluation_still_records_outages(self, monkeypatch, eval_mode: bool) -> None:
+        """No rollout id without capture: evaluation still needs a per-rollout client that records the outage."""
+        monkeypatch.setattr("responses_api_agents.verifiers_agent.app.is_eval_mode", lambda: eval_mode)
+        config = VerifiersAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+        )
+        agent = VerifiersAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        with patch.object(VerifiersAgent, "resolve_model_base_url", return_value="http://policy/v1"):
+            client = agent._get_client()
+            shared = agent.client_cache["policy_model"]
+            assert isinstance(client, _ResponseIdRecordingClient) is eval_mode
+            # Training keeps the shared client; evaluation's per-rollout client shares its transport settings.
+            assert (client is shared) is not eval_mode
+            assert str(client.client.base_url) == str(shared.client.base_url)
+
+    def test_a_dead_policy_endpoint_is_recorded_as_infra(self) -> None:
+        connection_error = ConnectionRefusedError(111, "Connection refused")
+        client = self._client(connection_error)
+        with patch.object(
+            _ResponseIdRecordingClient.__mro__[1], "get_native_response", AsyncMock(side_effect=connection_error)
+        ):
+            with pytest.raises(ConnectionRefusedError):
+                asyncio.run(client.get_native_response(prompt=[], model="m", sampling_args={}, tools=None))
+        assert client.infra_error is connection_error
+
+    @pytest.mark.parametrize("eval_mode", [False, True], ids=["training", "evaluation"])
+    def test_a_swallowed_outage_is_masked_only_in_evaluation(self, monkeypatch, eval_mode: bool) -> None:
+        """Training keeps the reward and mask verifiers returned; evaluation masks the row as an infra failure."""
+        monkeypatch.setattr("responses_api_agents.verifiers_agent.app.is_eval_mode", lambda: eval_mode)
+        config = VerifiersAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+            vf_env_id="stub_env",
+        )
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {OBSERVABILITY_ENABLED_KEY_NAME: False}
+        agent = VerifiersAgent(config=config, server_client=server_client)
+        scored = VerifiersNeMoGymResponse(
+            id="r",
+            created_at=0.0,
+            model="m",
+            object="response",
+            output=[],
+            parallel_tool_calls=True,
+            tool_choice="auto",
+            tools=[],
+            env_id="stub_env",
+            group_id="g",
+            reward=0.0,
+            policy_infra_error="ConnectionRefusedError: [Errno 111] Connection refused",
+        )
+        with patch.object(VerifiersAgent, "responses", AsyncMock(return_value=scored)):
+            body = (
+                TestClient(agent.setup_webserver())
+                .post("/run", json={"task_idx": 0, "responses_create_params": {"input": []}})
+                .json()
+            )
+
+        assert body["reward"] == 0.0
+        assert body["mask_sample"] is eval_mode
+        assert body.get("failure_kind") == ("provider_unavailable" if eval_mode else None)
+
+    def test_a_model_side_error_is_not_recorded(self) -> None:
+        bad_output = ValueError("could not parse tool arguments")
+        client = self._client(bad_output)
+        with patch.object(
+            _ResponseIdRecordingClient.__mro__[1], "get_native_response", AsyncMock(side_effect=bad_output)
+        ):
+            with pytest.raises(ValueError):
+                asyncio.run(client.get_native_response(prompt=[], model="m", sampling_args={}, tools=None))
+        assert client.infra_error is None
