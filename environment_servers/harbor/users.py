@@ -160,11 +160,18 @@ class HarborUsersMixin:
     """
 
     async def _set_default_user(
-        self, sandbox: AsyncSandbox, task: HarborTask, names: dict[str, str], *, role: str = "agent"
+        self,
+        sandbox: AsyncSandbox,
+        task: HarborTask,
+        names: dict[str, str],
+        *,
+        role: str = "agent",
+        user: str | None = None,
     ) -> None:
-        """Make the task's user (the image's own ``USER`` for a separate verifier, see :func:`_sandbox_spec`)
-        the sandbox's default for every exec, once it exists in the sandbox, normalised as
-        :func:`_normalised_user` says.
+        """Make the task's user (the image's own ``USER`` for a separate verifier, see :func:`_sandbox_spec`), or
+        ``user`` when given (a step's ``[steps.agent].user`` for one turn of a multi-step task, see
+        :meth:`HarborEnvironmentServer._apply_turn_user`), the sandbox's default for every exec, once it exists
+        in the sandbox, normalised as :func:`_normalised_user` says.
 
         A digit-only ``USER`` is resolved to its name with ``getent`` (``names`` is what the overlay
         already looked up), because OpenSandbox and PTY sessions switch user by name. When the uid
@@ -175,8 +182,14 @@ class HarborUsersMixin:
         (``agent:1000``, or ``1000:1000`` as written when the uid has no name): only Docker takes the pair,
         and :func:`_check_user_group` has refused it on every other provider.
         """
-        user: str | int | None = _normalised_user(task, task.entrypoint_user if role == "verifier" else task.user)
         if user is None:
+            user = task.entrypoint_user if role == "verifier" else task.user
+        user = _normalised_user(task, user)
+        if user is None:
+            # Plain root on an image that starts as root: the provider's own default already is root. A turn
+            # switching back to root from another user has to say so, since the facade's default was changed.
+            if sandbox.default_user is not None:
+                sandbox.set_default_user(None)
             return
         # `_sandbox_spec` refused the pair before the sandbox existed; the one place the default is installed
         # checks too, for a sandbox created another way.

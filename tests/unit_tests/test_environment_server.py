@@ -586,3 +586,68 @@ def test_dependency_failure_names_the_error_type_bounds_the_reason_and_honors_te
     ).failure
     assert forced.terminal is True
     assert forced.failure_reason == "timed out"
+
+
+def test_a_protocol_may_derive_the_episode_deadline_per_request() -> None:
+    """`episode_timeout_seconds` is the one place the per-episode deadline comes from: the base returns the
+    configured default, and a server that derives a longer one for a request (the Harbor server, for a multi-step
+    task whose steps add up to more than the default) is held to that, not to the default."""
+
+    class _SlowEnvironmentServer(_EnvironmentServer):
+        async def run(self, request: _Request, cleanup: CleanupContext) -> _Response:
+            await asyncio.sleep(0.05)
+            return _Response(episode_id=request.episode_id, task_id=request.task.task_id, result="late")
+
+    class _DerivingEnvironmentServer(_SlowEnvironmentServer):
+        asked: list[str] = []
+
+        async def episode_timeout_seconds(self, request: _Request) -> float | None:
+            self.asked.append(request.task.task_input.value)
+            return 5.0
+
+    config = _environment_server(default_episode_timeout_seconds=0.01).config
+    assert (
+        asyncio.run(_environment_server(default_episode_timeout_seconds=0.01).episode_timeout_seconds(_request()))
+        == 0.01
+    )
+    cut = asyncio.run(
+        _SlowEnvironmentServer(config=config, server_client=MagicMock(spec=ServerClient)).run_request(_request())
+    )
+    assert cut.failure is not None and cut.failure.failure_reason == "Episode timed out"
+    server = _DerivingEnvironmentServer(config=config, server_client=MagicMock(spec=ServerClient))
+    response = asyncio.run(server.run_request(_request()))
+    assert response.failure is None and response.result == "late"
+    assert server.asked == [_request().task.task_input.value]
+
+
+async def test_a_request_cancelled_while_its_bound_resolves_releases_its_admission_slot() -> None:
+    """The bound is read after the admission slot is taken; the Harbor server awaits the task's snapshot there.
+    A request cancelled (or failing) during that lookup must give the slot back, or a concurrency of one is spent
+    for good and every later request times out at admission."""
+    lookup = asyncio.Event()
+
+    class _ResolvingEnvironmentServer(_EnvironmentServer):
+        async def episode_timeout_seconds(self, request: _Request) -> float | None:
+            await lookup.wait()
+            return 1
+
+    class _UnresolvedEnvironmentServer(_EnvironmentServer):
+        async def episode_timeout_seconds(self, request: _Request) -> float | None:
+            raise RuntimeError("snapshot lost")
+
+    config = _environment_server(max_concurrent_episodes=1, queue_timeout_seconds=0.2).config
+    server = _ResolvingEnvironmentServer(config=config, server_client=MagicMock(spec=ServerClient))
+    first = asyncio.create_task(server.run_request(_request()))
+    while not server._admission.locked():
+        await asyncio.sleep(0)
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    lookup.set()
+    response = await server.run_request(_request())
+    assert response.failure is None and response.result == "result"
+
+    server = _UnresolvedEnvironmentServer(config=config, server_client=MagicMock(spec=ServerClient))
+    response = await server.run_request(_request())
+    assert response.failure is not None and "RuntimeError: snapshot lost" in response.failure.failure_reason
+    assert not server._admission.locked()

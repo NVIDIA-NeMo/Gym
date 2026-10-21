@@ -87,6 +87,12 @@ class HarborTurn:
         """Relative to the task folder; may be absent, in which case the task's ``tests/`` is used alone."""
         return Path(STEPS_DIR) / self.name / "tests"
 
+    @property
+    def solution_dir(self) -> Path:
+        """The step's own reference solution, relative to the task folder (Harbor's ``steps/<name>/solution/``);
+        may be absent, in which case the task's top-level ``solution/`` stands in for it (:meth:`HarborTask.turn_solution_dir`)."""
+        return Path(STEPS_DIR) / self.name / "solution"
+
 
 @dataclass(frozen=True)
 class HarborTask:
@@ -212,7 +218,20 @@ class HarborTask:
 
     @property
     def has_solution(self) -> bool:
+        """Whether the oracle can run this task: ``solution/solve.sh`` for a single-turn task; for a multi-step
+        task a ``solve.sh`` for every step, its own under ``steps/<name>/solution/`` or the task's top-level one
+        (:meth:`turn_solution_dir`), as Harbor 0.22.0's oracle resolves each step's solution (``agents/oracle.py``)."""
+        if self.turns:
+            return all((self.turn_solution_dir(turn) / "solve.sh").is_file() for turn in self.turns)
         return (self.path / "solution" / "solve.sh").is_file()
+
+    def turn_solution_dir(self, turn: HarborTurn) -> Path:
+        """The folder the oracle gets at ``/solution`` for ``turn``: the step's own ``steps/<name>/solution/`` when
+        that folder exists, else the task's top-level ``solution/`` (which may be absent too), the fallback Harbor's
+        oracle applies per step. A step folder that exists is the step's answer even without a ``solve.sh``, as in
+        Harbor, where such a step fails rather than running the task's script."""
+        own = self.path / turn.solution_dir
+        return own if own.is_dir() else self.path / "solution"
 
 
 def has_compose_file(task_folder: Path) -> bool:
@@ -673,9 +692,9 @@ def _load_turns(path: Path, config: HarborTaskConfig) -> tuple[HarborTurn, ...]:
 
     Each turn needs ``steps/<name>/instruction.md`` and a ``test.sh``, its own under
     ``steps/<name>/tests/`` or the task's under ``tests/``, which is the script Harbor runs for the step.
-    A step's own ``[steps.agent].user`` is among the refused features: Harbor switches the agent's user per
-    step, while every turn here runs as the task's user, so a task that sets one is refused rather than run
-    as the wrong user.
+    A step's own ``[steps.agent].user`` is read as written: the server switches the sandbox's default user,
+    the working directory's owner and the harness's user to it for that turn (and refuses a ``name:group``
+    pair at seed on a provider that switches user by name only, as it refuses the task's own).
     """
     turns: list[HarborTurn] = []
     for step in config.steps:
@@ -688,8 +707,6 @@ def _load_turns(path: Path, config: HarborTaskConfig) -> tuple[HarborTurn, ...]:
                 raise HarborTaskError(f"{where}: steps/{step.name}/{name} is not supported yet")
         if step.healthcheck is not None or step.artifacts:
             raise HarborTaskError(f"{where}: per-step healthcheck and artifacts are not supported yet")
-        if step.agent.user is not None:
-            raise HarborTaskError(f"{where}: per-step agent user is not supported yet")
         if step.verifier.environment_mode == "separate" or step.verifier.environment is not None:
             raise HarborTaskError(f"{where}: separate per-step verification is not supported yet")
         if not (step_dir / "tests" / "test.sh").is_file() and not (path / "tests" / "test.sh").is_file():

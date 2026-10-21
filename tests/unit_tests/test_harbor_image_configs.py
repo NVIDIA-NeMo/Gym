@@ -1,11 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import base64
 import io
 import json
 import logging
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -17,6 +19,8 @@ from nemo_gym.sandbox.compose_config import _compose_literals
 from nemo_gym.sandbox.compose_fields import service_gpus
 from nemo_gym.tasks.harbor import image_configs
 from nemo_gym.tasks.harbor import registry as registry_module
+from nemo_gym.tasks.harbor.build_options import BuildOptions
+from nemo_gym.tasks.harbor.cli import prepare_target
 from nemo_gym.tasks.harbor.compose_variables import compose_variables
 from nemo_gym.tasks.harbor.digest import content_hash, context_digest, is_covered
 from nemo_gym.tasks.harbor.errors import HarborTaskError
@@ -128,13 +132,17 @@ class FakeResponse(io.BytesIO):
 
 
 class FakeRegistry:
-    """Serves the OCI distribution API for a few images and records every request."""
+    """Serves the OCI distribution API for a few images and records every request.
+
+    ``basic_auth`` maps a repository (as the token scope names it) to the ``(username, password)`` its token
+    endpoint requires as Basic auth: a private repository. Any other repository gets its token anonymously."""
 
     INDEX = "application/vnd.oci.image.index.v1+json"
     MANIFEST = "application/vnd.oci.image.manifest.v1+json"
 
-    def __init__(self, *, require_token: bool = True):
+    def __init__(self, *, require_token: bool = True, basic_auth: dict[str, tuple[str, str]] | None = None):
         self.require_token = require_token
+        self.basic_auth = basic_auth or {}
         self.requests: list[tuple[str, dict[str, str]]] = []
         self.blobs = {
             "sha256:cfg-amd64": {
@@ -210,6 +218,12 @@ class FakeRegistry:
         url, headers = request.full_url, dict(request.header_items())
         self.requests.append((url, headers))
         if url.startswith("https://auth.example/token"):
+            scope = urllib.parse.parse_qs(urllib.parse.urlparse(url).query).get("scope", [""])[0]
+            expected = self.basic_auth.get(scope.split(":")[1] if scope.count(":") >= 2 else "")
+            if expected is not None:
+                basic = "Basic " + base64.b64encode(f"{expected[0]}:{expected[1]}".encode()).decode()
+                if headers.get("Authorization") != basic:
+                    raise urllib.error.HTTPError(url, 401, "Unauthorized", {}, io.BytesIO(b""))
             return FakeResponse(json.dumps({"token": "tok"}).encode())
         _, _, path = url.partition("/v2/")
         repository, kind, ref = path.rsplit("/", 2)
@@ -356,6 +370,90 @@ class TestRegistryClient:
         RegistryClient({"registry-1.docker.io": ("user", "secret")}).image_config("redis:7-alpine")
         token_request = next(headers for url, headers in registry.requests if url.startswith("https://auth.example"))
         assert token_request["Authorization"] == "Basic dXNlcjpzZWNyZXQ="
+
+    def test_image_prefix_auth_is_turned_into_prefix_keyed_credentials(self, monkeypatch):
+        """A sandbox provider's `images.auth` maps an image prefix to {username, password}; prepare reads private
+        images with the same (G7 round 24: prepare's registry client was anonymous and a private GitLab sidecar
+        stopped prepare with HTTP 403). Each prefix keeps its own entry, spelled the way Docker reads a reference
+        (host, Docker Hub's registry for `docker.io/`), and a reference takes the credentials of its longest matching
+        prefix, as the provider selects an `images.auth` entry at pull (CI bot, round 34: the map was folded to one
+        pair per host, so a second repository's credentials on the same registry were never sent)."""
+        from nemo_gym.tasks.harbor.registry import credentials_for_image_prefixes
+
+        assert credentials_for_image_prefixes(None) == {}
+        assert credentials_for_image_prefixes({}) == {}
+        creds = credentials_for_image_prefixes(
+            {
+                "registry.example.com:5005/": {"username": "u", "password": "p"},
+                "docker.io/org/": {"username": "du", "password": "dp"},
+                "localhost:5000/": {"username": "lu", "password": "lp"},
+                "reg.example": {"username": "hu", "password": "hp"},
+            }
+        )
+        assert creds == {
+            "registry.example.com:5005/": ("u", "p"),
+            "registry-1.docker.io/org/": ("du", "dp"),
+            "localhost:5000/": ("lu", "lp"),
+            "reg.example/": ("hu", "hp"),
+        }
+        # A client built from it sends each prefix's credentials as Basic auth at the token challenge of a reference
+        # under it: the GitLab-style prefix's to its registry, the `docker.io/org/` prefix's to Docker Hub's token
+        # endpoint for `org/hub`; a Docker Hub reference outside that prefix (`library/redis`) gets no Basic auth.
+        fake = FakeRegistry(basic_auth={"org/app": ("u", "p"), "org/hub": ("du", "dp")})
+        patch_opener(monkeypatch, fake)
+        client = RegistryClient(creds)
+        assert client.image_config("registry.example.com:5005/org/app:7-alpine")["config"]["Env"] == ["A=1"]
+        assert client.image_config("org/hub:7-alpine")["config"]["Env"] == ["A=1"]
+        client.image_config("redis:7-alpine")
+        tokens = [(url, h.get("Authorization")) for url, h in fake.requests if url.startswith("https://auth.example")]
+        assert [auth for url, auth in tokens if "org%2Fapp" in url] == ["Basic dTpw"]
+        assert [auth for url, auth in tokens if "org%2Fhub" in url] == ["Basic ZHU6ZHA="]
+        assert [auth for url, auth in tokens if "library%2Fredis" in url] == [None]
+
+    def test_each_prefix_of_one_host_keeps_its_credentials_and_the_longest_match_wins(self, monkeypatch):
+        """Review (CI bot, round 34): `reg.example/a/` with credentials A and `reg.example/bb/` with B collapsed to one
+        pair per host (the shorter prefix's), so preparing an image under `reg.example/bb/` sent A and the registry
+        refused it. A broad host rule and a specific repository override coexist the way the provider applies them:
+        the longest matching prefix, and no Basic authorization for a reference no prefix covers."""
+        from nemo_gym.tasks.harbor.registry import credentials_for_image_prefixes
+
+        creds = credentials_for_image_prefixes(
+            {
+                "reg.example/a/": {"username": "u", "password": "p"},
+                "reg.example/bb/": {"username": "u2", "password": "p2"},
+            }
+        )
+        assert creds == {"reg.example/a/": ("u", "p"), "reg.example/bb/": ("u2", "p2")}
+        fake = FakeRegistry(basic_auth={"a/app": ("u", "p"), "bb/app": ("u2", "p2")})
+        patch_opener(monkeypatch, fake)
+        client = RegistryClient(creds)
+        client.image_config("reg.example/a/app:7-alpine")
+        client.image_config("reg.example/bb/app:7-alpine")
+        client.image_config("reg.example/c/app:7-alpine")
+        tokens = [(url, h.get("Authorization")) for url, h in fake.requests if url.startswith("https://auth.example")]
+        assert [auth for url, auth in tokens if "a%2Fapp" in url] == ["Basic dTpw"]
+        assert [auth for url, auth in tokens if "bb%2Fapp" in url] == ["Basic dTI6cDI="]
+        assert [auth for url, auth in tokens if "c%2Fapp" in url] == [None]
+        # A host-wide rule beside a repository override: the override wins under it, the rule everywhere else on the
+        # host, and an explicit host key (what `RegistryClient` callers pass by hand) is that host-wide rule.
+        for broad in ({"reg.example/": {"username": "hu", "password": "hp"}}, None):
+            fake = FakeRegistry(basic_auth={"a/app": ("hu", "hp"), "bb/app": ("u2", "p2")})
+            patch_opener(monkeypatch, fake)
+            if broad is not None:
+                client = RegistryClient(
+                    credentials_for_image_prefixes(broad | {"reg.example/bb/": {"username": "u2", "password": "p2"}})
+                )
+            else:
+                client = RegistryClient({"reg.example": ("hu", "hp"), "reg.example/bb/": ("u2", "p2")})
+            client.image_config("reg.example/a/app:7-alpine")
+            client.image_config("reg.example/bb/app:7-alpine")
+            tokens = [(url, h.get("Authorization")) for url, h in fake.requests if "auth.example" in url]
+            assert [auth for url, auth in tokens if "a%2Fapp" in url] == ["Basic aHU6aHA="]
+            assert [auth for url, auth in tokens if "bb%2Fapp" in url] == ["Basic dTI6cDI="]
+        with pytest.raises(ValueError, match="must hold a `username`"):
+            credentials_for_image_prefixes({"reg.example/": {"username": "u"}})
+        with pytest.raises(ValueError, match="must map an image prefix"):
+            credentials_for_image_prefixes(["reg.example/"])
 
     def test_an_index_without_linux_amd64_is_rejected(self, registry):
         with pytest.raises(ImageConfigError, match="no linux/amd64 manifest"):
@@ -1387,6 +1485,108 @@ class TestDockerfileBaseImages:
         write_task(tmp_path, "a", image=None, dockerfile="FROM ubuntu:24.04\nRUN true\n")
         (tmp_path / "dataset.toml").write_text("not = [toml")
         assert dockerfile_base_images(tmp_path) == {}
+
+
+class TestPrepareRecordsPrivateImagesWithTheSandboxCredentials:
+    """G7 round 24, item 2: prepare's registry client was anonymous, so a private Compose sidecar stopped prepare
+    with the registry's refusal although the sandbox block's `images.auth` would pull it. Under test is the chain
+    the live run takes, `prepare_target(registry_credentials=...)` -> `RegistryClient(credentials)` ->
+    `record_base_images` / `record_compose_images(client=...)`, against a registry whose token endpoint refuses the
+    private repository without Basic auth (round 24, G11 review 2: the pieces were tested, the chain was not)."""
+
+    PRIVATE = "private.example:5005/org/mcp:7-alpine"
+    COMPOSE = f"services:\n  main:\n    image: ${{MAIN_IMAGE_NAME}}\n  mcp-server:\n    image: {PRIVATE}\n"
+
+    def dataset(self, tmp_path, monkeypatch):
+        fake = FakeRegistry(basic_auth={"org/mcp": ("user", "secret")})
+        patch_opener(monkeypatch, fake)
+        folder = tmp_path / "ds"
+        folder.mkdir()
+        write_task(folder, "shop", image=None, compose=self.COMPOSE, dockerfile="FROM redis:7-alpine\n")
+        write_task(folder, "plain", image=None, dockerfile="FROM redis:7-alpine\n")
+        return fake, folder
+
+    def test_the_private_sidecar_is_recorded_with_the_credentials_of_its_host(self, tmp_path, monkeypatch):
+        fake, folder = self.dataset(tmp_path, monkeypatch)
+        prepared = prepare_target(
+            str(folder),
+            output_root=tmp_path / "out",
+            build=BuildOptions(enabled=False),
+            registry_credentials={"private.example:5005": ("user", "secret")},
+        )
+        assert sorted(task.task_id for task in prepared.tasks) == ["plain", "shop"] and prepared.skipped == {}
+        recorded = json.loads((folder / "compose-images.json").read_text())
+        assert recorded[self.PRIVATE]["image"] == "private.example:5005/org/mcp@sha256:index-of-7-alpine"
+        assert recorded[self.PRIVATE]["config"]["Cmd"] == ["python", "server.py"]
+        assert recorded["redis:7-alpine"]["image"] == "library/redis@sha256:index-of-7-alpine"
+        # The token request for the private repository carried the host's credentials as Basic auth; the public
+        # base image's (another host) carried none.
+        tokens = [(url, h.get("Authorization")) for url, h in fake.requests if url.startswith("https://auth.example")]
+        assert [auth for url, auth in tokens if "org%2Fmcp" in url] == ["Basic dXNlcjpzZWNyZXQ="]
+        assert [auth for url, auth in tokens if "library%2Fredis" in url] == [None]
+
+    TWO_SCOPES = (
+        "services:\n  main:\n    image: ${MAIN_IMAGE_NAME}\n"
+        "  mcp-a:\n    image: private.example:5005/a/mcp:7-alpine\n"
+        "  mcp-b:\n    image: private.example:5005/bb/mcp:7-alpine\n"
+    )
+
+    def test_two_repositories_of_one_registry_are_each_read_with_their_own_prefixes_credentials(
+        self, tmp_path, monkeypatch
+    ):
+        """Review (CI bot, round 34): through `prepare_target`, with the sandbox block's `images.auth` naming two
+        prefixes of one host with different credentials, the second repository's token request carried the first
+        prefix's credentials and the registry refused it, stopping the preparation. Each scope is authenticated with
+        its own prefix's pair and both images are recorded."""
+        from nemo_gym.tasks.harbor.registry import credentials_for_image_prefixes
+
+        fake = FakeRegistry(basic_auth={"a/mcp": ("user-a", "secret-a"), "bb/mcp": ("user-b", "secret-b")})
+        patch_opener(monkeypatch, fake)
+        folder = tmp_path / "ds"
+        folder.mkdir()
+        write_task(folder, "shop", image=None, compose=self.TWO_SCOPES, dockerfile="FROM redis:7-alpine\n")
+        credentials = credentials_for_image_prefixes(
+            {
+                "private.example:5005/a/": {"username": "user-a", "password": "secret-a"},
+                "private.example:5005/bb/": {"username": "user-b", "password": "secret-b"},
+            }
+        )
+
+        prepared = prepare_target(
+            str(folder),
+            output_root=tmp_path / "out",
+            build=BuildOptions(enabled=False),
+            registry_credentials=credentials,
+        )
+
+        assert [task.task_id for task in prepared.tasks] == ["shop"] and prepared.skipped == {}
+        recorded = json.loads((folder / "compose-images.json").read_text())
+        assert recorded["private.example:5005/a/mcp:7-alpine"]["image"] == (
+            "private.example:5005/a/mcp@sha256:index-of-7-alpine"
+        )
+        assert recorded["private.example:5005/bb/mcp:7-alpine"]["image"] == (
+            "private.example:5005/bb/mcp@sha256:index-of-7-alpine"
+        )
+        tokens = [(url, h.get("Authorization")) for url, h in fake.requests if url.startswith("https://auth.example")]
+        assert [auth for url, auth in tokens if "a%2Fmcp" in url] == ["Basic dXNlci1hOnNlY3JldC1h"]
+        assert [auth for url, auth in tokens if "bb%2Fmcp" in url] == ["Basic dXNlci1iOnNlY3JldC1i"]
+        assert [auth for url, auth in tokens if "library%2Fredis" in url] == [None]
+
+    def test_without_credentials_the_same_prepare_stops_with_the_registrys_refusal(self, tmp_path, monkeypatch):
+        """What G7 met: an anonymous client, and the private sidecar stops the whole preparation (a reference the
+        registry refuses is not a Compose field the task got wrong, so it is not a skip), naming the image, the task
+        and the registry's answer."""
+        fake, folder = self.dataset(tmp_path, monkeypatch)
+        with pytest.raises(ImageConfigError) as refused:
+            prepare_target(str(folder), output_root=tmp_path / "out", build=BuildOptions(enabled=False))
+        assert str(refused.value) == (
+            f"Could not record the configuration of Compose image {self.PRIVATE!r} (used by task(s) shop): "
+            "private.example:5005/org/mcp: token request failed with HTTP 401"
+        )
+        recorded = json.loads((folder / "compose-images.json").read_text())
+        assert self.PRIVATE not in recorded and "redis:7-alpine" in recorded
+        tokens = [(url, h.get("Authorization")) for url, h in fake.requests if url.startswith("https://auth.example")]
+        assert [auth for url, auth in tokens if "org%2Fmcp" in url] == [None]
 
 
 class TestRecordBaseImages:

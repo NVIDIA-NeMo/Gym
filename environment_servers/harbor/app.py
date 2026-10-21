@@ -58,7 +58,12 @@ from environment_servers.harbor.entrypoint import (
     _cancel_entrypoint,
 )
 from environment_servers.harbor.overlay import HarborOverlayError, HarborOverlayMixin
-from environment_servers.harbor.sandboxes import COMPOSE_IMAGES_FILE, PULL_RETRY_CONCURRENCY, HarborSandboxMixin
+from environment_servers.harbor.sandboxes import (
+    COMPOSE_IMAGES_FILE,
+    PULL_RETRY_CONCURRENCY,
+    SEED_CREATE_GRACE_S,
+    HarborSandboxMixin,
+)
 from environment_servers.harbor.session import HarborSession, HarborSessionMixin, resolve_env_templates
 from environment_servers.harbor.users import HarborUsersMixin
 from environment_servers.harbor.verifier import (
@@ -360,6 +365,8 @@ class HarborEnvironmentServer(
         self._snapshots = tempfile.TemporaryDirectory(prefix="nemo-gym-harbor-tasks-")
         # Built or declared verifier images found without /tests/test.sh, each warned about once.
         self._verifier_images_without_tests: set[str] = set()
+        # Task digests whose Compose sidecars without deploy.resources were warned about once (`_warn_unsized_sidecars`).
+        self._unsized_sidecars_warned: set[str] = set()
         self._pull_retry_gate = asyncio.Semaphore(PULL_RETRY_CONCURRENCY)
         self._shutting_down = False
         artifacts = self.config.artifacts_dir
@@ -538,12 +545,67 @@ class HarborEnvironmentServer(
                 budget += task.config.environment.build_timeout_sec
         return budget
 
+    def _seed_bound_s(self, task: HarborTask) -> float:
+        """The most the seed may take before the task's own deadline opens: every sandbox start it may make
+        (``sandbox_ready_timeout_s`` plus the create grace per attempt, ``image_pull_retries + 1`` attempts: a
+        single sandbox runs its attempts under one such deadline, a Compose group each under its own) and the
+        Dockerfile overlay when there is one. The nominal one-start allowance of :meth:`_task_budget_s` sizes
+        the sandbox lifetime; this is the bound an episode deadline that starts at the request has to cover."""
+        attempts = self.config.image_pull_retries + 1
+        bound = (self.config.sandbox_ready_timeout_s + SEED_CREATE_GRACE_S) * attempts
+        if task.overlay:
+            bound += task.config.environment.build_timeout_sec
+        return bound
+
+    def _episode_bound_s(self, task: HarborTask) -> float:
+        """What one episode of a multi-step task may take from the request: the seed's bound
+        (:meth:`_seed_bound_s`) and everything after the sandbox is ready (:meth:`_post_seed_budget_s`). The
+        quantity the episode deadline is raised to and the sandbox lifetime follows above
+        ``default_episode_timeout_seconds``, so a seed that needs a pull retry or a slow sidecar start cannot eat
+        the final turns' budget and end the episode with the base server's generic timeout. It is a worst case:
+        the seed's refusal without enforcement compares the nominal one-start :meth:`_task_budget_s` with the
+        default and names this bound beside it."""
+        return self._seed_bound_s(task) + self._post_seed_budget_s(task)
+
     def _episode_budget_s(self, task: HarborTask) -> float:
-        """Wall time one episode of this task may take: its own budget when enforced, within the run-wide deadline."""
+        """Wall time one episode of this task may take: its own budget when enforced, within the run-wide deadline.
+
+        A multi-step task is the exception to the cap: its steps may add up to more than
+        ``default_episode_timeout_seconds`` (six steps of 1800 s agent and verifier time already do), and an
+        episode cut off at the default would be retried, never scored, so with ``enforce_task_timeouts`` its
+        budget is the task's own even above the default (:meth:`_episode_bound_s`, which
+        :meth:`episode_timeout_seconds` raises the episode deadline to). Without enforcement the seed refuses a
+        task whose nominal one-start episode (:meth:`_task_budget_s`) does not fit the default (:meth:`_seed`).
+        """
         default = self.config.default_episode_timeout_seconds
         if not self.config.enforce_task_timeouts:
             return default
+        if task.turns and (bound := self._episode_bound_s(task)) > default:
+            return bound
         return min(default, self._task_budget_s(task))
+
+    async def episode_timeout_seconds(self, request: HarborEpisodeRequest) -> float:
+        """The episode's wall-clock bound: ``default_episode_timeout_seconds``, raised to the task's own bound
+        for a multi-step task whose episode may take more (see :meth:`_episode_bound_s`), so the deadline the
+        base server opens before the seed covers the seed's own bounds and matches the sandbox lifetime. A task
+        that does not resolve keeps the default; the seed reports why.
+
+        The lookup is the seed's own (:meth:`_resolve_task`: one shielded folder snapshot per task, shared by its
+        concurrent episodes), run here before the deadline opens, so it is bounded by the default itself: a
+        snapshot still copying after that long leaves the episode the default, and the seed finds the snapshot
+        (or waits for it under the deadline) rather than copying the folder again."""
+        default = self.config.default_episode_timeout_seconds
+        if not self.config.enforce_task_timeouts:
+            return default
+        try:
+            task = await asyncio.wait_for(
+                self._resolve_task(request.task.task_id, request.task.task_input.task_data), timeout=default
+            )
+        except Exception:
+            return default
+        if not task.turns:
+            return default
+        return max(default, self._episode_bound_s(task))
 
     # -- the episode -----------------------------------------------------------------------
 
@@ -846,8 +908,10 @@ class HarborEnvironmentServer(
 
         Each turn opens a fresh agent session (Harbor's default, ``resume_trajectory = false``), sends the
         step's instruction, closes the session and runs the step's verifier: the task's ``tests/`` with
-        ``steps/<name>/tests/`` on top. The episode stops after a turn that is masked, produces no verifier
-        result, or misses its ``min_reward``; the remaining turns do not run.
+        ``steps/<name>/tests/`` on top. Before a turn the sandbox takes the step's ``[steps.agent].user`` when
+        it has one and the oracle gets the step's own solution (:meth:`_prepare_turn`). The episode stops
+        after a turn that is masked, produces no verifier result, or misses its ``min_reward``; the remaining
+        turns do not run.
         """
         task = session.task
         inputs = request.task.task_input.turns
@@ -863,6 +927,21 @@ class HarborEnvironmentServer(
         results: list[HarborTurnResult] = []
         stopped_after: str | None = None
         for turn, turn_input in zip(task.turns, inputs):
+            try:
+                access = await self._prepare_turn(session, turn, access)
+            except HTTPException as error:
+                raise self._failure(
+                    stage="agent",
+                    failure_reason=f"turn {turn.name!r}: {error.detail}",
+                    terminal=error.status_code < 500,
+                ) from error
+            except Exception as error:
+                # The sandbox could not take the turn's user or solution: a provider-side failure, retried elsewhere.
+                raise self._failure(
+                    stage="agent",
+                    failure_reason=f"turn {turn.name!r}: {type(error).__name__}: {error}",
+                    terminal=False,
+                ) from error
             response, observations, trajectory = await self._agent_turn(
                 request,
                 access,
@@ -874,9 +953,13 @@ class HarborEnvironmentServer(
             )
             progress.stage = "verification"
             try:
-                outcome = await self._verified_outcome(
-                    session, request, response, (turn, turn_input.responses_create_params)
-                )
+                # The step's verifier runs as its own user, never the step's agent user: the sandbox's default is
+                # the seed's again for the hooks and test.sh (Harbor's `with_default_user` around the shared
+                # verifier), then the step's user is back in place for the next turn's switch to compare with.
+                with self._as_seed_default_user(session):
+                    outcome = await self._verified_outcome(
+                        session, request, response, (turn, turn_input.responses_create_params)
+                    )
             except HTTPException as error:
                 raise self._failure(
                     stage="verification",
@@ -913,6 +996,50 @@ class HarborEnvironmentServer(
             **roll_up_turns(results, strategy),
         )
         return HarborEpisodeResponse(episode_id=request.episode_id, task_id=request.task.task_id, result=episode)
+
+    async def _prepare_turn(self, session: HarborSession, turn: HarborTurn, access: SandboxAccess) -> SandboxAccess:
+        """What a turn needs in place before its agent session opens: the step's user and the step's solution.
+
+        Harbor runs each step as its own ``[steps.agent].user`` (else the task's ``[agent].user``), so when the
+        turn's user differs from the one the sandbox runs as, the sandbox's default user, the working directory's
+        owner and the user the harness is handed switch to it (:meth:`_apply_turn_user`), and the access the
+        harness gets is rebuilt for it; the verifier keeps its own user and fallback. The oracle alone then gets
+        the step's ``solution/`` at ``/solution`` (:meth:`_place_turn_solution`).
+        """
+        task = session.task
+        user = str(turn.config.agent.user) if turn.config.agent.user is not None else task.user
+        # Compared as written (the seed's or the previous turn's), not with the form the sandbox installed.
+        if user != session.requested_user:
+            await self._apply_turn_user(session, user)
+            access = await self._sandbox_access(session)
+        await self._place_turn_solution(session, turn)
+        return access
+
+    async def _apply_turn_user(self, session: HarborSession, user: str | None) -> None:
+        """Switch the episode's sandbox to ``user`` for the turns that follow: the default of every exec that
+        names no user (a numeric uid resolved to its name, as at seed), the working directory's owner, and the
+        user the harness runs as. A ``name:group`` pair was refused at seed on a provider that cannot apply it.
+
+        The working directory's owner as the seed left it (the task's user, or what the image or overlay gave
+        it) is read once, before the first switch, and a turn that switches back to the image's own default
+        (``None``) gives the directory back to that owner, as a step running as the image's non-root user
+        would find it under Harbor, which never changes it.
+        """
+        task = session.task
+        if session.workdir_owner is None:
+            session.workdir_owner = await self._workdir_owner(session)
+        await self._set_default_user(session.sandbox, task, session.user_names, user=user)
+        # The sandbox now runs as the resolved form of the step's user (a uid resolved to its name, as at seed, or
+        # the integer uid when it names no user); the working directory and the harness's own access follow the
+        # same value, as installed, so the oracle runs as it too (an integer stays OpenSandbox's native uid, where
+        # its string would be looked up as an account name).
+        resolved = session.sandbox.default_user
+        if resolved is None:
+            await self._restore_workdir_owner(session)
+        else:
+            await self._own_workdir(session.sandbox, session.workdir, str(resolved))
+        session.agent_user = resolved
+        session.requested_user = user
 
     def _task_tool_accesses(self, task: HarborTask) -> list[ToolAccess]:
         """The task's MCP servers as agent tool grants, when ``task_mcp_grants`` asks for them.
@@ -992,6 +1119,9 @@ class HarborEnvironmentServer(
             # The sources the turn's verifier resolves its env from (`_verifier_env`: the server's secrets, then the
             # process environment), so a judge key only `secrets` supplies passes here as it does at the task level.
             resolve_env_templates(turn.config.verifier.env, self.config.secrets)
+            # A step's own agent user is installed for its turn (`_apply_turn_user`); a pair the provider cannot
+            # apply is refused before the earlier turns are paid for, as the task's own `[agent].user` is.
+            self._refuse_unsupported_group(task, turn.config.agent.user, where=f" step {turn.name!r}")
         if task.needs_compose:
             # A Compose file the deployment leaves incomplete (a variable no compose_variables entry sets) is a
             # configuration error: refused before anything is provisioned, and not retried.
@@ -1000,17 +1130,49 @@ class HarborEnvironmentServer(
             except ImageConfigError as exc:
                 raise HTTPException(422, f"Compose file of task {task.task_id!r}: {exc}") from exc
         if task.turns:
-            budget = sum(
-                task.config.step_agent_timeout_sec(turn.config)
-                + task.config.step_verifier_timeout_sec(turn.config)
-                + self.config.verifier_grace_s
-                for turn in task.turns
+            # Three figures of one episode: what the steps need once the sandbox is ready (`_post_seed_budget_s`),
+            # the nominal episode of one sandbox start, with the overlay build, before that (`_task_budget_s`), and
+            # the worst case a deadline opened before the seed has to cover, every image pull attempt at its
+            # timeout (`_episode_bound_s`), the one the deadline is raised to and the sandbox lifetime follows.
+            # The refusal compares the nominal figure: a normal seed makes one start, and a task that fits the
+            # default that way is run, not refused for the worst case; the WARNINGs name both figures.
+            bound = self._episode_bound_s(task)
+            nominal = self._task_budget_s(task)
+            after_seed = self._post_seed_budget_s(task)
+            default = self.config.default_episode_timeout_seconds
+            need = (
+                f"its {len(task.turns)} steps need up to {after_seed:.0f}s once the sandbox is ready (harness setup, "
+                f"agent and verifier budgets, hooks and grace per step), {nominal:.0f}s with one sandbox start and "
+                f"up to {bound:.0f}s with every image pull retry"
             )
-            if budget > self.config.default_episode_timeout_seconds:
-                # An expired episode is retried, not scored, so a task this long may never finish here.
+            if not self.config.enforce_task_timeouts:
+                # Nothing derives a longer deadline without enforcement, so the default is the deadline. An
+                # episode that cannot fit it after one sandbox start would be cut short and retried, never scored:
+                # refused with the setting named. One that fits only without a retried seed runs, with a WARNING
+                # once per episode: a retried seed is a possibility whose outcome is a retryable timeout.
+                if nominal > default:
+                    raise HTTPException(
+                        422,
+                        f"Task {task.task_id!r}: {need}, above default_episode_timeout_seconds={default:.0f} after one "
+                        f"sandbox start already, and enforce_task_timeouts is off, so the episode would be cut short "
+                        f"and retried; raise default_episode_timeout_seconds to at least {nominal:.0f} ({bound:.0f} to "
+                        "cover a retried seed), or set enforce_task_timeouts: true to give the episode the task's own "
+                        "budget",
+                    )
+                if bound > default:
+                    LOGGER.warning(
+                        f"{task.task_id}: {need}; default_episode_timeout_seconds={default:.0f} covers the episode "
+                        "after one sandbox start but not after a retried seed, and enforce_task_timeouts is off, so "
+                        "an episode whose seed retries its image pulls may time out and be retried; set "
+                        "enforce_task_timeouts: true to give the episode the task's own bound"
+                    )
+            elif bound > default:
+                # Once per episode of such a task, at WARNING so the run's log shows which tasks run above the
+                # run-wide default (a notable operational fact, not an error): the deadline and the sandbox
+                # lifetime follow the task's own bound, so the episode is not cut short and retried.
                 LOGGER.warning(
-                    f"{task.task_id}: its turns budget up to {budget:.0f}s of agent and verifier time, above "
-                    f"default_episode_timeout_seconds={self.config.default_episode_timeout_seconds:.0f}"
+                    f"{task.task_id}: {need}; default_episode_timeout_seconds={default:.0f} is below that bound, so "
+                    f"the episode deadline and the sandbox lifetime follow the task's own bound ({bound:.0f}s)"
                 )
         if self._shutting_down:
             raise HTTPException(503, "Environment server is shutting down")
@@ -1046,6 +1208,7 @@ class HarborEnvironmentServer(
                 session_id=episode_key,
                 provider_ref=self._provider_ref(task),
                 compose=compose,
+                requested_user=task.user,
             )
             # A Compose group ran the overlay on main inside its start, before main's uploads and command.
             if compose is not None:
@@ -1053,6 +1216,13 @@ class HarborEnvironmentServer(
             else:
                 names = await self._apply_overlay(sandbox, task)
             await self._set_default_user(sandbox, task, names)
+            session.user_names = names
+            # What a turn of a multi-step task restores for its verifier (`_as_seed_default_user`).
+            session.seed_default_user = sandbox.default_user
+            # The harness is handed the user as installed, as a turn's switch leaves it (`_apply_turn_user`): the
+            # name a uid resolved to, or the integer uid when it names no user (OpenSandbox's native `uid=` exec
+            # path, where the string the task wrote would be looked up as an account name and fail).
+            session.agent_user = sandbox.default_user
             image_user = await self._image_user_name(sandbox, task, names)
             # The working directory and /logs exist before the entrypoint starts, as Harbor's bind mounts do. For a
             # Compose group the adapter already created the /logs paths main bound, before its command; this mkdir

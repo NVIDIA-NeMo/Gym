@@ -538,6 +538,13 @@ class HarborVerificationMixin:
             if _verifier_runs_task_image(task):
                 # Its default is that image's own USER, never [agent].user, resolved by name once it exists.
                 await self._set_default_user(verifier, task, names, role="verifier")
+            if overlaid and task.workdir is not None:
+                # The overlay made the Dockerfile's WORKDIR directories only. The task workdir ([environment].workdir
+                # when task.toml sets one, else the Dockerfile's final WORKDIR) is where test.sh is sent below, so it
+                # is made and handed to the task's user here as the seed's `_prepare_workdir` leaves it in the agent's
+                # sandbox, which is how the shared verifier finds it; a Docker exec into a missing directory fails
+                # before test.sh starts.
+                await self._own_workdir(verifier, task.workdir, task.user, create=True)
             # The verifier's /logs folders exist before its entrypoint starts, as in the seed and as Harbor's
             # /logs/verifier bind mount does; /tests and the artifacts follow, as Harbor uploads them after start.
             prepare = await exec_as_root(
@@ -588,9 +595,10 @@ class HarborVerificationMixin:
             await _make_test_script_executable(verifier)
             # An overlaid verifier sandbox was created without the task workdir, as the agent's is (see
             # `_create_verifier_sandbox`), so its default directory is the base image's own: test.sh is sent to the
-            # task's workdir, where the overlay's WORKDIR step made it, as the shared verifier's exec is and as
-            # Harbor's `compose exec` lands in the built image's WORKDIR. Every other verifier sandbox starts in
-            # the directory its spec named, or its image's own.
+            # task workdir made above, as the shared verifier's exec is sent to the session's. Harbor's exec passes
+            # `[environment].workdir` whenever task.toml sets one and lands in the built image's WORKDIR otherwise,
+            # which is what `task.workdir` resolves. Every other verifier sandbox starts in the directory its spec
+            # named, or its image's own.
             result = await verifier.exec(
                 verifier_command(budget),
                 cwd=task.workdir if overlaid else None,

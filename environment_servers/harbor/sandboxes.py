@@ -43,7 +43,7 @@ from nemo_gym.sandbox.compose_config import (
     resolve_compose,
     sandbox_platform,
 )
-from nemo_gym.sandbox.compose_fields import service_gpus
+from nemo_gym.sandbox.compose_fields import service_gpus, service_resources
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata, resolve_provider_volume_sources
 from nemo_gym.sandbox.providers.base import ORPHAN_REAP_TIMEOUT_S, SandboxCreateError
 from nemo_gym.sandbox.utils import cpu_cap_env
@@ -500,6 +500,7 @@ class HarborSandboxMixin:
         service_specs: dict[str, SandboxSpec] = {}
         service_providers: dict[str, Any] = {}
         service_volume_sources: dict[str, dict[str, str]] = {}
+        self._warn_unsized_sidecars(task, document)
         for name, service in document["services"].items():
             if name == "main":
                 service_specs[name] = main_spec
@@ -653,6 +654,29 @@ class HarborSandboxMixin:
                     raise exc from None
                 await asyncio.sleep(_pull_retry_delay(attempt))
         raise AssertionError("unreachable")  # pragma: no cover
+
+    def _warn_unsized_sidecars(self, task: HarborTask, document: dict[str, Any]) -> None:
+        """Say once per task which sidecars run at the provider's default sandbox size.
+
+        A sidecar's size is its ``deploy.resources`` (:func:`_sidecar_spec` hands the adapter no task resources);
+        without one it gets whatever the provider gives a sandbox that asks for nothing (the OpenSandbox SDK's
+        defaults), where Harbor's ``docker compose`` gives it the host's resources. A sidecar that loads a large
+        catalog then dies at start, so the choice is logged, with the two places to size it; the default itself
+        is not changed here.
+        """
+        unsized = sorted(
+            name
+            for name, service in document["services"].items()
+            if name != "main" and not {"cpu", "memory_mib"} & set(service_resources(service))
+        )
+        if not unsized or task.digest in self._unsized_sidecars_warned:
+            return
+        self._unsized_sidecars_warned.add(task.digest)
+        LOGGER.warning(
+            f"{task.task_id}: Compose service(s) {', '.join(unsized)} declare no deploy.resources, so each runs at the "
+            "sandbox provider's default size (under Harbor's docker compose a sidecar has the host's resources); size a "
+            "sidecar with deploy.resources.limits (cpus, memory) in the task's Compose file"
+        )
 
     def _sidecar_provider_ref(self, task: HarborTask, service: dict[str, Any]) -> str:
         """Which sandbox block runs a Compose sidecar: the GPU one when the service reserves GPUs through

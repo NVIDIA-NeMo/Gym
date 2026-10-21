@@ -996,8 +996,13 @@ class TestMultiStepTasks:
         assert all(turn.instruction.startswith("# MemoryArena Bundled Shopping") for turn in task.turns)
         assert all((task.path / turn.tests_dir / "test.sh").is_file() for turn in task.turns)
         assert all((task.path / "steps" / turn.name / "solution" / "solve.sh").is_file() for turn in task.turns)
-        # No top-level instruction, tests or solution: the steps carry them (the oracle finds none at `solution/`).
-        assert task.instruction == "" and not (task.path / "tests").exists() and not task.has_solution
+        # No top-level instruction, tests or solution: the steps carry them, so the task is validatable through its
+        # steps' own solutions, each resolved per turn as Harbor's oracle resolves them (`turn_solution_dir`).
+        assert task.instruction == "" and not (task.path / "tests").exists() and not (task.path / "solution").exists()
+        assert task.has_solution
+        assert [task.turn_solution_dir(turn) for turn in task.turns] == [
+            task.path / "steps" / name / "solution" for name in MEMORY_ARENA_STEPS
+        ]
         [mcp] = config.environment.mcp_servers
         assert (mcp.name, mcp.transport, mcp.url) == ("webshop", "streamable-http", "http://mcp-server:8000/mcp")
         env = config.environment
@@ -1067,14 +1072,6 @@ class TestMultiStepTasks:
             (lambda root: (root / "steps" / "01_plan" / "setup.sh").write_text("true\n"), "setup.sh"),
             (lambda root: (root / "steps" / "01_plan" / "workdir").mkdir(), "workdir"),
             (lambda root: (root / "steps" / "02_implement" / "instruction.md").unlink(), "instruction.md"),
-            # Harbor runs each step as its own `[steps.agent].user`; every turn here runs as the task's user, so
-            # a step that names one is refused (by step) instead of being run silently as the wrong user.
-            (
-                lambda root: (root / "task.toml").write_text(
-                    (root / "task.toml").read_text() + '[steps.agent]\nuser = "tester"\n'
-                ),
-                "step '02_implement': per-step agent user is not supported yet",
-            ),
         ],
     )
     def test_unsupported_or_incomplete_steps_are_refused_by_name(self, tmp_path, change, message):
@@ -1082,6 +1079,41 @@ class TestMultiStepTasks:
         change(root)
         with pytest.raises(HarborTaskError, match=message):
             load_task(root)
+
+    def test_a_step_agent_user_loads_as_written_for_the_server_to_apply_per_turn(self, tmp_path):
+        """Harbor runs each step as its own `[steps.agent].user` (else the task's); the loader used to refuse a step
+        that named one (G7 round 24, item 1b). The server now switches the sandbox to it for that turn, so the
+        loader reads it as written, a numeric uid included, and leaves the other steps' user unset (the task's)."""
+        root = write_multi_step_task(tmp_path / "t")
+        (root / "task.toml").write_text((root / "task.toml").read_text() + '[steps.agent]\nuser = "tester"\n')
+        task = load_task(root)
+        assert [turn.config.agent.user for turn in task.turns] == [None, "tester"]
+        (root / "task.toml").write_text((root / "task.toml").read_text().replace('user = "tester"', "user = 1000"))
+        assert [turn.config.agent.user for turn in load_task(root).turns] == [None, 1000]
+
+    def test_a_task_has_a_solution_when_every_step_has_one_of_its_own_or_the_tasks(self, tmp_path):
+        """`gym dataset validate` keeps a task whose solutions are per step (the MemoryArena shape: no top-level
+        `solution/`), as Harbor's oracle runs `steps/<name>/solution/solve.sh` per step and falls back to the task's
+        `solution/` for a step without one; a step with neither leaves the task unvalidated, and a step folder that
+        exists without a `solve.sh` is that step's (missing) answer, never the task's script, as in Harbor."""
+        root = write_multi_step_task(tmp_path / "t")
+        shutil.rmtree(root / "solution")
+        plan, implement = (root / "steps" / name / "solution" for name in ("01_plan", "02_implement"))
+        assert not load_task(root).has_solution
+        plan.mkdir()
+        (plan / "solve.sh").write_text("#!/bin/bash\necho plan\n")
+        task = load_task(root)
+        assert not task.has_solution and task.turn_solution_dir(task.turns[1]) == root / "solution"
+        # The task's top-level solution stands in for the step without one.
+        (root / "solution").mkdir()
+        (root / "solution" / "solve.sh").write_text("#!/bin/bash\necho task\n")
+        task = load_task(root)
+        assert task.has_solution
+        assert [task.turn_solution_dir(turn) for turn in task.turns] == [plan, root / "solution"]
+        # A step folder of its own without solve.sh is not covered by the task's script.
+        implement.mkdir()
+        task = load_task(root)
+        assert not task.has_solution and task.turn_solution_dir(task.turns[1]) == implement
 
     def test_a_step_needs_a_test_script_of_its_own_or_the_tasks(self, tmp_path):
         root = write_multi_step_task(tmp_path / "t")
@@ -3364,6 +3396,62 @@ class TestComposeVolumeSourcesAtPrepare:
                 ],
             )
         assert seen == [({"pgdata": "datasets/pgdata"}, None), ({"pgdata": "pg"}, {"pgdata": "gpu/pg"})]
+
+    def test_registry_credentials_come_from_the_sandbox_image_auth(self, tmp_path, monkeypatch):
+        """G7 round 24: prepare read registries anonymously, so a private Compose sidecar (registry.example.com...) stopped
+        it with HTTP 403 though the sandbox block's `images.auth` would pull it. Prepare reads the same block's
+        `images.auth`, resolved (so `${gitlab_registry_password}` comes from env.yaml), and records images with it."""
+        import nemo_gym.tasks.harbor.build_options as build_options
+        import nemo_gym.tasks.harbor.cli as harbor_cli
+
+        dotenv = tmp_path / "env.yaml"
+        dotenv.write_text("gitlab_registry_username: bot\ngitlab_registry_password: secret\n")
+        monkeypatch.setattr(build_options, "_resolve_under_cwd_or_install", lambda rel: tmp_path / rel)
+        provider = tmp_path / "provider.yaml"
+        provider.write_text(
+            "sandbox:\n  opensandbox:\n    images:\n      auth:\n"
+            '        "registry.example.com:5005/":\n'
+            "          username: ${gitlab_registry_username}\n"
+            "          password: ${gitlab_registry_password}\n"
+        )
+        monkeypatch.setattr(harbor_cli, "resolve_sandbox_config", lambda name: provider)
+
+        from nemo_gym.tasks.harbor.cli import registry_credentials_from_overrides
+
+        # No block names a provider: anonymous, as before.
+        assert registry_credentials_from_overrides([], None) == {}
+        assert registry_credentials_from_overrides([], "opensandbox") == {
+            "registry.example.com:5005/": ("bot", "secret")
+        }
+
+    def test_run_and_validate_hand_registry_credentials_to_prepare(self, tmp_path, monkeypatch, sources):
+        import argparse
+
+        import nemo_gym.tasks.harbor.cli as harbor_cli
+
+        # The `sources` fixture's provider.yaml has no images.auth, so credentials are empty; a block with one is
+        # covered above. This asserts both entry points read them and pass them on.
+        seen = []
+
+        def fake_prepare(target, **kwargs):
+            seen.append(kwargs["registry_credentials"])
+            raise harbor_cli.HubError("stop here")
+
+        def fail(message):
+            raise SystemExit(message)
+
+        monkeypatch.setattr(harbor_cli, "prepare_target", fake_prepare)
+        monkeypatch.setattr(
+            harbor_cli, "resolve_agent", lambda name: harbor_cli.AgentSelection(Path("a.yaml"), name, name)
+        )
+        args = argparse.Namespace(
+            target=str(tmp_path), agent="a", sandbox="opensandbox", _parser=argparse.Namespace(error=fail)
+        )
+        with pytest.raises(SystemExit, match="stop here"):
+            harbor_cli.run_target(args, [])
+        with pytest.raises(SystemExit, match="stop here"):
+            harbor_cli.validate_target(args, [])
+        assert seen == [{}, {}]
 
     def test_prepare_fails_naming_an_unmapped_external_volume(self, tmp_path, fake_registry):
         folder = tmp_path / "ds"

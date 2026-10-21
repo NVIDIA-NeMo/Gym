@@ -71,7 +71,12 @@ from nemo_gym.tasks.harbor.materialize import (
 )
 from nemo_gym.tasks.harbor.prepare_builds import _build_dockerfiles
 from nemo_gym.tasks.harbor.records import read_image_configs
-from nemo_gym.tasks.harbor.registry import ImageConfigError
+from nemo_gym.tasks.harbor.registry import (
+    ImageConfigError,
+    RegistryClient,
+    credentials_for_image_prefixes,
+    platform_pair,
+)
 from nemo_gym.tasks.harbor.task import HarborTask, discover_tasks, is_task_folder
 from nemo_gym.tasks.harbor.validation_report import (
     _task_digests,
@@ -148,11 +153,37 @@ def sandbox_provider_from_overrides(overrides: list[str], sandbox: str | None) -
 
     The block comes from the ``--sandbox`` provider file (when given) and the configuration the command line
     names, merged as :func:`_merged_cli_config` does; only its keys are read, never its values, so provider
-    credentials are not needed at prepare. Prepare checks each Compose task's ``tmpfs``, ``ulimits``,
+    credentials are not needed for this (the registry credentials prepare does read are the block's
+    ``images.auth``, :func:`registry_credentials_from_overrides`). Prepare checks each Compose task's ``tmpfs``, ``ulimits``,
     ``sysctls`` and ``security_opt`` against this provider's capabilities. ``None`` when no block names a
     provider: the check then runs at seed, against the live provider.
     """
     return _block_provider_name(overrides, sandbox, SANDBOX_BLOCK_KEY)
+
+
+# The sandbox provider block's image credentials (OpenSandbox's `images.auth`: image prefix to username and
+# password), the one place a deployment names registry credentials; prepare reads private images with the same.
+SANDBOX_IMAGES_AUTH_KEY = "images.auth"
+
+
+def registry_credentials_from_overrides(overrides: list[str], sandbox: str | None) -> dict[str, tuple[str, str]]:
+    """The registry credentials prepare records private images with: the ``sandbox:`` block's ``images.auth``
+    (what the provider pulls those images with at seed), turned into the registry client's prefix-keyed form
+    (:func:`~nemo_gym.tasks.harbor.registry.credentials_for_image_prefixes`), so each image is read with the
+    credentials of its longest matching prefix, as the provider pulls it.
+
+    Read from the ``--sandbox`` provider file and the configuration the command names, resolved against them
+    (so ``${gitlab_registry_password}`` comes from ``env.yaml`` as it does at seed), like
+    :func:`volume_sources_from_overrides`. Empty when no block names a provider or the block has no
+    ``images.auth``: prepare then reads registries anonymously, as before. A malformed block is a
+    :class:`ValueError` naming the key.
+    """
+    provider = sandbox_provider_from_overrides(overrides, sandbox)
+    if provider is None:
+        return {}
+    files = [resolve_sandbox_config(sandbox)] if sandbox is not None else []
+    key = f"{SANDBOX_BLOCK_KEY}.{provider}.{SANDBOX_IMAGES_AUTH_KEY}"
+    return credentials_for_image_prefixes(_block_from_overrides(overrides, key, config_files=files), key)
 
 
 def gpu_sandbox_provider_from_overrides(overrides: list[str], sandbox: str | None) -> str | None:
@@ -292,6 +323,7 @@ def prepare_target(
     shared_storage: bool | None = None,
     gpu_shared_storage: bool | None = None,
     rows_name: str = "tasks.jsonl",
+    registry_credentials: Mapping[str, tuple[str, str]] | None = None,
 ) -> PreparedTaskset:
     """Fetch (for hub references) and load the tasks, then write the rows file.
 
@@ -313,7 +345,10 @@ def prepare_target(
     such tasks on; ``shared_storage`` and ``gpu_shared_storage`` say whether each block's provider has the shared
     storage named volumes and shared logs binds need, so a task that needs it is left out at prepare, naming the
     setting, when the block has none (``None``: unknown, decided at seed). ``rows_name`` names the rows file inside the taskset's output folder: a run scopes it to its
-    agent, so two agents prepared with different selections on one taskset keep their own rows.
+    agent, so two agents prepared with different selections on one taskset keep their own rows. ``registry_credentials``
+    (registry host or image prefix to username and password, :func:`registry_credentials_from_overrides`) are what the base images
+    and the Compose images are read from their registries with; without them a private image stops the
+    preparation with the registry's refusal.
 
     Before any image is recorded, built or pushed, ``manifest.toml`` beside the task folders is
     reconciled with their digests (:func:`~nemo_gym.tasks.harbor.manifest.check_manifest`): a fetched
@@ -359,8 +394,17 @@ def prepare_target(
     # task IDs are rejected by the folder walk itself, before any registry or docker work. Images are
     # recorded for the platform the sandboxes run, ``builds.platform`` (linux/amd64 unless set), as the
     # built ones are.
+    # One registry client for the base images and the Compose images, for the platform the images are recorded for
+    # and with the deployment's credentials; None keeps the recorder's own anonymous client.
+    client = (
+        RegistryClient(dict(registry_credentials), platform=platform_pair(build.platform))
+        if registry_credentials
+        else None
+    )
     images = (
-        record_base_images(folder, select=None if is_task_folder(folder) else selected, platform=build.platform)
+        record_base_images(
+            folder, select=None if is_task_folder(folder) else selected, platform=build.platform, client=client
+        )
         if folder.is_dir()
         else None
     )
@@ -408,6 +452,7 @@ def prepare_target(
     images = record_compose_images(
         tasks,
         dataset_root,
+        client=client,
         skipped=unresolved,
         platform=build.platform,
         sandbox_provider=sandbox_provider,
@@ -753,6 +798,7 @@ def run_target(args: argparse.Namespace, overrides: list[str]) -> None:
             shared_storage=shared_storage_from_overrides(overrides, sandbox),
             gpu_shared_storage=gpu_shared_storage_from_overrides(overrides, sandbox),
             rows_name=_rows_name(agent),
+            registry_credentials=registry_credentials_from_overrides(overrides, sandbox),
         )
     except (
         HarborTaskError,
@@ -888,6 +934,7 @@ def validate_target(args: argparse.Namespace, overrides: list[str], *, agent: Ag
             shared_storage=shared_storage_from_overrides(overrides, sandbox),
             gpu_shared_storage=gpu_shared_storage_from_overrides(overrides, sandbox),
             rows_name=_rows_name(agent),
+            registry_credentials=registry_credentials_from_overrides(overrides, sandbox),
         )
     except (
         HarborTaskError,

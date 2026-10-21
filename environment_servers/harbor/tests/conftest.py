@@ -185,7 +185,20 @@ class FakeSandbox:
         return OK
 
     async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
-        record = {"command": command, "cwd": cwd, "env": env, "timeout_s": timeout_s, "user": user, "seen": None}
+        # The facade's rule (`AsyncSandbox.exec`): an exec that names no user runs as the sandbox's default, and
+        # a sandbox with no default runs as the image's own user. `user` is the raw argument, `ran_as` the user
+        # the container ran the command as.
+        effective = user if user is not None else self.default_user
+        who = str(effective) if effective is not None else self.image_user
+        record = {
+            "command": command,
+            "cwd": cwd,
+            "env": env,
+            "timeout_s": timeout_s,
+            "user": user,
+            "ran_as": who,
+            "seen": None,
+        }
         self.execs.append(record)
         if "test.sh" in command:
             if "timeout" not in command:
@@ -200,10 +213,21 @@ class FakeSandbox:
         if command == "pwd":
             # The image's own WORKDIR, asked for when a task declares none.
             return SandboxExecResult(stdout="/app\n", stderr="", return_code=0)
-        who = str(user) if user is not None else self.image_user
         if match := re.fullmatch(r"getent passwd (\S+) \| cut -d: -f1", command):
             name = self.passwd.get(shlex.split(match.group(1))[0], "")
             return SandboxExecResult(stdout=f"{name}\n" if name else "", stderr="", return_code=0)
+        if match := re.fullmatch(r"stat -c %u:%g (\S+)", command):
+            # The owner's uid and gid (one group per user here); a name the passwd table lacks is its own uid.
+            owner = self.dirs.get(shlex.split(match.group(1))[0], "root")
+            uid = next((uid for uid, name in self.passwd.items() if name == owner), owner)
+            return SandboxExecResult(stdout=f"{uid}:{uid}\n", stderr="", return_code=0)
+        if match := re.fullmatch(r"chown (\S+) (\S+)", command):
+            owner, path = shlex.split(match.group(1))[0], shlex.split(match.group(2))[0]
+            if who.split(":")[0] not in ("root", "0"):
+                return _fails(f"chown: changing ownership of '{path}': Operation not permitted")
+            uid = owner.split(":")[0]
+            self.dirs[path] = self.passwd.get(uid, uid)
+            return OK
         if match := re.fullmatch(r"test -d (\S+) \|\| \(mkdir -p \1 && chown (\S+) \1\)", command):
             path, owner = shlex.split(match.group(1))[0], shlex.split(match.group(2))[0]
             if path in self.dirs:
@@ -296,7 +320,8 @@ class FakeAgentClient(ServerClient):
     """Stands in for the agent server: answers the session seed, the turn and the close.
 
     ``fail_path`` makes the next call to that path time out (a lost reply). ``slow_path`` delays
-    that path so an episode deadline can expire during it.
+    that path by ``slow_seconds`` so an episode deadline can expire during it, or so a turn costs real time
+    within a budget a test sizes.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -306,6 +331,7 @@ class FakeAgentClient(ServerClient):
     # Raise this exception (instead of losing the reply) the next time this path is called.
     fail_with: dict = {}
     slow_path: str | None = None
+    slow_seconds: float = 0.5
     observations: dict | None = None
     trajectory: dict | None = None
     # What the seed response declares: a harness that reads the task's MCP servers and skills directory.
@@ -323,7 +349,7 @@ class FakeAgentClient(ServerClient):
                 if inspect.isawaitable(outcome):
                     await outcome
         if url_path == self.slow_path:
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(self.slow_seconds)
         if url_path == self.fail_path:
             self.fail_path = None
             raise TimeoutError(f"response lost for {url_path}")
