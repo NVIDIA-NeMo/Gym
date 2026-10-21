@@ -63,6 +63,7 @@ def test_nooa_recipe_prepares_and_routes_canonical_terminal_tasks(
         **OmegaConf.to_container(resource_block, resolve=True),
     )
     assert agent.nooa.execution_mode == "sandboxed"
+    assert agent.sandbox_runner_timeout_seconds == 21600
     assert agent.resources_server == environment.resources_server
     assert agent.model_server.name == "policy_model"
     assert agent.num_workers == resources.num_workers == 1
@@ -76,6 +77,9 @@ def test_nooa_recipe_prepares_and_routes_canonical_terminal_tasks(
         canonical.terminal_bench_2_1_resources_server.resources_servers.terminal_bench_2_1.sandbox_config
     )
     assert resources.sandbox_config == sandbox | {"ttl_s": 30600}
+    assert resources.sandbox_config["ttl_s"] >= (
+        environment.default_episode_timeout_seconds + 3 * environment.cleanup_timeout_seconds
+    )
     assert resource_block.allowed_agents == ["nooa_agent"]
 
     # The canonical preparer reads the task instruction and image, not verifier assets or per-task budgets.
