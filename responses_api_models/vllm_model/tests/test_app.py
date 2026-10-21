@@ -7539,6 +7539,9 @@ class TestCodexRequests:
     def test_forward_unvalidated_reasoning_effort_requires_the_chat_path(self) -> None:
         with raises(ValueError, match="requires is_responses_native=false"):
             self._server(forward_unvalidated_reasoning_effort=True, is_responses_native=True)
+        # /v1/completions has no reasoning_effort, so the forwarded effort would be dropped silently.
+        with raises(ValueError, match="requires use_completions_api=false"):
+            self._server(forward_unvalidated_reasoning_effort=True, use_completions_api=True)
         default, _ = self._server()
         assert not default.config.forward_unvalidated_reasoning_effort
 

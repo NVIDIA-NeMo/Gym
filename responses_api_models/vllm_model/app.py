@@ -372,7 +372,8 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
             "Forward a Responses `reasoning.effort` that the pinned OpenAI SDK does not list (for example "
             "`max`, which the Codex CLI sends when its model catalog offers it) verbatim as the chat "
             "`reasoning_effort`, instead of refusing the request with 422. The engine validates the value. "
-            "Efforts the SDK lists keep their existing path. Requires `is_responses_native: false`."
+            "Efforts the SDK lists keep their existing path. Requires `is_responses_native: false` and "
+            "`use_completions_api: false`."
         ),
     )
     custom_tools_as_functions: bool = Field(
@@ -508,6 +509,11 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
                     raise ValueError(
                         f"{option} applies to the Chat Completions conversion and requires is_responses_native=false"
                     )
+        if self.forward_unvalidated_reasoning_effort and self.use_completions_api:
+            raise ValueError(
+                "forward_unvalidated_reasoning_effort requires use_completions_api=false: /v1/completions has no "
+                "reasoning_effort, so the effort would be dropped"
+            )
         if self.custom_tools_as_functions and self.return_token_id_information:
             raise ValueError(
                 "custom_tools_as_functions does not support return_token_id_information: custom_tool_call "
