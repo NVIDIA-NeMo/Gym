@@ -31,18 +31,19 @@ message contains a UUID; tool calls, tool results and context are not checked).
 
 - `reward` is 1 when every IF item passes; `if_result` reports `passed` and `total`.
 - Completion items are reported in `grading_result.dimensions` and never change the reward.
-- A missing or truncated answer fails every item without the judge, so a prohibition cannot
-  pass by omission: reward 0, unmasked, with `failure_kind` `partner_if:no_answer` or
-  `partner_if:truncated`. This covers a blank reply, a reply with only reasoning or no
-  output (including Simple Agent's `empty_output` and `incomplete_reasoning` replies), a
-  tool call in `text_response` or `frozen_tool_history` mode, a reply cut off by the
-  output-token cap, and a mock-tool episode that ends without the final answer its backend
-  requires.
+- A missing or truncated answer fails every item without a judge call: reward 0, unmasked,
+  with `failure_kind` `partner_if:no_answer` or `partner_if:truncated`. This covers a
+  blank reply, a reply with only reasoning or no output (including Simple Agent's
+  `empty_output` and `incomplete_reasoning` replies), a tool call in `text_response` or
+  `frozen_tool_history` mode, a reply cut off by the output-token cap, and a mock-tool
+  episode that ends without the final answer its backend requires.
 - A failed judge call raises out of `/verify` into Gym's judge failsafe: the row is masked
   with `failure_kind: judge_failed`, written to the failures file
   (`<output>_failures.jsonl`) and retried on resume. `gym eval reverify
   --judge-failed-only` can recover it, except a `live_agent` row, whose evidence is not
-  in the row.
+  in the row. For the same reason, the servers that grade `live_agent` rows (the mock-tool
+  and SWE servers, and this server with `accept_verification_input: true`) report reverify
+  mode `unsupported`, so a full `gym eval reverify` refuses them without `--force`.
 - These rollouts are masked (`mask_sample: true`), and `failure_reason` gives the reason
   of the first item that could not be scored or, for a row masked as a whole (such as an
   unsigned contract, unsupported input or output, a missing `verification_input` or a
@@ -55,9 +56,9 @@ message contains a UUID; tool calls, tool results and context are not checked).
     support, including hidden context (`previous_response_id`, `conversation`, `prompt`),
     and a `live_agent` row whose `verification_input` is missing or was captured from
     other input;
-  - `partner_if:evidence_too_large`: evidence over 1,000,000 characters, counted as text:
-    an artifact over the limit for the items that need it, or more evidence in total for
-    the items the judge grades;
+  - `partner_if:evidence_too_large`: an artifact over 1,000,000 characters, for the items
+    that need it, or a judge input over `judge_max_input_chars` characters: the serialized
+    rubrics and evidence of the items the judge grades, with only the artifacts they need;
   - `partner_if:unsigned_contract`: a contract with `audit_signoff: false` on a server
     without `allow_provisional_rubrics: true`. With it, the contract is scored and marked
     `provisional`.
@@ -68,8 +69,9 @@ message contains a UUID; tool calls, tool results and context are not checked).
   rows in the failures file are left out entirely.
 
 Key config fields: `judge_model_server`, `judge_responses_create_params` (8192 output
-tokens, temperature 0), `judge_max_concurrency` (8), `allow_provisional_rubrics` (false)
-and `task_check_modules` ([]). The SWE server defaults to 32768 output tokens and a
+tokens, temperature 0), `judge_max_concurrency` (8), `judge_max_input_chars` (1,000,000;
+size it to the judge's context window), `allow_provisional_rubrics` (false) and
+`task_check_modules` ([]). The SWE server defaults to 32768 output tokens and a
 concurrency of 2.
 
 ## Task-specific checks and live agents
@@ -85,18 +87,18 @@ concurrency of 2.
   is an infrastructure error. `configs/mock_tools.yaml`
   runs the example `example_tools.NotesBackend` on `data/mock_tools_example.jsonl`.
 - `swe_app.py` (Scale-SWE with an OpenCode agent) also captures `live_agent` evidence.
-  It does not change the agent: `actor_system_prompt` and `tool_description_additions`
-  tell the judge the system prompt and tool-description additions that the agent's own
-  config gives the actor. `configs/swe.yaml` validates, but it runs only with a sandbox
-  provider and Scale-SWE rows that carry a `live_agent` contract, which Gym does not ship.
+  Set `actor_system_prompt` and `tool_description_additions` to what the agent's own
+  config gives the actor; the judge reads them. `configs/swe.yaml` validates, but it runs
+  only with a sandbox provider and Scale-SWE rows that carry a `live_agent` contract,
+  which Gym does not ship.
 - An agent that runs a `live_agent` episode itself, such as
   `responses_api_agents/partner_if_harbor_agent`, sends what it captured to this server's
   `/verify` as `verification_input` (`native_evidence.LiveAgentCapture`: the input the
-  actor was given, its documents and artifact capture receipts). The server grades it
-  with the response's visible trajectory; rows never carry it.
+  actor was given, its documents and artifact capture receipts). With
+  `accept_verification_input: true`, the server grades it with the response's visible
+  trajectory; rows never carry it.
 - `responses_api_agents/partner_if_dispatcher` routes each task of a mixed benchmark to
-  its environment; its config runs both examples below under one score. The mock-tool
-  and SWE servers keep sessions in process memory, so `num_workers` must be unset or 1.
+  its environment; its config runs both examples below under one score.
 
 Relative paths in these configs resolve under `--search-dir` / `NEMO_GYM_EXTRA_ROOTS`
 first, then the working directory, then the Gym root.
@@ -115,9 +117,9 @@ gym eval run --no-serve --agent partner_if_simple_agent \
 
 `configs/partner_if.yaml` includes the `openai_model` policy server. `data/example.jsonl`
 holds five synthetic examples. `configs/verifier.yaml` starts only the server and its
-judge, for `gym eval reverify`. For the mock-tool example, use `--resources-server
-partner_if/mock_tools`, `--agent partner_if_mock_tools_simple_agent` and
-`data/mock_tools_example.jsonl`.
+judge, for `gym eval reverify` of rows that are not `live_agent`. For the mock-tool
+example, use `--resources-server partner_if/mock_tools`, `--agent
+partner_if_mock_tools_simple_agent` and `data/mock_tools_example.jsonl`.
 
 ## Testing
 

@@ -1,13 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Execution-independent scoring contract and internal evidence/error results."""
+"""Grading results and failure kinds. The contract types live in task_data.py and are re-exported here."""
 
 from typing import Literal
 
 from pydantic import Field, StrictBool
 
-# Task schemas must be self-contained for Gym's dependency-light data tooling.
-# Re-export existing names so execution adapters retain their public import paths.
+# Contract types live in task_data.py, which Gym's data tooling loads without server dependencies.
 from resources_servers.partner_if.task_data import Dimension, StrictModel, Text
 from resources_servers.partner_if.task_data import GradingContract as GradingContract
 from resources_servers.partner_if.task_data import GradingItem as GradingItem

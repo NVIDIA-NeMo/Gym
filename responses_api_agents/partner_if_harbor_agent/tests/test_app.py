@@ -67,7 +67,7 @@ def harbor_config(tmp_path, job=None, **overrides):
     """The agent's config; `job` replaces fields of its native Harbor job."""
     return PartnerIFHarborConfig.model_validate(
         {
-            "name": "partner_if_markdown",
+            "name": "partner_if_harbor_agent",
             "host": "127.0.0.1",
             "port": 8000,
             "entrypoint": "app.py",
@@ -121,7 +121,7 @@ def make_agent(tmp_path, *, observability=False, **overrides):
     client = _ResourcesClient(
         head_server_config=BaseServerConfig(host="head", port=1),
         global_config_dict=OmegaConf.create({"observability_enabled": observability}),
-        resources=TestClient(server().setup_webserver()),
+        resources=TestClient(server(accept_verification_input=True).setup_webserver()),
         calls=[],
     )
     return PartnerIFHarborAgent(config=harbor_config(tmp_path, **overrides), server_client=client), client
@@ -264,7 +264,7 @@ async def test_verify_is_posted_under_the_runs_rollout_prefix(tmp_path, monkeypa
     # A real ServerClient takes the prefix from the posted body; checkpointing refuses a /verify without it.
     body = run_body(tmp_path, live_contract())
     monkeypatch.setattr(harbor, "harbor_job_worker", FakeJobWorker(write_trial(tmp_path)))
-    resources, urls = TestClient(server().setup_webserver()), []
+    resources, urls = TestClient(server(accept_verification_input=True).setup_webserver()), []
 
     async def request(*, method, url, json, **_):
         urls.append(url)
@@ -395,7 +395,7 @@ async def test_aggregate_metrics_are_partner_if_metrics(tmp_path):
 def test_llm_base_url_points_openhands_at_the_gym_model_server(tmp_path, monkeypatch):
     agent, _ = make_agent(tmp_path)
     body = run_body(tmp_path, live_contract())
-    job = agent.build_job_config(body)
+    job = agent.job_config_for_run(body)
     [openhands] = job.agents
     assert openhands.kwargs == {"version": "0.62.0", "max_iterations": 30, "api_base": f"{MODEL_SERVER_URL}/v1"}
     assert openhands.env == {"LLM_API_KEY": "gym-proxy-no-provider-secret", "LLM_BASE_URL": f"{MODEL_SERVER_URL}/v1"}
@@ -414,7 +414,7 @@ def test_a_configured_llm_base_url_is_rejected(tmp_path):
     agent, _ = make_agent(tmp_path)
     agent.config.job.agents[0].env["LLM_BASE_URL"] = "http://other-provider.example/v1"
     with pytest.raises(ValueError, match="LLM_BASE_URL"):
-        agent.build_job_config(run_body(tmp_path, live_contract()))
+        agent.job_config_for_run(run_body(tmp_path, live_contract()))
 
 
 @pytest.mark.parametrize("url", ["http://127.0.0.1:9000", "http://localhost:9000", "http://0.0.0.0:9000"])
@@ -478,6 +478,10 @@ def test_example_config_validates_as_the_agent_starts(monkeypatch):
     assert "job" in block
     agent = PartnerIFHarborConfig.model_validate(block | {"name": "partner_if_harbor_agent"})
     assert (agent.model_server.name, agent.resources_server.name) == ("partner_if_harbor_model", "partner_if")
+    # Each run and retry gets its own Harbor job, so no trial is reused.
+    assert agent.harbor_unique_job_names
+    # The grader accepts the agent's captures.
+    assert config.partner_if.resources_servers.partner_if.accept_verification_input is True
     assert config.partner_if_harbor_model.responses_api_models.vllm_model.is_responses_native is False
     assert agent.job.datasets[0].path == PARENT_DIR / "data/partner_if_harbor/tasks"
     assert agent.job.jobs_dir == PARENT_DIR / "results/partner_if_harbor_agent/harbor_jobs"

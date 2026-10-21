@@ -72,9 +72,9 @@ def resolve_harbor_path(path: Path, *, from_gym_root: bool) -> Path:
 def resolve_harbor_dataset_path(path: Path) -> Path:
     """Resolve a dataset path under the first root that has it: the benchmark plugin roots
     (`NEMO_GYM_EXTRA_ROOTS`, set by `--search-dir`), then the Gym root. A path that no root has resolves
-    under the first root, which is the Gym root when no plugin roots are set."""
+    under the Gym root."""
     roots = [*_extra_roots(), GYM_ROOT]
-    return next((root / path for root in roots if (root / path).exists()), roots[0] / path).resolve()
+    return next((root / path for root in roots if (root / path).exists()), GYM_ROOT / path).resolve()
 
 
 @contextmanager
@@ -240,9 +240,10 @@ class HarborAgent(SimpleResponsesAPIAgent):
         metrics, _, _, _ = compute_pass_majority_metrics(tasks, score_fn=self._score_fn)
         return metrics
 
-    def build_job_config(self, body: HarborRunRequest) -> JobConfig:
+    def job_config_for_run(self, body: HarborRunRequest) -> JobConfig:
         """The Harbor job for one run, a copy of the configured `job`. Override to add per-run settings, such as
-        a model URL built with `base_url_for_run`."""
+        a model URL built with `base_url_for_run`. Harbor resumes a job by its name, so per-run values that
+        change between attempts need `harbor_unique_job_names: true`."""
         return self.config.build_job_config(
             task_name=body.task_name,
             ## Stable names allow resume unless fresh jobs are configured.
@@ -252,7 +253,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
     async def run(self, body: HarborRunRequest) -> HarborVerifyResponse:
         async with self._sem:
             try:
-                job_config = self.build_job_config(body)
+                job_config = self.job_config_for_run(body)
 
                 job_ref = harbor_job_worker.options(num_cpus=self.config.harbor_ray_task_num_cpus).remote(
                     job_config.model_dump(mode="json"),

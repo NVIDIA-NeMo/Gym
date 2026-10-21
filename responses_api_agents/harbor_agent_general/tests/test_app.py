@@ -256,7 +256,7 @@ async def test_run_job_rejects_failed_steps_and_invalidates_resume(tmp_path, mon
 
 
 @pytest.mark.asyncio
-async def test_run_builds_the_job_per_run(tmp_path, monkeypatch):
+async def test_run_sends_the_job_a_subclass_builds_for_the_run(tmp_path, monkeypatch):
     from responses_api_agents.harbor_agent_general.app import HarborAgentConfig, HarborRunRequest
 
     seen = {}
@@ -273,6 +273,12 @@ async def test_run_builds_the_job_per_run(tmp_path, monkeypatch):
 
             return trial()
 
+    class PerRunAgent(HarborAgent):
+        def job_config_for_run(self, body):
+            job = super().job_config_for_run(body)
+            job.agents[0].kwargs["api_base"] = f"http://model.invalid/run-{body.rollout_index}/v1"
+            return job
+
     monkeypatch.setattr(app, "get_global_config_dict", lambda: {})
     monkeypatch.setattr(app, "harbor_job_worker", Worker())
     monkeypatch.setattr(HarborAgent, "success_response", lambda self, body, trial_dir: "graded")
@@ -282,9 +288,11 @@ async def test_run_builds_the_job_per_run(tmp_path, monkeypatch):
             "host": "0.0.0.0",
             "port": 8080,
             "entrypoint": "app.py",
-            "harbor_jobs_dir": tmp_path / "jobs",
-            "harbor_dataset": {"path": str(tmp_path / "dataset")},
-            "harbor_agent": {"name": "opencode", "model_name": "test-model"},
+            "job": {
+                "jobs_dir": tmp_path / "jobs",
+                "datasets": [{"path": tmp_path / "dataset"}],
+                "agents": [{"name": "opencode", "model_name": "test-model"}],
+            },
         }
     )
     body = HarborRunRequest.model_validate(
@@ -296,8 +304,11 @@ async def test_run_builds_the_job_per_run(tmp_path, monkeypatch):
         }
     )
 
-    assert await HarborAgent.model_construct(config=config).run(body) == "graded"
+    assert await PerRunAgent.model_construct(config=config).run(body) == "graded"
     assert seen["job"]["job_name"] == "t3-r1" and seen["job"]["datasets"][0]["task_names"] == ["task-001"]
+    assert seen["job"]["agents"][0]["kwargs"]["api_base"] == "http://model.invalid/run-1/v1"
+    # The run's job is a copy: the configured job is unchanged.
+    assert config.job.agents[0].kwargs == {} and not config.job.datasets[0].task_names
 
 
 @pytest.fixture

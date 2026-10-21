@@ -19,19 +19,11 @@ from resources_servers.partner_if.grading_contract import (
     RawJudgment,
     StrictModel,
 )
-from resources_servers.partner_if.llm import PROTOCOL, parse_verdict, request_payload
-
-
-class GradeRequest(StrictModel):
-    contract: GradingContract
-    evidence: EvidenceBundle
+from resources_servers.partner_if.llm import parse_verdict, request_payload
 
 
 class GradeResponse(StrictModel):
-    task_id: str
-    rubric_hash: str
     grading_result: Evaluation
-    judge_protocol: str = PROTOCOL
     judge_request: dict | None = None
     judge_response: NeMoGymResponse | None = None
 
@@ -43,12 +35,14 @@ def contract_hash(contract: GradingContract) -> str:
 
 
 async def grade(
-    body: GradeRequest,
+    contract: GradingContract,
+    evidence: EvidenceBundle,
     *,
     server_client: ServerClient,
     server_name: str,
     semaphore: asyncio.Semaphore,
     responses_create_params: NeMoGymResponseCreateParamsNonStreaming,
+    max_input_chars: int,
 ) -> GradeResponse:
     """All evidence adapters share this judge transport and score engine."""
     receipt_request = None
@@ -57,7 +51,9 @@ async def grade(
     async def judge(items: list[GradingItem], evidence: EvidenceBundle) -> list[RawJudgment]:
         nonlocal receipt_request, receipt_response
         try:
-            receipt_request = request_payload(items, evidence, responses_create_params)
+            receipt_request = request_payload(
+                items, evidence, responses_create_params, max_input_chars=max_input_chars
+            )
             async with semaphore:
                 receipt_response = await call_judge(
                     server_client,
@@ -97,14 +93,8 @@ async def grade(
                 for item in items
             ]
 
-    result = await evaluate(body.contract, body.evidence, judge=judge)
-    return GradeResponse(
-        task_id=body.contract.task_id,
-        rubric_hash=contract_hash(body.contract),
-        grading_result=result,
-        judge_request=receipt_request,
-        judge_response=receipt_response,
-    )
+    result = await evaluate(contract, evidence, judge=judge)
+    return GradeResponse(grading_result=result, judge_request=receipt_request, judge_response=receipt_response)
 
 
 def unanswered(contract: GradingContract, failure_kind: str, reason: str) -> GradeResponse:
@@ -113,6 +103,4 @@ def unanswered(contract: GradingContract, failure_kind: str, reason: str) -> Gra
         RawJudgment(id=item.id, passed=False, reason=reason, evidence="No answer to grade", failure_kind=failure_kind)
         for item in contract.checks
     ]
-    return GradeResponse(
-        task_id=contract.task_id, rubric_hash=contract_hash(contract), grading_result=aggregate(contract, judgments)
-    )
+    return GradeResponse(grading_result=aggregate(contract, judgments))

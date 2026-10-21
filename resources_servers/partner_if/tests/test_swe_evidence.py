@@ -5,6 +5,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from nemo_gym.base_resources_server import ReverifyMode
+from nemo_gym.config_types import ResourcesServerRef
+from nemo_gym.sandbox.agent_tools import verify_agent_response
+
+
+JUDGE = "resources_servers.partner_if.grading_service.call_judge"
+SCALE_SWE_VERIFY = "resources_servers.scale_swe.app.ScaleSWEResourcesServer.verify"
+
 
 def test_swe_handoff_carries_working_directory():
     from resources_servers.partner_if.swe_app import SWEIFSeedResponse
@@ -25,7 +33,6 @@ def test_swe_evidence_preserves_actions_and_excludes_hidden_reasoning():
             {"type": "function_call_output", "call_id": "a", "output": "1: def f():"},
             {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Done"}]},
         ],
-        complete=True,
     )
     assert [e.kind for e in bundle.trajectory] == ["tool_call", "tool_result", "assistant"]
     assert bundle.trajectory[0].arguments == {"filePath": "/app/x.py"}
@@ -34,19 +41,10 @@ def test_swe_evidence_preserves_actions_and_excludes_hidden_reasoning():
     assert "hidden" not in bundle.model_dump_json()
 
 
-def test_incomplete_swe_execution_cannot_be_graded_as_an_ordinary_omission():
-    from resources_servers.partner_if.swe_app import build_swe_evidence
-
-    result = build_swe_evidence(context=[], system_prompt="Rules", output=[], complete=False)
-    assert result.trajectory_error
-
-
 def test_unknown_trajectory_kind_is_a_capture_error():
     from resources_servers.partner_if.swe_app import build_swe_evidence
 
-    result = build_swe_evidence(
-        context=[], system_prompt="Rules", output=[{"type": "unknown_new_kind"}], complete=True
-    )
+    result = build_swe_evidence(context=[], system_prompt="Rules", output=[{"type": "unknown_new_kind"}])
     assert result.trajectory_error
 
 
@@ -67,7 +65,18 @@ def swe_server():
     return SWEIFResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
 
-def swe_request(answer="HELLO", **contract):
+def opencode_response(output, *, cutoff=False):
+    """OpenCode's two response shapes: an unset status, or the output-token cutoff."""
+    from resources_servers.partner_if.tests.test_app import response
+
+    return response().model_dump() | {
+        "output": output,
+        "status": "incomplete" if cutoff else None,
+        "incomplete_details": {"reason": "max_output_tokens"} if cutoff else None,
+    }
+
+
+def swe_request(answer="HELLO", *, output=None, cutoff=False, **contract):
     from resources_servers.partner_if.swe_app import SWEIFVerifyRequest
     from resources_servers.partner_if.tests.test_app import response
     from resources_servers.partner_if.tests.test_shared_adapter import shared_request
@@ -76,23 +85,20 @@ def swe_request(answer="HELLO", **contract):
     request.update(instance_id="fixture", image_url="fixture:latest", workdir="/workspace", task_name="swe-1")
     request["verifier_metadata"]["partner_if"].update(evidence_mode="live_agent", **contract)
     request["verifier_metadata"]["partner_if"]["rubrics"] = request["verifier_metadata"]["partner_if"]["rubrics"][:1]
-    request["response"] = response(answer).model_dump()
+    visible = response(answer).model_dump()["output"] if output is None else output
+    request["response"] = opencode_response(visible, cutoff=cutoff)
     return SWEIFVerifyRequest.model_validate(request)
 
 
-@pytest.mark.parametrize("completion, answer, expected", [(0, "HELLO", 1), (1, "GOODBYE", 0)])
-async def test_if_points_do_not_depend_on_patch_correctness(completion, answer, expected):
+def scale_swe_outcome(body, reward=0):
     from resources_servers.scale_swe.app import ScaleSWEVerifyResponse
 
-    body = swe_request(answer)
-    server = swe_server()
-    assert server.config.judge_responses_create_params.max_output_tokens == 32768
-    outcome = ScaleSWEVerifyResponse.model_validate(
+    return ScaleSWEVerifyResponse.model_validate(
         body.model_dump()
         | {
-            "reward": completion,
+            "reward": reward,
             "evaluation_completed": True,
-            "resolved": bool(completion),
+            "resolved": bool(reward),
             "patch_applied": True,
             "test_results": {},
             "test_output": "",
@@ -101,7 +107,14 @@ async def test_if_points_do_not_depend_on_patch_correctness(completion, answer, 
             "patch_verification_time_taken": 0,
         }
     )
-    with patch("resources_servers.scale_swe.app.ScaleSWEResourcesServer.verify", AsyncMock(return_value=outcome)):
+
+
+@pytest.mark.parametrize("completion, answer, expected", [(0, "HELLO", 1), (1, "GOODBYE", 0)])
+async def test_if_points_do_not_depend_on_patch_correctness(completion, answer, expected):
+    body = swe_request(answer)
+    server = swe_server()
+    assert server.config.judge_responses_create_params.max_output_tokens == 32768
+    with patch(SCALE_SWE_VERIFY, AsyncMock(return_value=scale_swe_outcome(body, completion))):
         result = await server.verify(SimpleNamespace(), body)
     assert result.reward == expected
     assert result.task_outcome["reward"] == completion
@@ -109,37 +122,64 @@ async def test_if_points_do_not_depend_on_patch_correctness(completion, answer, 
     assert result.model_dump()["task_name"] == "swe-1"
 
 
-async def test_an_unsigned_contract_is_masked_without_a_verification_sandbox():
-    from nemo_gym.server_utils import SESSION_ID_KEY
+@pytest.mark.parametrize(
+    "output,cutoff,kind",
+    [
+        (None, True, "partner_if:truncated"),
+        ([], True, "partner_if:truncated"),
+        ([], False, "partner_if:no_answer"),
+        ([{"type": "reasoning", "id": "r", "summary": []}], False, "partner_if:no_answer"),
+    ],
+    ids=["cut_off", "cut_off_empty", "empty", "reasoning_only"],
+)
+async def test_a_cut_off_or_empty_trajectory_fails_every_item_without_the_judge(output, cutoff, kind):
+    body = swe_request(output=output, cutoff=cutoff)
+    verify = AsyncMock(return_value=scale_swe_outcome(body))
+    with patch(SCALE_SWE_VERIFY, verify), patch(JUDGE, new_callable=AsyncMock) as judge:
+        result = await swe_server().verify(SimpleNamespace(), body)
+    judge.assert_not_called()
+    assert (result.reward, result.mask_sample, result.failure_kind) == (0, False, kind)
+    assert [item.passed for item in result.if_result.items] == [False]
+    # Scale-SWE still records its verdict and releases the actor's sandbox.
+    verify.assert_awaited_once()
+    assert result.task_outcome["evaluation_completed"] is True
 
+
+@pytest.mark.parametrize("cutoff", [False, True])
+async def test_the_empty_response_of_opencodes_failure_preset_scores_an_unmasked_zero(cutoff):
+    # With execution_failure_reward_zero, OpenCode verifies a failed run with its output emptied and
+    # requires an unmasked zero.
+    body = swe_request(cutoff=cutoff)
     server = swe_server()
-    actor = MagicMock(stop=AsyncMock())
-    server._session_id_to_sandbox["s"] = actor
-    server._session_id_to_base_commit["s"] = "abc"
-    verify = AsyncMock(side_effect=AssertionError("No verification sandbox may start"))
-    with patch("resources_servers.scale_swe.app.ScaleSWEResourcesServer.verify", verify):
-        result = await server.verify(SimpleNamespace(session={SESSION_ID_KEY: "s"}), swe_request(audit_signoff=False))
-    assert result.mask_sample and result.failure_kind == "partner_if:unsigned_contract"
-    assert result.task_outcome is None and result.model_dump()["task_name"] == "swe-1"
-    # The actor's sandbox is released as Scale-SWE's own verify releases it.
-    actor.stop.assert_awaited_once()
-    assert "s" not in server._session_id_to_sandbox and "s" not in server._session_id_to_base_commit
 
+    async def post(**request):
+        with patch(SCALE_SWE_VERIFY, AsyncMock(return_value=scale_swe_outcome(body))):
+            result = await server.verify(SimpleNamespace(), type(body).model_validate(request["json"]))
+        return SimpleNamespace(ok=True, read=AsyncMock(return_value=result.model_dump_json().encode()))
 
-def test_process_local_swe_sessions_require_a_single_worker():
-    from nemo_gym.server_utils import ServerClient
-    from resources_servers.partner_if.swe_app import SWEIFConfig, SWEIFResourcesServer
-
-    config = SWEIFConfig(
-        host="127.0.0.1",
-        port=8001,
-        name="swe",
-        entrypoint="swe_app.py",
-        sandbox_provider="sandbox",
-        sandbox_config={},
-        actor_system_prompt="Say HELLO.",
-        judge_model_server={"type": "responses_api_models", "name": "judge"},
-        num_workers=2,
+    row = await verify_agent_response(
+        SimpleNamespace(post=post),
+        ResourcesServerRef(type="resources_servers", name="swe"),
+        body,
+        body.response,
+        {},
+        force_zero_reward=True,
     )
-    with pytest.raises(ValueError, match="num_workers=1"):
-        SWEIFResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    assert (row["reward"], row["mask_sample"], row["failure_kind"]) == (0, False, "agent_run_error")
+    # The row keeps the run's own response.
+    assert row["if_result"]["passed"] == 0 and row["response"]["output"]
+
+
+async def test_an_unsigned_contract_is_masked_after_scale_swe_releases_the_actors_sandbox():
+    body = swe_request(audit_signoff=False)
+    verify = AsyncMock(return_value=scale_swe_outcome(body))
+    with patch(SCALE_SWE_VERIFY, verify), patch(JUDGE, new_callable=AsyncMock) as judge:
+        result = await swe_server().verify(SimpleNamespace(), body)
+    judge.assert_not_called()
+    verify.assert_awaited_once()
+    assert result.mask_sample and result.failure_kind == "partner_if:unsigned_contract"
+    assert result.task_outcome["reward"] == 0 and result.model_dump()["task_name"] == "swe-1"
+
+
+async def test_reverify_cannot_run_the_swe_verification_again():
+    assert await swe_server().get_reverify_mode() == ReverifyMode.UNSUPPORTED

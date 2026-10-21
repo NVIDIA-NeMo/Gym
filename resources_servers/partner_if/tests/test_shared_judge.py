@@ -166,17 +166,23 @@ def test_judge_requests_object_mode_through_the_real_gym_converter():
     assert converted.response_format == {"type": "json_object"}
 
 
-def test_the_judge_and_artifact_limits_count_the_same_evidence_characters():
+def test_the_judge_limit_counts_the_input_as_sent_and_the_artifact_limit_is_separate():
     from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
     from resources_servers.partner_if.evidence import MAX_EVIDENCE_CHARS, EvidenceTooLarge
 
     configured = NeMoGymResponseCreateParamsNonStreaming(input=[])
-    # Many short lines inflate the JSON payload well past the limit, but not the evidence itself.
+    # Many short lines inflate the serialized input far past their text: an artifact within its own limit
+    # can still be too large for the judge.
     largest = EvidenceBundle(artifacts={"log": {"status": "present", "text": "x\n" * (MAX_EVIDENCE_CHARS // 2)}})
-    assert largest.artifact_text("log") and llm.request_payload(rubric(), largest, configured)
-    oversized = EvidenceBundle(answer="x", artifacts=largest.artifacts)
-    with pytest.raises(EvidenceTooLarge, match="Judge evidence exceeds"):
-        llm.request_payload(rubric(), oversized, configured)
+    assert largest.artifact_text("log")
+    with pytest.raises(EvidenceTooLarge, match=f"Judge input exceeds {llm.MAX_JUDGE_INPUT_CHARS:,} characters"):
+        llm.request_payload(rubric(), largest, configured)
+    # The limit applies to the user message exactly as it is sent.
+    small = EvidenceBundle(answer="HELLO")
+    sent = len(llm.request_payload(rubric(), small, configured)["input"][1]["content"])
+    assert llm.request_payload(rubric(), small, configured, max_input_chars=sent)
+    with pytest.raises(EvidenceTooLarge, match=f"Judge input exceeds {sent - 1:,} characters"):
+        llm.request_payload(rubric(), small, configured, max_input_chars=sent - 1)
     beyond = EvidenceBundle(artifacts={"log": {"status": "present", "text": "x" * (MAX_EVIDENCE_CHARS + 1)}})
     with pytest.raises(EvidenceTooLarge, match="Artifact log exceeds"):
         beyond.artifact_text("log")

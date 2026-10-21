@@ -22,11 +22,12 @@ Judge = Callable[[list[GradingItem], EvidenceBundle], Awaitable[list[RawJudgment
 
 
 async def evaluate(contract: GradingContract, evidence: EvidenceBundle, *, judge: Judge) -> Evaluation:
-    """Score each item exactly once; errors raised by `judge`, such as a failed judge call, propagate."""
+    """Score each item exactly once; errors raised by `judge`, such as a failed judge call, propagate.
+    The judge is sent only the artifacts its items need."""
     implementations = {r.id: resolve(r.verifier) for r in contract.checks}
     context = CheckContext(evidence=evidence)
     raw: dict[str, RawJudgment] = {}
-    llm_items = []
+    llm_items, judged_artifacts = [], set()
     for item in contract.checks:
         if evidence.trajectory_error:
             raw[item.id] = RawJudgment(
@@ -47,6 +48,7 @@ async def evaluate(contract: GradingContract, evidence: EvidenceBundle, *, judge
                 for name in required:
                     evidence.artifact_text(name)
                 llm_items.append(item)
+                judged_artifacts.update(required)
                 continue
             passed, detail = await asyncio.to_thread(checker.run, params, context)
             raw[item.id] = RawJudgment(id=item.id, passed=passed, reason=detail, evidence=detail)
@@ -60,7 +62,8 @@ async def evaluate(contract: GradingContract, evidence: EvidenceBundle, *, judge
             )
 
     if llm_items:
-        judgments = await judge(llm_items, evidence)
+        artifacts = {name: artifact for name, artifact in evidence.artifacts.items() if name in judged_artifacts}
+        judgments = await judge(llm_items, evidence.model_copy(update={"artifacts": artifacts}))
         identifiers = [j.id for j in judgments]
         if len(set(identifiers)) != len(identifiers) or set(identifiers) != {r.id for r in llm_items}:
             raise ValueError("Judge must return every rubric ID exactly once")

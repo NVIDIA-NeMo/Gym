@@ -149,7 +149,7 @@ async def test_live_agent_row_is_graded_on_the_evidence_its_agent_captured():
         new_callable=AsyncMock,
         return_value=response(json.dumps(reply)),
     ) as call:
-        row = TestClient(server().setup_webserver()).post("/verify", json=payload).json()
+        row = TestClient(server(accept_verification_input=True).setup_webserver()).post("/verify", json=payload).json()
     sources = json.loads(call.call_args.kwargs["json"]["input"][1]["content"])["evidence_sources"]
     assert sources["document:skill"]["lines"][0]["text"] == "Greet briefly."
     assert sources["artifact:submission"]["lines"][0]["text"] == "HELLO"
@@ -168,6 +168,39 @@ async def test_live_agent_row_is_graded_on_the_evidence_its_agent_captured():
 async def test_live_agent_row_without_matching_capture_is_masked(body, reason):
     body = body()
     body.verifier_metadata.partner_if.evidence_mode = "live_agent"
-    result = await server().verify(body)
+    result = await server(accept_verification_input=True).verify(body)
     assert result.mask_sample and result.if_result.status == "unscorable"
     assert result.failure_kind == "partner_if:unscorable" and reason in result.failure_reason
+
+
+async def test_the_judge_input_holds_only_the_artifacts_the_judged_items_need():
+    from resources_servers.partner_if.tests.test_shared_judge import verdict
+
+    build_log = {"exists": True, "text": "ok\n" * 1000}
+    body = live_request(artifacts={"submission": {"exists": True, "text": "HELLO"}, "build_log": build_log})
+    reply = verdict(id="semantic", references=[{"source": "artifact:submission", "start_line": 1, "end_line": 1}])
+    with patch(
+        "resources_servers.partner_if.grading_service.call_judge",
+        new_callable=AsyncMock,
+        return_value=response(json.dumps(reply)),
+    ) as call:
+        # The build log alone would put the judge's input over this limit.
+        result = await server(accept_verification_input=True, judge_max_input_chars=5_000).verify(body)
+    sources = json.loads(call.call_args.kwargs["json"]["input"][1]["content"])["evidence_sources"]
+    assert "artifact:submission" in sources and "artifact:build_log" not in sources
+    assert (result.reward, result.mask_sample) == (1, False)
+
+
+@pytest.mark.parametrize("accept", [False, True])
+def test_only_a_server_that_accepts_captures_grades_live_agent_rows_and_reverify_refuses_it(accept):
+    body = live_request()
+    payload = body.model_dump(mode="json") | {"verification_input": body.verification_input.model_dump(mode="json")}
+    client = TestClient(server(accept_verification_input=accept).setup_webserver())
+    with patch(
+        "resources_servers.partner_if.grading_service.call_judge",
+        new_callable=AsyncMock,
+        return_value=response(json.dumps({"items": []})),
+    ):
+        status = client.post("/verify", json=payload).status_code
+    # Rows never carry the capture, so `gym eval reverify` refuses a server that grades it without --force.
+    assert (status, client.get("/reverify_mode").json()) == ((200, "unsupported") if accept else (422, "stateless"))

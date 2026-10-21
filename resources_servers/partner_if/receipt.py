@@ -23,7 +23,7 @@ def scoring_fields(contract: GradingContract, receipt: GradeResponse) -> dict[st
     result = IFResult(
         task_id=contract.task_id,
         rubric_version=contract.rubric_version,
-        rubric_hash=receipt.rubric_hash,
+        rubric_hash=contract_hash(contract),
         status=("scored" if contract.audit_signoff else "provisional") if scored else "unscorable",
         passed=sum(item.passed is True for item in items),
         total=len(items),
@@ -54,7 +54,7 @@ def scoring_fields(contract: GradingContract, receipt: GradeResponse) -> dict[st
         "failure_kind": failure_kind,
         "failure_reason": failure.reason if failure else None,
         "if_result": result.model_dump(mode="json"),
-        **receipt.model_dump(mode="json", exclude={"task_id", "rubric_hash"}),
+        **receipt.model_dump(mode="json"),
     }
 
 

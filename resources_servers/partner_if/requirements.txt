@@ -1,2 +1,2 @@
--e nemo-gym[sandbox] @ ../../
+-e nemo-gym[dev,sandbox] @ ../../
 markdown-it-py==3.0.0

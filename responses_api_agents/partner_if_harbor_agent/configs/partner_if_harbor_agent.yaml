@@ -7,6 +7,13 @@ config_paths:
 # OpenHands calls the model server from inside the sandbox.
 use_absolute_ip: true
 
+# The grader takes the captures this agent sends as verification_input; rows never carry them, so it reports
+# reverify mode unsupported.
+partner_if:
+  resources_servers:
+    partner_if:
+      accept_verification_input: true
+
 partner_if_harbor_agent:
   responses_api_agents:
     partner_if_harbor_agent:
@@ -20,10 +27,13 @@ partner_if_harbor_agent:
       # One TaskBundle JSON (the task's contract and actor documents) per Harbor task.
       task_bundles_dir: ${partner_if_harbor_task_bundles_dir}
       harbor_resolve_paths_from_gym_root: true
+      # A fresh Harbor job for every run and retry: no trial is resumed or shared between collections.
+      harbor_unique_job_names: true
       # Native harbor.models.job.config.JobConfig fields.
       job:
-        # Trials go to a harbor/ directory beside the --output file, taking a relative --output from the
-        # Gym root; without --output, to results/partner_if_harbor_agent/harbor_jobs under the Gym root.
+        # Trials go to the harbor/ directory of the --output file's directory, which every output file in it
+        # shares (a relative --output is taken from the Gym root); without --output, to
+        # results/partner_if_harbor_agent/harbor_jobs under the Gym root.
         jobs_dir: ${oc.select:output_jsonl_fpath,results/partner_if_harbor_agent/harbor_jobs}
         datasets:
           - path: ${partner_if_harbor_tasks_dir}

@@ -284,7 +284,6 @@ def test_generic_profiles_keep_path_and_resume_defaults(
 
 def test_relative_paths_opt_in_to_gym_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("NEMO_GYM_EXTRA_ROOTS", raising=False)
     config = _make_config(
         tmp_path,
         Path("relative/jobs"),
@@ -310,11 +309,11 @@ def test_relative_dataset_paths_search_benchmark_plugin_roots_first(
         return config.job.datasets[0].path
 
     assert dataset_path("benchmarks/tasks") == (plugin / "benchmarks/tasks").resolve()
-    # A path only the Gym root has still resolves there; a missing one points at the plugin root.
+    # A path only the Gym root has, or that no root has, resolves under the Gym root.
     assert dataset_path("responses_api_agents/harbor_agent_general/configs") == (
         GYM_ROOT / "responses_api_agents/harbor_agent_general/configs"
     )
-    assert dataset_path("benchmarks/missing") == (plugin / "benchmarks/missing").resolve()
+    assert dataset_path("benchmarks/missing") == GYM_ROOT / "benchmarks/missing"
 
 
 @pytest.mark.parametrize("from_gym_root", [False, True])

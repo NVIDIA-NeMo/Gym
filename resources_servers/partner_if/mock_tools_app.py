@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Shared fixture-backed tool server: Gym owns execution, a backend owns its tools, partner_if owns scoring.
 
-Each profile instance serves one backend (a fixed tool family over a packaged fixture),
+Each server instance serves one backend (a fixed tool family over a packaged fixture),
 named in config by the import path of its `ToolBackend` class. Sessions, per-task tool
 isolation, call receipts and evidence assembly are shared; backends supply only tool
 behavior, whether a closing answer is required, and receipts. `example_tools.NotesBackend`
@@ -28,9 +28,9 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.mcp_auto_exposure import MCPTool
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
 from resources_servers.partner_if.app import (
-    UNSIGNED,
+    NoAnswer,
     PartnerIFResourcesServer,
     PartnerIFResourcesServerConfig,
     VerifyRequest,
@@ -40,17 +40,10 @@ from resources_servers.partner_if.app import (
 )
 from resources_servers.partner_if.checks import resolve
 from resources_servers.partner_if.evidence import Artifact, EvidenceBundle
-from resources_servers.partner_if.grading_contract import (
-    NO_ANSWER,
-    TRUNCATED,
-    UNSIGNED_CONTRACT,
-    GradingContract,
-    StrictModel,
-)
-from resources_servers.partner_if.grading_service import GradeRequest, contract_hash, unanswered
+from resources_servers.partner_if.grading_contract import NO_ANSWER, TRUNCATED, GradingContract, StrictModel
+from resources_servers.partner_if.grading_service import contract_hash
 from resources_servers.partner_if.native_evidence import visible_events
 from resources_servers.partner_if.package import RepoPath
-from resources_servers.partner_if.receipt import masked_fields, scoring_fields
 from resources_servers.partner_if.tool_backend import ToolBackend, ToolCallError
 
 
@@ -204,8 +197,6 @@ class MockToolsResourcesServer(PartnerIFResourcesServer):
 
     def model_post_init(self, context: object) -> None:
         super().model_post_init(context)
-        if self.config.num_workers not in (None, 1):
-            raise ValueError("Mock-tool sessions are process-local and require num_workers=1")
         self._backend = load_backend(self.config.backend)(self.config.fixture_path)
         for line in self.config.tasks_path.read_text().splitlines():
             if not line.strip():
@@ -315,9 +306,8 @@ class MockToolsResourcesServer(PartnerIFResourcesServer):
             raise HTTPException(409, "Actor input differs from the configured task")
         episode = self._episodes.get(request.session.get(SESSION_ID_KEY))
         calls = episode.calls if episode else []
-        if not contract.audit_signoff and not self.config.allow_provisional_rubrics:
-            fields = masked_fields(contract, UNSIGNED_CONTRACT, UNSIGNED)
-        else:
+
+        def evidence() -> EvidenceBundle:
             bundle = to_evidence(
                 params, body.response, calls, artifacts=self._backend.artifacts(episode.state) if episode else None
             )
@@ -326,15 +316,13 @@ class MockToolsResourcesServer(PartnerIFResourcesServer):
             if bundle.trajectory_error is None and self._backend.requires_final_answer and not bundle.answer.strip():
                 if output_cap_cutoff(body.response):
                     reason = "The episode was cut off by the output-token cap before its final answer"
-                    receipt = unanswered(contract, TRUNCATED, reason)
-                else:
-                    receipt = unanswered(contract, NO_ANSWER, "The episode ended without a final answer")
-            else:
-                receipt = await self.grade_evidence(GradeRequest(contract=contract, evidence=bundle))
-            fields = scoring_fields(contract, receipt)
+                    raise NoAnswer(TRUNCATED, reason)
+                raise NoAnswer(NO_ANSWER, "The episode ended without a final answer")
+            return bundle
+
         return MockToolsVerifyResponse(
             **body.model_dump(),
-            **fields,
+            **await self.grade_response(contract, evidence),
             tool_calls=calls,
             environment_receipts=self._backend.receipts(episode.state) if episode else {},
         )
@@ -342,3 +330,5 @@ class MockToolsResourcesServer(PartnerIFResourcesServer):
 
 if __name__ == "__main__":
     MockToolsResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = MockToolsResourcesServer.run_webserver()

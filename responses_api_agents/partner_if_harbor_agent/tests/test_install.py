@@ -17,6 +17,6 @@ def test_harbor_installer_explicitly_restores_its_opt_in_packaging_dependency():
             "skip_venv_if_present": False,
         }
     )
-    command = setup_env_command(root, config, "partner_if_markdown")
+    command = setup_env_command(root, config, "partner_if_harbor_agent")
     assert "--override overrides.txt" in command
     assert "pathspec==1.1.1" in (root / "overrides.txt").read_text().splitlines()

@@ -21,9 +21,9 @@ from nemo_gym.server_utils import (
 )
 from resources_servers.partner_if import grading_contract as kinds
 from resources_servers.partner_if.app import PartnerIFResourcesServer, PartnerIFResourcesServerConfig, VerifyRequest
-from resources_servers.partner_if.evidence import MAX_EVIDENCE_CHARS
 from resources_servers.partner_if.grading_contract import GradingContract
 from resources_servers.partner_if.grading_service import contract_hash
+from resources_servers.partner_if.llm import MAX_JUDGE_INPUT_CHARS
 from resources_servers.partner_if.schema import VerifierMetadata
 
 
@@ -156,7 +156,7 @@ def test_hash_is_stable_and_sensitive():
 @pytest.mark.parametrize("passed,expected", [(True, 1), (False, 0)])
 async def test_fixed_denominator_and_prompt_isolation(passed, expected):
     body = request()
-    body.response = response("<!-- scratchpad --> HELLO")
+    body.response = response("<!-- note --> HELLO")
     before = body.model_dump()
     parsed = verdict()
     parsed["items"][1]["passed"] = passed
@@ -176,7 +176,7 @@ async def test_fixed_denominator_and_prompt_isolation(passed, expected):
     assert (judge_request["max_output_tokens"], judge_request["temperature"]) == (8192, 0)
     payload = json.loads(judge_request["input"][1]["content"])
     assert payload["evidence_sources"]["context:0/content"]["lines"][0]["text"] == "Say HELLO."
-    assert payload["evidence_sources"]["answer"]["lines"][0]["text"] == "<!-- scratchpad --> HELLO"
+    assert payload["evidence_sources"]["answer"]["lines"][0]["text"] == "<!-- note --> HELLO"
     assert payload["rubrics"][0]["constraint"] == "The answer contains HELLO."
     assert "actor" not in payload  # No model label or reference answer given to the judge.
     assert result.judge_response is not None
@@ -278,14 +278,20 @@ async def test_provider_errors_other_incomplete_replies_and_unsupported_output_s
     assert result.failure_kind == "partner_if:unscorable"
 
 
-async def test_evidence_over_the_limit_is_masked_without_calling_the_judge():
+@pytest.mark.parametrize(
+    "answer,limit",
+    [("HELLO" * (MAX_JUDGE_INPUT_CHARS // 5 + 1), MAX_JUDGE_INPUT_CHARS), ("HELLO " * 100, 500)],
+    ids=["default", "configured"],
+)
+async def test_a_judge_input_over_the_limit_is_masked_without_calling_the_judge(answer, limit):
     body = request()
-    body.response = response("HELLO" * (MAX_EVIDENCE_CHARS // 5 + 1))
+    body.response = response(answer)
     with patch("resources_servers.partner_if.grading_service.call_judge", new_callable=AsyncMock) as call:
-        result = await server().verify(body)
+        result = await server(judge_max_input_chars=limit).verify(body)
     call.assert_not_called()
     assert result.mask_sample and result.failure_kind == "partner_if:evidence_too_large"
-    assert result.failure_reason.startswith("Judge evidence exceeds") and result.judge_request is None
+    assert result.failure_reason == f"Judge input exceeds {limit:,} characters; no silent truncation"
+    assert result.judge_request is None
 
 
 async def test_unsigned_audit_requires_explicit_development_option():
@@ -361,9 +367,11 @@ async def test_verifier_fixture_pins_both_reward_endpoints_without_a_judge():
     call.assert_not_called()
 
 
-def test_uvicorn_workers_import_a_module_level_app(monkeypatch):
-    # With num_workers > 1, each uvicorn worker imports `resources_servers.partner_if.app:app`.
-    path, name = str(Path(__file__).parents[1] / "app.py"), "resources_servers.partner_if.app"
+@pytest.mark.parametrize("entrypoint", ["app.py", "mock_tools_app.py", "swe_app.py"])
+def test_uvicorn_workers_import_a_module_level_app(monkeypatch, entrypoint):
+    # With num_workers > 1, each uvicorn worker imports the entrypoint module's `app`.
+    path = str(Path(__file__).parents[1] / entrypoint)
+    name = f"resources_servers.partner_if.{entrypoint.removesuffix('.py')}"
     started = MagicMock(return_value=object())
     monkeypatch.setattr(SimpleServer, "run_webserver", started)
     for key in (IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME, IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME):
@@ -371,6 +379,6 @@ def test_uvicorn_workers_import_a_module_level_app(monkeypatch):
     assert "app" not in runpy.run_path(path, run_name=name)
     started.assert_not_called()
     monkeypatch.setenv(IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME, "1")
-    monkeypatch.setenv(IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME, "resources_servers/partner_if/app.py")
+    monkeypatch.setenv(IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME, f"resources_servers/partner_if/{entrypoint}")
     assert runpy.run_path(path, run_name=name)["app"] is started.return_value
     started.assert_called_once_with()

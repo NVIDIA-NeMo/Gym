@@ -42,7 +42,7 @@ class PartnerIFHarborConfig(HarborAgentConfig):
     resources_server: ResourcesServerRef
 
 
-# OpenHands stops at max_iterations with this error. Like the HTTP profiles' step cap, it ends the episode.
+# OpenHands stops at max_iterations with this error. Like a step cap, it ends the episode, and the episode is graded.
 ITERATION_CAP = "RuntimeError: Agent reached maximum iteration."
 
 
@@ -96,8 +96,8 @@ class PartnerIFHarborAgent(HarborAgent):
         ):
             raise ValueError(f"{OPENSANDBOX_API_KEY} must be set for the Harbor workers")
 
-    def build_job_config(self, body: HarborRunRequest) -> JobConfig:
-        job = super().build_job_config(body)
+    def job_config_for_run(self, body: HarborRunRequest) -> JobConfig:
+        job = super().job_config_for_run(body)
         # The rollout prefix keeps OpenHands' model calls correlated with this run.
         run = body.model_dump(by_alias=True) | {ROLLOUT_ID_KEY_NAME: body.capture_rollout_id}
         url = sandbox_server_url(self.config.model_server.name, require_reachable=True)

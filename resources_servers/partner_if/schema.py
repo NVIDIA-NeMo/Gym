@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Execution-independent IF rubric contract. No task data or actor prompt templates."""
+"""Verify-request metadata, judge and IF result models, and input checks for the text evidence modes."""
 
 import json
 from typing import Literal

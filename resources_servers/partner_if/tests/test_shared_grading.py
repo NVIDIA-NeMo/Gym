@@ -162,6 +162,29 @@ async def test_llm_absent_deliverable_is_gradable_not_a_capture_failure(status, 
     assert result.status == "scored" and result.reward == int(passed)
 
 
+@pytest.mark.parametrize(
+    "notes_params,sent",
+    [({"artifacts": ["notes"]}, {"report", "notes"}), ({}, {"report", "notes", "build_log"})],
+    ids=["listed", "unlisted"],
+)
+async def test_the_judge_is_sent_only_the_artifacts_its_items_need(notes_params, sent):
+    async def judge(items, bundle):
+        assert set(bundle.artifacts) == sent
+        return [RawJudgment(id=r.id, passed=True, reason="Present", evidence="HELLO") for r in items]
+
+    result = await evaluate(
+        task(
+            [
+                item("report", verifier="llm_judge_v1", params={"artifacts": ["report"]}),
+                item("notes", verifier="llm_judge_v1", params=notes_params),
+            ]
+        ),
+        evidence(artifacts={name: {"status": "present", "text": name} for name in ("report", "notes", "build_log")}),
+        judge=judge,
+    )
+    assert result.reward == 1
+
+
 async def test_no_artifact_dependency_cannot_bypass_actor_capture_failure():
     result = await evaluate(
         task([item("format", verifier="llm_judge_v1", params={"artifacts": []})]),

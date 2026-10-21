@@ -35,7 +35,7 @@ TOOLS = [
 
 
 class StepCappedNotes(NotesBackend):
-    """A backend whose episodes may end on a tool result, like a build turn cut off at the step cap."""
+    """A backend whose episodes may end on a tool result, like an episode cut off at the step cap."""
 
     requires_final_answer = False
 
@@ -127,17 +127,14 @@ def test_backend_is_a_class_named_by_import_path(tmp_path, plugin):
             make_server(tmp_path, backend=backend)
 
 
-def test_process_local_sessions_require_a_single_worker(tmp_path, plugin):
-    with pytest.raises(ValueError, match="num_workers=1"):
-        make_server(tmp_path, num_workers=2)
-    make_server(tmp_path, num_workers=1)
-
-
-def test_episodes_are_not_exported_so_checkpoints_restart_them():
+def test_episodes_are_not_exported_so_checkpoints_restart_them(server):
     assert (api.MockToolsResourcesServer.checkpoint_mode, api.MockToolsResourcesServer.checkpoint_verify) == (
         "restart_only",
         "wait",
     )
+    # The episodes are gone after the run, so reverify cannot grade the rollouts again.
+    resource, _, _ = server
+    assert TestClient(resource.setup_webserver()).get("/reverify_mode").json() == "unsupported"
 
 
 @pytest.mark.parametrize(
@@ -187,7 +184,6 @@ def test_sessions_isolate_backend_state_and_only_tool_routes_are_added(server):
     assert appended.headers["content-type"].startswith("text/plain") and appended.text == "Appended"
     assert resource._episodes["session-one"].state == ["HELLO"]
     assert resource._episodes["session-two"].state == []
-    assert first.post("/grade", json={}).status_code == 404
     assert first.post("/invented", json={}).status_code == 404
     close = {k: seed[k] for k in ("resources_session_id", "episode_id")}
     assert first.post("/close_session", json=close).status_code == 200

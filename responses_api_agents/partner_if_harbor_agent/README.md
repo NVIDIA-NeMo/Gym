@@ -2,9 +2,9 @@
 
 Runs a native Harbor task (OpenHands 0.62 on OpenSandbox) and sends what the run captured
 to its `resources_server`'s `/verify` as a `verification_input`: the input the actor was
-given, the task bundle's documents and the verifier's artifact receipt. `partner_if`
-grades that with the response and returns the score fields; `/aggregate_metrics` returns
-its metrics.
+given, the task bundle's documents and the verifier's artifact receipt. `partner_if`,
+with `accept_verification_input: true`, grades that with the response and returns the
+score fields; `/aggregate_metrics` returns its metrics.
 
 OpenHands calls the configured `model_server` from inside the sandbox at the URL set as
 both `api_base` and `LLM_BASE_URL`, so set `use_absolute_ip: true`. With capture

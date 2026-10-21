@@ -3,11 +3,13 @@
 """Shared IF verification of replies and live-agent captures, independent of task sources and native task rewards."""
 
 import asyncio
+from collections.abc import Callable
 from functools import partial
 from pathlib import Path
 from typing import ClassVar
 
-from pydantic import Field, PrivateAttr
+from fastapi import HTTPException
+from pydantic import Field, JsonValue
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -28,9 +30,10 @@ from resources_servers.partner_if.grading_contract import (
     UNSCORABLE,
     UNSIGNED_CONTRACT,
     Evaluation,
+    GradingContract,
 )
-from resources_servers.partner_if.grading_service import GradeRequest, GradeResponse, grade, unanswered
-from resources_servers.partner_if.llm import PROTOCOL
+from resources_servers.partner_if.grading_service import grade, unanswered
+from resources_servers.partner_if.llm import MAX_JUDGE_INPUT_CHARS, PROTOCOL
 from resources_servers.partner_if.metrics import PartnerIFMetricsMixin
 from resources_servers.partner_if.native_evidence import LiveAgentCapture, live_agent_evidence, visible_events
 from resources_servers.partner_if.receipt import masked_fields, scoring_fields
@@ -38,8 +41,9 @@ from resources_servers.partner_if.schema import IFResult, VerifierMetadata, vali
 from resources_servers.partner_if.verifier_fixture import create_fixture_server
 
 
-class PartnerIFResourcesServerConfig(BaseResourcesServerConfig):
-    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
+class PartnerIFGradingConfig(BaseResourcesServerConfig):
+    """The shared grader's settings, which every partner_if server has."""
+
     judge_model_server: ModelServerRef
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming = Field(
         default_factory=lambda: NeMoGymResponseCreateParamsNonStreaming(
@@ -47,9 +51,19 @@ class PartnerIFResourcesServerConfig(BaseResourcesServerConfig):
         )
     )
     judge_max_concurrency: int = Field(default=8, gt=0)
+    # Characters of the judge's user message (the serialized rubrics and evidence); size it to the judge's
+    # context window. A larger input is not sent, and the items it holds are evidence_too_large.
+    judge_max_input_chars: int = Field(default=MAX_JUDGE_INPUT_CHARS, gt=0)
     allow_provisional_rubrics: bool = False
     # Importable modules whose CHECKERS add task-specific verifier IDs (see checks.register_modules).
     task_check_modules: list[str] = Field(default_factory=list)
+
+
+class PartnerIFResourcesServerConfig(PartnerIFGradingConfig):
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
+    # Grade live_agent rows on the verification_input their agent sends. Rows never carry it, so such a
+    # server reports reverify mode UNSUPPORTED.
+    accept_verification_input: bool = False
 
 
 UNSIGNED = "Rubric audit unsigned; enable allow_provisional_rubrics for provisional development scoring"
@@ -156,60 +170,81 @@ def tool_response_evidence(params: dict, response: NeMoGymResponse) -> EvidenceB
     )
 
 
-class PartnerIFResourcesServer(PartnerIFMetricsMixin, SimpleResourcesServer):
+class PartnerIFGradingMixin:
+    """The grading boundary every partner_if server shares: its config, its startup and its scoring policy."""
+
+    config: PartnerIFGradingConfig
+
+    def model_post_init(self, context) -> None:
+        super().model_post_init(context)
+        register_modules(self.config.task_check_modules)
+        self._judge_semaphore = asyncio.Semaphore(self.config.judge_max_concurrency)
+
+    async def grade_response(
+        self, contract: GradingContract, build_evidence: Callable[[], EvidenceBundle]
+    ) -> dict[str, JsonValue]:
+        """The Gym verify fields for one rollout. In order: an unsigned contract is masked; a reply that gives
+        nothing to grade fails every item without the judge (`build_evidence` raises NoAnswer, TRUNCATED when
+        the output-token cap cut the reply off); evidence that cannot be assessed (ValueError) is masked; any
+        other evidence is graded."""
+        if not contract.audit_signoff and not self.config.allow_provisional_rubrics:
+            return masked_fields(contract, UNSIGNED_CONTRACT, UNSIGNED)
+        try:
+            evidence = build_evidence()
+        except NoAnswer as missing:
+            receipt = unanswered(contract, missing.failure_kind, str(missing))
+        except ValueError as error:
+            return masked_fields(contract, UNSCORABLE, str(error))
+        else:
+            receipt = await grade(
+                contract,
+                evidence,
+                server_client=self.server_client,
+                server_name=self.config.judge_model_server.name,
+                semaphore=self._judge_semaphore,
+                responses_create_params=self.config.judge_responses_create_params,
+                max_input_chars=self.config.judge_max_input_chars,
+            )
+        return scoring_fields(contract, receipt)
+
+
+class PartnerIFResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixin, SimpleResourcesServer):
     # Verification keeps no session state, so a checkpoint can run it again after a crash instead of waiting for it.
     checkpoint_mode = "stateless"
     checkpoint_verify = "replay"
 
     config: PartnerIFResourcesServerConfig
-    _judge_semaphore: asyncio.Semaphore = PrivateAttr()
 
-    def model_post_init(self, context):
-        super().model_post_init(context)
-        register_modules(self.config.task_check_modules)
-        self._judge_semaphore = asyncio.Semaphore(self.config.judge_max_concurrency)
-
-    async def grade_evidence(self, body: GradeRequest) -> GradeResponse:
-        return await grade(
-            body,
-            server_client=self.server_client,
-            server_name=self.config.judge_model_server.name,
-            semaphore=self._judge_semaphore,
-            responses_create_params=self.config.judge_responses_create_params,
-        )
+    async def get_reverify_mode(self) -> ReverifyMode:
+        # A live agent's capture is not in the row, so reverify cannot grade the row again.
+        if self.config.accept_verification_input:
+            return ReverifyMode.UNSUPPORTED
+        return await super().get_reverify_mode()
 
     async def verify(self, body: VerifyRequest) -> VerifyResponse:
         contract = body.verifier_metadata.partner_if
-        if not contract.audit_signoff and not self.config.allow_provisional_rubrics:
-            return VerifyResponse(**body.model_dump(), **masked_fields(contract, UNSIGNED_CONTRACT, UNSIGNED))
-        try:
+        if contract.evidence_mode == "live_agent" and not self.config.accept_verification_input:
+            raise HTTPException(422, "live_agent rows need a server with accept_verification_input: true")
+
+        def evidence() -> EvidenceBundle:
             params = body.responses_create_params.model_dump(exclude_none=True)
             if contract.evidence_mode == "live_agent":
                 output = [item.model_dump(exclude_none=True) for item in body.response.output]
-                bundle = live_agent_evidence(params, output, body.verification_input)
-            else:
-                validate_input(params, evidence_mode=contract.evidence_mode)
-                if contract.evidence_mode == "tool_call_response":
-                    bundle = tool_response_evidence(params, body.response)
-                else:
-                    answer = visible_answer(body.response)
-                    bundle = EvidenceBundle(
-                        context=params["input"],
-                        instructions=params.get("instructions"),
-                        tools=params.get("tools") or [],
-                        answer="\n".join(
-                            part.get("text") or part.get("refusal") or ""
-                            for message in answer
-                            for part in message["content"]
-                        ),
-                    )
-        except NoAnswer as missing:
-            receipt = unanswered(contract, missing.failure_kind, str(missing))
-        except ValueError as error:
-            return VerifyResponse(**body.model_dump(), **masked_fields(contract, UNSCORABLE, str(error)))
-        else:
-            receipt = await self.grade_evidence(GradeRequest(contract=contract, evidence=bundle))
-        return VerifyResponse(**body.model_dump(), **scoring_fields(contract, receipt))
+                return live_agent_evidence(params, output, body.verification_input)
+            validate_input(params, evidence_mode=contract.evidence_mode)
+            if contract.evidence_mode == "tool_call_response":
+                return tool_response_evidence(params, body.response)
+            answer = visible_answer(body.response)
+            return EvidenceBundle(
+                context=params["input"],
+                instructions=params.get("instructions"),
+                tools=params.get("tools") or [],
+                answer="\n".join(
+                    part.get("text") or part.get("refusal") or "" for message in answer for part in message["content"]
+                ),
+            )
+
+        return VerifyResponse(**body.model_dump(), **await self.grade_response(contract, evidence))
 
 
 VERIFIER_FIXTURE = VerifierFixture(

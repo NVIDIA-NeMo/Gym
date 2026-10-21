@@ -3,9 +3,9 @@
 Routes each episode of a mixed-harness benchmark to the environment server configured
 for its `verifier_metadata.partner_if.task_id`, then returns that environment's
 receipt unchanged. Sessions, execution and grading stay in the routed environments.
-It exists because Gym cannot compute one aggregate metric across several environment
-servers: all of the benchmark's rows come back through this agent, and its
-`/aggregate_metrics` is proxied to the configured `resources_server`.
+All of the benchmark's rows come back through this agent, and its `/aggregate_metrics`
+is proxied to the configured `resources_server`, so one aggregate covers every
+environment.
 
 `configs/partner_if_dispatcher.yaml` runs partner_if's text and mock-tool examples
 (`data/example.jsonl`) in their own environments:

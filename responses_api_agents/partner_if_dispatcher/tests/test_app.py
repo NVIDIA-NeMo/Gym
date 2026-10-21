@@ -25,18 +25,18 @@ METRICS_SERVER = {"type": "resources_servers", "name": "partner_if"}
 
 def server(upstream=None):
     module = importlib.import_module("responses_api_agents.partner_if_dispatcher.app")
-    profiles = ("text", "tools", "markdown", "swe")
-    routes = {f"task-{p}": {"type": "environment_servers", "name": f"env-{p}"} for p in profiles}
+    harnesses = ("text", "tools", "harbor", "swe")
+    routes = {f"task-{h}": {"type": "environment_servers", "name": f"env-{h}"} for h in harnesses}
     client = _Client(
         head_server_config=BaseServerConfig(host="head", port=1),
         global_config_dict=OmegaConf.create(
             {
-                f"env-{p}": {
+                f"env-{h}": {
                     "environment_servers": {
-                        "legacy_agent": {"agent_server": {"type": "responses_api_agents", "name": f"agent-{p}"}}
+                        "legacy_agent": {"agent_server": {"type": "responses_api_agents", "name": f"agent-{h}"}}
                     }
                 }
-                for p in profiles
+                for h in harnesses
             }
         ),
         calls=[],
@@ -53,11 +53,11 @@ def server(upstream=None):
     return module.PartnerIFDispatcher(config=config, server_client=client), client
 
 
-@pytest.mark.parametrize("profile", ["text", "tools", "markdown", "swe"])
-def test_routes_the_complete_episode_without_rewriting_native_fields(profile):
+@pytest.mark.parametrize("harness", ["text", "tools", "harbor", "swe"])
+def test_routes_the_complete_episode_without_rewriting_native_fields(harness):
     actor = {
         "responses_create_params": {"input": "original"},
-        "verifier_metadata": {"partner_if": {"task_id": f"task-{profile}"}},
+        "verifier_metadata": {"partner_if": {"task_id": f"task-{harness}"}},
         "_ng_task_index": 7,
         "_ng_rollout_index": 0,
         "_ng_rollout_id": "capture-7",
@@ -81,27 +81,27 @@ def test_routes_the_complete_episode_without_rewriting_native_fields(profile):
     assert response.content == expected
     assert response.headers.get_list("set-cookie") == ["one=1", "two=2"]
     [(destination, path, kwargs)] = downstream.calls
-    assert (destination, path) == (f"env-{profile}", "/run")
+    assert (destination, path) == (f"env-{harness}", "/run")
     forwarded = json.loads(kwargs["data"])
-    assert forwarded == {**actor, "agent_ref": {"name": f"agent-{profile}"}, "task_source": f"agent-{profile}"}
+    assert forwarded == {**actor, "agent_ref": {"name": f"agent-{harness}"}, "task_source": f"agent-{harness}"}
     assert kwargs["cookies"] == {"session": "original"}
     assert kwargs["headers"]["x-trace"] == "trace-7"
     assert "host" not in kwargs["headers"] and "content-length" not in kwargs["headers"]
 
     # Exercise the actual session boundary, whose host-route validation rejects
     # an unchanged dispatcher agent_ref/task_source before any model call.
-    if profile in {"text", "tools"}:
+    if harness in {"text", "tools"}:
         from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
         from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
 
         environment = SingleAgentTurnLegacyEnvironmentServer(
             config=SingleAgentTurnEnvironmentServerConfig(
-                name=f"env-{profile}",
+                name=f"env-{harness}",
                 entrypoint="app.py",
                 host="localhost",
                 port=8111,
                 cleanup_timeout_seconds=180,
-                agent_server={"type": "responses_api_agents", "name": f"agent-{profile}"},
+                agent_server={"type": "responses_api_agents", "name": f"agent-{harness}"},
                 resources_server={"type": "resources_servers", "name": "resources"},
             ),
             server_client=downstream,
@@ -276,7 +276,7 @@ def test_example_config_runs_each_partner_if_example_in_its_own_environment():
         "partner_if_environment_server": "partner_if_simple_agent",
         "partner_if_mock_tools_environment_server": "partner_if_mock_tools_simple_agent",
     }
-    # The example is partner_if's two examples, and each task goes to its own profile's environment.
+    # The example is partner_if's two examples, and each task goes to its own environment.
     examples = PARENT_DIR / "resources_servers/partner_if/data"
     rows = [
         json.loads(line) for line in (PARENT_DIR / settings["datasets"][0]["jsonl_fpath"]).read_text().splitlines()

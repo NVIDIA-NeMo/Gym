@@ -12,7 +12,7 @@ from resources_servers.partner_if.tests.test_app import contract, response, serv
 
 
 def frozen_row():
-    data = {"verifier_metadata": {"partner_if": contract("frozen-synthetic", data_kind="reported")}}
+    data = {"verifier_metadata": {"partner_if": contract("frozen-synthetic")}}
     data["verifier_metadata"]["partner_if"]["evidence_mode"] = "frozen_tool_history"
     data["responses_create_params"] = {
         "tools": [

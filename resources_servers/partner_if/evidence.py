@@ -9,8 +9,8 @@ from pydantic import Field, JsonValue, model_validator
 from resources_servers.partner_if.grading_contract import StrictModel
 
 
-# Evidence over this many characters is refused, never truncated: each captured artifact,
-# and the text of all evidence sent to the judge.
+# A captured artifact over this many characters is refused, never truncated. The judge's input has its own
+# limit (judge_max_input_chars).
 MAX_EVIDENCE_CHARS = 1_000_000
 
 
@@ -19,7 +19,7 @@ class EvidenceUnavailable(ValueError):
 
 
 class EvidenceTooLarge(EvidenceUnavailable):
-    """Evidence over MAX_EVIDENCE_CHARS."""
+    """An artifact over MAX_EVIDENCE_CHARS, or a judge input over its limit."""
 
 
 class Artifact(StrictModel):
