@@ -319,7 +319,7 @@ The agent/environment separation design keeps task behavior independent of the s
 | Agent Server | Harness behavior, model interaction, dependencies, and harness-local sessions |
 | Model Server | Model inference and provider-specific adaptation |
 | Environment | Configuration that selects the task, participants, model bindings, episode protocol, and run policy |
-| Environment Server | Episode entrypoint and protocol orchestration; legacy adapters delegate episode execution to the agent |
+| Environment Server | Episode entrypoint and protocol orchestration; the `legacy_agent` relay delegates episode execution to the agent |
 
 A Resources Server is one participant in an environment. Reuse an existing harness when adding tasks or scoring; a new benchmark does not by itself need a new Agent Server. Expose every tool or artifact the verifier depends on through the task contract. For example, a verifier that reads deliverables must document how any compatible harness can create them, without relying on a private handoff in one agent.
 

@@ -31,7 +31,7 @@ class _Cookie:
     value = "cookie-value"
 
 
-def test_legacy_module_exports_app_for_multi_worker_import(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_flat_row_module_exports_app_for_multi_worker_import(monkeypatch: pytest.MonkeyPatch) -> None:
     worker_app = object()
     monkeypatch.setattr(nemo_gym.server_utils, "is_nemo_gym_fastapi_entrypoint", lambda _: True)
     monkeypatch.setattr(SimpleServer, "run_webserver", classmethod(lambda _: worker_app))
@@ -140,7 +140,7 @@ def _environment_server() -> tuple[SingleAgentTurnEnvironmentServer, _Client]:
     return SingleAgentTurnEnvironmentServer(config=config, server_client=client), client
 
 
-async def test_legacy_compatibility_is_a_separate_environment_deployment() -> None:
+async def test_flat_row_adapter_is_a_separate_environment_deployment() -> None:
     environment_server, client = _environment_server()
     adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client)
     result = await adapter.run_legacy(
@@ -161,7 +161,7 @@ async def test_legacy_compatibility_is_a_separate_environment_deployment() -> No
     assert "ng_agent_observations" not in result
 
 
-def test_legacy_adapter_forwards_aggregate_metrics_to_resources() -> None:
+def test_flat_row_adapter_forwards_aggregate_metrics_to_resources() -> None:
     environment_server, client = _environment_server()
     client.responses = [_Response({"agent_metrics": {"mean/reward": 0.5}})]
     adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client)
@@ -176,7 +176,7 @@ def test_legacy_adapter_forwards_aggregate_metrics_to_resources() -> None:
     assert [(server, path) for server, path, _ in client.calls] == [("resources", "/aggregate_metrics")]
 
 
-def test_legacy_adapter_preserves_task_identity_and_data():
+def test_flat_row_adapter_preserves_task_identity_and_data():
     row = {
         "problem_id": "problem-1",
         "instance_id": "instance-1",
@@ -328,11 +328,11 @@ def test_task_source_naming_another_instance_is_rejected() -> None:
 
 
 async def test_flat_rows_and_episode_requests_project_the_same_result() -> None:
-    legacy_environment, legacy_client = _environment_server()
+    flat_environment, flat_client = _environment_server()
     episode_environment, episode_client = _environment_server()
-    legacy_adapter = SingleAgentTurnLegacyEnvironmentServer(
-        config=legacy_environment.config,
-        server_client=legacy_client,
+    flat_adapter = SingleAgentTurnLegacyEnvironmentServer(
+        config=flat_environment.config,
+        server_client=flat_client,
     )
     episode_adapter = SingleAgentTurnLegacyEnvironmentServer(
         config=episode_environment.config,
@@ -357,10 +357,10 @@ async def test_flat_rows_and_episode_requests_project_the_same_result() -> None:
         ),
     )
 
-    legacy_result = await legacy_adapter.run_legacy(flat_row)
+    flat_result = await flat_adapter.run_legacy(flat_row)
     episode_result = await episode_adapter.run_legacy(episode_request.model_dump(mode="json"))
 
-    assert episode_result == legacy_result
+    assert episode_result == flat_result
 
 
 class _BlockingAgentClient(_Client):
@@ -376,7 +376,7 @@ class _BlockingAgentClient(_Client):
         return await super().post(server_name, url_path, **kwargs)
 
 
-async def test_legacy_rows_take_part_in_checkpoints() -> None:
+async def test_flat_rows_take_part_in_checkpoints() -> None:
     environment_server, client = _environment_server()
     client.global_config_dict["checkpoint"] = {"enabled": True, "control_auth_token": "t"}
     blocking = _BlockingAgentClient(

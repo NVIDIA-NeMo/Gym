@@ -6,7 +6,7 @@ One participant serves both ways an episode can reach an agent:
 
 - Through an environment server, the agent owns a session named by ``agent_session_id``.
   The environment server owns the protocol position and invokes one activation at a time.
-- Through a legacy ``/run``, the agent owns the whole episode: it is both the episode protocol (seed,
+- Through the agent's own ``/run``, the agent owns the whole episode: it is both the episode protocol (seed,
   turn loop, verify) and the turn loop.
   The participant keys that episode by its logical rollout ID so a replacement attempt finds the restored state,
   and tracks its steps with the same ``EpisodeSteps`` an environment server uses.
@@ -73,7 +73,7 @@ class ActivationOutOfOrderError(ControlError):
 
 
 class LegacyRun:
-    """Handle for one legacy ``/run`` episode: its restored boundary, and its steps."""
+    """Handle for one episode on an agent's own ``/run``: its restored boundary, and its steps."""
 
     def __init__(self, steps: EpisodeSteps, key: str) -> None:
         self._steps = steps
@@ -305,7 +305,7 @@ class AgentSessionParticipant(CheckpointParticipant):
 
     @asynccontextmanager
     async def legacy_run(self, session_key: str, episode_id: EpisodeId) -> AsyncIterator[LegacyRun]:
-        """Hold one legacy ``/run`` episode and its turn-loop session."""
+        """Hold one episode on the agent's own ``/run`` and its turn-loop session."""
         self.open_session(session_key, episode_id)
         session = self._sessions[session_key]
         # This /run claims a restored episode whatever step it continues at, so a commit no longer retires it.
@@ -388,7 +388,7 @@ class AgentSessionParticipant(CheckpointParticipant):
 
     @asynccontextmanager
     async def restart_call(self, capture_key: Optional[str]) -> AsyncIterator[None]:
-        """Track a call that belongs to neither an agent session nor a legacy ``/run`` as a restart.
+        """Track a call that belongs to neither an agent session nor the agent's own ``/run`` as a restart.
 
         Such a call is a direct ``/v1/responses``.
         Nothing of it is in a checkpoint, so it never holds up prepare, and the commit must leave its rollout out.
@@ -580,7 +580,7 @@ class AgentSessionParticipant(CheckpointParticipant):
                 episode_id=session.episode_id,
                 session=states[session.key],
                 boundary=boundary,
-                # A restored legacy episode whose replacement /run has not started keeps its restored step.
+                # A restored /run episode whose replacement /run has not started keeps its restored step.
                 episode=legacy.get(session.key, self._restored_episodes.get(session.key)),
             )
             for session, boundary in zip(sessions, boundaries)

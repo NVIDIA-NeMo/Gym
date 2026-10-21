@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Agent-owned views of the legacy seed/verify wire protocol.
+"""Agent-owned views of the flat seed/verify wire protocol used by the agent's own /run.
 
 Resources servers validate their own models at the HTTP boundary. Keep this
 adapter local until Gym's shared agent/task session contracts are available.

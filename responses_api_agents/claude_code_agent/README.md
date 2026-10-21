@@ -261,13 +261,13 @@ Configure `model_server` as above, or `anthropic_base_url` and `anthropic_api_ke
 the endpoint must be reachable from the sandbox. With `model_server`, only
 placeholder Anthropic credentials enter the sandbox; the configured direct
 Anthropic credential stays on the host. `resources_server` is needed only
-for the legacy agent `/run` path. Sandbox-only servers install no host CLI. For
+for the agent's own `/run` path. Sandbox-only servers install no host CLI. For
 local execution, installation happens on the first local invocation; concurrent
 calls share setup, failures propagate, and a later call can retry.
 
 The default YAML selects composition with an Environment Server rather than acting as an unbound
-legacy swap source. To use `--resources-server X --agent-type claude_code_agent`
-with legacy swap configurations, explicitly restore
+`--agent-type` swap source. To use `--resources-server X --agent-type claude_code_agent`
+with `--agent-type` swap configurations, explicitly restore
 `resources_server: {type: resources_servers, name: "???"}` on the agent. Existing
 resource-bound recipes retain their bindings.
 

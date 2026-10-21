@@ -502,15 +502,13 @@ async def test_results_preserve_verification_and_observations(mask_sample: bool,
     if result_path != "flat-adapter":
         return
     adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment.config, server_client=client)
-    legacy = adapter._legacy_result(result)
-    assert legacy["mask_sample"] is mask_sample
-    assert legacy["reward"] == 1.0
-    assert legacy["benchmark_field"] == "preserved"
-    assert legacy["grader_output"] == {"resolved": True}
-    assert legacy["response"] == _agent_response().model_dump(mode="json")
-    assert legacy["ng_agent_observations"] == AgentObservationBundle.model_validate(observations).model_dump(
-        mode="json"
-    )
+    flat = adapter._legacy_result(result)
+    assert flat["mask_sample"] is mask_sample
+    assert flat["reward"] == 1.0
+    assert flat["benchmark_field"] == "preserved"
+    assert flat["grader_output"] == {"resolved": True}
+    assert flat["response"] == _agent_response().model_dump(mode="json")
+    assert flat["ng_agent_observations"] == AgentObservationBundle.model_validate(observations).model_dump(mode="json")
 
 
 @pytest.mark.parametrize("stage", ["agent", "verification"])
@@ -549,14 +547,12 @@ async def test_dependency_failure_closes_sessions(stage: str, error: Exception) 
     assert result.failure.failure_reason == str(error)
     assert result.failure.terminal is isinstance(error, ValueError)
     assert result.failure.partial_response == (_agent_response() if stage == "verification" else None)
-    # The closed agent session's evidence survives the failure, including in the legacy flat reply.
+    # The closed agent session's evidence survives the failure, including in the flat reply.
     assert result.failure.agent_observations == AgentObservationBundle.model_validate(observations)
-    legacy = SingleAgentTurnLegacyEnvironmentServer(config=environment.config, server_client=client)._legacy_result(
+    flat = SingleAgentTurnLegacyEnvironmentServer(config=environment.config, server_client=client)._legacy_result(
         result
     )
-    assert legacy["ng_agent_observations"] == AgentObservationBundle.model_validate(observations).model_dump(
-        mode="json"
-    )
+    assert flat["ng_agent_observations"] == AgentObservationBundle.model_validate(observations).model_dump(mode="json")
     paths = [path for _, path, _ in client.calls]
     assert paths == [
         "/seed_session",

@@ -493,11 +493,11 @@ def test_metadata_rejection_preserves_activation_and_configuration_hint(setup, m
 
 def test_no_session_keeps_existing_local_path(setup):
     agent, sandbox = setup
-    with patch.object(agent, "_create_response", AsyncMock(side_effect=RuntimeError("legacy path reached"))) as legacy:
+    with patch.object(agent, "_create_response", AsyncMock(side_effect=RuntimeError("local path reached"))) as local:
         with TestClient(agent.setup_webserver()) as client:
-            with pytest.raises(RuntimeError, match="legacy path reached"):
+            with pytest.raises(RuntimeError, match="local path reached"):
                 client.post("/v1/responses", json={"input": "task"})
-        legacy.assert_awaited_once()
+        local.assert_awaited_once()
     sandbox.launch.assert_not_awaited()
 
 
@@ -1227,11 +1227,11 @@ async def test_invalid_or_expired_sandbox_cookie_never_uses_local_execution(setu
     sandbox.launch.assert_not_awaited()
 
 
-def test_sandbox_close_cookie_blocks_legacy_run_with_configured_resources(setup):
+def test_sandbox_close_cookie_blocks_agent_run_with_configured_resources(setup):
     from nemo_gym.config_types import ResourcesServerRef
 
     agent, sandbox = setup
-    agent.config.resources_server = ResourcesServerRef(type="resources_servers", name="legacy-resources")
+    agent.config.resources_server = ResourcesServerRef(type="resources_servers", name="bound-resources")
     with TestClient(agent.setup_webserver()) as client:
         session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
@@ -1533,7 +1533,7 @@ async def test_independent_configs_route_prepared_rows_through_environment_run(s
             offline=True,
         )
     )
-    # The benchmark's legacy allowlist predates this sandbox harness. Keep its
+    # The benchmark's existing allowlist predates this sandbox harness. Keep its
     # definition untouched and explicitly opt in, as the CLI smoke does.
     monkeypatch.setenv("NEMO_GYM_ALLOW_UNSUPPORTED_PAIRING", "1")
     if failed:

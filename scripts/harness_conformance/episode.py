@@ -36,7 +36,7 @@ class _Server(uvicorn.Server):
 
 
 def check_runtime(harness: str, *, use_agent_sessions: bool = False) -> dict:
-    """Record session runtime pins or require a preinstalled legacy runtime."""
+    """Record session runtime pins or require a preinstalled runtime for the agent's own /run."""
     if use_agent_sessions and harness != "hermes":
         return {"installation": "agent_session"}
     if harness == "hermes":
@@ -53,7 +53,7 @@ def check_runtime(harness: str, *, use_agent_sessions: bool = False) -> dict:
 
 
 def _supports_agent_sessions(agent_cls: type[SimpleResponsesAPIAgent]) -> bool:
-    # Every SimpleResponsesAPIAgent exposes session routes, including legacy agents
+    # Every SimpleResponsesAPIAgent exposes session routes, including agents
     # whose handlers raise NotImplementedError. Check implementations, not route presence.
     return all(
         getattr(agent_cls, handler) is not getattr(SimpleResponsesAPIAgent, handler)

@@ -638,8 +638,8 @@ async def test_a_seed_arriving_during_an_open_checkpoint_waits_for_resume() -> N
     await asyncio.sleep(0.01)
     waited = not seeding.done() and not participant.has_session("late") and participant.readiness().ready
     with pytest.raises(AdmissionClosedError):
-        # A new session that is not a seed, such as a legacy /run, is still refused.
-        participant.open_session("legacy", EpisodeId(rollout_id="other"))
+        # A new session that is not a seed, such as an agent's own /run, is still refused.
+        participant.open_session("own-run", EpisodeId(rollout_id="other"))
     await participant.open_admission()
     await asyncio.wait_for(seeding, 5)
 

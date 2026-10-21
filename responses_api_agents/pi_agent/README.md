@@ -71,7 +71,7 @@ benchmark's declared `allowed_agents` before running a new pairing.
 
 Use this explicit composition for now. `--agent` selects a configured agent; it does not
 install or rebind one. The existing `--agent-type` swap and automatic benchmark-data lookup
-still depend on legacy Agent-to-Resources bindings; they are not equivalent to this workflow.
+still depend on the agent's own `resources_server` binding; they are not equivalent to this workflow.
 A new pairing does not need another combined preset.
 
 ## Runtime and model requirements

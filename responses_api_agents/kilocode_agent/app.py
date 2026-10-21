@@ -876,7 +876,7 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
             diagnostics=stderr[-4096:],
         )
         if problem is not None:
-            # The legacy /run path still verifies (the conformance convention), so a failed run is
+            # The agent's own /run path still verifies (the conformance convention), so a failed run is
             # marked failed rather than passed off as a completed answer.
             LOG.warning("Kilo run failed: %s", problem[:500])
             response.status = "failed"

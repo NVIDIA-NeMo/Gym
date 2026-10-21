@@ -954,7 +954,7 @@ async def test_resolved_workdir_check_runs_before_session_files_are_created(setu
     assert list(sessions.iterdir()) == []
 
 
-def test_close_response_cookie_blocks_legacy_run(setup):
+def test_close_response_cookie_blocks_agent_run(setup):
     agent, sandbox = setup
     with TestClient(agent.setup_webserver()) as client:
         created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))

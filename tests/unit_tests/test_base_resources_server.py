@@ -94,7 +94,7 @@ class TestBaseResourcesServer:
             }
             | identity,
         )
-        # An Agent's /run seeds with its legacy row, which keeps the empty response.
+        # An agent's own /run seeds with a flat row, which keeps the empty response.
         legacy_seed = client.post("/seed_session", json={"responses_create_params": {"input": "2+2"}})
         typed_close = client.post("/close_session", json={"resources_session_id": "resources-session"} | identity)
 
