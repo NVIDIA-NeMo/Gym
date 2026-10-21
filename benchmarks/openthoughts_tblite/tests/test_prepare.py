@@ -171,6 +171,7 @@ def test_harbor_profile_runs_each_task_with_its_own_limits() -> None:
     agent = _harbor_agent(_resolve("config.yaml", output_jsonl_fpath="/results/run/rollouts.jsonl"))
     assert agent["datasets"] == DATASETS
     assert agent["harbor_resolve_paths_from_gym_root"] is True
+    assert agent["harbor_unique_job_names"] is True
     assert agent["harbor_dataset"] == {"path": "benchmarks/openthoughts_tblite/data/tasks"}
     assert agent["harbor_jobs_dir"] == "/results/run/rollouts.jsonl"
     assert agent["harbor_max_retries"] == 0
@@ -206,6 +207,25 @@ def test_harbor_profile_builds_a_harbor_job_for_one_task(tmp_path: Path) -> None
     assert job.timeout_multiplier == 1.0
 
 
+def test_harbor_profile_gives_every_attempt_its_own_job_folder(tmp_path: Path) -> None:
+    """Two runs writing next to each other (model-a.jsonl, model-b.jsonl) share one harbor/ folder; neither may
+    pick up the other's trial for the same task and attempt."""
+    pytest.importorskip("harbor")
+    from responses_api_agents.harbor_agent_general.app import HarborAgentConfig
+
+    jobs = []
+    for output in ("model-a.jsonl", "model-b.jsonl"):
+        agent = _harbor_agent(_resolve("config.yaml", output_jsonl_fpath=str(tmp_path / output)))
+        config = HarborAgentConfig.model_validate(
+            {"name": "openthoughts_tblite", "host": "127.0.0.1", "port": 1, **agent}
+        )
+        jobs.append(config.build_job_config("amuse-install", "t0-r0"))
+    first, second = jobs
+    assert first.jobs_dir == second.jobs_dir == tmp_path / "harbor"
+    assert first.job_name != second.job_name
+    assert first.job_name.startswith("t0-r0-") and second.job_name.startswith("t0-r0-")
+
+
 def test_terminus_2_profile_runs_the_same_rows_on_the_terminal_bench_server() -> None:
     # `--model-type vllm_model` adds the model server that Gym's Terminus-2 calls.
     config = _resolve("terminus_2.yaml", "responses_api_models/vllm_model/configs/vllm_model.yaml")
@@ -222,6 +242,27 @@ def test_terminus_2_profile_runs_the_same_rows_on_the_terminal_bench_server() ->
     # One limit for every task: TB-Lite's longest agent and verifier limits.
     assert agent["sandbox_timeout"] == resources["evaluation_timeout"] == 3600
     assert resources["is_verifying_golden_patch"] is False
+
+
+@pytest.mark.parametrize("provider", ["docker", "opensandbox"])
+def test_terminus_2_profile_uses_the_one_provider_the_run_names(
+    provider: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The README's command adds a provider config; agent and resources server both resolve to it alone."""
+    from nemo_gym.sandbox.config import resolve_provider_config
+
+    monkeypatch.setenv("OPENSANDBOX_API_KEY", "unused")
+    config = _resolve(
+        "terminus_2.yaml",
+        "responses_api_models/vllm_model/configs/vllm_model.yaml",
+        f"nemo_gym/sandbox/providers/{provider}/configs/{provider}.yaml",
+    )
+    agent = config["openthoughts_tblite_terminus_2_sandboxed_agent"]["responses_api_agents"][
+        "terminus_2_sandboxed_agent"
+    ]
+    resources = config[agent["resources_server"]["name"]]["resources_servers"]["terminal_bench_2_1"]
+    for server in (agent, resources):
+        assert list(resolve_provider_config(server["sandbox_provider"], config)) == [provider]
 
 
 @pytest.mark.parametrize(

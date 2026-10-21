@@ -13,6 +13,8 @@ openthoughts_tblite:
           num_repeats: 3
 
       harbor_resolve_paths_from_gym_root: true
+      # Each attempt gets its own Harbor job folder: runs sharing a results folder can't reuse each other's trials.
+      harbor_unique_job_names: true
       # Harbor's files for every attempt go to a `harbor` folder next to the rollouts.
       harbor_jobs_dir: ${oc.select:output_jsonl_fpath,results/openthoughts_tblite/rollouts.jsonl}
       # Gym retries a failed attempt; a Harbor retry would start another sandbox inside the same request.
