@@ -102,9 +102,9 @@ _OSWORLD_LOG_CONTEXT_FIELDS = (
     "step",
     "parse_attempt",
 )
-_MODEL_LOG_CONTEXT_HEADERS = {
-    field: f"x-nemo-gym-log-{field.replace('_', '-')}" for field in _OSWORLD_LOG_CONTEXT_FIELDS
-}
+# The model server copies this header's JSON object into its opt-in transport log unchanged
+# (``TRANSPORT_LOG_CONTEXT_HEADER`` in responses_api_models/vllm_model/app.py).
+_MODEL_LOG_CONTEXT_HEADER = "x-nemo-gym-log-context"
 _ROLLOUT_DIAGNOSTIC_ENV_VARS = (
     "NEMO_GYM_RESPONSE_LOGGING",
     "OSWORLD_MODEL_IO_LOG",
@@ -172,13 +172,16 @@ def _normalize_log_context(context: Mapping[str, Any] | None) -> Dict[str, Any]:
 
 
 def _log_context_headers(context: Mapping[str, Any] | None) -> Dict[str, str]:
-    """Encode OSWorld identity as headers without changing the model body."""
+    """Encode OSWorld identity as one header without changing the model body."""
 
-    headers: Dict[str, str] = {}
-    for field, value in _normalize_log_context(context).items():
-        header_value = str(value).replace("\r", "").replace("\n", "")
-        headers[_MODEL_LOG_CONTEXT_HEADERS[field]] = header_value[:1024]
-    return headers
+    normalized = {
+        field: value[:1024] if isinstance(value, str) else value
+        for field, value in _normalize_log_context(context).items()
+    }
+    if not normalized:
+        return {}
+    # ASCII-only JSON escapes control characters and keeps the header value valid.
+    return {_MODEL_LOG_CONTEXT_HEADER: json.dumps(normalized, ensure_ascii=True, separators=(",", ":"))}
 
 
 def _jsonable(value: Any) -> Any:

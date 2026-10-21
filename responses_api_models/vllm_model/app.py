@@ -151,45 +151,23 @@ def _mark_propagated_overflow(error: ClientResponseError) -> None:
     )
 
 
-_TRANSPORT_LOG_CONTEXT_HEADERS = {
-    "run_id": "x-nemo-gym-log-run-id",
-    "adapter": "x-nemo-gym-log-adapter",
-    "sampling_event_id": "x-nemo-gym-log-sampling-event-id",
-    "source_group_id": "x-nemo-gym-log-source-group-id",
-    "rollout_id": "x-nemo-gym-log-rollout-id",
-    "group_id": "x-nemo-gym-log-group-id",
-    "rollout_index": "x-nemo-gym-log-rollout-index",
-    "attempt_index": "x-nemo-gym-log-attempt-index",
-    "task_id": "x-nemo-gym-log-task-id",
-    "domain": "x-nemo-gym-log-domain",
-    "task_attempt": "x-nemo-gym-log-task-attempt",
-    "step": "x-nemo-gym-log-step",
-    "parse_attempt": "x-nemo-gym-log-parse-attempt",
-}
+# A caller may describe its request for the opt-in transport log in one header holding a JSON object.
+# The model server does not interpret it: the caller (today, osworld_agent) owns its fields, and the
+# transport log records it unchanged under its own ``log_context`` key (transport schema version 3).
+TRANSPORT_LOG_CONTEXT_HEADER = "x-nemo-gym-log-context"
 
 
 def _transport_log_context(request: Request) -> Dict[str, Any]:
-    """Read opt-in Gym trace headers without changing the model body."""
+    """Read the caller's transport-log context without changing the model body."""
 
-    context: Dict[str, Any] = {}
-    for field, header in _TRANSPORT_LOG_CONTEXT_HEADERS.items():
-        value = request.headers.get(header)
-        if not value:
-            continue
-        if field in {
-            "rollout_index",
-            "attempt_index",
-            "task_attempt",
-            "step",
-            "parse_attempt",
-        }:
-            try:
-                context[field] = int(value)
-            except ValueError:
-                continue
-        else:
-            context[field] = value
-    return context
+    raw = request.headers.get(TRANSPORT_LOG_CONTEXT_HEADER)
+    if not isinstance(raw, str) or not raw:
+        return {}
+    try:
+        context = json.loads(raw)
+    except ValueError:
+        return {}
+    return context if isinstance(context, dict) else {}
 
 
 def _jsonable(value: Any) -> Any:
@@ -1196,8 +1174,8 @@ class VLLMModel(SimpleResponsesAPIModel):
             started_ns = time_ns()
             _append_transport_io(
                 {
-                    **log_context,
-                    "schema_version": 2,
+                    "schema_version": 3,
+                    "log_context": log_context,
                     "event": "transport_request",
                     "call_index": call_index,
                     "timestamp_unix_ns": started_ns,
@@ -1218,8 +1196,8 @@ class VLLMModel(SimpleResponsesAPIModel):
                 finished_ns = time_ns()
                 _append_transport_io(
                     {
-                        **log_context,
-                        "schema_version": 2,
+                        "schema_version": 3,
+                        "log_context": log_context,
                         "event": "transport_error_response",
                         "call_index": call_index,
                         "timestamp_unix_ns": finished_ns,
@@ -1259,8 +1237,8 @@ class VLLMModel(SimpleResponsesAPIModel):
                 finished_ns = time_ns()
                 _append_transport_io(
                     {
-                        **log_context,
-                        "schema_version": 2,
+                        "schema_version": 3,
+                        "log_context": log_context,
                         "event": "transport_error",
                         "call_index": call_index,
                         "timestamp_unix_ns": finished_ns,
@@ -1277,8 +1255,8 @@ class VLLMModel(SimpleResponsesAPIModel):
             finished_ns = time_ns()
             _append_transport_io(
                 {
-                    **log_context,
-                    "schema_version": 2,
+                    "schema_version": 3,
+                    "log_context": log_context,
                     "event": "transport_response",
                     "call_index": call_index,
                     "timestamp_unix_ns": finished_ns,
