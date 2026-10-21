@@ -47,7 +47,7 @@ def main() -> None:
         result = image_result(args.path)
     except (OSError, ValueError) as error:
         parser.exit(1, f"view_image: {error}\n")
-    print(json.dumps(result))
+    print("\n" + json.dumps(result))
 
 
 if __name__ == "__main__":

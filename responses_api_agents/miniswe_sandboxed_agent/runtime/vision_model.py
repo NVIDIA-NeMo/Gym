@@ -24,7 +24,22 @@ class VisionResponseModel(LitellmResponseModel):
                     envelope = json.loads(line)
                 except ValueError:
                     envelope = None
-                if not isinstance(envelope, dict) or envelope.get("_nemo_gym_view_image") != 1:
+                parts = envelope.get("content") if isinstance(envelope, dict) else None
+                if (
+                    not isinstance(envelope, dict)
+                    or envelope.get("_nemo_gym_view_image") != 1
+                    or not isinstance(envelope.get("path"), str)
+                    or not isinstance(envelope.get("sha256"), str)
+                    or not isinstance(parts, list)
+                    or not parts
+                    or any(
+                        not isinstance(part, dict)
+                        or part.get("type") != "image"
+                        or part.get("mimeType") not in ("image/png", "image/jpeg", "image/gif", "image/webp")
+                        or not isinstance(part.get("data"), str)
+                        for part in parts
+                    )
+                ):
                     text.append(line)
                     continue
                 call_id = actions[index].get("tool_call_id", str(index))

@@ -224,13 +224,16 @@ class MiniSWEHarness:
             await self.sandbox.upload(Path(__file__).with_name("runtime") / name, f"{remote}/{name}")
         command_path = remote + "/image-tools/view_image"
         wrapper = f'#!/bin/sh\nexec {quote(remote + "/venv/bin/python")} {quote(remote + "/view_image.py")} "$@"\n'
+        local_wrapper = self.directory / "view_image"
+        local_wrapper.write_text(wrapper)
+        await self.sandbox.upload(local_wrapper, remote + "/view_image-wrapper")
         result = await self.sandbox.exec(
             f"mkdir -p {quote(remote + '/image-tools')} && "
-            f"printf %s {quote(wrapper)} > {quote(command_path)} && chmod +x {quote(command_path)}",
+            f"cp {quote(remote + '/view_image-wrapper')} {quote(command_path)} && chmod +x {quote(command_path)}",
             user=self.context.user,
             timeout_s=self.context.setup_timeout_sec,
         )
-        if result.return_code:
+        if result.return_code != 0 or result.error_type is not None:
             raise RuntimeError(f"Experimental image command installation failed: {result.stderr}")
         self.extra_instruction += (
             "\nVision is available through bash: run `view_image PATH` to inspect an image file. "

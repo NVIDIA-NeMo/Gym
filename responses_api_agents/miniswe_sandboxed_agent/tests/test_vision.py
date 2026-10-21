@@ -4,6 +4,7 @@
 import base64
 import hashlib
 import json
+import shlex
 import shutil
 import struct
 import subprocess
@@ -19,6 +20,27 @@ from responses_api_agents.miniswe_sandboxed_agent.harness import HarnessContext,
 
 
 HELPER = Path(__file__).parents[1] / "runtime" / "view_image.py"
+
+
+def bash_response(commands: list[str]) -> NeMoGymResponse:
+    return NeMoGymResponse(
+        id="resp_test",
+        created_at=0,
+        object="response",
+        model="test",
+        parallel_tool_calls=len(commands) > 1,
+        tool_choice="auto",
+        tools=[],
+        output=[
+            {
+                "type": "function_call",
+                "call_id": f"call_{index}",
+                "name": "bash",
+                "arguments": json.dumps({"command": command}),
+            }
+            for index, command in enumerate(commands, 1)
+        ],
+    )
 
 
 def png_bytes() -> bytes:
@@ -42,28 +64,16 @@ async def test_native_image_command_is_opt_in_and_reaches_model(tmp_path, runner
 
     async def query(params):
         requests.append(params)
-        command = (
-            "command -v python3; echo before; view_image 'reference image.png'; echo after; view_image 'reference image.png'"
+        commands = (
+            [
+                "command -v python3; printf before; view_image 'reference image.png'; "
+                "echo after; view_image 'reference image.png'",
+                "printf 'second result'",
+            ]
             if len(requests) == 1
-            else "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+            else ["echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"]
         )
-        return NeMoGymResponse(
-            id=f"resp_{len(requests)}",
-            created_at=0,
-            object="response",
-            model="test",
-            parallel_tool_calls=False,
-            tool_choice="auto",
-            tools=[],
-            output=[
-                {
-                    "type": "function_call",
-                    "call_id": f"call_{len(requests)}",
-                    "name": "bash",
-                    "arguments": json.dumps({"command": command}),
-                }
-            ],
-        )
+        return bash_response(commands)
 
     harness = await runner_factory(
         context=HarnessContext(session_id="vision-test", instruction="Inspect the reference image"),
@@ -99,6 +109,17 @@ async def test_native_image_command_is_opt_in_and_reaches_model(tmp_path, runner
         assert "before" in tool["output"] and "after" in tool["output"]
         assert json.loads(tool["output"])["output"].splitlines()[0] == shutil.which("python3")
         assert data[:12].hex() not in tool["output"]
+        assert base64.b64encode(data).decode("ascii") not in tool["output"]
+        results = requests[1]["input"]
+        tool_indices = [index for index, item in enumerate(results) if item.get("type") == "function_call_output"]
+        image_indices = [
+            index
+            for index, item in enumerate(results)
+            if item.get("role") == "user" and isinstance(item.get("content"), list)
+        ]
+        assert len(tool_indices) == 2
+        assert "second result" in results[tool_indices[1]]["output"]
+        assert max(tool_indices) < min(image_indices)
         # Exercise the real Responses -> Chat Completions boundary used by vLLM.
         chat = (
             VLLMConverter(return_token_id_information=False)
@@ -122,6 +143,56 @@ async def test_native_image_command_is_opt_in_and_reaches_model(tmp_path, runner
         assert images == []
         tool = next(item for item in requests[1]["input"] if item.get("type") == "function_call_output")
         assert json.loads(tool["output"])["returncode"] == 127
+    assert response.output
+
+
+async def test_malformed_image_envelopes_remain_text_and_allow_completion(tmp_path, runner_factory):
+    valid_shape = {"_nemo_gym_view_image": 1, "path": "image.png", "sha256": "0" * 64}
+    records = [
+        {"ordinary": "json"},
+        {"_nemo_gym_view_image": 1},
+        {**valid_shape, "content": None},
+        {**valid_shape, "content": []},
+        {**valid_shape, "content": "not a list"},
+        {**valid_shape, "content": [{}]},
+        {**valid_shape, "content": [None]},
+        {**valid_shape, "content": [{"type": "image", "mimeType": "image/png", "data": None}]},
+        {**valid_shape, "content": [{"type": "image", "mimeType": "text/plain", "data": "bytes"}]},
+        {**valid_shape, "path": None, "content": [{"type": "image", "mimeType": "image/png", "data": "bytes"}]},
+        {**valid_shape, "sha256": None, "content": [{"type": "image", "mimeType": "image/png", "data": "bytes"}]},
+    ]
+    text = "\n".join(json.dumps(record) for record in records)
+    requests = []
+
+    async def query(params):
+        requests.append(params)
+        command = (
+            f"printf '%s\\n' {shlex.quote(text)}"
+            if len(requests) == 1
+            else "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+        )
+        return bash_response([command])
+
+    harness = await runner_factory(
+        context=HarnessContext(session_id="malformed-images", instruction="Read the command output"),
+        config=MiniSWEConfig(enable_view_image=True),
+        params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        query=query,
+        model_name="test",
+        directory=tmp_path / "artifacts",
+    )
+    response, outcome, _ = await harness.execute(30)
+    assert outcome.reason == "completed", outcome
+    assert len(requests) == 2
+    tool = next(item for item in requests[1]["input"] if item.get("type") == "function_call_output")
+    assert json.loads(tool["output"])["output"].strip() == text
+    assert not any(
+        part.get("type") == "input_image"
+        for item in requests[1]["input"]
+        if isinstance(item.get("content"), list)
+        for part in item["content"]
+        if isinstance(part, dict)
+    )
     assert response.output
 
 
