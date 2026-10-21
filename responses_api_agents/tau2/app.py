@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import json
+import re
 from collections import defaultdict
 from collections.abc import Mapping
 from functools import partial
@@ -41,6 +42,8 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.failure_kinds import PROVIDER_UNAVAILABLE
+from nemo_gym.global_config import is_eval_mode
 from nemo_gym.openai_utils import (
     NeMoGymAsyncOpenAI,
     NeMoGymResponse,
@@ -61,6 +64,13 @@ from tau2.utils.llm_utils import to_litellm_messages
 
 TAU2_MALFORMED_TOOL_CALL_FAILURE_CLASS = "tau2_malformed_tool_call"
 TAU2_AGENT_FAILURE_CLASS = "tau2_agent_error"
+# Evaluation only: an episode that ended with no tool call and no content, and a policy request that overflowed the
+# context window. tau2 reruns the first and leaves both out of the score.
+TAU2_EMPTY_OUTPUT_FAILURE_CLASS = "tau2_empty_output"
+TAU2_CONTEXT_OVERFLOW_FAILURE_CLASS = "tau2_context_overflow"
+_CONTEXT_OVERFLOW_PATTERN = re.compile(
+    r"context_length_exceeded|maximum context length|maximum model length|context window", re.IGNORECASE
+)
 
 _RESERVED_RESULT_KEYS = (
     "reward",
@@ -74,6 +84,10 @@ _RESERVED_RESULT_KEYS = (
 
 class Tau2MalformedToolCallError(ValueError):
     """A model response whose tool arguments are not a JSON object."""
+
+
+class Tau2UserSimulatorToolCallError(Tau2MalformedToolCallError):
+    """The user simulator's model, not the policy, returned malformed tool arguments."""
 
 
 def _validate_tool_call_arguments(response: Mapping[str, Any]) -> None:
@@ -120,6 +134,19 @@ class Tau2ToolValidatingAsyncOpenAI(NeMoGymAsyncOpenAI):
     """Reject chat completions whose raw tool arguments Tau2 cannot parse."""
 
     malformed_tool_call_max_retries: int = Field(default=0, ge=0)
+    # Tau2 builds this client for both the policy and the user simulator, so it is told the two server names.
+    policy_model_server_name: Optional[str] = None
+    user_model_server_name: Optional[str] = None
+
+    def _is_user_simulator(self) -> bool:
+        """Whether this client calls the user simulator's model. A shared server stays the policy's."""
+        if not self.user_model_server_name or not self.policy_model_server_name:
+            return False
+        user_url = get_server_url(self.user_model_server_name)
+        # The base URL is the server root plus a path: match at a path boundary, so :800 is not a prefix of :8000.
+        return user_url != get_server_url(self.policy_model_server_name) and self.base_url.startswith(
+            user_url.rstrip("/") + "/"
+        )
 
     async def create_chat_completion(self, **kwargs: Any) -> Dict[str, Any]:
         max_attempts = self.malformed_tool_call_max_retries + 1
@@ -134,7 +161,10 @@ class Tau2ToolValidatingAsyncOpenAI(NeMoGymAsyncOpenAI):
                     flush=True,
                 )
                 if attempt == max_attempts:
-                    raise Tau2MalformedToolCallError(
+                    error_type = (
+                        Tau2UserSimulatorToolCallError if self._is_user_simulator() else Tau2MalformedToolCallError
+                    )
+                    raise error_type(
                         f"model returned malformed tool arguments in {max_attempts} consecutive attempts: {error}"
                     ) from error
                 continue
@@ -156,6 +186,17 @@ def _find_nested_exception(error: BaseException, error_type: type[BaseException]
             if match is not None:
                 return match
     return None
+
+
+def _is_harness_data_error(error: FileNotFoundError) -> bool:
+    """Whether a missing file is Tau2's own data or prompt, which the model cannot touch."""
+    text = f"{error} {getattr(error, 'filename', '') or ''}"
+    return (
+        "Prompt template not found" in text
+        or "tau2_data" in text
+        or str(DATA_DIR) in text
+        or bool(re.search(r"(?:^|/)(?:db\.json|documents/[^/\s'\"]+\.json)\b", text))
+    )
 
 
 def _first_nested_exception(error: BaseException) -> BaseException:
@@ -233,6 +274,8 @@ class Tau2Agent(SimpleResponsesAPIAgent):
         tau2_llm_utils.NeMoGymAsyncOpenAI = partial(
             Tau2ToolValidatingAsyncOpenAI,
             malformed_tool_call_max_retries=self.config.malformed_tool_call_max_retries,
+            policy_model_server_name=self.config.model_server.name,
+            user_model_server_name=self.config.user_model_server.name,
         )
 
         if not self.config.debug:
@@ -250,21 +293,48 @@ class Tau2Agent(SimpleResponsesAPIAgent):
     async def run(self, body: Tau2RunRequest) -> Tau2VerifyResponse | Tau2FailureResponse:
         record = self._sanitized_record(body)
         try:
-            return await self._run(body)
+            response = await self._run(body)
+            if is_eval_mode() and response.result.termination_reason == "empty_tool_calls_and_content":
+                # Evaluation reruns an empty episode, then leaves it out of the score at the attempt cap.
+                # model_copy puts the key in the serialized extras; setattr of an underscore name would not.
+                response = response.model_copy(update={NG_FAILURE_CLASS_KEY: TAU2_EMPTY_OUTPUT_FAILURE_CLASS})
+            return response
         except Exception as error:  # noqa: BLE001 -- one bad rollout must not abort the full collection
             malformed_error = _find_nested_exception(error, Tau2MalformedToolCallError)
-            if malformed_error is not None:
+            infra = False
+            eval_mode = is_eval_mode()
+            if isinstance(malformed_error, Tau2UserSimulatorToolCallError) and eval_mode:
+                # The user simulator's model broke the turn, not the policy. Outside evaluation the row keeps the
+                # malformed-tool-call class it always had.
+                failure_class = TAU2_AGENT_FAILURE_CLASS
+                detail = malformed_error
+                infra = True
+            elif malformed_error is not None:
                 failure_class = TAU2_MALFORMED_TOOL_CALL_FAILURE_CLASS
                 detail = malformed_error
             else:
                 failure_class = TAU2_AGENT_FAILURE_CLASS
                 detail = _first_nested_exception(error)
-            return self._failure_response(
+                # A model server's 400 keeps its body in response_content; str() of the error omits it.
+                payload = getattr(detail, "response_content", b"") or b""
+                if isinstance(payload, bytes):
+                    payload = payload.decode("utf-8", errors="replace")
+                if eval_mode and _CONTEXT_OVERFLOW_PATTERN.search(f"{type(detail).__name__}: {detail} {payload}"):
+                    # The policy's request overflowed the context window: left out of the score.
+                    failure_class = TAU2_CONTEXT_OVERFLOW_FAILURE_CLASS
+                # The harness lost its data or prompt files (a domain db.json, documents/*.json, a prompt template)
+                # before the model's first turn.
+                infra = eval_mode and isinstance(detail, FileNotFoundError) and _is_harness_data_error(detail)
+            response = self._failure_response(
                 body,
                 record,
                 failure_class,
                 f"{type(detail).__name__}: {detail}",
             )
+            if infra:
+                response.failure_kind = PROVIDER_UNAVAILABLE
+                response.failure_reason = response.error
+            return response
 
     async def _run(self, body: Tau2RunRequest) -> Tau2VerifyResponse:
         # Gym-internal request fields (e.g. `capture_rollout_id`) are marked `exclude=True`;
@@ -464,7 +534,9 @@ class Tau2Agent(SimpleResponsesAPIAgent):
                     subtask = task["task"]["id"].split("]")[0].removeprefix("[")
                     telecom_subtask_rewards[f"telecom/{subtask}/reward"].append(task["reward"])
 
-                termination_reason = task["result"]["termination_reason"]
+                # A rollout counted as 0 without running (a failure row in the metric input) has no result.
+                result = task.get("result") or {}
+                termination_reason = result.get("termination_reason") or "no_result"
                 termination_reason_count[f"trajectory_termination_reason/{termination_reason}/count"] += 1
                 termination_reason_domain_count[
                     f"{domain}/trajectory_termination_reason/{termination_reason}/count"
@@ -472,7 +544,7 @@ class Tau2Agent(SimpleResponsesAPIAgent):
 
                 this_task_transfer_to_human_agents = False
                 has_tool_call = False
-                for message in task["result"]["messages"]:
+                for message in result.get("messages") or []:
                     if message["role"] == "tool":
                         # e.g. `Error: Tool 'run_speed_test' not found.`
                         if "Error: Tool" and "not found" in message["content"]:
@@ -552,7 +624,8 @@ class Tau2Agent(SimpleResponsesAPIAgent):
             "trajectory_missing_tool_call/count": missing_tool_call,
             "trajectory_missing_tool_call/pct": missing_tool_call / total_count,
             "messages_with_incomplete_reasoning/count": incomplete_reasoning,
-            "messages_with_incomplete_reasoning/pct": incomplete_reasoning / total_num_assistant_messages,
+            # A run of failures counted as 0 has no assistant message at all.
+            "messages_with_incomplete_reasoning/pct": incomplete_reasoning / max(total_num_assistant_messages, 1),
         }
         self.__key_metrics = list(res.keys())
         return res

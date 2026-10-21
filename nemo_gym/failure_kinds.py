@@ -168,12 +168,15 @@ def validate_failure_kind(name: str | None) -> str | None:
 
 
 # --- retry rule ------------------------------------------------------------------------------ #
-FailureRule = Literal["retry", "final", "evidence", "unscored"]
+FailureRule = Literal["retry", "final", "evidence", "unscored", "retry_then_unscored"]
 RETRY: FailureRule = "retry"
 FINAL: FailureRule = "final"
 EVIDENCE: FailureRule = "evidence"
 # A gap in the benchmark's own data or judge eligibility: nothing to retry and nothing to score.
 UNSCORED: FailureRule = "unscored"
+# The model's failure, but the benchmark's method reruns it and leaves it out of the score if it still fails at the
+# attempt cap (tau2's run_with_retry), instead of counting it as 0.
+RETRY_THEN_UNSCORED: FailureRule = "retry_then_unscored"
 
 
 FailureCause = Literal["infra", "model"]
@@ -211,7 +214,11 @@ FAILURE_RULES: dict[str, FailureRule] = {
     COHORT_INCOMPLETE: RETRY,
     # Sidecar labels that predate this vocabulary and that Gym's own collector, servers and agents write.
     "environment_server_failed": EVIDENCE,
-    "tau2_malformed_tool_call": FINAL,
+    # tau2 reruns a simulation that raised (malformed tool-call arguments) or ended empty, and leaves it out of its
+    # metrics once its retries are spent; a context-window overflow is left out as well.
+    "tau2_malformed_tool_call": RETRY_THEN_UNSCORED,
+    "tau2_empty_output": RETRY_THEN_UNSCORED,
+    "tau2_context_overflow": UNSCORED,
     "tau2_agent_error": EVIDENCE,
     "remote_agent_error": EVIDENCE,
     "harbor_failed": EVIDENCE,
@@ -397,9 +404,14 @@ def is_retryable(kind: str | None, *, cause: FailureCause | None) -> bool:
     rule = FAILURE_RULES.get(kind, EVIDENCE)
     if rule == EVIDENCE:
         return cause == INFRA
-    return rule == RETRY
+    return rule in (RETRY, RETRY_THEN_UNSCORED)
 
 
 def is_unscored(kind: str | None) -> bool:
     """Whether a failure of ``kind`` is left out of the score: never retried and never counted as 0."""
     return FAILURE_RULES.get(kind) == UNSCORED
+
+
+def is_unscored_at_cap(kind: str | None) -> bool:
+    """Whether a failure of ``kind`` that is still failing at the attempt cap is left out of the score."""
+    return FAILURE_RULES.get(kind) == RETRY_THEN_UNSCORED

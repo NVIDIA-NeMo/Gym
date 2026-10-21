@@ -8,6 +8,18 @@ gym env start \
     '++gpt-5_2-2025-12-11.responses_api_models.openai_model.extra_body._delete_key=max_output_tokens'
 ```
 
+## Failures
+
+A policy tool call with arguments that are not a JSON object is `tau2_malformed_tool_call`. In evaluation, as
+tau2 does, it is rerun, and once the attempt cap is spent it is left out of the score. An episode that ends with
+no tool call and no content (`tau2_empty_output`) is handled the same way, and a policy request that overflows the
+context window (`tau2_context_overflow`) is left out of the score. All three are the policy's failures, not
+infra.
+In evaluation (`gym eval run`), the same error from the user simulator's model is retried as
+`provider_unavailable`, because the policy did not cause it; when one model server serves both, the error cannot
+be told apart and stays the policy's. A missing Tau2 data or prompt file is retried too. Outside evaluation both
+keep the class Tau2 always wrote, with no failure kind.
+
 ## Tau3 banking_knowledge
 
 The banking_knowledge configs use the Tau2 bridge with Tau3 data and retrieval

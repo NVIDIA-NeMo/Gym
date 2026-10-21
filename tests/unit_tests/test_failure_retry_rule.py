@@ -148,7 +148,7 @@ class TestTheRuleOnSidecarRows:
 
     def test_a_server_may_withhold_a_retry_but_not_grant_one(self) -> None:
         assert is_terminal_failure({NG_FAILURE_CLASS_KEY: "judge_failed", "_ng_failure_terminal": True})
-        assert is_terminal_failure({NG_FAILURE_CLASS_KEY: "tau2_malformed_tool_call", "_ng_failure_terminal": False})
+        assert is_terminal_failure({NG_FAILURE_CLASS_KEY: "timeout_exceeded", "_ng_failure_terminal": False})
 
 
 class TestAgentRunErrorBySource:
@@ -322,7 +322,8 @@ class TestResume:
             _http_error(500, b"calling an inner server: ClientConnectorError(model:8000)"), 500
         )
         failures = [
-            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, NG_FAILURE_CLASS_KEY: "tau2_malformed_tool_call"},
+            # The agent's own time budget: a final model failure.
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, NG_FAILURE_CLASS_KEY: "timeout_exceeded"},
             {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, **dead_model},
         ]
         failures_path_for(output).write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in failures))
@@ -335,13 +336,14 @@ class TestResume:
 class TestHarnessFailurePaths:
     """Harness failure paths, through the rule Gym applies to the sidecar row."""
 
-    def test_tau2_malformed_tool_call_is_final_and_a_dead_policy_is_retried(self) -> None:
+    def test_tau2_reruns_a_malformed_tool_call_and_a_dead_policy(self) -> None:
+        # tau2 reruns a simulation whose tool-call arguments were malformed, then leaves it out at the cap.
         malformed = {NG_FAILURE_CLASS_KEY: "tau2_malformed_tool_call", "error": "Tau2MalformedToolCallError: bad"}
         dead_policy = {
             NG_FAILURE_CLASS_KEY: "tau2_agent_error",
             "error": "APIConnectionError: litellm.APIConnectionError: Connection error.",
         }
-        assert is_terminal_failure(malformed)
+        assert not is_terminal_failure(malformed)
         assert not is_terminal_failure(dead_policy)
 
     def test_tau2_agent_error_without_infra_evidence_is_final(self) -> None:
@@ -480,13 +482,41 @@ class TestBudgetMasks:
         )
 
 
+class TestTau2LeavesOutWhatItReruns:
+    """tau2 reruns a malformed or empty simulation and leaves it out once its retries are spent."""
+
+    @pytest.mark.parametrize("failure_class", ["tau2_malformed_tool_call", "tau2_empty_output"])
+    def test_left_out_at_the_cap_and_counted_before_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_class: str
+    ) -> None:
+        monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "2")
+        failures = tmp_path / "out_failures.jsonl"
+        row = {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, NG_FAILURE_CLASS_KEY: failure_class}
+        failures.write_bytes(orjson.dumps(row) + b"\n")
+        assert len(_failure_rows_counted_as_zero([failures], None, set())) == 1
+        failures.write_bytes(failures.read_bytes() + orjson.dumps(row) + b"\n")
+        assert _failure_rows_counted_as_zero([failures], None, set()) == []
+
+    @pytest.mark.parametrize("failure_class", ["tau2_malformed_tool_call", "tau2_empty_output"])
+    def test_a_rerun_episode_is_the_policys_failure(self, failure_class: str) -> None:
+        # Rerun as tau2 does, but the policy produced it: the cause is model, never infra.
+        assert failure_cause_of_row({NG_FAILURE_CLASS_KEY: failure_class}) == MODEL
+
+    def test_a_context_overflow_is_never_scored(self, tmp_path: Path) -> None:
+        failures = tmp_path / "out_failures.jsonl"
+        row = {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, NG_FAILURE_CLASS_KEY: "tau2_context_overflow"}
+        failures.write_bytes(orjson.dumps(row) + b"\n")
+        assert is_terminal_failure(row)
+        assert _failure_rows_counted_as_zero([failures], None, set()) == []
+
+
 class TestScoringDefaults:
     """Every failed rollout counts as 0 by default; opting out leaves only final failures counted."""
 
     def _sidecar(self, tmp_path: Path) -> Path:
         failures = tmp_path / "out_failures.jsonl"
         rows = [
-            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, NG_FAILURE_CLASS_KEY: "tau2_malformed_tool_call"},
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, NG_FAILURE_CLASS_KEY: "timeout_exceeded"},
             {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, NG_FAILURE_CLASS_KEY: "judge_failed"},
         ]
         failures.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))

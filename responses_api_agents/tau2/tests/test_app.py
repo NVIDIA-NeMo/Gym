@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import json
 from copy import deepcopy
 from pathlib import Path
@@ -22,7 +23,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 from nemo_gym.base_responses_api_agent import AggregateMetricsRequest
-from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY
+from nemo_gym.rollout_collection import (
+    NG_FAILURE_CLASS_KEY,
+    NG_NO_PERSIST_KEY,
+    NG_TERMINAL_KEY,
+    is_terminal_failure,
+    is_unscored_failure,
+)
 from nemo_gym.server_utils import ServerClient
 
 
@@ -39,6 +46,7 @@ from responses_api_agents.tau2.app import (
     Tau2MalformedToolCallError,
     Tau2RunRequest,
     Tau2ToolValidatingAsyncOpenAI,
+    Tau2UserSimulatorToolCallError,
 )
 from tau2.data_model.message import AssistantMessage, UserMessage
 from tau2.data_model.simulation import RewardInfo, SimulationRun, TerminationReason
@@ -299,6 +307,176 @@ class TestApp:
         assert NG_NO_PERSIST_KEY not in result
         assert NG_TERMINAL_KEY not in result
 
+    @pytest.mark.parametrize(
+        ("error", "expected_failure_class", "retried"),
+        [
+            # The user simulator's model, not the policy, broke the tool call.
+            (Tau2UserSimulatorToolCallError("invalid arguments"), TAU2_AGENT_FAILURE_CLASS, True),
+            # A real failure: a domain db.json vanished before the model's first turn.
+            (
+                FileNotFoundError(2, "No such file or directory", "<tau2_data>/domains/banking/db.json"),
+                TAU2_AGENT_FAILURE_CLASS,
+                True,
+            ),
+            # A real failure: the harness lost a prompt template.
+            (FileNotFoundError("Prompt template not found: <path>"), TAU2_AGENT_FAILURE_CLASS, True),
+            # The policy's own malformed call: tau2 reruns it, then leaves it out of the score at the cap.
+            (Tau2MalformedToolCallError("invalid arguments"), TAU2_MALFORMED_TOOL_CALL_FAILURE_CLASS, True),
+            # A file the model's task asked for is not harness data: no infra evidence.
+            (FileNotFoundError("report.csv"), TAU2_AGENT_FAILURE_CLASS, False),
+        ],
+    )
+    def test_run_names_failures_the_policy_did_not_cause(
+        self, error: Exception, expected_failure_class: str, retried: bool, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("responses_api_agents.tau2.app.is_eval_mode", lambda: True)
+        _, server = self._dummy_server()
+        with patch("responses_api_agents.tau2.app.ensure_tau2_data_dir"):
+            app = server.setup_webserver()
+        with (
+            patch("responses_api_agents.tau2.app.get_server_url", return_value="http://model"),
+            patch("responses_api_agents.tau2.app.run_single_task", AsyncMock(side_effect=error)),
+        ):
+            result = TestClient(app).post("/run", json=self._example_run_request().model_dump(mode="json")).json()
+
+        assert result[NG_FAILURE_CLASS_KEY] == expected_failure_class
+        assert is_terminal_failure(result) is not retried
+
+    @pytest.mark.parametrize(
+        ("error", "expected_failure_class"),
+        [
+            (Tau2UserSimulatorToolCallError("invalid arguments"), TAU2_MALFORMED_TOOL_CALL_FAILURE_CLASS),
+            (
+                FileNotFoundError(2, "No such file or directory", "<tau2_data>/domains/banking/db.json"),
+                TAU2_AGENT_FAILURE_CLASS,
+            ),
+            (Tau2MalformedToolCallError("invalid arguments"), TAU2_MALFORMED_TOOL_CALL_FAILURE_CLASS),
+        ],
+    )
+    def test_training_sees_the_failure_row_as_before(self, error: Exception, expected_failure_class: str) -> None:
+        """Outside evaluation: the class Tau2 always wrote, reward 0, and no failure kind."""
+        _, server = self._dummy_server()
+        with patch("responses_api_agents.tau2.app.ensure_tau2_data_dir"):
+            app = server.setup_webserver()
+        with (
+            patch("responses_api_agents.tau2.app.get_server_url", return_value="http://model"),
+            patch("responses_api_agents.tau2.app.run_single_task", AsyncMock(side_effect=error)),
+        ):
+            result = TestClient(app).post("/run", json=self._example_run_request().model_dump(mode="json")).json()
+
+        assert (result[NG_FAILURE_CLASS_KEY], result["reward"]) == (expected_failure_class, 0.0)
+        assert result.get("failure_kind") is None
+
+    def test_a_context_overflow_is_left_out_of_the_score_in_evaluation(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("responses_api_agents.tau2.app.is_eval_mode", lambda: True)
+        _, server = self._dummy_server()
+        with patch("responses_api_agents.tau2.app.ensure_tau2_data_dir"):
+            app = server.setup_webserver()
+        overflow = RuntimeError("BadRequestError: This model's maximum context length is 131072 tokens")
+        with (
+            patch("responses_api_agents.tau2.app.get_server_url", return_value="http://model"),
+            patch("responses_api_agents.tau2.app.run_single_task", AsyncMock(side_effect=overflow)),
+        ):
+            result = TestClient(app).post("/run", json=self._example_run_request().model_dump(mode="json")).json()
+
+        assert result[NG_FAILURE_CLASS_KEY] == "tau2_context_overflow"
+        assert is_terminal_failure(result) and is_unscored_failure(result)
+
+    @pytest.mark.parametrize(
+        ("status", "body", "expected"),
+        [
+            (400, b'{"error":{"message":"maximum context length is 131072 tokens"}}', "tau2_context_overflow"),
+            (500, b'{"error":{"message":"maximum context length is 131072 tokens"}}', "tau2_context_overflow"),
+            (400, b'{"error":{"message":"invalid tool schema"}}', "tau2_agent_error"),
+        ],
+    )
+    def test_a_context_overflow_carried_only_in_the_http_body_is_left_out(
+        self, monkeypatch: pytest.MonkeyPatch, status: int, body: bytes, expected: str
+    ) -> None:
+        from types import SimpleNamespace
+
+        from aiohttp import ClientResponseError
+
+        monkeypatch.setattr("responses_api_agents.tau2.app.is_eval_mode", lambda: True)
+        _, server = self._dummy_server()
+        error = ClientResponseError(
+            request_info=SimpleNamespace(real_url="http://model/v1/chat/completions"), history=(), status=status
+        )
+        error.response_content = body
+        with (
+            patch("responses_api_agents.tau2.app.get_server_url", return_value="http://model"),
+            patch("responses_api_agents.tau2.app.run_single_task", AsyncMock(side_effect=error)),
+        ):
+            response = asyncio.run(server.run(self._example_run_request()))
+        assert response.model_dump(mode="json")[NG_FAILURE_CLASS_KEY] == expected
+
+    @pytest.mark.parametrize("eval_mode", [False, True], ids=["training", "evaluation"])
+    def test_an_empty_episode_is_rerun_only_in_evaluation(
+        self, monkeypatch: pytest.MonkeyPatch, eval_mode: bool
+    ) -> None:
+        monkeypatch.setattr("responses_api_agents.tau2.app.is_eval_mode", lambda: eval_mode)
+        _, server = self._dummy_server()
+        response = MagicMock()
+        response.result.termination_reason = "empty_tool_calls_and_content"
+        with patch.object(Tau2Agent, "_run", AsyncMock(return_value=response)):
+            result = asyncio.run(server.run(self._example_run_request()))
+
+        if eval_mode:
+            response.model_copy.assert_called_once_with(update={NG_FAILURE_CLASS_KEY: "tau2_empty_output"})
+            assert result is response.model_copy.return_value
+            assert not is_terminal_failure({NG_FAILURE_CLASS_KEY: "tau2_empty_output"})
+        else:
+            # Training gets the scored episode exactly as tau2 returned it.
+            assert result is response and not isinstance(getattr(result, NG_FAILURE_CLASS_KEY, None), str)
+
+    def test_the_empty_episode_marker_reaches_the_run_json(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A real response, not a mock: the class must be in what /run serializes, or collection scores it."""
+        monkeypatch.setattr("responses_api_agents.tau2.app.is_eval_mode", lambda: True)
+        _, server = self._dummy_server()
+        simulation = self._fake_simulation_run(termination_reason=TerminationReason.EMPTY_TOOL_CALLS_AND_CONTENT)
+        with (
+            patch("responses_api_agents.tau2.app.get_server_url", return_value="http://model"),
+            patch("responses_api_agents.tau2.app.run_single_task", AsyncMock(return_value=simulation)),
+        ):
+            response = asyncio.run(server.run(self._example_run_request()))
+        assert response.model_dump(mode="json")[NG_FAILURE_CLASS_KEY] == "tau2_empty_output"
+
+    def test_aggregation_of_a_run_whose_every_rollout_failed(self) -> None:
+        """Every rollout a failure counted as 0: no assistant message, and still a score, not a crash."""
+        from nemo_gym.rollout_collection import _counted_failure_row
+
+        _, server = self._dummy_server()
+        body = self._example_run_request()
+        failure = server._failure_response(body, server._sanitized_record(body), "tau2_agent_error", "RuntimeError: x")
+        row = _counted_failure_row(
+            {**body.model_dump(mode="json"), **failure.model_dump(mode="json"), "_ng_task_index": 0}
+        )
+
+        metrics = server.compute_metrics([[row]])
+
+        assert metrics["messages_with_incomplete_reasoning/pct"] == 0
+
+    def test_the_client_tells_the_user_simulator_from_the_policy(self) -> None:
+        urls = {"policy": "http://policy:1", "user": "http://user:2"}
+        with patch("responses_api_agents.tau2.app.get_server_url", side_effect=urls.__getitem__):
+            user = Tau2ToolValidatingAsyncOpenAI(
+                base_url="http://user:2/ng-rollout/r/v1",
+                api_key="dummy",  # pragma: allowlist secret
+                policy_model_server_name="policy",
+                user_model_server_name="user",
+            )
+            policy = user.model_copy(update={"base_url": "http://policy:1/v1"})
+            assert user._is_user_simulator()
+            assert not policy._is_user_simulator()
+        # A user server whose URL is a string prefix of the policy's is a different server.
+        prefixed = {"policy": "http://127.0.0.1:8000", "user": "http://127.0.0.1:800"}
+        with patch("responses_api_agents.tau2.app.get_server_url", side_effect=prefixed.__getitem__):
+            assert not user.model_copy(update={"base_url": "http://127.0.0.1:8000/v1"})._is_user_simulator()
+            assert user.model_copy(update={"base_url": "http://127.0.0.1:800/ng-rollout/r/v1"})._is_user_simulator()
+        # One server for both: a malformed call cannot be told apart, so it stays the policy's.
+        with patch("responses_api_agents.tau2.app.get_server_url", return_value="http://shared:1"):
+            assert not user.model_copy(update={"base_url": "http://shared:1/v1"})._is_user_simulator()
+
     def test_sanity_query_input(self) -> None:
         example_jsonl = Path(__file__).parent.parent / "data" / "example.jsonl"
         with example_jsonl.open() as f:
@@ -505,6 +683,25 @@ class TestApp:
             "messages_with_incomplete_reasoning/pct": 0.0,
         }
         assert expected_key_aggregate_metrics == actual_aggregate_metrics.key_metrics
+
+    async def test_aggregation_accepts_a_rollout_counted_as_zero_without_a_result(self) -> None:
+        """Rollout collection counts a failed rollout as 0 with its task fields and no result; metrics still come back."""
+        example_rollouts_fpath = Path(__file__).parent.parent / "data" / "example_rollouts.jsonl"
+        with example_rollouts_fpath.open() as f:
+            rollouts = list(map(json.loads, f))
+        counted = {key: rollouts[0][key] for key in ("config", "task")} | {
+            "_ng_task_index": len(rollouts),
+            "_ng_rollout_index": 0,
+            "reward": 0.0,
+            "mask_sample": False,
+        }
+
+        _, server = self._dummy_server()
+        metrics = await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[*rollouts, counted]))
+
+        assert metrics.agent_metrics["trajectory_termination_reason/no_result/count"] == 1
+        domain = rollouts[0]["config"]["domain"]
+        assert metrics.agent_metrics[f"{domain}/num_samples_total"] >= 2
 
     async def test_compute_metrics_counts_max_agent_steps_termination(self) -> None:
         example_rollouts_fpath = Path(__file__).parent.parent / "data" / "example_rollouts.jsonl"

@@ -67,11 +67,13 @@ from nemo_gym.failure_kinds import (
     JUDGE_FAILED,
     MODEL,
     RETRY,
+    RETRY_THEN_UNSCORED,
     failure_cause_of_text,
     is_namespaced,
     is_registered,
     is_retryable,
     is_unscored,
+    is_unscored_at_cap,
 )
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
@@ -1693,7 +1695,7 @@ def failure_cause_of_row(record: Mapping[str, Any]) -> str:
         return cause
     # A kind with a fixed rule (judge_failed, whatever its status) has its cause in the rule, not in the row.
     rule = FAILURE_RULES.get(_rule_kind(record))
-    if rule in (RETRY, FINAL):
+    if rule in (RETRY, RETRY_THEN_UNSCORED, FINAL):
         return INFRA if rule == RETRY else MODEL
     # No reply, or a gateway status: something in front of the rollout failed before it ran.
     if record.get(NG_FAILURE_CLASS_KEY) == AGENT_REQUEST_FAILED_FAILURE_CLASS:
@@ -2183,22 +2185,49 @@ def _failure_rows_counted_as_zero(
     it, so leaving it out of the denominator would score the model only on the rollouts it did not break.
     """
     latest_by_key = _latest_failure_rows(failures_fpaths)
+    attempts = _failure_attempts(failures_fpaths)
+    max_attempts = _get_max_rollout_attempts()
     return [
         _counted_failure_row(row)
         for key, row in latest_by_key.items()
         if key not in scored_keys
-        and _counts_failure_class(row, failure_classes, retry_terminal_timeouts=retry_terminal_timeouts)
+        and _counts_failure_class(
+            row,
+            failure_classes,
+            retry_terminal_timeouts=retry_terminal_timeouts,
+            at_cap=attempts[key] >= max_attempts,
+        )
     ]
 
 
+def _failure_attempts(failures_fpaths: List[Path]) -> Counter:
+    """How many failed attempts the sidecars record for each ``(task_index, rollout_index)``."""
+    attempts: Counter = Counter()
+    for fpath in failures_fpaths:
+        if not fpath.exists():
+            continue
+        with fpath.open("rb") as f:
+            for line_no, line in enumerate(f, 1):
+                line = line.strip()
+                if line:
+                    row = loads_jsonl_line(line, fpath, line_no)
+                    attempts[(row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME))] += 1
+    return attempts
+
+
 def _counts_failure_class(
-    row: Mapping[str, Any], failure_classes: Optional[List[str]], *, retry_terminal_timeouts: bool = False
+    row: Mapping[str, Any],
+    failure_classes: Optional[List[str]],
+    *,
+    retry_terminal_timeouts: bool = False,
+    at_cap: bool = False,
 ) -> bool:
     """Whether a failure row scores 0: its class is selected (``None`` is every class), or it is final.
 
-    A data gap (``is_unscored_failure``) never scores 0, whatever the selection.
+    A data gap (``is_unscored_failure``) never scores 0, whatever the selection, and neither does a failure
+    whose kind leaves the score once it is still failing at the attempt cap (``is_unscored_at_cap``).
     """
-    if is_unscored_failure(row):
+    if is_unscored_failure(row) or (at_cap and is_unscored_at_cap(_rule_kind(row))):
         return False
     selected = failure_classes is None or row.get(NG_FAILURE_CLASS_KEY) in failure_classes
     return selected or is_terminal_failure(row, retry_terminal_timeouts=retry_terminal_timeouts)
@@ -4829,10 +4858,14 @@ class RolloutAggregationHelper(BaseModel):
         # not hide another run's failed or lost rollout. A rollout another shard landed for the same
         # server is still not counted, and of the attempts recorded for one rollout the last stands.
         latest_failures: Dict[tuple, Dict[str, Any]] = {}
+        failure_attempts: Counter = Counter()
         for path, failures_fpath in zip(input_paths, failures_fpaths):
+            shard_attempts = _failure_attempts([failures_fpath])
             for key, row in _latest_failure_rows([failures_fpath]).items():
                 if key not in shard_keys[path]:
                     latest_failures[_identity_key(row, group)] = row
+                    failure_attempts[_identity_key(row, group)] += shard_attempts[key]
+        max_attempts = _get_max_rollout_attempts()
         result_ids = (
             {_identity_key(r, group) for r in results}
             if latest_failures or config.count_missing_rollouts_as_zero
@@ -4843,7 +4876,9 @@ class RolloutAggregationHelper(BaseModel):
             _counted_failure_row(row)
             for identity, row in latest_failures.items()
             if identity not in result_ids
-            and _counts_failure_class(row, config.count_failure_classes_as_zero)
+            and _counts_failure_class(
+                row, config.count_failure_classes_as_zero, at_cap=failure_attempts[identity] >= max_attempts
+            )
             and _routing_identity(row) is not None
         ]
         if counted or config.count_failure_classes_as_zero != []:
