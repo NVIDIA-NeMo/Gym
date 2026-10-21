@@ -206,3 +206,39 @@ named under `unvalidated` with the reason (`no reference solution`), beside the 
 `gym dataset validate ... -v` (or `--verbose`, the `verbose` config key) raises the log level to DEBUG in the CLI
 and in the spun-up servers: the Harbor environment server then traces every episode's seed, verifier exit and
 score, and the oracle agent its `solve.sh` run.
+
+## Job-level Compose overlay
+
+A run can attach services and tools to every task without touching the tasks, as Harbor's job config does with
+`extra_docker_compose`, `agents[].mcp_servers` and an agent's `prompt_template_path`. The environment server's
+`compose_overlay` block names Compose `files` merged onto every task's Compose group after the task's own file
+(a task with only an image first becomes Harbor's one-service group `main`), `mcp_servers` merged by name with
+the task's `[[environment.mcp_servers]]` (the overlay's winning, as Harbor merges the job's) and granted with them,
+and a Jinja `prompt_template` with `{{ instruction }}` rendered around the instruction of the episode's first
+turn. The files merge as Compose merges `-f` files, `!reset` and `!override` included, and are interpolated with
+the task's variables, the deployment's `compose_variables` standing above the task's own sources in them (the overlay
+files are the operator's, like the values); their relative paths (`env_file` entries, bind sources) resolve against the
+Compose project directory, the task's `environment` folder, as Compose resolves every `-f` file's and Harbor's
+`--project-directory` names it, never against the overlay file's own folder; their `env_file` entries may be any
+readable file and are read once after the merge, the merged `environment` winning, as Compose reads them. Prepare
+reads the block from the configuration the command names, so the overlay's images are recorded with the tasks'
+and the merge is checked per task before any sandbox starts; set it in a `--config` file, and swap the backend by
+swapping the block. A dataset prepared without the block the server runs with is refused at seed (terminally,
+naming the services whose images have no record) until it is prepared again with it, and so is an overlay the
+deployment cannot run (the seed runs every check prepare ran on the merged document: the field check, the volume
+planner, the services the task's artifacts and collect hooks name, the non-root sidecar `extra_hosts` rule); the
+reason names the task's Compose file and the overlay files merged onto it. The template is read and compiled once,
+when the block is read.
+
+```yaml
+harbor_environment_server:
+  environment_servers:
+    harbor:
+      compose_overlay:
+        files: [/path/hindsight-docker-compose.yaml, /path/hindsight-docker-compose.harbor.yaml]
+        mcp_servers:
+          - {name: hindsight-memory, transport: streamable-http, url: "http://hindsight:8888/mcp/default/"}
+        prompt_template: /path/memory_prompt.md.j2
+```
+
+See the environment server README, "Job-level Compose overlay", for the merge rules and what the group cannot run.

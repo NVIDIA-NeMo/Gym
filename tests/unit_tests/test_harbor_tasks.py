@@ -1695,7 +1695,7 @@ class TestCli:
         assert prepared.skipped["bad-required"] == (
             "bad-required: docker-compose.yaml: ${API_KEY} is required: API_KEY is needed"
         )
-        assert "env_file 'missing.env' not found" in prepared.skipped["bad-env-file"]
+        assert "environment/missing.env' not found" in prepared.skipped["bad-env-file"]
         assert json.loads((prepared.output_dir / "skipped.json").read_text()) == prepared.skipped
         assert len(prepared.rows_path.read_text().splitlines()) == 1
         assert sorted(r.getMessage()[:22] for r in caplog.records) == [
