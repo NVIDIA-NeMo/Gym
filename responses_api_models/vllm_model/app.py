@@ -65,6 +65,7 @@ from nemo_gym.token_id_capture import (
 from nemo_gym.token_id_capture.config import token_id_capture_config
 from nemo_gym.token_id_capture.external_capture import (
     DYNAMO_GYM_REQUEST_ANNOTATION,
+    DYNAMO_PREFIX_ANNOTATION_PREFIX,
     ExternalCaptureHandler,
     annotate_dynamo_request,
     make_external_capture_handler,
@@ -994,8 +995,18 @@ class VLLMModel(SimpleResponsesAPIModel):
         """Fit a chat request to the Dynamo frontend.
 
         Strip the token fields agents echo on messages, which the frontend rejects, mark the request as
-        Gym rollout traffic, and request engine data.
+        Gym rollout traffic, and request engine data. Without capture, the last echoed assistant turn's
+        tokens move to an annotation instead, so the engine can splice them as vLLM's
+        ``required_prefix_token_ids`` extension does. Capture calls resolve their prefix from staging.
         """
+        if self._external_capture_handler is None:
+            for message_dict in reversed(body_dict.get("messages") or []):
+                if "prompt_token_ids" in message_dict:
+                    prefix = message_dict["prompt_token_ids"] + message_dict["generation_token_ids"]
+                    annotate_dynamo_request(
+                        body_dict, DYNAMO_PREFIX_ANNOTATION_PREFIX + json.dumps(prefix, separators=(",", ":"))
+                    )
+                    break
         for message_dict in body_dict.get("messages") or []:
             for field_name in TOKEN_FIELDS:
                 message_dict.pop(field_name, None)
