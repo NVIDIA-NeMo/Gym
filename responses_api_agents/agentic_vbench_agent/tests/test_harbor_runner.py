@@ -150,7 +150,7 @@ def test_hub_claude_keeps_original_request(hub_judge) -> None:
     path, payload, headers = calls[0]
     assert path == "/v1/messages" and headers == {"anthropic-version": "2023-06-01"}
     assert payload == {
-        "model": "us/aws/anthropic/eccn-claude-opus-4-7",
+        "model": "aws/anthropic/bedrock-claude-opus-4-7",
         "max_tokens": 300,
         "system": "grader",
         "messages": [{"role": "user", "content": content}],
@@ -172,7 +172,7 @@ def test_hub_gemini_sends_inline_media_with_bounded_thinking(hub_judge, tmp_path
 
     assert response.text == '{"pass": false, "why": "x"}'
     path, payload, _ = calls[0]
-    assert path == "/v1beta/models/us/gcp/google/eccn-gemini-3.5-flash:generateContent"
+    assert path == "/v1beta/models/gcp/google/gemini-3.5-flash:generateContent"
     parts = payload["contents"][0]["parts"]
     assert parts[0] == {"inlineData": {"mimeType": "video/mp4", "data": base64.b64encode(b"video-bytes").decode()}}
     assert parts[1] == {"inlineData": {"mimeType": "audio/mpeg", "data": base64.b64encode(b"mp3").decode()}}
