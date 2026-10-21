@@ -793,11 +793,10 @@ class CodexAgent(SimpleResponsesAPIAgent):
         prompt: str,
         system: str,
     ) -> NeMoGymResponse:
+        mcp_servers, skipped_grants = self._granted_mcp_servers(state.request)
         invocation_id = state.request.episode_id.capture_key
         base_url = self._resolve_call_base_url(invocation_id)
-        config = self._build_config(
-            base_url, developer_instructions=system, mcp_servers=self._granted_mcp_servers(state.request)
-        )
+        config = self._build_config(base_url, developer_instructions=system, mcp_servers=mcp_servers or None)
         config["model_providers"]["gym"]["http_headers"] = {"x-session-id": invocation_id}
         await state.upload_text("home/.codex/config.toml", toml_dumps(config))
         timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
@@ -939,6 +938,10 @@ class CodexAgent(SimpleResponsesAPIAgent):
             ObservationGap(code="compaction_observations_unavailable"),
             *(ObservationGap(code="model_metadata_fallback", detail=warning) for warning in startup_warnings),
             *(ObservationGap(code="compaction_accuracy_advisory", detail=warning) for warning in compaction_warnings),
+            *(
+                ObservationGap(code="mcp_server_skipped", detail=f"{name}: Codex cannot start a server with that name")
+                for name in skipped_grants
+            ),
         ]
         for count, code in (
             (
@@ -972,6 +975,13 @@ class CodexAgent(SimpleResponsesAPIAgent):
             gaps.append(ObservationGap(code="agent_activation_interrupted", detail=type(failure).__name__))
         if not events:
             gaps.append(ObservationGap(code="agent_transcript_unavailable"))
+        if error and not started and failure is None:
+            # Startup failures, such as a required MCP server that did not connect, are reported only on stderr.
+            stderr = await self._startup_stderr_tail(state)
+            if stderr:
+                error = f"{error}; stderr: {stderr}"
+                # Environment Servers keep the observations, not the 502 body, in their failure records.
+                gaps.append(ObservationGap(code="agent_startup_failed", detail=stderr))
         invocation_status = "incomplete" if failure else status
         invocation_error = _PROVIDER_ERROR if reported_model_error else None
         if state.native_transcript is not None:
@@ -1046,11 +1056,6 @@ class CodexAgent(SimpleResponsesAPIAgent):
         if failure is not None:
             raise failure
         if error and not reported_model_error:
-            if not started:
-                # Startup failures, such as a required MCP server that did not connect, are reported only on stderr.
-                stderr = await self._startup_stderr_tail(state)
-                if stderr:
-                    error = f"{error}; stderr: {stderr}"
             raise HTTPException(502, f"Codex execution failed: {error}")
         terminal = next((event for _, event in reversed(events) if event.get("type") == "turn.failed"), {})
         if state.model_attempts:
@@ -1096,12 +1101,20 @@ class CodexAgent(SimpleResponsesAPIAgent):
             )
         except Exception:
             return ""
-        for access in self.effective_tool_accesses(state.request):
-            if isinstance(access, MCPToolAccess):
-                for value in access.connection.headers.values():
-                    if value:
-                        stderr = stderr.replace(value, "[redacted]")
-        return stderr.strip()[-_STDERR_TAIL_CHARS:]
+        values = [
+            str(value)
+            for access in self.effective_tool_accesses(state.request)
+            if isinstance(access, MCPToolAccess)
+            for value in access.connection.headers.values()
+            if value
+        ]
+        for value in sorted(values, key=len, reverse=True):
+            # Codex cuts long error bodies, which can end a value early; its first characters still identify it.
+            pattern = re.escape(value) if len(value) < 8 else re.escape(value[:8]) + r"[^\s'\"]*"
+            stderr = re.sub(pattern, "[redacted]", stderr)
+        # Codex can repeat an error body of several kilobytes on one line; keep the start, which names the server.
+        lines = [line if len(line) <= 500 else f"{line[:400]} ... {line[-100:]}" for line in stderr.splitlines()]
+        return "\n".join(lines).strip()[-_STDERR_TAIL_CHARS:]
 
     def _resolve_call_base_url(self, rollout_id: Optional[str]) -> str:
         """Provider base_url for the CLI's model calls (Codex appends ``/responses`` to it).
@@ -1348,26 +1361,27 @@ class CodexAgent(SimpleResponsesAPIAgent):
         url = f"{self._resources_server_base_url().rstrip('/')}/{url_path.lstrip('/')}"
         return {server_name: self._mcp_server_entry(url, headers)}
 
-    def _granted_mcp_servers(self, request: AgentSeedSessionRequest) -> Optional[dict[str, Any]]:
-        """``mcp_servers`` config.toml entries for a session's MCP tool grants.
+    def _granted_mcp_servers(self, request: AgentSeedSessionRequest) -> tuple[dict[str, Any], list[str]]:
+        """``mcp_servers`` config.toml entries for a session's MCP tool grants, and the optional grants left out.
 
         Codex connects when the activation starts. A required server that does not connect fails the
         activation before the first model call; an optional one is left out of the tool list.
-        Codex runs one tool call at a time per server, and a call that times out keeps running on the server,
-        so ``mcp_tool_timeout_seconds`` should exceed the slowest call the server can make.
+        Codex runs no other tool while an MCP call is in flight, and a call that times out keeps running on the
+        server, so ``mcp_tool_timeout_seconds`` should exceed the slowest call the server can make.
         """
         servers = {}
+        skipped = []
         for access in self.effective_tool_accesses(request):
             if not isinstance(access, MCPToolAccess):
                 continue
             if not _codex_mcp_server_name(access.name):
                 # Seeding rejects such a name when the grant is required.
-                LOG.warning("Skipping optional MCP grant %r: Codex cannot start a server with that name", access.name)
+                skipped.append(access.name)
                 continue
             servers[access.name] = self._mcp_server_entry(
                 str(access.connection.url), access.connection.headers, required=access.required
             )
-        return servers or None
+        return servers, skipped
 
     def _mcp_server_entry(
         self, url: str, headers: Optional[Mapping[str, Any]], *, required: bool = False

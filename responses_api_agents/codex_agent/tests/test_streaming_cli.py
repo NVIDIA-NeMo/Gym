@@ -377,7 +377,7 @@ def test_pinned_cli_calls_a_granted_gym_mcp_tool(tmp_path: Path, setup) -> None:
         agent, _ = setup
         request = AgentSeedSessionRequest(**(seed().model_dump(mode="json") | {"tool_accesses": [grant]}))
         config = agent._build_config(
-            f"http://127.0.0.1:{model_server.server_port}/v1", mcp_servers=agent._granted_mcp_servers(request)
+            f"http://127.0.0.1:{model_server.server_port}/v1", mcp_servers=agent._granted_mcp_servers(request)[0]
         )
         (home / "config.toml").write_text(toml_dumps(config))
         result = subprocess.run(
@@ -406,8 +406,12 @@ def test_pinned_cli_calls_a_granted_gym_mcp_tool(tmp_path: Path, setup) -> None:
     assert outputs and "recorded hello" in json.dumps(outputs)
 
 
-def test_pinned_cli_fails_when_a_required_mcp_server_is_unreachable(tmp_path: Path, setup) -> None:
-    """A required grant must fail the activation instead of letting the model run without its tools."""
+@pytest.mark.parametrize("required", [True, False])
+def test_pinned_cli_with_an_unreachable_mcp_server(tmp_path: Path, setup, required: bool) -> None:
+    """A required grant must fail the activation instead of letting the model run without its tools.
+
+    An optional grant that does not connect is left out, and the run reaches the model.
+    """
     binary = pinned_cli()
     unused = socket.socket()
     unused.bind(("127.0.0.1", 0))
@@ -432,14 +436,16 @@ def test_pinned_cli_fails_when_a_required_mcp_server_is_unreachable(tmp_path: Pa
     grant = {
         "kind": "mcp",
         "name": "recorder",
-        "required": True,
+        "required": required,
         "connection": {"url": f"http://127.0.0.1:{port}/mcp", "headers": {}},
     }
     agent, _ = setup
     request = AgentSeedSessionRequest(**(seed().model_dump(mode="json") | {"tool_accesses": [grant]}))
     config = agent._build_config(
-        f"http://127.0.0.1:{model_server.server_port}/v1", mcp_servers=agent._granted_mcp_servers(request)
+        f"http://127.0.0.1:{model_server.server_port}/v1", mcp_servers=agent._granted_mcp_servers(request)[0]
     )
+    # The model server always fails; do not wait for Codex's retries.
+    config["model_providers"]["gym"].update(request_max_retries=0, stream_max_retries=0)
     (home / "config.toml").write_text(toml_dumps(config))
     try:
         result = subprocess.run(
@@ -455,8 +461,12 @@ def test_pinned_cli_fails_when_a_required_mcp_server_is_unreachable(tmp_path: Pa
         model_server.shutdown()
         model_server.server_close()
         model_thread.join(timeout=2)
+    started = any(json.loads(line).get("type") == "turn.started" for line in result.stdout.splitlines())
+    if not required:
+        assert started and requests, result.stdout + result.stderr
+        return
     assert result.returncode != 0, result.stdout + result.stderr
     # The adapter's stderr-tail error path relies on both: no turn starts, and the reason is on stderr.
-    assert not any(json.loads(line).get("type") == "turn.started" for line in result.stdout.splitlines())
+    assert not started
     assert "required MCP servers failed to initialize" in result.stderr
     assert not requests, "the model must not be called without the required tools"
