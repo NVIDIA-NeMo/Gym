@@ -12,8 +12,10 @@ rows were materialized (see ``nemo_gym.tasks.harbor``).
 - seed: check the row's digest against the mapping and the folder, start the task's
   image as a sandbox through the configured provider, create the working directory;
 - agent: open an agent session on the configured agent server, handing it a
-  ``SandboxAccess`` for that sandbox, post the task's ``responses_create_params`` to it,
-  then close the session and keep what the agent observed;
+  ``SandboxAccess`` for that sandbox (an agent instance implemented by the Harbor oracle,
+  ``harbor_oracle_agent``, first gets the snapshot's ``solution/`` at ``/solution`` and the
+  task's ``[solution].env``), post the task's ``responses_create_params`` to it, then close
+  the session and keep what the agent observed;
 - verify: run ``tests/test.sh`` inside the same sandbox (Harbor's shared verifier mode),
   then read ``/logs/verifier/reward.json`` or ``reward.txt``;
 - cleanup: stop the sandbox, whatever happened before.
@@ -61,6 +63,7 @@ from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.rollout_observability import AgentObservationBundle
 from nemo_gym.sandbox import AsyncSandbox
+from nemo_gym.sandbox.transfer import exec_as_root
 from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
 from nemo_gym.single_agent_turn_types import SingleAgentTurnFailure, SingleAgentTurnRequest, SingleAgentTurnResult
 from nemo_gym.tasks.harbor import DIGEST_KEY, HarborTask, load_task
@@ -68,8 +71,6 @@ from nemo_gym.tasks.harbor.errors import HarborTaskError
 
 
 LOGGER = logging.getLogger(__name__)
-
-DEFAULT_WORKDIR = "/app"
 
 
 class HarborEpisodeResult(SingleAgentTurnResult):
@@ -82,6 +83,7 @@ class HarborEpisodeResult(SingleAgentTurnResult):
     verifier_rewards: dict[str, float] | None = None
     verifier_return_code: int | None = None
     verifier_logs_dir: str | None = None
+    verifier_seconds: float | None = None
 
 
 class HarborEpisodeResponse(BaseEpisodeResponse[HarborEpisodeResult]):
@@ -115,6 +117,21 @@ class HarborEnvironmentServerConfig(BaseEnvironmentServerConfig):
     sandbox_ttl_slack_s: float = Field(default=900, ge=0)
     sandbox_provider_options: dict[str, Any] = Field(default_factory=dict)
     sandbox_metadata: dict[str, str] = Field(default_factory=dict)
+    # Replaces the task's declared cpus, memory_mb and storage_mb when set (keys: cpu, memory_mib, disk_gib).
+    # Used to run a benchmark at fixed resources, for example to compare against another server.
+    sandbox_resources_override: dict[str, Any] | None = None
+    # Export CPU-count env vars (OMP_NUM_THREADS and friends) matching the sandbox CPU limit.
+    derive_cpu_env: bool = True
+    # Operator environment for every sandbox; a task's own `[environment.env]` wins.
+    sandbox_env: dict[str, str] = Field(default_factory=dict)
+    # Shell commands run as root in every new sandbox before the agent sees it, for repairs the
+    # operator owns rather than the task (for example pointing an end-of-life distro at an archive).
+    # A failing command fails the seed as a retryable episode failure.
+    sandbox_setup_commands: list[str] = Field(default_factory=list)
+    sandbox_setup_timeout_s: float = Field(default=600, gt=0)
+    # Extra seconds the provider exec waits beyond `[verifier].timeout_sec` for the in-container `timeout` to
+    # kill test.sh and return; it does not extend the tests' own deadline, which is the task's `timeout_sec`.
+    verifier_grace_s: float = Field(default=30, ge=0)
     # Verifier logs are downloaded here, one fresh folder per verification.
     artifacts_dir: Path | None = None
 
@@ -248,6 +265,16 @@ class HarborEnvironmentServer(
             pending.add_done_callback(remove_failed_load)
         return pending.result() if pending.done() else await asyncio.shield(pending)
 
+    async def _run_setup_commands(self, sandbox: AsyncSandbox, task: HarborTask) -> None:
+        for command in self.config.sandbox_setup_commands:
+            # Root first, like every other setup step; sandboxes that cannot switch users fall back.
+            result = await exec_as_root(sandbox, command, timeout_s=self.config.sandbox_setup_timeout_s)
+            if result.return_code != 0:
+                raise RuntimeError(
+                    f"Sandbox setup command failed for {task.task_id!r} (exit {result.return_code}): "
+                    f"{(result.stderr or result.stdout or '')[-500:]}"
+                )
+
     # -- the episode -----------------------------------------------------------------------
 
     async def run(self, request: SingleAgentTurnRequest, cleanup: CleanupContext) -> HarborEpisodeResponse:
@@ -275,6 +302,8 @@ class HarborEnvironmentServer(
         cleanup.register_cleanup("harbor sandbox", close_sandbox)
         try:
             session = await self._seed(request, episode_key)
+            # The sandbox is seeded; the oracle alone also gets the task's solution before its session opens.
+            await self._seed_solution(session)
             access = await self._sandbox_access(session)
         except HTTPException as error:
             # 4xx: the task or row is at fault and a retry would fail the same way. 5xx: the provider failed.
@@ -319,6 +348,7 @@ class HarborEnvironmentServer(
                     episode_id=request.episode_id,
                     task_id=request.task.task_id,
                     sandbox_access=access,
+                    agent_timeout_sec=session.task.config.agent.timeout_sec,
                 ).model_dump(mode="json"),
             )
             await raise_for_status(agent_create_http_response)
@@ -420,11 +450,11 @@ class HarborEnvironmentServer(
                 raise HTTPException(
                     503, f"A sandbox of a previous attempt of this episode could not be stopped yet: {exc}"
                 ) from exc
-        workdir = task.workdir or DEFAULT_WORKDIR
         try:
-            sandbox = await self._create_sandbox(task, workdir, episode_key=episode_key)
+            sandbox = await self._create_sandbox_within_deadline(task, episode_key)
             self._sandboxes[episode_key] = sandbox
-            await self._prepare_workdir(sandbox, task, workdir)
+            workdir = await self._prepare_workdir(sandbox, task, task.workdir)
+            await self._run_setup_commands(sandbox, task)
         except BaseException as exc:
             if not isinstance(exc, Exception):
                 # Cancellation (the episode deadline fired): the registered `close_sandbox` cleanup stops

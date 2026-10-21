@@ -101,6 +101,7 @@ def needs_environment_server(instance: dict) -> bool:
             "opencode_agent",
             "kilocode_agent",
             "claude_code_agent",
+            "harbor_oracle_agent",
         }
         and resources_server is None
     ):

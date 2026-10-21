@@ -26,6 +26,7 @@ from environment_servers.harbor.app import (
     HarborEnvironmentServerConfig,
     HarborEpisodeResponse,
 )
+from environment_servers.harbor.verifier import EXIT_RECORD_NAME
 from nemo_gym.base_responses_api_agent import AgentSeedSessionRequest
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.sandbox.providers.base import SandboxExecResult
@@ -50,7 +51,16 @@ storage_mb = 10240
 """
 
 
-def write_task(root: Path, *, toml: str = TASK_TOML, dockerfile: str = "FROM ubuntu:24.04\nWORKDIR /app") -> Path:
+SOLVE_SH = "#!/bin/bash\necho hi > hello.txt\n"
+
+
+def write_task(
+    root: Path,
+    *,
+    toml: str = TASK_TOML,
+    dockerfile: str = "FROM ubuntu:24.04\nWORKDIR /app",
+    solution: bool = False,
+) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     (root / "task.toml").write_text(toml)
     (root / "instruction.md").write_text("Create hello.txt\n")
@@ -58,6 +68,16 @@ def write_task(root: Path, *, toml: str = TASK_TOML, dockerfile: str = "FROM ubu
     (root / "environment" / "Dockerfile").write_text(dockerfile)
     (root / "tests").mkdir(exist_ok=True)
     (root / "tests" / "test.sh").write_text("#!/bin/bash\necho 1 > /logs/verifier/reward.txt\n")
+    if solution:
+        # A reference solution with a subfolder, an author's private mode on the script, and an editor
+        # leftover the task digest skips; the digest covers solution/, so it is written before the load.
+        (root / "solution").mkdir(exist_ok=True)
+        (root / "solution" / "solve.sh").write_text(SOLVE_SH)
+        (root / "solution" / "solve.sh").chmod(0o700)
+        (root / "solution" / "data").mkdir(exist_ok=True)
+        (root / "solution" / "data" / "answer.txt").write_text("42\n")
+        (root / "solution" / "__pycache__").mkdir(exist_ok=True)
+        (root / "solution" / "__pycache__" / "x.pyc").write_bytes(b"\x00")
     return root
 
 
@@ -74,10 +94,17 @@ def archive_of(files: dict[str, str]) -> bytes:
 
 @dataclass
 class FakeSandbox:
-    """Records sandbox calls; ``verifier_files`` is what ``/logs/verifier`` holds after test.sh."""
+    """Records sandbox calls; ``verifier_files`` is what ``/logs/verifier`` holds after test.sh.
+
+    The verifier wrapper's exit record is added when the wrapper ran to its end: ``test_elapsed`` is how
+    long the run took inside the container. A provider timeout, or ``wrapper_ran=False`` (no ``timeout``
+    or ``bash`` in the image), leaves no record.
+    """
 
     verifier_files: dict[str, str] = field(default_factory=lambda: {"reward.txt": "1\n"})
     test_result: SandboxExecResult = SandboxExecResult(stdout="", stderr="", return_code=0)
+    test_elapsed: int = 1
+    wrapper_ran: bool = True
     execs: list[dict] = field(default_factory=list)
     uploads: list[tuple[Path, str]] = field(default_factory=list)
     uploaded_archives: list[bytes] = field(default_factory=list)
@@ -86,7 +113,15 @@ class FakeSandbox:
     async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
         self.execs.append({"command": command, "cwd": cwd, "env": env, "timeout_s": timeout_s, "user": user})
         if "test.sh" in command:
+            if self.wrapper_ran and self.test_result.error_type != "timeout":
+                start = 1_700_000_000
+                self.verifier_files.setdefault(
+                    EXIT_RECORD_NAME, f"{self.test_result.return_code} {start} {start + self.test_elapsed}\n"
+                )
             return self.test_result
+        if command == "pwd":
+            # The image's own WORKDIR, asked for when a task declares none.
+            return SandboxExecResult(stdout="/app\n", stderr="", return_code=0)
         return SandboxExecResult(stdout="", stderr="", return_code=0)
 
     async def upload(self, local_path, remote_path):
@@ -189,9 +224,11 @@ class FakeAgentClient(ServerClient):
         return [call[1] for call in self.calls]
 
 
-def make_client() -> FakeAgentClient:
+def make_client(implementation: str = "test") -> FakeAgentClient:
+    """``implementation`` is the key under the agent instance's ``responses_api_agents`` block in the run config:
+    the server reads it to tell the oracle (``harbor_oracle_agent``) from every other harness."""
     global_config = OmegaConf.create(
-        {"agent": {"responses_api_agents": {"test": {"host": "agent", "port": 8001, "entrypoint": "app.py"}}}}
+        {"agent": {"responses_api_agents": {implementation: {"host": "agent", "port": 8001, "entrypoint": "app.py"}}}}
     )
     return FakeAgentClient(
         head_server_config=BaseServerConfig(host="head", port=1),
@@ -209,10 +246,12 @@ def make_server(
     *,
     toml: str = TASK_TOML,
     dockerfile: str = "FROM ubuntu:24.04\nWORKDIR /app",
+    agent_implementation: str = "test",
+    solution: bool = False,
     **config_overrides,
 ):
     folder = tmp_path / "datasets" / "ds"
-    task = load_task(write_task(folder / "hello", toml=toml, dockerfile=dockerfile))
+    task = load_task(write_task(folder / "hello", toml=toml, dockerfile=dockerfile, solution=solution))
     config = HarborEnvironmentServerConfig(
         host="0.0.0.0",
         port=8080,
@@ -224,7 +263,7 @@ def make_server(
         cleanup_timeout_seconds=10,
         **config_overrides,
     )
-    server = HarborEnvironmentServer(config=config, server_client=make_client())
+    server = HarborEnvironmentServer(config=config, server_client=make_client(agent_implementation))
     sandbox = sandbox or FakeSandbox()
     created: list[tuple] = []
 

@@ -136,6 +136,9 @@ class AgentSeedSessionRequest(BaseModel):
             "Omitted for ordinary sessions."
         ),
     )
+    # The task's own time budget for the harness's work, in seconds (Harbor's ``[agent].timeout_sec``).
+    # The environment server enforces it; a harness that reads it can stop cleanly and return a partial turn.
+    agent_timeout_sec: float | None = Field(default=None, gt=0)
 
     @field_validator("tool_accesses")
     @classmethod

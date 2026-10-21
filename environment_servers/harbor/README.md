@@ -14,7 +14,12 @@ This is an environment server: one `/run` call owns one whole episode, and no re
   re-materialize and restart the server to use edited tasks.
 - Agent: opens a session on the configured agent server with a `SandboxAccess` for that sandbox (the same
   seed request every sandboxed harness already accepts), posts the task's `responses_create_params` to it,
-  then closes the session and keeps the harness's observations for the result.
+  then closes the session and keeps the harness's observations for the result. When the agent instance is
+  implemented by `harbor_oracle_agent` (the key under its `responses_api_agents` block), the seed first
+  uploads the snapshot's `solution/` to `/solution`, as root like its other uploads, and the sandbox access
+  carries the host-resolved `[solution].env` as `env`; that is where Harbor's oracle copies and runs the
+  solution. No other harness receives the solution, and a task without `solution/` uploads nothing (the
+  oracle reports it unvalidated).
 - Verify: clears `/tests` and `/logs/verifier`, uploads the snapshot's `tests/`, runs `bash /tests/test.sh`
   in the same sandbox, and downloads the verifier logs.
 - Cleanup: stops the sandbox after the episode, whatever happened before. Cancellation and the episode
@@ -49,6 +54,12 @@ are an authoring error (a terminal `stage: verification` failure) because Gym re
 | Image ENTRYPOINT | No Harbor-compatible entrypoint lifecycle is guaranteed; startup follows the selected Gym sandbox provider. Tasks must not rely on an entrypoint running. |
 | Other features | Multi-step tasks, in-sandbox MCP tools, Windows and TPU environments are unsupported. |
 
+Shared-mode verification does not stop or quiesce what the agent left running: `test.sh` runs in the same
+sandbox beside those processes, as Harbor's shared mode runs it, so a test that talks to a service the agent
+started keeps working, and a process the agent left behind can still interfere. Separate verifier mode is the
+tamper-proof path: the verifier gets its own sandbox and its own image, and nothing the agent started is there
+(see the Verification row for what this layer supports).
+
 Clearing `/tests` and `/logs/verifier` before verification is a deliberate difference from Harbor's
 single-step shared mode, which merges tests. It prevents agent-planted reward files or test helpers
 from being used. Linked verification roots (including `/logs`) are unlinked before preparation,
@@ -69,8 +80,11 @@ with `failure_kind: persistence_failed` and identify the affected path.
 Measured outcomes include an absolute `verifier_logs_dir` naming the collection location; that directory
 can be empty if optional log collection fails.
 
-Hermes honors the task's `[agent].timeout_sec` via the materialized `agent_timeout_sec` metadata,
-using the smaller of that deadline and its configured runner limit. The verifier uses
+The task's `[agent].timeout_sec` reaches the harness twice: in the agent-session seed as
+`agent_timeout_sec`, next to `sandbox_access` (which also names the task's `[agent].user` as `user`, and
+for the oracle the resolved `[solution].env` as `env`; the oracle's solve budget is that `agent_timeout_sec`),
+and, until every harness reads the seed, as the materialized `agent_timeout_sec` metadata that Hermes
+honors today, using the smaller of that deadline and its configured runner limit. The verifier uses
 `[verifier].timeout_sec`. Sandbox lifetime covers the episode budget (`default_episode_timeout_seconds`),
 the final cleanup budget (`cleanup_timeout_seconds`) and `sandbox_ttl_slack_s`, so setup and queued agent
 work also fit; both budgets must be finite. Sandboxes are normally stopped as soon as the episode ends.
@@ -78,6 +92,17 @@ work also fit; both budgets must be finite. Sandboxes are normally stopped as so
 Resource settings come from the task. `sandbox_resources_override`, `gpu_sandbox_provider`,
 `request_gpu_type` and `verifier_grace_s` belong to later stack layers and are not configuration options
 in this PR.
+
+Servers bind loopback (`127.0.0.1`) by default, the head server with its `/global_config_dict_yaml` endpoint
+included. A harness that calls the model server from inside the task sandbox (`calls_model_from_sandbox = True`
+on its agent class, or `sandbox_model_base_url` in its config) cannot reach loopback there, so
+`gym eval run <target> --agent <harness>` sets `use_absolute_ip: true` together with
+`absolute_ip_server_types: [responses_api_models]` in the generated run config: only the model server
+advertises the node's resolved address; the head server, the agent server and this environment server stay on
+loopback exactly as on a run without a sandboxed harness. The oracle (`gym dataset validate`), Terminus 2 and
+mini-SWE run their commands in the sandbox but call the model from the host, so nothing moves for them. A
+deployment that needs more servers reachable sets `absolute_ip_server_types` (or `default_host`, which applies
+to every server) explicitly; a config file or command-line override wins over the generated default.
 
 `harbor:<dataset>[@<version>]` resolves the Harbor registry and fetches task folders into Gym's shared
 datasets folder (`$NEMO_GYM_DATASETS_DIR`, default `./datasets`). A local task folder, or a folder of task
