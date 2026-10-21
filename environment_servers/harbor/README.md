@@ -97,18 +97,28 @@ without `resume_trajectory`: a fresh agent session per turn, with the step's
 `steps/<name>/instruction.md` as its only input and the step's `[steps.agent].timeout_sec` (else the task's)
 as its budget. The task's top-level `instruction.md` is never sent; a multi-step task may keep material there
 the agent must not see. After each turn the shared verifier runs the task's `tests/` with
-`steps/<name>/tests/` on top, under the step's verifier timeout, user and environment over the task's.
+`steps/<name>/tests/` on top, under the step's verifier timeout, user and environment over the task's. A step's
+`[steps.verifier].user` that names a group (`name:group`, `uid:gid`) is refused at seed on every provider but
+Docker, as the task's `[verifier].user` is, before any sandbox exists. Every turn's agent runs as the task's
+user (`[agent].user`, else the image's `USER`): Harbor switches to a step's own `[steps.agent].user` per step,
+which is not applied here yet, so a step that sets one is refused by the loader, by step name, instead of
+being run as the wrong user.
 
 The episode stops after a turn that is masked, writes no valid reward file, or misses the step's
 `min_reward` (a number gates `reward`, a table gates each named key). `multi_step_reward_strategy` rolls the
 turns up: `mean` (the default) averages the turns with a verifier result, and `final` takes the last turn that
-ran. The result lists every turn under `turns`; its `response` and `ng_agent_observations` are the last
-turn's. Per-step `workdir/`, `setup.sh`, healthchecks, artifacts and separate verification are refused by the
-loader, and `separate_verifier_for_artifacts` is refused at seed for such a task. Each turn is seeded with
-its step's agent budget and hands the verifier an ATIF transcript of its own request; with
-`enforce_task_timeouts` the task deadline sums every turn's harness setup, agent budget, hooks and verifier
-time. A long task's turns can budget more than `default_episode_timeout_seconds`; the seed logs a warning,
-because an expired episode is retried rather than scored.
+ran. The pre-1.3 spellings `version` and `multi_step_reward_mode` (what older multi-step generators such as the
+MemoryArena adapters write) are read as Harbor 0.22.0 reads them: `version` is `schema_version`, and
+`multi_step_reward_mode = "aggregate"` is dropped and the task rolls up with the default `mean` (or its own
+`multi_step_reward_strategy`), as under Harbor, which has no such field; any other value of that key is dropped
+too, with a warning naming it, never read as a strategy. The result lists every turn under `turns`; its
+`response` and `ng_agent_observations` are the last turn's. Per-step `workdir/`, `setup.sh`, healthchecks,
+artifacts, agent user and separate verification are refused by the loader, and `separate_verifier_for_artifacts`
+is refused at seed for such a task. Each turn is seeded with its step's agent budget and hands the verifier an
+ATIF transcript of its own request; with `enforce_task_timeouts` the task deadline sums every turn's harness
+setup, agent budget, hooks and verifier time. A long task's turns can budget more than
+`default_episode_timeout_seconds`; the seed logs a warning, because an expired episode is retried rather than
+scored.
 
 ## Dockerfile builds
 
