@@ -4,14 +4,23 @@
 import asyncio
 import gzip
 import hashlib
+import os
 import shutil
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from responses_api_agents.claude_code_agent import runtime
+
+
+@pytest.fixture(autouse=True)
+def isolated_process_cache(monkeypatch):
+    monkeypatch.setattr(runtime, "_CACHE_LOCKS", {})
+    monkeypatch.setattr(runtime, "_HASH_LOCKS", {})
+    monkeypatch.setattr(runtime, "_VERIFIED", {})
+    monkeypatch.setattr(runtime, "_UPLOAD_SLOTS", asyncio.Semaphore(4))
 
 
 class Response:
@@ -180,4 +189,143 @@ async def test_bounded_upload_reassembles_bytes_and_removes_parts(tmp_path):
     assert Path(destination).read_bytes() == data
     assert not list(directory.glob("*.part"))
     assert max(sizes) <= 1024 * 1024 and sum(sizes) == len(data)
-    assert maximum == 4
+    assert 1 <= maximum <= 4
+
+
+@pytest.mark.asyncio
+async def test_warm_seeds_share_hashes_and_detect_same_size_replacements(tmp_path, monkeypatch):
+    monkeypatch.setattr(runtime, "CACHE_DIR", tmp_path / "cache")
+    data = b"verified native binary"
+    checksum = hashlib.sha256(data).hexdigest()
+    download = AsyncMock(return_value=Response(data=data))
+    monkeypatch.setattr(runtime, "request", download)
+    digest = MagicMock(wraps=runtime.sha256_file)
+    monkeypatch.setattr(runtime, "sha256_file", digest)
+    path, _ = await runtime.cached_binary("2.1.108", "linux-x64", expected=checksum)
+    archive = await runtime.compressed_binary(path, checksum)
+    initial_hashes = digest.call_count
+    for _ in range(3):
+        assert await runtime.cached_binary("2.1.108", "linux-x64", expected=checksum) == (path, checksum)
+        assert await runtime.compressed_binary(path, checksum) == archive
+    assert digest.call_count == initial_hashes
+    identity = path.stat()
+    replacement = path.with_name("replacement")
+    replacement.write_bytes(b"x" * len(data))
+    os.utime(replacement, ns=(identity.st_atime_ns, identity.st_mtime_ns))
+    replacement.replace(path)
+    await runtime.cached_binary("2.1.108", "linux-x64", expected=checksum)
+    assert path.read_bytes() == data
+    assert download.await_count == 2
+    assert digest.call_count > initial_hashes
+
+
+@pytest.mark.asyncio
+async def test_host_cache_is_private_and_rejects_foreign_ownership(tmp_path, monkeypatch):
+    cache = tmp_path / "cache"
+    cache.mkdir(mode=0o755)
+    monkeypatch.setattr(runtime, "CACHE_DIR", cache)
+    data = b"native"
+    checksum = hashlib.sha256(data).hexdigest()
+    download = AsyncMock(return_value=Response(data=data))
+    monkeypatch.setattr(runtime, "request", download)
+    await runtime.cached_binary("2.1.108", "linux-x64", expected=checksum)
+    assert all(
+        path.stat().st_mode & 0o777 == 0o700 for path in (cache, cache / "2.1.108", cache / "2.1.108/linux-x64")
+    )
+    owner = cache.stat().st_uid
+    monkeypatch.setattr(runtime.os, "getuid", lambda: owner + 1)
+    download.reset_mock()
+    with pytest.raises(PermissionError, match="owned by the current user"):
+        await runtime.cached_binary("2.1.108", "linux-x64", expected=checksum)
+    download.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_host_cache_rejects_symlink_before_reading_manifest(tmp_path, monkeypatch):
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    cache = tmp_path / "cache"
+    cache.symlink_to(shared, target_is_directory=True)
+    monkeypatch.setattr(runtime, "CACHE_DIR", cache)
+    download = AsyncMock()
+    monkeypatch.setattr(runtime, "request", download)
+    with pytest.raises(PermissionError, match="owned by the current user"):
+        await runtime.cached_binary("2.1.108", "linux-x64")
+    download.assert_not_awaited()
+    assert not list(shared.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_host_cache_rejects_previously_shared_write_access(tmp_path, monkeypatch):
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    cache.chmod(0o777)
+    monkeypatch.setattr(runtime, "CACHE_DIR", cache)
+    download = AsyncMock()
+    monkeypatch.setattr(runtime, "request", download)
+    with pytest.raises(PermissionError, match="shared write access"):
+        await runtime.cached_binary("2.1.108", "linux-x64")
+    download.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_seeds_bound_staged_chunks_and_uploads_across_sandboxes(tmp_path):
+    archive = tmp_path / "source.gz"
+    data = bytes(range(256)) * (1024 * 24 + 7)
+    archive.write_bytes(data)
+    release = asyncio.Event()
+    full = asyncio.Event()
+    active = maximum = 0
+    staging = set()
+
+    async def upload(source, destination):
+        nonlocal active, maximum
+        active += 1
+        maximum = max(maximum, active)
+        staging.add(source.parent)
+        if active == 4:
+            full.set()
+        try:
+            await release.wait()
+            shutil.copyfile(source, destination)
+        finally:
+            active -= 1
+
+    async def execute(command, **kwargs):
+        process = await asyncio.create_subprocess_shell(command)
+        return result(code=await process.wait())
+
+    sandbox = SimpleNamespace(upload=upload, exec=execute)
+    directories = [tmp_path / f"remote-{index}" for index in range(3)]
+    for directory in directories:
+        directory.mkdir()
+    tasks = [
+        asyncio.create_task(runtime._upload_archive(sandbox, archive, str(directory), 60)) for directory in directories
+    ]
+    try:
+        await asyncio.wait_for(full.wait(), timeout=5)
+        # Paused transfers keep their source files: a full per-seed split would exceed this bound.
+        assert (
+            sum(path.stat().st_size for directory in staging for path in directory.glob("*.part")) <= 4 * 1024 * 1024
+        )
+        release.set()
+        destinations = await asyncio.wait_for(asyncio.gather(*tasks), timeout=10)
+        assert all(Path(path).read_bytes() == data for path in destinations)
+        assert maximum == 4
+    finally:
+        release.set()
+        await asyncio.gather(*tasks, return_exceptions=True)
+    assert all(not directory.exists() for directory in staging)
+
+
+@pytest.mark.asyncio
+async def test_failed_upload_releases_slots_for_later_seeds(tmp_path):
+    archive = tmp_path / "source.gz"
+    archive.write_bytes(b"x" * 5 * 1024 * 1024)
+    upload = AsyncMock(side_effect=RuntimeError("transfer failed"))
+    with pytest.raises(ExceptionGroup, match="TaskGroup"):
+        await runtime._upload_archive(SimpleNamespace(upload=upload), archive, "/remote", 60)
+    assert all(not call.args[0].exists() for call in upload.await_args_list)
+    sandbox = SimpleNamespace(upload=AsyncMock(), exec=AsyncMock(return_value=result()))
+    await asyncio.wait_for(runtime._upload_archive(sandbox, archive, "/remote", 60), timeout=5)
+    assert sandbox.upload.await_count == 5

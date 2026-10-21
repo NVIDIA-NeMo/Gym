@@ -5,11 +5,13 @@
 import asyncio
 import gzip
 import json
+import os
 import re
 import shutil
+import stat
 from pathlib import Path
 from shlex import quote
-from tempfile import TemporaryDirectory, gettempdir
+from tempfile import TemporaryDirectory
 from uuid import uuid4
 
 from aiohttp import ClientTimeout
@@ -19,8 +21,38 @@ from nemo_gym.server_utils import request
 from responses_api_agents.claude_code_agent.install_claude_runtime import sha256_file
 
 
-CACHE_DIR = Path(gettempdir()) / "nemo-gym-claude-assets"
-_DOWNLOAD_LOCK = asyncio.Lock()
+CACHE_DIR = Path.home() / ".cache" / "nemo_gym" / "claude"
+_CACHE_LOCKS: dict[Path, asyncio.Lock] = {}
+_HASH_LOCKS: dict[Path, asyncio.Lock] = {}
+_VERIFIED: dict[Path, tuple[tuple[int, ...], str]] = {}
+_UPLOAD_SLOTS = asyncio.Semaphore(4)
+
+
+def _private_directory(path: Path) -> None:
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    info = path.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
+        raise PermissionError(f"Claude cache must be owned by the current user without shared write access: {path}")
+    path.chmod(0o700)
+
+
+def _fingerprint(path: Path) -> tuple[int, ...]:
+    info = path.stat()
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+async def _verified_sha256(path: Path) -> str:
+    # Rehash replacements or edits, but share verification across warm concurrent seeds.
+    async with _HASH_LOCKS.setdefault(path, asyncio.Lock()):
+        identity = _fingerprint(path)
+        cached = _VERIFIED.get(path)
+        if cached is not None and cached[0] == identity:
+            return cached[1]
+        digest = await asyncio.to_thread(sha256_file, path)
+        if _fingerprint(path) != identity:
+            raise ValueError(f"Claude artifact changed during checksum verification: {path}")
+        _VERIFIED[path] = (identity, digest)
+        return digest
 
 
 def _target(probe: str) -> str:
@@ -43,9 +75,10 @@ async def cached_binary(version: str, target: str, *, expected: str | None = Non
         "linux-arm64-musl",
     }:
         raise ValueError("Claude runtime requires an exact version and supported Linux target")
-    async with _DOWNLOAD_LOCK:
-        directory = CACHE_DIR / version
-        directory.mkdir(parents=True, exist_ok=True)
+    _private_directory(CACHE_DIR)
+    directory = CACHE_DIR / version
+    async with _CACHE_LOCKS.setdefault(directory, asyncio.Lock()):
+        _private_directory(directory)
         base = "https://downloads.claude.ai/claude-code-releases/" + version
         if expected is None:
             manifest_path = directory / "manifest.json"
@@ -64,10 +97,12 @@ async def cached_binary(version: str, target: str, *, expected: str | None = Non
                 finally:
                     temporary.unlink(missing_ok=True)
         checksum = expected.lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", checksum):
+            raise ValueError("Claude executable requires a SHA-256 checksum")
         path = directory / target / "claude"
-        if path.is_file() and await asyncio.to_thread(sha256_file, path) == checksum:
+        _private_directory(path.parent)
+        if path.is_file() and await _verified_sha256(path) == checksum:
             return path, checksum
-        path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_name(".claude-" + uuid4().hex)
         try:
             async with await request(
@@ -77,10 +112,13 @@ async def cached_binary(version: str, target: str, *, expected: str | None = Non
                 with temporary.open("wb") as output:
                     async for chunk in response.content.iter_chunked(1024 * 1024):
                         await asyncio.to_thread(output.write, chunk)
-            if await asyncio.to_thread(sha256_file, temporary) != checksum:
+            if await _verified_sha256(temporary) != checksum:
                 raise ValueError("Claude executable SHA-256 mismatch")
             temporary.replace(path)
+            _VERIFIED[path] = (_fingerprint(path), checksum)
         finally:
+            _VERIFIED.pop(temporary, None)
+            _HASH_LOCKS.pop(temporary, None)
             temporary.unlink(missing_ok=True)
         return path, checksum
 
@@ -92,24 +130,24 @@ def _compress(source: Path, destination: Path) -> None:
 
 async def compressed_binary(source: Path, checksum: str) -> Path:
     """Cache a smaller transfer artifact while retaining verification of the native bytes."""
-    async with _DOWNLOAD_LOCK:
-        directory = CACHE_DIR / "compressed"
-        directory.mkdir(parents=True, exist_ok=True)
-        path = directory / (checksum + ".gz")
+    _private_directory(CACHE_DIR)
+    directory = CACHE_DIR / "compressed"
+    _private_directory(directory)
+    path = directory / (checksum + ".gz")
+    async with _CACHE_LOCKS.setdefault(path, asyncio.Lock()):
         receipt = path.with_suffix(".sha256")
-        if (
-            path.is_file()
-            and receipt.is_file()
-            and await asyncio.to_thread(sha256_file, path) == receipt.read_text().strip()
-        ):
+        if path.is_file() and receipt.is_file() and await _verified_sha256(path) == receipt.read_text().strip():
             return path
         temporary = directory / (".gzip-" + uuid4().hex)
         try:
             await asyncio.to_thread(_compress, source, temporary)
-            digest = await asyncio.to_thread(sha256_file, temporary)
+            digest = await _verified_sha256(temporary)
             temporary.replace(path)
+            _VERIFIED[path] = (_fingerprint(path), digest)
             receipt.write_text(digest)
         finally:
+            _VERIFIED.pop(temporary, None)
+            _HASH_LOCKS.pop(temporary, None)
             temporary.unlink(missing_ok=True)
         return path
 
@@ -123,29 +161,37 @@ def _check(result: SandboxExecResult) -> None:
 
 
 async def _upload_archive(sandbox: AsyncSandbox, archive: Path, directory: str, timeout: float) -> str:
-    """Keep each upload below sandbox proxy request-size limits."""
+    """Stream bounded pieces with a process-wide limit on staged bytes and uploads."""
     destination = directory + "/claude-upload.gz"
     with TemporaryDirectory(prefix="claude-upload-") as staging:
 
-        def split() -> list[Path]:
-            parts = []
-            with archive.open("rb") as source:
-                while data := source.read(1024 * 1024):
-                    path = Path(staging) / f"claude-upload-{len(parts):04d}.part"
-                    path.write_bytes(data)
-                    parts.append(path)
-            return parts
-
-        parts = await asyncio.to_thread(split)
-        semaphore = asyncio.Semaphore(4)
-
         async def upload(part: Path) -> None:
-            async with semaphore:
+            try:
                 await sandbox.upload(part, directory + "/" + part.name)
+            finally:
+                part.unlink(missing_ok=True)
+                _UPLOAD_SLOTS.release()
 
+        parts = []
         async with asyncio.TaskGroup() as tasks:
-            for part in parts:
-                tasks.create_task(upload(part))
+            with archive.open("rb") as source:
+                while True:
+                    await _UPLOAD_SLOTS.acquire()
+                    try:
+                        data = await asyncio.to_thread(source.read, 1024 * 1024)
+                        if not data:
+                            _UPLOAD_SLOTS.release()
+                            break
+                        part = Path(staging) / f"claude-upload-{len(parts):04d}.part"
+                        await asyncio.to_thread(part.write_bytes, data)
+                        del data
+                    except BaseException:
+                        _UPLOAD_SLOTS.release()
+                        raise
+                    parts.append(part)
+                    tasks.create_task(upload(part))
+        if not parts:
+            raise ValueError("Cannot upload an empty Claude archive")
         sources = " ".join(quote(directory + "/" + part.name) for part in parts)
         result = await sandbox.exec(f"cat {sources} > {quote(destination)} && rm -f {sources}", timeout_s=timeout)
         _check(result)
@@ -172,7 +218,7 @@ async def install_sandbox_runtime(
     else:
         if local_source:
             local = Path(local_source).expanduser()
-            checksum = await asyncio.to_thread(sha256_file, local)
+            checksum = await _verified_sha256(local)
             if checksum != expected.lower():
                 raise ValueError("Local Claude executable SHA-256 mismatch")
         else:

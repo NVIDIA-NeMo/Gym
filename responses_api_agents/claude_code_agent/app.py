@@ -689,7 +689,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         env = {
             "CLAUDE_CONFIG_DIR": directory + "/config",
             "IS_SANDBOX": "1",
-            "ANTHROPIC_API_KEY": self.config.anthropic_api_key or "EMPTY",
+            "ANTHROPIC_API_KEY": "gym" if self.config.model_server else self.config.anthropic_api_key or "EMPTY",
             "ANTHROPIC_MODEL": model,
             "ANTHROPIC_DEFAULT_HAIKU_MODEL": model,
             "ANTHROPIC_DEFAULT_SONNET_MODEL": model,
@@ -699,7 +699,10 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
         }
         if base_url:
-            env.update(ANTHROPIC_BASE_URL=base_url, ANTHROPIC_AUTH_TOKEN=self.config.anthropic_api_key or "local")
+            env.update(
+                ANTHROPIC_BASE_URL=base_url,
+                ANTHROPIC_AUTH_TOKEN="gym" if self.config.model_server else self.config.anthropic_api_key or "local",
+            )
         artifacts = None
         failure = None
         try:
@@ -764,7 +767,15 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 SandboxObservation(
                     role="agent",
                     provider=access.connection.provider_config_ref if access else self.config.sandbox_provider,
-                    outcome="timeout" if cleanup["timed_out"] else "failed" if status == "failed" else "completed",
+                    outcome=(
+                        "timeout"
+                        if cleanup["timed_out"]
+                        else "cancelled"
+                        if reason == "cancelled"
+                        else "failed"
+                        if status == "failed"
+                        else "completed"
+                    ),
                     exit_code=cleanup["return_code"],
                     error_type=reason,
                 )

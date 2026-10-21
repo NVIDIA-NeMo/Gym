@@ -356,8 +356,10 @@ async def test_retry_shares_execution_and_rejects_changed_body(monkeypatch):
     with pytest.raises(HTTPException) as error:
         await instance.responses(request(), NeMoGymResponseCreateParamsNonStreaming(input="Changed"))
     assert error.value.status_code == 409
-    with pytest.raises(HTTPException):
+    with pytest.raises(HTTPException) as error:
         await instance.responses(request(rollout="wrong"), body)
+    assert error.value.status_code == 409
+    assert execute.await_count == 1
 
 
 @pytest.mark.asyncio
@@ -410,6 +412,54 @@ async def test_empty_sandbox_output_uses_local_padding(monkeypatch):
     assert response.output[0].content[0].text == ""
     assert response.output[0].role == "assistant"
     assert response.status == "incomplete"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_server", [None, {"type": "responses_api_models", "name": "policy"}])
+async def test_sandbox_only_receives_direct_credentials_without_gym_model_server(monkeypatch, model_server):
+    credential = "direct-provider-credential"
+    instance = agent(model_server=model_server, anthropic_api_key=credential, anthropic_base_url="http://direct")
+    state = adapter.ClaudeCodeSandboxSession(
+        request=seed(),
+        runtime="/runtime",
+        session=SimpleNamespace(session_dir="/tmp/session", workdir="/app", cleanup=None),
+    )
+    execute = AsyncMock(return_value=adapter.ClaudeCodeArtifacts(""))
+    monkeypatch.setattr(adapter.ClaudeCodeSandboxSession, "execute", execute)
+    monkeypatch.setattr(app.ClaudeCodeAgent, "_resolve_call_base_url", lambda *_: "http://model-server")
+    await instance._sandbox_response(
+        state, NeMoGymResponseCreateParamsNonStreaming(input="Question"), prompt="Question", system=None
+    )
+    payload = execute.await_args.args[0]
+    expected = "gym" if model_server else credential
+    assert payload["env"]["ANTHROPIC_API_KEY"] == expected
+    assert payload["env"]["ANTHROPIC_AUTH_TOKEN"] == expected
+    if model_server:
+        assert credential not in json.dumps(payload)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timed_out,expected", [(False, "cancelled"), (True, "timeout")])
+async def test_cancelled_activation_reports_sandbox_outcome(monkeypatch, timed_out, expected):
+    instance = agent()
+    state = adapter.ClaudeCodeSandboxSession(
+        request=seed(),
+        runtime="/runtime",
+        session=SimpleNamespace(
+            session_dir="/tmp/session",
+            workdir="/app",
+            artifacts=adapter.ClaudeCodeArtifacts(""),
+            cleanup={"timed_out": timed_out, "return_code": 143},
+        ),
+    )
+    monkeypatch.setattr(adapter.ClaudeCodeSandboxSession, "execute", AsyncMock(side_effect=asyncio.CancelledError()))
+    with pytest.raises(asyncio.CancelledError):
+        await instance._sandbox_response(
+            state, NeMoGymResponseCreateParamsNonStreaming(input="Question"), prompt="Question", system=None
+        )
+    record = next(record for record in state.observations.records if record.kind == "sandbox")
+    assert record.outcome == expected
+    assert record.exit_code == 143
 
 
 @pytest.mark.asyncio

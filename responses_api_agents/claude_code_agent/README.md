@@ -240,12 +240,17 @@ access to the release service, or a supplied local binary as described below.
 
 The sandbox installer decompresses the transfer, verifies the native bytes, and
 atomically installs them in `/tmp/nemo-gym-claude-runtime-<version>`, separate from
-session state. A file lock serializes installation. Later seeds verify the cached
-checksum and version before skipping the binary upload. Closing a borrowed session
+session state. A file lock serializes installation. Later seeds in the **same
+sandbox** verify the cached checksum and version before skipping the binary
+upload; a fresh sandbox still needs the transfer. Closing a borrowed session
 removes its private state and retains the shared runtime for subsequent sessions.
 
-Host downloads are checked against the release manifest's SHA-256 to detect
-corruption. For an independently trusted checksum, set
+Host downloads use the current user's owned, mode-0700
+`~/.cache/nemo_gym/claude` directory and are checked against the release manifest's
+SHA-256. Verified file identities are memoized in each worker; edits or replacements
+trigger verification again. Transfers stream from the compressed cache with at
+most four 1 MiB pieces staged or uploading per worker, shared across sessions.
+For an independently trusted checksum, set
 `sandbox_executable_sha256`. An offline Gym host can supply
 `sandbox_local_executable_path` pointing to a matching Linux binary on the host;
 alternatively, `sandbox_executable_path` names a binary already **inside the
@@ -253,10 +258,18 @@ sandbox**. These two options are mutually exclusive and require
 `sandbox_executable_sha256`.
 
 Configure `model_server` as above, or `anthropic_base_url` and `anthropic_api_key`;
-the endpoint must be reachable from the sandbox. `resources_server` is needed only
+the endpoint must be reachable from the sandbox. With `model_server`, only
+placeholder Anthropic credentials enter the sandbox; the configured direct
+Anthropic credential stays on the host. `resources_server` is needed only
 for the legacy agent `/run` path. Sandbox-only servers install no host CLI. For
 local execution, installation happens on the first local invocation; concurrent
 calls share setup, failures propagate, and a later call can retry.
+
+The default YAML selects native composition rather than acting as an unbound
+legacy swap source. To use `--resources-server X --agent-type claude_code_agent`
+with legacy swap configurations, explicitly restore
+`resources_server: {type: resources_servers, name: "???"}` on the agent. Existing
+resource-bound recipes retain their bindings.
 
 For borrowed execution, the seed request supplies `sandbox_access` with a direct
 provider connection descriptor and an absolute task `workdir`. Resources prepares
