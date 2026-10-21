@@ -184,6 +184,32 @@ def test_validate_filters_solutionless_before_limit_and_checks_repeats(
     assert ("missing result" in output) is missing_repeat
 
 
+@pytest.mark.parametrize("override", [None, "+num_repeats=2"])
+def test_validate_plays_each_solution_once_unless_the_command_line_says_otherwise(
+    tmp_path, monkeypatch, capsys, validation_cli, override
+):
+    """A dataset's `[gym.defaults].num_repeats` is an evaluation default; the oracle's result does not vary, so
+    `gym dataset validate` adds `+num_repeats=1` unless the command line sets a count, and sizes its report so."""
+    write_task(tmp_path / "ds" / "a")
+    (tmp_path / "ds" / "dataset.toml").write_text("[gym.defaults]\nnum_repeats = 3\n")
+    seen = {}
+
+    def collect(target, tokens):
+        monkeypatch.setattr(sys, "argv", ["e2e", *tokens])
+        config = global_config.get_global_config_dict()
+        seen["num_repeats"] = config.num_repeats
+        seen["tokens"] = [token for token in tokens if token.lstrip("+").startswith("num_repeats=")]
+        write_jsonl(Path(config.output_jsonl_fpath), [result(repeat=i) for i in range(config.num_repeats)])
+
+    monkeypatch.setattr(main_module, "dispatch", collect)
+    validation_cli(*([override] if override else []))
+    assert seen["num_repeats"] == (2 if override else 1)
+    assert seen["tokens"] == ([override] if override else ["+num_repeats=1"])
+    output = capsys.readouterr().out
+    assert f"validating {seen['num_repeats']} oracle rollout(s)" in output
+    assert ("a [repeat 1]" in output) is bool(override) and "a [repeat 2]" not in output
+
+
 @pytest.mark.parametrize("with_solution", [False, True])
 def test_validate_fails_for_skipped_tasks_even_with_no_solutions(
     tmp_path, monkeypatch, capsys, validation_cli, with_solution

@@ -10702,6 +10702,57 @@ class TestMultiAgentEnvironmentServers:
             RolloutCollectionHelper._validate_environment_servers([row], self._config())
 
 
+class TestDatasetAdmittedAgentsAtDispatch:
+    """A dataset an agent declares may name the harnesses it admits (`allowed_agents` on the entry, as a Harbor
+    dataset's `[gym]` table writes it); the pairing guard checks the agent's own type against it, for rows an
+    environment server runs (which binds no resources server) and for rows routed to the agent directly."""
+
+    @staticmethod
+    def _config(agent_type: str, admitted: object, **top: object) -> DictConfig:
+        entry = {"name": "tb21", "type": "benchmark", "verified": False, "jsonl_fpath": "tb21.jsonl"}
+        if admitted is not None:
+            entry["allowed_agents"] = admitted
+        return OmegaConf.create(
+            {
+                "harbor_tb21_agent": {"responses_api_agents": {agent_type: {"datasets": [entry]}}},
+                "harbor_tb21_environment": {
+                    "environment_servers": {
+                        "harbor": {"agent_server": {"type": "responses_api_agents", "name": "harbor_tb21_agent"}}
+                    }
+                },
+                **top,
+            }
+        )
+
+    ROW = {NG_ENVIRONMENT_SERVER_KEY: "harbor_tb21_environment"}
+
+    def test_an_agent_the_dataset_does_not_admit_is_refused_naming_both(self) -> None:
+        config = self._config("codex_agent", ["terminus_2_sandboxed_agent", "hermes_agent"])
+        with pytest.raises(ValueError) as exc:
+            RolloutCollectionHelper._validate_environment_servers([self.ROW], config)
+        message = str(exc.value)
+        assert "Rows would be scored by a verifier that does not accept the agent running them" in message
+        assert (
+            "rows routed to 'harbor_tb21_agent' run 'codex_agent', but its dataset 'tb21' admits only: "
+            "terminus_2_sandboxed_agent, hermes_agent"
+        ) in message
+        assert "--allow-unsupported-pairing" in message
+
+    @pytest.mark.parametrize("admitted", [None, ["hermes_agent"], "hermes_agent"], ids=["unset", "list", "bare"])
+    def test_an_admitted_agent_passes(self, admitted: object) -> None:
+        RolloutCollectionHelper._validate_environment_servers([self.ROW], self._config("hermes_agent", admitted))
+
+    def test_the_pairing_override_waives_it(self) -> None:
+        config = self._config("codex_agent", ["hermes_agent"], allow_unsupported_pairing=True)
+        RolloutCollectionHelper._validate_environment_servers([self.ROW], config)
+
+    def test_directly_routed_rows_meet_the_same_guard(self) -> None:
+        config = self._config("codex_agent", ["hermes_agent"])
+        rows = [{AGENT_REF_KEY_NAME: {"name": "harbor_tb21_agent"}}]
+        with pytest.raises(ValueError, match="its dataset 'tb21' admits only: hermes_agent"):
+            RolloutCollectionHelper._validate_agent_pairings(rows, config)
+
+
 class TestLiveHealthEvaluation:
     """The driver evaluates trajectory health as each rollout finishes, gated on telemetry and last in the loop."""
 

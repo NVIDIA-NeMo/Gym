@@ -1536,6 +1536,94 @@ class TestCollateTaskSourceStamping:
         assert rows[0]["task_source"] == "tau2_agent"
         assert "agent_ref" not in rows[0]
 
+    def test_materialized_rows_keep_their_own_task_source(self, tmp_path, monkeypatch) -> None:
+        """A Harbor row names its dataset itself (`task_source` is the dataset folder's name, written at
+        preparation) and routes by taskset, so collate keeps it; a materialized row without one, and every flat
+        row, is stamped with the declaring instance as before."""
+        materialized = {
+            "task_id": {"taskset": "tb21", "task_id": "hello"},
+            "task_input": {"responses_create_params": {"input": []}, "task_data": {"_ng_digest": "d" * 64}},
+        }
+        rows = [materialized | {"task_source": "tb21"}, materialized, materialized | {"task_source": ""}]
+        agent = _instance(
+            "harbor_tb21_agent",
+            "responses_api_agents",
+            # Declared as the Harbor run config does: already materialized rows, no `taskset` to materialize by.
+            {"entrypoint": "app.py", "datasets": [_dataset(tmp_path, "d5", rows)]},
+        )
+        paths = self._collate(tmp_path, monkeypatch, [agent])
+        assert [row["task_source"] for row in self._read(paths[0])] == [
+            "tb21",
+            "harbor_tb21_agent",
+            "harbor_tb21_agent",
+        ]
+
+    def test_catalog_edits_between_two_runs_do_not_conflict_with_the_metrics_sidecar(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """The entry's `domain`, `verified` and `allowed_agents` are catalog declarations, not properties of the
+        rows, so the metrics sidecar beside the rows records none of them: flipping `verified` after baselining,
+        widening or dropping `allowed_agents` or changing `domain` between two runs of one taskset and agent (a
+        `[gym]` edit of a Harbor dataset) validates against the first run's sidecar. A `license` edit still
+        conflicts, as for any Gym dataset, and the conflict names the sidecar to delete."""
+        materialized = {
+            "task_id": {"taskset": "ds", "task_id": "hello"},
+            "task_input": {"responses_create_params": {"input": []}, "task_data": {"_ng_digest": "d" * 64}},
+            "task_source": "ds",
+        }
+        base = _dataset(tmp_path, "tasks_hermes_agent", [materialized]) | {
+            "type": "validation",
+            "license": "Apache 2.0",
+            "domain": "coding",
+            "verified": False,
+            "allowed_agents": ["hermes_agent"],
+        }
+
+        def declared(entry: dict):
+            return _instance("harbor_ds_agent", "responses_api_agents", {"entrypoint": "app.py", "datasets": [entry]})
+
+        monkeypatch.chdir(tmp_path)
+        processor = TrainDataProcessor()
+        processor.validate_samples_and_aggregate_metrics([declared(base)], overwrite_metrics_conflicts=False)
+        sidecar = tmp_path / "tasks_hermes_agent_metrics.json"
+        recorded = json.loads(sidecar.read_text())
+        assert {"name", "type", "license", "jsonl_fpath"} <= set(recorded)
+        assert not {"domain", "verified", "allowed_agents"} & set(recorded)
+        edits = [
+            {"verified": True},
+            {"allowed_agents": ["hermes_agent", "codex_agent"]},
+            {"domain": "agent"},
+            {"allowed_agents": None, "domain": None},
+        ]
+        for edit in edits:
+            entry = {key: value for key, value in (base | edit).items() if value is not None}
+            processor.validate_samples_and_aggregate_metrics([declared(entry)], overwrite_metrics_conflicts=False)
+        assert json.loads(sidecar.read_text()) == recorded
+        assert not list(tmp_path.glob("*_conflict.json"))
+        with raises(ValueError, match="Found conflicting aggregate metrics") as excinfo:
+            processor.validate_samples_and_aggregate_metrics(
+                [declared(base | {"license": "MIT"})], overwrite_metrics_conflicts=False
+            )
+        assert str(sidecar) in str(excinfo.value)
+
+    def test_a_benchmark_entry_without_a_prepare_script_collates_its_rows(self, tmp_path, monkeypatch) -> None:
+        """The generated entry of a hub dataset without a license: `type: benchmark`, no `prepare_script`
+        (the rows were written by the run that generated it), `verified: false`. Collate accepts it through the
+        typed config and keeps the rows' own `task_source`."""
+        materialized = {
+            "task_id": {"taskset": "tb21", "task_id": "hello"},
+            "task_input": {"responses_create_params": {"input": []}, "task_data": {"_ng_digest": "d" * 64}},
+            "task_source": "tb21",
+        }
+        entry = _dataset(tmp_path, "tb21", [materialized]) | {"type": "benchmark", "verified": False}
+        agent = _instance("harbor_tb21_agent", "responses_api_agents", {"entrypoint": "app.py", "datasets": [entry]})
+        (declared,) = agent.datasets
+        assert declared.type == "benchmark" and declared.prepare_script is None and declared.verified is False
+        monkeypatch.chdir(tmp_path)
+        paths = TrainDataProcessor()._collate_samples_single_type(type="benchmark", server_instance_configs=[agent])
+        (row,) = self._read(paths[0])
+        assert row["task_source"] == "tb21" and row["task_id"] == {"taskset": "tb21", "task_id": "hello"}
+
     def test_incoming_legacy_agent_ref_is_stripped_with_warning(self, tmp_path, monkeypatch) -> None:
         legacy_rows = [
             {"responses_create_params": {"input": []}, "agent_ref": {"type": "responses_api_agents", "name": "old"}}
