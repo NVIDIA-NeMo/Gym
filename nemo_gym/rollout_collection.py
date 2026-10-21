@@ -27,14 +27,15 @@ import warnings
 from asyncio import Future, Semaphore
 from collections import Counter, defaultdict, deque
 from collections.abc import Iterable, Mapping
-from contextlib import ExitStack, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import timedelta
 from difflib import get_close_matches
 from itertools import repeat
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Callable, Dict, Iterator, List, Literal, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
 import aiohttp
 import orjson
@@ -58,7 +59,7 @@ from nemo_gym.config_types import (
 )
 from nemo_gym.episode_types import EpisodeId, is_materialized_task_row
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
-from nemo_gym.failure_kinds import CANCELLED, JUDGE_FAILED, is_namespaced, is_registered
+from nemo_gym.failure_kinds import AGENT_TIMEOUT, CANCELLED, JUDGE_FAILED, is_namespaced, is_registered
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     AGENT_SERVER_TYPE_KEY_NAME,
@@ -88,7 +89,12 @@ from nemo_gym.observability.model_calls import (
     model_call_capture_dirs_from_config,
     observability_enabled_from_config,
 )
-from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for, materialized_path_for
+from nemo_gym.path_utils import (
+    aggregate_metrics_path_for,
+    failures_path_for,
+    materialized_path_for,
+    resubmit_offset_path_for,
+)
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import (
@@ -105,15 +111,22 @@ from nemo_gym.rollout_observability import (
     TrajectoryTurn,
 )
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span
+from nemo_gym.telemetry.endpoints import ROLLOUT_ID_ATTRIBUTE
 from nemo_gym.telemetry.gym_metrics import (
+    DISPATCH_NAME_ATTRIBUTE,
+    HTTP_DESTINATION_SERVER_NAME_ATTRIBUTE,
     UNREGISTERED_FAILURE_KIND,
     record_rollout_completed,
     record_rollout_health,
     record_rollout_reward,
 )
 from nemo_gym.telemetry.observer import MeteredAdmission, count_resident, driver_metrics, observe_event_loop
-from nemo_gym.telemetry.setup import is_metrics_exporter_active
+from nemo_gym.telemetry.setup import is_metrics_exporter_active, is_trace_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
+
+
+if TYPE_CHECKING:
+    from opentelemetry.trace import SpanContext
 
 
 _failures_path_for = failures_path_for  # Backwards-compatible alias
@@ -1019,6 +1032,31 @@ def get_max_rollout_attempts() -> int:
 _get_max_rollout_attempts = get_max_rollout_attempts  # Backwards-compatible alias
 
 
+def load_resubmit_offset(output_fpath: str | Path) -> int:
+    """Failures-sidecar lines before this index predate the last `gym eval resubmit` and do not count to the cap."""
+    offset_fpath = resubmit_offset_path_for(Path(output_fpath))
+    return int(offset_fpath.read_text()) if offset_fpath.exists() else 0
+
+
+def record_resubmit_offset(output_fpath: str | Path) -> int:
+    """Start a fresh attempt budget: failures already in the sidecar stop counting to the cap.
+
+    Written atomically, so a run never reads a partial offset. The sidecar itself is not changed.
+    """
+    output_fpath = Path(output_fpath)
+    failures_fpath = failures_path_for(output_fpath)
+    offset = 0
+    if failures_fpath.exists():
+        with failures_fpath.open("rb") as f:
+            offset = sum(1 for _ in f)
+    offset_fpath = resubmit_offset_path_for(output_fpath)
+    offset_fpath.parent.mkdir(parents=True, exist_ok=True)
+    partial = offset_fpath.with_name(offset_fpath.name + ".tmp")
+    partial.write_text(f"{offset}\n")
+    partial.replace(offset_fpath)
+    return offset
+
+
 def _normalize_health_check_ignored_checks(value) -> List[str]:
     from nemo_gym.rollout_health import normalize_ignored_checks
 
@@ -1306,7 +1344,7 @@ class RunTimingReport:
 
     def record_result(self, result: Mapping[str, Any], seconds: float) -> None:
         self._durations.append(seconds)
-        if result.get("timed_out") or result.get(NG_FAILURE_CLASS_KEY) == "timeout_exceeded":
+        if result.get("timed_out") or result.get(NG_FAILURE_CLASS_KEY) in ("timeout_exceeded", AGENT_TIMEOUT):
             self._timed_out += 1
 
     def table(self) -> str:
@@ -1707,6 +1745,13 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         default=False,
         description="If the same command is run multiple times, check the materialized inputs and current outputs and remove the inputs that have already been run",
     )
+    resubmit: bool = Field(
+        default=False,
+        description=(
+            "Set by a job queued with `gym eval resubmit`: resume from cache whatever resume_from_cache says, "
+            "and give every failed rollout that is not final a fresh attempt budget."
+        ),
+    )
     prompt_config: Optional[str] = Field(
         default=None,
         description="Path to a prompt YAML file. Builds responses_create_params.input from the template at rollout time. Mutually exclusive with pre-populated responses_create_params.input in the JSONL data.",
@@ -1722,6 +1767,13 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         # default to 1 if num_repeats is None
         # for backwards compatibility
         return 1 if v is None else v
+
+    @model_validator(mode="after")
+    def _resubmit_resumes(self) -> "RolloutCollectionConfig":
+        # A resubmit continues its run: a fresh start would delete the rollouts it was queued to finish.
+        if self.resubmit:
+            self.resume_from_cache = True
+        return self
 
     @model_validator(mode="after")
     def _fold_agent_name_into_agent_map(self) -> "RolloutCollectionConfig":
@@ -1878,7 +1930,7 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         le=1,
         description=(
             "Share of rollouts ended by a per-rollout wall-clock limit (result field `timed_out`, or "
-            "failure class `timeout_exceeded`) above which the timing summary warns."
+            "failure class `timeout_exceeded` or `agent_timeout`) above which the timing summary warns."
         ),
     )
     retry_terminal_timeouts: bool = Field(
@@ -1911,6 +1963,55 @@ _RUN_FAILURE_ERRORS = (ClientError, orjson.JSONDecodeError, TimeoutError)
 # Statuses something in front of the environment server answers with; it returns 500 itself.
 _SERVER_DID_NOT_RUN_STATUSES = frozenset({429, 502, 503, 504})
 _MAX_FAILURE_BODY_CHARS = 2000
+
+
+#: ``SpanContext`` of the ``gym.job`` span the driver opened as a standalone trace root, for the
+#: duration of that run. None under an embedder's trace or when the ``job`` group is off. With
+#: traces off it holds the *invalid* context of a non-recording span rather than None;
+#: ``linked_root_span`` checks validity, so that case nests like the others.
+_OWNED_JOB_SPAN_CONTEXT: ContextVar[Optional["SpanContext"]] = ContextVar(
+    "nemo_gym_owned_job_span_context", default=None
+)
+
+
+def _current_span_is_valid() -> bool:
+    try:
+        from opentelemetry import trace as otel_trace
+    except ImportError:
+        return False
+    return otel_trace.get_current_span().get_span_context().is_valid
+
+
+@contextmanager
+def _dispatch_span(row: Mapping[str, Any], dispatch_name: str, *, server_name: str) -> Iterator[None]:
+    """One rollout's dispatch as the root of its own trace, linked to the run's `job` span.
+
+    The `/run` call made inside carries this span as `traceparent`, so the agent's
+    `gym.rollout` span and everything below it join the new trace instead of nesting under
+    `gym.job`. The link, not a parent edge, ties the trace back to the job; both carry the
+    run id as a resource attribute. The identity comes from the collector *row*, not from
+    the posted body: a materialized episode body carries it only as `episode_id`.
+    `dispatch_name` is the value the rollout counters record under the same key, so spans
+    and metrics join on it; `server_name` is the server the call goes to, which differs for
+    a row routed by agent. Only a job the driver opened as its own root is split; under an
+    embedder's trace the dispatch keeps nesting (see `linked_root_span`). Gate on the
+    `rollout` group and the trace exporter before calling.
+    """
+    from nemo_gym.telemetry.spans import linked_root_span
+
+    attributes: Dict[str, Any] = {
+        DISPATCH_NAME_ATTRIBUTE: dispatch_name,
+        HTTP_DESTINATION_SERVER_NAME_ATTRIBUTE: server_name,
+    }
+    try:
+        rollout_id = maybe_rollout_id_from_run_body(row)
+    except (TypeError, ValueError):
+        # Telemetry never decides whether a rollout runs; a malformed row just gets no id.
+        rollout_id = None
+    if rollout_id:
+        attributes[ROLLOUT_ID_ATTRIBUTE] = rollout_id
+    with linked_root_span("gym.rollout.dispatch", split_from=_OWNED_JOB_SPAN_CONTEXT.get(), **attributes):
+        yield None
 
 
 def _record_rollout_outcome(result: Dict[str, Any], outcome: str, dispatch_name: str) -> None:
@@ -2910,11 +3011,15 @@ class RolloutCollectionHelper(BaseModel):
         # per key + flag terminal rows so chain-hop 2 retries the right ones.
         failures_fpath = failures_path_for(Path(config.output_jsonl_fpath))
         attempts_by_key: Counter = Counter()
+        # Attempts since the last `gym eval resubmit`: a resubmit gives every non-terminal failure a fresh budget.
+        # If the sidecar is later rewritten shorter (a GDPval stage restart), the offset only gives extra attempts.
+        resubmit_offset = load_resubmit_offset(config.output_jsonl_fpath)
+        budget_used: Counter = Counter()
         terminal_keys: set = set()
         elapsed_by_key: Dict[Tuple, float] = {}
         if failures_fpath.exists():
             with failures_fpath.open("rb") as f:
-                for line in f:
+                for line_index, line in enumerate(f):
                     line = line.strip()
                     if not line:
                         continue
@@ -2923,6 +3028,8 @@ class RolloutCollectionHelper(BaseModel):
                         continue
                     k = (fr[TASK_INDEX_KEY_NAME], fr[ROLLOUT_INDEX_KEY_NAME])
                     attempts_by_key[k] += 1
+                    if line_index >= resubmit_offset:
+                        budget_used[k] += 1
                     if is_terminal_failure(fr, retry_terminal_timeouts=config.retry_terminal_timeouts):
                         terminal_keys.add(k)
                     # A failed attempt still tells us how long this task runs -
@@ -2933,7 +3040,7 @@ class RolloutCollectionHelper(BaseModel):
                         elapsed_by_key[k] = max(elapsed_by_key.get(k, 0.0), observed)
 
         max_attempts = _get_max_rollout_attempts()
-        maxed_out = {k for k, n in attempts_by_key.items() if n >= max_attempts}
+        maxed_out = {k for k, n in budget_used.items() if n >= max_attempts}
         gated = successes_seen | terminal_keys | maxed_out
 
         input_rows = [row for row in original_input_rows if get_key(row) not in gated]
@@ -2984,16 +3091,25 @@ class RolloutCollectionHelper(BaseModel):
     async def run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
         """Collect rollouts for a whole config. Wrapped in the run-scoped `job` span.
 
-        This is the driver side of an evaluation run and the outermost span Gym produces,
-        so every rollout it dispatches is a descendant of it. `job` is in the `default`
-        preset but deliberately not in `per_rollout`, where each rollout is meant to be
-        its own bounded root trace.
+        This is the driver side of an evaluation run and the outermost span Gym produces.
+        Rollouts are not its descendants: each dispatch opens its own trace, linked to this
+        span (see `_dispatch_span`), so a run's traces stay bounded by one rollout each while
+        `job` keeps the run's own lifecycle. `job` is in the `default` preset and not in
+        `per_rollout`.
         """
         async with observe_event_loop("driver"):
             if not is_span_group_enabled(GymSpanGroup.JOB):
                 return await self._run_from_config(config)
-            with managed_span(GymSpanGroup.JOB, "gym.job"):
-                return await self._run_from_config(config)
+            # Decide ownership before the job span exists: a valid span here means a caller
+            # owns the trace, and rollouts keep nesting under it.
+            embedded = _current_span_is_valid()
+            with managed_span(GymSpanGroup.JOB, "gym.job") as job:
+                owned = job.get_span_context() if job is not None and not embedded else None
+                token = _OWNED_JOB_SPAN_CONTEXT.set(owned)
+                try:
+                    return await self._run_from_config(config)
+                finally:
+                    _OWNED_JOB_SPAN_CONTEXT.reset(token)
 
     async def _run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
         output_fpath = Path(config.output_jsonl_fpath)
@@ -3019,6 +3135,8 @@ class RolloutCollectionHelper(BaseModel):
             _drop_truncated_tail(output_fpath)
             if failures_fpath.exists():
                 _drop_truncated_tail(failures_fpath)
+            if config.resubmit:
+                print(f"Resubmitted: a fresh attempt budget from failure {record_resubmit_offset(output_fpath)} on.")
             (
                 input_rows,
                 rows,
@@ -3095,6 +3213,7 @@ class RolloutCollectionHelper(BaseModel):
             # A fresh run must not inherit retry attempts or published metrics
             # from an older run that used the same output path.
             failures_fpath.unlink(missing_ok=True)
+            resubmit_offset_path_for(output_fpath).unlink(missing_ok=True)
             aggregate_metrics_path_for(output_fpath).unlink(missing_ok=True)
 
         batch_completed_rows: List[Dict] = []
@@ -3800,7 +3919,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         async def _fetch_agent_metrics(server_name: str, agent_name: str, agent_result_list: List[Dict]) -> Dict:
             nonlocal first_error
-            # Strip heavyweight fields before sending, but preserve response.usage and response.incomplete_details if present.
+            # Strip generated content, but keep provider metrics for request-level
+            # aggregation (e.g. SPEED-Bench), along with usage and truncation status.
             stripped = []
             for r in agent_result_list:
                 entry = {
@@ -3823,6 +3943,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 incomplete_details = response.get("incomplete_details")
                 if incomplete_details is not None:
                     response_metadata["incomplete_details"] = incomplete_details
+                metrics = response.get("metrics")
+                if metrics is not None:
+                    response_metadata["metrics"] = metrics
                 if response_metadata:
                     entry["response"] = response_metadata
                 stripped.append(entry)
@@ -4258,7 +4381,11 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 succeeded = False
                 try:
                     request_body = _episode_request_body(row) if _materialized_taskset(row) else row
-                    res = await server_client.post(server_name=server_name, url_path="/run", json=request_body)
+                    if is_span_group_enabled(GymSpanGroup.ROLLOUT) and is_trace_exporter_active():
+                        with _dispatch_span(row, self._dispatch_name(row), server_name=server_name):
+                            res = await server_client.post(server_name=server_name, url_path="/run", json=request_body)
+                    else:
+                        res = await server_client.post(server_name=server_name, url_path="/run", json=request_body)
                     await raise_for_status(res)
                     result = await get_response_json(res)
                     if run_timing is not None and isinstance(result, Mapping):

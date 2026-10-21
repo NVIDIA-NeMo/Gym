@@ -15,6 +15,7 @@
 import asyncio
 from unittest.mock import MagicMock
 
+import pytest
 from fastapi.testclient import TestClient
 
 from nemo_gym.base_resources_server import (
@@ -22,6 +23,7 @@ from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyResponse,
+    ClosedResourcesSessionRecords,
     ResourcesSeedSessionRequest,
     ReverifyMode,
     SimpleResourcesServer,
@@ -30,6 +32,7 @@ from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.failure_kinds import JUDGE_FAILED, SESSION_LOST
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.session_routing import ResourcesSessionLifetimes
 from nemo_gym.testing.session_conformance import check_resources_session_contract
 
 
@@ -212,3 +215,54 @@ class TestFailureKindOnTheContract:
 
         assert response.failure_kind == "lexmount_browser:quota_exhausted"
         assert caplog.records == []
+
+
+class TestClosedResourcesSessionRecords:
+    def test_a_record_lasts_the_window_after_the_first_close(self, monkeypatch) -> None:
+        clock = [100.0]
+        monkeypatch.setattr("nemo_gym.base_resources_server.monotonic", lambda: clock[0])
+        records = ClosedResourcesSessionRecords[str](window_seconds=10)
+
+        records.remember("a", "first close")
+        clock[0] = 105.0
+        records.remember("a", "retried close")
+        records.remember("b", "close")
+        assert records.get("a") == "first close"
+        assert "a" in records and len(records) == 2
+
+        # A retried close does not extend the record, so it ends 10 seconds after the first close.
+        clock[0] = 110.0
+        assert records.get("a") is None and "a" not in records
+        assert records.get("b") == "close"
+        clock[0] = 115.0
+        assert len(records) == 0
+        assert records.get("never closed") is None
+
+    def test_a_record_never_outlives_the_routing_claim(self, monkeypatch) -> None:
+        clock = [0.0]
+        monkeypatch.setattr("nemo_gym.base_resources_server.monotonic", lambda: clock[0])
+        monkeypatch.setattr("nemo_gym.session_routing.monotonic", lambda: clock[0])
+        window = 300.0
+        records = ClosedResourcesSessionRecords[bool](window_seconds=window)
+        claims = ResourcesSessionLifetimes(window, starts=("/seed_session",), ends=("/close_session",))
+
+        claims.served("id", {"path": "/seed_session", "headers": []}, 200)
+        # The server records the close before the router sees its reply, and the caller retries it later.
+        records.remember("id", True)
+        clock[0] = 0.5
+        claims.served("id", {"path": "/close_session", "headers": []}, 200)
+        clock[0] = 120.0
+        records.remember("id", True)
+        clock[0] = 120.25
+        claims.served("id", {"path": "/close_session", "headers": []}, 200)
+
+        for step in range(0, 4400):
+            clock[0] = step / 10
+            if "id" in records:
+                assert claims.holds("id"), f"the record outlived the claim at {clock[0]}"
+        assert "id" not in records and not claims.holds("id")
+
+    def test_a_window_that_is_not_positive_is_refused(self) -> None:
+        for window in (0, -1.0, float("nan")):
+            with pytest.raises(ValueError, match="window_seconds must be positive"):
+                ClosedResourcesSessionRecords[str](window_seconds=window)

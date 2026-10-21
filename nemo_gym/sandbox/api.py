@@ -25,6 +25,7 @@ from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path
 from typing import Any, TypeVar
 
+from nemo_gym.sandbox.observability import span_attributes as default_span_attributes
 from nemo_gym.sandbox.providers import (
     ConnectableProvider,
     SandboxEndpoint,
@@ -412,6 +413,11 @@ class AsyncSandbox:
         self._counted_active = False
         self.pty = SandboxPty(self)
 
+    @property
+    def sandbox_id(self) -> str | None:
+        """The provider's id for this sandbox, or None before it has started or connected."""
+        return _sandbox_id(self._handle)
+
     def _telemetry_provider_name(self) -> str:
         """Provider name for span attributes (`docker`, `daytona`, `opensandbox`, ...)."""
         return getattr(self._provider, "name", type(self._provider).__name__)
@@ -424,6 +430,8 @@ class AsyncSandbox:
     async def start(
         self,
         spec: SandboxSpec | None = None,
+        *,
+        span_attributes: Mapping[str, Any] | None = None,
     ) -> "AsyncSandbox":
         if self._closed:
             raise RuntimeError("Sandbox has been stopped")
@@ -442,7 +450,7 @@ class AsyncSandbox:
             with managed_span(
                 GymSpanGroup.SANDBOX,
                 "gym.sandbox.start",
-                **{"nemo.gym.sandbox.provider": provider_name},
+                **{"nemo.gym.sandbox.provider": provider_name, **default_span_attributes(span_attributes)},
             ) as span:
                 handle = await self._provider.create(requested_spec)
                 if span is not None:
@@ -496,6 +504,7 @@ class AsyncSandbox:
         timeout_s: int | float | None = 180,
         user: str | int | None = None,
         preserve_background_services: bool = False,
+        span_attributes: Mapping[str, Any] | None = None,
     ) -> SandboxExecResult:
         """Run a command, optionally preserving services needed by later commands.
 
@@ -524,7 +533,7 @@ class AsyncSandbox:
         with managed_span(
             GymSpanGroup.SANDBOX,
             "gym.sandbox.exec",
-            **{"nemo.gym.sandbox.provider": provider_name},
+            **{"nemo.gym.sandbox.provider": provider_name, **default_span_attributes(span_attributes)},
         ) as span:
             result = await self._exec_uninstrumented(
                 command,
@@ -654,6 +663,7 @@ class AsyncSandbox:
                     **{
                         "nemo.gym.sandbox.provider": self._telemetry_provider_name(),
                         "nemo.gym.sandbox.id": _sandbox_id(self._handle),
+                        **default_span_attributes(),
                     },
                 ):
                     await self._provider.close(self._handle)
