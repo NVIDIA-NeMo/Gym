@@ -23,7 +23,12 @@ async function harness(t) {
   } };
   const hooks = await SessionHeaders({ client });
   const start = async (id, callID, args = {}, parent = "ses_main") => {
-    await hooks["tool.execute.before"]({ tool: "task", sessionID: parent, callID }, { args });
+    const before = hooks["tool.execute.before"]({ tool: "task", sessionID: parent, callID }, { args });
+    await hooks.event({ event: { type: "message.part.updated", properties: { part: {
+      type: "tool", tool: "task", sessionID: parent, callID,
+      state: { status: "running" },
+    } } } });
+    await before;
     await hooks.event({ event: { type: "message.part.updated", properties: { part: {
       type: "tool", tool: "task", sessionID: parent, callID,
       state: { status: "running", metadata: { sessionId: id } },
@@ -124,7 +129,7 @@ test("unobserved or inconsistent Task ownership fails before child model headers
 test("native running Task metadata owns child calls before a timed-out Task can return", async (t) => {
   const { headers, hooks } = await harness(t);
   await headers("ses_main");
-  await hooks["tool.execute.before"](
+  const before = hooks["tool.execute.before"](
     { tool: "task", sessionID: "ses_main", callID: "call_A" },
     { args: { prompt: "bounded work", subagent_type: "general" } },
   );
@@ -132,9 +137,77 @@ test("native running Task metadata owns child calls before a timed-out Task can 
     type: "tool", tool: "task", sessionID: "ses_main", callID: "call_A",
     state: { status: "running", metadata: { sessionId: "ses_A" } },
   } } } });
+  await before;
   // No tool.execute.after: the benchmark terminates with this child still running.
   const child = await headers("ses_A");
   assert.equal(child["x-opencode-spawn-call"], "call_A");
   assert.equal(child["x-opencode-task-call"], "call_A");
   assert.equal(child["x-opencode-task-binding"], undefined);
+});
+
+test("Task execution waits for native part registration before publishing child metadata", async (t) => {
+  const { hooks, headers } = await harness(t);
+  let executed = false;
+  const before = hooks["tool.execute.before"](
+    { tool: "task", sessionID: "ses_main", callID: "racing_call" },
+    { args: { prompt: "bounded check", subagent_type: "general" } },
+  ).then(() => { executed = true; });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(executed, false);
+  await hooks.event({ event: { type: "message.part.updated", properties: { part: {
+    type: "tool", tool: "task", sessionID: "ses_main", callID: "racing_call",
+    state: { status: "pending" },
+  } } } });
+  assert.equal(executed, false);
+  await hooks.event({ event: { type: "message.part.updated", properties: { part: {
+    type: "tool", tool: "task", sessionID: "ses_main", callID: "racing_call",
+    state: { status: "running" },
+  } } } });
+  await before;
+  assert.equal(executed, true);
+  await hooks.event({ event: { type: "message.part.updated", properties: { part: {
+    type: "tool", tool: "task", sessionID: "ses_main", callID: "racing_call",
+    state: { status: "running", metadata: { sessionId: "ses_A" } },
+  } } } });
+  assert.equal((await headers("ses_A"))["x-opencode-spawn-call"], "racing_call");
+});
+
+test("already running native Task part needs no additional event to begin execution", async (t) => {
+  const { hooks } = await harness(t);
+  await hooks.event({ event: { type: "message.part.updated", properties: { part: {
+    type: "tool", tool: "task", sessionID: "ses_main", callID: "ready_call",
+    state: { status: "running" },
+  } } } });
+  await hooks["tool.execute.before"](
+    { tool: "task", sessionID: "ses_main", callID: "ready_call" }, { args: {} },
+  );
+});
+
+test("parallel Task calls wait only for their own native part", async (t) => {
+  const { hooks } = await harness(t);
+  const started = [];
+  const before = (callID) => hooks["tool.execute.before"](
+    { tool: "task", sessionID: "ses_main", callID }, { args: {} },
+  ).then(() => started.push(callID));
+  const a = before("call_A"), b = before("call_B");
+  const running = (callID) => hooks.event({ event: { type: "message.part.updated", properties: { part: {
+    type: "tool", tool: "task", sessionID: "ses_main", callID, state: { status: "running" },
+  } } } });
+  await running("call_B");
+  await b;
+  assert.deepEqual(started, ["call_B"]);
+  await running("call_A");
+  await a;
+  assert.deepEqual(started, ["call_B", "call_A"]);
+});
+
+test("a running part from another parent cannot authorize Task execution", async (t) => {
+  const { hooks } = await harness(t);
+  await hooks.event({ event: { type: "message.part.updated", properties: { part: {
+    type: "tool", tool: "task", sessionID: "ses_foreign", callID: "foreign_call",
+    state: { status: "running" },
+  } } } });
+  await assert.rejects(hooks["tool.execute.before"](
+    { tool: "task", sessionID: "ses_main", callID: "foreign_call" }, { args: {} },
+  ), /native tool part is running/);
 });

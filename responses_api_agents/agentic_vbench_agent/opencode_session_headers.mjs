@@ -7,6 +7,8 @@ export const SessionHeaders = async ({ client }) => {
   const invocations = new Map();
   const tasks = new Map();
   const waiting = new Map();
+  const running = new Map();
+  const starting = new Map();
   let captureURL;
   let provenanceError;
 
@@ -46,7 +48,19 @@ export const SessionHeaders = async ({ client }) => {
       if (["completed", "error"].includes(part.state?.status)) {
         const invocation = invocations.get(part.callID);
         if (invocation?.parent === part.sessionID) invocation.complete = true;
+        running.delete(part.callID);
         return;
+      }
+      if (part.state?.status === "running") {
+        const previous = running.get(part.callID);
+        if (previous && previous !== part.sessionID) {
+          provenanceError = "Native running Task part belongs to another parent session";
+          for (const ready of starting.values()) ready();
+          for (const ready of waiting.values()) ready();
+          return;
+        }
+        running.set(part.callID, part.sessionID);
+        starting.get(part.callID)?.();
       }
       const child = part.state?.metadata?.sessionId;
       if (part.state?.status !== "running" || typeof child !== "string" || !child) return;
@@ -59,6 +73,7 @@ export const SessionHeaders = async ({ client }) => {
         // Event hooks are fire-and-forget in OpenCode. Propagate a failure
         // through the awaited model hook instead of an unhandled rejection.
         provenanceError = "Native running Task metadata has inconsistent child ownership";
+        for (const ready of starting.values()) ready();
         for (const ready of waiting.values()) ready();
         return;
       }
@@ -73,6 +88,21 @@ export const SessionHeaders = async ({ client }) => {
         throw new Error("A Task follow-up targeted a child from another parent session");
       }
       invocations.set(input.callID, { parent: input.sessionID, complete: false });
+      // OpenCode can start an AI SDK tool before its stream processor has
+      // registered that tool's part. Task's ctx.metadata then silently drops
+      // the native child ID. Wait for the processor's own running event before
+      // allowing Task to create its child; never manufacture an ownership edge.
+      if (!running.has(input.callID) && !provenanceError) {
+        await new Promise((resolve) => {
+          const timer = setTimeout(resolve, 5000);
+          starting.set(input.callID, () => { clearTimeout(timer); resolve(); });
+        });
+        starting.delete(input.callID);
+      }
+      if (provenanceError) throw new Error(provenanceError);
+      if (running.get(input.callID) !== input.sessionID) {
+        throw new Error("Cannot execute OpenCode Task before its native tool part is running");
+      }
     },
     "tool.execute.after": async (input, output) => {
       if (input.tool.toLowerCase() !== "task") return;
