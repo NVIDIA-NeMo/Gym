@@ -88,6 +88,8 @@ _PROVIDER_ERROR = "provider_error"
 _OUTPUT_LIMIT_ERROR = "stream disconnected before completion: Incomplete response returned, reason: max_output_tokens"
 # Characters of Codex stderr kept in the error of an activation that never started a turn.
 _STDERR_TAIL_CHARS = 2000
+# Codex 0.144.4 rejects MCP server names with other characters.
+_CODEX_MCP_SERVER_NAME = re.compile(r"[A-Za-z0-9_-]+")
 _COMPACTION_ADVISORY = (
     "Heads up: Long threads and multiple compactions can cause the model to be less accurate. "
     "Start a new thread when possible to keep threads small and targeted."
@@ -167,7 +169,7 @@ fi
 
 def _codex_mcp_server_name(name: str) -> bool:
     """Whether Codex accepts ``name`` as an MCP server name."""
-    return re.fullmatch(r"[A-Za-z0-9_-]+", name) is not None
+    return _CODEX_MCP_SERVER_NAME.fullmatch(name) is not None
 
 
 def _toml_key(key: str) -> str:
@@ -939,7 +941,9 @@ class CodexAgent(SimpleResponsesAPIAgent):
             *(ObservationGap(code="model_metadata_fallback", detail=warning) for warning in startup_warnings),
             *(ObservationGap(code="compaction_accuracy_advisory", detail=warning) for warning in compaction_warnings),
             *(
-                ObservationGap(code="mcp_server_skipped", detail=f"{name}: Codex cannot start a server with that name")
+                ObservationGap(
+                    code="mcp_server_skipped", detail=f"{name}: its name is not letters, digits, '-' and '_'"
+                )
                 for name in skipped_grants
             ),
         ]
@@ -975,13 +979,6 @@ class CodexAgent(SimpleResponsesAPIAgent):
             gaps.append(ObservationGap(code="agent_activation_interrupted", detail=type(failure).__name__))
         if not events:
             gaps.append(ObservationGap(code="agent_transcript_unavailable"))
-        if error and not started and failure is None:
-            # Startup failures, such as a required MCP server that did not connect, are reported only on stderr.
-            stderr = await self._startup_stderr_tail(state)
-            if stderr:
-                error = f"{error}; stderr: {stderr}"
-                # Environment Servers keep the observations, not the 502 body, in their failure records.
-                gaps.append(ObservationGap(code="agent_startup_failed", detail=stderr))
         invocation_status = "incomplete" if failure else status
         invocation_error = _PROVIDER_ERROR if reported_model_error else None
         if state.native_transcript is not None:
@@ -1053,6 +1050,14 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 ],
                 gaps=gaps,
             )
+        if error and not started and failure is None:
+            # Startup failures, such as a required MCP server that did not connect, are reported only on stderr.
+            # The bundle is set first, so a close during this read still finds it.
+            stderr = await self._startup_stderr_tail(state)
+            if stderr:
+                error = f"{error}; stderr: {stderr}"
+                # Environment Servers keep the observations, not the 502 body, in their failure records.
+                state.observations.gaps.append(ObservationGap(code="agent_startup_failed", detail=stderr))
         if failure is not None:
             raise failure
         if error and not reported_model_error:
@@ -1099,7 +1104,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
             stderr = await asyncio.wait_for(
                 state.read_text("stderr.log"), timeout=self.config.session_close_timeout_seconds
             )
-        except Exception:
+        except Exception as exc:
+            LOG.warning("Codex stderr unavailable for the startup failure: %s", type(exc).__name__)
             return ""
         values = [
             str(value)
@@ -1109,8 +1115,11 @@ class CodexAgent(SimpleResponsesAPIAgent):
             if value
         ]
         for value in sorted(values, key=len, reverse=True):
-            # Codex cuts long error bodies, which can end a value early; its first characters still identify it.
-            pattern = re.escape(value) if len(value) < 8 else re.escape(value[:8]) + r"[^\s'\"]*"
+            if len(value) < 8:
+                pattern = rf"(?<!\w){re.escape(value)}(?!\w)"
+            else:
+                # Codex cuts long error bodies, which can end a value early; its first characters still identify it.
+                pattern = rf"{re.escape(value)}|{re.escape(value[:8])}[^\s'\"]*"
             stderr = re.sub(pattern, "[redacted]", stderr)
         # Codex can repeat an error body of several kilobytes on one line; keep the start, which names the server.
         lines = [line if len(line) <= 500 else f"{line[:400]} ... {line[-100:]}" for line in stderr.splitlines()]

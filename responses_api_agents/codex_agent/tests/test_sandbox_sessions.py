@@ -453,7 +453,7 @@ def test_optional_mcp_grant_with_an_unusable_name_is_left_out(setup):
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id)).json()
     assert list(config["mcp_servers"]) == ["gdpval_resources_server"]
     gaps = [(gap["code"], gap["detail"]) for gap in closed["agent_observations"]["gaps"]]
-    assert ("mcp_server_skipped", "search.mcp: Codex cannot start a server with that name") in gaps
+    assert ("mcp_server_skipped", "search.mcp: its name is not letters, digits, '-' and '_'") in gaps
 
 
 @pytest.mark.parametrize("value", [0, -1, float("nan"), 601])
@@ -468,7 +468,12 @@ def test_mcp_tool_timeout_must_be_positive_and_within_the_run_timeout(setup, val
 def test_startup_failure_reports_the_codex_stderr_tail(setup, started):
     agent, sandbox = setup
     # Codex repeats a failed server's error body, up to 8 KiB, after the line's start that names the server.
-    stderr = "Error: required MCP servers failed to initialize: gdpval_resources_server: " + "x" * 9000 + " (-32603)"
+    stderr = (
+        "rmcp worker log line\n" * 300
+        + "Error: required MCP servers failed to initialize: gdpval_resources_server: "
+        + "x" * 9000
+        + " (-32603)"
+    )
     sandbox.result["return_code"] = 1
     thread = [{"type": "thread.started", "thread_id": "t"}]
     if started:
@@ -495,7 +500,8 @@ def test_startup_failure_reports_the_codex_stderr_tail(setup, started):
     else:
         assert "required MCP servers failed to initialize: gdpval_resources_server" in detail
         assert detail.endswith(" (-32603)")
-        assert len(detail) < 700, "long stderr lines are shortened"
+        assert len(detail) < 2100, "the stderr tail is bounded"
+        assert "x" * 600 not in detail, "long stderr lines are shortened"
         # Environment Servers record the observations, not the 502 body.
         assert gaps["agent_startup_failed"] in detail
 
@@ -511,19 +517,23 @@ def test_startup_failure_stderr_hides_the_grant_tokens(setup):
         sandbox.files[f"{sandbox.directory}/stderr.log"] = (
             "MCP error body: X-NeMo-Gym-Session-Token: token-gdpval_resources_server\n"
             # Codex cuts long error bodies, which can end a token early.
-            "HTTP 401: {'x-nemo-gym-session-token': 'token-gdpval_reso... (truncated 2048 bytes)\n"
+            "HTTP 401: {'x-nemo-gym-session-token': 'token-gd... (truncated 2048 bytes)\n"
+            "authorization: Digest user=u nonce=s3cret\n"
             "Error: required MCP servers failed to initialize: gdpval_resources_server"
         )
 
     sandbox.publish = publish_with_stderr
+    grant = mcp_grant()
+    grant["connection"]["headers"]["Authorization"] = "Digest user=u nonce=s3cret"
     body = seed().model_dump(mode="json")
-    body["tool_accesses"] = [mcp_grant()]
+    body["tool_accesses"] = [grant]
     with TestClient(agent.setup_webserver()) as client:
         assert client.post("/v1/agent_sessions", json=body).status_code == 200
         result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
     assert result.status_code == 502
     detail = result.json()["detail"]
     assert "token-gd" not in detail
+    assert "s3cret" not in detail
     assert "X-NeMo-Gym-Session-Token: [redacted]" in detail
     assert "'x-nemo-gym-session-token': '[redacted] (truncated" in detail
 
@@ -845,6 +855,28 @@ async def test_close_cancels_active_codex_before_detaching(setup):
     assert sandbox.signals == ["SIGTERM"]
     sandbox.disconnect.assert_awaited_once()
     sandbox.stop.assert_not_awaited()
+
+
+async def test_close_during_the_startup_stderr_read_keeps_the_observations(setup):
+    agent, sandbox = setup
+    sandbox.result["return_code"] = 1
+    sandbox.events = json.dumps([0.0, {"type": "thread.started", "thread_id": "t"}])
+    download = sandbox.download
+    reading = asyncio.Event()
+
+    async def hanging_stderr_download(source, destination):
+        if source.endswith("/stderr.log"):
+            reading.set()
+            await asyncio.sleep(10)  # Bounded so a regression fails instead of hanging.
+        await download(source, destination)
+
+    sandbox.download = hanging_stderr_download
+    request, session_id, task = await activate(agent, sandbox)
+    await asyncio.wait_for(reading.wait(), 5)
+    closed = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert [record.status for record in closed.agent_observations.records] == ["failed"]
 
 
 async def test_terminal_termination_failure_releases_borrowed_session(setup):
