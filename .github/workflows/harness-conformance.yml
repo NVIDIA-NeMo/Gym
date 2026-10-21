@@ -63,6 +63,12 @@ jobs:
         with:
           submodules: recursive
           persist-credentials: false
+      - name: Trust checkout for NOOA container builds
+        if: matrix.harness == 'nooa'
+        run: |
+          # Checkout adds safe.directory under a temporary HOME. Later packaging
+          # needs the same trust in this disposable container's normal Git config.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Set output and runtime directories
         run: |
           echo "RESULTS=$RUNNER_TEMP/harness-conformance-$HARNESS" >> "$GITHUB_ENV"
