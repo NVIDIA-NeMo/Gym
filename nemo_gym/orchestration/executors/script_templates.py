@@ -176,8 +176,10 @@ def render_repo_checkout(repo: str, ref: str, dest: str | None = None) -> str:
     repo_name = repo.rstrip("/").split("/")[-1].removesuffix(".git")
     target = dest if dest is not None else shlex.quote(repo_name)
     ensure_git = "command -v git >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq git)"
+    # A PR commit can be fetchable by SHA without belonging to a cloned branch or tag.
     return (
-        f"({ensure_git}) && git clone {shlex.quote(repo)} {target} && cd {target} && git checkout {shlex.quote(ref)}"
+        f"({ensure_git}) && git clone {shlex.quote(repo)} {target} && cd {target} "
+        f"&& git fetch origin {shlex.quote(ref)} && git checkout --detach FETCH_HEAD"
     )
 
 
