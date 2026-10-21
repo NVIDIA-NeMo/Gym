@@ -2297,7 +2297,7 @@ async def test_failed_native_snapshot_preserves_collected_cli_events(setup):
 
 @pytest.mark.parametrize("transport_error", ["timed out", "IncompleteRead(0 bytes read, 20 more expected)", None])
 def test_post_header_failure_reaches_outcome_policy(setup, transport_error):
-    from environment_servers.single_agent_turn.app import agent_outcome_policy
+    from environment_servers.single_agent_turn.app import OutcomeAction, agent_outcome_policy
     from nemo_gym.openai_utils import NeMoGymResponse
 
     agent, sandbox = setup
@@ -2327,6 +2327,5 @@ def test_post_header_failure_reaches_outcome_policy(setup, transport_error):
         outcome = json.loads(body["metadata"]["ng_agent_outcome"])
         assert outcome == {"failure_kind": "model_transport_error" if transport_error is not None else "unknown"}
         policy = agent_outcome_policy(NeMoGymResponse.model_validate(body))
-        assert not policy.verifiable
-        assert policy.retryable is (transport_error is not None)
+        assert policy == OutcomeAction.RETRY
         client.post("/v1/agent_sessions/close", json=close_body(session_id)).raise_for_status()
