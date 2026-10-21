@@ -38,7 +38,8 @@ def check_resources_session_contract(
     - a seed that names the open session's ID with another episode is refused with 409;
     - a close of the closed session that names another episode is refused with 409;
     - a seed that arrives after its session closed, or after a close for an ID that was never seeded, is refused
-      with 409. A server that keeps no state has nothing such a seed could recreate.
+      with 409 while the server remembers the close (``session_close_retry_window_seconds``). A server that keeps
+      no state has nothing such a seed could recreate.
 
     The check also seeds a second session and drops its cookie, as when the seed's reply is lost, then closes it
     without a cookie, as the Environment Server does. That close must succeed. With ``holds_state``, a callable that

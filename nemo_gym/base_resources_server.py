@@ -16,7 +16,7 @@ import asyncio
 import logging
 from abc import abstractmethod
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from enum import Enum
@@ -43,7 +43,7 @@ from nemo_gym._checkpoint.resources import (
     ResourcesParticipant,
 )
 from nemo_gym._checkpoint.settings import checkpoint_settings
-from nemo_gym._checkpoint.steps import StepMode
+from nemo_gym._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER, StepMode
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.failure_kinds import SESSION_LOST, validate_failure_kind
@@ -56,6 +56,7 @@ from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_met
 from nemo_gym.rollout_correlation import RolloutContextMiddleware
 from nemo_gym.sandbox.access import SandboxAccess
 from nemo_gym.server_utils import SESSION_ID_KEY, BaseRunServerInstanceConfig, BaseServer, SimpleServer
+from nemo_gym.session_routing import SessionKind
 from nemo_gym.telemetry.endpoints import traced_verify_endpoint
 
 
@@ -125,6 +126,18 @@ class ReverifyMode(str, Enum):
 class BaseResourcesServerConfig(BaseRunServerInstanceConfig):
     # Opt in to serve this server's tool routes over MCP; default off.
     expose_tools_over_mcp: bool = False
+    session_close_retry_window_seconds: float = Field(
+        default=300,
+        gt=0,
+        allow_inf_nan=False,
+        description=(
+            "With several workers, how long a session stays with the worker that created it "
+            "after its last request, once it is closed, verified or failed to seed; "
+            "cover the caller's retry horizon and the server's own close fences. "
+            "Servers that remember closed sessions with ClosedResourcesSessionRecords keep them this long, "
+            "with any number of workers."
+        ),
+    )
     # The mode of reverification (for gym eval reverify) of this server.
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.UNKNOWN
 
@@ -229,10 +242,11 @@ class ResourcesSeedSessionRequest(BaseModel):
     """Idempotently initialize resources state under a caller-assigned identifier.
 
     Repeating the same identifier and episode must return the existing session.
-    Closing an unknown identifier must prevent a racing seed from creating it later.
-    ``ResourcesSessionFence`` keeps that record for ``CLOSED_SESSION_RETENTION_S``;
+    Closing an unknown identifier must prevent a racing seed from creating it
+    for session_close_retry_window_seconds (see ClosedResourcesSessionRecords and ResourcesSessionFence);
     callers must use unique IDs and finish seed retries within that window.
-    External resources should use provider TTLs when available.
+    External resources should use provider TTLs when available. Current process-local
+    session records may remain until the server shuts down.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -348,34 +362,83 @@ def lost_session_verification(reason: str, *, failure_kind: str = SESSION_LOST) 
     return {"reward": 0.0, "mask_sample": True, "failure_kind": failure_kind, "failure_reason": reason}
 
 
-# How long a closed resources session is remembered, so a late seed for it is refused.
-CLOSED_SESSION_RETENTION_S = 3600.0
+# A resources session is the cookie session: a typed seed or close names it by resources_session_id,
+# which the cookie then carries as its SESSION_ID_KEY (see nemo_gym.session_routing).
+RESOURCES_SESSIONS = SessionKind(
+    cookie_key=SESSION_ID_KEY,
+    id_field="resources_session_id",
+    seed_path="/seed_session",
+    close_path="/close_session",
+    cookie_session=True,
+)
+
+
+ClosedRecordT = TypeVar("ClosedRecordT")
+
+
+class ClosedResourcesSessionRecords(Generic[ClosedRecordT]):
+    """The resources sessions this worker closed, each kept for a fixed window after its first close.
+
+    A server uses it to refuse a late seed of a closed ``resources_session_id``, or to check a retried close.
+    Construct it with the server's ``session_close_retry_window_seconds``.
+    With several workers, the routing claim on the ID ends that long after the last request for the session,
+    and the close is recorded before its reply is sent.
+    So the claim never ends before the record (see ``nemo_gym.session_routing.ResourcesSessionLifetimes``).
+    While the claim lasts, a late seed reaches the worker that remembers the close and is refused.
+    After it ends, every worker treats the ID as new, so the answer does not depend on which worker gets it.
+    """
+
+    def __init__(self, window_seconds: float) -> None:
+        if not window_seconds > 0:
+            raise ValueError(f"window_seconds must be positive, got {window_seconds!r}")
+        self._window_seconds = window_seconds
+        # Earliest expiry first: every record lasts the same window, and a record is never moved.
+        self._records: OrderedDict[str, tuple[float, ClosedRecordT]] = OrderedDict()
+
+    def remember(self, resources_session_id: str, record: ClosedRecordT) -> None:
+        """Record a close; a retried close keeps the first record and its expiry."""
+        self._expire()
+        if resources_session_id not in self._records:
+            self._records[resources_session_id] = (monotonic() + self._window_seconds, record)
+
+    def get(self, resources_session_id: str) -> Optional[ClosedRecordT]:
+        """Return the record of the session's close, or None if it is not closed or its window has passed."""
+        self._expire()
+        entry = self._records.get(resources_session_id)
+        return None if entry is None else entry[1]
+
+    def __contains__(self, resources_session_id: object) -> bool:
+        self._expire()
+        return resources_session_id in self._records
+
+    def __len__(self) -> int:
+        self._expire()
+        return len(self._records)
+
+    def _expire(self) -> None:
+        now = monotonic()
+        while self._records and next(iter(self._records.values()))[0] <= now:
+            self._records.popitem(last=False)
 
 
 class ResourcesSessionFence:
-    """Serialize seed and close per resources session, and remember closed sessions for a bounded time.
+    """Serialize seed and close per resources session, and refuse a seed for a session closed within the window.
 
     A seed that arrives after its session closed (a retry, or a reply that raced the close) must not create the
-    session again, so a server remembers each closed ``resources_session_id``. Each record expires
-    ``retention_seconds`` after its close, which keeps memory bounded over a long training run. A per-session lock
-    exists only while a request holds or waits for it.
+    session again, so the fence remembers each closed ``resources_session_id`` and the episode that first closed it,
+    in ``ClosedResourcesSessionRecords``. Construct it with the server's ``session_close_retry_window_seconds``, so a
+    record lasts exactly as long as the session's routing claim with several workers. A per-session lock exists only
+    while a request holds or waits for it.
 
     TODO: also expire sessions that are never closed, as when the Environment Server dies before its close. Planned
     rule: a fixed lifetime from the seed (the sandbox ``ttl_s`` when set, else 24 hours), checked on the next request
     and at shutdown; an expired session is released, fenced, and verifies as ``SESSION_EXPIRED``.
     """
 
-    def __init__(
-        self,
-        *,
-        retention_seconds: float = CLOSED_SESSION_RETENTION_S,
-        clock: Callable[[], float] = monotonic,
-    ) -> None:
-        self._retention_seconds = retention_seconds
-        self._clock = clock
+    def __init__(self, window_seconds: float) -> None:
+        self._window_seconds = window_seconds
         self._locks: dict[str, _FenceLock] = {}
-        # Records share one retention, so insertion order is expiry order.
-        self._closed: OrderedDict[str, tuple[EpisodeId, float]] = OrderedDict()
+        self._closed: ClosedResourcesSessionRecords[EpisodeId] = ClosedResourcesSessionRecords(window_seconds)
 
     @asynccontextmanager
     async def locked(self, resources_session_id: str) -> AsyncIterator[None]:
@@ -391,10 +454,8 @@ class ResourcesSessionFence:
                 del self._locks[resources_session_id]
 
     def closed_episode(self, resources_session_id: str) -> EpisodeId | None:
-        """Return the episode that closed ``resources_session_id`` within the retention window, else ``None``."""
-        self._expire()
-        record = self._closed.get(resources_session_id)
-        return record[0] if record is not None else None
+        """Return the episode that first closed ``resources_session_id`` within the window, else ``None``."""
+        return self._closed.get(resources_session_id)
 
     def raise_if_closed(self, resources_session_id: str) -> None:
         """Refuse a seed for a closed session with 409, which the Environment Server does not retry."""
@@ -402,22 +463,15 @@ class ResourcesSessionFence:
             raise ResourcesSessionConflictError(f"Resources session is already closed: {resources_session_id}")
 
     def mark_closed(self, resources_session_id: str, episode_id: EpisodeId) -> None:
-        """Record ``resources_session_id`` as closed; call it only after its state was released."""
-        self._expire()
-        self._closed.pop(resources_session_id, None)
-        self._closed[resources_session_id] = (episode_id, self._clock() + self._retention_seconds)
+        """Record ``resources_session_id`` as closed; call it only after its state was released.
+
+        A retried close keeps the first close's episode and expiry.
+        """
+        self._closed.remember(resources_session_id, episode_id)
 
     def clear(self) -> None:
         """Forget every record, for a server that drops all of its sessions at shutdown."""
-        self._closed.clear()
-
-    def _expire(self) -> None:
-        now = self._clock()
-        while self._closed:
-            resources_session_id, (_, expires_at) = next(iter(self._closed.items()))
-            if expires_at > now:
-                return
-            del self._closed[resources_session_id]
+        self._closed = ClosedResourcesSessionRecords(self._window_seconds)
 
 
 @dataclass
@@ -443,14 +497,42 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
     checkpoint_session_starts: ClassVar[tuple[str, ...]] = ("/seed_session",)
     _checkpoint: Optional[ResourcesParticipant] = PrivateAttr(default=None)
     _mcp_token_serializer: Any = PrivateAttr(default=None)
+    routes_sessions_to_owner = True
+
+    def claimed_session_routing(self) -> dict[str, Any]:
+        return {
+            "kind": RESOURCES_SESSIONS,
+            "close_window_seconds": self.config.session_close_retry_window_seconds,
+            "session_starts": tuple(self.checkpoint_session_starts),
+            "session_ends": ("/verify",),
+            "close_follows_header": CHECKPOINT_CLOSE_FOLLOWS_HEADER,
+        }
 
     def setup_webserver(self) -> FastAPI:
+        app = self.create_resources_app()
+        self.register_protocol_routes(app)
+        return app
+
+    def create_resources_app(self) -> FastAPI:
+        """Build the app with what every resources server shares, whatever its episode protocol.
+
+        That is the session and rollout middleware, the checkpoint participant,
+        ``/aggregate_metrics`` and ``/reverify_mode``.
+        A server with another protocol, such as Gymnasium's ``/reset`` and ``/step``,
+        overrides ``register_protocol_routes`` instead of building its own app.
+        """
         app = FastAPI()
 
         self.setup_session_middleware(app)
         app.add_middleware(RolloutContextMiddleware)
         self.setup_resources_checkpoint(app)
 
+        app.post("/aggregate_metrics")(self.aggregate_metrics)
+        app.get("/reverify_mode")(self.get_reverify_mode)
+        return app
+
+    def register_protocol_routes(self, app: FastAPI) -> None:
+        """Register the episode routes ``/seed_session``, ``/close_session`` and ``/verify``."""
         app.post("/seed_session")(self.seed_session)
         app.post("/close_session")(self.close_resources_session)
         # Wrapped outside judge_failsafe so the span covers the failsafe's own handling too.
@@ -460,10 +542,6 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
                 static_attributes={"nemo.gym.server.name": self.config.name},
             )
         )
-        app.post("/aggregate_metrics")(self.aggregate_metrics)
-        app.get("/reverify_mode")(self.get_reverify_mode)
-
-        return app
 
     def setup_resources_checkpoint(self, app: FastAPI) -> None:
         # The declarations are class attributes nothing else checks: a typo would act as a mode of its own.
@@ -565,6 +643,12 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         session_id = request.session.get(SESSION_ID_KEY)
         if self._checkpoint is not None and session_id is not None:
             self._checkpoint.ended(session_id)
+        # With several workers, the session's routing claim ends a window after its last request from now on.
+        # A request without an app, such as a test's stand-in, has no routing and so no claim to end.
+        app = getattr(request, "app", None)
+        lifetimes = getattr(getattr(app, "state", None), "nemo_gym_resources_session_lifetimes", None)
+        if lifetimes is not None and session_id is not None:
+            lifetimes.ended(session_id)
 
     async def export_session_states(self, session_ids: list[str]) -> dict[str, JsonValue]:
         """Return each session's state for a checkpoint, leaving out sessions this server no longer holds."""
@@ -635,14 +719,15 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
 
         - succeed when the session is already closed or was never seeded;
         - keep a seed that arrives after the close from creating the session again, for a bounded time
-          (``ResourcesSessionFence`` does this for ``CLOSED_SESSION_RETENTION_S``);
+          (``ResourcesSessionFence`` does this for ``session_close_retry_window_seconds``);
         - release the session's state by ``resources_session_id`` even when the request carries no session cookie;
         - raise when releasing fails rather than recording the session as closed, so the caller can retry.
 
-        A close can arrive without the cookie: the Environment Server registers the close before it sends the seed,
-        so when the seed's reply is lost it closes with an empty cookie jar. A server that keys state by the cookie's
-        ``SESSION_ID_KEY`` must therefore also map ``resources_session_id`` to that state in its seed, or set
-        ``request.session[SESSION_ID_KEY] = body.resources_session_id`` there.
+        A served resources server routes sessions (see ``nemo_gym.session_routing``): a typed seed's session cookie
+        carries ``resources_session_id`` as its ``SESSION_ID_KEY``, and a typed close that carries no cookie, as when
+        the seed's reply was lost, is given that ID too, so a server may key state by either; they name the same
+        session. An app built without session routing, such as one under ``TestClient``, gives a new session a random
+        ID instead, so release by ``body.resources_session_id`` to be correct either way.
 
         ``nemo_gym.testing.session_conformance.check_resources_session_contract`` checks these rules from a server's tests.
         """

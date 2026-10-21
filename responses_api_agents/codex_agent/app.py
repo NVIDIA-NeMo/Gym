@@ -99,14 +99,14 @@ set --
 command -v python3 >/dev/null 2>&1 || set -- "$@" python3
 command -v bash >/dev/null 2>&1 || set -- "$@" bash
 if [ "$#" -gt 0 ]; then
-    [ "$(id -u)" = 0 ] || { echo "Native Codex requires $*: preinstall these tools or use a root image." >&2; exit 1; }
+    [ "$(id -u)" = 0 ] || { echo "Codex in the task sandbox requires $*: preinstall these tools or use a root image." >&2; exit 1; }
     if command -v apk >/dev/null 2>&1; then
         apk add --no-cache "$@"
     elif command -v apt-get >/dev/null 2>&1; then
         apt-get update
         DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$@"
     else
-        echo "Native Codex requires $*: preinstall these tools (automatic installation requires apt-get or apk)." >&2
+        echo "Codex in the task sandbox requires $*: preinstall these tools (automatic installation requires apt-get or apk)." >&2
         exit 1
     fi
 fi
@@ -192,7 +192,7 @@ def parse_exec_jsonl(
     successful retry. Tool-shaped items are mapped to a
     ``function_call`` + ``function_call_output`` pair so verifiers see one uniform trajectory
     shape across agent harnesses; reasoning is buffered and prepended to the next assistant
-    message inside ``<think>`` tags (mirroring the Claude Code agent). Native callers use
+    message inside ``<think>`` tags (mirroring the Claude Code agent). Sandbox session callers use
     ``conservative_usage_details`` because the pinned CLI defaults absent backend cache/reasoning
     counters to zero: only positive integers establish measured details in this artifact.
     """
@@ -486,8 +486,6 @@ class CodexAgent(SimpleResponsesAPIAgent):
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> CodexSandboxSession:
         # Match Hermes: session initialization owns the sandbox runtime setup,
         # with the same AgentSeedSessionRequest/SandboxAccess wire contracts.
-        if self.config.num_workers not in (None, 1):
-            raise HTTPException(422, "Native Codex sessions require num_workers=1")
         owns_sandbox = body.sandbox_access is None
         if owns_sandbox:
             if not self.config.sandbox_provider:
@@ -508,20 +506,24 @@ class CodexAgent(SimpleResponsesAPIAgent):
         ):
             raise HTTPException(422, "Codex runtime/session files must be outside SandboxAccess.workdir")
         if any(access.required for access in self.effective_tool_accesses(body)):
-            raise HTTPException(422, "Native Codex supports its own sandbox tools, not required HTTP/MCP tools")
+            raise HTTPException(
+                422, "Codex in the task sandbox supports its own sandbox tools, not required HTTP/MCP tools"
+            )
         if self.config.model_server is None:
-            raise HTTPException(422, "Native Codex requires a sandbox-reachable Gym model_server")
+            raise HTTPException(422, "Codex in the task sandbox requires a sandbox-reachable Gym model_server")
         if not self.config.codex_version or not re.fullmatch(r"\d+\.\d+\.\d+", self.config.codex_version):
-            raise HTTPException(422, "Native Codex requires an exact codex_version, for example 0.144.4")
+            raise HTTPException(422, "Codex in the task sandbox requires an exact codex_version, for example 0.144.4")
         if self.config.cwd is not None or self.config.extra_config or self.config.openai_base_url is not None:
             raise HTTPException(
                 422,
-                "Native Codex uses its sandbox workdir and Gym routing; cwd, extra_config, and openai_base_url overrides are unsupported",
+                "Codex in the task sandbox uses its sandbox workdir and Gym routing; cwd, extra_config, and openai_base_url overrides are unsupported",
             )
         if self.config.reasoning_effort is not None:
-            raise HTTPException(422, "Native Codex cannot guarantee reasoning_effort for custom Gym models")
+            raise HTTPException(
+                422, "Codex in the task sandbox cannot guarantee reasoning_effort for custom Gym models"
+            )
         if self.config.sandbox_mode != "danger-full-access":
-            raise HTTPException(422, "Native Codex requires danger-full-access inside the task sandbox")
+            raise HTTPException(422, "Codex in the task sandbox requires danger-full-access inside the task sandbox")
 
         provider = create_provider(resolve_provider_config(provider_ref, get_global_config_dict()))
         if owns_sandbox:
@@ -612,12 +614,16 @@ class CodexAgent(SimpleResponsesAPIAgent):
         values = body.model_dump(mode="json")
         for name in unsupported:
             if values.get(name) is not None:
-                raise HTTPException(422, f"Native Codex does not support request field {name}")
+                raise HTTPException(422, f"Codex in the task sandbox does not support request field {name}")
         if body.model is not None and body.model != self._effective_model():
-            raise HTTPException(422, "Native Codex model is selected by agent and model-server configuration")
+            raise HTTPException(
+                422, "Codex in the task sandbox selects its model by agent and model-server configuration"
+            )
         unknown = set(body.model_extra or {})
         if unknown:
-            raise HTTPException(422, f"Native Codex does not support extra request fields: {sorted(unknown)}")
+            raise HTTPException(
+                422, f"Codex in the task sandbox does not support extra request fields: {sorted(unknown)}"
+            )
         if body.tools or body.tool_choice != "auto" or not body.parallel_tool_calls or body.background:
             raise HTTPException(422, "Codex owns tool selection and execution policy")
         for name in ("chat_template_kwargs", "extra_body"):
@@ -628,13 +634,15 @@ class CodexAgent(SimpleResponsesAPIAgent):
         )
         roles = [getattr(item, "role", None) for item in items]
         if roles not in (["user"], ["system", "user"], ["developer", "user"]):
-            raise HTTPException(422, "Native Codex accepts one text user prompt with an optional system message")
+            raise HTTPException(
+                422, "Codex in the task sandbox accepts one text user prompt with an optional system message"
+            )
         for item in items:
             if not isinstance(item.content, str) and any(
                 (part.get("type") if isinstance(part, dict) else getattr(part, "type", None)) != "input_text"
                 for part in item.content
             ):
-                raise HTTPException(422, "Native Codex only supports text input")
+                raise HTTPException(422, "Codex in the task sandbox only supports text input")
 
         def text(item):
             return (
@@ -1263,7 +1271,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
 
     async def run(self, request: Request, body: CodexAgentRunRequest) -> CodexAgentVerifyResponse:
         if self._session_marker(request) is not None:
-            raise HTTPException(409, "Use the native session responses and close routes")
+            raise HTTPException(409, "Use the agent session responses and close routes")
         if self.config.resources_server is None:
             raise HTTPException(422, "Legacy /run requires resources_server")
         async with self.sem:

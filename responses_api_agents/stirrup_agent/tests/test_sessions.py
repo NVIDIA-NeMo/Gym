@@ -45,7 +45,6 @@ def agent() -> StirrupAgentWrapper:
         port=8080,
         entrypoint="",
         name="stirrup_agent",
-        task="gdpval",
         resources_server=ResourcesServerRef(type="resources_servers", name="gdpval_resources_server"),
         model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
         finish_tool_names=["finish", "abandon_task_finish"],
@@ -296,6 +295,49 @@ def test_request_tools_without_a_tool_access_are_rejected(client, root):
 
     assert response.status_code == 422
     assert "grants no tool access" in response.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    ("request_body", "detail"),
+    [
+        (
+            {"input": "Write the report.", "model": "policy", "tools": [t for t in _TOOLS if t["name"] != "finish"]},
+            "Finish tools ['finish'] are not among the request's tools",
+        ),
+        (
+            {
+                "input": [
+                    {"role": "user", "content": "Write the report."},
+                    {"role": "assistant", "content": "Working on it."},
+                ],
+                "model": "policy",
+                "tools": _TOOLS,
+            },
+            "Multi-turn input with assistant messages is not supported",
+        ),
+        (
+            {"input": [{"role": "system", "content": "Be brief."}], "model": "policy", "tools": _TOOLS},
+            "Stirrup requires a user message",
+        ),
+    ],
+    ids=["a finish tool is missing", "multi-turn input", "no user message"],
+)
+def test_a_request_that_can_never_run_is_a_422_before_the_runner_starts(
+    client, root, monkeypatch, request_body, detail
+):
+    started = []
+
+    async def execute(*_args, **_kwargs):
+        started.append(True)
+
+    monkeypatch.setattr(sandbox.StirrupSessionState, "execute", execute)
+    _seed(client, sandbox_access=_sandbox_access(str(root)), tool_accesses=[_TOOL_ACCESS])
+
+    response = client.post(f"/ng-rollout/{_EPISODE.capture_key}/v1/responses", json=request_body)
+
+    assert response.status_code == 422
+    assert detail in response.json()["detail"]
+    assert started == [], "nothing runs in the sandbox for a request that cannot succeed"
 
 
 def test_a_session_requiring_mcp_tools_is_rejected(client):

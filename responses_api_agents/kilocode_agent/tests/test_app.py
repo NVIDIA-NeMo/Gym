@@ -16,20 +16,26 @@
 import asyncio
 import json
 import logging
+import os
+import sys
 from functools import partial
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 import yaml
 from omegaconf import OmegaConf
+from starlette.requests import Request
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
+    NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
+from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.kilocode_agent.app import (
     KiloCodeAgent,
@@ -51,10 +57,7 @@ def _config(**kwargs) -> KiloCodeAgentConfig:
 
 
 def _make_agent(**kwargs) -> KiloCodeAgent:
-    with patch("responses_api_agents.kilocode_agent.app.KiloCodeAgent.model_post_init"):
-        agent = KiloCodeAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
-    agent.sem = asyncio.Semaphore(agent.config.concurrency)
-    return agent
+    return KiloCodeAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
 
 
 def _make_model_server_agent(**kwargs) -> KiloCodeAgent:
@@ -336,6 +339,7 @@ class TestModelServer:
         assert provider["options"] == {
             "apiKey": "EMPTY",  # pragma: allowlist secret
             "baseURL": "http://model-host:9000/v1",
+            "chunkTimeout": agent.config.timeout * 1000,
         }
         assert provider["models"] == {
             "Qwen/Qwen3-8B": {
@@ -362,6 +366,13 @@ class TestModelServer:
         assert written["permission"]["bash"] == "allow"
         assert written["provider"]["nemo"]["name"] == "mine"
 
+    def test_session_titles_disabled_unless_configured(self) -> None:
+        default = _make_model_server_agent(model="m")._build_kilo_config("http://x/v1")
+        assert default["agent"]["title"] == {"disable": True}
+        enabled = _make_model_server_agent(model="m", kilo_config={"agent": {"title": {"disable": False}}})
+        assert enabled._build_kilo_config("http://x/v1")["agent"]["title"] == {"disable": False}
+        assert "agent" not in _make_agent(model="p/m")._build_kilo_config()
+
     def test_limits_and_reasoning_field_configurable(self, tmp_path) -> None:
         agent = _make_model_server_agent(
             model="m", context_window=262144, max_output_tokens=16384, reasoning_field=None
@@ -370,6 +381,15 @@ class TestModelServer:
         model = json.loads((tmp_path / "kilo.json").read_text())["provider"]["nemo"]["models"]["m"]
         assert model["limit"] == {"context": 262144, "output": 16384}
         assert "interleaved" not in model
+
+    def test_stream_watchdog_follows_run_timeout_unless_overridden(self) -> None:
+        # The model server replays a finished completion, so a 60s chunk watchdog would cancel long calls.
+        for options, expected in [({}, 21_600_000), ({"chunkTimeout": 5000}, 5000)]:
+            agent = _make_model_server_agent(
+                model="m", timeout=21600, kilo_config={"provider": {"nemo": {"options": options}}}
+            )
+            written = agent._build_kilo_config("http://model/v1")["provider"]["nemo"]["options"]
+            assert written["chunkTimeout"] == expected
 
     def test_rollout_prefix_applied_to_base_url(self, tmp_path) -> None:
         agent = _make_model_server_agent(model="m")
@@ -388,10 +408,14 @@ class TestModelServer:
         agent = _make_model_server_agent(model="m", repo_dir=str(tmp_path))
         proc = MagicMock()
         proc.returncode = 0
-        proc.communicate = AsyncMock(return_value=(b"", b""))
-        with patch("responses_api_agents.kilocode_agent.app.asyncio.create_subprocess_exec") as spawn:
+        proc.wait = AsyncMock(return_value=0)
+        with (
+            patch("responses_api_agents.kilocode_agent.app.asyncio.create_subprocess_exec") as spawn,
+            patch("responses_api_agents.kilocode_agent.app.ensure_kilo") as install,
+        ):
             spawn.return_value = proc
             asyncio.run(agent._run_kilo("hi", None, "task0-rollout1"))
+        install.assert_called_once_with(agent.config.kilo_version)
 
         expected = "http://model-host:9000/ng-rollout/task0-rollout1/v1"
         written = json.loads((tmp_path / "kilo.json").read_text())
@@ -403,6 +427,102 @@ class TestModelServer:
         env = agent._env("/tmp/data", "/tmp/config", agent._resolve_model_base_url("r1"))
         assert env["OPENAI_BASE_URL"] == "http://model-host:9000/ng-rollout/r1/v1"
         assert env["OPENAI_API_KEY"] == "EMPTY"  # pragma: allowlist secret
+
+
+def _fake_kilo(tmp_path: Path, *, stdout: str = "", exit_code: int = 0, sleep: float = 0.0) -> str:
+    """A real subprocess standing in for the Kilo CLI: prints events, then sleeps and exits."""
+    script = tmp_path / "fake_kilo.py"
+    script.write_text(
+        "import os, pathlib, sys, time\n"
+        f"pathlib.Path({str(tmp_path / 'pid')!r}).write_text(str(os.getpid()))\n"
+        f"sys.stdout.write({stdout!r})\n"
+        "sys.stdout.flush()\n"
+        f"time.sleep({sleep})\n"
+        f"sys.exit({exit_code})\n"
+    )
+    return f"{sys.executable} {script}"
+
+
+class TestLocalRunOutcome:
+    """Local runs mark failures as failed responses: the legacy /run path still verifies them."""
+
+    STEP = _step_finish_event({"input": 5, "output": 2}, pid="prt_step")
+
+    def _respond(self, tmp_path: Path, command: str, *, timeout: int = 30, rollout_id: str | None = None):
+        agent = _make_model_server_agent(model="m", command=command, timeout=timeout, workspace_root=str(tmp_path))
+        path_params = {"rollout_id": rollout_id} if rollout_id else {}
+        request = Request({"type": "http", "path_params": path_params})
+        with patch("responses_api_agents.kilocode_agent.app.ensure_kilo"):
+            return asyncio.run(agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="hi")))
+
+    @staticmethod
+    def _assert_failed(response, message: str) -> None:
+        assert response.status == "failed"
+        assert message in response.error.message
+
+    def test_completed_run(self, tmp_path) -> None:
+        response = self._respond(tmp_path, _fake_kilo(tmp_path, stdout=_events(_text_event("42"), self.STEP)))
+        assert response.status == "completed" and response.error is None
+        assert response.output[-1].content[0].text == "42"
+
+    def test_timeout_keeps_partial_events_as_incomplete(self, tmp_path) -> None:
+        command = _fake_kilo(tmp_path, stdout=_events(_text_event("partial"), self.STEP) + "\n", sleep=30)
+        response = self._respond(tmp_path, command, timeout=1)
+        assert response.status == "incomplete" and response.error is None
+        assert response.output[0].content[0].text == "partial"
+
+    def test_timeout_before_any_model_call_fails(self, tmp_path) -> None:
+        self._assert_failed(
+            self._respond(tmp_path, _fake_kilo(tmp_path, sleep=30), timeout=1), "before any model call completed"
+        )
+
+    def test_nonzero_exit_fails(self, tmp_path) -> None:
+        command = _fake_kilo(tmp_path, stdout=_events(_text_event("x"), self.STEP), exit_code=3)
+        self._assert_failed(self._respond(tmp_path, command), "Kilo exited 3")
+
+    def test_cli_error_event_fails(self, tmp_path) -> None:
+        stdout = _events({"type": "error", "error": {"name": "APIError"}})
+        self._assert_failed(self._respond(tmp_path, _fake_kilo(tmp_path, stdout=stdout)), "execution error")
+
+    def test_rollout_calls_carry_observations_with_the_run_outcome(self, tmp_path) -> None:
+        stdout = _events({"type": "error", "error": {"name": "APIError"}})
+        response = self._respond(tmp_path, _fake_kilo(tmp_path, stdout=stdout), rollout_id="task0-rollout1")
+        observations = AgentObservationBundle.model_validate(response.model_extra["_ng_agent_observations"])
+        [root] = [record for record in observations.records if isinstance(record, AgentInvocation)]
+        assert (root.invocation_id, root.status) == ("task0-rollout1", "failed")
+        assert {"agent_artifact_unavailable", "no_sandbox_runtime"} <= {gap.code for gap in observations.gaps}
+        direct = self._respond(tmp_path, _fake_kilo(tmp_path, stdout=_events(_text_event("42"), self.STEP)))
+        assert "_ng_agent_observations" not in (direct.model_extra or {})
+
+    def test_cancelled_request_kills_kilo(self, tmp_path) -> None:
+        agent = _make_model_server_agent(
+            model="m", command=_fake_kilo(tmp_path, sleep=60), workspace_root=str(tmp_path / "ws")
+        )
+        pid_file = tmp_path / "pid"
+
+        async def cancel_mid_run() -> int:
+            task = asyncio.create_task(
+                agent.responses(
+                    Request({"type": "http", "path_params": {}}), NeMoGymResponseCreateParamsNonStreaming(input="hi")
+                )
+            )
+            async with asyncio.timeout(10):
+                while not pid_file.exists() or not pid_file.read_text():
+                    await asyncio.sleep(0.05)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            pid = int(pid_file.read_text())
+            async with asyncio.timeout(10):
+                while True:
+                    try:
+                        os.kill(pid, 0)
+                    except ProcessLookupError:
+                        return pid
+                    await asyncio.sleep(0.05)
+
+        with patch("responses_api_agents.kilocode_agent.app.ensure_kilo"):
+            asyncio.run(cancel_mid_run())
 
 
 class TestConfigYaml:

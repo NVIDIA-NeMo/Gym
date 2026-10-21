@@ -283,6 +283,7 @@ class TestStrictComparisonTrials:
         response = await server.verify(_NO_SESSION, body)
         dumped = response.model_dump()
         assert dumped["_ng_failure_class"] == "reference_missing"
+        assert dumped["_ng_failure_terminal"] is True
         assert (dumped["failure_kind"], dumped["mask_sample"]) == ("gdpval:reference_missing", True)
 
     @pytest.mark.parametrize("existing_dir", [False, True])
@@ -322,6 +323,7 @@ class TestStrictComparisonTrials:
             assert "_ng_failure_class" not in response.model_dump()
         else:
             assert response.model_dump()["_ng_failure_class"] == f"{missing}_missing"
+            assert response.model_dump()["_ng_failure_terminal"] is True
             assert "manual_imputation" not in response.judge_response
 
     @pytest.mark.parametrize("marker", ["null", "{}"])
@@ -354,6 +356,7 @@ class TestStrictComparisonTrials:
         if transport:
             response = await self._verify_with_trials(server, body, [TransportIneligibleError("attachment limit")])
             assert response.model_dump()["_ng_failure_class"] == "transport_ineligible"
+            assert response.model_dump()["_ng_failure_terminal"] is True
             assert "manual_imputation" not in response.judge_response
         else:
             with pytest.raises(RuntimeError, match="all 1 judge matchup"):
@@ -781,6 +784,7 @@ class TestApp:
         # non-final-stage coverage gate, which no policy setting can relax.
         dumped = resp.model_dump()
         assert dumped["_ng_failure_class"] == "reference_missing"
+        assert dumped["_ng_failure_terminal"] is True
         assert (dumped["failure_kind"], dumped["mask_sample"]) == ("gdpval:reference_missing", True)
 
     @pytest.mark.asyncio
@@ -826,6 +830,7 @@ class TestApp:
 
         if has_inputs and not from_eval:
             assert response.model_dump()["_ng_failure_class"] == "transport_ineligible"
+            assert response.model_dump()["_ng_failure_terminal"] is True
             client.chat.completions.create.assert_not_called()
             return
         assert response.judge_response["total_judged"] == 4
@@ -1442,6 +1447,7 @@ class TestMultiReference:
         assert resp.judge_response == {"error": "reference_missing"}
         dumped = resp.model_dump()
         assert dumped["_ng_failure_class"] == "reference_missing"
+        assert dumped["_ng_failure_terminal"] is True
         assert (dumped["failure_kind"], dumped["mask_sample"]) == ("gdpval:reference_missing", True)
 
     @staticmethod
