@@ -208,6 +208,14 @@ ALLOWED_MODEL_TYPES_KEY_NAME = "allowed_model_types"
 MODEL_SERVER_TYPE_KEY_NAME = "responses_api_models"
 RESOURCES_SERVER_TYPE_KEY_NAME = "resources_servers"
 
+# Public config-group keys, in discovery order, for Gym and downstream integrations.
+SERVER_TYPE_KEYS: Tuple[str, ...] = (
+    RESOURCES_SERVER_TYPE_KEY_NAME,
+    AGENT_SERVER_TYPE_KEY_NAME,
+    MODEL_SERVER_TYPE_KEY_NAME,
+    ENVIRONMENT_SERVER_TYPE_KEY_NAME,
+)
+
 
 def environment_server_agent_refs(server: DictConfig) -> list[DictConfig]:
     """Return the agent references in one environment server's config.
@@ -2202,7 +2210,6 @@ def format_almost_server_warning(server_name: str, error: ValidationError) -> st
     errors = error.errors()
 
     # Identify the actual server type from the error (excluding Union discriminator noise)
-    server_type_keys = ["responses_api_models", "resources_servers", "responses_api_agents", "environment_servers"]
     actual_server_type = None
 
     # Example error structure: ('ResponsesAPIAgentServerInstanceConfig', 'responses_api_agents', 'simple_agent', 'datasets', 0, 'license')
@@ -2210,7 +2217,7 @@ def format_almost_server_warning(server_name: str, error: ValidationError) -> st
         loc = err["loc"]
         # loc[1] is the actual server type key.
         # Skip "missing" errors from the irrelevant Union variants.
-        if len(loc) > 1 and loc[1] in server_type_keys and err["type"] != "missing":
+        if len(loc) > 1 and loc[1] in SERVER_TYPE_KEYS and err["type"] != "missing":
             actual_server_type = loc[1]
             break
 
@@ -2218,7 +2225,7 @@ def format_almost_server_warning(server_name: str, error: ValidationError) -> st
     if not actual_server_type:  # pragma: no cover
         for err in errors:
             if "input" in err and isinstance(err["input"], dict):
-                for key in server_type_keys:
+                for key in SERVER_TYPE_KEYS:
                     if key in err["input"]:
                         actual_server_type = key
                         break
@@ -2234,7 +2241,7 @@ def format_almost_server_warning(server_name: str, error: ValidationError) -> st
         if (
             err["type"] == "missing"
             and len(loc) > 1
-            and loc[1] in server_type_keys
+            and loc[1] in SERVER_TYPE_KEYS
             and actual_server_type
             and loc[1] != actual_server_type
         ):
