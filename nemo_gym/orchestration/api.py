@@ -346,6 +346,18 @@ class SlurmComputeConfig(BaseComputeConfig):
     type: Literal["slurm"]
     account: str
     hostname: str | None = None  # None means we're already on the login node; skip SSH.
+    # Submit-side variables explicitly exported before sbatch, without writing values
+    # into job.sh or the resolved config. Runtime-only Slurm variables stay untouched.
+    forward_env: list[str] = []
+
+    @field_validator("forward_env")
+    @classmethod
+    def _validate_forward_env(cls, names: list[str]) -> list[str]:
+        for name in names:
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+                raise ValueError(f"Invalid forward_env variable name: {name!r}")
+        return names
+
     walltime: str | None = None
     node_pools: dict[str, NodePool] = {}
     extra_args: dict[str, str] = {}  # Job-level #SBATCH directives (e.g. --comment, --mail-user).
@@ -507,6 +519,8 @@ class OtelConfig(_StrictModel):
     gym_span_groups: str = "default,verify"
     # Ship Gym's Python logging as OTel logs too (trace-correlated), through the same collector.
     gym_logs: bool = True
+    # One vLLM span per request (queue, prefill, decode, tokens) into the rollout trace; needs the OTel SDK in the image.
+    vllm_traces: bool = False
     # Node-level exporters that clusters commonly run as system services on every compute node;
     # scraped on localhost when set, skipped when null. DCGM gives per-GPU activity/memory/power,
     # node_exporter gives CPU/memory/network/disk. A closed port only logs scrape errors.

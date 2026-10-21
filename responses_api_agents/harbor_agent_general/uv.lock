@@ -861,12 +861,17 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/9e/63/0e3d788e8d1ed116125507c6a01e3fb95cf82be71f2ea7040a1458709d21/harbor-0.24.0-py3-none-any.whl", hash = "sha256:23b7ba616a3aae4eff561ced5e2c51c7186f2981e53a770dea9c689d3969877c", size = 2331740, upload-time = "2026-10-05T05:04:42.088Z" },
 ]
 
+[package.optional-dependencies]
+opensandbox = [
+    { name = "opensandbox" },
+]
+
 [[package]]
 name = "harbor-agent-general"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "harbor" },
+    { name = "harbor", extra = ["opensandbox"] },
     { name = "nemo-gym", extra = ["dev", "ray"] },
 ]
 
@@ -877,7 +882,7 @@ telemetry = [
 
 [package.metadata]
 requires-dist = [
-    { name = "harbor", specifier = ">=0.22" },
+    { name = "harbor", extras = ["opensandbox"], specifier = ">=0.22" },
     { name = "nemo-gym", extras = ["dev", "ray"], editable = "../../" },
     { name = "nemo-gym", extras = ["telemetry"], marker = "extra == 'telemetry'", editable = "../../" },
 ]
@@ -1723,6 +1728,24 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/4c/96/3b6f638f6275a8abbd45e582448723bffa29c1fb426721dedb5c72f7d056/opencensus-context-0.1.3.tar.gz", hash = "sha256:a03108c3c10d8c80bb5ddf5c8a1f033161fa61972a9917f9b9b3a18517f0088c", size = 4066, upload-time = "2022-08-03T22:20:22.359Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/10/68/162c97ea78c957d68ecf78a5c5041d2e25bd5562bdf5d89a6cbf7f8429bf/opencensus_context-0.1.3-py2.py3-none-any.whl", hash = "sha256:073bb0590007af276853009fac7e4bab1d523c3f03baf4cb4511ca38967c6039", size = 5060, upload-time = "2022-08-03T22:20:20.352Z" },
+]
+
+[[package]]
+name = "opensandbox"
+version = "1.1.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "attrs" },
+    { name = "httpcore" },
+    { name = "httpx" },
+    { name = "httpx-sse" },
+    { name = "opentelemetry-api" },
+    { name = "pydantic" },
+    { name = "python-dateutil" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/77/36/79ff65e79725e10dd540af000e9148bc26428d0494bb954f406e5da79c74/opensandbox-1.1.1.tar.gz", hash = "sha256:2c62b338ed30c99d37fe88116f9e82f08e8e5c9ec8574dfef38d1ea5801f4b5e", size = 299154, upload-time = "2026-10-09T14:34:36.335Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/48/38/c18410a5466904ff9beef867e51d177e7f9a3240413f4412fb126481aee1/opensandbox-1.1.1-py3-none-any.whl", hash = "sha256:98eb0d7b57fdeabbbb5202d5e3a5261741f68fe47a631f0ec483b1566eb5fef8", size = 668271, upload-time = "2026-10-09T14:34:35.143Z" },
 ]
 
 [[package]]
