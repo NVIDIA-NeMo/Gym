@@ -39,7 +39,7 @@ _IMPORT_CHECK = (
 )
 
 
-def _runtime_archive(root: Path, *, requirements_path: Path | None = None) -> tuple[bytes, str]:
+def _runtime_archive(root: Path) -> tuple[bytes, str]:
     """Include current source, never repository metadata, caches, or user artifacts."""
     files = {name: (root / name).read_bytes() for name in ("README.md", "LICENSE")}
     template = (root / "responses_api_agents/nooa_agent/runtime/pyproject.toml").read_text()
@@ -61,10 +61,7 @@ def _runtime_archive(root: Path, *, requirements_path: Path | None = None) -> tu
     for path in agent_dir.glob("*.py"):
         if not path.is_symlink():
             files[path.relative_to(root).as_posix()] = path.read_bytes()
-    selected_requirements = requirements_path or agent_dir / "requirements.txt"
-    if not selected_requirements.is_absolute():
-        selected_requirements = root / selected_requirements
-    requirements = selected_requirements.read_text()
+    requirements = (agent_dir / "requirements.txt").read_text()
     runtime_requirements = []
     for line in requirements.splitlines():
         if not line.strip() or line.startswith(("#", "-e ")):
@@ -101,9 +98,7 @@ def _python_download_url(target: str) -> str:
     )
 
 
-async def prepare_nooa_runtime(
-    sandbox: AsyncSandbox, *, requirements_path: Path | None = None, wheelhouse_path: Path | None = None
-) -> str:
+async def prepare_nooa_runtime(sandbox: AsyncSandbox, *, wheelhouse_path: Path | None = None) -> str:
     """Stage verified artifacts and return the target's healthy private Python.
 
     Cold setup requires Linux x86_64/aarch64 with glibc, bash, tar, gzip,
@@ -116,7 +111,7 @@ async def prepare_nooa_runtime(
     A healthy preinstalled or mounted runtime is reused without writing into it.
     """
     root = Path(__file__).resolve().parents[2]
-    source, fingerprint = _runtime_archive(root, requirements_path=requirements_path)
+    source, fingerprint = _runtime_archive(root)
     scratch = f"/tmp/nemo-gym-nooa-setup-{uuid4().hex}"
     script = scratch + ".sh"
     completed = False

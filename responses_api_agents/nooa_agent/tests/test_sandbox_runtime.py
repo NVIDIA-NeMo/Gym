@@ -114,18 +114,6 @@ def test_archive_selects_thin_runtime_dependencies(source_tree: Path) -> None:
     )
 
 
-def test_archive_uses_selected_requirements(source_tree: Path) -> None:
-    relative = Path("responses_api_agents/nooa_agent/runtime/benchagent-requirements.txt")
-    selected = source_tree / relative
-    selected.write_text("jsonschema==4.25.1\n")
-    _, default_fingerprint = sandbox_runtime._runtime_archive(source_tree)
-    blob, selected_fingerprint = sandbox_runtime._runtime_archive(source_tree, requirements_path=relative)
-    assert selected_fingerprint != default_fingerprint
-    assert sandbox_runtime._runtime_archive(source_tree, requirements_path=selected) == (blob, selected_fingerprint)
-    with tarfile.open(fileobj=io.BytesIO(blob)) as archive:
-        assert archive.extractfile("runtime-requirements.txt").read() == b"jsonschema==4.25.1\n"
-
-
 @pytest.fixture
 def portable_download(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> AsyncMock:
     from responses_api_agents.miniswe_sandboxed_agent import bootstrap

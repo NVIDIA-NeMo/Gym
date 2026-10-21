@@ -11,8 +11,7 @@ The SWE Resources server applies default-deny egress when it creates the task
 sandbox, before handing the sandbox to NOOA. NOOA borrows that Resources-owned
 sandbox. Fresh grading sandboxes continue using the benchmark's original
 network settings, images, test artifacts, and dependency preparation.
-Other SWE harnesses, NOOA Terminal-Bench, and NOOA GDPval keep their existing
-network behavior.
+Other SWE harnesses keep their existing network behavior.
 
 ## Deployment requirements
 
@@ -42,102 +41,59 @@ creation errors fail explicitly; they never trigger an unrestricted retry.
 Configure the OpenSandbox deployment outside the task: no task environment variable
 can turn a DNS-only deployment into `dns+nft` enforcement.
 
-## Prepare the controller and model
+## Prepare and run
 
-Use a reviewed, committed checkout in a new owned run directory. The following
-commands assume that checkout is at `$RUN_ROOT/Gym`. The controller needs Python
-3.13.14 or newer, package/GitHub access for preparation, and Docker capable of
-running a Linux amd64 build container. Docker is used only for offline runtime
-preparation; benchmark task sandboxes still run on OpenSandbox.
+Use a controller with Python 3.13.14 or newer, package/GitHub access, and Docker
+capable of running a Linux amd64 build container. Install Gym and the NOOA agent
+requirements in your controller environment. Docker builds the runtime; the
+benchmark task and grading sandboxes run on OpenSandbox.
 
-```bash
-export RUN_ROOT=/absolute/path/to/new-owned-run
-cd "$RUN_ROOT/Gym"
-bash benchmarks/nooa_baselines/bootstrap_eval.sh "$RUN_ROOT"
-source "$RUN_ROOT/controller-venv/bin/activate"
-mkdir -p "$RUN_ROOT/data"
-python - <<'PY'
-import os
-from pathlib import Path
-from benchmarks.swebench.pro.prepare import prepare
-output = Path(os.environ["RUN_ROOT"]) / "data/swebench-pro-731.jsonl"
-prepare(output_fpath=output)
-assert sum(1 for _ in output.open()) == 731
-PY
-```
-
-SWE uses the shared flat dataset and the existing legacy adapter. Start a new run directory;
-materialized NOOA SWE input and rollout caches from earlier recipes are incompatible.
-The baseline configuration reserves 32768 reply tokens without rewriting the dataset.
-
-Set `OPENSANDBOX_DOMAIN`, `OPENSANDBOX_API_KEY`, `POLICY_BASE_URL`,
-`POLICY_API_KEY`, and `POLICY_MODEL_NAME` through your private environment or
-secret manager. Do not commit credentials. The policy endpoint must support the
-baseline's 262144-token context, 32768 output tokens, and tool calls. Register it
-and run the two-request transport preflight:
+From the repository root, prepare a fresh bundle and the shared SWE dataset:
 
 ```bash
-python -m benchmarks.nooa_baselines.serving endpoint \
-  --run-dir "$RUN_ROOT/model" --base-url "$POLICY_BASE_URL" \
-  --served-model "$POLICY_MODEL_NAME" --api-key-env POLICY_API_KEY
-python -m benchmarks.nooa_baselines.serving preflight --run-dir "$RUN_ROOT/model"
-```
-
-## Launch the restricted canary
-
-```bash
-python -m benchmarks.nooa_baselines.run_eval \
-  --run-root "$RUN_ROOT" --benchmark swe --phase canary --prefetch
-```
-
-For SWE, `--prefetch` prepares `$RUN_ROOT/runtime-wheelhouse/swe` in a disposable
-Linux build container before task creation, in addition to installing controller
-server environments. The bundle contains pinned portable Python and wheels for
-NOOA, BenchAgent, the Gym runtime, and all dependencies. Its manifest binds the
-source fingerprint, Python checksum, wheel archive checksum, platform, and builder
-libc version. Task setup uploads those artifacts and installs wheels with
-`--no-index --no-deps` into a private runtime. It makes no package-network requests
-and does not replace or modify benchmark task images or their Python environment.
-
-A missing, mismatched, corrupted, or incompatible runtime fails setup before the
-agent starts. Changing source or requirements requires a fresh bundle directory
-and a new run. Task installation retains checksum checks, locking, health checks,
-and atomic publication. The controller records the bundle manifest hash in
-`launch.json` and preparation output in `runtime-preparation.log`.
-
-Without `--prefetch`, the launcher validates the existing bundle before creating
-any task. To prepare explicitly, including when using the recipe directly:
-
-```bash
-export NOOA_SWE_RUNTIME_WHEELHOUSE="$RUN_ROOT/runtime-wheelhouse/swe"
+export NOOA_SWE_RUNTIME_WHEELHOUSE=/absolute/path/to/new-owned-runtime-bundle
 python -m responses_api_agents.nooa_agent.offline_runtime \
   --output "$NOOA_SWE_RUNTIME_WHEELHOUSE" --target x86_64/gnu
+python benchmarks/swebench/pro/prepare.py
 ```
 
-The shipped SWE recipe selects Linux amd64. An explicit arm64 platform overlay
-requires a matching `aarch64/gnu` bundle and compatible benchmark images. The
-runtime checks target architecture and libc compatibility; musl targets are not
-supported by the offline builder. Prepared bundles may be transferred to another
-controller only with matching reviewed source, requirements, and target.
+The bundle contains portable Python, the pinned NOOA packages, the Gym runtime,
+and all dependency wheels. Its manifest binds the source, Python and wheel checksums,
+architecture, and builder glibc version. Task setup uses local wheels with
+`--no-index --no-deps` in a private prefix. It preserves the task image and its Python.
+Missing, incompatible, or corrupted bundles fail setup without an online fallback.
+Source or dependency changes require a fresh bundle directory. An existing bundle
+can be checked with the same command plus `--validate-only`.
 
-## Check the full path before expanding
+The recipe selects Linux amd64. An arm64 platform overlay requires a matching
+`aarch64/gnu` bundle and compatible task images. Task glibc must be at least the
+builder version; musl targets are unsupported. Prepared bundles can be transferred
+between controllers with matching source and target.
 
-A valid canary must show a fresh restricted sandbox installing NOOA, successful
-model inference, denied external hostname and literal-IP requests from that task
-sandbox, a completed SWE-bench Pro grade in its separately created grading
-sandbox, and cleanup of both owned sandboxes. Inspect the OpenSandbox deployment
-configuration and provider cleanup records as well as Gym's rollout, model-call,
-and completion receipts. Unit tests, Docker-only offline installs, and a model
-transport preflight do not establish live OpenSandbox network isolation.
-
-A completed grade with reward zero can pass the pipeline canary; a masked
-infrastructure failure cannot. Once the canary and deployment checks pass:
+Supply `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY` privately, and configure
+`policy_base_url`, `policy_api_key`, and `policy_model_name` through Gym's normal
+`env.yaml` or CLI overrides. The Gym model-server host must be reachable from the
+sandbox. Set the NOOA agent's optional `context_window` to the model's known context
+size when needed; its context planner reserves the rollout's `max_output_tokens`.
 
 ```bash
-python -m benchmarks.nooa_baselines.run_eval \
-  --run-root "$RUN_ROOT" --benchmark swe --phase full --concurrency 16
+gym env start --config benchmarks/swebench/pro/nooa.yaml \
+  --config responses_api_models/vllm_model/configs/vllm_model.yaml
+
+gym eval run --no-serve --agent swebench_pro_nooa_agent \
+  --input benchmarks/swebench/data/swebench_pro_benchmark.jsonl \
+  --output /tmp/nooa-swebench-pro.jsonl --limit 1 --concurrency 1
 ```
 
-Use concurrency appropriate for the endpoint and OpenSandbox capacity. The full
-phase checks the same input, model, source, and overlay provenance, reuses the
-canary's completed outcome, and validates the prepared runtime again, including the unchanged manifest hash.
+## Validate the deployment
+
+Before increasing concurrency, check a fresh task sandbox installs the offline
+runtime and reaches the model server. Confirm external hostname and literal-IP
+requests are denied, grading completes in a separate sandbox with its original
+network settings, and both sandboxes are cleaned up. Unit tests and successful
+policy creation do not establish live network enforcement.
+
+The recipe uses the existing SWE verifier and retains its reward and failure
+semantics. NOOA execution, transport, worker, resource, and cleanup failures remain
+episode failures. Inspect the rollout and verifier diagnostics before interpreting
+benchmark results.

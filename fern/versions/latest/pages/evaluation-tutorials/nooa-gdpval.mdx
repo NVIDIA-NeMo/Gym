@@ -1,0 +1,43 @@
+---
+title: "GDPval with NOOA"
+description: "Run NOOA with GDPval's existing sandbox sessions, task tools, and grading."
+---
+
+# GDPval with NOOA
+
+The [NOOA recipe](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/gdpval/nooa.yaml)
+uses GDPval's existing environment server, collection driver, resources server, and grading configuration.
+It selects the harness-neutral prompt and runs NOOA inside the resources-owned sandbox.
+
+Use GDPval's existing prerequisites: an image built from
+[the GDPval Dockerfile](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/gdpval/containers/Dockerfile),
+`GDPVAL_SANDBOX_IMAGE`, `OPENSANDBOX_DOMAIN`, `OPENSANDBOX_API_KEY`, `TAVILY_API_KEY`, and credentials for the
+configured judge endpoints. Set `HF_TOKEN` when needed for reference-file downloads. Set
+`PERSIST_DELIVERABLES_DIR` to a writable directory for collected submissions. See the
+[canonical GDPval instructions](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/gdpval/README.md)
+for judge-panel configuration and re-judging.
+
+Put your policy endpoint and deployment overrides in a private `private-policy-provider.yaml` overlay.
+Ensure the sandbox can reach the Gym model and resources servers; use `++use_absolute_ip=true` when the
+default addresses are unreachable. From the repository root:
+
+```bash
+gym eval prepare --benchmark gdpval/nooa
+
+gym env resolve \
+    --config benchmarks/gdpval/nooa.yaml \
+    --config responses_api_models/vllm_model/configs/vllm_model.yaml \
+    --config private-policy-provider.yaml
+
+gym eval run \
+    --benchmark gdpval/nooa \
+    --model-type vllm_model \
+    --config private-policy-provider.yaml \
+    --limit 1 --concurrency 1 --num-repeats 1 \
+    --output results/gdpval-nooa.jsonl
+```
+
+The existing direct task tools are available to NOOA: `finish(reason, paths)`, `abandon_task_finish`,
+`web_search`, and `fetch_web_page`. `finish` validates and records a submission but does not terminate
+NOOA; the agent must still return its native `TaskResult`. GDPval's existing missing-finish fallback and
+grading behavior remain in effect.
