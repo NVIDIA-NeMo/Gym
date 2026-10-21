@@ -183,6 +183,8 @@ def test_http_agent_session_flow_runs_codex_in_borrowed_sandbox(setup):
             assert f"{directory}/process_supervisor.py" not in sandbox.files
             installer = f"{directory}/install_codex_runtime.sh"
             assert installer in sandbox.files
+            for filename in ("sandbox_runner.py", "sandbox_transport.py"):
+                assert sandbox.files[f"{directory}/{filename}"] == (Path(__file__).parents[1] / filename).read_text()
             assert agent.config.resources_server is None
             assert not sandbox.launch.called
             assert not any(path.startswith("/app/") for path in sandbox.files)
@@ -2328,4 +2330,64 @@ def test_post_header_failure_reaches_outcome_policy(setup, transport_error):
         assert outcome == {"failure_kind": "model_transport_error" if transport_error is not None else "unknown"}
         policy = agent_outcome_policy(NeMoGymResponse.model_validate(body))
         assert policy == OutcomeAction.RETRY
+        client.post("/v1/agent_sessions/close", json=close_body(session_id)).raise_for_status()
+
+
+# Native Display strings from codex-rs/protocol/src/error.rs at rust-v0.144.4.
+@pytest.mark.parametrize(
+    "attempt,message,expected",
+    [
+        (
+            {"status": 400},
+            '{"error":{"message":"invalid input","code":"bad_request"}}',
+            {"failure_kind": "model_request_error", "status_code": 400},
+        ),
+        (
+            {"status": 429},
+            "exceeded retry limit, last status: 429 Too Many Requests",
+            {"failure_kind": "model_request_error", "status_code": 429},
+        ),
+        (
+            {"status": 500},
+            "We're currently experiencing high demand, which may cause temporary errors.",
+            {"failure_kind": "model_request_error", "status_code": 500},
+        ),
+        (
+            {"status": 503},
+            "Selected model is at capacity. Please try a different model.",
+            {"failure_kind": "model_request_error", "status_code": 503},
+        ),
+        ({"status": None, "error": "timed out"}, "request timed out", {"failure_kind": "model_transport_error"}),
+        (
+            {"status": 200, "transport_error": "timed out"},
+            "request timed out",
+            {"failure_kind": "model_transport_error"},
+        ),
+    ],
+)
+def test_native_errors_use_captured_attempt_facts(setup, attempt, message, expected):
+    from environment_servers.single_agent_turn.app import OutcomeAction, agent_outcome_policy
+    from nemo_gym.openai_utils import NeMoGymResponse
+
+    agent, sandbox = setup
+    sandbox.result["return_code"] = 1
+    sandbox.events = json.dumps([1.0, {"type": "turn.failed", "error": {"message": message}}])
+    original_publish = sandbox.publish
+
+    def publish():
+        original_publish()
+        sandbox.files[f"{sandbox.directory}/model_attempts.jsonl"] = json.dumps(attempt) + "\n"
+
+    sandbox.publish = publish
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        response = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
+        assert response.status_code == 200
+        result = NeMoGymResponse.model_validate(response.json())
+        assert result.status == "failed"
+        assert result.error.message == message
+        assert json.loads(result.metadata["ng_agent_outcome"]) == expected
+        assert agent_outcome_policy(result) == (
+            OutcomeAction.VERIFY if attempt["status"] == 400 else OutcomeAction.RETRY
+        )
         client.post("/v1/agent_sessions/close", json=close_body(session_id)).raise_for_status()
