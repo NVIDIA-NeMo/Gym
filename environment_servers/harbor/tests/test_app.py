@@ -4891,3 +4891,117 @@ class TestGeneralization:
             and escaped.failure.terminal
             and "invalid path" in escaped.failure.failure_reason
         )
+
+
+class TestVerifierNetwork:
+    """``[verifier].network_mode`` is the separate verifier sandbox's egress policy, applied when it is created.
+
+    OpenSandbox cannot switch a running sandbox from public to restricted (its egress API only patches rules
+    under the ``defaultAction`` the sandbox was created with), so the agent's sandbox stays as it is and the
+    phase policy shapes the verifier's own sandbox; any provider that cannot enforce it is refused at seed.
+    """
+
+    NO_NETWORK_TOML = SEPARATE_TOML.replace("[verifier]\n", '[verifier]\nnetwork_mode = "no-network"\n')
+    ALLOWLIST_TOML = SEPARATE_TOML.replace(
+        "[verifier]\n",
+        '[verifier]\nnetwork_mode = "allowlist"\nallowed_hosts = ["PyPI.org", "*.nvidia.com", "pypi.org", "10.0.0.7"]\n',
+    )
+
+    def prepared(self, tmp_path, monkeypatch, *, toml, provider="opensandbox", **config):
+        agent = AgentSandbox()
+        server, task, _, created = make_server(tmp_path, monkeypatch, agent, **config)
+        (task.path / "task.toml").write_text(toml)
+        task = load_task(task.path)
+        server.config.tasksets["ds"].tasks["hello"] = task.digest
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {provider: {}}}
+        )
+        verifier = FakeSandbox()
+        specs: list[SandboxSpec] = []
+
+        async def start_with_pull_retries(task, *, key, what, make, start):
+            # The real `_create_verifier_sandbox` built the spec; it reaches the provider through `start`.
+            class Starter:
+                async def start(self, spec):
+                    specs.append(spec)
+
+            assert agent.stopped, "the agent sandbox must be stopped before the verifier is created"
+            await start(Starter())
+            server._sandboxes[key] = verifier
+            return verifier
+
+        monkeypatch.setattr(server, "_start_with_pull_retries", start_with_pull_retries)
+        return server, task, agent, verifier, specs, created
+
+    async def test_no_network_verifier_is_created_under_a_deny_all_policy(self, tmp_path, monkeypatch):
+        server, task, agent, verifier, specs, _ = self.prepared(tmp_path, monkeypatch, toml=self.NO_NETWORK_TOML)
+        response = await run_episode(server, task)
+        result = response.result
+        assert result is not None, response.failure
+        assert (result.reward, result.verifier_mode, result.verifier_network) == (1.0, "separate", "no-network")
+        (spec,) = specs
+        assert spec.image == "org/verifier:1"
+        assert spec.provider_options == {"network_policy": {"defaultAction": "deny", "egress": []}}
+        # The agent's own sandbox is created as before: public, with the deployment's options only.
+        assert "network_policy" not in server._sandbox_spec(task, "/app").provider_options
+        assert verifier.stopped and agent.stopped
+
+    async def test_allowlist_hosts_become_allow_rules_in_order_without_repeats(self, tmp_path, monkeypatch):
+        server, task, _, _, specs, _ = self.prepared(tmp_path, monkeypatch, toml=self.ALLOWLIST_TOML)
+        response = await run_episode(server, task)
+        assert response.result is not None, response.failure
+        assert response.result.verifier_network == "allowlist"
+        assert specs[0].provider_options["network_policy"] == {
+            "defaultAction": "deny",
+            "egress": [
+                {"action": "allow", "target": "pypi.org"},
+                {"action": "allow", "target": "*.nvidia.com"},
+                {"action": "allow", "target": "10.0.0.7"},
+            ],
+        }
+
+    async def test_the_phase_policy_replaces_the_deployments_for_the_verifier_only(self, tmp_path, monkeypatch):
+        baseline = {"defaultAction": "allow", "egress": [{"action": "deny", "target": "evil.example"}]}
+        server, task, _, _, specs, _ = self.prepared(
+            tmp_path, monkeypatch, toml=self.NO_NETWORK_TOML, sandbox_provider_options={"network_policy": baseline}
+        )
+        assert (await run_episode(server, task)).result is not None
+        assert server._sandbox_spec(task, "/app").provider_options["network_policy"] == baseline
+        assert specs[0].provider_options["network_policy"] == {"defaultAction": "deny", "egress": []}
+        # The deployment's options are not mutated.
+        assert server.config.sandbox_provider_options["network_policy"] == baseline
+
+    @pytest.mark.parametrize("provider", ["docker", "daytona"])
+    async def test_providers_without_an_egress_policy_are_refused_at_seed(self, tmp_path, monkeypatch, provider):
+        server, task, _, _, specs, created = self.prepared(
+            tmp_path, monkeypatch, toml=self.NO_NETWORK_TOML, provider=provider
+        )
+        response = await run_episode(server, task)
+        failure = response.failure
+        assert response.result is None and failure.stage == "seed" and failure.terminal
+        assert "[verifier] network policy" in failure.failure_reason
+        assert "requires the OpenSandbox network-policy provider" in failure.failure_reason
+        # Refused before anything was provisioned: no agent sandbox, no verifier.
+        assert created == [] and specs == []
+
+    async def test_hosts_the_policy_cannot_express_are_refused_at_seed(self, tmp_path, monkeypatch):
+        toml = self.ALLOWLIST_TOML.replace('"10.0.0.7"', '"10.0.0.0/8"')
+        server, task, _, _, _, created = self.prepared(tmp_path, monkeypatch, toml=toml)
+        response = await run_episode(server, task)
+        assert response.failure.stage == "seed" and response.failure.terminal and created == []
+        assert "CIDR ranges are not supported" in response.failure.failure_reason
+
+    async def test_a_restricted_verifier_in_the_agents_sandbox_is_refused_at_seed(self, tmp_path, monkeypatch):
+        # The loader admits the policy for separate-mode tasks only; the seed keeps the invariant for a task
+        # object that did not come from it (here: separate mode switched off under the server).
+        server, task, _, _, _, created = self.prepared(tmp_path, monkeypatch, toml=self.NO_NETWORK_TOML)
+        monkeypatch.setattr(server, "_separate_verifier", lambda task: False)
+        response = await run_episode(server, task)
+        assert response.failure.stage == "seed" and response.failure.terminal and created == []
+        assert "network policy cannot be changed after it started" in response.failure.failure_reason
+
+    def test_public_verifier_phase_adds_no_policy(self, tmp_path, monkeypatch):
+        server, task, _, _, _, _ = self.prepared(tmp_path, monkeypatch, toml=SEPARATE_TOML)
+        assert server._verifier_network_policy(task) is None
+        spec = server._sandbox_spec(task, None, image="org/verifier:1", role="verifier", network_policy=None)
+        assert "network_policy" not in spec.provider_options

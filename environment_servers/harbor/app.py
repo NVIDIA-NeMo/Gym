@@ -1221,6 +1221,19 @@ class HarborEnvironmentServer(
         # The separate verifier's user is as static as its image: a `name:group` the provider cannot run as fails
         # here, before the rollout it would otherwise follow (`_sandbox_spec` refuses the agent's own the same way).
         self._refuse_verifier_group(task)
+        # So is its network: `[verifier].network_mode` becomes the separate verifier sandbox's egress policy at its
+        # creation, which only OpenSandbox enforces; a provider that cannot, or an entry the policy cannot express,
+        # fails here rather than after the rollout. The loader admits the phase policy for separate-mode tasks only.
+        try:
+            verifier_network_policy = self._verifier_network_policy(task)
+        except ValueError as exc:
+            raise HTTPException(422, f"Task {task.task_id!r} [verifier] network policy: {exc}") from exc
+        if verifier_network_policy is not None and not separate:
+            raise HTTPException(
+                422,
+                f"Task {task.task_id!r} restricts the verifier's network but verifies in the agent's sandbox, whose "
+                "network policy cannot be changed after it started; declare separate verification",
+            )
         for turn in task.turns:
             resolve_env_templates(turn.config.verifier.env)
             # A step's own agent user is installed for its turn (`_apply_turn_user`); a pair the provider cannot
