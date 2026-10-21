@@ -182,7 +182,7 @@ def test_config_keeps_defaults_local_to_in22(config_name: str, subset: str) -> N
 
 
 def _resolve_cli_config(config_names: list[str], flags: list[str] = ()) -> dict:
-    from nemo_gym.cli.main import _merge_config_paths, build_parser
+    from nemo_gym.cli.main import _is_positional_hydra_override, _merge_config_paths, build_parser
 
     args, extra_overrides = build_parser().parse_known_args(
         [
@@ -200,6 +200,10 @@ def _resolve_cli_config(config_names: list[str], flags: list[str] = ()) -> dict:
             *flags,
         ]
     )
+    # Match the CLI: argparse can consume a Hydra override as the optional TARGET.
+    if args.target and _is_positional_hydra_override(args.target):
+        extra_overrides = [args.target, *extra_overrides]
+        args.target = None
     overrides = _merge_config_paths(
         [token for flag in args._command.flags for token in flag.translate_to_hydra(args)] + extra_overrides
     )
