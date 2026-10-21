@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 
-VISITBENCH_REVISION = "41983853920321bb56a53c99db70f74db17060ba"
+VISITBENCH_REVISION = "41983853920321bb56a53c99db70f74db17060ba"  # pragma: allowlist secret
 VISITBENCH_PARQUET = (
     "https://huggingface.co/datasets/mlfoundations/VisIT-Bench/resolve/"
     f"{VISITBENCH_REVISION}/default/test/0000.parquet"

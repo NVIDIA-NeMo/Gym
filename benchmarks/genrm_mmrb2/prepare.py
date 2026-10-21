@@ -7,7 +7,7 @@ from pathlib import Path
 from shutil import copyfile
 
 
-DATASET_REVISION = "78392e6ab989bfc75d3ee19e3e8ca5c1cbe4e323"
+DATASET_REVISION = "78392e6ab989bfc75d3ee19e3e8ca5c1cbe4e323"  # pragma: allowlist secret
 
 
 def prepare(

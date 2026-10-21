@@ -19,7 +19,7 @@ from PIL import Image
 from resources_servers.genrm_eval.upstream_prompt import download_prompt
 
 
-UPSTREAM_REVISION = "7ff0552cf298441af5ebbabea634b682ef04afee"
+UPSTREAM_REVISION = "7ff0552cf298441af5ebbabea634b682ef04afee"  # pragma: allowlist secret
 
 
 def load_prompt() -> str:

@@ -24,7 +24,7 @@ from benchmarks.vision_arena_v1.build_validation import build_validation
 
 
 DATASET_ID = "lmarena-ai/vision-arena-bench-v0.1"
-DATASET_REVISION = "3abe18efa30d674a8903386b463ce278e7f41f2d"
+DATASET_REVISION = "3abe18efa30d674a8903386b463ce278e7f41f2d"  # pragma: allowlist secret
 BASELINE_ARTIFACT = "vision_arena_v1_baseline_answers.jsonl"
 
 

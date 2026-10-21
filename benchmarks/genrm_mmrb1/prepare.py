@@ -10,7 +10,7 @@ from shutil import copyfile
 from urllib.request import urlopen
 
 
-UPSTREAM_REVISION = "b4b92cdac0df81b2a134bcb1b91411d67b55f80f"
+UPSTREAM_REVISION = "b4b92cdac0df81b2a134bcb1b91411d67b55f80f"  # pragma: allowlist secret
 
 
 def prepare(source_jsonl: str | Path | None = None, *, judge_mode: str = "genrm") -> Path:
