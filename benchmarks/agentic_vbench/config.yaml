@@ -39,7 +39,10 @@ agentic_vbench_agent:
       datasets:
         - name: agentic_vbench
           type: benchmark
-          jsonl_fpath: ${oc.env:AGENTIC_VBENCH_DATASET,benchmarks/agentic_vbench/data/agentic_vbench_benchmark.jsonl}
+          # A literal path: Gym checks dataset paths before resolving interpolations, so an
+          # ${oc.env:...} here reads as missing on disk. prepare.py writes this path unless
+          # AGENTIC_VBENCH_DATASET names another, in which case point config_paths at a copy.
+          jsonl_fpath: benchmarks/agentic_vbench/data/agentic_vbench_benchmark.jsonl
           prepare_script: benchmarks/agentic_vbench/prepare.py
           num_repeats: 1
 
