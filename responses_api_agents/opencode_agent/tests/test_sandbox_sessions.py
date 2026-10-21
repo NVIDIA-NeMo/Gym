@@ -1587,7 +1587,11 @@ async def test_native_model_error_is_reported_with_classification(setup, status)
     response = await task
     assert response.status == "failed"
     assert response.error.message == (f"HTTP {status}: provider error" if status is not None else "provider error")
-    expected = {"failure_kind": "unknown"} if status is None else {"failure_kind": "model_request_error", "status_code": status}
+    expected = (
+        {"failure_kind": "unknown"}
+        if status is None
+        else {"failure_kind": "model_request_error", "status_code": status}
+    )
     assert json.loads(response.metadata["ng_agent_outcome"]) == expected
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
 
@@ -1633,3 +1637,45 @@ def test_provider_report_does_not_hide_other_execution_outcomes(change):
     else:
         cleanup["timed_out"] = True
     assert not OpenCodeAgent._reported_model_error(native, cleanup)
+
+
+@pytest.mark.parametrize(
+    "message, code",
+    [
+        ("Connection reset by server", "ECONNRESET"),
+        ("Response decompression failed", "ZlibError"),
+        ("Timed out waiting for response headers", "HeaderTimeoutError"),
+        ("Response stream interrupted", "ResponseStreamError"),
+    ],
+)
+async def test_statusless_transient_provider_failure_stays_retryable(setup, message, code):
+    from environment_servers.single_agent_turn.app import agent_outcome_policy
+
+    agent, sandbox = setup
+    export = json.loads(sandbox.events)
+    assistant = export["messages"][-1]["info"]
+    assistant.pop("finish")
+    assistant["error"] = {
+        "name": "APIError",
+        "data": {"message": message, "isRetryable": True, "metadata": {"code": code}},
+    }
+    sandbox.events = json.dumps(export)
+    sandbox.result["return_code"] = 1
+    request, session_id, task = await activate(agent, sandbox)
+    response = await task
+    assert response.status == "failed"
+    assert message in response.error.message
+    assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "model_transport_error"}
+    policy = agent_outcome_policy(response)
+    assert not policy.verifiable
+    assert policy.retryable
+    closed = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    assert closed.agent_observations is not None
+
+
+@pytest.mark.parametrize("retryable", [None, False, "true", 1])
+def test_statusless_error_without_native_retry_flag_remains_unknown(setup, retryable):
+    agent, _ = setup
+    data = {} if retryable is None else {"isRetryable": retryable}
+    outcome = agent.classify_outcome({"error": {"name": "APIError", "data": data}})
+    assert outcome.failure_kind == "unknown"

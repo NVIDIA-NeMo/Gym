@@ -50,7 +50,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.failure_kinds import MODEL_REQUEST_ERROR
+from nemo_gym.failure_kinds import MODEL_REQUEST_ERROR, MODEL_TRANSPORT_ERROR
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -234,13 +234,21 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         )
 
     def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
-        """Read OpenCode 1.17.11's native assistant APIError; tested on that version."""
+        """Read native APIError status or transport retry marker; tested on OpenCode 1.17.11.
+
+        OpenCode marks connection resets, header timeouts, decompression failures and
+        interrupted streams retryable without an HTTP status. Preserve that evidence;
+        the Environment Server still decides whether to retry the episode.
+        """
         error = native_result.get("error") or {}
         if error.get("name") != "APIError":
             return AgentOutcome(failure_kind="unknown")
-        status = (error.get("data") or {}).get("statusCode")
+        data = error.get("data") or {}
+        status = data.get("statusCode")
         if type(status) is int and 400 <= status <= 599:
             return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
+        if status is None and data.get("isRetryable") is True:
+            return AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
         return AgentOutcome(failure_kind="unknown")
 
     config: OpenCodeAgentConfig
