@@ -881,7 +881,7 @@ def _dataset_init(args: argparse.Namespace, overrides: list[str]) -> None:
     from nemo_gym.tasks.harbor.scaffold import init_dataset
 
     try:
-        folder = init_dataset(Path(args.root), args.name, image=args.image)
+        folder = init_dataset(Path(args.root), args.name, image=args.image, parameterized=args.parameterized)
     except (FileExistsError, ValueError) as exc:
         args._parser.error(str(exc))
     print(f"Wrote {folder}")
@@ -895,6 +895,22 @@ def _dataset_validate(args: argparse.Namespace, overrides: list[str]) -> None:
     from nemo_gym.tasks.harbor.cli import validate_target
 
     validate_target(args, overrides)
+
+
+def _dataset_publish(args: argparse.Namespace, overrides: list[str]) -> None:
+    """`gym dataset publish --harbor TARGET --output DIR`: plain Harbor task folders, checked by Harbor's own loader."""
+    from nemo_gym.tasks.harbor.errors import HarborTaskError
+    from nemo_gym.tasks.harbor.publish import publish_harbor
+
+    if not args.harbor:
+        args._parser.error("`gym dataset publish` writes Harbor task folders: pass --harbor")
+    try:
+        report = publish_harbor(Path(args.target), Path(args.output))
+    except (HarborTaskError, OSError) as exc:
+        args._parser.error(str(exc))
+    print(report.text())
+    if not report.ok:
+        sys.exit(1)
 
 
 def _dev_compare(args: argparse.Namespace, overrides: list[str]) -> None:
@@ -1059,6 +1075,44 @@ COMMANDS = {
             Flag(
                 register=lambda p: p.add_argument(
                     "--image", default="python:3.12-slim", metavar="IMAGE", help="The task's prebuilt image."
+                )
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--parameterized",
+                    action="store_true",
+                    help="Scaffold a template folder (task.toml, instruction.template.md, tasks.jsonl, task_data.py, "
+                    "a Python verifier, solution/answer.template.md) that prepare renders into one task per row.",
+                )
+            ),
+        ),
+    ),
+    "dataset publish": Command(
+        target=_dataset_publish,
+        summary="Write a Gym-authored dataset as plain Harbor task folders and run Harbor's format check.",
+        flags=(
+            Flag(
+                register=lambda p: p.add_argument(
+                    "target",
+                    metavar="TARGET",
+                    help="A dataset folder, a task folder, or a parameterized template folder (tasks.jsonl beside task.toml).",
+                )
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--harbor",
+                    action="store_true",
+                    help="Publish in Harbor's task format: rows expanded, Python verifiers wrapped in tests/test.sh, "
+                    "answer.md wrapped in solution/solve.sh.",
+                )
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--output",
+                    required=True,
+                    metavar="DIR",
+                    help="Where to write the task folders (new or empty). Harbor's format check runs over them when "
+                    "the `harbor` package is importable.",
                 )
             ),
         ),
