@@ -48,6 +48,10 @@ from nemo_gym.metrics_config import (
 )
 
 
+# Set by rollout collection on the metrics-only copy of a failure it counts as 0.
+NG_COUNTED_FAILURE_KEY = "_ng_counted_failure"
+
+
 class RewardProfileConfig(BaseNeMoGymCLIConfig):
     materialized_inputs_jsonl_fpath: str = Field(
         description="The file path of the materialized inputs as output by `gym eval run`."
@@ -596,6 +600,12 @@ def compute_pass_majority_metrics(
 
     # Collect score names
     score_names = sorted({name for task_scores in all_score_dicts for s in task_scores for name in s})
+    # A failed rollout that evaluation counts as 0 scores 0 on every channel, not only on reward.
+    for rollouts, task_scores in zip(tasks, all_score_dicts):
+        for r, scores in zip(rollouts, task_scores):
+            if r.get(NG_COUNTED_FAILURE_KEY):
+                for name in score_names:
+                    scores.setdefault(name, 0)
 
     for k in range(1, max_k + 1):
         for name in score_names:

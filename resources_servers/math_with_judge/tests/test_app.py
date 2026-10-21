@@ -1393,3 +1393,29 @@ async def test_failure_zero_uses_verifier_fields_and_counts_every_repeat():
     assert metrics["pass@1[avg-of-16]/symbolic_accuracy"] == 50
     assert metrics["pass@1[avg-of-8]/symbolic_accuracy"] == 0
     assert not grader._verify_answer_with_judge.called
+
+
+def test_a_failure_counted_as_zero_scores_zero_on_symbolic_accuracy_too():
+    """Collection counts a failed repeat as 0; math's headline channel must count it as well."""
+    from nemo_gym.reward_profile import compute_pass_majority_metrics
+    from nemo_gym.rollout_collection import _counted_failure_row
+    from resources_servers.math_with_judge.app import LibraryJudgeMathResourcesServer
+
+    solved = {
+        "reward": 1.0,
+        "library_reward": 1.0,
+        "extracted_answer": "1",
+        "_ng_task_index": 0,
+        "_ng_rollout_index": 0,
+    }
+    failed = _counted_failure_row(
+        {"_ng_failure_class": "agent_run_error", "_ng_task_index": 0, "_ng_rollout_index": 1}
+    )
+
+    metrics = compute_pass_majority_metrics(
+        [[solved, failed]], score_fn=LibraryJudgeMathResourcesServer._math_score_fn, answer_key="extracted_answer"
+    )[0]
+
+    assert metrics["pass@1[avg-of-2]/symbolic_accuracy"] == 50.0
+    # A measured repeat with no judge call keeps judge accuracy out, as before.
+    assert "pass@1[avg-of-2]/judge_accuracy" not in metrics

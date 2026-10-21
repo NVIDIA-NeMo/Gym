@@ -46,6 +46,7 @@ from nemo_gym.rollout_collection import (
     RolloutCollectionConfig,
     RolloutCollectionHelper,
     _agent_request_failure_row,
+    _failure_rows_counted_as_zero,
     failure_cause_of_row,
     failures_path_for,
     is_terminal_failure,
@@ -360,3 +361,41 @@ class TestHarnessFailurePaths:
     def test_terminal_bench_exits_split_by_who_failed(self, failure_type: str, final: bool) -> None:
         row = {NG_FAILURE_CLASS_KEY: "infrastructure_error", "_ng_failure_type": failure_type}
         assert is_terminal_failure(row) is final
+
+
+class TestScoringDefaults:
+    """Every failed rollout counts as 0 by default; opting out leaves only final failures counted."""
+
+    def _sidecar(self, tmp_path: Path) -> Path:
+        failures = tmp_path / "out_failures.jsonl"
+        rows = [
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, NG_FAILURE_CLASS_KEY: "tau2_malformed_tool_call"},
+            {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, NG_FAILURE_CLASS_KEY: "judge_failed"},
+        ]
+        failures.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
+        return failures
+
+    def test_the_default_counts_every_failure(self, tmp_path: Path) -> None:
+        config = RolloutCollectionConfig(input_jsonl_fpath="in.jsonl", output_jsonl_fpath="out.jsonl")
+        assert config.count_failure_classes_as_zero is None
+        assert config.route_failures_to_sidecar is True
+
+        counted = _failure_rows_counted_as_zero([self._sidecar(tmp_path)], None, set())
+        assert sorted(row[TASK_INDEX_KEY_NAME] for row in counted) == [0, 1]
+
+    def test_the_default_leaves_a_data_gap_out_of_the_score(self, tmp_path: Path) -> None:
+        failures = self._sidecar(tmp_path)
+        gap = {TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 0, NG_FAILURE_CLASS_KEY: "reference_missing"}
+        failures.write_bytes(failures.read_bytes() + orjson.dumps(gap) + b"\n")
+        config = RolloutCollectionConfig(input_jsonl_fpath="in.jsonl", output_jsonl_fpath="out.jsonl")
+
+        counted = _failure_rows_counted_as_zero([failures], config.count_failure_classes_as_zero, set())
+        assert sorted(row[TASK_INDEX_KEY_NAME] for row in counted) == [0, 1]
+
+    def test_opting_out_still_counts_a_final_failure(self, tmp_path: Path) -> None:
+        counted = _failure_rows_counted_as_zero([self._sidecar(tmp_path)], [], set())
+        assert [(row[TASK_INDEX_KEY_NAME], row["reward"]) for row in counted] == [(0, 0.0)]
+
+    def test_a_class_list_counts_those_classes_and_every_final_failure(self, tmp_path: Path) -> None:
+        counted = _failure_rows_counted_as_zero([self._sidecar(tmp_path)], ["judge_failed"], set())
+        assert sorted(row[TASK_INDEX_KEY_NAME] for row in counted) == [0, 1]

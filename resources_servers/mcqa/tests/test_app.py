@@ -1122,3 +1122,29 @@ class TestStrictBoxedLatexExtraction:
         result = await server.verify(body)
         assert result.extracted_answer == "E"
         assert result.reward == 1.0
+
+
+def test_a_failure_counted_as_zero_does_not_break_dual_scores() -> None:
+    """A counted failure has no verifier result: 0 on each component, not a mixed-schema error."""
+    from nemo_gym.rollout_collection import _counted_failure_row
+
+    config = MCQAResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name="")
+    server = MCQAResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    solved = {
+        "_ng_task_index": 0,
+        "_ng_rollout_index": 0,
+        "reward": 1.0,
+        "extracted_answer": "A",
+        "strict_boxed_reward": 1.0,
+        "strict_boxed_answer": "A",
+        "normalized_reward": 1.0,
+        "normalized_answer": "A",
+    }
+    failed = _counted_failure_row(
+        {"_ng_failure_class": "agent_request_failed", "_ng_task_index": 0, "_ng_rollout_index": 1}
+    )
+
+    metrics = server.compute_metrics([[solved, failed]])
+
+    assert metrics["pass@1[avg-of-2]/strict_boxed_accuracy"] == 50.0
+    assert metrics["pass@1[avg-of-2]/normalized_accuracy"] == 50.0

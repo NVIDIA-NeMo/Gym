@@ -104,6 +104,7 @@ from nemo_gym.observability.model_calls import (
 )
 from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for, materialized_path_for
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
+from nemo_gym.reward_profile import NG_COUNTED_FAILURE_KEY
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import (
     NG_AGENT_OBSERVATIONS_KEY,
@@ -1120,12 +1121,14 @@ class SharedRolloutCollectionConfig(RemovedRolloutOptionsMixin, UploadRolloutsCo
     def _validate_health_check_ignored_checks(cls, value):
         return _normalize_health_check_ignored_checks(value)
 
-    count_failure_classes_as_zero: List[str] = Field(
-        default_factory=list,
+    count_failure_classes_as_zero: Optional[List[str]] = Field(
+        default=None,
         description=(
-            "Failure classes from the failures sidecar to count in aggregate metrics, e.g. "
-            "['agent_run_error'], so a failed rollout lands in the denominator. A row that carries "
-            "no reward is scored zero for the metrics only; no artifact is changed."
+            "Failure classes from the failures sidecar to count in aggregate metrics, so a failed "
+            "rollout lands in the denominator. The default, null, counts every class; a list such as "
+            "['agent_run_error'] counts only those retryable classes, and [] counts no retryable one; a final "
+            "failure counts as 0 whatever the selection, except a data gap. A row that carries no reward "
+            "is scored zero for the metrics only; no artifact is changed."
         ),
     )
 
@@ -1151,11 +1154,11 @@ class SharedRolloutCollectionConfig(RemovedRolloutOptionsMixin, UploadRolloutsCo
     )
 
     route_failures_to_sidecar: bool = Field(
-        default=False,
+        default=True,
         description=(
             "Record a failed agent /run as a failures-sidecar row and keep going, instead of ending "
-            "the run. The failed rollouts are then absent from the rollouts jsonl and from the "
-            "score, which is reported over fewer rollouts than were dispatched."
+            "the run. On by default. The failed rollouts are absent from the rollouts jsonl and are "
+            "scored by count_failure_classes_as_zero. Set false to end the run on the first failure."
         ),
     )
     rollout_collection_driver: Optional[str] = Field(
@@ -2219,6 +2222,8 @@ def _counted_failure_row(row: Dict[str, Any]) -> Dict[str, Any]:
     # answer, failure diagnostics, and training mask remain untouched in the sidecar.
     scored["mask_sample"] = False
     scored.setdefault("reward", 0.0)
+    # Benchmark scorers read channels other than reward (math's symbolic accuracy); this row scores 0 on each.
+    scored[NG_COUNTED_FAILURE_KEY] = True
     return scored
 
 
@@ -3341,7 +3346,7 @@ class RolloutCollectionHelper(BaseModel):
         if config.route_failures_to_sidecar:
             print(
                 "route_failures_to_sidecar is on: a failed agent /run becomes a sidecar row instead of "
-                "ending the run, and its rollout leaves the score.",
+                "ending the run.",
                 flush=True,
             )
 
@@ -3718,12 +3723,25 @@ class RolloutCollectionHelper(BaseModel):
                 if config.count_missing_rollouts_as_zero and not config.disable_aggregation
                 else []
             )
+            # The default counts every class as 0, but a run where only retryable rows landed has nothing to
+            # report yet: a resume runs them. Only a final row, or a class the caller named, is a result.
+            result_failures = (
+                counted
+                if config.count_failure_classes_as_zero is not None
+                else await asyncio.to_thread(
+                    _failure_rows_counted_as_zero,
+                    [failures_fpath],
+                    [],
+                    persisted_success_keys,
+                    retry_terminal_timeouts=config.retry_terminal_timeouts,
+                )
+            )
             # A run whose every rollout is settled (a data gap, or at the attempt cap) has no score, but nothing
             # left for a resume to do.
             if (
                 input_rows
                 and persisted_count == 0
-                and not counted
+                and not result_failures
                 and not missing
                 and not await asyncio.to_thread(
                     _every_rollout_settled, input_rows, failures_fpath, config.retry_terminal_timeouts
@@ -4610,12 +4628,14 @@ class RolloutAggregationConfig(BaseNeMoGymCLIConfig):
         default=True,
         description="Concatenate the matched shard JSONLs into output_jsonl_fpath alongside the metrics file.",
     )
-    count_failure_classes_as_zero: List[str] = Field(
-        default_factory=list,
+    count_failure_classes_as_zero: Optional[List[str]] = Field(
+        default=None,
         description=(
-            "Failure classes from the failures sidecar to count in aggregate metrics, e.g. "
-            "['agent_run_error'], so a failed rollout lands in the denominator. A row that carries "
-            "no reward is scored zero for the metrics only; no artifact is changed. Each shard's "
+            "Failure classes from the failures sidecar to count in aggregate metrics, so a failed "
+            "rollout lands in the denominator. The default, null, counts every class; a list counts "
+            "only those retryable classes, and [] counts no retryable one; a final failure counts as 0 "
+            "whatever the selection, except a data gap. A row that carries no reward is scored zero for the "
+            "metrics only; no artifact is changed. Each shard's "
             "sidecar is read against that shard's own rows, so runs on different environment "
             "servers that reuse task indices do not hide each other's failures."
         ),

@@ -27,7 +27,7 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.reward_profile import NG_COUNTED_FAILURE_KEY, compute_pass_majority_metrics, highest_k_metrics
 
 
 class MCQAResourcesServerConfig(BaseResourcesServerConfig):
@@ -400,14 +400,15 @@ class MCQAResourcesServer(SimpleResourcesServer):
             score_fn=lambda r: {"accuracy": r["reward"]},
             answer_key="extracted_answer",
         )[0]
-        rows = [row for task in tasks for row in task]
+        # A failure counted as 0 has no verifier result: it scores 0 on each component, with no answer.
+        rows = [row for task in tasks for row in task if not row.get(NG_COUNTED_FAILURE_KEY)]
         if any("strict_boxed_reward" in row or "normalized_reward" in row for row in rows):
             for name in ("strict_boxed", "normalized"):
                 if any(f"{name}_reward" not in row or f"{name}_answer" not in row for row in rows):
                     raise ValueError("Mixed single/dual MCQA scores: reverify all rows before aggregation")
                 component_metrics = compute_pass_majority_metrics(
                     tasks,
-                    score_fn=lambda r: {f"{name}_accuracy": r[f"{name}_reward"]},
+                    score_fn=lambda r: {f"{name}_accuracy": r.get(f"{name}_reward", 0.0)},
                     answer_key=f"{name}_answer",
                 )[0]
                 for key, value in component_metrics.items():
