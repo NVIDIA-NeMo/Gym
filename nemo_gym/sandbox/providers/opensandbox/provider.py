@@ -131,11 +131,11 @@ METADATA_VALUE_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 DEFAULT_ATTRIBUTION_KEY_PREFIX = "nemo-gym.nvidia.com/"
 # Kubernetes label-key prefixes must be DNS-1123 subdomains (max 253 chars).
 ATTRIBUTION_KEY_PREFIX_RE = re.compile(r"(?=.{1,253}$)[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*")
-# Returned as stderr when a finished background command deleted its own output file,
+# Returned as stderr when a finished background command's output file was deleted,
 # so a caller that needed the output sees why it is empty.
 DELETED_OUTPUT_NOTE = (
-    "OpenSandbox could not return this command's output: the command deleted its output file "
-    "in the sandbox's temporary directory. Its exit status is kept."
+    "OpenSandbox could not return this command's output: the output file was deleted, for example "
+    "by a command that cleaned the temporary directory. The command's exit status is kept."
 )
 DEFAULT_IMAGE_PULL_POLICY = "IfNotPresent"
 IMAGE_PULL_POLICY_EXTENSION_KEY = "imagePullPolicy"
@@ -266,6 +266,17 @@ def _is_retryable_create_error(exception: BaseException) -> bool:
         return _has_retryable_error_marker(exception)
 
     return _has_retryable_error_marker(exception)
+
+
+def _is_deleted_output_error(exception: BaseException) -> bool:
+    """Return whether a log read failed because execd's output file for the command is gone.
+
+    execd keeps background output under ``os.TempDir()`` (``/tmp`` unless ``TMPDIR`` is set), so
+    any command that empties ``/tmp`` deletes it, and the read fails with "error open combined
+    output file for command <id>: ... no such file or directory". Rereading cannot bring it back.
+    """
+    message = str(exception)
+    return "combined output file" in message and "no such file or directory" in message
 
 
 def _is_retryable_sdk_operation_error(exception: BaseException, seen: set[int] | None = None) -> bool:
@@ -1889,20 +1900,18 @@ class OpenSandboxProvider:
                 sandbox_id=handle.sandbox_id,
                 timeout_s=poll_timeout_s,
                 retries=self._operations.retries,
-                is_retryable=_command_read_is_retryable,
+                is_retryable=lambda error: not _is_deleted_output_error(error) and _command_read_is_retryable(error),
             )
         except Exception as error:
-            # execd keeps background output under os.TempDir() (/tmp unless TMPDIR is set),
-            # so a command that empties /tmp (e.g. a verifier resetting its scratch roots)
-            # deletes it, and the log read then fails with execd's "error open combined
-            # output file for command <id>: ... no such file or directory". The status read
-            # above already holds the authoritative exit code. Any other error, including a
-            # reworded execd message, still raises.
-            message = str(error)
-            if "combined output file" not in message or "no such file or directory" not in message:
+            # A command that cleaned the temporary directory (e.g. a verifier resetting its
+            # scratch roots), or another one in the same sandbox, deleted execd's output file.
+            # The status read above holds the authoritative exit code; without one there is no
+            # evidence of how the command ended, so that case still raises, as does any other
+            # error, including a reworded execd message.
+            if not _is_deleted_output_error(error) or status.exit_code is None:
                 raise
             LOGGER.warning(
-                "OpenSandbox command output was deleted by the command itself; keeping its exit status %r. "
+                "OpenSandbox command output file was deleted; keeping the command's exit status %r. "
                 "sandbox_id=%r execution_id=%r",
                 status.exit_code,
                 handle.sandbox_id,
