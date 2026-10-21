@@ -972,6 +972,12 @@ async def test_prefill_global_average_pools_counts_instead_of_averaging_engine_m
             f"vllm/{replica}/prefill_batch_tokens_per_second": tokens,
             f"vllm/{replica}/prefill_batches_per_second": batches,
             f"vllm/{replica}/prefill_tokens_per_forward": tokens / batches,
+            f"vllm/{replica}/prefill_kv_lookup_duration_ns_per_second": tokens * 1e6,
+            f"vllm/{replica}/prefill_kv_lookup_completed_per_second": batches,
+            f"vllm/{replica}/prefill_kv_lookup_latency_ms": tokens / batches,
+            f"vllm/{replica}/prefill_delay_steps_per_second": batches,
+            f"vllm/{replica}/prefill_blocked_requests_by_reason_per_second/reason/kv_lookup_pending": tokens,
+            f"vllm/{replica}/prefill_blocked_requests_per_step/reason/kv_lookup_pending": tokens / batches,
         }
 
     def publish(metrics):
@@ -983,3 +989,52 @@ async def test_prefill_global_average_pools_counts_instead_of_averaging_engine_m
     await collector.run(stop)
     assert published["vllm/total/prefill_tokens_per_forward"] == 190
     assert "vllm/mean/prefill_tokens_per_forward" not in published
+    assert published["vllm/total/prefill_kv_lookup_latency_ms"] == 190
+    assert published["vllm/total/prefill_blocked_requests_per_step/reason/kv_lookup_pending"] == 190
+    assert "vllm/mean/prefill_kv_lookup_latency_ms" not in published
+    assert "vllm/mean/prefill_blocked_requests_per_step/reason/kv_lookup_pending" not in published
+
+
+def test_prefill_lookup_latency_and_request_counts_use_interval_deltas():
+    collector = InferenceMetricsCollector(config())
+    registry = CollectorRegistry()
+    counters = {
+        name: Counter(f"vllm:prefill_{name}_total", "Lookup inputs", registry=registry)
+        for name in (
+            "kv_lookup_completed",
+            "kv_lookup_duration_ns",
+            "kv_lookup_pending_completed",
+            "kv_lookup_pending_duration_ns",
+            "delay_steps",
+        )
+    }
+    delayed = Counter("vllm:prefill_delayed_requests_by_reason_total", "Request steps", ["reason"], registry=registry)
+    blocked = Counter("vllm:prefill_blocked_requests_by_reason_total", "Request steps", ["reason"], registry=registry)
+    for reason in ("kv_lookup_pending", "kv_load_pending", "mamba_alignment"):
+        delayed.labels(reason).inc(0)
+        blocked.labels(reason).inc(0)
+    collector.parse("replica0", generate_latest(registry).decode(), 10)
+    for name, value in {
+        "kv_lookup_completed": 4,
+        "kv_lookup_duration_ns": 8_000_000,
+        "kv_lookup_pending_completed": 2,
+        "kv_lookup_pending_duration_ns": 7_000_000,
+        "delay_steps": 5,
+    }.items():
+        counters[name].inc(value)
+    delayed.labels("kv_lookup_pending").inc(10)
+    blocked.labels("kv_lookup_pending").inc(10)
+    delayed.labels("mamba_alignment").inc(5)
+    blocked.labels("mamba_alignment").inc(1)
+    payload = generate_latest(registry).decode()
+    result = collector.parse("replica0", payload, 20)
+    prefix = "vllm/replica0/"
+    assert result[prefix + "prefill_kv_lookup_latency_ms"] == 2
+    assert result[prefix + "prefill_kv_lookup_pending_latency_ms"] == 3.5
+    assert result[prefix + "prefill_blocked_requests_per_step/reason/kv_lookup_pending"] == 2
+    assert result[prefix + "prefill_delayed_requests_per_step/reason/mamba_alignment"] == 1
+    assert result[prefix + "prefill_blocked_requests_per_step/reason/mamba_alignment"] == 0.2
+    assert result[prefix + "prefill_blocked_requests_per_step/reason/kv_load_pending"] == 0
+    idle = collector.parse("replica0", payload, 30)
+    assert prefix + "prefill_kv_lookup_latency_ms" not in idle
+    assert prefix + "prefill_blocked_requests_per_step/reason/kv_lookup_pending" not in idle

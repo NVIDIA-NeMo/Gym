@@ -42,6 +42,10 @@ PREFILL_INTERVAL_RATIOS = {
 PREFILL_DERIVED_METRICS = set(PREFILL_INTERVAL_RATIOS) | {
     "prefill_batch_token_fill_ratio",
     "prefill_underfill_reason_fraction",
+    "prefill_kv_lookup_latency_ms",
+    "prefill_kv_lookup_pending_latency_ms",
+    "prefill_delayed_requests_per_step",
+    "prefill_blocked_requests_per_step",
 }
 MOONCAKE_STORAGE_GAUGES = {"master_allocated_bytes", "master_total_capacity_bytes"}
 MOONCAKE_EVICTION_GAUGES = {
@@ -228,6 +232,21 @@ class InferenceMetricsCollector:
             count = metrics.get(f"{prefix}prefill_{denominator}_per_second")
             if total is not None and count is not None and count > 0:
                 metrics[f"{prefix}{name}"] = total / count
+        # Scheduler-observed latency includes time until the completion is polled.
+        # Pending-only latency excludes lookups answered on their first call.
+        for kind in ("kv_lookup", "kv_lookup_pending"):
+            duration = metrics.get(f"{prefix}prefill_{kind}_duration_ns_per_second")
+            completed = metrics.get(f"{prefix}prefill_{kind}_completed_per_second")
+            if duration is not None and completed is not None and completed > 0:
+                metrics[f"{prefix}prefill_{kind}_latency_ms"] = duration / completed / 1e6
+        steps = metrics.get(f"{prefix}prefill_delay_steps_per_second")
+        if steps is not None and steps > 0:
+            for field in ("delayed_requests", "blocked_requests"):
+                reason_prefix = f"{prefix}prefill_{field}_by_reason_per_second/reason/"
+                for key, value in list(metrics.items()):
+                    if key.startswith(reason_prefix):
+                        reason = key.removeprefix(reason_prefix)
+                        metrics[f"{prefix}prefill_{field}_per_step/reason/{reason}"] = value / steps
         tokens = metrics.get(f"{prefix}prefill_batch_tokens_per_second")
         unused = metrics.get(f"{prefix}prefill_unused_token_slots_per_second")
         if tokens is not None and unused is not None and tokens + unused > 0:
