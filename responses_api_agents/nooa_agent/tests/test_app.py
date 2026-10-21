@@ -200,8 +200,9 @@ async def test_close_cancels_execution_and_keeps_partial_evidence(monkeypatch: p
     waiter = asyncio.create_task(instance.responses(req, NeMoGymResponseCreateParamsNonStreaming(input="task")))
     await started.wait()
     receipt = await close(instance)
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(HTTPException) as interrupted:
         await waiter
+    assert interrupted.value.status_code == 409
     assert NOOATerminationReason.CANCELLED in {gap.code for gap in receipt.agent_observations.gaps}
     assert receipt.agent_observations.source == "nooa"
     with pytest.raises(HTTPException):
@@ -253,12 +254,8 @@ async def test_policy_termination_remains_a_gradable_response(
     runner_run.return_value = partial
     req = await open_session(instance)
     response = await instance.responses(req, NeMoGymResponseCreateParamsNonStreaming(input="task"))
-    if reason is NOOATerminationReason.INVALID_POLICY_OUTPUT:
-        assert response.status == "failed"
-        assert reason in response.error.message
-    else:
-        assert response.status == "incomplete"
-        assert response.error is None
+    assert response.status == "incomplete"
+    assert response.error is None
     assert response.output == partial.episode.response.output
     assert "_ng_failure_class" not in response.model_dump(mode="json")
     assert reason in {gap.code for gap in (await close(instance)).agent_observations.gaps}

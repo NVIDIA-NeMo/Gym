@@ -22,12 +22,11 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from threading import Lock
-from types import FrameType
 from typing import Any, Protocol
 from uuid import uuid4
 
 from aiohttp import ClientResponseError
-from nooa.errors import GenerationError, LoopDetectedError
+from nooa.errors import LoopDetectedError
 from nooa.runtime.hooks import hooks_scope
 from nooa.strategies.codeact import CodeActSession, CodeActStrategy
 from nooa.strategies.predict import PredictStrategy
@@ -50,7 +49,7 @@ from responses_api_agents.nooa_agent.resource_tools import (
     create_agent_class_with_resource_methods,
     validate_agent_resource_method_bindings,
 )
-from responses_api_agents.nooa_agent.termination import NOOATerminationReason
+from responses_api_agents.nooa_agent.termination import NOOATerminationReason, _generation_error_frame
 
 
 logger = logging.getLogger(__name__)
@@ -117,17 +116,6 @@ def _validate_agent_llm_bindings(agent_class: type) -> None:
         )
 
 
-def _generation_error_frame(error: BaseException) -> FrameType | None:
-    # GenerationError is also available to arbitrary agent code. Recognize the
-    # pinned strategies by the code that raised it, not its type or message alone.
-    if type(error) is not GenerationError or error.__traceback__ is None:
-        return None
-    traceback = error.__traceback__
-    while traceback.tb_next is not None:
-        traceback = traceback.tb_next
-    return traceback.tb_frame
-
-
 def _codeact_failure_session(error: BaseException) -> CodeActSession | None:
     frame = _generation_error_frame(error)
     if frame is None or frame.f_code is not CodeActStrategy._run_generation.__code__:
@@ -192,7 +180,9 @@ class InProcessNOOARunner:
                 return
             # NOOA's synchronous callbacks do not yield to sibling async calls.
             # Keep projection and persistence in one critical section as well,
-            # so concurrent callbacks cannot publish older snapshots last.
+            # so concurrent callbacks cannot publish older snapshots last. Publish
+            # before execution resumes: a queued write could lose this boundary
+            # if the worker is killed immediately after the callback returns.
             with progress_lock:
                 try:
                     episode, trajectory = trace.project(
@@ -201,6 +191,7 @@ class InProcessNOOARunner:
                         task_id=request.task_id,
                         rollout_id=request.rollout_id,
                         default_model=self._model_server_name,
+                        partial=True,
                     )
                     self._on_progress(
                         NOOARunResult(

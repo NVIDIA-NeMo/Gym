@@ -21,6 +21,7 @@ def set_response_lifecycle(
         return response.model_copy(update={"status": "completed", "error": None})
     if reason in {
         NOOATerminationReason.POLICY_BUDGET_EXCEEDED,
+        NOOATerminationReason.INVALID_POLICY_OUTPUT,
         NOOATerminationReason.MAX_ITERATIONS_EXCEEDED,
         NOOATerminationReason.MAX_OUTPUT_TOKENS_EXCEEDED,
         NOOATerminationReason.LOOP_DETECTED,

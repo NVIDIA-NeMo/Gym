@@ -619,6 +619,27 @@ def test_failed_and_cancelled_code_keeps_matching_output(error: BaseException) -
     assert json.loads(output.output)["error_type"] == type(error).__name__
 
 
+def test_final_projection_preserves_output_for_a_tool_without_an_after_hook() -> None:
+    trace = GymTraceHooks()
+    context = trace.before_agent_call(call_id="root", parent_call_id=None)
+    trace.before_code_execution(code="await pending()", execution_id="exec-1", tool_call_id="call-1")
+    trace.after_agent_call(context=context, exception=None)
+    episode, trajectory = trace.project(
+        create_params=NeMoGymResponseCreateParamsNonStreaming(input="task"),
+        state=RolloutLLMState(max_policy_calls=1),
+        task_id="task",
+        rollout_id="0-0",
+    )
+    assert [item.type for item in episode.response.output] == ["function_call", "function_call_output"]
+    output = episode.response.output[-1]
+    assert output.call_id == "call-1"
+    assert output.status == "incomplete"
+    assert json.loads(output.output) is None
+    assert trajectory.tool_calls[0].status == "incomplete"
+    assert trajectory.tool_calls[0].completed_at is None
+    assert trajectory.invocations[0].conversation[-1] == output
+
+
 @pytest.mark.asyncio
 async def test_parallel_tool_completions_checkpoint_only_finished_outputs() -> None:
     snapshots = []
@@ -629,6 +650,7 @@ async def test_parallel_tool_completions_checkpoint_only_finished_outputs() -> N
             state=RolloutLLMState(max_policy_calls=None),
             task_id="task",
             rollout_id="rollout",
+            partial=True,
         )
         # Serialize inside the callback while the event state is stable.
         snapshots.append((episode.response.model_dump(mode="json"), trajectory.model_dump(mode="json")))
@@ -851,3 +873,49 @@ def test_finalize_observation_gaps_appends_termination_gap() -> None:
 
     assert finalized.gaps[0].code == "policy_budget_exceeded"
     assert finalized.gaps[0].detail == "budget exhausted"
+
+
+@pytest.mark.parametrize("invalid_output", [False, True])
+@pytest.mark.parametrize("outer_failure", [False, True])
+def test_policy_stop_labels_preserve_unrelated_outer_failures(invalid_output: bool, outer_failure: bool) -> None:
+    from responses_api_agents.nooa_agent.gym_llm import InvalidPolicyOutputError, PolicyCallBudgetExceeded
+
+    stop = InvalidPolicyOutputError("invalid answer") if invalid_output else PolicyCallBudgetExceeded("call limit")
+    error = RuntimeError("cleanup failed") if outer_failure else stop
+    if outer_failure:
+        error.__cause__ = stop
+    trace = GymTraceHooks()
+    context = trace.before_agent_call(call_id="root", parent_call_id=None)
+    trace.after_agent_call(context=context, exception=error)
+    _, trajectory = trace.project(
+        create_params=NeMoGymResponseCreateParamsNonStreaming(input="task"),
+        state=RolloutLLMState(max_policy_calls=1),
+        task_id="task",
+        rollout_id="0-0",
+    )
+    assert trajectory.invocations[0].status == ("failed" if outer_failure else "incomplete")
+    assert trajectory.invocations[0].error_type == type(error).__name__
+
+
+@pytest.mark.parametrize("invalid_output", [False, True])
+def test_later_cleanup_failure_updates_final_trace_without_changing_checkpoint(invalid_output: bool) -> None:
+    from responses_api_agents.nooa_agent.gym_llm import InvalidPolicyOutputError, PolicyCallBudgetExceeded
+
+    stop = InvalidPolicyOutputError("invalid answer") if invalid_output else PolicyCallBudgetExceeded("call limit")
+    trace = GymTraceHooks()
+    context = trace.before_agent_call(call_id="root", parent_call_id=None)
+    trace.after_agent_call(context=context, exception=stop)
+    projection = dict(
+        create_params=NeMoGymResponseCreateParamsNonStreaming(input="task"),
+        state=RolloutLLMState(max_policy_calls=1),
+        task_id="task",
+        rollout_id="0-0",
+    )
+    _, checkpoint = trace.project(**projection)
+    assert checkpoint.invocations[0].status == "incomplete"
+    # The invocation adapter finishes cleanup after NOOA emits after_agent_call.
+    stop.nooa_cleanup_errors = (ConnectionError("cleanup transport failed"),)
+    _, final = trace.project(**projection)
+    assert final.invocations[0].status == "failed"
+    assert final.invocations[0].error_type == type(stop).__name__
+    assert checkpoint.invocations[0].status == "incomplete"

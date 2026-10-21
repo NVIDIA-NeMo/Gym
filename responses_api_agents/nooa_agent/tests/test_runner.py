@@ -327,7 +327,33 @@ async def test_real_strategy_budget_failure_keeps_completed_calls() -> None:
     )
     assert result.termination_reason is NOOATerminationReason.POLICY_BUDGET_EXCEEDED
     assert len(calls) == len(result.trajectory.turns) == 2
-    assert any(invocation.status == "failed" for invocation in result.trajectory.invocations)
+    assert any(invocation.status == "incomplete" for invocation in result.trajectory.invocations)
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_failure_logs_error_without_failing_the_run(caplog) -> None:
+    runner, calls = policy_runner()
+
+    def disk_full(result: object) -> None:
+        raise OSError("disk full")
+
+    runner._on_progress = disk_full
+    with caplog.at_level("ERROR", logger="responses_api_agents.nooa_agent.runner"):
+        result = await runner.run(
+            NOOARunRequest(
+                tool_access=grant(),
+                responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="question"),
+                model_url_path="/v1/responses",
+            )
+        )
+    assert result.return_value == "done"
+    assert result.termination_reason is None
+    assert len(calls) == len(result.trajectory.turns) == 1
+    failures = [record for record in caplog.records if record.message == "Failed to persist NOOA partial checkpoint"]
+    assert failures
+    assert all(
+        isinstance(record.exc_info[1], OSError) and str(record.exc_info[1]) == "disk full" for record in failures
+    )
 
 
 @pytest.mark.asyncio

@@ -48,7 +48,7 @@ from nemo_gym.rollout_observability import (
     TrajectoryTurn,
 )
 from responses_api_agents.nooa_agent.gym_llm import GymModelCall, RolloutLLMState
-from responses_api_agents.nooa_agent.termination import NOOATerminationReason
+from responses_api_agents.nooa_agent.termination import NOOATerminationReason, is_policy_limit_stop
 
 
 if TYPE_CHECKING:
@@ -89,6 +89,7 @@ class GymTraceHooks:
     def __init__(self, *, on_progress: Callable[[], None] | None = None) -> None:
         self._current: ContextVar[str] = ContextVar("gym_nooa_invocation", default="root")
         self._invocations: dict[str, AgentInvocation] = {}
+        self._invocation_errors: dict[str, BaseException] = {}
         self._events: list[GymModelCall | _ToolCall] = []
         self._python_outputs: dict[tuple[str, str], str] = {}
         self._captured_python_outputs: dict[tuple[str, str], str] = {}
@@ -116,6 +117,7 @@ class GymTraceHooks:
         )
 
     def before_agent_call(self, *, call_id: str, parent_call_id: str | None, **_: Any) -> _AgentCall:
+        self._invocation_errors.pop(call_id, None)
         self._invocations[call_id] = AgentInvocation(
             invocation_id=call_id, parent_invocation_id=parent_call_id, status="incomplete"
         )
@@ -125,8 +127,12 @@ class GymTraceHooks:
         if not isinstance(context, _AgentCall):
             return
         invocation = self._invocations[context.invocation_id]
-        invocation.status = "failed" if exception is not None else "completed"
+        invocation.status = (
+            "incomplete" if is_policy_limit_stop(exception) else "failed" if exception is not None else "completed"
+        )
         invocation.error_type = type(exception).__name__ if exception is not None else None
+        if exception is not None:
+            self._invocation_errors[context.invocation_id] = exception
         invocation.duration_ms = max(0.0, (perf_counter() - context.started) * 1000)
         self._current.reset(context.token)
 
@@ -295,10 +301,15 @@ class GymTraceHooks:
         task_id: str,
         rollout_id: str,
         default_model: str = "nooa",
+        partial: bool = False,
     ) -> tuple[AgentEpisode, TrajectoryRecord]:
-        """Project captured facts without interpreting the invocation adapter."""
+        """Project evidence, omitting pending tool outputs only in partial snapshots."""
 
         invocations = {key: record.model_copy(deep=True) for key, record in self._invocations.items()}
+        # Adapter cleanup can mark an existing exception after after_agent_call.
+        # Reevaluate each snapshot without changing earlier checkpoint evidence.
+        for identity, error in self._invocation_errors.items():
+            invocations[identity].status = "incomplete" if is_policy_limit_stop(error) else "failed"
         output: list[Any] = []
         tools: list[TrajectoryToolCall] = []
         turns: list[TrajectoryTurn] = []
@@ -392,7 +403,7 @@ class GymTraceHooks:
                     )
                     invocation.conversation.append(call_item)
                     output.append(call_item)
-                if record.completed_at is None:
+                if partial and record.completed_at is None:
                     # A sibling tool may still be running at a checkpoint. Keep
                     # its start event without inventing a completed/null output.
                     record.output = None

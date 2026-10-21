@@ -396,13 +396,22 @@ async def test_real_cleanup_failure_remains_ungradable(tmp_path, monkeypatch, bo
         with pytest.raises(NOOARunFailure) as caught:
             await runner.run(request)
         assert caught.value.__cause__ is solve_errors[0]
-        assert caught.value.result.termination_reason is None
+        result = caught.value.result
+        assert result.termination_reason is None
     else:
         result = await runner.run(request)
         expected = "policy_budget_exceeded" if terminal == "policy_budget" else "max_output_tokens_exceeded"
         assert result.termination_reason == expected
         response, _ = finalize_run_result(result)
         assert response.status == "incomplete" and response.error is None
+    if terminal == "policy_budget":
+        solve_invocations = [
+            invocation
+            for invocation in result.trajectory.invocations
+            if invocation.error_type == type(solve_errors[0]).__name__
+        ]
+        assert len(solve_invocations) == 1
+        assert solve_invocations[0].status == ("failed" if cleanup_fails else "incomplete")
     assert len(cleanup_attempts) == len(solve_errors) == 1
 
 
