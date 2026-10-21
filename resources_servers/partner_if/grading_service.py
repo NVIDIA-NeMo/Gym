@@ -9,7 +9,7 @@ import json
 from nemo_gym.judge import call_judge
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
-from resources_servers.partner_if.engine import aggregate, evaluate
+from resources_servers.partner_if.engine import aggregate, evaluate, reward_checks
 from resources_servers.partner_if.evidence import EvidenceBundle, EvidenceTooLarge
 from resources_servers.partner_if.grading_contract import (
     Evaluation,
@@ -46,6 +46,7 @@ async def grade(
     """All evidence adapters share this judge transport and score engine."""
     receipt_request = None
     receipt_response = None
+    gating = reward_checks(contract)
 
     async def judge(items: list[GradingItem], evidence: EvidenceBundle) -> list[RawJudgment]:
         nonlocal receipt_request, receipt_response
@@ -65,7 +66,7 @@ async def grade(
                 raise ValueError("Judge response was incomplete")
             if any(item.type not in {"message", "reasoning"} for item in receipt_response.output):
                 raise ValueError("Judge returned unexpected tool output")
-            return parse_verdict(receipt_response.output_text, items, evidence)
+            return parse_verdict(receipt_response.output_text, items, evidence, gating=gating)
         except EvidenceTooLarge:
             # Nothing was sent; the engine decides which items the judge grades instead.
             raise

@@ -133,4 +133,3 @@ Data: Apache 2.0
 
 Dependencies
 - nemo_gym: Apache 2.0
-- markdown-it-py: MIT

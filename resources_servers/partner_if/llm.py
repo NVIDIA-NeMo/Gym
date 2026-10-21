@@ -119,8 +119,12 @@ def request_payload(
     }
 
 
-def parse_verdict(text: str, items: list[GradingItem], evidence: EvidenceBundle) -> list[RawJudgment]:
-    """Validate source/range references and retain host-extracted literal quotations."""
+def parse_verdict(
+    text: str, items: list[GradingItem], evidence: EvidenceBundle, *, gating: set[str]
+) -> list[RawJudgment]:
+    """Validate source/range references and retain host-extracted literal quotations. `gating` holds the checks
+    that gate reward (engine.reward_checks): a missing or invalid verdict for one of them rejects the reply,
+    while any other item is left unscorable on its own."""
     text = text.strip()
     if text.startswith("<think>"):
         end = text.find("</think>")
@@ -145,7 +149,7 @@ def parse_verdict(text: str, items: list[GradingItem], evidence: EvidenceBundle)
     if (
         len(by_id) != len(verdict.items)
         or set(by_id) - {r.id for r in items}
-        or {r.id for r in items if r.dimension == "if"} - set(by_id)
+        or {r.id for r in items if r.id in gating} - set(by_id)
     ):
         raise ValueError("Judge must return every rubric ID exactly once")
 
@@ -179,17 +183,17 @@ def parse_verdict(text: str, items: list[GradingItem], evidence: EvidenceBundle)
     for requested in items:
         try:
             if requested.id not in by_id:
-                raise ValueError(f"Missing completion rubric ID: {requested.id}")
+                raise ValueError(f"Missing rubric ID: {requested.id}")
             results.append(validate_item(by_id[requested.id]))
         except ValueError as error:
-            if requested.dimension != "completion":
+            if requested.id in gating:
                 raise
             results.append(
                 RawJudgment(
                     id=requested.id,
                     passed=None,
-                    reason=f"Invalid completion judgment: {error}",
-                    evidence="Completion validation failed; original judge receipt retained for review",
+                    reason=f"Invalid judgment of a check that does not gate reward: {error}",
+                    evidence="Judge validation failed for this check; original judge receipt retained for review",
                 )
             )
     return results

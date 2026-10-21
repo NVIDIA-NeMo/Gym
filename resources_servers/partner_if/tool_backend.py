@@ -16,11 +16,25 @@ class ToolCallError(Exception):
 
 
 class ToolBackend(Protocol):
+    """A task's simulated tools. The server holds one state per episode and calls these methods synchronously
+    on its event loop, so each must return quickly and must not block on I/O."""
+
+    # Whether an episode must end with a text answer; one that does not scores 0 without the judge.
     requires_final_answer: bool
 
-    def tools(self, row: dict[str, JsonValue]) -> dict[str, dict[str, JsonValue]]: ...
-    def new_state(self, row: dict[str, JsonValue]) -> Any: ...
-    # Raises ToolCallError for the model's mistakes; any other exception is an infrastructure error.
-    def call(self, state: Any, name: str, arguments: dict[str, JsonValue]) -> JsonValue: ...
-    def artifacts(self, state: Any) -> dict[str, str]: ...
-    def receipts(self, state: Any) -> dict[str, JsonValue]: ...
+    def tools(self, row: dict[str, JsonValue]) -> dict[str, dict[str, JsonValue]]:
+        """The tools this row's task may call, by name."""
+
+    def new_state(self, row: dict[str, JsonValue]) -> Any:
+        """A fresh state for one episode of this row."""
+
+    def call(self, state: Any, name: str, arguments: dict[str, JsonValue]) -> JsonValue:
+        """Run one tool call against the episode's state and return its output. Raise ToolCallError for the
+        model's mistakes, which the model sees as the output; any other exception is an infrastructure error.
+        The server records the call only after this returns, so a call that raises leaves no record."""
+
+    def artifacts(self, state: Any) -> dict[str, str]:
+        """The files the episode produced, by name; the judge sees them as artifact evidence."""
+
+    def receipts(self, state: Any) -> dict[str, JsonValue]:
+        """The backend's own records of the episode, returned with the verify response."""

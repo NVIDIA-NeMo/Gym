@@ -7,7 +7,7 @@ partner_if:
     partner_if:
       domain: instruction_following
       verified: false
-      description: Versioned instruction-following rubric verification across visible evidence types.
+      description: Text variant that grades a response and its visible evidence against versioned instruction-following rubrics.
 
 partner_if_simple_agent:
   responses_api_agents:

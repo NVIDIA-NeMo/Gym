@@ -95,7 +95,32 @@ async def test_completion_protocol_error_keeps_independent_if_score_and_original
     assert result.if_result.passed == result.if_result.total == 2
     assert result.grading_result.dimensions["completion"].binary_score is None
     assert result.judge_response == raw
-    assert "Invalid completion judgment" in result.grading_result.items[-1].reason
+    assert "does not gate reward" in result.grading_result.items[-1].reason
+
+
+@pytest.mark.parametrize("file_reply", [None, {"references": []}], ids=["omitted", "invalid"])
+async def test_a_prerequisite_of_completion_alone_cannot_mask_the_if_verdicts(file_reply):
+    from resources_servers.partner_if.tests.test_shared_judge import verdict
+
+    body = shared_request()
+    contract = body.verifier_metadata.partner_if
+    # A judged prerequisite keeps the default IF dimension, but only the completion rubric depends on it.
+    contract.prerequisites.append(contract.rubrics[1].model_copy(update={"id": "file"}))
+    contract.rubrics.append(
+        contract.rubrics[1].model_copy(update={"id": "content", "dimension": "completion", "depends_on": ["file"]})
+    )
+    reply = verdict(id="semantic")
+    reply["items"].append(reply["items"][0] | {"id": "content"})
+    if file_reply is not None:
+        reply["items"].append(reply["items"][0] | {"id": "file"} | file_reply)
+    raw = response(json.dumps(reply))
+    with patch("resources_servers.partner_if.grading_service.call_judge", new_callable=AsyncMock, return_value=raw):
+        result = await server().verify(body)
+    assert not result.mask_sample and result.reward == 1
+    assert result.if_result.passed == result.if_result.total == 2
+    prerequisite = next(item for item in result.grading_result.prerequisites if item.id == "file")
+    assert prerequisite.raw_passed is None and "does not gate reward" in prerequisite.reason
+    assert result.grading_result.dimensions["completion"].binary_score is None
 
 
 async def test_judge_abstention_is_a_protocol_error_not_a_model_failure():

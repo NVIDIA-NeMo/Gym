@@ -65,7 +65,7 @@ def test_judge_payload_preserves_surfaces_but_excludes_analogue_and_model_labels
     "wrap", [lambda x: x, lambda x: "<think>internal</think>\n" + x, lambda x: "```json\n" + x + "\n```"]
 )
 def test_known_reasoning_and_json_envelopes_are_parsed_without_losing_verdict(wrap):
-    result = llm.parse_verdict(wrap(json.dumps(verdict())), rubric(), EvidenceBundle(answer="HELLO"))
+    result = llm.parse_verdict(wrap(json.dumps(verdict())), rubric(), EvidenceBundle(answer="HELLO"), gating={"one"})
     assert result[0].passed is True and result[0].evidence == "HELLO"
 
 
@@ -86,7 +86,7 @@ def test_known_reasoning_and_json_envelopes_are_parsed_without_losing_verdict(wr
 )
 def test_invalid_judge_evidence_or_verdict_rejected(change):
     with pytest.raises(ValueError):
-        llm.parse_verdict(json.dumps(verdict(**change)), rubric(), EvidenceBundle(answer="HELLO"))
+        llm.parse_verdict(json.dumps(verdict(**change)), rubric(), EvidenceBundle(answer="HELLO"), gating={"one"})
 
 
 def test_absence_failure_is_a_binary_judgment():
@@ -94,6 +94,7 @@ def test_absence_failure_is_a_binary_judgment():
         json.dumps(verdict(passed=False, evidence="No requested text", references=[])),
         rubric(),
         EvidenceBundle(answer=""),
+        gating={"one"},
     )
     assert missing[0].passed is False
 
@@ -114,13 +115,14 @@ def test_prohibition_pass_is_an_ordinary_evidence_backed_boolean():
         json.dumps(verdict(reason="The answer contains only the required plain text")),
         items,
         EvidenceBundle(answer="HELLO"),
+        gating={"one"},
     )
     assert result[0].passed is True
 
 
 def test_duplicate_json_fields_are_not_accepted_as_a_valid_judgment():
     with pytest.raises(ValueError, match="Duplicate"):
-        llm.parse_verdict('{"items": [], "items": []}', rubric(), EvidenceBundle(answer="HELLO"))
+        llm.parse_verdict('{"items": [], "items": []}', rubric(), EvidenceBundle(answer="HELLO"), gating={"one"})
 
 
 @pytest.mark.parametrize(
@@ -136,7 +138,10 @@ def test_references_extract_literal_text_without_model_escape_roundtrip(source, 
         trajectory=[{"source_index": 2, "kind": "tool_call", "arguments": {"filePath": "/workspace/plan.md"}}],
     )
     result = llm.parse_verdict(
-        json.dumps(verdict(references=[{"source": source, "start_line": start, "end_line": end}])), rubric(), evidence
+        json.dumps(verdict(references=[{"source": source, "start_line": start, "end_line": end}])),
+        rubric(),
+        evidence,
+        gating={"one"},
     )
     assert result[0].passed is True
     assert result[0].quotes[0].quote == quote
@@ -149,6 +154,7 @@ def test_judge_supplied_quotes_are_rejected():
             json.dumps(verdict(quotes=[{"source": "artifact:output", "quote": r"first\n second"}])),
             rubric(),
             evidence,
+            gating={"one"},
         )
 
 
@@ -205,17 +211,17 @@ def test_invalid_completion_item_does_not_discard_valid_if_judgment(change):
     items.append(items[0].model_copy(update={"id": "content", "dimension": "completion"}))
     reply = verdict()
     reply["items"].append(reply["items"][0] | {"id": "content"} | change)
-    results = llm.parse_verdict(json.dumps(reply), items, EvidenceBundle(answer="HELLO"))
+    results = llm.parse_verdict(json.dumps(reply), items, EvidenceBundle(answer="HELLO"), gating={"one"})
     assert results[0].passed is True
     assert results[0].quotes[0].quote == "HELLO"
     assert results[1].passed is None
-    assert "Invalid completion judgment" in results[1].reason
+    assert "does not gate reward" in results[1].reason
 
 
 def test_missing_completion_item_is_unavailable_not_an_if_failure():
     items = rubric()
     items.append(items[0].model_copy(update={"id": "content", "dimension": "completion"}))
-    results = llm.parse_verdict(json.dumps(verdict()), items, EvidenceBundle(answer="HELLO"))
+    results = llm.parse_verdict(json.dumps(verdict()), items, EvidenceBundle(answer="HELLO"), gating={"one"})
     assert results[0].passed is True and results[1].passed is None
 
 
@@ -223,4 +229,4 @@ def test_missing_if_item_still_rejects_incomplete_judge_response():
     items = rubric()
     items.append(items[0].model_copy(update={"id": "content", "dimension": "completion"}))
     with pytest.raises(ValueError, match="rubric ID"):
-        llm.parse_verdict(json.dumps(verdict(id="content")), items, EvidenceBundle(answer="HELLO"))
+        llm.parse_verdict(json.dumps(verdict(id="content")), items, EvidenceBundle(answer="HELLO"), gating={"one"})

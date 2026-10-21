@@ -5,6 +5,7 @@
 import json
 from pathlib import Path
 
+from resources_servers.partner_if.engine import reward_checks
 from resources_servers.partner_if.schema import VerifierMetadata
 
 
@@ -48,5 +49,5 @@ def test_example_receipts_match_current_contracts_and_grounded_judge_protocol():
         answer = NeMoGymResponse.model_validate(receipt["response"]).output_text
         evidence = EvidenceBundle(context=receipt["responses_create_params"]["input"], answer=answer)
         judge = NeMoGymResponse.model_validate(receipt["judge_response"])
-        verdicts = parse_verdict(judge.output_text, contract.rubrics, evidence)
+        verdicts = parse_verdict(judge.output_text, contract.rubrics, evidence, gating=reward_checks(contract))
         assert [v.passed for v in verdicts] == [v["raw_passed"] for v in receipt["grading_result"]["items"]]

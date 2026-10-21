@@ -5,7 +5,9 @@ import runpy
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
+from aiohttp import ClientResponseError, ServerDisconnectedError
 
 
 pytest.importorskip("harbor")
@@ -95,11 +97,18 @@ def harbor_config(tmp_path, job=None, **overrides):
 
 
 class _Reply:
+    """An aiohttp response, as get_response_json and raise_for_status read it."""
+
     def __init__(self, reply):
-        self.ok, self.status, self.content = reply.is_success, reply.status_code, reply.content
+        self.ok, self.status = reply.is_success, reply.status_code
+        self.content = MagicMock(read=AsyncMock(return_value=reply.content))
 
     async def read(self):
-        return self.content
+        return await self.content.read()
+
+    def raise_for_status(self):
+        if not self.ok:
+            raise ClientResponseError(MagicMock(), (), status=self.status)
 
 
 class _ResourcesClient(ServerClient):
@@ -324,6 +333,31 @@ async def test_failed_judge_call_returns_a_judge_failed_row_through_verify(tmp_p
     assert row["atif_conversion"]["lossless"]
 
 
+@pytest.mark.parametrize(
+    "post,reason",
+    [
+        (MagicMock(side_effect=ServerDisconnectedError()), "ServerDisconnectedError: Server disconnected"),
+        (MagicMock(return_value=httpx.Response(503)), "ClientResponseError: 503"),
+    ],
+    ids=["unreachable", "error_status"],
+)
+async def test_failed_verify_call_returns_a_masked_verifier_error_row(tmp_path, monkeypatch, post, reason):
+    body = run_body(tmp_path, live_contract())
+    monkeypatch.setattr(harbor, "harbor_job_worker", FakeJobWorker(write_trial(tmp_path)))
+    agent, client = make_agent(tmp_path)
+    # Harbor finished, but the resources server is unreachable or answers an error status.
+    client.resources = MagicMock(post=post)
+    row = (await agent.run(body)).model_dump()
+    assert [path for _, path, _ in client.calls] == ["/verify"]
+    assert (row[NG_FAILURE_CLASS_KEY], row["failure_kind"], row["mask_sample"], row["reward"]) == (
+        "harbor_failed",
+        "verifier_error",
+        True,
+        0.0,
+    )
+    assert row["failure_reason"].startswith(reason)
+
+
 async def test_controller_error_is_a_harbor_failure_and_is_never_graded(tmp_path, monkeypatch):
     body = run_body(tmp_path, live_contract())
     state = {"agent_state": "error", "reason": "RuntimeError: LLM provider rejected the request"}
@@ -337,6 +371,41 @@ async def test_controller_error_is_a_harbor_failure_and_is_never_graded(tmp_path
         True,
     )
     assert "LLM provider rejected the request" in row["failure_reason"]
+
+
+@pytest.mark.parametrize(
+    "task_name,bundle,reason",
+    [
+        ("../native", None, "ValueError: Unsafe native task name"),
+        ("absent", None, "FileNotFoundError"),
+        ("native", "{}", "ValidationError"),
+        (
+            "native",
+            TaskBundle(contract=live_contract().model_copy(update={"rubric_version": "native-v2"})).model_dump_json(),
+            "ValueError: Native task bundle does not match the row contract",
+        ),
+    ],
+    ids=["unsafe_name", "missing_bundle", "invalid_bundle", "contract_mismatch"],
+)
+async def test_failed_task_check_is_a_masked_failure_row_and_starts_no_harbor_job(
+    tmp_path, monkeypatch, task_name, bundle, reason
+):
+    body = run_body(tmp_path, live_contract()).model_copy(update={"task_name": task_name})
+    if bundle is not None:
+        (tmp_path / "native.json").write_text(bundle)
+    worker = FakeJobWorker(tmp_path)
+    monkeypatch.setattr(harbor, "harbor_job_worker", worker)
+    agent, client = make_agent(tmp_path)
+    row = (await agent.run(body)).model_dump()
+    # Neither a sandbox nor the grader is reached.
+    assert worker.jobs == [] and client.calls == []
+    assert (row[NG_FAILURE_CLASS_KEY], row["failure_kind"], row["mask_sample"], row["reward"]) == (
+        "harbor_failed",
+        "agent_run_error",
+        True,
+        0.0,
+    )
+    assert row["failure_reason"].startswith(reason)
 
 
 def test_openhands_zero_exit_is_not_enough_without_finished_event(tmp_path):

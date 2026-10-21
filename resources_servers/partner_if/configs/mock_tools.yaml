@@ -9,7 +9,7 @@ partner_if_mock_tools:
       entrypoint: mock_tools_app.py
       domain: instruction_following
       verified: false
-      description: Instruction-following rubric verification of live tool-calling episodes, with an example notes backend.
+      description: Mock-tool variant that grades live tool-calling episodes against instruction-following rubrics, with an example notes backend.
       num_workers: 1
       backend: resources_servers.partner_if.example_tools:NotesBackend
       fixture_path: resources_servers/partner_if/data/mock_tools_notes.json

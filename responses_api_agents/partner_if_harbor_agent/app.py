@@ -7,6 +7,7 @@ OpenHands calls the run's Gym model server, so the provider key never enters the
 
 import asyncio
 import json
+import logging
 import os
 import re
 from pathlib import Path
@@ -17,7 +18,7 @@ from harbor.models.trial.paths import TrialPaths
 from pydantic import JsonValue
 
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, ModelServerRef, ResourcesServerRef
-from nemo_gym.failure_kinds import AGENT_RUN_ERROR
+from nemo_gym.failure_kinds import AGENT_RUN_ERROR, VERIFIER_ERROR
 from nemo_gym.global_config import ROLLOUT_ID_KEY_NAME
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY
 from nemo_gym.sandbox.agent_tools import sandbox_server_url
@@ -34,6 +35,9 @@ from responses_api_agents.harbor_agent_general.app import (
     HarborVerifyResponse,
 )
 from responses_api_agents.partner_if_harbor_agent.environment import OPENSANDBOX_API_KEY, ArtifactEnvironment
+
+
+logger = logging.getLogger(__name__)
 
 
 class PartnerIFHarborConfig(HarborAgentConfig):
@@ -90,11 +94,17 @@ class PartnerIFHarborAgent(HarborAgent):
         super().model_post_init(context)
         # Fail at startup rather than on every rollout.
         sandbox_server_url(self.config.model_server.name, require_reachable=True)
+        # The Harbor worker reads the key from its own environment, with harbor_worker_env on top. Gym's local Ray
+        # workers inherit the environment Gym was started with, as this server does; this check cannot see an
+        # external Ray cluster's environment.
         environment = self.config.job.environment.import_path
         if environment == f"{ArtifactEnvironment.__module__}:{ArtifactEnvironment.__name__}" and not (
             os.environ.get(OPENSANDBOX_API_KEY) or self.config.harbor_worker_env.get(OPENSANDBOX_API_KEY)
         ):
-            raise ValueError(f"{OPENSANDBOX_API_KEY} must be set for the Harbor workers")
+            raise ValueError(
+                f"{OPENSANDBOX_API_KEY} must be set in harbor_worker_env, or in Gym's environment when Gym starts "
+                "the Ray cluster"
+            )
 
     def job_config_for_run(self, body: HarborRunRequest) -> JobConfig:
         job = super().job_config_for_run(body)
@@ -116,6 +126,16 @@ class PartnerIFHarborAgent(HarborAgent):
         response = super().success_response(body, trial_dir)
         return response.model_copy(update={"partner_if_artifact": artifact_receipt(trial_dir)})
 
+    def failure_response(
+        self, body: HarborRunRequest, err: Exception, failure_kind: str = AGENT_RUN_ERROR
+    ) -> HarborVerifyResponse:
+        """A run that cannot be scored is an outage for the failures file, not a score. The base sends Harbor and
+        OpenHands failures here; run() sends its task check and /verify failures."""
+        data = super().failure_response(body, err).model_dump(mode="json")
+        return HarborVerifyResponse.model_validate(
+            data | {"mask_sample": True, "failure_kind": failure_kind, "failure_reason": data["error"]}
+        )
+
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
         """Proxy aggregate_metrics to the resources server, which computes partner_if's metrics."""
         response = await self.server_client.post(
@@ -125,27 +145,26 @@ class PartnerIFHarborAgent(HarborAgent):
         return AggregateMetrics.model_validate(await get_response_json(response))
 
     async def run(self, body: HarborRunRequest) -> HarborVerifyResponse:
-        # Validate host-selected task identity before allocating a sandbox.
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", body.task_name):
-            raise ValueError("Unsafe native task name")
-        task = TaskBundle.model_validate_json(
-            await asyncio.to_thread((self.config.task_bundles_dir / f"{body.task_name}.json").read_text)
-        )
-        contract = VerifierMetadata.model_validate(body.model_dump().get("verifier_metadata", {})).partner_if
-        if contract_hash(contract) != contract_hash(task.contract):
-            raise ValueError("Native task bundle does not match the row contract")
+        try:
+            # Validate host-selected task identity before allocating a sandbox.
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", body.task_name):
+                raise ValueError("Unsafe native task name")
+            task = TaskBundle.model_validate_json(
+                await asyncio.to_thread((self.config.task_bundles_dir / f"{body.task_name}.json").read_text)
+            )
+            contract = VerifierMetadata.model_validate(body.model_dump().get("verifier_metadata", {})).partner_if
+            if contract_hash(contract) != contract_hash(task.contract):
+                raise ValueError("Native task bundle does not match the row contract")
+        except Exception as err:
+            logger.exception(
+                "Native task check failed: task_index=%s rollout_index=%s", body.task_index, body.rollout_index
+            )
+            return self.failure_response(body, err)
         response = await super().run(body)
         data = response.model_dump(mode="json")
         if data.get(NG_FAILURE_CLASS_KEY):
-            # Harbor or OpenHands failed: an outage for the failures file, not a score.
-            return HarborVerifyResponse.model_validate(
-                data
-                | {
-                    "mask_sample": True,
-                    "failure_kind": AGENT_RUN_ERROR,
-                    "failure_reason": data.get("error", "Harbor execution failed"),
-                }
-            )
+            # Harbor or OpenHands failed, and failure_response masked the row.
+            return response
         capture = LiveAgentCapture(
             input=response.responses_create_params.model_dump(mode="json", exclude_none=True)["input"],
             documents=task.documents,
@@ -154,14 +173,20 @@ class PartnerIFHarborAgent(HarborAgent):
         # The resources server grades the capture and returns the score fields; a failed judge call comes
         # back as a judge_failed row for the failures file. Dumped by alias, the body keeps the _ng_* index
         # keys, from which ServerClient derives this run's rollout prefix; checkpointing requires it.
-        verified = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/verify",
-            json=body.model_dump(mode="json", by_alias=True)
-            | {"response": data["response"], "verification_input": capture.model_dump(mode="json")},
-        )
-        await raise_for_status(verified)
-        return HarborVerifyResponse.model_validate(data | await get_response_json(verified))
+        try:
+            verified = await self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path="/verify",
+                json=body.model_dump(mode="json", by_alias=True)
+                | {"response": data["response"], "verification_input": capture.model_dump(mode="json")},
+            )
+            await raise_for_status(verified)
+            graded = await get_response_json(verified)
+        except Exception as err:
+            # An unreachable resources server or an error status leaves the run ungraded.
+            logger.exception("/verify failed: task_index=%s rollout_index=%s", body.task_index, body.rollout_index)
+            return self.failure_response(body, err, VERIFIER_ERROR)
+        return HarborVerifyResponse.model_validate(data | graded)
 
 
 if __name__ == "__main__":
