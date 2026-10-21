@@ -15,7 +15,7 @@ terminal_bench_2_1_nooa_resources_server:
       num_workers: 1
       sandbox_config:
         # Leave 600s after the episode deadline for bounded final cleanup.
-        # Verification uses the Resources server's existing 1,800s timeout.
+        # Each verifier command uses the Resources server's existing 1,800s timeout.
         ttl_s: 30600
       datasets:
         - name: terminal_bench_2_1
@@ -34,12 +34,14 @@ terminal_bench_2_1_nooa_agent:
         name: terminal_bench_2_1_nooa_resources_server
       nooa:
         execution_mode: sandboxed
+      sandbox_runner_timeout_seconds: 21600
       max_policy_calls: null
 
 terminal_bench_2_1_nooa:
   _inherit_from: nooa_environment_server
   environment_servers:
     single_agent_turn:
+      # Bounds seed, agent, verify, and close together; the worker ceiling is 21,600s (6h).
       default_episode_timeout_seconds: 30000
       resources_server:
         type: resources_servers

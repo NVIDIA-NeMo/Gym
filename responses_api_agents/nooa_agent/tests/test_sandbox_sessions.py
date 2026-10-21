@@ -30,8 +30,8 @@ def access() -> dict:
 @pytest.fixture
 def setup(monkeypatch):
     client = MagicMock(spec=ServerClient)
-    client.global_config_dict = {}
-    client._resolve_base_url.return_value = "http://model:8000"
+    client.global_config_dict = {"policy": {"responses_api_models": {"model": {"host": "model", "port": 8000}}}}
+    client._build_server_base_url.return_value = "http://model:8000"
     instance = NOOAAgent(config=agent_config(nooa=invocation_config(execution_mode="sandboxed")), server_client=client)
     sandbox = MemorySandbox()
     connect = AsyncMock(return_value=sandbox)
@@ -278,11 +278,92 @@ async def test_active_shared_session_retries_unknown_cleanup_before_cancelling_p
     sandbox.disconnect.assert_not_awaited()
     confirmed = True
     receipt = await asyncio.wait_for(close(instance), timeout=1)
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(HTTPException) as interrupted:
         await activation
+    assert interrupted.value.status_code == 409
     assert events == ["stop", "stop", "capture", "provider_cancel", "disconnect"]
     assert NOOATerminationReason.CANCELLED in {gap.code for gap in receipt.agent_observations.gaps}
     assert receipt.resources_cookies == {"resource": "new"}
     assert state.execution.done()
     assert await close(instance) == receipt
     sandbox.stop.assert_not_awaited()
+
+
+async def test_seed_wires_resolved_endpoint_runtime_and_limits_into_one_runner(setup) -> None:
+    instance, sandbox, staging, connect = setup
+    instance.config.sandbox_runner_timeout_seconds = 1234
+    instance.config.session_close_timeout_seconds = 19
+    instance.config.max_policy_calls = 7
+    body = seed(sandbox_access={**access(), "workdir": "/task/repo"})
+    await instance.seed_agent_session(request(), body)
+    runner = instance._require_agent_session("session").runner
+    assert runner.sandbox is sandbox
+    assert runner.session.workdir == "/task/repo"
+    assert runner.python == "/opt/nooa/bin/python"
+    assert runner.model_base_url == "http://model:8000"
+    assert runner.model_server_name == "policy"
+    assert runner.timeout == 1234
+    assert runner.close_timeout == 19
+    assert runner.max_policy_calls == 7
+    assert runner.invocation is instance.config.nooa
+    instance.server_client._resolve_base_url.assert_not_called()
+    instance.server_client._build_server_base_url.assert_called_once_with({"host": "model", "port": 8000})
+    staging.assert_awaited_once_with(sandbox, wheelhouse_path=None)
+    connect.assert_awaited_once()
+    await instance.seed_agent_session(request(), body)
+    assert instance._require_agent_session("session").runner is runner
+    connect.assert_awaited_once()
+    await close(instance)
+
+
+async def test_failed_connect_closes_provider_without_retaining_seeded_state(setup) -> None:
+    instance, sandbox, staging, connect = setup
+    provider = app_module.create_provider.return_value
+    provider.aclose = AsyncMock()
+    connect.side_effect = ConnectionError("cannot attach sandbox")
+    with pytest.raises(ConnectionError, match="cannot attach"):
+        await instance.seed_agent_session(request(), seed(sandbox_access=access()))
+    provider.aclose.assert_awaited_once()
+    assert "session" not in instance._session_records
+    staging.assert_not_awaited()
+    sandbox.disconnect.assert_not_awaited()
+
+
+async def test_worker_budget_failure_is_not_reported_as_retryable_dependency_outage(setup) -> None:
+    import json
+
+    from responses_api_agents.nooa_agent.runner import NOOARunFailure
+    from responses_api_agents.nooa_agent.tests.test_sandbox_runner import checkpoint_artifact, cleanup_receipt
+
+    instance, sandbox, _, _ = setup
+    await instance.seed_agent_session(request(), seed(sandbox_access=access()))
+    runner = instance._require_agent_session("session").runner
+    sandbox.files[runner.directory + "/cleanup.json"] = json.dumps(cleanup_receipt(timed_out=True))
+    sandbox.files[runner.directory + "/checkpoint.json"] = checkpoint_artifact().model_dump_json()
+    with pytest.raises(NOOARunFailure, match="worker exceeded its execution deadline"):
+        await instance.responses(request(session_id="session"), NeMoGymResponseCreateParamsNonStreaming(input="task"))
+    receipt = await close(instance)
+    assert NOOATerminationReason.INFRASTRUCTURE_ERROR in {gap.code for gap in receipt.agent_observations.gaps}
+
+
+async def test_cancelled_request_stays_cancelled_even_when_session_is_closing(setup) -> None:
+    instance, sandbox, _, _ = setup
+    await instance.seed_agent_session(request(), seed(sandbox_access=access()))
+    state = instance._require_agent_session("session")
+    active = asyncio.Event()
+
+    async def run(body):
+        active.set()
+        await asyncio.Event().wait()
+
+    state.runner.run = run
+    activation = asyncio.create_task(
+        instance.responses(request(session_id="session"), NeMoGymResponseCreateParamsNonStreaming(input="task"))
+    )
+    await asyncio.wait_for(active.wait(), timeout=1)
+    state.closing = True
+    activation.cancel("caller cancelled")
+    with pytest.raises(asyncio.CancelledError, match="caller cancelled"):
+        await activation
+    assert not state.execution.done()
+    await close(instance)

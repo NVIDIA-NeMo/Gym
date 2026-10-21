@@ -3,9 +3,12 @@
 """Borrow a task sandbox and supervise one whole NOOA activation."""
 
 import asyncio
+import logging
 from dataclasses import replace
 from shlex import quote
 from uuid import uuid4
+
+from pydantic import ValidationError
 
 from nemo_gym.agent_utils.sandbox_session import SandboxCommand, SandboxSession
 from nemo_gym.agent_utils.task_timeout import resolve_agent_timeout
@@ -13,10 +16,13 @@ from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGa
 from nemo_gym.sandbox import AsyncSandbox
 from nemo_gym.sandbox.utils import read_text, upload_text
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig
-from responses_api_agents.nooa_agent.result import set_response_lifecycle
+from responses_api_agents.nooa_agent.result import is_transient_infrastructure_error, set_response_lifecycle
 from responses_api_agents.nooa_agent.runner import NOOARunFailure, NOOARunRequest, NOOARunResult
 from responses_api_agents.nooa_agent.sandbox_entrypoint import SandboxCheckpoint, SandboxInput, SandboxResult
 from responses_api_agents.nooa_agent.termination import NOOATerminationReason
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class SandboxNOOARunner:
@@ -88,8 +94,6 @@ class SandboxNOOARunner:
                 "responses_api_agents.nooa_agent.sandbox_entrypoint",
                 f"{self.directory}/input.json",
                 f"{self.directory}/result.json",
-                self.session.stop_request_path,
-                f"{self.directory}/completion.json",
             ],
         )
 
@@ -107,19 +111,16 @@ class SandboxNOOARunner:
             cleanup = self.session.cleanup
             if cleanup is None:
                 raise RuntimeError("NOOA worker termination is unconfirmed")
+            if cleanup["timed_out"] or cleanup["error"] or cleanup["return_code"] != 0 or self.artifact is None:
+                await self._collect_diagnostics()
             if cleanup["timed_out"]:
-                raise TimeoutError("NOOA sandbox worker exceeded its execution deadline")
+                # Exhausting the worker budget is not a retryable dependency outage.
+                raise RuntimeError("NOOA sandbox worker exceeded its execution deadline")
             if cleanup["error"]:
                 raise RuntimeError(f"NOOA sandbox supervisor failed: {cleanup['error']}")
             if cleanup["return_code"] != 0:
                 raise RuntimeError(f"NOOA sandbox worker did not exit successfully (exit {cleanup['return_code']})")
             if self.artifact is None:
-                # Optional logs must not consume the session's artifact-capture deadline.
-                try:
-                    async with asyncio.timeout(min(1.0, self.close_timeout)):
-                        self.diagnostics = (await self.session.read_output_log())[-2000:]
-                except TimeoutError:
-                    pass
                 raise RuntimeError(f"NOOA sandbox result is missing or malformed: {self.diagnostics}")
             request.model_cookies.update(self.artifact.model_cookies)
             request.resource_cookies.update(self.artifact.resource_cookies)
@@ -156,57 +157,86 @@ class SandboxNOOARunner:
                         raise NOOARunFailure(error, result) from error
             raise
 
+    async def _collect_diagnostics(self) -> None:
+        """Retain a bounded log tail only after the important evidence is captured."""
+        try:
+            async with asyncio.timeout(min(1.0, self.close_timeout)):
+                tail = (await self.session.read_output_log())[-2000:]
+        except TimeoutError:
+            return
+        self.diagnostics = "".join(char for char in tail if char.isprintable() or char in "\n\t")
+        if self.diagnostics:
+            observations = (self.observations or AgentObservationBundle(source="nooa")).model_copy(deep=True)
+            observations.gaps.append(ObservationGap(code="sandbox_worker_diagnostics", detail=self.diagnostics))
+            self.observations = observations
+
+    async def _read_artifact(self, name: str) -> str:
+        # The shared session bounds the entire capture, including this one retry.
+        try:
+            return await read_text(self.sandbox, path=f"{self.directory}/{name}")
+        except Exception as error:
+            if not is_transient_infrastructure_error(error):
+                raise
+            LOGGER.warning("Retrying NOOA %s capture after %s", name, type(error).__name__)
+        return await read_text(self.sandbox, path=f"{self.directory}/{name}")
+
     async def _collect_artifacts(self) -> None:
         """Prefer terminal evidence; recovered checkpoints can never establish completion."""
+        capture_error: Exception | None = None
         try:
-            artifact = SandboxResult.model_validate_json(
-                await read_text(self.sandbox, path=f"{self.directory}/result.json")
-            )
-            if artifact.response is None and artifact.error is None:
-                raise ValueError("NOOA terminal result has neither a response nor an error")
-        except Exception:
-            pass
+            artifact = SandboxResult.model_validate_json(await self._read_artifact("result.json"))
+        except (FileNotFoundError, ValidationError) as error:
+            unavailable = f"missing or malformed ({type(error).__name__})"
+        except Exception as error:
+            capture_error = error
+            unavailable = f"unavailable ({type(error).__name__})"
         else:
-            self.artifact = artifact
-            self.checkpoint = None
-            self.observations = artifact.observations
-            return
+            if artifact.response is not None or artifact.error is not None:
+                self.artifact = artifact
+                self.checkpoint = None
+                self.observations = artifact.observations
+                return
+            unavailable = "missing or malformed (neither a response nor an error)"
 
         gap = ObservationGap(
             code="sandbox_result_unavailable",
-            detail="NOOA terminal result is missing or malformed; recovered evidence cannot establish completion.",
+            detail=f"NOOA terminal result is {unavailable}; recovered evidence cannot establish completion.",
         )
         try:
-            checkpoint = SandboxCheckpoint.model_validate_json(
-                await read_text(self.sandbox, path=f"{self.directory}/checkpoint.json")
-            )
-        except Exception:
+            checkpoint = SandboxCheckpoint.model_validate_json(await self._read_artifact("checkpoint.json"))
+        except (FileNotFoundError, ValidationError):
+            checkpoint = self.checkpoint
+        except Exception as error:
+            capture_error = capture_error or error
             checkpoint = self.checkpoint
         if checkpoint is None:
             self.observations = AgentObservationBundle(source="nooa", gaps=[gap])
-            return
-
-        detail = "NOOA worker exited without a valid final result; checkpoint evidence is partial and not gradable."
-        observations = checkpoint.observations.model_copy(deep=True)
-        observations.gaps = list(
-            {
-                item.model_dump_json(): item
-                for item in [*observations.gaps, gap, ObservationGap(code="partial_checkpoint", detail=detail)]
-            }.values()
-        )
-        self.checkpoint = checkpoint.model_copy(
-            update={
-                "response": set_response_lifecycle(
-                    checkpoint.response, NOOATerminationReason.INFRASTRUCTURE_ERROR, detail
-                )
-                if checkpoint.response is not None
-                else None,
-                "observations": observations,
-                "termination_reason": NOOATerminationReason.INFRASTRUCTURE_ERROR,
-                "termination_error": detail,
-            }
-        )
-        self.observations = observations
+        else:
+            detail = (
+                "NOOA worker exited without a valid final result; checkpoint evidence is partial and not gradable."
+            )
+            observations = checkpoint.observations.model_copy(deep=True)
+            observations.gaps = list(
+                {
+                    item.model_dump_json(): item
+                    for item in [*observations.gaps, gap, ObservationGap(code="partial_checkpoint", detail=detail)]
+                }.values()
+            )
+            self.checkpoint = checkpoint.model_copy(
+                update={
+                    "response": set_response_lifecycle(
+                        checkpoint.response, NOOATerminationReason.INFRASTRUCTURE_ERROR, detail
+                    )
+                    if checkpoint.response is not None
+                    else None,
+                    "observations": observations,
+                    "termination_reason": NOOATerminationReason.INFRASTRUCTURE_ERROR,
+                    "termination_error": detail,
+                }
+            )
+            self.observations = observations
+        if capture_error is not None:
+            raise capture_error
 
     def _record_capture_error(self, failure: BaseException | None = None) -> None:
         error: BaseException | None = self.session.capture_error or self.session.termination_error

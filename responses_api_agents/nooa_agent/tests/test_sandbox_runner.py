@@ -91,7 +91,9 @@ async def test_launch_quotes_paths_runs_in_task_and_preserves_cookies(limit: int
     assert "sandbox_supervisor" not in command
     assert "/process_supervisor.py" in command
     assert r.directory + "/process_supervisor.py" in s.files
-    assert r.session.stop_request_path in command
+    launch_command = await r._stage_activation(request)
+    assert launch_command.argv[-2:] == [r.directory + "/input.json", r.directory + "/result.json"]
+    assert len(launch_command.argv) == 6
     assert "--timeout 21600.0" in command
     assert s.exec.await_args_list[1].kwargs == {"cwd": "/app", "timeout_s": 21660}
     launch = SandboxInput.model_validate_json(s.files[r.directory + "/input.json"])
@@ -493,6 +495,8 @@ async def test_optional_diagnostics_preserve_recovered_evidence(
     else:
         assert type(caught.value) is RuntimeError
         assert r.checkpoint is None
+    if log_kind == "available":
+        expected_gaps.add("sandbox_worker_diagnostics")
     assert {gap.code for gap in r.observations.gaps} == expected_gaps
     assert r.diagnostics == (("diagnostic " * 250)[-2000:] if log_kind == "available" else "")
     observations = r.observations.model_copy(deep=True)
@@ -753,4 +757,161 @@ async def test_close_during_capture_cannot_turn_final_evidence_into_success() ->
     assert caught.value.nooa_result.episode.response.status == "cancelled"
     assert r.artifact == artifact()
     assert r.session.closed
+    s.disconnect.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "result", [SandboxExecResult("", "denied", 1), SandboxExecResult("", "timeout", 0, "timeout")]
+)
+async def test_prepare_rejects_failed_directory_creation(result: SandboxExecResult) -> None:
+    r, s = runner()
+    s.exec.return_value = result
+    with pytest.raises(RuntimeError, match="Could not prepare NOOA session directory"):
+        await r.prepare()
+    assert not r.session.launch_started
+    s.exec.return_value = SandboxExecResult("", "", 0)
+    await r.close()
+    s.disconnect.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_transient_terminal_download_retries_once_and_preserves_completed_result() -> None:
+    r, s = runner()
+    complete_files(r, s)
+    download = s.download
+    attempts = 0
+
+    async def flaky_download(source: str, destination: Path) -> None:
+        nonlocal attempts
+        if source.endswith("/result.json"):
+            attempts += 1
+            if attempts == 1:
+                raise ConnectionError("temporary download failure")
+        await download(source, destination)
+
+    s.download = flaky_download
+    result = await r.run(payload().request)
+    assert attempts == 2
+    assert result.episode.response == artifact().response
+    assert r.session.capture_error is None
+    assert r.checkpoint is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_type,attempts", [(ConnectionError, 2), (PermissionError, 1), (ValueError, 1)])
+async def test_terminal_download_failure_keeps_exception_class_and_checkpoint(error_type, attempts) -> None:
+    from responses_api_agents.nooa_agent.result import is_transient_infrastructure_error
+
+    r, s = runner()
+    complete_files(r, s)
+    s.files[r.directory + "/checkpoint.json"] = checkpoint_artifact().model_dump_json()
+    download = s.download
+    count = 0
+
+    async def failed_download(source: str, destination: Path) -> None:
+        nonlocal count
+        if source.endswith("/result.json"):
+            count += 1
+            raise error_type("cannot download result")
+        await download(source, destination)
+
+    s.download = failed_download
+    with pytest.raises(NOOARunFailure) as caught:
+        await r.run(payload().request)
+    assert count == attempts
+    assert isinstance(caught.value.__cause__, error_type)
+    assert is_transient_infrastructure_error(caught.value) == (error_type is ConnectionError)
+    assert caught.value.result.episode.response.output == checkpoint_artifact().response.output
+    assert error_type.__name__ in next(
+        gap.detail for gap in r.observations.gaps if gap.code == "sandbox_result_unavailable"
+    )
+    await r.close()
+    s.disconnect.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_retry_cannot_exceed_artifact_capture_budget() -> None:
+    r, s = runner()
+    complete_files(r, s)
+    r.close_timeout = 0.02
+    download = s.download
+    attempts = 0
+
+    async def slow_retry(source: str, destination: Path) -> None:
+        nonlocal attempts
+        if source.endswith("/result.json"):
+            attempts += 1
+            if attempts == 1:
+                raise ConnectionError("temporary download failure")
+            await asyncio.Event().wait()
+        await download(source, destination)
+
+    s.download = slow_retry
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(r.run(payload().request), timeout=0.5)
+    assert attempts == 2
+    assert isinstance(r.session.capture_error, TimeoutError)
+    await r.close()
+    s.disconnect.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_worker_deadline_preserves_checkpoint_without_retryable_dependency_error() -> None:
+    from responses_api_agents.nooa_agent.result import is_transient_infrastructure_error
+
+    r, s = runner()
+    s.files[r.directory + "/cleanup.json"] = json.dumps(cleanup_receipt(timed_out=True))
+    s.files[r.directory + "/checkpoint.json"] = checkpoint_artifact().model_dump_json()
+    with pytest.raises(NOOARunFailure, match="worker exceeded its execution deadline") as caught:
+        await r.run(payload().request)
+    assert not is_transient_infrastructure_error(caught.value)
+    assert caught.value.result.termination_reason is NOOATerminationReason.INFRASTRUCTURE_ERROR
+    assert caught.value.result.episode.response.status == "failed"
+    assert caught.value.result.episode.response.output == checkpoint_artifact().response.output
+    assert "partial_checkpoint" in {gap.code for gap in r.observations.gaps}
+    await r.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("receipt", [cleanup_receipt(return_code=137), cleanup_receipt(error="startup failed")])
+async def test_failed_worker_retains_bounded_diagnostics_gap(receipt: CleanupReceipt) -> None:
+    r, s = runner()
+    complete_files(r, s)
+    s.files[r.directory + "/cleanup.json"] = json.dumps(receipt)
+    s.files[r.directory + "/output.log"] = "x" * 2500 + "\nImportError: missing module\x00"
+    with pytest.raises(NOOARunFailure) as caught:
+        await r.run(payload().request)
+    gap = next(
+        gap for gap in caught.value.result.episode.observations.gaps if gap.code == "sandbox_worker_diagnostics"
+    )
+    assert len(gap.detail) <= 2000
+    assert gap.detail.endswith("\nImportError: missing module")
+    assert "\x00" not in gap.detail
+    await r.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_without_any_artifact_preserves_bare_cancellation() -> None:
+    r, s = runner()
+    active = asyncio.Event()
+
+    async def execute(command: str, **kwargs) -> SandboxExecResult:
+        if "process_supervisor.py" in command:
+            active.set()
+            await asyncio.Event().wait()
+        elif command.startswith("[ -f "):
+            s.files[r.directory + "/cleanup.json"] = json.dumps(cleanup_receipt())
+        return SandboxExecResult("", "", 0)
+
+    s.exec.side_effect = execute
+    task = asyncio.create_task(r.run(payload().request))
+    await asyncio.wait_for(active.wait(), timeout=1)
+    task.cancel("request cancelled")
+    with pytest.raises(asyncio.CancelledError, match="request cancelled") as caught:
+        await asyncio.wait_for(task, timeout=1)
+    assert not hasattr(caught.value, "nooa_result")
+    assert r.artifact is None and r.checkpoint is None
+    assert {gap.code for gap in r.observations.gaps} == {"sandbox_result_unavailable"}
+    await r.close()
     s.disconnect.assert_awaited_once()

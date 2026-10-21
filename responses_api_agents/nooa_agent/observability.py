@@ -225,8 +225,9 @@ class GymTraceHooks:
         task_id: str,
         rollout_id: str,
         default_model: str = "nooa",
+        partial: bool = False,
     ) -> tuple[AgentEpisode, TrajectoryRecord]:
-        """Project captured facts without interpreting the invocation adapter."""
+        """Project evidence, omitting pending tool outputs only in partial snapshots."""
 
         invocations = {key: record.model_copy(deep=True) for key, record in self._invocations.items()}
         # Adapter cleanup can mark an existing exception after after_agent_call.
@@ -307,7 +308,7 @@ class GymTraceHooks:
                     )
                     invocation.conversation.append(call_item)
                     output.append(call_item)
-                if record.completed_at is None:
+                if partial and record.completed_at is None:
                     # A sibling tool may still be running at a checkpoint. Keep
                     # its start event without inventing a completed/null output.
                     record.output = None
