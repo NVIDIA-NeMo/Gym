@@ -1,12 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""The shared mock-tool server with a synthetic backend, loaded by import path as a plugin's backend is."""
+"""The shared mock-tool server with the example backend, loaded by import path as a plugin's backend is."""
 
 import json
+import runpy
 import sys
-from pathlib import Path
 from types import ModuleType
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -14,9 +14,12 @@ from pydantic import ValidationError
 
 from nemo_gym.mcp_auto_exposure import harvest_tools
 from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.server_utils import ServerClient, SimpleServer
 from resources_servers.partner_if import mock_tools_app as api
+from resources_servers.partner_if.evidence import MAX_EVIDENCE_CHARS
+from resources_servers.partner_if.example_tools import NotesBackend
 from resources_servers.partner_if.tests.test_app import response
+from resources_servers.partner_if.tests.test_configs import server_config
 
 
 TOOLS = [
@@ -31,31 +34,15 @@ TOOLS = [
 ]
 
 
-class NotesBackend:
-    """Reads packaged notes and appends to a per-session log, which is the episode's artifact."""
+class StepCappedNotes(NotesBackend):
+    """A backend whose episodes may end on a tool result, like a build turn cut off at the step cap."""
 
-    requires_final_answer = True
+    requires_final_answer = False
 
-    def __init__(self, fixture_path: Path):
-        self.notes = json.loads(fixture_path.read_text())
 
-    def tools(self, row):
-        return {tool["name"]: tool for tool in row["responses_create_params"]["tools"]}
-
-    def new_state(self, row):
-        return []
-
+class FailingNotes(NotesBackend):
     def call(self, state, name, arguments):
-        if name == "lookup":
-            return {"note": self.notes.get(arguments.get("key"))}
-        state.append(str(arguments.get("text", "")))
-        return "Appended"
-
-    def artifacts(self, state):
-        return {"log": "\n".join(state)}
-
-    def receipts(self, state):
-        return {"appended": list(state)}
+        raise RuntimeError("emulator bug")
 
 
 def row():
@@ -93,7 +80,7 @@ def row():
 @pytest.fixture
 def plugin(monkeypatch):
     module = ModuleType("synthetic_tools")
-    module.NotesBackend = NotesBackend
+    module.NotesBackend, module.StepCappedNotes, module.FailingNotes = NotesBackend, StepCappedNotes, FailingNotes
     monkeypatch.setitem(sys.modules, module.__name__, module)
     return module
 
@@ -117,16 +104,19 @@ def make_server(tmp_path, backend="synthetic_tools:NotesBackend", task=None, **c
     )
 
 
-@pytest.fixture
-def server(tmp_path, plugin):
-    task = row()
-    seed = {
-        "resources_session_id": "session-one",
+def seed_for(task, session="session-one"):
+    return {
+        "resources_session_id": session,
         "episode_id": {"rollout_id": "r", "attempt": 0},
         "task_id": {"taskset": "synthetic", "task_id": "smoke"},
         "task_data": {"verifier_metadata": task["verifier_metadata"]},
     }
-    return make_server(tmp_path), task, seed
+
+
+@pytest.fixture
+def server(tmp_path, plugin):
+    task = row()
+    return make_server(tmp_path), task, seed_for(task)
 
 
 def test_backend_is_a_class_named_by_import_path(tmp_path, plugin):
@@ -143,41 +133,39 @@ def test_process_local_sessions_require_a_single_worker(tmp_path, plugin):
     make_server(tmp_path, num_workers=1)
 
 
-class ServiceBackend(NotesBackend):
-    """Serves its whole tool family whatever a task advertises, as a search service would."""
+def test_episodes_are_not_exported_so_checkpoints_restart_them():
+    assert (api.MockToolsResourcesServer.checkpoint_mode, api.MockToolsResourcesServer.checkpoint_verify) == (
+        "restart_only",
+        "wait",
+    )
 
-    def tools(self, row):
-        return {tool["name"]: tool for tool in TOOLS}
+
+@pytest.mark.parametrize(
+    "change,error",
+    [
+        (lambda task: task["responses_create_params"].update(tools=[*TOOLS, TOOLS[0] | {"name": "erase"}]), "erase"),
+        (lambda task: task["verifier_metadata"]["partner_if"]["rubrics"][0]["verifier"].update(id="x.v1"), "x.v1"),
+        (
+            lambda task: task["verifier_metadata"]["partner_if"]["rubrics"][0]["verifier"]["params"].pop("literal"),
+            "literal",
+        ),
+    ],
+)
+def test_tasks_the_server_cannot_serve_or_grade_fail_at_startup(tmp_path, plugin, change, error):
+    task = row()
+    change(task)
+    with pytest.raises(ValueError, match=error):
+        make_server(tmp_path, task=task)
 
 
 def test_a_task_can_call_only_the_tools_it_advertises(tmp_path, plugin):
-    plugin.ServiceBackend = ServiceBackend
     task = row()
     task["responses_create_params"]["tools"] = TOOLS[:1]
-    (tmp_path / "tasks.jsonl").write_text(json.dumps(task) + "\n")
-    (tmp_path / "notes.json").write_text(json.dumps({"greeting": "HELLO"}))
-    resource = api.MockToolsResourcesServer(
-        config=api.MockToolsServerConfig(
-            host="127.0.0.1",
-            port=8001,
-            name="notes",
-            entrypoint="mock_tools_app.py",
-            backend="synthetic_tools:ServiceBackend",
-            fixture_path=tmp_path / "notes.json",
-            tasks_path=tmp_path / "tasks.jsonl",
-            judge_model_server={"type": "responses_api_models", "name": "judge"},
-        ),
-        server_client=MagicMock(spec=ServerClient),
-    )
+    resource = make_server(tmp_path, task=task)
     app = resource.setup_webserver()
     assert set(harvest_tools(app, resource)) == {"lookup"}
     client = TestClient(app)
-    seed = {
-        "resources_session_id": "session-one",
-        "episode_id": {"rollout_id": "r", "attempt": 0},
-        "task_id": {"taskset": "synthetic", "task_id": "smoke"},
-        "task_data": {"verifier_metadata": task["verifier_metadata"]},
-    }
+    seed = seed_for(task)
     assert client.post("/seed_session", json=seed).status_code == 200
     assert resource.mcp_allowed_tools_for_session(seed["task_data"]) == ["lookup"]
     assert client.post("/lookup", json={"key": "greeting"}).json() == {"note": "HELLO"}
@@ -237,9 +225,9 @@ def episode(events, **overrides):
     return NeMoGymResponse.model_validate(response("HELLO").model_dump() | {"output": events} | overrides)
 
 
-def evidence(raw, records, *, requires_final_answer=True, artifacts=None):
+def evidence(raw, records, *, artifacts=None):
     params = {"input": [{"role": "user", "content": "Look up"}], "tools": TOOLS}
-    return api.to_evidence(params, raw, records, requires_final_answer=requires_final_answer, artifacts=artifacts)
+    return api.to_evidence(params, raw, records, artifacts=artifacts)
 
 
 def test_evidence_correlates_parallel_calls_and_uses_only_the_final_answer():
@@ -295,11 +283,10 @@ def test_unknown_tools_and_malformed_arguments_are_visible_actor_errors():
     assert not evidence(episode(events), []).trajectory_error
 
 
-def test_backends_decide_whether_a_turn_may_end_on_a_tool_result():
+def test_a_turn_ending_on_a_tool_result_is_complete_evidence():
     records = [api.RecordedToolCall(name="append", arguments={"text": "HELLO"}, output="Appended")]
     events = [call("append", {"text": "HELLO"}), output("Appended")]
-    assert evidence(episode(events), records).trajectory_error
-    bundle = evidence(episode(events), records, requires_final_answer=False, artifacts={"log": "HELLO"})
+    bundle = evidence(episode(events), records, artifacts={"log": "HELLO"})
     assert bundle.trajectory_error is None and bundle.answer == ""
     assert bundle.artifact_text("log") == "HELLO"
 
@@ -316,15 +303,15 @@ def test_output_cap_cutoff_ends_a_turn_without_a_final_answer_like_the_step_cap(
         call("append", {"text": "BYE"}, "call2"),
         call("lookup", {"key": "greeting"}, "call3") | {"status": "in_progress"},
     ]
-    bundle = evidence(episode(events, **CUTOFF), records, requires_final_answer=False)
+    bundle = evidence(episode(events, **CUTOFF), records)
     assert bundle.trajectory_error is None
     assert [event.call_id for event in bundle.trajectory if event.kind == "tool_call"] == ["call1"]
     cut_before_any_result = episode([call("append", {"text": "HELLO"}) | {"status": "in_progress"}], **CUTOFF)
-    bundle = evidence(cut_before_any_result, [], requires_final_answer=False)
+    bundle = evidence(cut_before_any_result, [])
     assert bundle.trajectory_error is None and bundle.trajectory == []
 
 
-@pytest.mark.parametrize("case", ["other_reason", "answer_required", "executed_call_hidden"])
+@pytest.mark.parametrize("case", ["other_reason", "executed_call_hidden"])
 def test_other_incomplete_turns_stay_unscorable(case):
     records = [api.RecordedToolCall(name="lookup", arguments={"key": "greeting"}, output={"note": "HELLO"})]
     events = [call(), output({"note": "HELLO"})]
@@ -334,7 +321,7 @@ def test_other_incomplete_turns_stay_unscorable(case):
         records.append(api.RecordedToolCall(name="append", arguments={"text": "HELLO"}, output="Appended"))
         events.append(call("append", {"text": "HELLO"}, "call2"))
     raw = episode(events, status="incomplete", incomplete_details=details)
-    assert evidence(raw, records, requires_final_answer=case == "answer_required").trajectory_error
+    assert evidence(raw, records).trajectory_error
 
 
 def test_http_verify_grades_backend_artifacts_and_returns_its_receipts(server):
@@ -380,3 +367,118 @@ def test_uuid_rule_checks_assistant_messages_before_the_last_tool_result(tmp_pat
     body = client.post("/verify", json=task | {"response": episode(events).model_dump(mode="json")}).json()
     assert body["grading_result"]["items"][0]["raw_passed"] is False
     assert body["reward"] == 0 and body["mask_sample"] is False
+
+
+REASONING_ONLY = {"status": "incomplete", "metadata": {"ng_termination_reason": "incomplete_reasoning"}}
+
+
+@pytest.mark.parametrize(
+    "ending,overrides,kind",
+    [
+        ([], {}, "partner_if:no_answer"),
+        ([answer(" ")], {}, "partner_if:no_answer"),
+        ([{"type": "reasoning", "id": "r", "summary": []}], REASONING_ONLY, "partner_if:no_answer"),
+        ([call("append", {"text": "BYE"}, "call3") | {"status": "in_progress"}], CUTOFF, "partner_if:truncated"),
+    ],
+)
+def test_an_episode_without_its_required_final_answer_fails_every_item(tmp_path, plugin, ending, overrides, kind):
+    task = row()
+    task["verifier_metadata"]["partner_if"]["rubrics"].append(
+        {"id": "kept", "constraint": "Never erases the log.", "verifier": {"id": "llm_judge_v1"}}
+    )
+    client = TestClient(make_server(tmp_path, task=task).setup_webserver())
+    client.post("/seed_session", json=seed_for(task))
+    appended = client.post("/append", json={"text": "HELLO"}).text
+    events = [call("append", {"text": "HELLO"}), output(appended), *ending]
+    raw = episode(events, **overrides).model_dump(mode="json")
+    with patch("resources_servers.partner_if.grading_service.call_judge", new_callable=AsyncMock) as judge:
+        body = client.post("/verify", json=task | {"response": raw}).json()
+    judge.assert_not_called()  # So the prohibition cannot pass by omission.
+    assert body["reward"] == 0 and body["mask_sample"] is False and body["failure_kind"] == kind
+    assert [item["raw_passed"] for item in body["grading_result"]["items"]] == [False, False, False]
+
+
+def test_a_backend_that_needs_no_final_answer_grades_the_completed_exchanges(tmp_path, plugin):
+    task = row()
+    client = TestClient(make_server(tmp_path, backend="synthetic_tools:StepCappedNotes").setup_webserver())
+    client.post("/seed_session", json=seed_for(task))
+    appended = client.post("/append", json={"text": "HELLO"}).text
+    raw = episode([call("append", {"text": "HELLO"}), output(appended)]).model_dump(mode="json")
+    body = client.post("/verify", json=task | {"response": raw}).json()
+    assert body["mask_sample"] is False and body["failure_kind"] is None
+    assert {item["id"]: item["passed"] for item in body["grading_result"]["items"]} == {
+        "logged": True,
+        "answered": False,
+    }
+
+
+def test_a_tool_call_error_is_the_models_call_and_keeps_its_receipt(server):
+    resource, task, seed = server
+    client = TestClient(resource.setup_webserver())
+    client.post("/seed_session", json=seed)
+    missing = client.post("/lookup", json={"key": "missing"})
+    assert missing.status_code == 200 and missing.json() == {"error": "No note has the key 'missing'"}
+    events = [call(args={"key": "missing"}), output(missing.json()), answer()]
+    body = client.post("/verify", json=task | {"response": episode(events).model_dump(mode="json")}).json()
+    assert body["mask_sample"] is False and body["tool_calls"][0]["output"] == missing.json()
+
+
+def test_a_tool_call_error_is_caught_when_gym_runs_the_server_as_a_script(monkeypatch):
+    # Gym starts `python mock_tools_app.py`, so the running server's classes are __main__'s.
+    monkeypatch.setattr(SimpleServer, "run_webserver", MagicMock())
+    script = runpy.run_path(api.__file__, run_name="__main__")
+    config = script["MockToolsServerConfig"].model_validate(server_config("mock_tools.yaml", "partner_if_mock_tools"))
+    resource = script["MockToolsResourcesServer"](config=config, server_client=MagicMock(spec=ServerClient))
+    client = TestClient(resource.setup_webserver())
+    task = json.loads(config.tasks_path.read_text().splitlines()[0])
+    assert client.post("/seed_session", json=seed_for(task)).status_code == 200
+    missing = client.post("/lookup", json={"key": "missing"})
+    assert missing.status_code == 200 and missing.json() == {"error": "No note has the key 'missing'"}
+    assert [call.model_dump() for call in resource._episodes["session-one"].calls] == [
+        {"name": "lookup", "arguments": {"key": "missing"}, "output": missing.json()}
+    ]
+
+
+def test_other_backend_failures_are_logged_infrastructure_errors(tmp_path, plugin, caplog):
+    resource = make_server(tmp_path, backend="synthetic_tools:FailingNotes")
+    client = TestClient(resource.setup_webserver(), raise_server_exceptions=False)
+    client.post("/seed_session", json=seed_for(row()))
+    assert client.post("/lookup", json={"key": "greeting"}).status_code == 500
+    assert resource._episodes["session-one"].calls == []
+    assert "synthetic_tools:FailingNotes failed in lookup" in caplog.text
+
+
+async def test_a_retired_session_frees_its_episode_and_stays_closed(server):
+    resource, _, seed = server
+    client = TestClient(resource.setup_webserver())
+    client.post("/seed_session", json=seed)
+    await resource.retire_session_state("session-one")
+    assert "session-one" not in resource._episodes
+    assert client.post("/seed_session", json=seed).status_code == 409
+
+
+def test_an_unsigned_contract_is_masked_rather_than_rejected(tmp_path, plugin):
+    task = row()
+    task["verifier_metadata"]["partner_if"]["audit_signoff"] = False
+    client = TestClient(make_server(tmp_path, task=task).setup_webserver())
+    client.post("/seed_session", json=seed_for(task))
+    raw = episode([answer()]).model_dump(mode="json")
+    body = client.post("/verify", json=task | {"response": raw}).json()
+    assert body["mask_sample"] and body["failure_kind"] == "partner_if:unsigned_contract"
+    assert body["if_result"]["status"] == "unscorable" and body["grading_result"] is None
+
+
+def test_an_oversized_artifact_is_a_capture_error_for_the_items_that_need_it(server):
+    resource, task, seed = server
+    client = TestClient(resource.setup_webserver())
+    client.post("/seed_session", json=seed)
+    text = "x" * (MAX_EVIDENCE_CHARS + 1)
+    appended = client.post("/append", json={"text": text}).text
+    events = [call("append", {"text": text}), output(appended), answer()]
+    body = client.post("/verify", json=task | {"response": episode(events).model_dump(mode="json")}).json()
+    assert body["mask_sample"] and body["failure_kind"] == "partner_if:evidence_too_large"
+    assert body["failure_reason"] == f"Artifact log exceeds {MAX_EVIDENCE_CHARS:,} characters"
+    assert {item["id"]: item["raw_passed"] for item in body["grading_result"]["items"]} == {
+        "logged": None,
+        "answered": True,
+    }

@@ -156,13 +156,32 @@ def test_judge_requests_object_mode_through_the_real_gym_converter():
     from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
     from nemo_gym.responses_converter import ResponsesConverter
 
-    request = NeMoGymResponseCreateParamsNonStreaming.model_validate(
-        llm.request_payload(rubric(), EvidenceBundle(answer="HELLO"), max_tokens=2048, temperature=0)
-    )
+    configured = NeMoGymResponseCreateParamsNonStreaming(input=[], max_output_tokens=2048, temperature=0, top_p=0.5)
+    payload = llm.request_payload(rubric(), EvidenceBundle(answer="HELLO"), configured)
+    assert (payload["max_output_tokens"], payload["temperature"], payload["top_p"]) == (2048, 0, 0.5)
+    request = NeMoGymResponseCreateParamsNonStreaming.model_validate(payload)
     converted = ResponsesConverter(return_token_id_information=False).responses_to_chat_completion_create_params(
         request
     )
     assert converted.response_format == {"type": "json_object"}
+
+
+def test_the_judge_and_artifact_limits_count_the_same_evidence_characters():
+    from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+    from resources_servers.partner_if.evidence import MAX_EVIDENCE_CHARS, EvidenceTooLarge
+
+    configured = NeMoGymResponseCreateParamsNonStreaming(input=[])
+    # Many short lines inflate the JSON payload well past the limit, but not the evidence itself.
+    largest = EvidenceBundle(artifacts={"log": {"status": "present", "text": "x\n" * (MAX_EVIDENCE_CHARS // 2)}})
+    assert largest.artifact_text("log") and llm.request_payload(rubric(), largest, configured)
+    oversized = EvidenceBundle(answer="x", artifacts=largest.artifacts)
+    with pytest.raises(EvidenceTooLarge, match="Judge evidence exceeds"):
+        llm.request_payload(rubric(), oversized, configured)
+    beyond = EvidenceBundle(artifacts={"log": {"status": "present", "text": "x" * (MAX_EVIDENCE_CHARS + 1)}})
+    with pytest.raises(EvidenceTooLarge, match="Artifact log exceeds"):
+        beyond.artifact_text("log")
+    # An artifact over the limit is not judge evidence for items that do not need it.
+    assert "artifact:log" not in llm.payload(rubric(), beyond)["evidence_sources"]
 
 
 @pytest.mark.parametrize(

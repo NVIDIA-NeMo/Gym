@@ -39,6 +39,7 @@ from harbor.environments.base import BaseEnvironment, ExecResult
 from harbor.models.environment_type import EnvironmentType
 from harbor.models.trial.paths import EnvironmentPaths
 
+from nemo_gym.global_config import GlobalConfigDictParserConfig
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxSpec,
@@ -46,10 +47,15 @@ from nemo_gym.sandbox import (
     resolve_provider_metadata,
     rewrite_image,
 )
+from nemo_gym.server_utils import get_global_aiohttp_client
 
 
 # The sandbox-side scratch directory used for tar-based directory transfer.
 _TRANSFER_DIR = "/tmp"
+
+# Newer Harbor releases, 0.24 among them, run a command as a user and merge persistent and scoped
+# variables (such as AgentConfig.env) into its environment. The pinned release has neither.
+_HARBOR_EXEC_CONTEXT = hasattr(BaseEnvironment, "_merge_env")
 
 
 def _cpu_pin_prefix(width: int) -> str:
@@ -237,6 +243,10 @@ class NemoGymSandboxEnvironment(BaseEnvironment):
                 self.environment_name,
             )
 
+        # A bare Ray worker has its own command-line flags, not Gym's. Initialize the HTTP client the
+        # sandbox transport shares from the Gym configuration the worker inherited, or from defaults,
+        # before the first request would parse those flags.
+        get_global_aiohttp_client(GlobalConfigDictParserConfig(skip_load_from_cli=True, skip_load_from_dotenv=True))
         sandbox = AsyncSandbox(
             resolve_provider_config(self._sandbox_provider),
             self._build_spec(),
@@ -276,8 +286,11 @@ class NemoGymSandboxEnvironment(BaseEnvironment):
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         timeout_sec: int | None = None,
+        user: str | int | None = None,
     ) -> ExecResult:
         timeout_s = timeout_sec if timeout_sec is not None else self._default_exec_timeout_s
+        if _HARBOR_EXEC_CONTEXT:
+            env, user = self._merge_env(env), self._resolve_user(user)
         # Harbor's docker/daytona backends use an interactive bash, so
         # .bashrc-based task setups (conda, pyenv, PATH) must behave the same.
         if self._exec_shell:
@@ -291,6 +304,7 @@ class NemoGymSandboxEnvironment(BaseEnvironment):
             cwd=cwd,
             env=env,
             timeout_s=timeout_s,
+            user=user,
         )
         return ExecResult(
             stdout=result.stdout,

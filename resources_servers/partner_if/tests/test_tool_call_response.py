@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from resources_servers.partner_if.app import VerifyRequest
-from resources_servers.partner_if.package import validate_rows
 from resources_servers.partner_if.tests.test_app import response, server
 
 
@@ -79,9 +78,7 @@ def judgment(passed, source=None):
 
 
 async def test_tool_only_response_reaches_shared_judge_with_typed_arguments():
-    row = tool_row()
-    assert validate_rows([row], allow_synthetic=True) == [row]
-    body = VerifyRequest.model_validate({**row, "response": response(output=[function_call()]).model_dump()})
+    body = VerifyRequest.model_validate({**tool_row(), "response": response(output=[function_call()]).model_dump()})
     with patch(
         "resources_servers.partner_if.grading_service.call_judge",
         new_callable=AsyncMock,
@@ -99,10 +96,8 @@ async def test_tool_only_response_reaches_shared_judge_with_typed_arguments():
     assert result.grading_result.items[0].quotes[0].quote == "hello"
 
 
-@pytest.mark.parametrize(
-    "output", [[], response("I cannot do that.").model_dump()["output"], [function_call("not JSON")]]
-)
-async def test_completed_omission_or_malformed_call_is_judged_not_masked(output):
+@pytest.mark.parametrize("output", [response("I cannot do that.").model_dump()["output"], [function_call("not JSON")]])
+async def test_a_refusal_or_malformed_call_is_judged_not_masked(output):
     body = VerifyRequest.model_validate({**tool_row(), "response": response(output=output).model_dump()})
     with patch(
         "resources_servers.partner_if.grading_service.call_judge",
@@ -118,33 +113,47 @@ async def test_completed_omission_or_malformed_call_is_judged_not_masked(output)
 
 
 @pytest.mark.parametrize(
-    "output,reason",
-    [([], "empty_output"), ([{"type": "reasoning", "id": "r1", "summary": []}], "incomplete_reasoning")],
+    "override,kind",
+    [
+        ({"output": []}, "partner_if:no_answer"),
+        ({"output": response(" ").model_dump()["output"]}, "partner_if:no_answer"),
+        # Simple Agent marks a completed reply without a message or call as incomplete; the reply is still complete.
+        (
+            {"output": [], "status": "incomplete", "metadata": {"ng_termination_reason": "empty_output"}},
+            "partner_if:no_answer",
+        ),
+        (
+            {
+                "output": [{"type": "reasoning", "id": "r1", "summary": []}],
+                "status": "incomplete",
+                "metadata": {"ng_termination_reason": "incomplete_reasoning"},
+            },
+            "partner_if:no_answer",
+        ),
+        ({"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}}, "partner_if:truncated"),
+        (
+            {
+                "status": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "metadata": {"ng_termination_reason": "empty_output"},
+            },
+            "partner_if:truncated",
+        ),
+    ],
 )
-async def test_reply_the_agent_relabeled_incomplete_is_judged_as_an_omission(output, reason):
-    """Simple Agent marks a completed reply without a message or call as incomplete; the reply is still complete."""
-    relabeled = response(output=output, status="incomplete", metadata={"ng_termination_reason": reason})
-    body = VerifyRequest.model_validate({**tool_row(), "response": relabeled.model_dump()})
-    with patch(
-        "resources_servers.partner_if.grading_service.call_judge",
-        new_callable=AsyncMock,
-        return_value=judgment(False),
-    ):
+async def test_a_reply_without_an_answer_or_call_fails_every_item_without_the_judge(override, kind):
+    body = VerifyRequest.model_validate({**tool_row(), "response": response(**override).model_dump()})
+    with patch("resources_servers.partner_if.grading_service.call_judge", new_callable=AsyncMock) as call:
         result = await server().verify(body)
+    call.assert_not_called()
     assert result.reward == 0 and not result.mask_sample
-    assert result.if_result.status == "scored"
+    assert result.failure_kind == kind and result.if_result.status == "scored"
 
 
 @pytest.mark.parametrize(
     "override",
     [
-        {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}},
         {"status": "incomplete", "metadata": {"ng_termination_reason": "max_steps"}},
-        {
-            "status": "incomplete",
-            "incomplete_details": {"reason": "max_output_tokens"},
-            "metadata": {"ng_termination_reason": "empty_output"},
-        },
         {"output": [function_call() | {"status": "in_progress"}]},
         {"output": [{"type": "function_call_output", "call_id": "c1", "output": "not actually executed"}]},
     ],

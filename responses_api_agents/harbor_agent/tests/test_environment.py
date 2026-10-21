@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Optional
 
 import pytest
+from harbor.environments.base import BaseEnvironment
 from harbor.models.task.config import EnvironmentConfig as TaskEnvironmentConfig
 from harbor.models.trial.paths import TrialPaths
 
@@ -25,6 +26,8 @@ from responses_api_agents.harbor_agent.custom_envs.nemo_gym_sandbox.environment 
 
 
 PROVIDER_NAME = "nemo_gym_sandbox_test_provider"
+# Harbor 0.24 runs commands as a user with merged environments; the pinned release predates both.
+HARBOR_EXEC_CONTEXT = hasattr(BaseEnvironment, "_merge_env")
 
 
 class FakeProvider:
@@ -222,6 +225,31 @@ class TestStartStop:
         finally:
             FakeProvider.__init__ = original_init
 
+    @pytest.mark.asyncio
+    async def test_start_initializes_http_without_parsing_ray_worker_arguments(self, tmp_path, monkeypatch):
+        import sys
+
+        import nemo_gym.global_config as global_config
+        import nemo_gym.server_utils as server_utils
+
+        monkeypatch.setattr(global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
+        monkeypatch.delenv("NEMO_GYM_CONFIG_DICT", raising=False)
+        monkeypatch.setattr(sys, "argv", ["default_worker.py", "--node-ip-address=192.0.2.1"])
+
+        def no_worker_cli(_self):
+            raise AssertionError("Ray's arguments are not Gym command-line configuration")
+
+        monkeypatch.setattr(global_config.GlobalConfigDictParser, "parse_global_config_dict_from_cli", no_worker_cli)
+        env = _make_environment(tmp_path)
+        try:
+            await env.start(force_build=False)
+            # The SDK's aiohttp transport asks for this shared client on its first request.
+            assert server_utils._GLOBAL_AIOHTTP_CLIENT is not None
+        finally:
+            if server_utils._GLOBAL_AIOHTTP_CLIENT is not None:
+                await server_utils._GLOBAL_AIOHTTP_CLIENT.close()
+
 
 class TestExec:
     @pytest.mark.asyncio
@@ -238,6 +266,25 @@ class TestExec:
         assert call["cwd"] == "/app"
         assert call["env"] == {"A": "1"}
         assert call["timeout_s"] == 42
+        assert call["user"] is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(not HARBOR_EXEC_CONTEXT, reason="this Harbor release has no exec user or scoped environment")
+    async def test_exec_honours_harbor_user_and_merged_environment(self, tmp_path):
+        env = _make_environment(tmp_path, persistent_env={"BASE": "base"})
+        await env.start(force_build=False)
+        provider = _provider()
+
+        # Persistent < per-command < scoped (AgentConfig.env during the agent phases).
+        with env.scoped_exec_env({"LLM_API_KEY": "placeholder", "BASE": "scoped"}):
+            await env.exec("true", env={"BASE": "per-command"}, user="root")
+        call = provider.exec_calls[-1]
+        assert (call["user"], call["env"]) == ("root", {"BASE": "scoped", "LLM_API_KEY": "placeholder"})
+
+        with env.with_default_user("agent"):
+            await env.exec("true")
+        call = provider.exec_calls[-1]
+        assert (call["user"], call["env"]) == ("agent", {"BASE": "base"})
 
     @pytest.mark.asyncio
     async def test_exec_wraps_commands_in_interactive_bash_by_default(self, tmp_path):

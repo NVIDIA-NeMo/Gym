@@ -4,9 +4,20 @@
 
 import json
 
-from pydantic import JsonValue
+from pydantic import Field, JsonValue
 
-from resources_servers.partner_if.evidence import Artifact, VisibleEvent
+from resources_servers.partner_if.evidence import Artifact, EvidenceBundle, VisibleEvent
+from resources_servers.partner_if.grading_contract import StrictModel
+
+
+class LiveAgentCapture(StrictModel):
+    """What a live agent captured outside its response; it sends this to `/verify` as `verification_input`."""
+
+    # The input the harness gave the actor, which must be the row's frozen input.
+    input: list[dict[str, JsonValue]]
+    documents: dict[str, str] = Field(default_factory=dict)
+    # Capture receipts by artifact name, read by captured_artifact.
+    artifacts: dict[str, dict[str, JsonValue]] = Field(default_factory=dict)
 
 
 def _text(value: JsonValue) -> str:
@@ -84,3 +95,23 @@ def captured_artifact(receipt: dict[str, JsonValue]) -> Artifact:
     if receipt.get("exists") is True and isinstance(receipt.get("text"), str):
         return Artifact(status="present", text=receipt["text"])
     return Artifact(status="error", error="Missing or invalid artifact capture receipt")
+
+
+def live_agent_evidence(
+    params: dict[str, JsonValue], output: list[dict[str, JsonValue]], capture: LiveAgentCapture | None
+) -> EvidenceBundle:
+    """A live agent's visible trajectory, with the documents and artifacts it captured."""
+    if capture is None:
+        raise ValueError("A live_agent row needs the evidence its agent captured")
+    if capture.input != params["input"]:
+        raise ValueError("The actor's input differs from the frozen row")
+    events = visible_events(output)
+    return EvidenceBundle(
+        context=params["input"],
+        instructions=params.get("instructions"),
+        tools=params.get("tools") or [],
+        documents=capture.documents,
+        trajectory=events,
+        answer="\n".join(event.text for event in events if event.kind == "assistant"),
+        artifacts={name: captured_artifact(receipt) for name, receipt in capture.artifacts.items()},
+    )

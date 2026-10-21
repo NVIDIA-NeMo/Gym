@@ -3,23 +3,27 @@
 """Scale-SWE lifecycle with visible-agent evidence and the shared IF grader.
 
 The native SWE verdict remains a separate diagnostic; it never supplies IF points.
-This adapter neither implements tools nor changes the agent harness.
+This adapter neither implements tools nor changes the agent harness: the agent's own
+config sets the actor's system prompt and any tool-description additions, and this
+server's config repeats them for the judge.
 """
 
 import asyncio
-import json
 
 from fastapi import HTTPException, Request
 from pydantic import Field, JsonValue, PrivateAttr
 
 from nemo_gym.config_types import ModelServerRef
-from resources_servers.partner_if.app import VerifyResponse
+from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.server_utils import SESSION_ID_KEY
+from resources_servers.partner_if.app import UNSIGNED, VerifyResponse
 from resources_servers.partner_if.checks import register_modules
 from resources_servers.partner_if.evidence import EvidenceBundle
+from resources_servers.partner_if.grading_contract import UNSIGNED_CONTRACT
 from resources_servers.partner_if.grading_service import GradeRequest, grade
 from resources_servers.partner_if.metrics import PartnerIFMetricsMixin
 from resources_servers.partner_if.native_evidence import visible_events
-from resources_servers.partner_if.receipt import scoring_fields
+from resources_servers.partner_if.receipt import masked_fields, scoring_fields
 from resources_servers.partner_if.schema import VerifierMetadata
 from resources_servers.scale_swe.app import (
     ScaleSWEResourcesServer,
@@ -32,34 +36,18 @@ from resources_servers.scale_swe.app import (
 
 class SWEIFConfig(ScaleSWEResourcesServerConfig):
     judge_model_server: ModelServerRef
+    # The system prompt the agent's config gives the actor; the judge reads it as the instructions.
     actor_system_prompt: str = Field(min_length=1)
-    judge_max_output_tokens: int = Field(default=32768, gt=0)
-    judge_temperature: float = Field(default=0.0, ge=0, le=2)
+    judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming = Field(
+        default_factory=lambda: NeMoGymResponseCreateParamsNonStreaming(
+            input=[], max_output_tokens=32768, temperature=0
+        )
+    )
     judge_max_concurrency: int = Field(default=2, gt=0)
     allow_provisional_rubrics: bool = False
+    # Text the agent's config appends to tool descriptions, by tool ID; shown to the judge with the evidence.
     tool_description_additions: dict[str, str] = Field(default_factory=dict)
     task_check_modules: list[str] = Field(default_factory=list)
-
-
-DESCRIPTION_PLUGIN_PATH = "/tmp/nemo-gym-tool-description-additions.mjs"
-
-
-def description_plugin(additions: dict[str, str]) -> str:
-    """Trusted host configuration changes descriptions, never schemas or execution."""
-    return (
-        "const additions = "
-        + json.dumps(additions, ensure_ascii=True)
-        + ";\n"
-        + """
-export const ToolDescriptionAdditions = async () => ({
-  "tool.definition": async (input, output) => {
-    if (Object.hasOwn(additions, input.toolID)) {
-      output.description = (output.description || "") + "\\n\\n" + additions[input.toolID];
-    }
-  }
-});
-"""
-    )
 
 
 class SWEIFSeedResponse(ScaleSWESeedSessionResponse):
@@ -72,7 +60,8 @@ class SWEIFVerifyRequest(ScaleSWEVerifyRequest):
 
 
 class SWEIFVerifyResponse(VerifyResponse):
-    task_outcome: dict[str, JsonValue]
+    # Scale-SWE's own verdict; absent when the rollout is masked before verification.
+    task_outcome: dict[str, JsonValue] | None = None
     task_name: str | None = None
 
 
@@ -109,13 +98,6 @@ class SWEIFResourcesServer(PartnerIFMetricsMixin, ScaleSWEResourcesServer):
         register_modules(self.config.task_check_modules)
         self._judge_semaphore = asyncio.Semaphore(self.config.judge_max_concurrency)
 
-    async def _create_sandbox(self, body, files=None):
-        # Only the actor receives the description-only plugin. The pristine grader
-        # sandbox receives the upstream held-out verification assets unchanged.
-        if files is None and self.config.tool_description_additions:
-            files = {DESCRIPTION_PLUGIN_PATH: description_plugin(self.config.tool_description_additions)}
-        return await super()._create_sandbox(body, files=files)
-
     async def seed_session(self, request: Request, body: ScaleSWESeedSessionRequest) -> SWEIFSeedResponse:
         result = await super().seed_session(request, body)
         # OpenCode reconnects by ID. Its SDK handle must retain the task directory.
@@ -126,7 +108,14 @@ class SWEIFResourcesServer(PartnerIFMetricsMixin, ScaleSWEResourcesServer):
         if contract.evidence_mode != "live_agent":
             raise HTTPException(422, "SWE evidence requires a shared live-agent grading contract")
         if not contract.audit_signoff and not self.config.allow_provisional_rubrics:
-            raise HTTPException(422, "Rubric audit unsigned; opt into provisional scoring explicitly")
+            # No verification sandbox starts; the actor's is released as Scale-SWE's verify would release it.
+            session_id = request.session[SESSION_ID_KEY]
+            self._session_id_to_base_commit.pop(session_id, None)
+            self._session_id_to_pristine_untracked.pop(session_id, None)
+            await self._stop_sandbox(self._session_id_to_sandbox.pop(session_id, None))
+            return SWEIFVerifyResponse.model_validate(
+                body.model_dump() | masked_fields(contract, UNSIGNED_CONTRACT, UNSIGNED)
+            )
         outcome = await super().verify(request, body)
         response = body.response
         evidence = build_swe_evidence(
@@ -144,8 +133,7 @@ class SWEIFResourcesServer(PartnerIFMetricsMixin, ScaleSWEResourcesServer):
             server_client=self.server_client,
             server_name=self.config.judge_model_server.name,
             semaphore=self._judge_semaphore,
-            max_tokens=self.config.judge_max_output_tokens,
-            temperature=self.config.judge_temperature,
+            responses_create_params=self.config.judge_responses_create_params,
         )
         return SWEIFVerifyResponse.model_validate(
             body.model_dump()

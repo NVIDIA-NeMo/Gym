@@ -240,3 +240,58 @@ async def test_metrics_server_failure_is_raised_not_replaced_by_empty_metrics():
     with pytest.raises(RuntimeError, match="503"):
         await adapter.aggregate_metrics(AggregateMetricsRequest(verify_responses=[{"reward": 1.0}]))
     assert [(destination, path) for destination, path, _ in downstream.calls] == [("partner_if", "/aggregate_metrics")]
+
+
+def test_example_config_runs_each_partner_if_example_in_its_own_environment():
+    from nemo_gym import PARENT_DIR
+    from nemo_gym.global_config import (
+        GlobalConfigDictParser,
+        GlobalConfigDictParserConfig,
+        get_first_server_config_dict,
+    )
+    from nemo_gym.server_utils import ServerClient
+
+    module = importlib.import_module("responses_api_agents.partner_if_dispatcher.app")
+    config = GlobalConfigDictParser().parse(
+        GlobalConfigDictParserConfig(
+            initial_global_config_dict=OmegaConf.merge(
+                GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+                {"config_paths": ["responses_api_agents/partner_if_dispatcher/configs/partner_if_dispatcher.yaml"]},
+            ),
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+            offline=True,
+        )
+    )
+    block = get_first_server_config_dict(config, "partner_if_dispatcher")
+    settings = OmegaConf.to_container(block, resolve=True) | {"name": "partner_if_dispatcher"}
+    # Construction checks every route: one environment server that binds one execution agent.
+    dispatcher = module.PartnerIFDispatcher(
+        config=module.PartnerIFDispatcherConfig.model_validate(settings),
+        server_client=ServerClient(
+            head_server_config=BaseServerConfig(host="127.0.0.1", port=11000), global_config_dict=config
+        ),
+    )
+    assert dispatcher._execution_agents == {
+        "partner_if_environment_server": "partner_if_simple_agent",
+        "partner_if_mock_tools_environment_server": "partner_if_mock_tools_simple_agent",
+    }
+    # The example is partner_if's two examples, and each task goes to its own profile's environment.
+    examples = PARENT_DIR / "resources_servers/partner_if/data"
+    rows = [
+        json.loads(line) for line in (PARENT_DIR / settings["datasets"][0]["jsonl_fpath"]).read_text().splitlines()
+    ]
+    assert rows == [
+        json.loads(line)
+        for name in ("example.jsonl", "mock_tools_example.jsonl")
+        for line in (examples / name).read_text().splitlines()
+    ]
+    environments = {
+        "text_response": "partner_if_environment_server",
+        "live_agent": "partner_if_mock_tools_environment_server",
+    }
+    contracts = [row["verifier_metadata"]["partner_if"] for row in rows]
+    assert {task: route["name"] for task, route in settings["task_routes"].items()} == {
+        contract["task_id"]: environments[contract.get("evidence_mode", "text_response")] for contract in contracts
+    }
+    assert settings["resources_server"]["name"] == "partner_if"

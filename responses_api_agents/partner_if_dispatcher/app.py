@@ -3,34 +3,17 @@
 """Route complete mixed-harness benchmark episodes to their existing environments."""
 
 import json
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 
 from fastapi import Body, FastAPI, HTTPException, Request, Response
 from pydantic import Field, PrivateAttr, model_validator
 
+from environment_servers.legacy_agent.app import _relayed_headers
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.config_types import EnvironmentServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
-
-
-_SKIPPED_HEADERS = frozenset(
-    {
-        "connection",
-        "content-encoding",
-        "content-length",
-        "cookie",
-        "host",
-        "keep-alive",
-        "transfer-encoding",
-        "upgrade",
-    }
-)
-
-
-def _relayed_headers(headers: Iterable[tuple[str, str]]) -> list[tuple[str, str]]:
-    return [(name, value) for name, value in headers if name.lower() not in _SKIPPED_HEADERS]
 
 
 class PartnerIFDispatcherConfig(BaseResponsesAPIAgentConfig):

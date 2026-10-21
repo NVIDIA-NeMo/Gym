@@ -86,56 +86,6 @@ class GradingContract(StrictModel):
         return self
 
 
-SHA256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
-
-
-class CurationReceipt(StrictModel):
-    """An immutable evidence artifact; never a curator's local path."""
-
-    uri: Annotated[str, StringConstraints(pattern=r"^https://\S+$")]
-    sha256: SHA256
-
-
-class CurationEvaluation(StrictModel):
-    """Versioned all-IF-pass counts, independent of task completion diagnostics."""
-
-    model: Text
-    passed: int | None = Field(default=None, ge=0, le=3, strict=True)
-    attempts: Literal[3] = 3
-    valid_attempts: int = Field(ge=0, le=3, strict=True)
-    stage: Literal["discovery", "confirmation", "historical"]
-    actor_sha256: SHA256
-    rubric_hash: SHA256
-    settings: dict[str, JsonValue]
-    receipts: list[CurationReceipt] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def complete_count(self):
-        if (self.passed is not None) != (self.valid_attempts == self.attempts):
-            raise ValueError("A passed/3 count requires exactly three valid attempts")
-        if self.valid_attempts and not self.receipts:
-            raise ValueError("Evaluated attempts require evidence receipts")
-        return self
-
-
-class CurationMetadata(StrictModel):
-    """Non-scoring task annotations; never included in actor or judge input."""
-
-    task_id: Text
-    provenance: Literal["original", "modified", "reconstruction"]
-    source: Text
-    bug_ids: list[Text] | None = None
-    related_bug_ids: list[Text] = Field(default_factory=list)
-    source_defect_class: Text | None = None
-    source_case_id: Text | None = None
-    source_task_id: Text | None = None
-    taxonomy_revision: Text
-    rubric_families: dict[Text, list[Text]]
-    rubric_if_types: dict[Text, list[Text]] = Field(default_factory=dict)
-    evaluations: list[CurationEvaluation] = Field(default_factory=list)
-    notes: list[Text] = Field(default_factory=list)
-
-
 class TaskData(StrictModel):
     partner_if: GradingContract = Field(
         json_schema_extra={
@@ -143,22 +93,5 @@ class TaskData(StrictModel):
             "consumed_by": ["verify", "metrics", "provenance"],
         }
     )
-    curation: CurationMetadata | None = Field(default=None, exclude_if=lambda value: value is None)
-
-    @model_validator(mode="after")
-    def curation_identity(self):
-        if self.curation is None:
-            return self
-        if self.curation.task_id != self.partner_if.task_id:
-            raise ValueError("Curation task ID must match the scoring contract")
-        if_ids = {r.id for r in self.partner_if.rubrics if r.dimension == "if"}
-        if set(self.curation.rubric_families) != if_ids or any(
-            not families for families in self.curation.rubric_families.values()
-        ):
-            raise ValueError("Curation families must cover every IF rubric exactly once")
-        if self.curation.rubric_if_types and (
-            set(self.curation.rubric_if_types) != if_ids
-            or any(not types for types in self.curation.rubric_if_types.values())
-        ):
-            raise ValueError("Curated IF types must cover every IF rubric exactly once")
-        return self
+    # A benchmark's own annotations, which it validates. Never read by grading.
+    curation: dict[str, JsonValue] | None = Field(default=None, exclude_if=lambda value: value is None)

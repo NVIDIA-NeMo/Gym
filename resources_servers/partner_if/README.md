@@ -20,6 +20,8 @@ Each row has `responses_create_params` and `verifier_metadata.partner_if`, a
   `analogues` are not.
 - `prerequisites`: optional unscored items that `depends_on` can reference.
 
+`verifier_metadata.curation`, any JSON object, is optional; it is kept but never read.
+
 Built-in verifiers: `llm_judge_v1` (optional `artifacts`: the captured artifacts an item
 needs; omit it to require all), `text_contains_v1` (`source`: `answer` or
 `artifact:<name>`; `literal`) and `text_no_uuid_v1` (fails if the answer or any assistant
@@ -29,36 +31,46 @@ message contains a UUID; tool calls, tool results and context are not checked).
 
 - `reward` is 1 when every IF item passes; `if_result` reports `passed` and `total`.
 - Completion items are reported in `grading_result.dimensions` and never change the reward.
+- A missing or truncated answer fails every item without the judge, so a prohibition cannot
+  pass by omission: reward 0, unmasked, with `failure_kind` `partner_if:no_answer` or
+  `partner_if:truncated`. This covers a blank reply, a reply with only reasoning or no
+  output (including Simple Agent's `empty_output` and `incomplete_reasoning` replies), a
+  tool call in `text_response` or `frozen_tool_history` mode, a reply cut off by the
+  output-token cap, and a mock-tool episode that ends without the final answer its backend
+  requires.
 - A failed judge call raises out of `/verify` into Gym's judge failsafe: the row is masked
   with `failure_kind: judge_failed`, written to the failures file
-  (`<output>_failures.jsonl`) and retried on resume, and
-  `gym eval reverify --judge-failed-only` can recover it. `/grade` returns HTTP 500
-  instead; the Harbor agent sends that row, like any Harbor or grading failure, to the
-  failures file.
-- These rollouts are masked (`mask_sample: true`, `failure_kind: partner_if:unscorable`):
-  - an IF item, or a prerequisite an IF item depends on, is unscorable: the judge reply
-    is invalid or incomplete, a capture the item needs is missing or failed, a live
-    agent's trajectory is incomplete or does not match its tool receipts, or an item it
-    depends on is unscorable;
-  - on this server's `/verify`, the reply is incomplete, or, in `text_response` and
-    `frozen_tool_history` modes, blank or not text-only;
-  - on this server's `/verify`, the input relies on hidden context
-    (`previous_response_id`, `conversation`, `prompt`) or content its mode does not
-    support, including `live_agent` rows.
+  (`<output>_failures.jsonl`) and retried on resume. `gym eval reverify
+  --judge-failed-only` can recover it, except a `live_agent` row, whose evidence is not
+  in the row.
+- These rollouts are masked (`mask_sample: true`), and `failure_reason` gives the reason
+  of the first item that could not be scored or, for a row masked as a whole (such as an
+  unsigned contract, unsupported input or output, a missing `verification_input` or a
+  provider error), the row's own reason:
+  - `partner_if:unscorable`: an IF item, or a prerequisite an IF item depends on, is
+    unscorable: the judge reply is invalid or incomplete, a capture the item needs is
+    missing or failed, a live agent's trajectory is incomplete or does not match its tool
+    receipts, or an item it depends on is unscorable. On this server's `/verify`, also a
+    provider error or another incomplete reply, and input or output its mode does not
+    support, including hidden context (`previous_response_id`, `conversation`, `prompt`),
+    and a `live_agent` row whose `verification_input` is missing or was captured from
+    other input;
+  - `partner_if:evidence_too_large`: evidence over 1,000,000 characters, counted as text:
+    an artifact over the limit for the items that need it, or more evidence in total for
+    the items the judge grades;
+  - `partner_if:unsigned_contract`: a contract with `audit_signoff: false` on a server
+    without `allow_provisional_rubrics: true`. With it, the contract is scored and marked
+    `provisional`.
 - A mock-tool backend that requires no final answer grades a reply cut off by the
   output-token cap on the tool exchanges completed before it.
-- Contracts with `audit_signoff: false` are scored only when the server sets
-  `allow_provisional_rubrics: true`, and their results are marked `provisional`.
-  Otherwise `/verify` masks the rollout, while `/grade`, the mock-tool server and the SWE
-  server reject the request with HTTP 422.
 - Metrics: `all_if_pass` and `if_partial` (the passed fraction of IF items), overall and
   per `origin`. Masked rollouts are left out of them and counted under `coverage/*`;
   rows in the failures file are left out entirely.
 
-Key config fields: `judge_model_server`, `judge_max_output_tokens` (8192),
-`judge_temperature` (0.0), `judge_max_concurrency` (8), `allow_provisional_rubrics`
-(false) and `task_check_modules` ([]). The SWE server defaults to 32768 output tokens
-and a concurrency of 2.
+Key config fields: `judge_model_server`, `judge_responses_create_params` (8192 output
+tokens, temperature 0), `judge_max_concurrency` (8), `allow_provisional_rubrics` (false)
+and `task_check_modules` ([]). The SWE server defaults to 32768 output tokens and a
+concurrency of 2.
 
 ## Task-specific checks and live agents
 
@@ -66,11 +78,25 @@ and a concurrency of 2.
   `checks.Checker` objects, usually `checks.fixed(fn)`. They are registered at startup
   and cannot redefine a registered ID.
 - `mock_tools_app.py` serves the `ToolBackend` named by `backend: module:Class` over
-  `fixture_path` and `tasks_path`. `swe_app.py` (Scale-SWE with an OpenCode agent) and
-  `responses_api_agents/partner_if_harbor_agent` also capture `live_agent` evidence.
-  `responses_api_agents/partner_if_dispatcher` routes each task of a mixed benchmark to
-  its environment. The mock-tool and SWE servers keep sessions in process memory, so
-  `num_workers` must be unset or 1.
+  `fixture_path` and `tasks_path`. It fails at startup when a task advertises a tool the
+  backend does not serve or names a verifier that does not resolve. A backend implements
+  `tool_backend.ToolBackend` and raises `tool_backend.ToolCallError` for the model's
+  mistakes: the model sees `{"error": ...}` and the call is graded; any other exception
+  is an infrastructure error. `configs/mock_tools.yaml`
+  runs the example `example_tools.NotesBackend` on `data/mock_tools_example.jsonl`.
+- `swe_app.py` (Scale-SWE with an OpenCode agent) also captures `live_agent` evidence.
+  It does not change the agent: `actor_system_prompt` and `tool_description_additions`
+  tell the judge the system prompt and tool-description additions that the agent's own
+  config gives the actor. `configs/swe.yaml` validates, but it runs only with a sandbox
+  provider and Scale-SWE rows that carry a `live_agent` contract, which Gym does not ship.
+- An agent that runs a `live_agent` episode itself, such as
+  `responses_api_agents/partner_if_harbor_agent`, sends what it captured to this server's
+  `/verify` as `verification_input` (`native_evidence.LiveAgentCapture`: the input the
+  actor was given, its documents and artifact capture receipts). The server grades it
+  with the response's visible trajectory; rows never carry it.
+- `responses_api_agents/partner_if_dispatcher` routes each task of a mixed benchmark to
+  its environment; its config runs both examples below under one score. The mock-tool
+  and SWE servers keep sessions in process memory, so `num_workers` must be unset or 1.
 
 Relative paths in these configs resolve under `--search-dir` / `NEMO_GYM_EXTRA_ROOTS`
 first, then the working directory, then the Gym root.
@@ -80,7 +106,7 @@ first, then the working directory, then the Gym root.
 ```bash
 gym env start --resources-server partner_if \
     +policy_base_url=... +policy_api_key=... +policy_model_name=... \
-    +partner_if_judge_base_url=... +partner_if_judge_api_key=... +partner_if_judge_model_name=...
+    +judge_base_url=... +judge_api_key=... +judge_model_name=...
 
 gym eval run --no-serve --agent partner_if_simple_agent \
     --input resources_servers/partner_if/data/example.jsonl \
@@ -89,7 +115,9 @@ gym eval run --no-serve --agent partner_if_simple_agent \
 
 `configs/partner_if.yaml` includes the `openai_model` policy server. `data/example.jsonl`
 holds five synthetic examples. `configs/verifier.yaml` starts only the server and its
-judge, for `gym eval reverify`.
+judge, for `gym eval reverify`. For the mock-tool example, use `--resources-server
+partner_if/mock_tools`, `--agent partner_if_mock_tools_simple_agent` and
+`data/mock_tools_example.jsonl`.
 
 ## Testing
 

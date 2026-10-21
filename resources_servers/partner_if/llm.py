@@ -6,7 +6,8 @@ import json
 
 from pydantic import Field, JsonValue, StrictInt
 
-from resources_servers.partner_if.evidence import EvidenceBundle
+from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from resources_servers.partner_if.evidence import MAX_EVIDENCE_CHARS, EvidenceBundle, EvidenceTooLarge
 from resources_servers.partner_if.evidence_sources import evidence_sources
 from resources_servers.partner_if.grading_contract import EvidenceQuote, GradingItem, RawJudgment, StrictModel
 from resources_servers.partner_if.schema import JudgeItem
@@ -100,15 +101,16 @@ def payload(items: list[GradingItem], evidence: EvidenceBundle) -> dict:
 
 
 def request_payload(
-    items: list[GradingItem], evidence: EvidenceBundle, *, max_tokens: int, temperature: float
+    items: list[GradingItem],
+    evidence: EvidenceBundle,
+    responses_create_params: NeMoGymResponseCreateParamsNonStreaming,
 ) -> dict:
+    """The configured judge parameters with this protocol's input and JSON output format."""
+    if sum(len(source.text) for source in evidence_sources(evidence).values()) > MAX_EVIDENCE_CHARS:
+        raise EvidenceTooLarge(f"Judge evidence exceeds {MAX_EVIDENCE_CHARS:,} characters; no silent truncation")
     content = json.dumps(payload(items, evidence), ensure_ascii=False)
-    if len(content) > 1_000_000:
-        raise ValueError("Judge evidence exceeds one million characters; no silent truncation")
-    return {
+    return responses_create_params.model_dump(exclude_unset=True) | {
         "input": [{"role": "system", "content": PROMPT}, {"role": "user", "content": content}],
-        "max_output_tokens": max_tokens,
-        "temperature": temperature,
         "text": {"format": {"type": "json_object"}},
     }
 

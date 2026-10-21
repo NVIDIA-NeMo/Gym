@@ -6,8 +6,9 @@ import asyncio
 from collections.abc import Awaitable, Callable
 
 from resources_servers.partner_if.checks import CheckContext, LLMParams, resolve
-from resources_servers.partner_if.evidence import EvidenceBundle, EvidenceUnavailable
+from resources_servers.partner_if.evidence import EvidenceBundle, EvidenceTooLarge, EvidenceUnavailable
 from resources_servers.partner_if.grading_contract import (
+    EVIDENCE_TOO_LARGE,
     DimensionScore,
     Evaluation,
     GradingContract,
@@ -50,7 +51,13 @@ async def evaluate(contract: GradingContract, evidence: EvidenceBundle, *, judge
             passed, detail = await asyncio.to_thread(checker.run, params, context)
             raw[item.id] = RawJudgment(id=item.id, passed=passed, reason=detail, evidence=detail)
         except EvidenceUnavailable as error:
-            raw[item.id] = RawJudgment(id=item.id, passed=None, reason=str(error), evidence=str(error))
+            raw[item.id] = RawJudgment(
+                id=item.id,
+                passed=None,
+                reason=str(error),
+                evidence=str(error),
+                failure_kind=EVIDENCE_TOO_LARGE if isinstance(error, EvidenceTooLarge) else None,
+            )
 
     if llm_items:
         judgments = await judge(llm_items, evidence)
@@ -60,6 +67,20 @@ async def evaluate(contract: GradingContract, evidence: EvidenceBundle, *, judge
         raw.update({j.id: j for j in judgments})
 
     return aggregate(contract, list(raw.values()))
+
+
+def reward_checks(contract: GradingContract) -> set[str]:
+    """The checks that gate reward. The contract rejects IF dependencies on completion,
+    so these are the IF rubrics and the checks they depend on, directly or transitively."""
+    checks = {r.id: r for r in contract.checks}
+    gating = {r.id for r in contract.rubrics if r.dimension == "if"}
+    pending = list(gating)
+    while pending:
+        for dependency in checks[pending.pop()].depends_on:
+            if dependency not in gating:
+                gating.add(dependency)
+                pending.append(dependency)
+    return gating
 
 
 def aggregate(contract: GradingContract, judgments: list[RawJudgment]) -> Evaluation:
@@ -100,17 +121,10 @@ def aggregate(contract: GradingContract, judgments: list[RawJudgment]) -> Evalua
             partial_score=earned / len(group) if earned is not None else None,
             binary_score=int(earned == len(group)) if earned is not None else None,
         )
-    # Completion is diagnostic, including when it cannot be scored. The contract
-    # rejects IF dependencies on completion, so only IF rubrics and the checks they
-    # depend on, directly or transitively, gate reward.
-    if_checks = {r.id for r in contract.rubrics if r.dimension == "if"}
-    pending = list(if_checks)
-    while pending:
-        for dependency in items[pending.pop()].depends_on:
-            if dependency not in if_checks:
-                if_checks.add(dependency)
-                pending.append(dependency)
-    complete = all(effective[i].passed is not None and effective[i].raw_passed is not None for i in if_checks)
+    # Completion is diagnostic, including when it cannot be scored.
+    complete = all(
+        effective[i].passed is not None and effective[i].raw_passed is not None for i in reward_checks(contract)
+    )
     return Evaluation(
         status="scored" if complete else "unscorable",
         items=results,

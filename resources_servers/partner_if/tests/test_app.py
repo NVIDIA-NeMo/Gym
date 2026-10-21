@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from nemo_gym.failure_kinds import is_namespaced
 from nemo_gym.judge import JudgeError
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import (
@@ -18,9 +19,12 @@ from nemo_gym.server_utils import (
     ServerClient,
     SimpleServer,
 )
+from resources_servers.partner_if import grading_contract as kinds
 from resources_servers.partner_if.app import PartnerIFResourcesServer, PartnerIFResourcesServerConfig, VerifyRequest
+from resources_servers.partner_if.evidence import MAX_EVIDENCE_CHARS
 from resources_servers.partner_if.grading_contract import GradingContract
 from resources_servers.partner_if.grading_service import contract_hash
+from resources_servers.partner_if.schema import VerifierMetadata
 
 
 def contract(task_id="smoke-1", audit_signoff=True, data_kind="synthetic_smoke"):
@@ -128,6 +132,19 @@ def test_reject_invalid_contract(mutate):
         GradingContract.model_validate(data)
 
 
+def test_curation_is_an_opaque_annotation():
+    curation = {"stage": "any benchmark-defined JSON", "counts": [1, None]}
+    assert VerifierMetadata.model_validate({"partner_if": contract(), "curation": curation}).curation == curation
+    assert "curation" not in VerifierMetadata.model_validate({"partner_if": contract()}).model_dump()
+
+
+@pytest.mark.parametrize(
+    "kind", [kinds.NO_ANSWER, kinds.TRUNCATED, kinds.UNSCORABLE, kinds.UNSIGNED_CONTRACT, kinds.EVIDENCE_TOO_LARGE]
+)
+def test_failure_kinds_are_namespaced(kind):
+    assert is_namespaced(kind)
+
+
 def test_hash_is_stable_and_sensitive():
     data = contract()
     first = contract_hash(GradingContract.model_validate(data))
@@ -155,8 +172,9 @@ async def test_fixed_denominator_and_prompt_isolation(passed, expected):
     assert result.if_result.rubric_hash == contract_hash(body.verifier_metadata.partner_if)
     assert result.if_result.status == "scored"
     assert body.model_dump() == before
-    judge_input = call.call_args.kwargs["json"]["input"]
-    payload = json.loads(judge_input[1]["content"])
+    judge_request = call.call_args.kwargs["json"]
+    assert (judge_request["max_output_tokens"], judge_request["temperature"]) == (8192, 0)
+    payload = json.loads(judge_request["input"][1]["content"])
     assert payload["evidence_sources"]["context:0/content"]["lines"][0]["text"] == "Say HELLO."
     assert payload["evidence_sources"]["answer"]["lines"][0]["text"] == "<!-- scratchpad --> HELLO"
     assert payload["rubrics"][0]["constraint"] == "The answer contains HELLO."
@@ -181,6 +199,8 @@ async def test_invalid_judge_is_not_actor_failure(bad):
     ):
         output = await server().verify(request())
     assert output.mask_sample and output.if_result.status == "unscorable"
+    assert output.failure_kind == "partner_if:unscorable"
+    assert output.failure_reason.startswith("Invalid shared IF judge response")
     assert output.judge_response is not None
 
 
@@ -197,43 +217,82 @@ async def test_judge_call_failure_reaches_gyms_judge_failsafe():
     assert row["mask_sample"] is True
 
 
+REASONING = {"type": "reasoning", "id": "r", "summary": []}
+CALL = {"type": "function_call", "id": "f", "call_id": "c", "name": "run", "arguments": "{}", "status": "completed"}
+RELABELED = {"status": "incomplete", "metadata": {"ng_termination_reason": "incomplete_reasoning"}}
+CUTOFF = {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}}
+
+
 @pytest.mark.parametrize(
-    "output",
+    "overrides,kind",
     [
-        [],
-        [
-            {
-                "type": "function_call",
-                "id": "f",
-                "call_id": "c",
-                "name": "run",
-                "arguments": "{}",
-                "status": "completed",
-            }
-        ],
+        ({"output": []}, "partner_if:no_answer"),
+        ({"output": [REASONING]}, "partner_if:no_answer"),
+        ({"output": [REASONING], **RELABELED}, "partner_if:no_answer"),
+        (
+            {"output": [], "status": "incomplete", "metadata": {"ng_termination_reason": "empty_output"}},
+            "partner_if:no_answer",
+        ),
+        ({"output": [CALL]}, "partner_if:no_answer"),
+        ({"output": response("HELLO").model_dump()["output"] + [CALL]}, "partner_if:no_answer"),
+        (CUTOFF, "partner_if:truncated"),
+        ({**CUTOFF, "metadata": {"ng_termination_reason": "empty_output"}}, "partner_if:truncated"),
     ],
 )
-async def test_missing_or_tool_evidence_is_unscorable(output):
+async def test_a_missing_or_truncated_answer_fails_every_item_without_the_judge(overrides, kind):
     body = request()
-    body.response = response(output=output)
+    body.response = response(**overrides)
     with patch("resources_servers.partner_if.grading_service.call_judge", new_callable=AsyncMock) as call:
         result = await server().verify(body)
-    assert result.mask_sample is True
-    assert result.if_result.status == "unscorable"
     call.assert_not_called()
+    assert result.reward == 0 and result.mask_sample is False
+    assert result.failure_kind == kind and result.failure_reason
+    assert result.if_result.status == "scored" and result.if_result.total == 2
+    assert [item.passed for item in result.if_result.items] == [False, False]
+    assert result.grading_result.dimensions["if"].points_earned == 0
 
 
-async def test_incomplete_actor_not_scored():
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {**CUTOFF, "error": {"code": "server_error", "message": "Provider failed"}},
+        {"status": "incomplete", "incomplete_details": {"reason": "content_filter"}},
+        {"status": "incomplete", "metadata": {"ng_termination_reason": "max_steps"}},
+        {
+            "output": [
+                {
+                    "type": "web_search_call",
+                    "id": "w",
+                    "status": "completed",
+                    "action": {"type": "search", "query": "hello"},
+                }
+            ]
+        },
+    ],
+)
+async def test_provider_errors_other_incomplete_replies_and_unsupported_output_stay_masked(overrides):
     body = request()
-    body.response = response(status="incomplete", incomplete_details={"reason": "max_output_tokens"})
+    body.response = response(**overrides)
     result = await server().verify(body)
     assert result.mask_sample and result.if_result.status == "unscorable"
+    assert result.failure_kind == "partner_if:unscorable"
+
+
+async def test_evidence_over_the_limit_is_masked_without_calling_the_judge():
+    body = request()
+    body.response = response("HELLO" * (MAX_EVIDENCE_CHARS // 5 + 1))
+    with patch("resources_servers.partner_if.grading_service.call_judge", new_callable=AsyncMock) as call:
+        result = await server().verify(body)
+    call.assert_not_called()
+    assert result.mask_sample and result.failure_kind == "partner_if:evidence_too_large"
+    assert result.failure_reason.startswith("Judge evidence exceeds") and result.judge_request is None
 
 
 async def test_unsigned_audit_requires_explicit_development_option():
     body = request(audit_signoff=False)
     result = await server().verify(body)
     assert result.mask_sample and result.if_result.status == "unscorable"
+    assert result.failure_kind == "partner_if:unsigned_contract"
     with patch(
         "resources_servers.partner_if.grading_service.call_judge",
         new_callable=AsyncMock,
@@ -279,8 +338,15 @@ async def test_empty_visible_text_never_earns_reward(text):
         return_value=response(json.dumps(verdict())),
     ) as call:
         result = await server().verify(body)
-    assert result.reward == 0 and result.mask_sample
+    assert result.reward == 0 and not result.mask_sample and result.failure_kind == "partner_if:no_answer"
     call.assert_not_called()
+
+
+def test_checkpoints_replay_the_stateless_verification():
+    assert (PartnerIFResourcesServer.checkpoint_mode, PartnerIFResourcesServer.checkpoint_verify) == (
+        "stateless",
+        "replay",
+    )
 
 
 async def test_verifier_fixture_pins_both_reward_endpoints_without_a_judge():

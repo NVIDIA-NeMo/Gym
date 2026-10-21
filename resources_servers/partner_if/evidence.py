@@ -9,13 +9,22 @@ from pydantic import Field, JsonValue, model_validator
 from resources_servers.partner_if.grading_contract import StrictModel
 
 
+# Evidence over this many characters is refused, never truncated: each captured artifact,
+# and the text of all evidence sent to the judge.
+MAX_EVIDENCE_CHARS = 1_000_000
+
+
 class EvidenceUnavailable(ValueError):
     """An infrastructure capture gap, not an absent model deliverable."""
 
 
+class EvidenceTooLarge(EvidenceUnavailable):
+    """Evidence over MAX_EVIDENCE_CHARS."""
+
+
 class Artifact(StrictModel):
     status: Literal["present", "absent", "error"]
-    text: str = Field(default="", max_length=1_000_000)
+    text: str = ""
     error: str | None = None
 
     @model_validator(mode="after")
@@ -55,6 +64,8 @@ class EvidenceBundle(StrictModel):
             raise EvidenceUnavailable(f"No capture receipt for artifact {name}")
         if artifact.status == "error":
             raise EvidenceUnavailable(f"Artifact {name}: {artifact.error}")
+        if len(artifact.text) > MAX_EVIDENCE_CHARS:
+            raise EvidenceTooLarge(f"Artifact {name} exceeds {MAX_EVIDENCE_CHARS:,} characters")
         return artifact.text if artifact.status == "present" else None
 
     def source_text(self, source: str) -> str | None:

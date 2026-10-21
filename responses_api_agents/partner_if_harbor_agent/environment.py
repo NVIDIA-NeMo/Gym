@@ -7,14 +7,11 @@ import shlex
 from copy import deepcopy
 from pathlib import Path, PurePosixPath
 
-from harbor.environments.base import ExecResult
+from responses_api_agents.harbor_agent.custom_envs.nemo_gym_sandbox.environment import NemoGymSandboxEnvironment
 
-from nemo_gym.global_config import GlobalConfigDictParserConfig
-from nemo_gym.server_utils import get_global_aiohttp_client
-from responses_api_agents.harbor_agent.custom_envs.nemo_gym_sandbox.environment import (
-    NemoGymSandboxEnvironment,
-    _cpu_pin_prefix,
-)
+
+# The Harbor worker reads the OpenSandbox key from its environment, so Harbor's job configs never hold it.
+OPENSANDBOX_API_KEY = "OPENSANDBOX_API_KEY"
 
 
 def actor_directory(environment: Path, relative: str) -> Path:
@@ -42,8 +39,7 @@ class ArtifactEnvironment(NemoGymSandboxEnvironment):
         **kwargs,
     ):
         provider = deepcopy(sandbox_provider)
-        # Resolve inside the Ray worker; JobConfig receipts never serialize the key.
-        provider["opensandbox"]["connection"]["api_key"] = os.environ["OPENSANDBOX_API_KEY"]
+        provider["opensandbox"]["connection"]["api_key"] = os.environ[OPENSANDBOX_API_KEY]
         self._actor_directories = dict(actor_directories)
         self._output_directory = output_directory
         for destination in [*actor_directories.values(), output_directory]:
@@ -51,42 +47,12 @@ class ArtifactEnvironment(NemoGymSandboxEnvironment):
                 raise ValueError("Sandbox asset/output paths must be absolute without traversal")
         super().__init__(*args, sandbox_provider=provider, **kwargs)
 
-    async def exec(
-        self,
-        command: str,
-        cwd: str | None = None,
-        env: dict[str, str] | None = None,
-        timeout_sec: int | None = None,
-        user: str | None = None,
-    ) -> ExecResult:
-        """Pass Harbor 0.24's `user` and scoped environment through to the sandbox."""
-        if self._exec_shell:
-            command = f"{self._exec_shell} {shlex.quote(command)}"
-        if self._cpu_pin_enabled:
-            width = int(self.task_env_config.cpus or 0)
-            if width > 0:
-                command = f"{_cpu_pin_prefix(width)} {command}"
-        result = await self._require_sandbox().exec(
-            command,
-            cwd=cwd,
-            env=self._merge_env(env),
-            user=user,
-            timeout_s=timeout_sec if timeout_sec is not None else self._default_exec_timeout_s,
-        )
-        return ExecResult(stdout=result.stdout, stderr=result.stderr, return_code=result.return_code)
-
     async def start(self, force_build: bool) -> None:
         paths = [
             (actor_directory(self.environment_dir, source), destination)
             for source, destination in self._actor_directories.items()
         ]
         try:
-            # A bare Ray worker has worker CLI flags, not Gym CLI overrides.
-            # Initialize the shared SDK transport explicitly; reuse injected Gym
-            # configuration when present, otherwise use library defaults only.
-            get_global_aiohttp_client(
-                GlobalConfigDictParserConfig(skip_load_from_cli=True, skip_load_from_dotenv=True)
-            )
             await super().start(force_build)
             for source, destination in paths:
                 await self.upload_dir(source, destination)

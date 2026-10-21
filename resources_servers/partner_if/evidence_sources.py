@@ -8,7 +8,7 @@ from typing import Literal
 
 from pydantic import JsonValue
 
-from resources_servers.partner_if.evidence import EvidenceBundle
+from resources_servers.partner_if.evidence import MAX_EVIDENCE_CHARS, EvidenceBundle
 
 
 Origin = Literal["context", "candidate"]
@@ -128,7 +128,8 @@ def evidence_sources(evidence: EvidenceBundle) -> dict[str, EvidenceSource]:
     for name, text in evidence.documents.items():
         add(f"document:{escape(name)}", text, "context")
     for name, artifact in evidence.artifacts.items():
-        if artifact.status == "present":
+        # An oversized artifact is a capture error for the items that need it, not evidence for the rest.
+        if artifact.status == "present" and len(artifact.text) <= MAX_EVIDENCE_CHARS:
             add(f"artifact:{escape(name)}", artifact.text, "candidate")
     seen = set()
     for event in evidence.trajectory:

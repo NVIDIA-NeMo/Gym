@@ -1,27 +1,31 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Run a Harbor task with OpenHands and grade the captured evidence through partner_if's `/grade` endpoint.
+"""Run a Harbor task with OpenHands and send the captured evidence to partner_if's `/verify`.
 
 OpenHands calls the run's Gym model server, so the provider key never enters the sandbox.
 """
 
 import asyncio
 import json
-import logging
+import os
 import re
 from pathlib import Path
 
+from fastapi import Body
 from harbor.models.job.config import JobConfig
-from pydantic import field_validator
+from harbor.models.trial.paths import TrialPaths
+from pydantic import JsonValue
 
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, ModelServerRef, ResourcesServerRef
+from nemo_gym.failure_kinds import AGENT_RUN_ERROR
+from nemo_gym.global_config import ROLLOUT_ID_KEY_NAME
+from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY
 from nemo_gym.sandbox.agent_tools import sandbox_server_url
-from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint, raise_for_status
-from resources_servers.partner_if.evidence import EvidenceBundle
-from resources_servers.partner_if.grading_service import GradeRequest, GradeResponse, contract_hash
-from resources_servers.partner_if.native_evidence import captured_artifact, visible_events
-from resources_servers.partner_if.package import RepoPath, TaskBundle, resolve_repo_path
-from resources_servers.partner_if.receipt import scoring_fields
+from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
+from resources_servers.partner_if.evidence import MAX_EVIDENCE_CHARS
+from resources_servers.partner_if.grading_service import contract_hash
+from resources_servers.partner_if.native_evidence import LiveAgentCapture
+from resources_servers.partner_if.package import RepoPath, TaskBundle
 from resources_servers.partner_if.schema import VerifierMetadata
 from responses_api_agents.harbor_agent_general.app import (
     HarborAgent,
@@ -29,34 +33,22 @@ from responses_api_agents.harbor_agent_general.app import (
     HarborRunRequest,
     HarborVerifyResponse,
 )
-
-
-logger = logging.getLogger(__name__)
+from responses_api_agents.partner_if_harbor_agent.environment import OPENSANDBOX_API_KEY, ArtifactEnvironment
 
 
 class PartnerIFHarborConfig(HarborAgentConfig):
     model_server: ModelServerRef
     task_bundles_dir: RepoPath
-    grading_server: ResourcesServerRef
+    resources_server: ResourcesServerRef
 
-    @field_validator("harbor_dataset", mode="after")
-    @classmethod
-    def resolve_dataset_path(cls, dataset):
-        path = getattr(dataset, "path", None)
-        if path is None or Path(path).is_absolute():
-            return dataset
-        return dataset.model_copy(update={"path": resolve_repo_path(Path(path))})
 
-    def build_job_config(self, task_name: str, job_name: str) -> JobConfig:
-        job = super().build_job_config(task_name, job_name)
-        api_base = f"{sandbox_server_url(self.model_server.name, require_reachable=True)}/v1"
-        agents = [agent.model_copy(update={"kwargs": {**agent.kwargs, "api_base": api_base}}) for agent in job.agents]
-        return job.model_copy(update={"agents": agents})
+# OpenHands stops at max_iterations with this error. Like the HTTP profiles' step cap, it ends the episode.
+ITERATION_CAP = "RuntimeError: Agent reached maximum iteration."
 
 
 def validate_openhands_completion(trial_dir: Path) -> None:
     """Harbor's tee pipeline can exit zero after an OpenHands controller error."""
-    sessions = list((trial_dir / "agent/sessions").glob("*/events"))
+    sessions = list((TrialPaths(trial_dir).agent_dir / "sessions").glob("*/events"))
     if len(sessions) != 1:
         raise RuntimeError("Cannot establish OpenHands completion state: expected one event stream")
     state, reason = None, ""
@@ -65,14 +57,28 @@ def validate_openhands_completion(trial_dir: Path) -> None:
         if event.get("observation") == "agent_state_changed":
             state = event.get("extras", {}).get("agent_state")
             reason = str(event.get("extras", {}).get("reason") or "")
-    limits = (
-        "RuntimeError: Agent reached maximum iteration.",
-        "RuntimeError: Agent reached maximum budget for conversation.",
-    )
-    if state == "error" and reason.startswith(limits):
-        raise RuntimeError(f"OpenHands execution budget exhausted: {reason}")
+    if state == "error" and reason.startswith(ITERATION_CAP):
+        return
     if state != "finished":
         raise RuntimeError(f"Invalid OpenHands completion state {state!r}: {reason[:1000]}")
+
+
+# JSON escapes a character to at most 12 bytes (a surrogate pair), so a receipt this size holds any text of
+# MAX_EVIDENCE_CHARS characters; partner_if refuses longer text as evidence_too_large.
+MAX_RECEIPT_BYTES = 12 * MAX_EVIDENCE_CHARS + 65_536
+
+
+def artifact_receipt(trial_dir: Path) -> dict[str, JsonValue]:
+    """The verifier's capture receipt. A receipt that cannot be read is a capture error, which leaves
+    only the items that need the artifact unscorable."""
+    capture = TrialPaths(trial_dir).verifier_dir / "artifact.json"
+    try:
+        if capture.stat().st_size > MAX_RECEIPT_BYTES:
+            return {"error": "Artifact capture receipt exceeds size limit"}
+        receipt = json.loads(capture.read_text())
+    except (OSError, ValueError) as error:
+        return {"error": f"Cannot read the artifact capture receipt: {error}"}
+    return receipt if isinstance(receipt, dict) else {"error": "Artifact capture receipt is not a JSON object"}
 
 
 class PartnerIFHarborAgent(HarborAgent):
@@ -80,14 +86,43 @@ class PartnerIFHarborAgent(HarborAgent):
     ray_enabled = True
     config: PartnerIFHarborConfig
 
+    def model_post_init(self, context) -> None:
+        super().model_post_init(context)
+        # Fail at startup rather than on every rollout.
+        sandbox_server_url(self.config.model_server.name, require_reachable=True)
+        environment = self.config.harbor_environment.import_path
+        if environment == f"{ArtifactEnvironment.__module__}:{ArtifactEnvironment.__name__}" and not (
+            os.environ.get(OPENSANDBOX_API_KEY) or self.config.harbor_worker_env.get(OPENSANDBOX_API_KEY)
+        ):
+            raise ValueError(f"{OPENSANDBOX_API_KEY} must be set for the Harbor workers")
+
+    def build_job_config(self, body: HarborRunRequest) -> JobConfig:
+        job = super().build_job_config(body)
+        # The rollout prefix keeps OpenHands' model calls correlated with this run.
+        run = body.model_dump(by_alias=True) | {ROLLOUT_ID_KEY_NAME: body.capture_rollout_id}
+        url = sandbox_server_url(self.config.model_server.name, require_reachable=True)
+        base_url = f"{self.base_url_for_run(url, run)}/v1"
+        agents = []
+        for agent in job.agents:
+            # Harbor's OpenHands prefers LLM_BASE_URL in its env, then in the worker's, over api_base.
+            if agent.env.get("LLM_BASE_URL", base_url) != base_url:
+                raise ValueError("LLM_BASE_URL is set by this agent: OpenHands must call the Gym model server")
+            update = {"kwargs": {**agent.kwargs, "api_base": base_url}, "env": {**agent.env, "LLM_BASE_URL": base_url}}
+            agents.append(agent.model_copy(update=update))
+        return job.model_copy(update={"agents": agents})
+
     def success_response(self, body: HarborRunRequest, trial_dir: Path) -> HarborVerifyResponse:
         validate_openhands_completion(trial_dir)
         response = super().success_response(body, trial_dir)
-        capture = trial_dir / "verifier/artifact.json"
-        if capture.stat().st_size > 2_000_000:
-            raise ValueError("Artifact capture receipt exceeds size limit")
-        artifact = json.loads(capture.read_text())
-        return response.model_copy(update={"partner_if_artifact": artifact})
+        return response.model_copy(update={"partner_if_artifact": artifact_receipt(trial_dir)})
+
+    async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
+        """Proxy aggregate_metrics to the resources server, which computes partner_if's metrics."""
+        response = await self.server_client.post(
+            server_name=self.config.resources_server.name, url_path="/aggregate_metrics", json=body
+        )
+        await raise_for_status(response)
+        return AggregateMetrics.model_validate(await get_response_json(response))
 
     async def run(self, body: HarborRunRequest) -> HarborVerifyResponse:
         # Validate host-selected task identity before allocating a sandbox.
@@ -101,47 +136,32 @@ class PartnerIFHarborAgent(HarborAgent):
             raise ValueError("Native task bundle does not match the row contract")
         response = await super().run(body)
         data = response.model_dump(mode="json")
-        if data.get("_ng_failure_class"):
-            return response.model_copy(
-                update={
+        if data.get(NG_FAILURE_CLASS_KEY):
+            # Harbor or OpenHands failed: an outage for the failures file, not a score.
+            return HarborVerifyResponse.model_validate(
+                data
+                | {
                     "mask_sample": True,
-                    "failure_kind": data["_ng_failure_class"],
+                    "failure_kind": AGENT_RUN_ERROR,
                     "failure_reason": data.get("error", "Harbor execution failed"),
                 }
             )
-        try:
-            params = data["responses_create_params"]
-            if params["input"] != body.responses_create_params.model_dump(mode="json")["input"]:
-                raise ValueError("Harbor task instruction differs from the frozen row")
-            events = visible_events(data["response"]["output"])
-            evidence = EvidenceBundle(
-                context=params["input"],
-                instructions=params.get("instructions"),
-                tools=params.get("tools") or [],
-                documents=task.documents,
-                trajectory=events,
-                answer="\n".join(event.text for event in events if event.kind == "assistant"),
-                artifacts={"submission": captured_artifact(data["partner_if_artifact"])},
-            )
-            request = GradeRequest(contract=task.contract, evidence=evidence)
-            remote = await self.server_client.post(
-                server_name=self.config.grading_server.name, url_path="/grade", json=request.model_dump(mode="json")
-            )
-            await raise_for_status(remote)
-            receipt = GradeResponse.model_validate(await remote.json())
-            return response.model_copy(update=scoring_fields(task.contract, receipt))
-        except Exception as error:
-            # Boundary: capture/contract/judge failures are never an ordinary actor zero.
-            logger.exception("Shared grading failed for native task %s", body.task_name)
-            return response.model_copy(
-                update={
-                    "reward": 0.0,
-                    "mask_sample": True,
-                    "failure_kind": "partner_if:unscorable",
-                    "failure_reason": str(error),
-                    "_ng_failure_class": "partner_if_unscorable",
-                }
-            )
+        capture = LiveAgentCapture(
+            input=response.responses_create_params.model_dump(mode="json", exclude_none=True)["input"],
+            documents=task.documents,
+            artifacts={"submission": data["partner_if_artifact"]},
+        )
+        # The resources server grades the capture and returns the score fields; a failed judge call comes
+        # back as a judge_failed row for the failures file. Dumped by alias, the body keeps the _ng_* index
+        # keys, from which ServerClient derives this run's rollout prefix; checkpointing requires it.
+        verified = await self.server_client.post(
+            server_name=self.config.resources_server.name,
+            url_path="/verify",
+            json=body.model_dump(mode="json", by_alias=True)
+            | {"response": data["response"], "verification_input": capture.model_dump(mode="json")},
+        )
+        await raise_for_status(verified)
+        return HarborVerifyResponse.model_validate(data | await get_response_json(verified))
 
 
 if __name__ == "__main__":

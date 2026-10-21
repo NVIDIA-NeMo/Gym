@@ -5,13 +5,15 @@
 Each profile instance serves one backend (a fixed tool family over a packaged fixture),
 named in config by the import path of its `ToolBackend` class. Sessions, per-task tool
 isolation, call receipts and evidence assembly are shared; backends supply only tool
-behavior, whether a closing answer is required, and receipts.
+behavior, whether a closing answer is required, and receipts. `example_tools.NotesBackend`
+is a small example.
 """
 
 import json
+import logging
 from dataclasses import dataclass, field
 from importlib import import_module
-from typing import Any, ClassVar, Protocol
+from typing import Any, ClassVar
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -28,27 +30,31 @@ from nemo_gym.mcp_auto_exposure import MCPTool
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import SESSION_ID_KEY
 from resources_servers.partner_if.app import (
+    UNSIGNED,
     PartnerIFResourcesServer,
     PartnerIFResourcesServerConfig,
     VerifyRequest,
     VerifyResponse,
+    is_complete,
+    output_cap_cutoff,
 )
+from resources_servers.partner_if.checks import resolve
 from resources_servers.partner_if.evidence import Artifact, EvidenceBundle
-from resources_servers.partner_if.grading_contract import GradingContract, StrictModel
-from resources_servers.partner_if.grading_service import GradeRequest, contract_hash
+from resources_servers.partner_if.grading_contract import (
+    NO_ANSWER,
+    TRUNCATED,
+    UNSIGNED_CONTRACT,
+    GradingContract,
+    StrictModel,
+)
+from resources_servers.partner_if.grading_service import GradeRequest, contract_hash, unanswered
 from resources_servers.partner_if.native_evidence import visible_events
 from resources_servers.partner_if.package import RepoPath
-from resources_servers.partner_if.receipt import scoring_fields
+from resources_servers.partner_if.receipt import masked_fields, scoring_fields
+from resources_servers.partner_if.tool_backend import ToolBackend, ToolCallError
 
 
-class ToolBackend(Protocol):
-    requires_final_answer: bool
-
-    def tools(self, row: dict[str, JsonValue]) -> dict[str, dict[str, JsonValue]]: ...
-    def new_state(self, row: dict[str, JsonValue]) -> Any: ...
-    def call(self, state: Any, name: str, arguments: dict[str, JsonValue]) -> JsonValue: ...
-    def artifacts(self, state: Any) -> dict[str, str]: ...
-    def receipts(self, state: Any) -> dict[str, JsonValue]: ...
+logger = logging.getLogger(__name__)
 
 
 def load_backend(import_path: str) -> type[ToolBackend]:
@@ -102,7 +108,6 @@ def to_evidence(
     response: NeMoGymResponse,
     calls: list[RecordedToolCall],
     *,
-    requires_final_answer: bool,
     artifacts: dict[str, str] | None = None,
 ) -> EvidenceBundle:
     """Join captured calls/results with authoritative receipts, retaining only visible events.
@@ -112,9 +117,10 @@ def to_evidence(
     ordering without guessing. Calls the harness rejects before any tool runs (unadvertised
     names, non-object arguments) are actor errors without receipts, not capture gaps.
 
-    Without a required final answer, a response cut off by the output-token cap ends the
-    episode like the step cap: its calls never ran, so the completed tool exchanges before
-    it are graded. Receipts still have to match, so a cutoff cannot hide an executed call.
+    A response cut off by the output-token cap ends the episode like the step cap: its calls
+    never ran, so the completed tool exchanges before it are the evidence. Receipts still have
+    to match, so a cutoff cannot hide an executed call. Whether the episode lacks a required
+    final answer is for the caller to decide.
     """
     bundle = EvidenceBundle(
         context=initial_params["input"],
@@ -125,12 +131,12 @@ def to_evidence(
     advertised = {tool["name"] for tool in bundle.tools}
     try:
         items = [item.model_dump(mode="json") for item in response.output]
-        if not requires_final_answer and _output_cap_cutoff(response):
+        if output_cap_cutoff(response):
             last_output = max(
                 (i for i, item in enumerate(items) if item["type"] == "function_call_output"), default=-1
             )
             items = items[: last_output + 1]
-        elif response.error or response.incomplete_details or response.status != "completed":
+        elif not is_complete(response):
             raise ValueError("Actor trajectory is incomplete")
         bundle.trajectory = visible_events(items)
         pending, seen, remaining, last_result = {}, set(), list(calls), -1
@@ -174,16 +180,9 @@ def to_evidence(
         bundle.answer = "\n".join(
             event.text for event in bundle.trajectory if event.kind == "assistant" and event.source_index > last_result
         )
-        if requires_final_answer and not bundle.answer.strip():
-            raise ValueError("Actor produced no final answer after its tool calls")
     except (ValueError, TypeError) as error:
         bundle.trajectory_error = str(error)
     return bundle
-
-
-def _output_cap_cutoff(response: NeMoGymResponse) -> bool:
-    details = response.incomplete_details
-    return response.error is None and details is not None and details.reason == "max_output_tokens"
 
 
 def _actor_input(params: dict[str, JsonValue]) -> dict[str, JsonValue]:
@@ -192,6 +191,10 @@ def _actor_input(params: dict[str, JsonValue]) -> dict[str, JsonValue]:
 
 
 class MockToolsResourcesServer(PartnerIFResourcesServer):
+    # Episodes live in this process and are not exported, so a checkpoint restarts their rollouts.
+    checkpoint_mode = "restart_only"
+    checkpoint_verify = "wait"
+
     config: MockToolsServerConfig
     _backend: ToolBackend = PrivateAttr()
     _tasks: dict[str, dict[str, JsonValue]] = PrivateAttr(default_factory=dict)
@@ -211,9 +214,15 @@ class MockToolsResourcesServer(PartnerIFResourcesServer):
             contract = GradingContract.model_validate(row["verifier_metadata"]["partner_if"])
             if contract.evidence_mode != "live_agent" or contract.task_id in self._tasks:
                 raise ValueError("Mock-tool tasks require unique IDs and live-agent contracts")
+            for item in contract.checks:
+                resolve(item.verifier)  # An unknown verifier or invalid params fails here, not on every rollout.
             # A backend may serve a whole tool family; a task's actor can call only the tools it advertises.
             advertised = {tool["name"] for tool in row["responses_create_params"].get("tools") or []}
             served = self._backend.tools(row)
+            if unserved := advertised - set(served):
+                raise ValueError(
+                    f"Task {contract.task_id} advertises tools the backend does not serve: {', '.join(sorted(unserved))}"
+                )
             self._tools[contract.task_id] = {name: tool for name, tool in served.items() if name in advertised}
             self._tasks[contract.task_id] = row
         if not self._tasks:
@@ -221,7 +230,6 @@ class MockToolsResourcesServer(PartnerIFResourcesServer):
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
-        app.router.routes = [route for route in app.router.routes if getattr(route, "path", None) != "/grade"]
         app.post("/{tool_name}")(self.call_tool)
         return app
 
@@ -278,14 +286,24 @@ class MockToolsResourcesServer(PartnerIFResourcesServer):
         self._closed.add(body.resources_session_id)
         return ResourcesCloseSessionResponse(resources_session_id=body.resources_session_id)
 
+    async def retire_session_state(self, session_id: str) -> None:
+        self._episodes.pop(session_id, None)
+        self._closed.add(session_id)
+
     async def call_tool(self, request: Request, tool_name: str, body: dict[str, JsonValue]):
-        """Run one tool this rollout's task may use; anything else (e.g. the host-only /grade) is absent."""
+        """Run one tool this rollout's task may use; any other name is absent."""
         episode = self._episodes.get(request.session.get(SESSION_ID_KEY))
         if episode is not None and tool_name not in episode.tools:
             raise HTTPException(404, "Not a tool of this task")
         if episode is None:
             raise HTTPException(409, "Session was not seeded or is closed")
-        output = self._backend.call(episode.state, tool_name, body)
+        try:
+            output = self._backend.call(episode.state, tool_name, body)
+        except ToolCallError as error:
+            output = {"error": str(error)}
+        except Exception:
+            logger.exception("Tool backend %s failed in %s", self.config.backend, tool_name)
+            raise
         episode.calls.append(RecordedToolCall(name=tool_name, arguments=body, output=output))
         return PlainTextResponse(output) if isinstance(output, str) else JSONResponse(output)
 
@@ -297,19 +315,26 @@ class MockToolsResourcesServer(PartnerIFResourcesServer):
             raise HTTPException(409, "Actor input differs from the configured task")
         episode = self._episodes.get(request.session.get(SESSION_ID_KEY))
         calls = episode.calls if episode else []
-        bundle = to_evidence(
-            params,
-            body.response,
-            calls,
-            requires_final_answer=self._backend.requires_final_answer,
-            artifacts=self._backend.artifacts(episode.state) if episode else None,
-        )
-        if episode is None or episode.task != contract.task_id:
-            bundle.trajectory_error = "Missing or mismatched resource session"
-        receipt = await self.grade_evidence(GradeRequest(contract=contract, evidence=bundle))
+        if not contract.audit_signoff and not self.config.allow_provisional_rubrics:
+            fields = masked_fields(contract, UNSIGNED_CONTRACT, UNSIGNED)
+        else:
+            bundle = to_evidence(
+                params, body.response, calls, artifacts=self._backend.artifacts(episode.state) if episode else None
+            )
+            if episode is None or episode.task != contract.task_id:
+                bundle.trajectory_error = "Missing or mismatched resource session"
+            if bundle.trajectory_error is None and self._backend.requires_final_answer and not bundle.answer.strip():
+                if output_cap_cutoff(body.response):
+                    reason = "The episode was cut off by the output-token cap before its final answer"
+                    receipt = unanswered(contract, TRUNCATED, reason)
+                else:
+                    receipt = unanswered(contract, NO_ANSWER, "The episode ended without a final answer")
+            else:
+                receipt = await self.grade_evidence(GradeRequest(contract=contract, evidence=bundle))
+            fields = scoring_fields(contract, receipt)
         return MockToolsVerifyResponse(
             **body.model_dump(),
-            **scoring_fields(contract, receipt),
+            **fields,
             tool_calls=calls,
             environment_receipts=self._backend.receipts(episode.state) if episode else {},
         )

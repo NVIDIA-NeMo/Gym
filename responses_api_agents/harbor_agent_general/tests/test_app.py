@@ -255,6 +255,51 @@ async def test_run_job_rejects_failed_steps_and_invalidates_resume(tmp_path, mon
         assert result_path.exists()
 
 
+@pytest.mark.asyncio
+async def test_run_builds_the_job_per_run(tmp_path, monkeypatch):
+    from responses_api_agents.harbor_agent_general.app import HarborAgentConfig, HarborRunRequest
+
+    seen = {}
+
+    class Worker:
+        def options(self, **_):
+            return self
+
+        def remote(self, job_config, task_name, worker_env):
+            seen["job"] = job_config
+
+            async def trial():
+                return str(tmp_path / "trial")
+
+            return trial()
+
+    monkeypatch.setattr(app, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(app, "harbor_job_worker", Worker())
+    monkeypatch.setattr(HarborAgent, "success_response", lambda self, body, trial_dir: "graded")
+    config = HarborAgentConfig.model_validate(
+        {
+            "name": "harbor_agent_general",
+            "host": "0.0.0.0",
+            "port": 8080,
+            "entrypoint": "app.py",
+            "harbor_jobs_dir": tmp_path / "jobs",
+            "harbor_dataset": {"path": str(tmp_path / "dataset")},
+            "harbor_agent": {"name": "opencode", "model_name": "test-model"},
+        }
+    )
+    body = HarborRunRequest.model_validate(
+        {
+            "responses_create_params": {"input": []},
+            "task_name": "task-001",
+            "_ng_task_index": 3,
+            "_ng_rollout_index": 1,
+        }
+    )
+
+    assert await HarborAgent.model_construct(config=config).run(body) == "graded"
+    assert seen["job"]["job_name"] == "t3-r1" and seen["job"]["datasets"][0]["task_names"] == ["task-001"]
+
+
 @pytest.fixture
 def agent(monkeypatch: pytest.MonkeyPatch) -> HarborAgent:
     """An agent built without a server: compute_metrics reads only the rollouts it is handed."""

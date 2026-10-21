@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from resources_servers.partner_if.app import VerifyRequest
-from resources_servers.partner_if.package import validate_rows
+from resources_servers.partner_if.schema import validate_input
 from resources_servers.partner_if.tests.test_app import contract, response, server, verdict
 
 
@@ -35,12 +35,12 @@ def frozen_row():
 
 
 def test_explicit_frozen_mode_preserves_history_and_tools():
-    data = frozen_row()
-    original = copy.deepcopy(data)
-    assert validate_rows([data]) == [original]
-    data["verifier_metadata"]["partner_if"]["evidence_mode"] = "text_response"
+    params = frozen_row()["responses_create_params"]
+    original = copy.deepcopy(params)
+    validate_input(params, evidence_mode="frozen_tool_history")
+    assert params == original
     with pytest.raises(ValueError):
-        validate_rows([data])
+        validate_input(params, evidence_mode="text_response")
 
 
 @pytest.mark.parametrize(
@@ -62,10 +62,10 @@ def test_explicit_frozen_mode_preserves_history_and_tools():
     ],
 )
 def test_reject_malformed_or_hidden_frozen_history(mutate):
-    data = frozen_row()
-    mutate(data["responses_create_params"])
+    params = frozen_row()["responses_create_params"]
+    mutate(params)
     with pytest.raises(ValueError):
-        validate_rows([data])
+        validate_input(params, evidence_mode="frozen_tool_history")
 
 
 async def test_judge_sees_recorded_tools_but_only_grades_new_answer():
@@ -86,3 +86,14 @@ async def test_judge_sees_recorded_tools_but_only_grades_new_answer():
     assert payload["evidence_sources"]["answer"]["lines"][0]["text"] == "HELLO"
     assert "recorded" in call.call_args.kwargs["json"]["input"][0]["content"].lower()
     assert body.model_dump() == before
+
+
+async def test_a_new_tool_call_instead_of_the_answer_fails_every_item_without_the_judge():
+    call = {"type": "function_call", "id": "f2", "call_id": "c2", "name": "search", "arguments": "{}"}
+    body = VerifyRequest.model_validate({**frozen_row(), "response": response(output=[call]).model_dump()})
+    with patch("resources_servers.partner_if.grading_service.call_judge", new_callable=AsyncMock) as judge:
+        output = await server().verify(body)
+    judge.assert_not_called()
+    assert output.reward == 0 and not output.mask_sample
+    assert output.failure_kind == "partner_if:no_answer"
+    assert output.if_result.status == "scored" and output.if_result.passed == 0

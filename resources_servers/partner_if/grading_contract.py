@@ -14,6 +14,15 @@ from resources_servers.partner_if.task_data import GradingItem as GradingItem
 from resources_servers.partner_if.task_data import VerifierSpec as VerifierSpec
 
 
+# Namespaced failure kinds (see nemo_gym.failure_kinds). NO_ANSWER and TRUNCATED are the
+# model's own failures and score zero; the others mask the rollout.
+NO_ANSWER = "partner_if:no_answer"
+TRUNCATED = "partner_if:truncated"
+UNSCORABLE = "partner_if:unscorable"
+UNSIGNED_CONTRACT = "partner_if:unsigned_contract"
+EVIDENCE_TOO_LARGE = "partner_if:evidence_too_large"
+
+
 class EvidenceQuote(StrictModel):
     source: Text
     quote: Text
@@ -25,6 +34,8 @@ class RawJudgment(StrictModel):
     reason: Text
     evidence: Text
     quotes: list[EvidenceQuote] = Field(default_factory=list)
+    # The failure kind behind a verdict that no check or judge gave, such as NO_ANSWER.
+    failure_kind: str | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class ItemResult(RawJudgment):

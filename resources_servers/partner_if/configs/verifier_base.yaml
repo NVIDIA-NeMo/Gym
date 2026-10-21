@@ -9,6 +9,8 @@ partner_if:
         type: responses_api_models
         name: partner_if_judge
       allow_provisional_rubrics: false
-      judge_max_output_tokens: 8192
-      judge_temperature: 0.0
+      judge_responses_create_params:
+        input: []
+        max_output_tokens: 8192
+        temperature: 0.0
       judge_max_concurrency: 8

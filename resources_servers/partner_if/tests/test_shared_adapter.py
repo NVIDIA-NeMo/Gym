@@ -3,8 +3,12 @@
 import json
 from unittest.mock import AsyncMock, patch
 
+import pytest
+from fastapi.testclient import TestClient
+
 from resources_servers.partner_if.app import VerifyRequest
 from resources_servers.partner_if.grading_contract import GradingContract
+from resources_servers.partner_if.native_evidence import LiveAgentCapture
 from resources_servers.partner_if.tests.test_app import response, server
 
 
@@ -119,8 +123,51 @@ async def test_judge_abstention_is_a_protocol_error_not_a_model_failure():
     assert result.judge_response == raw
 
 
-async def test_text_server_does_not_accept_live_agent_evidence_without_adapter():
+def live_request(**capture):
     body = shared_request()
+    body.verifier_metadata.partner_if.evidence_mode = "live_agent"
+    body.verifier_metadata.partner_if.rubrics[1].verifier.params["artifacts"] = ["submission"]
+    body.verification_input = LiveAgentCapture.model_validate(
+        {
+            "input": [{"role": "user", "content": "Say HELLO.", "type": "message"}],
+            "documents": {"skill": "Greet briefly."},
+            "artifacts": {"submission": {"exists": True, "text": "HELLO"}},
+        }
+        | capture
+    )
+    return body
+
+
+async def test_live_agent_row_is_graded_on_the_evidence_its_agent_captured():
+    from resources_servers.partner_if.tests.test_shared_judge import verdict
+
+    body = live_request()
+    payload = body.model_dump(mode="json") | {"verification_input": body.verification_input.model_dump(mode="json")}
+    reply = verdict(id="semantic", references=[{"source": "artifact:submission", "start_line": 1, "end_line": 1}])
+    with patch(
+        "resources_servers.partner_if.grading_service.call_judge",
+        new_callable=AsyncMock,
+        return_value=response(json.dumps(reply)),
+    ) as call:
+        row = TestClient(server().setup_webserver()).post("/verify", json=payload).json()
+    sources = json.loads(call.call_args.kwargs["json"]["input"][1]["content"])["evidence_sources"]
+    assert sources["document:skill"]["lines"][0]["text"] == "Greet briefly."
+    assert sources["artifact:submission"]["lines"][0]["text"] == "HELLO"
+    assert (row["reward"], row["mask_sample"], row["if_result"]["status"]) == (1.0, False, "scored")
+    assert "verification_input" not in row
+
+
+@pytest.mark.parametrize(
+    "body,reason",
+    [
+        (shared_request, "needs the evidence its agent captured"),
+        (lambda: live_request(input=[{"role": "user", "content": "Say GOODBYE.", "type": "message"}]), "frozen row"),
+    ],
+    ids=["no_capture", "other_input"],
+)
+async def test_live_agent_row_without_matching_capture_is_masked(body, reason):
+    body = body()
     body.verifier_metadata.partner_if.evidence_mode = "live_agent"
     result = await server().verify(body)
     assert result.mask_sample and result.if_result.status == "unscorable"
+    assert result.failure_kind == "partner_if:unscorable" and reason in result.failure_reason

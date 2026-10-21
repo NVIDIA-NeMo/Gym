@@ -20,7 +20,7 @@ def test_all_synthetic_examples_use_explicit_registered_verifiers():
     assert len(rows) == 5
     for row in rows:
         contract = VerifierMetadata.model_validate(row["verifier_metadata"]).partner_if
-        assert isinstance(contract, GradingContract)
+        assert isinstance(contract, GradingContract) and contract.data_kind == "synthetic_smoke"
         for rubric in contract.checks:
             resolve(rubric.verifier)
 

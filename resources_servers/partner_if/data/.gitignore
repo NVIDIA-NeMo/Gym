@@ -1,3 +1,4 @@
 *.jsonl
 !example.jsonl
 !example_rollouts.jsonl
+!mock_tools_example.jsonl

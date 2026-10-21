@@ -50,20 +50,10 @@ def test_unknown_trajectory_kind_is_a_capture_error():
     assert result.trajectory_error
 
 
-@pytest.mark.parametrize("completion, answer, expected", [(0, "HELLO", 1), (1, "GOODBYE", 0)])
-async def test_if_points_do_not_depend_on_patch_correctness(completion, answer, expected):
+def swe_server():
     from nemo_gym.server_utils import ServerClient
-    from resources_servers.partner_if.swe_app import SWEIFConfig, SWEIFResourcesServer, SWEIFVerifyRequest
-    from resources_servers.partner_if.tests.test_app import response
-    from resources_servers.partner_if.tests.test_shared_adapter import shared_request
-    from resources_servers.scale_swe.app import ScaleSWEVerifyResponse
+    from resources_servers.partner_if.swe_app import SWEIFConfig, SWEIFResourcesServer
 
-    request = shared_request().model_dump()
-    request.update(instance_id="fixture", image_url="fixture:latest", workdir="/workspace", task_name="swe-1")
-    request["verifier_metadata"]["partner_if"].update(evidence_mode="live_agent")
-    request["verifier_metadata"]["partner_if"]["rubrics"] = request["verifier_metadata"]["partner_if"]["rubrics"][:1]
-    request["response"] = response(answer).model_dump()
-    body = SWEIFVerifyRequest.model_validate(request)
     config = SWEIFConfig(
         host="127.0.0.1",
         port=8001,
@@ -74,7 +64,29 @@ async def test_if_points_do_not_depend_on_patch_correctness(completion, answer, 
         actor_system_prompt="Say HELLO.",
         judge_model_server={"type": "responses_api_models", "name": "judge"},
     )
-    server = SWEIFResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    return SWEIFResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+
+def swe_request(answer="HELLO", **contract):
+    from resources_servers.partner_if.swe_app import SWEIFVerifyRequest
+    from resources_servers.partner_if.tests.test_app import response
+    from resources_servers.partner_if.tests.test_shared_adapter import shared_request
+
+    request = shared_request().model_dump()
+    request.update(instance_id="fixture", image_url="fixture:latest", workdir="/workspace", task_name="swe-1")
+    request["verifier_metadata"]["partner_if"].update(evidence_mode="live_agent", **contract)
+    request["verifier_metadata"]["partner_if"]["rubrics"] = request["verifier_metadata"]["partner_if"]["rubrics"][:1]
+    request["response"] = response(answer).model_dump()
+    return SWEIFVerifyRequest.model_validate(request)
+
+
+@pytest.mark.parametrize("completion, answer, expected", [(0, "HELLO", 1), (1, "GOODBYE", 0)])
+async def test_if_points_do_not_depend_on_patch_correctness(completion, answer, expected):
+    from resources_servers.scale_swe.app import ScaleSWEVerifyResponse
+
+    body = swe_request(answer)
+    server = swe_server()
+    assert server.config.judge_responses_create_params.max_output_tokens == 32768
     outcome = ScaleSWEVerifyResponse.model_validate(
         body.model_dump()
         | {
@@ -97,6 +109,23 @@ async def test_if_points_do_not_depend_on_patch_correctness(completion, answer, 
     assert result.model_dump()["task_name"] == "swe-1"
 
 
+async def test_an_unsigned_contract_is_masked_without_a_verification_sandbox():
+    from nemo_gym.server_utils import SESSION_ID_KEY
+
+    server = swe_server()
+    actor = MagicMock(stop=AsyncMock())
+    server._session_id_to_sandbox["s"] = actor
+    server._session_id_to_base_commit["s"] = "abc"
+    verify = AsyncMock(side_effect=AssertionError("No verification sandbox may start"))
+    with patch("resources_servers.scale_swe.app.ScaleSWEResourcesServer.verify", verify):
+        result = await server.verify(SimpleNamespace(session={SESSION_ID_KEY: "s"}), swe_request(audit_signoff=False))
+    assert result.mask_sample and result.failure_kind == "partner_if:unsigned_contract"
+    assert result.task_outcome is None and result.model_dump()["task_name"] == "swe-1"
+    # The actor's sandbox is released as Scale-SWE's own verify releases it.
+    actor.stop.assert_awaited_once()
+    assert "s" not in server._session_id_to_sandbox and "s" not in server._session_id_to_base_commit
+
+
 def test_process_local_swe_sessions_require_a_single_worker():
     from nemo_gym.server_utils import ServerClient
     from resources_servers.partner_if.swe_app import SWEIFConfig, SWEIFResourcesServer
@@ -114,33 +143,3 @@ def test_process_local_swe_sessions_require_a_single_worker():
     )
     with pytest.raises(ValueError, match="num_workers=1"):
         SWEIFResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
-
-
-def test_description_plugin_changes_description_only(tmp_path):
-    import json
-    import shutil
-    import subprocess
-
-    from resources_servers.partner_if.swe_app import description_plugin
-
-    node = shutil.which("node")
-    if not node:
-        pytest.skip("Node required for the actual native OpenCode hook")
-    plugin = tmp_path / "plugin.mjs"
-    plugin.write_text(description_plugin({"todowrite": "Keep items short."}))
-    script = f"""
-    import {{ToolDescriptionAdditions}} from {json.dumps(plugin.as_uri())};
-    const hooks = await ToolDescriptionAdditions();
-    const tool = {{description: 'Original.', jsonSchema: {{type: 'object'}}}};
-    await hooks['tool.definition']({{toolID:'todowrite'}}, tool);
-    const untouched = {{description: 'Read a file.'}};
-    await hooks['tool.definition']({{toolID:'read'}}, untouched);
-    console.log(JSON.stringify({{tool, untouched, hooks:Object.keys(hooks)}}));
-    """
-    value = json.loads(subprocess.check_output([node, "--input-type=module", "-e", script], text=True))
-    assert value["tool"] == {
-        "description": "Original.\n\nKeep items short.",
-        "jsonSchema": {"type": "object"},
-    }
-    assert value["untouched"] == {"description": "Read a file."}
-    assert value["hooks"] == ["tool.definition"]
