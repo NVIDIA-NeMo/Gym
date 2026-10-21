@@ -1023,6 +1023,25 @@ def load_resubmit_offset(output_fpath: str | Path) -> int:
     return int(offset_fpath.read_text()) if offset_fpath.exists() else 0
 
 
+def record_resubmit_offset(output_fpath: str | Path) -> int:
+    """Start a fresh attempt budget: failures already in the sidecar stop counting to the cap.
+
+    Written atomically, so a run never reads a partial offset. The sidecar itself is not changed.
+    """
+    output_fpath = Path(output_fpath)
+    failures_fpath = failures_path_for(output_fpath)
+    offset = 0
+    if failures_fpath.exists():
+        with failures_fpath.open("rb") as f:
+            offset = sum(1 for _ in f)
+    offset_fpath = resubmit_offset_path_for(output_fpath)
+    offset_fpath.parent.mkdir(parents=True, exist_ok=True)
+    partial = offset_fpath.with_name(offset_fpath.name + ".tmp")
+    partial.write_text(f"{offset}\n")
+    partial.replace(offset_fpath)
+    return offset
+
+
 def _normalize_health_check_ignored_checks(value) -> List[str]:
     from nemo_gym.rollout_health import normalize_ignored_checks
 
@@ -1711,6 +1730,13 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         default=False,
         description="If the same command is run multiple times, check the materialized inputs and current outputs and remove the inputs that have already been run",
     )
+    resubmit: bool = Field(
+        default=False,
+        description=(
+            "Set by a job queued with `gym eval resubmit`: resume from cache whatever resume_from_cache says, "
+            "and give every failed rollout that is not final a fresh attempt budget."
+        ),
+    )
     prompt_config: Optional[str] = Field(
         default=None,
         description="Path to a prompt YAML file. Builds responses_create_params.input from the template at rollout time. Mutually exclusive with pre-populated responses_create_params.input in the JSONL data.",
@@ -1726,6 +1752,13 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         # default to 1 if num_repeats is None
         # for backwards compatibility
         return 1 if v is None else v
+
+    @model_validator(mode="after")
+    def _resubmit_resumes(self) -> "RolloutCollectionConfig":
+        # A resubmit continues its run: a fresh start would delete the rollouts it was queued to finish.
+        if self.resubmit:
+            self.resume_from_cache = True
+        return self
 
     @model_validator(mode="after")
     def _fold_agent_name_into_agent_map(self) -> "RolloutCollectionConfig":
@@ -3028,6 +3061,8 @@ class RolloutCollectionHelper(BaseModel):
             _drop_truncated_tail(output_fpath)
             if failures_fpath.exists():
                 _drop_truncated_tail(failures_fpath)
+            if config.resubmit:
+                print(f"Resubmitted: a fresh attempt budget from failure {record_resubmit_offset(output_fpath)} on.")
             (
                 input_rows,
                 rows,

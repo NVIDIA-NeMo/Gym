@@ -5266,6 +5266,49 @@ class TestRolloutCollection:
         )
         assert input_rows == []
 
+    async def test_a_resubmit_resumes_and_gives_capped_rows_a_fresh_budget(
+        self, tmp_path: Path, empty_global_config: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "2")
+        row = lambda i: {"responses_create_params": {"input": []}, AGENT_REF_KEY_NAME: {"name": "agent"}, "i": i}
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_bytes(b"".join(orjson.dumps(row(i)) + b"\n" for i in range(2)))
+        output_fpath = tmp_path / "output.jsonl"
+        dispatched: list[list[int]] = []
+
+        class Helper(RolloutCollectionHelper):
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                dispatched.append([e[TASK_INDEX_KEY_NAME] for e in examples])
+                futures = []
+                for example in examples:
+                    future = Future()
+                    future.set_result(_CompletedRollout(row=example, result={"reward": 1.0}, rollout_latency_ms=None))
+                    futures.append(future)
+                return futures
+
+        # A run configured without cache resume: task 0 landed, task 1 hit its cap of 2 failed attempts.
+        base = dict(input_jsonl_fpath=str(input_fpath), output_jsonl_fpath=str(output_fpath), disable_aggregation=True)
+        await Helper().run_from_config(RolloutCollectionConfig(**base, resume_from_cache=False))
+        landed = [
+            line for line in output_fpath.read_bytes().splitlines() if orjson.loads(line)[TASK_INDEX_KEY_NAME] == 0
+        ]
+        output_fpath.write_bytes(landed[0] + b"\n")
+        failure = {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, NG_FAILURE_CLASS_KEY: "agent_run_error"}
+        _failures_path_for(output_fpath).write_bytes((orjson.dumps(failure) + b"\n") * 2)
+        dispatched.clear()
+
+        config = RolloutCollectionConfig(**base, resume_from_cache=False, resubmit=True)
+        assert config.resume_from_cache
+        await Helper().run_from_config(config)
+
+        # The landed rollout is kept, and only the capped one runs again, once.
+        assert dispatched == [[1]]
+        assert sorted(orjson.loads(line)[TASK_INDEX_KEY_NAME] for line in output_fpath.read_bytes().splitlines()) == [
+            0,
+            1,
+        ]
+        assert (tmp_path / "output_resubmit_offset").read_text() == "2\n"
+
     @pytest.mark.parametrize("resume_from_cache", [False, True])
     async def test_run_from_config_creates_missing_output_dir(
         self, tmp_path: Path, empty_global_config: MagicMock, resume_from_cache: bool

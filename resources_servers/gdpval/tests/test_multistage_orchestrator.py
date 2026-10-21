@@ -3399,6 +3399,24 @@ class TestPrepareResume:
         plans, _, got_fp = read_journal(journal)
         assert 0 in plans and got_fp == fp
 
+    def test_a_resubmit_gives_capped_stage_rows_a_fresh_budget(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", raising=False)
+        out = tmp_path / "rollouts.jsonl"
+        journal = journal_path_for(out)
+        fp = compute_fingerprint(_two_stage_cfg(), REF_ELOS, _distribution(["t0"]))
+        out.write_bytes(b"")
+        append_journal_record(journal, {"stage_index": 0, "status": "planned", "task_ids": ["t0"]}, fp)
+        capped = {"stage_index": 0, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, NG_FAILURE_CLASS_KEY: "x"}
+        failures_path_for(out).write_bytes(b"".join(json.dumps(capped).encode() + b"\n" for _ in range(3)))
+        assert (0, 0) in _prepare_resume(self._cfg(True), out, journal, fp).gated_keys[0]
+
+        resume = _prepare_resume(SimpleNamespace(resume_from_cache=True, resubmit=True), out, journal, fp)
+
+        assert (tmp_path / "rollouts_resubmit_offset").read_text() == "3\n"
+        assert (0, 0) not in resume.gated_keys.get(0, set())
+
     def test_resume_disabled_clears_existing_and_empties_state(self, tmp_path: Path) -> None:
         out = tmp_path / "rollouts.jsonl"
         journal = journal_path_for(out)

@@ -108,6 +108,7 @@ from nemo_gym.rollout_collection import (
     is_terminal_failure,
     load_resubmit_offset,
     observed_elapsed,
+    record_resubmit_offset,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from resources_servers.gdpval.multistage_elo import (
@@ -2732,6 +2733,8 @@ def _prepare_resume(
                 print(f"[multistage-elo] quarantined stale state: {quarantined}", file=sys.stderr, flush=True)
     else:
         print("[multistage-elo] resuming multi-stage run from cache (fingerprint match)", file=sys.stderr, flush=True)
+        if getattr(rollout_collection_config, "resubmit", False):
+            record_resubmit_offset(output_fpath)
     return build_file_resume(output_fpath, journal_fpath, fingerprint)
 
 

@@ -129,11 +129,7 @@ def validate_destination(config: SubmitConfig) -> None:
 
 def resolve_token(config: SubmitConfig) -> str:
     """The ingest token from the submitting environment; a missing one fails the submit."""
-    return token_from_env(config.otel.token_env)
-
-
-def token_from_env(name: str) -> str:
-    """The ingest token held in `name` in this process's environment; a missing one is an error."""
+    name = config.otel.token_env
     token = os.environ.get(name)
     if not token:
         raise ValueError(

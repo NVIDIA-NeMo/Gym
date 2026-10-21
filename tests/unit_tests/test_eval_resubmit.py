@@ -23,18 +23,17 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
-import yaml
 
 from nemo_gym.cli.main import COMMANDS, _eval_resubmit
-from nemo_gym.orchestration.api import SubmitConfig
+from nemo_gym.orchestration.api import ResumeConfig, SubmitConfig
 from nemo_gym.orchestration.executors.base import BaseExecutor, UnsupportedOperationError
 from nemo_gym.orchestration.executors.connection import LocalConnection
 from nemo_gym.orchestration.executors.kubernetes import KubernetesExecutor
+from nemo_gym.orchestration.executors.resume_script import RETRY_FILE_NAME, render_resume_prologue
 from nemo_gym.orchestration.executors.slurm import SlurmExecutor
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
 from nemo_gym.orchestration.jobs import (
     MANIFEST_NAME,
-    RESOLVED_CONFIG_NAME,
     BenchmarkJob,
     SubmissionRecord,
     load_submission_record,
@@ -43,23 +42,40 @@ from nemo_gym.orchestration.jobs import (
 from nemo_gym.orchestration.submit import _EXECUTORS_BY_NAME, resubmit
 
 
+# Rendered by this Gym, so it carries the line a resubmitted job uses to resume.
+_JOB_SH = "#!/bin/bash\nGYM_CMD=(\n    gym eval run\n)\nif [ x = 1 ]; then GYM_CMD+=(++resubmit=True); fi\n"
+
+
+def _config(tmp_path: Path, *, otel: dict | None = None, forward_env: list[str] | None = None) -> SubmitConfig:
+    compute = {"type": "slurm", "account": "a", "hostname": None, "forward_env": forward_env or []}
+    return SubmitConfig.model_validate(
+        {
+            "services": {"vllm_model": {"type": "vllm", "container": "vllm:latest", "model": "org/model"}},
+            "compute": {"cluster": compute},
+            "driver": {"container": "python:3.12", "benchmarks": {"gsm8k": {}, "mmlu": {}}},
+            "job": {"output_path": str(tmp_path)},
+            "otel": otel or {"enabled": False},
+        }
+    )
+
+
 @pytest.fixture(autouse=True)
 def _local_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
 
 
-def _staged_run(tmp_path: Path, *, executor: str = "slurm") -> Path:
+def _staged_run(tmp_path: Path, *, executor: str = "slurm", config: SubmitConfig | None = None) -> Path:
+    """A submitted run as `persist()` leaves it: local index, manifest and resolved config."""
     run_dir = tmp_path / "gym-job-x"
     job_dir = run_dir / "gsm8k"
     job_dir.mkdir(parents=True)
-    (job_dir / "job.sh").write_text("#!/bin/bash\n")
-    (job_dir / ".gym_job_chain").write_text("100\n")
+    (job_dir / "job.sh").write_text(_JOB_SH)
     record = SubmissionRecord(
         gym_job_id=run_dir.name,
         gym_version="0",
         submitted_at="2026-01-01T00:00:00Z",
         run_dir=str(run_dir),
-        cluster="c",
+        cluster="cluster",
         executor=executor,
         submitted_by="me",
         benchmarks=[
@@ -67,8 +83,7 @@ def _staged_run(tmp_path: Path, *, executor: str = "slurm") -> Path:
             BenchmarkJob(benchmark="mmlu", job_dir=str(run_dir / "mmlu"), job_id="101"),
         ],
     )
-    (run_dir / MANIFEST_NAME).write_text(record.dumps())
-    record.write_local_index()
+    SlurmExecutor().persist(record, config or _config(tmp_path), LocalConnection().write_text)
     return job_dir
 
 
@@ -83,20 +98,41 @@ def _record(job_dir: Path) -> SubmissionRecord:
 
 @pytest.fixture
 def slurm_bin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """squeue prints the `squeue_workdirs` file; sbatch records its cwd and answers 4242."""
+    """squeue prints the `squeue_workdirs` file; sbatch records its cwd and environment and answers 4242."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     (bin_dir / "squeue").write_text('#!/bin/bash\ncat "$(dirname "$0")/squeue_workdirs" 2>/dev/null; exit 0\n')
-    (bin_dir / "sbatch").write_text('#!/bin/bash\necho "$PWD" > "$(dirname "$0")/cwd"\necho 4242\n')
+    (bin_dir / "sbatch").write_text(
+        '#!/bin/bash\necho "$PWD" > "$(dirname "$0")/cwd"\nenv > "$(dirname "$0")/env"\necho 4242\n'
+    )
     for stub in ("squeue", "sbatch"):
         (bin_dir / stub).chmod(0o755)
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     return bin_dir
 
 
+def _sbatch_env(slurm_bin: Path) -> dict[str, str]:
+    return dict(line.split("=", 1) for line in (slurm_bin / "env").read_text().splitlines() if "=" in line)
+
+
+@pytest.fixture
+def ssh_like_shell(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run the executor's commands in a shell without the caller's environment, as they run over SSH."""
+    clean_env = {"PATH": os.environ["PATH"], "HOME": os.environ.get("HOME", "/")}
+    monkeypatch.setattr(
+        LocalConnection,
+        "run",
+        lambda self, commands: subprocess.run(
+            ["bash", "-s"], input="\n".join(commands), env=clean_env, text=True, capture_output=True, check=True
+        ).stdout,
+    )
+
+
+# --- Executor contract, record and CLI handle ---------------------------------------------------------------
+
+
 def test_resubmit_queues_job_sh_from_its_job_dir_and_records_the_new_id(tmp_path: Path, slurm_bin: Path) -> None:
     job_dir = _staged_run(tmp_path)
-    (slurm_bin / "squeue_workdirs").write_text(f"{tmp_path / 'other'}\n")
 
     job = resubmit(*_handle(job_dir))
 
@@ -127,8 +163,7 @@ def test_the_cli_takes_a_gym_job_id_and_a_benchmark(
     _eval_resubmit(argparse.Namespace(gym_job_id=job_dir.parent.name, benchmark="gsm8k"), [])
 
     assert capsys.readouterr().out == "4242\n"
-    summary = COMMANDS["eval resubmit"].summary
-    assert "Slurm" not in summary
+    assert "Slurm" not in COMMANDS["eval resubmit"].summary
 
 
 @pytest.mark.parametrize(("executor", "supported"), [(SlurmExecutor, True), (KubernetesExecutor, False)])
@@ -142,24 +177,6 @@ def test_which_executors_support_resubmit(tmp_path: Path, slurm_bin: Path, execu
             resubmit(*_handle(job_dir))
     assert "resubmit" in BaseExecutor.__abstractmethods__
     assert set(_EXECUTORS_BY_NAME) == {"slurm", "kubernetes"}
-
-
-def test_resubmit_starts_a_fresh_attempt_budget_and_retry_count(tmp_path: Path, slurm_bin: Path) -> None:
-    job_dir = _staged_run(tmp_path)
-    (job_dir / "artifacts").mkdir()
-    failures = '{"_ng_task_index": 0, "_ng_rollout_index": 0}\n{"_ng_task_index": 1, "_ng_rollout_index": 0}\n'
-    (job_dir / "artifacts" / "rollouts_failures.jsonl").write_text(failures)
-    (job_dir / ".gym_infra_retries").write_text("3\n")
-    (job_dir / "job.sh").write_text("#!/bin/bash\n# --- Auto-resume chain ---\n")
-    (slurm_bin / "squeue_workdirs").write_text(f"{tmp_path / 'other'}\n")
-
-    assert resubmit(*_handle(job_dir)).job_id == "4242"
-
-    assert (job_dir / "artifacts" / "rollouts_failures.jsonl").read_text() == failures
-    assert (job_dir / "artifacts" / "rollouts_resubmit_offset").read_text().strip() == "2"
-    assert not (job_dir / ".gym_infra_retries").exists()
-    # The resumable job.sh chains itself when it starts, so the resubmit does not.
-    assert (job_dir / ".gym_job_chain").read_text() == "100\n"
 
 
 def test_resubmit_refuses_while_a_job_runs_in_the_job_dir(tmp_path: Path, slurm_bin: Path) -> None:
@@ -181,55 +198,6 @@ def test_resubmit_refuses_an_unknown_submission(tmp_path: Path) -> None:
 def test_resubmit_refuses_an_unknown_executor(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="unknown executor 'local'"):
         resubmit(*_handle(_staged_run(tmp_path, executor="local")))
-
-
-def _run_args(script: str, job_dir: Path) -> list[str]:
-    """The `gym eval run` arguments job.sh builds, run through bash from its job dir."""
-    start = script.index("GYM_CMD=(")
-    end = script.index("; fi\n", start) + len("; fi\n")
-    snippet = script[start:end] + 'printf "%s\\n" "${GYM_CMD[@]}"\n'
-    return subprocess.run(
-        ["bash", "-c", snippet], cwd=job_dir, text=True, capture_output=True, check=True
-    ).stdout.split()
-
-
-@pytest.mark.parametrize("run", [{}, {"resume_from_cache": False}])
-def test_a_resubmitted_job_sh_resumes_even_without_cache_resume(tmp_path: Path, run: dict) -> None:
-    config = SubmitConfig.model_validate(
-        {
-            "services": {"vllm_model": {"type": "vllm", "container": "vllm:latest", "model": "org/model"}},
-            "compute": {"cluster": {"type": "slurm", "account": "a", "hostname": "foo"}},
-            "driver": {"container": "python:3.12", "benchmarks": {"gsm8k": {"run": run}}},
-            "job": {"output_path": str(tmp_path)},
-        }
-    )
-    job_dir = tmp_path / "gsm8k"
-    (job_dir / "artifacts").mkdir(parents=True)
-    script = build_sbatch_script(
-        config, "gsm8k", config.driver.benchmarks["gsm8k"], next(iter(config.compute.values())), job_dir
-    )
-    assert "++resume_from_cache=True" not in _run_args(script, job_dir)
-
-    # A resubmit writes the offset; the run then keeps its rollouts instead of clearing them as a fresh run.
-    (job_dir / "artifacts" / "rollouts_resubmit_offset").write_text("0\n")
-    assert _run_args(script, job_dir)[-1] == "++resume_from_cache=True"
-
-
-def test_resubmit_refuses_a_populated_run_whose_job_sh_starts_fresh(tmp_path: Path, slurm_bin: Path) -> None:
-    job_dir = _staged_run(tmp_path)
-    (job_dir / "artifacts").mkdir()
-    rollouts = job_dir / "artifacts" / "rollouts.jsonl"
-    rollouts.write_text('{"reward": 1.0}\n')
-    # A job.sh staged before resubmits forced resume: `gym eval run` would delete the rollouts above.
-    (job_dir / "job.sh").write_text("#!/bin/bash\nGYM_CMD=(\n    gym eval run\n    +resume_from_cache=False\n)\n")
-    (slurm_bin / "squeue_workdirs").write_text("")
-
-    with pytest.raises(RuntimeError, match="would delete its rollouts"):
-        resubmit(*_handle(job_dir))
-
-    assert not (slurm_bin / "cwd").exists()
-    assert not (job_dir / "artifacts" / "rollouts_resubmit_offset").exists()
-    assert rollouts.read_text() == '{"reward": 1.0}\n'
 
 
 def test_two_concurrent_resubmits_queue_one_job(tmp_path: Path, slurm_bin: Path) -> None:
@@ -255,40 +223,148 @@ def test_two_concurrent_resubmits_queue_one_job(tmp_path: Path, slurm_bin: Path)
     assert not (job_dir / ".gym_resubmit.lock").exists()
 
 
-def _save_otel(job_dir: Path, otel: dict) -> None:
-    (job_dir.parent / RESOLVED_CONFIG_NAME).write_text(yaml.safe_dump({"otel": otel}))
+# --- The resubmit only queues; the job resets its own run state ---------------------------------------------
 
 
-def test_resubmit_forwards_the_saved_telemetry_token(
-    tmp_path: Path, slurm_bin: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_resubmit_only_queues_and_asks_the_job_to_reset_its_state(tmp_path: Path, slurm_bin: Path) -> None:
     job_dir = _staged_run(tmp_path)
-    _save_otel(job_dir, {"enabled": True, "token_env": "MY_INGEST_TOKEN"})
-    (slurm_bin / "sbatch").write_text('#!/bin/bash\necho "$MY_INGEST_TOKEN" > "$(dirname "$0")/token"\necho 4242\n')
-    monkeypatch.setenv("MY_INGEST_TOKEN", "s3cret value")
-    # The commands run in a shell without the caller's environment, as they do over SSH.
-    clean_env = {"PATH": os.environ["PATH"], "HOME": os.environ.get("HOME", "/")}
-    monkeypatch.setattr(
-        LocalConnection,
-        "run",
-        lambda self, commands: subprocess.run(
-            ["bash", "-s"], input="\n".join(commands), env=clean_env, text=True, capture_output=True, check=True
-        ).stdout,
-    )
+    (job_dir / "artifacts").mkdir()
+    failures = '{"_ng_task_index": 0, "_ng_rollout_index": 0}\n'
+    (job_dir / "artifacts" / "rollouts_failures.jsonl").write_text(failures)
+    (job_dir / RETRY_FILE_NAME).write_text("3\n")
 
     assert resubmit(*_handle(job_dir)).job_id == "4242"
 
-    assert (slurm_bin / "token").read_text() == "s3cret value\n"
+    # Nothing in the run dir is rewritten by the transport; the queued job is told it is a resubmit.
+    assert sorted(p.name for p in (job_dir / "artifacts").iterdir()) == ["rollouts_failures.jsonl"]
+    assert (job_dir / RETRY_FILE_NAME).read_text() == "3\n"
+    assert _sbatch_env(slurm_bin)["GYM_RESUBMIT"] == "1"
 
 
-def test_resubmit_without_the_telemetry_token_queues_nothing(
-    tmp_path: Path, slurm_bin: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def _run_prologue(prologue: str, job_dir: Path, env: dict[str, str]) -> subprocess.CompletedProcess:
+    """The prologue up to the follow-up sbatch, whose environment it records."""
+    bin_dir = job_dir / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    (bin_dir / "sbatch").write_text('#!/bin/bash\necho "GYM_RESUBMIT=${GYM_RESUBMIT:-}" > follow_up_env\necho 7\n')
+    (bin_dir / "sbatch").chmod(0o755)
+    script = prologue + 'echo "_gym_resubmit=$_gym_resubmit"\n'
+    return subprocess.run(
+        ["bash", "-c", script],
+        cwd=job_dir,
+        env={"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "SLURM_JOB_ID": "5", **env},
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+
+def test_a_resubmitted_job_resets_its_retry_count_once(tmp_path: Path) -> None:
+    prologue = render_resume_prologue(ResumeConfig(max_retries=3))
+    (tmp_path / RETRY_FILE_NAME).write_text("3\n")
+
+    first = _run_prologue(prologue, tmp_path, {"GYM_RESUBMIT": "1"})
+
+    assert not (tmp_path / RETRY_FILE_NAME).exists()
+    assert "_gym_resubmit=1" in first.stdout
+    # The chain's next hop inherits this environment, but it is an ordinary hop, not a second resubmit.
+    assert (tmp_path / "follow_up_env").read_text() == "GYM_RESUBMIT=\n"
+
+    (tmp_path / RETRY_FILE_NAME).write_text("2\n")
+    _run_prologue(prologue, tmp_path, {})
+    assert (tmp_path / RETRY_FILE_NAME).read_text() == "2\n"
+
+
+def _run_args(script: str, job_dir: Path, env: dict[str, str]) -> list[str]:
+    """The `gym eval run` arguments job.sh builds, run through bash from its job dir."""
+    start = script.index("GYM_CMD=(")
+    end = script.index("; fi\n", start) + len("; fi\n")
+    snippet = script[start:end] + 'printf "%s\\n" "${GYM_CMD[@]}"\n'
+    return subprocess.run(
+        ["bash", "-c", snippet], cwd=job_dir, env={"PATH": os.environ["PATH"], **env}, text=True, capture_output=True
+    ).stdout.split()
+
+
+@pytest.mark.parametrize("run", [{}, {"resume_from_cache": False}])
+@pytest.mark.parametrize("env", [{"GYM_RESUBMIT": "1"}, {"_gym_resubmit": "1"}])
+def test_a_resubmitted_job_sh_tells_rollout_collection(tmp_path: Path, run: dict, env: dict) -> None:
+    config = _config(tmp_path)
+    config.driver.benchmarks["gsm8k"].run = run
+    job_dir = tmp_path / "gsm8k"
+    job_dir.mkdir()
+    script = build_sbatch_script(
+        config, "gsm8k", config.driver.benchmarks["gsm8k"], next(iter(config.compute.values())), job_dir
+    )
+
+    assert "++resubmit=True" not in _run_args(script, job_dir, {})
+    # Set directly (no prologue), or moved into `_gym_resubmit` by the auto-resume prologue.
+    assert _run_args(script, job_dir, env)[-1] == "++resubmit=True"
+
+
+def test_resubmit_refuses_a_populated_run_whose_job_sh_predates_resubmit(tmp_path: Path, slurm_bin: Path) -> None:
     job_dir = _staged_run(tmp_path)
-    _save_otel(job_dir, {"enabled": True, "token_env": "MY_INGEST_TOKEN"})
-    monkeypatch.delenv("MY_INGEST_TOKEN", raising=False)
+    (job_dir / "artifacts").mkdir()
+    rollouts = job_dir / "artifacts" / "rollouts.jsonl"
+    rollouts.write_text('{"reward": 1.0}\n')
+    # Without the resubmit line, a job.sh with resume off would start fresh and delete the rollouts above.
+    (job_dir / "job.sh").write_text("#!/bin/bash\nGYM_CMD=(\n    gym eval run\n    +resume_from_cache=False\n)\n")
 
-    with pytest.raises(ValueError, match="MY_INGEST_TOKEN"):
+    with pytest.raises(RuntimeError, match="predates resubmit"):
+        resubmit(*_handle(job_dir))
+
+    assert not (slurm_bin / "cwd").exists()
+    assert rollouts.read_text() == '{"reward": 1.0}\n'
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can write a read-only directory")
+def test_resubmit_queues_nothing_when_preparation_fails(tmp_path: Path, slurm_bin: Path) -> None:
+    job_dir = _staged_run(tmp_path)
+    # The lock cannot be taken in a read-only job dir, so the script stops before sbatch.
+    job_dir.chmod(0o555)
+    try:
+        with pytest.raises(RuntimeError, match="another resubmit holds"):
+            resubmit(*_handle(job_dir))
+    finally:
+        job_dir.chmod(0o755)
+
+    assert not (slurm_bin / "cwd").exists()
+    assert _record(job_dir).benchmark_job("gsm8k").job_id == "100"
+
+
+# --- The resubmit repeats what submit did -------------------------------------------------------------------
+
+
+def test_resubmit_forwards_what_submit_forwards(
+    tmp_path: Path, slurm_bin: Path, ssh_like_shell: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    otel = {"enabled": True, "token_env": "MY_INGEST_TOKEN", "endpoint": "https://otel.example", "service_name": "s"}
+    job_dir = _staged_run(tmp_path, config=_config(tmp_path, otel=otel, forward_env=["MY_KEY"]))
+    monkeypatch.setenv("MY_INGEST_TOKEN", "s3cret value")
+    monkeypatch.setenv("MY_KEY", "k'ey")
+
+    assert resubmit(*_handle(job_dir)).job_id == "4242"
+
+    env = _sbatch_env(slurm_bin)
+    assert (env["MY_INGEST_TOKEN"], env["MY_KEY"]) == ("s3cret value", "k'ey")
+
+
+@pytest.mark.parametrize(
+    ("config_kwargs", "unset", "message"),
+    [
+        ({"forward_env": ["MY_KEY"]}, "MY_KEY", "compute.forward_env variables are unset: MY_KEY"),
+        (
+            {"otel": {"enabled": True, "token_env": "MY_INGEST_TOKEN", "endpoint": "https://o", "service_name": "s"}},
+            "MY_INGEST_TOKEN",
+            "'MY_INGEST_TOKEN' is not set",
+        ),
+    ],
+)
+def test_resubmit_queues_nothing_when_a_forwarded_value_is_unset(
+    tmp_path: Path, slurm_bin: Path, monkeypatch: pytest.MonkeyPatch, config_kwargs: dict, unset: str, message: str
+) -> None:
+    job_dir = _staged_run(tmp_path, config=_config(tmp_path, **config_kwargs))
+    monkeypatch.delenv(unset, raising=False)
+
+    with pytest.raises(ValueError, match=re.escape(message)):
         resubmit(*_handle(job_dir))
 
     assert not (slurm_bin / "cwd").exists()
@@ -298,26 +374,6 @@ def test_resubmit_with_telemetry_off_needs_no_token(
     tmp_path: Path, slurm_bin: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     job_dir = _staged_run(tmp_path)
-    _save_otel(job_dir, {"enabled": False})
     monkeypatch.delenv("OTEL_TOKEN", raising=False)
 
     assert resubmit(*_handle(job_dir)).job_id == "4242"
-
-
-@pytest.mark.skipif(os.geteuid() == 0, reason="root can write a read-only directory")
-def test_resubmit_queues_nothing_when_the_offset_cannot_be_written(tmp_path: Path, slurm_bin: Path) -> None:
-    job_dir = _staged_run(tmp_path)
-    artifacts = job_dir / "artifacts"
-    artifacts.mkdir()
-    (artifacts / "rollouts_failures.jsonl").write_text('{"_ng_task_index": 0, "_ng_rollout_index": 0}\n')
-    (job_dir / ".gym_infra_retries").write_text("3\n")
-    artifacts.chmod(0o555)
-    try:
-        with pytest.raises(RuntimeError, match="cannot write .*rollouts_resubmit_offset"):
-            resubmit(*_handle(job_dir))
-    finally:
-        artifacts.chmod(0o755)
-
-    assert not (slurm_bin / "cwd").exists()
-    assert (job_dir / ".gym_infra_retries").read_text() == "3\n"
-    assert (job_dir / ".gym_job_chain").read_text() == "100\n"

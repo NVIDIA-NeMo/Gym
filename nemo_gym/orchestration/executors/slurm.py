@@ -25,7 +25,7 @@ from pathlib import Path
 import yaml
 
 from nemo_gym import __version__
-from nemo_gym.orchestration.api import OtelConfig, SlurmComputeConfig, SubmitConfig, VllmPDServiceConfig
+from nemo_gym.orchestration.api import SlurmComputeConfig, SubmitConfig, VllmPDServiceConfig
 from nemo_gym.orchestration.executors.base import BaseExecutor
 from nemo_gym.orchestration.executors.connection import Connection, get_connection
 from nemo_gym.orchestration.executors.git_ref import validate_gym_install_ref
@@ -35,11 +35,10 @@ from nemo_gym.orchestration.executors.otel import (
     otel_active,
     render_collector_config,
     resolve_token,
-    token_from_env,
     validate_destination,
     validate_gym_telemetry,
 )
-from nemo_gym.orchestration.executors.resume_script import RETRY_FILE_NAME
+from nemo_gym.orchestration.executors.resume_script import RESUBMIT_ENV
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
 from nemo_gym.orchestration.jobs import (
     RESOLVED_CONFIG_NAME,
@@ -50,7 +49,6 @@ from nemo_gym.orchestration.jobs import (
     utc_now,
     utc_timestamp,
 )
-from nemo_gym.path_utils import failures_path_for, resubmit_offset_path_for
 
 
 # Each sbatch reports its own result on a line that names its benchmark, so a
@@ -166,6 +164,14 @@ def _submission_env_exports(compute: SlurmComputeConfig) -> list[str]:
     return [f"export {name}={shlex.quote(os.environ[name])}" for name in sorted(set(compute.forward_env))]
 
 
+def _submission_exports(config: SubmitConfig) -> list[str]:
+    """What `run()` exports ahead of sbatch: the forwarded values, then the telemetry token when it is on."""
+    exports = _submission_env_exports(next(iter(config.compute.values())))
+    if otel_active(config):
+        exports.append(f"export {config.otel.token_env}={shlex.quote(resolve_token(config))}")
+    return exports
+
+
 class SlurmExecutor(BaseExecutor):
     """Slurm executor for Pyxis-enabled clusters (https://github.com/NVIDIA/pyxis).
 
@@ -230,16 +236,13 @@ class SlurmExecutor(BaseExecutor):
         """
         job = record.benchmark_job(benchmark)
         job_dir = Path(job.job_dir)
-        # Relative to the job dir, which the script enters first, so messages can name them without quoting paths.
-        rollouts = Path("artifacts") / "rollouts.jsonl"
-        failures = failures_path_for(rollouts)
-        offset = resubmit_offset_path_for(rollouts)
         with get_connection(record.hostname) as conn:
-            token_export = self._resubmit_token_export(conn, Path(record.run_dir))
-            # One script, so the lock spans the scheduler check, the resets and sbatch; any failed step stops it.
+            exports = _submission_exports(self._saved_config(conn, Path(record.run_dir)))
+            # One script, so the lock spans the scheduler check and sbatch; any failed step stops it.
+            # The job itself resets the run's retry and attempt state when it starts (see RESUBMIT_ENV).
             results = _parse_sbatch_results(
                 conn.run(
-                    token_export
+                    exports
                     + [
                         'fail() { echo "Error: $*" >&2; exit 1; }',
                         f"cd {shlex.quote(str(job_dir))} || fail 'cannot enter the job dir'",
@@ -250,14 +253,10 @@ class SlurmExecutor(BaseExecutor):
                         "workdirs=$(squeue --me --noheader --format=%Z) || fail 'squeue failed'",
                         'for d in $workdirs; do [ "$d" != "$PWD" ] || '
                         'fail "A job of this run is still pending or running in $PWD."; done',
-                        f"if [ -s {rollouts} ] && ! grep -qF -- +resume_from_cache=True job.sh; then "
-                        'fail "job.sh in $PWD does not resume from cache, so a resubmit would delete its '
+                        "if [ -s artifacts/rollouts.jsonl ] && ! grep -qF -- ++resubmit=True job.sh; then "
+                        'fail "job.sh in $PWD predates resubmit, so it could start the run fresh and delete its '
                         'rollouts; submit the run again instead"; fi',
-                        # A fresh attempt budget for failed rollouts, and fresh auto-resume retries.
-                        f"mkdir -p {offset.parent} && "
-                        f"if [ -f {failures} ]; then wc -l < {failures}; else echo 0; fi > {offset}.tmp "
-                        f'&& mv {offset}.tmp {offset} || fail "cannot write $PWD/{offset}"',
-                        f"rm -f {RETRY_FILE_NAME} || fail 'cannot remove {RETRY_FILE_NAME}'",
+                        f"export {RESUBMIT_ENV}=1",
                         _sbatch_command(benchmark, job_dir / "job.sh"),
                     ]
                 )
@@ -270,17 +269,11 @@ class SlurmExecutor(BaseExecutor):
         return job
 
     @staticmethod
-    def _resubmit_token_export(conn: Connection, run_dir: Path) -> list[str]:
-        """The token export `run` sends with sbatch, so a resubmitted job's collector can still authenticate."""
-        resolved = shlex.quote(str(run_dir / RESOLVED_CONFIG_NAME))
-        saved = yaml.safe_load(conn.run([f"if [ -f {resolved} ]; then cat {resolved}; fi"])) or {}
-        if not saved:
-            return []
-        otel = saved.get("otel") or {}
-        if not otel.get("enabled", OtelConfig().enabled):
-            return []
-        name = otel.get("token_env", OtelConfig().token_env)
-        return [f"export {name}={shlex.quote(token_from_env(name))}"]
+    def _saved_config(conn: Connection, run_dir: Path) -> SubmitConfig:
+        """The resolved config `persist()` saved for this run, so a resubmit repeats what submit did."""
+        resolved = run_dir / RESOLVED_CONFIG_NAME
+        text = conn.run([f"cat {shlex.quote(str(resolved))}"])
+        return SubmitConfig.model_validate(yaml.safe_load(text))
 
     def _build_record(
         self,

@@ -35,6 +35,8 @@ _JOB_SCRIPT_NAME = "job.sh"
 PROLOGUE_MARKER = "# --- Auto-resume chain ---"
 JOB_CHAIN_NAME = ".gym_job_chain"
 RETRY_FILE_NAME = ".gym_infra_retries"
+# Set to 1 in the environment of a job queued by `gym eval resubmit`.
+RESUBMIT_ENV = "GYM_RESUBMIT"
 
 _PROLOGUE_TEMPLATE = """\
 # --- Auto-resume chain ---
@@ -43,6 +45,14 @@ _this_script="$OUTPUT_DIR/{job_script_name}"
 _prev_slurm_job_id="${{1:-}}"
 _walltime_file="$OUTPUT_DIR/.gym_accumulated_walltime"
 _retry_file="$OUTPUT_DIR/{retry_file_name}"
+
+# A job queued by `gym eval resubmit` starts a fresh retry count. The variable is read once and unset,
+# so the follow-up queued below (which inherits this environment) is an ordinary chain hop.
+_gym_resubmit="${{{resubmit_env}:-}}"
+unset {resubmit_env}
+if [[ "$_gym_resubmit" == 1 ]]; then
+    rm -f "$_retry_file"
+fi
 
 if [[ "$_prev_slurm_job_id" != "" ]]; then
     for _sacct_try in 1 2 3 4 5 6; do
@@ -146,6 +156,7 @@ def render_resume_prologue(resume: ResumeConfig) -> str:
         job_script_name=_JOB_SCRIPT_NAME,
         job_chain_name=JOB_CHAIN_NAME,
         retry_file_name=RETRY_FILE_NAME,
+        resubmit_env=RESUBMIT_ENV,
         max_retries=resume.max_retries,
         max_walltime_check=max_walltime_check,
     )
