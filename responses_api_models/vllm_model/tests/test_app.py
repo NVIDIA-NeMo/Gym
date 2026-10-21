@@ -1721,10 +1721,12 @@ class TestApp:
         assert "generation_log_probs" not in outbound["messages"][1]
         assert outbound["nvext"]["extra_fields"] == ["engine_data"]
         assert not {"ng_capture", "required_prefix_token_ids"} & outbound.keys()
-        # Every Gym request is marked as rollout traffic; a capture call also carries its admission.
-        *capture_annotations, marker = outbound["nvext"]["annotations"]
+        # Every Gym request is marked as rollout traffic. A capture call also carries its admission;
+        # otherwise the echoed turn's tokens ride as the prefix the engine splices.
+        (call_annotation, marker) = outbound["nvext"]["annotations"]
         assert marker == "nemo_gym:rollout"
-        assert len(capture_annotations) == int(capture)
+        if not capture:
+            assert call_annotation == "ng_prefix:[1,2]"
         assert sent[0]["headers"]["x-default"] == "kept"
         if error:
             return
@@ -1734,9 +1736,8 @@ class TestApp:
             # The engine stages log probabilities itself; the admission is the only capture field sent.
             assert "logprobs" not in outbound
             assert outbound["stream"] is False
-            (annotation,) = capture_annotations
-            assert annotation.startswith("ng_capture:")
-            assert CaptureAdmission.model_validate_json(annotation.removeprefix("ng_capture:")) == (
+            assert call_annotation.startswith("ng_capture:")
+            assert CaptureAdmission.model_validate_json(call_annotation.removeprefix("ng_capture:")) == (
                 context.capture_admission
             )
             assert sent[0]["headers"]["x-dynamo-session-id"] == "rollout-1"
