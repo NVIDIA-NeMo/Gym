@@ -17,6 +17,7 @@ import hashlib
 import json
 import logging
 import os
+import socket
 import time
 from contextlib import nullcontext
 from copy import deepcopy
@@ -24,7 +25,7 @@ from types import SimpleNamespace
 from typing import Any, Union
 from unittest.mock import AsyncMock, MagicMock
 
-from aiohttp import ClientResponseError, RequestInfo
+from aiohttp import ClientConnectorError, ClientResponseError, ClientSession, RequestInfo
 from fastapi import Response
 from fastapi.testclient import TestClient
 from multidict import CIMultiDict, CIMultiDictProxy
@@ -6534,6 +6535,37 @@ class TestEndpointFile:
         # Without route-around or an endpoint file, the same list keeps unbounded retries.
         server = self._make_server(tmp_path, endpoint_file=None, base_url=static_urls)
         assert [client.max_connection_retries for client in server._clients] == [None, None]
+
+    def test_connection_retry_timeout_reaches_every_client(self, tmp_path) -> None:
+        static_urls = ["http://engine-0:8712/v1", "http://engine-1:8712/v1"]
+        server = self._make_server(tmp_path, endpoint_file=None, base_url=static_urls)
+        assert [client.connection_retry_timeout_s for client in server._clients] == [None, None]
+
+        server = self._make_server(
+            tmp_path, endpoint_file=None, base_url=static_urls, endpoint_connection_retry_timeout_s=30.0
+        )
+        assert [client.connection_retry_timeout_s for client in server._clients] == [30.0, 30.0]
+
+        (tmp_path / "endpoint.txt").write_text("http://new-host:8712/v1\n")
+        server = self._make_server(tmp_path, endpoint_connection_retry_timeout_s=30.0)
+        server._maybe_rebind_endpoint()
+        assert [client.connection_retry_timeout_s for client in server._clients] == [30.0]
+
+    async def test_a_dead_engine_fails_the_call_within_the_retry_timeout(
+        self, tmp_path, monkeypatch: MonkeyPatch
+    ) -> None:
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            refused_url = f"http://127.0.0.1:{sock.getsockname()[1]}/v1"
+        server = self._make_server(
+            tmp_path, endpoint_file=None, base_url=refused_url, endpoint_connection_retry_timeout_s=1.0
+        )
+        async with ClientSession() as session:
+            monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: session)
+            started = time.monotonic()
+            with raises(ClientConnectorError):
+                await server._clients[0].create_chat_completion(model="dummy_model", messages=[])
+            assert time.monotonic() - started < 2.5
 
     def test_unpublished_endpoint_grace_lifecycle(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
         endpoint_file = tmp_path / "endpoint.txt"
