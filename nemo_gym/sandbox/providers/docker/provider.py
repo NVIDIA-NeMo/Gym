@@ -36,10 +36,14 @@ from nemo_gym.sandbox.providers.base import (
     SandboxEndpoint,
     SandboxExecResult,
     SandboxHandle,
+    SandboxPtyError,
+    SandboxPtySession,
+    SandboxPtySpec,
     SandboxResources,
     SandboxSpec,
     SandboxStatus,
 )
+from nemo_gym.sandbox.providers.docker import pty as docker_pty
 
 
 LOGGER = logging.getLogger(__name__)
@@ -274,6 +278,8 @@ class DockerProvider:
         self._probe = _coerce_config(probe, DockerProbeConfig)
         self._binary = _require_docker()
         self._semaphore = asyncio.Semaphore(self._exec_config.concurrency)
+        # Live PTY sessions by container name; closed with their container and at provider shutdown.
+        self._pty_sessions: dict[str, set[docker_pty.DockerPtySession]] = {}
 
     def service_options(
         self,
@@ -552,6 +558,123 @@ class DockerProvider:
             )
         return SandboxExecResult(stdout=out, stderr=err, return_code=code, error_type=None)
 
+    def _pty_argv(self, handle: SandboxHandle, spec: SandboxPtySpec, session_id: str) -> list[str]:
+        """The ``docker exec`` command line of one PTY session: interactive, with a terminal in PTY mode.
+
+        The session's marker (``NEMO_GYM_PTY_SESSION=<session id>``) goes last among the ``--env`` flags so no
+        spec env can override it: it is how the recorded pid is known to be this session's process.
+        """
+        inst = handle.raw
+        flags: list[str] = ["-i"]
+        if spec.pty:
+            flags.append("-t")
+        if spec.cwd is not None:
+            flags += ["-w", spec.cwd]
+        merged_env = dict(getattr(inst, "env", {}))
+        if spec.env:
+            merged_env.update(spec.env)
+        merged_env.pop(docker_pty.SESSION_ENV, None)
+        for key, value in merged_env.items():
+            flags += ["--env", f"{key}={value}"]
+        flags += ["--env", docker_pty.session_marker(session_id)]
+        if spec.user is not None:
+            flags += ["--user", _user_flag(spec.user)]
+        flags += list(self._exec_config.extra_exec_args)
+        launcher = docker_pty.launcher_argv(
+            inst.shell, docker_pty.pid_file_for(session_id), docker_pty.fallback_pid_file_for(session_id), spec.command
+        )
+        return [self._binary, "exec", *flags, inst.name, *launcher]
+
+    async def create_pty(self, handle: SandboxHandle, spec: SandboxPtySpec) -> SandboxPtySession:
+        """Open an interactive terminal in the container: one ``docker exec -it`` client under a host pty.
+
+        ``cwd``, ``env`` and ``user`` map to the exec flags, ``rows``/``cols`` size the terminal before the
+        client starts, ``pty=False`` runs the client on pipes. The client process is not counted against
+        ``exec.concurrency``: it lives as long as the session. The session's pid is recorded under ``/tmp`` in the
+        container (under ``/dev/shm`` when ``/tmp`` refuses the write, as under ``create.read_only: true``; a session
+        that can record it nowhere ends at once with a message instead of running unsignallable), read as the
+        session's own user and signalled as root (no ``CAP_SYS_PTRACE`` needed). This returns as soon as the client
+        is spawned: ``send_signal()``/``close()`` wait up to two seconds for the record when they come first, refuse
+        at once a record that is not a regular file, and read it under a timeout of their own
+        (``PID_READ_TIMEOUT_S``) rather than ``exec.default_timeout_s``. A client that exits without having started
+        the program (the daemon refused the exec: the container paused or gone, the daemon unreachable, told by the
+        client's stderr as ``exec()`` tells a runtime failure) ends the session with ``SandboxPtyError`` from
+        ``wait_exit()`` and ``read()`` rather than as the program's exit; a container closed while the session was
+        being opened has it abandoned and ``SandboxPtyError`` raised here. See :mod:`nemo_gym.sandbox.providers.docker.pty`.
+        """
+        if isinstance(spec.user, bool):
+            raise ValueError("Docker PTY sessions take a user name or uid, not a bool")
+        session_id = uuid.uuid4().hex
+
+        async def run_in_container(
+            command: str, *, as_session_user: bool = False, timeout_s: float | None = None
+        ) -> SandboxExecResult:
+            # The pid read runs as the session's user (``spec.user``, or the container's default user like the
+            # session itself): ``/proc/<pid>/environ`` is readable by the process's own uid, not by a root without
+            # ``CAP_SYS_PTRACE``, which Docker's default capabilities omit. ``kill`` and the cleanup run as root so
+            # they reach the process whatever user the session runs as. ``timeout_s`` caps the exec's timeout below
+            # ``exec.default_timeout_s`` (the pid read's own bound), never above it.
+            user = spec.user if as_session_user else "root"
+            limit = self._exec_config.default_timeout_s
+            if timeout_s is not None:
+                limit = timeout_s if limit is None else min(limit, timeout_s)
+            return await self.exec(handle, command, user=user, timeout_s=limit)
+
+        name = handle.raw.name
+        # The container's session set, taken before the awaits below: ``close(handle)`` pops it, so the set doubles as
+        # the token that tells, once the spawn returns, whether the container is still there (see below).
+        sessions = self._pty_sessions.setdefault(name, set())
+        # Retire the sessions of this container whose process exited, and release them: ``closed`` is true once the
+        # process exited, but the host pty master (and the pid record in the container) stays until ``close()``,
+        # which a caller that only read the session to EOF never issued; discarded unreleased they would hold their
+        # descriptors until the container's close or ``aclose()``, out of reach of both. Discarded before the releases
+        # await: ``close(handle)`` may iterate the set meanwhile.
+        stale_sessions = [s for s in sessions if s.closed]
+        sessions.difference_update(stale_sessions)
+        for stale in stale_sessions:
+            await self._release_pty_session(stale, name, abandon=False)
+        session = await self._spawn_pty(
+            self._pty_argv(handle, spec, session_id),
+            use_pty=spec.pty,
+            rows=spec.rows,
+            cols=spec.cols,
+            session_id=session_id,
+            run_in_container=run_in_container,
+            pid_file=docker_pty.pid_file_for(session_id),
+            fallback_pid_file=docker_pty.fallback_pid_file_for(session_id),
+            # A client that exits with the daemon's refusal on its stderr (the lines ``exec()`` classifies as a
+            # runtime failure) never ran the program: the session ends with ``SandboxPtyError``, not that code.
+            runtime_failure=_is_runtime_failure,
+        )
+        # ``close(handle)`` while this awaited (the sandbox torn down as a harness opens a session) popped the set and
+        # abandoned the sessions it held, and ``aclose()`` may have followed at once, as the facade's ``stop()`` runs
+        # the two back to back: a session added to the popped set would be out of ``aclose()``'s reach, one added to
+        # the provider now would sit in a provider nothing closes again, its master and client leaking either way.
+        # The container is gone, so this session goes the way of its siblings and the caller is told.
+        if self._pty_sessions.get(name) is not sessions:
+            await session.abandon()
+            raise SandboxPtyError(f"sandbox {name!r} closed while its PTY session was being opened")
+        sessions.add(session)
+        return session
+
+    # The seam tests replace to run a local program under the same terminal plumbing.
+    _spawn_pty = staticmethod(docker_pty.spawn)
+
+    async def _release_pty_sessions(self, name: str, *, abandon: bool) -> None:
+        """Close (or, when the container goes away, abandon) the live sessions of container ``name``."""
+        for session in self._pty_sessions.pop(name, set()):
+            await self._release_pty_session(session, name, abandon=abandon)
+
+    async def _release_pty_session(self, session: SandboxPtySession, name: str, *, abandon: bool) -> None:
+        """One session of :meth:`_release_pty_sessions`; a failure is logged, never raised into the caller."""
+        try:
+            if abandon:
+                await session.abandon()
+            else:
+                await session.close()
+        except Exception:
+            LOGGER.warning("Failed to close PTY session %s of %r", session.session_id, name, exc_info=True)
+
     async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
         """Upload one host file (creates the parent dir; the file lands owned by root)."""
         inst = handle.raw
@@ -624,8 +747,9 @@ class DockerProvider:
         return SandboxEndpoint(endpoint=_http_endpoint(host, host_port))
 
     async def close(self, handle: SandboxHandle) -> None:
-        """Force-remove the container (already-gone counts as success)."""
+        """Force-remove the container (already-gone counts as success); its PTY clients are released first."""
         inst = handle.raw
+        await self._release_pty_sessions(inst.name, abandon=True)
         code, _out, err = await self._run(
             [self._binary, "rm", "-f", inst.name],
             timeout_s=self._exec_config.default_timeout_s,
@@ -634,4 +758,6 @@ class DockerProvider:
             raise RuntimeError(f"docker rm -f failed (code={code}) for {inst.name!r}: {err.strip()}")
 
     async def aclose(self) -> None:
-        return None
+        """Close the PTY sessions still open; the containers themselves belong to their handles."""
+        for name in list(self._pty_sessions):
+            await self._release_pty_sessions(name, abandon=False)

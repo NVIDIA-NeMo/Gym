@@ -34,7 +34,7 @@ from environment_servers.harbor.users import _creation_user
 from environment_servers.harbor.verifier import _verifier_image, _verifier_key, _verifier_runs_task_image
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox, AsyncSandboxCompose, SandboxSpec, clamp_resource_requests
-from nemo_gym.sandbox.agent_tools import sandbox_server_url
+from nemo_gym.sandbox.agent_tools import phase_network_policy, sandbox_server_url
 from nemo_gym.sandbox.compose_config import (
     adapt_non_root_sidecars,
     deployment_platform,
@@ -170,8 +170,15 @@ class HarborSandboxMixin:
         image: str | None = None,
         role: str = "agent",
         ttl: float | None = None,
+        network_policy: Mapping[str, Any] | None = None,
     ) -> SandboxSpec:
-        """The agent's sandbox by default; pass the verifier's environment for a separate verifier."""
+        """The agent's sandbox by default; pass the verifier's environment for a separate verifier.
+
+        ``network_policy`` is the provider's egress policy for this sandbox (the separate verifier's
+        ``[verifier].network_mode``, see :meth:`_verifier_network_policy`); it replaces the deployment's
+        ``sandbox_provider_options.network_policy`` for that sandbox, as Harbor's explicit phase policy replaces
+        the environment baseline.
+        """
         global_config_dict = get_global_config_dict()
         if environment is None:
             # The agent's sandbox: Dockerfile ENV recorded by the loader, under the host-resolved `[environment.env]`.
@@ -214,6 +221,9 @@ class HarborSandboxMixin:
                 self._refuse_unsupported_group(task, step.user, global_config_dict)
         in_task_image = runs_task_image and not task.overlay
         user = _creation_user(task, default) if in_task_image else None
+        provider_options = self._provider_options_within(resources, task, role)
+        if network_policy is not None:
+            provider_options["network_policy"] = dict(network_policy)
         return SandboxSpec(
             image=image or task.image,
             ttl_s=ttl,
@@ -222,9 +232,24 @@ class HarborSandboxMixin:
             env=env,
             metadata=metadata,
             resources=resources,
-            provider_options=self._provider_options_within(resources, task, role),
+            provider_options=provider_options,
             user=user,
         )
+
+    def _verifier_network_policy(self, task: HarborTask) -> dict[str, Any] | None:
+        """The separate verifier's egress policy from ``[verifier].network_mode`` and ``allowed_hosts``; ``None`` when public.
+
+        Harbor switches the environment's policy for the verify phase and back (``_phase_network_policy``);
+        OpenSandbox cannot change a running sandbox's ``defaultAction`` (its egress API only patches rules
+        under the policy the sandbox was created with), so the restricted policy is applied to the separate
+        verifier's sandbox at creation, for the whole of its life. The loader admits the phase policy for
+        separate-mode tasks only; here the provider is checked (:func:`phase_network_policy` fails closed for
+        every provider but OpenSandbox) and the entries are turned into egress rules. Raises ``ValueError``.
+        """
+        verifier = task.config.verifier
+        if verifier.network_mode in (None, "public") and not verifier.allowed_hosts:
+            return None  # the common case: no provider lookup for a public verifier
+        return phase_network_policy(self._task_provider_name(task), verifier.network_mode, verifier.allowed_hosts)
 
     def _provider_options_within(self, resources: Mapping[str, Any], task: HarborTask, role: str) -> dict[str, Any]:
         """The configured provider options, with scheduling requests capped at the task's declared limits.
@@ -568,7 +593,12 @@ class HarborSandboxMixin:
             # An explicit verifier image starts in its `[verifier.environment].workdir`, else its own WORKDIR.
             workdir = environment.workdir
         spec = self._sandbox_spec(
-            task, workdir, environment=environment, image=_verifier_image(task, True), role="verifier"
+            task,
+            workdir,
+            environment=environment,
+            image=_verifier_image(task, True),
+            role="verifier",
+            network_policy=self._verifier_network_policy(task),
         )
         provider_config = resolve_provider_config(self._provider_ref(task), get_global_config_dict())
         if episode_key is None:
