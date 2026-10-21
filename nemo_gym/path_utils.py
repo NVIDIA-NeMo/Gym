@@ -36,3 +36,12 @@ def aggregate_metrics_path_for(output_fpath: Path) -> Path:
     (e.g. `gym eval compare`) derive the same path the writers produced.
     """
     return output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
+
+
+def run_summary_path_for(output_fpath: Path) -> Path:
+    """`results/rollouts.jsonl` -> `results/rollouts_run_summary.json`.
+
+    The per-run summary a Harbor run writes beside its rollouts (`nemo_gym.tasks.harbor.run_summary`),
+    named like the other sidecars so a renamed `--output` keeps them together.
+    """
+    return output_fpath.with_stem(output_fpath.stem + "_run_summary").with_suffix(".json")

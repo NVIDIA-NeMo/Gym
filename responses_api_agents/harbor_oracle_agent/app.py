@@ -15,6 +15,7 @@ A task without ``solution/solve.sh`` is not failed: the oracle returns a respons
 ``oracle=unvalidated`` and does nothing in the sandbox.
 """
 
+import logging
 import math
 from dataclasses import dataclass
 from time import time
@@ -50,6 +51,8 @@ from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.sandbox.providers import create_provider
 from nemo_gym.sandbox.transfer import SandboxTransferError, SandboxUnavailableError, exec_as_root
 
+
+LOGGER = logging.getLogger(__name__)
 
 SOLVE_SCRIPT = f"{SOLUTION_DIR}/solve.sh"
 SOLVE_LOG_DIR = "/logs/agent"
@@ -195,6 +198,13 @@ class OracleAgent(SimpleResponsesAPIAgent):
         # One bounded exec: the provider keeps the command alive for `timeout_s`, and `timeout`
         # inside the container stops the solution itself (a sub-second budget still gets a whole
         # second: `timeout 0` means no limit). Output goes to a file we tail.
+        LOGGER.debug(
+            "Running %s as %s in %s with a %.0fs budget",
+            SOLVE_SCRIPT,
+            session.user if session.user is not None else "the sandbox default user",
+            session.workdir,
+            timeout,
+        )
         result = await session.sandbox.exec(
             f"{TIMEOUT_WRAPPER_GUARD}; "
             f"timeout -s KILL {max(1, math.ceil(timeout))} bash {SOLVE_SCRIPT} > {SOLVE_LOG} 2>&1",
@@ -209,6 +219,13 @@ class OracleAgent(SimpleResponsesAPIAgent):
         log = await session.sandbox.exec(f"tail -c {tail} {SOLVE_LOG} 2>/dev/null", cwd="/", timeout_s=60)
         output = "\n".join(part for part in ((log.stdout or "")[-tail:], (result.stderr or "")[-tail:]) if part)
         status = ORACLE_STATUS_SOLVED if result.return_code == 0 else ORACLE_STATUS_FAILED
+        LOGGER.debug(
+            "%s exited %s (%s%s)",
+            SOLVE_SCRIPT,
+            result.return_code,
+            status,
+            f", {result.error_type}" if result.error_type else "",
+        )
         extra = {"oracle_return_code": str(result.return_code)}
         if result.error_type:
             extra["oracle_error_type"] = result.error_type

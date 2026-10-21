@@ -177,3 +177,24 @@ out and stops before starting servers. Pass `--skip-unloadable` to run the loada
 tasks stay listed in `skipped.json`. Tasks that declare GPUs run on the environment server's `gpu_sandbox_provider`
 block when one is configured. The run's rows, generated configuration and outputs are the same artifacts every
 other `gym eval run` produces, so `gym eval aggregate`, `gym eval export` and the health check apply unchanged.
+
+### Run summary and verbosity
+
+Both commands leave a per-run summary beside the rollouts, `rollouts_run_summary.json` (`<stem>_run_summary.json`
+when `--output` names another file). It records the command, target, taskset and agent, the dataset's folder,
+source and digests, the run's `task_source`, the files of the run (rollouts and sidecars, the health check's
+reports, the rows and the data processor's files beside them, the collated collector input, run config,
+`skipped.json`, `images.json`, the verifier root; `null` for one the run did not write, for the aggregate
+metrics and health reports when an older file by that name predates this run's rollouts, and for rollouts,
+failures and materialized inputs a fresh start never got to clear, such as after servers that failed to start;
+such files are named under `stale_files` instead, and their rows are not this run's), and one entry per
+selected task and repeat: its status,
+reward and `failure_kind`, the verifier's mode, wall time and return code, the relative paths of its verifier log
+folder (`test-stdout.txt`, `trajectory.json`, collected `artifacts/`), and the input the row carried (task and
+dataset digests, `agent_timeout_sec`, the step for a multi-step task). A path a row names that is missing on
+disk is listed under `missing_paths`. The file is written whatever the run did, a validate that found no task
+with a `solution/` included (beside the requested `--output`). Start from this file when a score needs checking.
+
+`gym dataset validate ... -v` (or `--verbose`, the `verbose` config key) raises the log level to DEBUG in the CLI
+and in the spun-up servers: the Harbor environment server then traces every episode's seed, verifier exit and
+score, and the oracle agent its `solve.sh` run.
