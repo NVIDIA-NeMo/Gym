@@ -247,6 +247,36 @@ class TestApp:
         assert step_json["function_calls"][0]["call_id"] == "c-9"
         assert response.env_id == "env-1"
 
+    async def test_responses_sums_usage_across_turns(self, agent_config: ToolSandboxAgentConfig) -> None:
+        def usage(input_tokens: int, output_tokens: int, cached: int, reasoning: int) -> dict[str, Any]:
+            return {
+                "input_tokens": input_tokens,
+                "input_tokens_details": {"cached_tokens": cached},
+                "output_tokens": output_tokens,
+                "output_tokens_details": {"reasoning_tokens": reasoning},
+                "total_tokens": input_tokens + output_tokens,
+            }
+
+        post = _post_router(
+            {
+                "/seed_session": [_seed_payload()],
+                "/v1/responses": [
+                    _function_call_response() | {"usage": usage(300, 1400, cached=100, reasoning=1200)},
+                    _text_response("It is noon.", response_id="resp-final") | {"usage": usage(1818, 24, 300, 0)},
+                ],
+                "/step": [_step_payload(done=False), _step_payload(done=True)],
+                "/close": [{"message": "closed", "success": True}],
+            }
+        )
+        agent = self._make_agent(agent_config, post)
+
+        response = await agent.responses(self._run_request())
+
+        assert len(self._calls_to(agent, "/v1/responses")) == 2
+        assert response.id == "resp-final"
+        # Usage covers every model call in the episode, not just the last one.
+        assert response.usage.model_dump() == usage(2118, 1424, cached=400, reasoning=1200)
+
     async def test_responses_no_actionable_output_breaks(self, agent_config: ToolSandboxAgentConfig) -> None:
         post = _post_router(
             {

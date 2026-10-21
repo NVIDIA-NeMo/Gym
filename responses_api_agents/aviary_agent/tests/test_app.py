@@ -33,6 +33,16 @@ from responses_api_agents.aviary_agent.app import (
 )
 
 
+def _usage(input_tokens: int, output_tokens: int, *, cached: int = 0, reasoning: int = 0) -> dict:
+    return {
+        "input_tokens": input_tokens,
+        "input_tokens_details": {"cached_tokens": cached},
+        "output_tokens": output_tokens,
+        "output_tokens_details": {"reasoning_tokens": reasoning},
+        "total_tokens": input_tokens + output_tokens,
+    }
+
+
 class TestApp:
     def test_lifecycle(self) -> None:
         config = AviaryAgentConfig(
@@ -243,6 +253,7 @@ class TestApp:
             "parallel_tool_calls": True,
             "tool_choice": "auto",
             "tools": [],
+            "usage": _usage(300, 1400, cached=100, reasoning=1200),
         }
         mock_step_1 = {
             "obs": [{"type": "function_call_output", "call_id": "call_1", "output": "Result 1"}],
@@ -263,6 +274,7 @@ class TestApp:
             "parallel_tool_calls": True,
             "tool_choice": "auto",
             "tools": [],
+            "usage": _usage(1818, 24, cached=300, reasoning=0),
         }
         mock_step_2 = {
             "obs": [{"type": "function_call_output", "call_id": "call_2", "output": "Result 2"}],
@@ -293,6 +305,8 @@ class TestApp:
         assert response.env_id == env_id
         assert response.group_id == "42"
         assert len(response.output) == 2
+        # Usage covers every model call in the episode, not just the last one.
+        assert response.usage.model_dump() == _usage(2118, 1424, cached=400, reasoning=1200)
 
         calls = agent.server_client.post.await_args_list
         assert len(calls) == 6
@@ -354,6 +368,7 @@ class TestApp:
             "parallel_tool_calls": True,
             "tool_choice": "auto",
             "tools": [],
+            "usage": _usage(500, 40),
         }
         mock_terminal_step = {
             "obs": [
@@ -383,6 +398,7 @@ class TestApp:
             "parallel_tool_calls": False,
             "tool_choice": "none",
             "tools": [],
+            "usage": _usage(600, 8),
         }
         mock_close_data = {"message": "Success", "success": True}
 
@@ -415,6 +431,8 @@ class TestApp:
         assert response.contains_transitions is return_transitions
         if return_transitions:
             assert len(response.output) == (2 if has_final_response else 1)
+        # The post-terminal model call is billed like any other turn.
+        assert response.usage.model_dump() == (_usage(1100, 48) if has_final_response else _usage(500, 40))
 
         calls = agent.server_client.post.await_args_list
         model_path = agent.url_path_for_run("/v1/responses", request)

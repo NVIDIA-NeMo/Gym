@@ -78,6 +78,14 @@ jq -r 'select(.attributes."nemo.gym.rollout.id") | .attributes."nemo.gym.rollout
 ls <capture_dir>/<rollout_id>.capture.jsonl
 ```
 
+### Engine Request Ids
+
+Inside a rollout, every call a Gym model server makes to its inference backend carries
+`X-Request-Id: <rollout id>-<8 hex chars>`. vLLM uses that header as its request id and records it
+as `gen_ai.request.id` on its request span and in its request log, so an engine span or log line
+can be matched to a rollout directly, without walking the trace. A caller's own `X-Request-Id`
+header is kept.
+
 ## Span Kinds
 
 Span kind is what tells a backend that a call left one service and arrived at another.
@@ -124,6 +132,17 @@ The `traceparent` header is not arriving. Check, in order:
 3. **Is telemetry enabled in the *receiving* process?** A server that never initialized
    telemetry does not extract the header. Confirm that the environment reached it —
    `NEMO_GYM_OTEL_ENABLED` must be set in the server process, not only in your shell.
+
+### A Request Nests Under the Previous One on the Same Connection
+
+Seen as a server span whose parent is the previous request's server span, in another rollout's
+trace, with the caller's client span left without a child. uvicorn starts a pipelined request's
+task from inside the previous request's task, so it inherits that request's context, and the
+instrumentor then skips `traceparent` extraction. Gym's servers wrap every request in
+`RequestContextIsolationMiddleware`, installed outside the instrumentor by `run_webserver`, which
+resets the OpenTelemetry context before the instrumentor runs (and clears the rollout id as a
+guard). An app served without `run_webserver` needs `install_request_context_isolation(app)` after
+instrumenting to be safe from this.
 
 ### Traces Are Missing Their Last Spans
 

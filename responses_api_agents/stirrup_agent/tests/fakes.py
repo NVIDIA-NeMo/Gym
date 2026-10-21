@@ -23,9 +23,12 @@ def _call(name: str, arguments: str) -> dict:
 
 
 class _ModelServer:
-    """Answer chat completions in order and record each request body; a ``None`` answer hangs until closed."""
+    """Answer chat completions in order and record each request body.
 
-    def __init__(self, answers: list[dict | None]) -> None:
+    A ``None`` answer hangs until closed; an ``int`` answer is an HTTP error status.
+    """
+
+    def __init__(self, answers: list[dict | int | None]) -> None:
         self.answers = answers
         self.blocked = threading.Event()
         self.release = threading.Event()
@@ -38,6 +41,14 @@ class _ModelServer:
                 server.requests.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
                 server.session_ids.append(self.headers.get("x-session-id"))
                 message = server.answers[len(server.requests) - 1]
+                if isinstance(message, int):
+                    body = json.dumps({"error": {"message": "rejected", "type": "stub_error"}}).encode()
+                    self.send_response(message)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
                 if message is None:
                     server.blocked.set()
                     server.release.wait(60)
