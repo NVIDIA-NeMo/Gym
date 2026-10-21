@@ -84,7 +84,14 @@ class Reply:
 
 
 class Harness:
-    def __init__(self, *, skip_verification: bool = False, restart_resource: bool = False):
+    def __init__(
+        self,
+        *,
+        skip_verification: bool = False,
+        restart_resource: bool = False,
+        fail_verification: bool = False,
+        detached_dispatch: bool = False,
+    ):
         self.model_started, self.model_release = asyncio.Event(), asyncio.Event()
         self.verify_started, self.verify_release = asyncio.Event(), asyncio.Event()
         self.reply_sent, self.reply_delivery = asyncio.Event(), asyncio.Event()
@@ -93,6 +100,9 @@ class Harness:
         self.model_paths: list[str] = []
         self.verifications = self.closes = 0
         self.restart_resource = restart_resource
+        self.fail_verification = fail_verification
+        self.detached_dispatch = detached_dispatch
+        self.model_handlers: list[asyncio.Task] = []
         client = MagicMock(spec=ServerClient)
         client.global_config_dict = {"checkpoint": {"enabled": True, "control_auth_token": "test"}}
         client.post = AsyncMock(side_effect=self.post)
@@ -133,7 +143,14 @@ class Harness:
             return Reply(MODEL_REPLY)
         if server_name == "agent":
             capture_key = re.search(r"/ng-rollout/([^/]+)", url_path)[1]
-            response = await self.agent.responses(request(capture_key), json)
+            if self.detached_dispatch:
+                # Cancelling an HTTP caller need not cancel the server's handler.
+                handler = asyncio.create_task(self.agent.responses(request(capture_key), json))
+                self.model_handlers.append(handler)
+                self.tasks.append(handler)
+                response = await asyncio.shield(handler)
+            else:
+                response = await self.agent.responses(request(capture_key), json)
             self.reply_sent.set()
             await self.reply_delivery.wait()
             return Reply(response.model_dump(mode="json"))
@@ -146,6 +163,8 @@ class Harness:
             self.verifications += 1
             self.verify_started.set()
             await self.verify_release.wait()
+            if self.fail_verification:
+                raise RuntimeError("controlled verification failure")
             verdict = await self.verifier.verify(SingleStepToolUseArgumentComparisonVerifyRequest.model_validate(json))
             return Reply(verdict.model_dump(mode="json"))
         if url_path == "/close_session":
@@ -228,7 +247,7 @@ async def test_inflight_model_wait_saves_and_survives_a_second_restore(harnesses
     result = await asyncio.wait_for(third.start(2), 2)
     assert result.reward == 1.0
     assert "/ng-rollout/rollout-a2/" in third.model_paths[0]
-    assert not third.agent._model_replies and not third.agent._model_completed
+    assert not third.agent._model_replies
     assert third.closes == 1
 
 
@@ -266,6 +285,54 @@ async def test_checkpoint_in_verification_reuses_response_and_replays_only_verif
     await second.restore(tmp_path)
     result = await asyncio.wait_for(second.start(1), 2)
     assert result.reward == 1.0 and second.model_paths == []
+
+
+async def test_failed_verification_during_checkpoint_can_restart_after_restore(harnesses, tmp_path):
+    first = harnesses(fail_verification=True)
+    first.model_release.set()
+    first.verify_release.clear()
+    run = first.start()
+    await asyncio.wait_for(first.verify_started.wait(), 2)
+    await first.prepare()
+    first.verify_release.set()
+    async with asyncio.timeout(2):
+        while first.participant.legacy_episodes.exported()["run:rollout"] is not None:
+            await asyncio.sleep(0)
+    assert not run.done(), "the failed replay step must stay parked until resume"
+    await first.controller.commit(CommitRequest(**control(), checkpoint_dir=str(tmp_path)))
+    records = await first.participant.export(None)
+    assert records[0].episode is None
+    assert records[0].session == {"model_completed": False}
+
+    second = harnesses()
+    await second.restore(tmp_path)
+    second.model_release.set()
+    result = await asyncio.wait_for(second.start(1), 2)
+    assert result.reward == 1.0
+    assert second.model_paths == ["/ng-rollout/rollout-a1/v1/responses"]
+    assert second.verifications == 1
+    await first.controller.resume(CheckpointRequest(**control()))
+    with pytest.raises(RuntimeError, match="controlled verification failure"):
+        await asyncio.wait_for(run, 2)
+
+
+@pytest.mark.parametrize("replacement_live", [False, True])
+async def test_cancelled_run_late_model_reply_cannot_be_reused_by_replacement(harnesses, replacement_live):
+    first = harnesses(detached_dispatch=True)
+    old_run = first.start()
+    await asyncio.wait_for(first.model_started.wait(), 2)
+    old_run.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await old_run
+    assert not first.participant.has_session("run:rollout")
+    assert not first.model_handlers[0].done(), "the self-dispatched HTTP handler is still running"
+    if replacement_live:
+        first.participant.open_session("run:rollout", EpisodeId(rollout_id="rollout", attempt=1))
+    first.model_release.set()
+    await asyncio.wait_for(first.model_handlers[0], 2)
+    result = await asyncio.wait_for(first.start(1), 2)
+    assert result.reward == 1.0
+    assert first.model_paths == ["/ng-rollout/rollout/v1/responses", "/ng-rollout/rollout-a1/v1/responses"]
 
 
 async def test_unclaimed_restored_reply_survives_another_save(harnesses, tmp_path):

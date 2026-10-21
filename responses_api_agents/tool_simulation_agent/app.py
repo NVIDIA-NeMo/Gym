@@ -14,8 +14,9 @@
 # limitations under the License.
 import json
 import logging
-from collections.abc import Mapping
-from contextlib import nullcontext
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager, nullcontext
+from dataclasses import dataclass
 
 from fastapi import Body, Request
 from pydantic import ConfigDict, JsonValue, PrivateAttr, ValidationError
@@ -60,42 +61,46 @@ class ToolSimulationAgentVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
 
+@dataclass
+class _ModelReply:
+    completed: bool = False
+    response: NeMoGymResponse | None = None
+
+
 class ToolSimulationAgent(SimpleResponsesAPIAgent):
     config: ToolSimulationAgentConfig
     checkpoint_sessions_supported = True
     # A completed self-dispatch may still be on its way to /run when a checkpoint
     # exports it. Keep its reply until /run records the verification boundary.
-    _model_replies: dict[str, NeMoGymResponse] = PrivateAttr(default_factory=dict)
-    _model_completed: set[str] = PrivateAttr(default_factory=set)
+    _model_replies: dict[str, _ModelReply] = PrivateAttr(default_factory=dict)
 
     async def export_agent_sessions(self, session_keys: list[str]) -> dict[str, dict[str, JsonValue]]:
-        return {
-            key: {
-                "model_completed": key in self._model_completed,
-                **(
-                    {"response": self._model_replies[key].model_dump(mode="json")}
-                    if key in self._model_replies
-                    else {}
-                ),
+        states = {}
+        for key in session_keys:
+            reply = self._model_replies.get(key, _ModelReply())
+            states[key] = {
+                "model_completed": reply.completed,
+                **({"response": reply.response.model_dump(mode="json")} if reply.response is not None else {}),
             }
-            for key in session_keys
-        }
+        return states
 
     async def restore_agent_sessions(self, sessions: list[RestoredAgentSession]) -> None:
         # Validate every reply before installing any of them.
         restored = {
-            session.session_key: NeMoGymResponse.model_validate(session.session["response"])
+            session.session_key: _ModelReply(
+                completed=session.session.get("model_completed", False),
+                response=(
+                    NeMoGymResponse.model_validate(session.session["response"])
+                    if "response" in session.session
+                    else None
+                ),
+            )
             for session in sessions
-            if "response" in session.session
         }
         self._model_replies.update(restored)
-        self._model_completed.update(
-            session.session_key for session in sessions if session.session.get("model_completed", False)
-        )
 
     async def retire_agent_session(self, session_key: str) -> None:
         self._model_replies.pop(session_key, None)
-        self._model_completed.discard(session_key)
 
     async def responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
@@ -112,11 +117,14 @@ class ToolSimulationAgent(SimpleResponsesAPIAgent):
             async with participant.restart_call(capture_key):
                 return await self._responses(request, body)
         participant.check_session(session_key, episode_id)
+        # Capture the session's object before awaiting: a late reply may update
+        # this object after /run removes it, but cannot recreate the cache entry.
+        model_reply = self._model_replies.setdefault(session_key, _ModelReply())
         while True:
-            if session_key in self._model_replies:
+            if model_reply.response is not None:
                 participant.replayed(session_key, episode_id)
-                return self._model_replies[session_key]
-            if session_key in self._model_completed:
+                return model_reply.response
+            if model_reply.completed:
                 raise ActivationOutOfOrderError("tool-simulation model reply was already consumed by /run")
             if not await participant.wait_activation(session_key, 1):
                 break
@@ -126,8 +134,8 @@ class ToolSimulationAgent(SimpleResponsesAPIAgent):
             await activation.boundary(lambda: {})
             async with activation.awaiting_model():
                 reply = await self._responses(request, body)
-            self._model_replies[session_key] = reply
-            self._model_completed.add(session_key)
+            model_reply.response = reply
+            model_reply.completed = True
             return reply
 
     async def _responses(self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
@@ -155,11 +163,12 @@ class ToolSimulationAgent(SimpleResponsesAPIAgent):
         episode_id = EpisodeId.from_capture_key(require_rollout(self.rollout_id_from_run(body)))
         session_key = f"{_LEGACY_SESSION_PREFIX}{episode_id.rollout_id}"
         async with participant.legacy_run(session_key, episode_id) as legacy_run:
+            model_reply = self._model_replies.setdefault(session_key, _ModelReply())
             try:
                 return await self._run(body, legacy_run=legacy_run)
             finally:
-                self._model_replies.pop(session_key, None)
-                self._model_completed.discard(session_key)
+                if self._model_replies.get(session_key) is model_reply:
+                    self._model_replies.pop(session_key)
 
     async def _run(
         self, body: ToolSimulationAgentRunRequest, *, legacy_run: LegacyRun | None
@@ -171,18 +180,33 @@ class ToolSimulationAgent(SimpleResponsesAPIAgent):
             raise ValueError(f"unknown tool-simulation checkpoint stage {stage!r}")
         cookies = continuation.get("cookies", {})
         verify_mode: StepMode = continuation.get("verify_mode", "wait")
+        model_reply = self._model_replies[legacy_run.key] if legacy_run is not None else None
+
+        @asynccontextmanager
+        async def step(mode: StepMode) -> AsyncIterator[None]:
+            async with legacy_run.step(mode) if legacy_run else nullcontext():
+                try:
+                    yield
+                except BaseException:
+                    # A failed replay step can park before propagating its error,
+                    # exporting a null boundary that restarts from input. Clear
+                    # the completion marker before that snapshot can be taken.
+                    if model_reply is not None:
+                        model_reply.completed = False
+                        model_reply.response = None
+                    raise
 
         async def boundary(state: dict[str, JsonValue]) -> None:
             if legacy_run is not None:
                 if state["next"] in {"verify", "return"}:
                     # No await between removing the cached reply and recording
                     # the boundary that now owns it.
-                    self._model_replies.pop(legacy_run.key, None)
+                    model_reply.response = None
                 await legacy_run.boundary(state)
 
         if stage == "seed":
             await boundary({"next": "seed"})
-            async with legacy_run.step("replay"):
+            async with step("replay"):
                 seed = await self.server_client.post(
                     server_name=config.resources_server.name, url_path="/seed_session", json=body.model_dump()
                 )
@@ -195,7 +219,7 @@ class ToolSimulationAgent(SimpleResponsesAPIAgent):
 
         if stage == "model":
             await boundary({"next": "model", "cookies": cookies, "verify_mode": verify_mode})
-            async with legacy_run.step("replay") if legacy_run else nullcontext():
+            async with step("replay"):
                 response = await self.server_client.post(
                     server_name=config.name,
                     url_path=self.url_path_for_run("/v1/responses", body),
@@ -229,7 +253,7 @@ class ToolSimulationAgent(SimpleResponsesAPIAgent):
                 if legacy_run
                 else {}
             )
-            async with legacy_run.step(verify_mode) if legacy_run else nullcontext():
+            async with step(verify_mode):
                 verify_response = await self.server_client.post(
                     server_name=config.resources_server.name,
                     url_path="/verify",
