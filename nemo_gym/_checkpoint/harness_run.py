@@ -129,6 +129,9 @@ class VerifyBookmark(_Bookmark):
     verify_mode: StepMode
     outcome: dict[str, JsonValue]
     launches: list[LaunchRecord]
+    # What a prepared verification captured (such as the patch) once the owner ended the session: grading it
+    # is replayable, so a checkpoint does not wait for it and a restore grades it again.
+    prepared: Optional[dict[str, JsonValue]] = None
 
 
 class ReturnBookmark(_Bookmark):
@@ -240,6 +243,28 @@ class PausesAtCheckpoints(Protocol):
 
     def pauses_at_checkpoints(self) -> bool:
         """Whether this run pauses its harness at checkpoints."""
+        ...
+
+
+class PreparedVerification(Protocol[OutcomeT]):
+    """Optional for a :class:`HarnessAdapter`: verification in two steps, so a checkpoint never waits for grading.
+
+    ``prepare_verification`` runs as a wait step: it captures what grading needs and ends the session, which
+    frees the sandbox. ``verify_prepared`` grades that capture as a replay step.
+    """
+
+    def prepares_verification(self) -> bool:
+        """Whether this run verifies in two steps."""
+        ...
+
+    async def prepare_verification(self, cookies: dict[str, str], outcome: OutcomeT) -> dict[str, JsonValue]:
+        """Capture what grading needs and end the session; a retry returns the same capture."""
+        ...
+
+    async def verify_prepared(
+        self, cookies: dict[str, str], outcome: OutcomeT, prepared: dict[str, JsonValue]
+    ) -> dict[str, Any]:
+        """Grade ``prepared``; returns the grading reply."""
         ...
 
 
@@ -364,6 +389,8 @@ class _HarnessRun(Generic[OutcomeT]):
         # The session cookies once seeded; a checkpointed run that leaves without a verdict closes the session.
         self.cookies: Optional[dict[str, str]] = None
         self.verified = False
+        # A prepared verification ended the session: there is nothing left to close.
+        self.session_ended = False
 
     async def record(self, bookmark: Bookmark) -> None:
         if self.legacy_run is None:
@@ -389,9 +416,21 @@ class _HarnessRun(Generic[OutcomeT]):
             if isinstance(bookmark, VerifyBookmark):
                 if outcome is None:
                     outcome = self.adapter.outcome_model.model_validate(bookmark.outcome)
+                prepares = getattr(self.adapter, "prepares_verification", None)
+                if bookmark.prepared is None and prepares is not None and prepares():
+                    await self.record(bookmark)
+                    # Short and state-changing (it ends the session), so a checkpoint waits for it.
+                    async with self.step("wait"):
+                        prepared = await self.adapter.prepare_verification(bookmark.cookies, outcome)
+                    bookmark = bookmark.model_copy(update={"prepared": prepared})
+                self.session_ended = bookmark.prepared is not None
                 await self.record(bookmark)
-                async with self.step(bookmark.verify_mode):
-                    result = await self.adapter.verify(bookmark.cookies, outcome)
+                if bookmark.prepared is not None:
+                    async with self.step("replay"):
+                        result = await self.adapter.verify_prepared(bookmark.cookies, outcome, bookmark.prepared)
+                else:
+                    async with self.step(bookmark.verify_mode):
+                        result = await self.adapter.verify(bookmark.cookies, outcome)
                 self.verified = True
                 bookmark = ReturnBookmark(result=result, outcome=bookmark.outcome, launches=bookmark.launches)
                 # Recorded so that a restore never runs a state-changing verification twice.
@@ -530,7 +569,7 @@ class _HarnessRun(Generic[OutcomeT]):
             await self.disconnect()
             return
         if self.checkpointed:
-            if not self.verified and self.cookies is not None:
+            if not self.verified and not self.session_ended and self.cookies is not None:
                 await self.close_session()
             await self.disconnect()
             return
