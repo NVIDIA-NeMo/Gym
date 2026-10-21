@@ -204,7 +204,13 @@ class StageResume:
             setattr(self, name, {stage: value for stage, value in values.items() if stage <= index})
 
 
+_REFERENCE_MISSING_FAILURE_CLASS = "reference_missing"
 _TRANSPORT_INELIGIBLE_FAILURE_CLASS = "transport_ineligible"
+
+# Terminal failures that a resume judges again from the persisted deliverable, without running the policy: the
+# reference tree or the judge panel's limits may have been repaired between launches. A missing evaluated
+# deliverable (``eval_missing``) has nothing to judge, so it stays closed.
+_REVERIFIABLE_FAILURE_CLASSES = frozenset({_REFERENCE_MISSING_FAILURE_CLASS, _TRANSPORT_INELIGIBLE_FAILURE_CLASS})
 
 # Stamped on every row of a stage accepted by its partial-completion policy, so
 # aggregation can tell an accepted partial final stage from a degraded one.
@@ -2074,7 +2080,8 @@ def load_gated_keys(
     Mirrors ``_load_from_cache`` with the stage dimension added: a stage-row is
     gated if it is a success (main jsonl), a terminal sidecar failure
     (``_ng_failure_terminal``), or has hit ``get_max_rollout_attempts`` attempts
-    in the sidecar. Everything else is re-dispatched.
+    in the sidecar. Everything else is re-dispatched, and so are the terminal
+    failures in ``_REVERIFIABLE_FAILURE_CLASSES``.
     """
     gated: Dict[int, set[Tuple[Any, Any]]] = {
         index: {(r.get(TASK_INDEX_KEY_NAME), r.get(ROLLOUT_INDEX_KEY_NAME)) for r in rows}
@@ -2099,7 +2106,7 @@ def load_gated_keys(
                 continue
             key = (int(fr.get("stage_index", 0) or 0), fr[TASK_INDEX_KEY_NAME], fr[ROLLOUT_INDEX_KEY_NAME])
             attempts[key] = attempts.get(key, 0) + (line_index >= resubmit_offset)
-            if is_terminal_failure(fr):
+            if is_terminal_failure(fr) and fr.get(NG_FAILURE_CLASS_KEY) not in _REVERIFIABLE_FAILURE_CLASSES:
                 terminal.add(key)
 
     for key in attempts:
@@ -2579,7 +2586,10 @@ async def run_e2e_multistage(
             completed = await future
             # A failure while verifying comes after the rollout, so a retry judges the persisted deliverable;
             # without one, /verify answers 404 and the policy runs again.
-            if completed.result.get("_ng_failure_stage") == "verification":
+            if (
+                completed.result.get("_ng_failure_stage") == "verification"
+                or completed.result.get(NG_FAILURE_CLASS_KEY) in _REVERIFIABLE_FAILURE_CLASSES
+            ):
                 completed.result["reuse_cached_deliverable"] = True
             if completed.environment_server is not None:
                 completed.result[NG_ENVIRONMENT_SERVER_KEY] = completed.environment_server

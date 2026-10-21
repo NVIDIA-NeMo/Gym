@@ -58,7 +58,7 @@ from nemo_gym.config_types import (
 )
 from nemo_gym.episode_types import EpisodeId, is_materialized_task_row
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
-from nemo_gym.failure_kinds import CANCELLED, JUDGE_FAILED, is_namespaced, is_registered
+from nemo_gym.failure_kinds import AGENT_TIMEOUT, CANCELLED, JUDGE_FAILED, is_namespaced, is_registered
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     AGENT_SERVER_TYPE_KEY_NAME,
@@ -1329,7 +1329,7 @@ class RunTimingReport:
 
     def record_result(self, result: Mapping[str, Any], seconds: float) -> None:
         self._durations.append(seconds)
-        if result.get("timed_out") or result.get(NG_FAILURE_CLASS_KEY) == "timeout_exceeded":
+        if result.get("timed_out") or result.get(NG_FAILURE_CLASS_KEY) in ("timeout_exceeded", AGENT_TIMEOUT):
             self._timed_out += 1
 
     def table(self) -> str:
@@ -1915,7 +1915,7 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         le=1,
         description=(
             "Share of rollouts ended by a per-rollout wall-clock limit (result field `timed_out`, or "
-            "failure class `timeout_exceeded`) above which the timing summary warns."
+            "failure class `timeout_exceeded` or `agent_timeout`) above which the timing summary warns."
         ),
     )
     retry_terminal_timeouts: bool = Field(
