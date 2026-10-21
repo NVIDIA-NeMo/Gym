@@ -325,7 +325,7 @@ async def test_real_strategy_budget_failure_keeps_completed_calls() -> None:
     )
     assert result.termination_reason is NOOATerminationReason.POLICY_BUDGET_EXCEEDED
     assert len(calls) == len(result.trajectory.turns) == 2
-    assert any(invocation.status == "failed" for invocation in result.trajectory.invocations)
+    assert any(invocation.status == "incomplete" for invocation in result.trajectory.invocations)
 
 
 @pytest.mark.asyncio

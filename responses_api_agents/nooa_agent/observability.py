@@ -48,7 +48,7 @@ from nemo_gym.rollout_observability import (
     TrajectoryTurn,
 )
 from responses_api_agents.nooa_agent.gym_llm import GymModelCall, RolloutLLMState
-from responses_api_agents.nooa_agent.termination import NOOATerminationReason
+from responses_api_agents.nooa_agent.termination import NOOATerminationReason, is_policy_limit_stop
 
 
 def _json_output(value: Any) -> str:
@@ -106,7 +106,9 @@ class GymTraceHooks:
         if not isinstance(context, _AgentCall):
             return
         invocation = self._invocations[context.invocation_id]
-        invocation.status = "failed" if exception is not None else "completed"
+        invocation.status = (
+            "incomplete" if is_policy_limit_stop(exception) else "failed" if exception is not None else "completed"
+        )
         invocation.error_type = type(exception).__name__ if exception is not None else None
         invocation.duration_ms = max(0.0, (perf_counter() - context.started) * 1000)
         self._current.reset(context.token)

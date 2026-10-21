@@ -21,7 +21,7 @@ from responses_api_agents.nooa_agent.tests.test_gym_llm import model_response
         (NOOATerminationReason.MAX_ITERATIONS_EXCEEDED, "max_iterations_exceeded", "incomplete"),
         (NOOATerminationReason.MAX_OUTPUT_TOKENS_EXCEEDED, "max_output_tokens_exceeded", "incomplete"),
         (NOOATerminationReason.LOOP_DETECTED, "loop_detected", "incomplete"),
-        (NOOATerminationReason.INVALID_POLICY_OUTPUT, "invalid_policy_output", "failed"),
+        (NOOATerminationReason.INVALID_POLICY_OUTPUT, "invalid_policy_output", "incomplete"),
         (NOOATerminationReason.TIMEOUT_EXCEEDED, "timeout_exceeded", "incomplete"),
         (NOOATerminationReason.CANCELLED, "cancelled", "cancelled"),
         (NOOATerminationReason.INFRASTRUCTURE_ERROR, "infrastructure_error", "failed"),
@@ -55,6 +55,7 @@ def test_termination_projection_preserves_status_and_wire_values(
     else:
         if wire_reason in {
             "policy_budget_exceeded",
+            "invalid_policy_output",
             "max_iterations_exceeded",
             "max_output_tokens_exceeded",
             "loop_detected",

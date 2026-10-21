@@ -253,12 +253,8 @@ async def test_policy_termination_remains_a_gradable_response(
     runner_run.return_value = partial
     req = await open_session(instance)
     response = await instance.responses(req, NeMoGymResponseCreateParamsNonStreaming(input="task"))
-    if reason is NOOATerminationReason.INVALID_POLICY_OUTPUT:
-        assert response.status == "failed"
-        assert reason in response.error.message
-    else:
-        assert response.status == "incomplete"
-        assert response.error is None
+    assert response.status == "incomplete"
+    assert response.error is None
     assert response.output == partial.episode.response.output
     assert "_ng_failure_class" not in response.model_dump(mode="json")
     assert reason in {gap.code for gap in (await close(instance)).agent_observations.gaps}

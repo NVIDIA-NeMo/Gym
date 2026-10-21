@@ -22,11 +22,10 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from threading import Lock
-from types import FrameType
 from typing import Any, Protocol
 from uuid import uuid4
 
-from nooa.errors import GenerationError, LoopDetectedError
+from nooa.errors import LoopDetectedError
 from nooa.runtime.hooks import hooks_scope
 from nooa.strategies.codeact import CodeActSession, CodeActStrategy
 from nooa.strategies.predict import PredictStrategy
@@ -49,7 +48,7 @@ from responses_api_agents.nooa_agent.resource_tools import (
     create_agent_class_with_resource_methods,
     validate_agent_resource_method_bindings,
 )
-from responses_api_agents.nooa_agent.termination import NOOATerminationReason
+from responses_api_agents.nooa_agent.termination import NOOATerminationReason, _generation_error_frame
 
 
 logger = logging.getLogger(__name__)
@@ -114,17 +113,6 @@ def _validate_agent_llm_bindings(agent_class: type) -> None:
             "NOOA method-level LLM overrides bypass Gym's model server and are unsupported; "
             f"remove llm= from @strategy on: {names}"
         )
-
-
-def _generation_error_frame(error: BaseException) -> FrameType | None:
-    # GenerationError is also available to arbitrary agent code. Recognize the
-    # pinned strategies by the code that raised it, not its type or message alone.
-    if type(error) is not GenerationError or error.__traceback__ is None:
-        return None
-    traceback = error.__traceback__
-    while traceback.tb_next is not None:
-        traceback = traceback.tb_next
-    return traceback.tb_frame
 
 
 def _codeact_failure_session(error: BaseException) -> CodeActSession | None:

@@ -437,3 +437,25 @@ def test_finalize_observation_gaps_appends_termination_gap() -> None:
 
     assert finalized.gaps[0].code == "policy_budget_exceeded"
     assert finalized.gaps[0].detail == "budget exhausted"
+
+
+@pytest.mark.parametrize("invalid_output", [False, True])
+@pytest.mark.parametrize("outer_failure", [False, True])
+def test_policy_stop_labels_preserve_unrelated_outer_failures(invalid_output: bool, outer_failure: bool) -> None:
+    from responses_api_agents.nooa_agent.gym_llm import InvalidPolicyOutputError, PolicyCallBudgetExceeded
+
+    stop = InvalidPolicyOutputError("invalid answer") if invalid_output else PolicyCallBudgetExceeded("call limit")
+    error = RuntimeError("cleanup failed") if outer_failure else stop
+    if outer_failure:
+        error.__cause__ = stop
+    trace = GymTraceHooks()
+    context = trace.before_agent_call(call_id="root", parent_call_id=None)
+    trace.after_agent_call(context=context, exception=error)
+    _, trajectory = trace.project(
+        create_params=NeMoGymResponseCreateParamsNonStreaming(input="task"),
+        state=RolloutLLMState(max_policy_calls=1),
+        task_id="task",
+        rollout_id="0-0",
+    )
+    assert trajectory.invocations[0].status == ("failed" if outer_failure else "incomplete")
+    assert trajectory.invocations[0].error_type == type(error).__name__
