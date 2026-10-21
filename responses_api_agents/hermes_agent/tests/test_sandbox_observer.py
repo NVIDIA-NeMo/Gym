@@ -50,7 +50,10 @@ def test_sandbox_observer_records_model_tool_and_compaction_events() -> None:
 
 
 @pytest.mark.parametrize("child_call", [False, True])
-def test_failed_model_call_carries_its_invocation_without_mutating_headers(child_call: bool) -> None:
+@pytest.mark.parametrize("headers", [None, {"custom": "preserved", "x-session-id": "stale"}])
+def test_failed_model_call_carries_its_invocation_without_mutating_headers(
+    child_call: bool, headers: dict | None
+) -> None:
     class FailingAgent(_Agent):
         def _interruptible_api_call(self, api_kwargs):
             self.request_headers = api_kwargs["extra_headers"]
@@ -62,15 +65,34 @@ def test_failed_model_call_carries_its_invocation_without_mutating_headers(child
     if child_call:
         caller = FailingAgent()
         agent._active_children.append(caller)
-    api_kwargs = {"extra_headers": {"custom": "preserved", "x-session-id": "stale"}}
+    api_kwargs = {"extra_headers": headers}
 
     with pytest.raises(RuntimeError, match="HTTP 400"):
         caller._interruptible_api_call(api_kwargs=api_kwargs)
 
     invocation_id = "root.child-1" if child_call else "root"
-    assert caller.request_headers == {"custom": "preserved", "x-session-id": invocation_id}
-    assert api_kwargs == {"extra_headers": {"custom": "preserved", "x-session-id": "stale"}}
+    assert caller.request_headers == {**(headers or {}), "x-session-id": invocation_id}
+    assert api_kwargs == {"extra_headers": headers}
     invocation = next(
         item for item in observer.finish(None, None)["invocations"] if item["invocation_id"] == invocation_id
     )
     assert invocation["model_response_ids"] == []
+
+
+@pytest.mark.parametrize("kwargs", [{"changed_argument": {}}, {"api_kwargs": {"extra_headers": 42}}])
+def test_header_observation_failure_preserves_original_call(kwargs: dict) -> None:
+    calls = []
+    response = {"id": "response-1"}
+
+    class ChangedAgent(_Agent):
+        def _interruptible_api_call(self, **received):
+            calls.append(received)
+            return response
+
+    agent = ChangedAgent()
+    observer = SandboxHermesObserver().instrument(agent)
+    assert agent._interruptible_api_call(**kwargs) is response
+    assert calls == [kwargs]
+    evidence = observer.finish(None, None)
+    assert evidence["invocations"][0]["model_response_ids"] == ["response-1"]
+    assert any(gap["code"] == "hermes_observer_error" for gap in evidence["gaps"])
