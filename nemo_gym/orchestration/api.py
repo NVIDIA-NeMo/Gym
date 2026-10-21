@@ -367,16 +367,28 @@ class KubernetesComputeConfig(BaseComputeConfig):
     type: Literal["kubernetes"]
     context: str | None = None  # kubeconfig context; None means whatever is already current.
     namespace: str = "default"
-    # v1 is single-node only: one implicit pool, sized by this rather than named node_pools.
+    # No named node_pools (unlike Slurm): one implicit pool, sized by gpus_per_node x nodes.
     gpus_per_node: int | None = None
+    # Total nodes/pods the implicit pool spans. 1 (default) is a single pod, same as before this
+    # field existed. > 1 requires every vllm service to be shaped as multi-node data-parallel
+    # (number_of_instances > 1, evenly divisible by nodes, each node's local share fitting in
+    # gpus_per_node) -- see SubmitConfig._resolve_and_validate_placements and
+    # kubernetes_script.py's _vllm_multi_node_command. Kubernetes can't infer hardware topology
+    # any more than Slurm's node_pools can, so this must be set explicitly.
+    nodes: int = 1
     node_selector: dict[str, str] = {}
     service_account: str | None = None
     # A pre-existing PVC, mounted at job.output_path in every container. Required: the driver
-    # container always mounts this volume, so an unset pvc_name would leave that reference
-    # dangling and the pod rejected outright ("volumeMounts[0].name: Not found").
+    # container's own volumeMounts always references this volume (build_job_manifest), so an
+    # unset pvc_name would leave that reference dangling and the pod rejected outright by the API
+    # server ("volumeMounts[0].name: Not found") -- fail clearly at config-validation time instead.
     pvc_name: str
-    # Memory *request* per requested GPU on a service container (e.g. "32Gi"). Without it a pod
-    # is QoS class BestEffort, which the kubelet kills first under node memory pressure.
+    # Memory *request* (Kubernetes quantity string, e.g. "32Gi") per requested GPU on a service
+    # container. Without a memory request a pod gets QoS class BestEffort, which the kubelet
+    # kills first under node memory pressure -- observed in practice as a GPU sidecar getting
+    # SIGKILLed (exit 137) mid-startup on a busy shared node, with no error of its own to explain
+    # it. Scaling by GPU count is a coarse proxy for what a service actually needs, but it beats
+    # leaving every GPU pod first-in-line for eviction by default.
     memory_per_gpu: str = "32Gi"
     extra_args: dict[str, str] = {}  # Forwarded verbatim as pod labels/annotations.
     # Seconds after a Job finishes before k8s garbage-collects it and its pods. 24h by default so
@@ -385,6 +397,13 @@ class KubernetesComputeConfig(BaseComputeConfig):
     # Kills a still-Running Job (e.g. a hung vLLM) after this long, freeing its GPUs. None (the
     # default) sets no deadline -- benchmark runtimes vary too widely for one default to be safe.
     active_deadline_seconds: int | None = None
+
+    @field_validator("nodes")
+    @classmethod
+    def _validate_nodes(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"nodes must be >= 1, got {v}")
+        return v
 
 
 ComputeConfig = Annotated[
@@ -574,9 +593,22 @@ class SubmitConfig(_StrictModel):
             total_nodes = sum(p.nodes for p in compute.node_pools.values())
             pool_names = set(compute.node_pools)
         else:
-            # Kubernetes v1: always exactly one implicit node/pool, sized by gpus_per_node.
-            total_nodes = 1
+            # Kubernetes: always exactly one implicit node/pool, sized by gpus_per_node x nodes.
+            total_nodes = compute.nodes
             pool_names = set()
+
+        if isinstance(compute, KubernetesComputeConfig) and compute.nodes > 1:
+            # Every service is replicated onto every pod (no per-service node_pool pinning on
+            # Kubernetes), so a second vllm service would make the head Service's port list and
+            # "which service owns which replica" ambiguous. Revisit if a real multi-service
+            # multi-node need shows up.
+            vllm_services = [name for name, svc in self.services.items() if isinstance(svc, VllmServiceConfig)]
+            if len(vllm_services) > 1:
+                raise ValueError(
+                    f"compute '{sole_compute}' has nodes={compute.nodes} (multi-node) but multiple vllm services "
+                    f"are declared ({', '.join(sorted(vllm_services))}). The kubernetes executor supports only "
+                    "one vllm service per multi-node compute resource."
+                )
 
         for name, service in self.services.items():
             if isinstance(service, VllmPDServiceConfig):
@@ -639,10 +671,30 @@ class SubmitConfig(_StrictModel):
             if isinstance(compute, SlurmComputeConfig):
                 service_gpus = [p.gpus_per_node for p in service_pools.values() if p.gpus_per_node is not None]
             else:
-                # Kubernetes v1: no named pools (enforced above), one implicit node/pool.
+                # Kubernetes: no named pools (enforced above), one implicit pool of `nodes` nodes.
                 service_gpus = [compute.gpus_per_node] if compute.gpus_per_node is not None else []
 
             is_ray_serve = effective_ray_serve(service, service_nodes, service_gpus)
+
+            if isinstance(compute, KubernetesComputeConfig) and service_nodes > 1:
+                if service.number_of_instances == 1:
+                    raise ValueError(
+                        f"Service '{service_name}': compute '{service.placement}' spans {service_nodes} nodes "
+                        f"(nodes={service_nodes}) but number_of_instances=1. The kubernetes executor only "
+                        "supports multi-node deployment as data-parallel replicas fanned out across nodes "
+                        "(number_of_instances > 1, evenly divisible by nodes). A single instance whose own "
+                        "tensor_parallel_size/pipeline_parallel_size footprint spans multiple nodes (vLLM's ray "
+                        "distributed-executor-backend) is not supported on kubernetes yet."
+                    )
+                if is_ray_serve:
+                    raise ValueError(
+                        f"Service '{service_name}': tensor_parallel_size*pipeline_parallel_size="
+                        f"{service.tensor_parallel_size * service.pipeline_parallel_size} with "
+                        f"number_of_instances={service.number_of_instances} across {service_nodes} nodes would "
+                        "require the Ray Serve gateway, which the kubernetes executor does not support (nor does "
+                        "it support use_ray_serve=true). Reduce tensor_parallel_size*pipeline_parallel_size to fit "
+                        "within gpus_per_node, or use the slurm executor for this topology."
+                    )
 
             if (
                 service_nodes > 1

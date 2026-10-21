@@ -123,7 +123,7 @@ def _gpu_resources(gpu_count: int, memory_per_gpu: str) -> dict[str, Any]:
     }
 
 
-def _vllm_command(service: VllmServiceConfig, port: int) -> list[str]:
+def _vllm_command(service: VllmServiceConfig, port: int, *, single_node_dp: bool = True) -> list[str]:
     cmd = ["vllm", "serve", service.model, "--port", str(port)]
     if service.served_model_name:
         cmd += ["--served-model-name", service.served_model_name]
@@ -131,7 +131,7 @@ def _vllm_command(service: VllmServiceConfig, port: int) -> list[str]:
         cmd += ["--tensor-parallel-size", str(service.tensor_parallel_size)]
     if service.pipeline_parallel_size > 1:
         cmd += ["--pipeline-parallel-size", str(service.pipeline_parallel_size)]
-    if service.number_of_instances > 1:
+    if single_node_dp and service.number_of_instances > 1:
         # vLLM's plain single-node DP mode: replicas run as local ranks in this one pod/port.
         # Only viable when replica*TP*PP fits this node's GPUs (api.py's gpus_per_node check).
         cmd += ["--data-parallel-size", str(service.number_of_instances)]
@@ -142,9 +142,75 @@ def _vllm_command(service: VllmServiceConfig, port: int) -> list[str]:
     return cmd
 
 
+# vLLM refuses `--api-server-count` in headless mode ("no API servers are started in headless
+# mode") and exits before loading anything. Mirrors slurm_script.py's identical concern; kept
+# local here (not shared) to avoid coupling the two executor modules over one regex.
+_HEADLESS_INCOMPATIBLE_FLAG = re.compile(r"\s--api-server-count(?:[= ]\S+)?")
+
+_DP_RPC_PORT = 13345
+
+
+def _strip_headless_incompatible_flags(cmd: str) -> str:
+    return _HEADLESS_INCOMPATIBLE_FLAG.sub("", cmd)
+
+
+def _head_service_name(job_name_str: str) -> str:
+    # <=63 chars (Service names are RFC 1035 labels); truncate the job name so "-head" always fits.
+    return f"{job_name_str[:57].rstrip('-')}-head"
+
+
+def _head_service_fqdn(service_name: str, namespace: str) -> str:
+    return f"{service_name}.{namespace}.svc.cluster.local"
+
+
+def _vllm_multi_node_command(
+    service: VllmServiceConfig, port: int, *, total_nodes: int, head_service_fqdn: str
+) -> list[str]:
+    """Head/worker vLLM multi-node data-parallel command, branching on Kubernetes' own
+    `JOB_COMPLETION_INDEX` env var (auto-injected per pod by an Indexed Job) -- the k8s equivalent
+    of Slurm's $SLURM_NODEID. A k8s container `command` is an argv array, not a shell string a
+    caller re-parses (unlike Slurm's `srun ... &` line), so no extra escaping layer is needed here
+    the way slurm_script.py needs escape_for_single_quoted_block.
+
+    number_of_instances is guaranteed evenly divisible by total_nodes here -- api.py's
+    SubmitConfig validation enforces this before build_job_manifest is ever called.
+    """
+    dp_size_local = service.number_of_instances // total_nodes
+    # The multi-node DP flags below replace _vllm_command's plain single-node --data-parallel-size.
+    base = shlex.join(_vllm_command(service, port, single_node_dp=False))
+    dp_flags = (
+        f" --data-parallel-size {service.number_of_instances}"
+        f" --data-parallel-size-local {dp_size_local}"
+        f' --data-parallel-address "{head_service_fqdn}"'
+        f" --data-parallel-rpc-port {_DP_RPC_PORT}"
+    )
+    head_cmd = base + dp_flags
+    worker_cmd = (
+        _strip_headless_incompatible_flags(base)
+        + dp_flags
+        + " --headless"
+        + f" --data-parallel-start-rank $(( JOB_COMPLETION_INDEX * {dp_size_local} ))"
+    )
+    script = f'if [ "$JOB_COMPLETION_INDEX" = "0" ]; then\n    {head_cmd}\nelse\n    {worker_cmd}\nfi'
+    return ["bash", "-lc", script]
+
+
 def _probe(path: str, port: int, *, period: int, failure_threshold: int) -> dict[str, Any]:
     return {
         "httpGet": {"path": path, "port": port},
+        "periodSeconds": period,
+        "failureThreshold": failure_threshold,
+    }
+
+
+def _multi_node_probe(path: str, port: int, *, period: int, failure_threshold: int) -> dict[str, Any]:
+    # A headless worker (index != 0) starts no HTTP server at all, and an Indexed Job shares one
+    # pod template across every index -- an httpGet probe here would never succeed on worker pods,
+    # permanently blocking kubelet from starting the driver-slot container there. Only check
+    # health on index 0; trivially succeed elsewhere.
+    check = f'[ "$JOB_COMPLETION_INDEX" != "0" ] || curl -sf http://localhost:{port}{path} > /dev/null'
+    return {
+        "exec": {"command": ["sh", "-c", check]},
         "periodSeconds": period,
         "failureThreshold": failure_threshold,
     }
@@ -156,24 +222,47 @@ _READINESS_PERIOD_SECONDS = 5
 _READINESS_FAILURE_THRESHOLD = 3
 
 
-def _sidecar_containers(config: SubmitConfig, compute: KubernetesComputeConfig) -> list[dict[str, Any]]:
+def _sidecar_containers(
+    config: SubmitConfig,
+    compute: KubernetesComputeConfig,
+    *,
+    total_nodes: int,
+    head_service_fqdn: str | None,
+) -> list[dict[str, Any]]:
     containers = []
     for name, service in config.services.items():
         if isinstance(service, RayServiceConfig):
             raise ValueError(f"Service '{name}': ray services are not supported by the kubernetes executor yet.")
         if service.use_ray_serve:
             raise ValueError(f"Service '{name}': use_ray_serve is not supported by the kubernetes executor yet.")
+        is_multi_node = total_nodes > 1 and service.number_of_instances > 1
         _reject_unsupported_mounts(service.mounts)
-        # number_of_instances replicas all run in this one pod (vLLM's single-node data-parallel
-        # mode -- see _vllm_command), so the pod needs GPUs for all of them.
-        gpu_count = service.tensor_parallel_size * service.pipeline_parallel_size * service.number_of_instances
+        gpu_count = service.tensor_parallel_size * service.pipeline_parallel_size
+        if is_multi_node:
+            # Each node runs its own equal share of the data-parallel replicas locally (see
+            # _vllm_multi_node_command's --data-parallel-size-local) -- the pod needs GPUs for all
+            # of them, not just one instance's tensor/pipeline-parallel footprint. Missing this
+            # under-requests nvidia.com/gpu (e.g. 2 instead of 8 for TP2 x 4 local replicas),
+            # starving the container of GPU devices it then crashes on ("No CUDA GPUs are
+            # available") -- observed for real against a cluster.
+            gpu_count *= service.number_of_instances // total_nodes
+            assert head_service_fqdn is not None
+            command = _vllm_multi_node_command(
+                service, service.port, total_nodes=total_nodes, head_service_fqdn=head_service_fqdn
+            )
+        else:
+            # Single node: number_of_instances replicas all run in this one pod (vLLM's plain
+            # single-node data-parallel mode -- see _vllm_command), so the pod needs GPUs for all
+            # of them.
+            gpu_count *= service.number_of_instances
+            command = _vllm_command(service, service.port)
         container: dict[str, Any] = {
             "name": _dns_label(name),
             "image": service.container,
             "restartPolicy": "Always",  # Native sidecar (k8s >= 1.29): torn down after the
             # driver finishes. Only startupProbe (below) delays the driver starting; readinessProbe
             # alone doesn't gate it.
-            "command": _vllm_command(service, service.port),
+            "command": command,
             "ports": [{"containerPort": service.port}],
             "resources": _gpu_resources(gpu_count, compute.memory_per_gpu),
         }
@@ -185,10 +274,11 @@ def _sidecar_containers(config: SubmitConfig, compute: KubernetesComputeConfig) 
             port = service.health_check.port or service.port
             period = 5
             failure_threshold = max(1, service.health_check.timeout_seconds // period)
-            container["startupProbe"] = _probe(
+            probe_fn = _multi_node_probe if is_multi_node else _probe
+            container["startupProbe"] = probe_fn(
                 service.health_check.path, port, period=period, failure_threshold=failure_threshold
             )
-            container["readinessProbe"] = _probe(
+            container["readinessProbe"] = probe_fn(
                 service.health_check.path,
                 port,
                 period=_READINESS_PERIOD_SECONDS,
@@ -263,6 +353,99 @@ def _manifest_write_commands(resolved_config: str, manifest: str, run_dir: str) 
     ]
 
 
+def _render_self_delete_trap(job_name: str, namespace: str, head_service_name: str) -> str:
+    """Deletes this Job (cascades to all its pods, including this one) and its head Service when
+    the driver script on pod 0 exits, success or failure -- the k8s equivalent of a Slurm
+    allocation being released when the sbatch script exits. Worker pods (index != 0) never exit on
+    their own (see _wrap_driver_command_for_multi_node), so nothing else tears them down.
+
+    Requires compute.service_account to be bound to a Role granting `delete` on batch/jobs and
+    core/services in this namespace -- documented in the multi-node example YAML. Prefers curl;
+    falls back to python3/python's stdlib urllib so no new binary is strictly required beyond
+    what render_driver_entrypoint's own gym_install may already need.
+    """
+    return f"""\
+_gym_k8s_cleanup() {{
+    ns="$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null || echo {shlex.quote(namespace)})"
+    tok="/var/run/secrets/kubernetes.io/serviceaccount/token"
+    ca="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+    api="https://kubernetes.default.svc"
+    for res in "apis/batch/v1/namespaces/${{ns}}/jobs/{job_name}" "api/v1/namespaces/${{ns}}/services/{head_service_name}"; do
+        if command -v curl >/dev/null 2>&1; then
+            curl -sS -X DELETE --cacert "$ca" -H "Authorization: Bearer $(cat "$tok")" \\
+                "${{api}}/${{res}}?propagationPolicy=Background" >/dev/null 2>&1 || true
+        elif command -v python3 >/dev/null 2>&1 || command -v python >/dev/null 2>&1; then
+            "$(command -v python3 || command -v python)" - "$ns" "$tok" "$ca" "$api" "$res" <<'PYEOF' || true
+import ssl, sys, urllib.request
+ns, tok, ca, api, res = sys.argv[1:]
+req = urllib.request.Request(f"{{api}}/{{res}}?propagationPolicy=Background", method="DELETE",
+                              headers={{"Authorization": f"Bearer {{open(tok).read().strip()}}"}})
+ctx = ssl.create_default_context(cafile=ca)
+urllib.request.urlopen(req, context=ctx, timeout=10)
+PYEOF
+        else
+            echo "WARNING: neither curl nor python available; cannot self-delete ${{res}}." >&2
+        fi
+    done
+}}
+trap _gym_k8s_cleanup EXIT"""
+
+
+def _wrap_driver_command_for_multi_node(driver_cmd: list[str], *, job_name: str, namespace: str) -> list[str]:
+    """The Indexed Job's pod template is shared across every index, so the driver-slot container's
+    command must branch on $JOB_COMPLETION_INDEX too: index 0 is the real driver (plus a cleanup
+    trap that tears the whole Job down on exit); other indices just idle, since nothing else would
+    stop their vllm-worker sidecar otherwise.
+    """
+    assert driver_cmd[:2] == ["bash", "-c"]
+    inner_script = driver_cmd[2]
+    delete_trap = _render_self_delete_trap(job_name, namespace, _head_service_name(job_name))
+    wrapped = (
+        f'if [ "$JOB_COMPLETION_INDEX" = "0" ]; then\n{delete_trap}\n{inner_script}\nelse\n    sleep infinity\nfi'
+    )
+    return ["bash", "-c", wrapped]
+
+
+def build_head_service_manifest(
+    compute: KubernetesComputeConfig, job_name: str, labels: dict[str, str], *, vllm_port: int
+) -> dict[str, Any]:
+    """A headless Service selecting only pod index 0 of the given Indexed Job, so worker pods have
+    a stable DNS name for --data-parallel-address -- the k8s equivalent of Slurm's $HEAD_NODE_IP,
+    resolved here at manifest-build time (as a plain string) since both the Service name and
+    compute.namespace are known before `kubectl apply`, unlike Slurm's runtime scontrol lookup.
+
+    Must be headless (clusterIP: None): vLLM's head process doesn't just advertise this address to
+    workers, it `bind()`s a ZMQ socket on it directly (same flag, same value, for both roles -- see
+    _vllm_multi_node_command). A normal ClusterIP is a virtual, load-balanced address that no pod's
+    network interface actually owns, so the head can't bind to it ("Cannot assign requested
+    address", observed for real against a cluster). A headless Service's DNS name instead resolves
+    straight to the selected pod's real IP, which the head *can* bind (it's its own address) and
+    workers can still reach directly (flat pod network).
+
+    publishNotReadyAddresses is required too: a headless Service normally only publishes DNS
+    records for Ready pods, but the head needs to resolve/bind its own address before it can ever
+    start serving -- i.e. before it can become Ready -- so without this it deadlocks.
+
+    Selects on `batch.kubernetes.io/job-completion-index`, a pod label Kubernetes' Job controller
+    sets automatically for every pod of an Indexed Job -- consistent with this file's existing
+    k8s >= 1.29 native-sidecar assumption elsewhere.
+    """
+    return {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {"name": _head_service_name(job_name), "namespace": compute.namespace, "labels": labels},
+        "spec": {
+            "clusterIP": "None",
+            "publishNotReadyAddresses": True,
+            "selector": {**labels, "batch.kubernetes.io/job-completion-index": "0"},
+            "ports": [
+                {"name": "api", "port": vllm_port, "targetPort": vllm_port},
+                {"name": "dp-rpc", "port": _DP_RPC_PORT, "targetPort": _DP_RPC_PORT},
+            ],
+        },
+    }
+
+
 def build_job_manifest(
     config: SubmitConfig,
     benchmark_name: str,
@@ -278,11 +461,17 @@ def build_job_manifest(
     run_dir_str = str(run_dir)
     manifest_writes = _manifest_write_commands(resolved_config, manifest, run_dir_str)
     _reject_unsupported_mounts(config.driver.mounts)
+    total_nodes = compute.nodes
+    head_service_fqdn = _head_service_fqdn(_head_service_name(name), compute.namespace) if total_nodes > 1 else None
 
     volumes = [
         {"name": SHM_VOLUME_NAME, "emptyDir": {"medium": "Memory", "sizeLimit": SHM_SIZE}},
         {"name": OUTPUT_VOLUME_NAME, "persistentVolumeClaim": {"claimName": compute.pvc_name}},
     ]
+
+    driver_cmd = _driver_command(config, benchmark_name, benchmark, run_dir_str, manifest_writes)
+    if total_nodes > 1:
+        driver_cmd = _wrap_driver_command_for_multi_node(driver_cmd, job_name=name, namespace=compute.namespace)
 
     driver_env = dict(config.driver.env)
     if benchmark.command is not None:
@@ -291,7 +480,7 @@ def build_job_manifest(
     driver_container: dict[str, Any] = {
         "name": "driver",
         "image": config.driver.container,
-        "command": _driver_command(config, benchmark_name, benchmark, run_dir_str, manifest_writes),
+        "command": driver_cmd,
         "volumeMounts": [_output_volume_mount(config.job.output_path)],
         "resources": {"requests": {"memory": DRIVER_MEMORY_REQUEST}},
     }
@@ -300,7 +489,9 @@ def build_job_manifest(
 
     pod_spec: dict[str, Any] = {
         "restartPolicy": "Never",
-        "initContainers": _sidecar_containers(config, compute),
+        "initContainers": _sidecar_containers(
+            config, compute, total_nodes=total_nodes, head_service_fqdn=head_service_fqdn
+        ),
         "containers": [driver_container],
         "volumes": volumes,
     }
@@ -325,6 +516,10 @@ def build_job_manifest(
     }
     if compute.active_deadline_seconds is not None:
         job_spec["activeDeadlineSeconds"] = compute.active_deadline_seconds
+    if total_nodes > 1:
+        job_spec["completionMode"] = "Indexed"
+        job_spec["parallelism"] = total_nodes
+        job_spec["completions"] = total_nodes
 
     return {
         "apiVersion": "batch/v1",
