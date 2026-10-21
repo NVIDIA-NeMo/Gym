@@ -813,6 +813,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     query = input_item.content[0]["text"]
 
         assert query, body.input
+        if self.config.verbatim_prompt and not query.strip():
+            raise ValueError("verbatim_prompt cannot deliver a blank prompt: OpenCode rejects blank stdin")
 
         opencode_debug_str = ""
         if self.config.debug:
@@ -884,10 +886,16 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         # Here, we set an exorbitantly high number that cannot ever be reached.
         # In future versions of OpenCode, this can be directly passed via maxOutputTokens in the limit config above https://github.com/anomalyco/opencode/blob/1b18a50418f730aca32630ccfcde850f2b5fc360/packages/opencode/src/provider/transform.ts#L1418
         prompt_arg = f"-- {quote(query)}"
+        launch_prefix = launch_suffix = ""
         prompt_remote_fpath = None
         if self.config.verbatim_prompt:
             prompt_remote_fpath = f"/tmp/nemo-gym-prompt-{uuid4().hex}.txt"
-            prompt_arg = f"< {quote(prompt_remote_fpath)}"
+            prompt_arg = ""
+            # The shell opens the file for stdin before `rm` runs, so OpenCode still reads it, while the file is gone
+            # before the model starts and however `opencode run` ends. `;` not `&&`: an upload that is root-owned in a
+            # sticky /tmp cannot be removed by a non-root user, and that must not abort the run.
+            launch_prefix = f"{{ rm -f {quote(prompt_remote_fpath)} 2>/dev/null; "
+            launch_suffix = f"; }} < {quote(prompt_remote_fpath)}"
 
         command = f"""
         echo "Shell: $SHELL" \
@@ -897,8 +905,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && test "$(opencode --version)" = {quote(self.config.opencode_version)} \
         && echo "Installed OpenCode" \
         && rm -f /tmp/nemo-gym-mcp-setup-error \
-        && NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps([s.name for s in self.config.tool_servers]))} OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} \
-            opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str} {prompt_arg} \
+        && {launch_prefix}NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps([s.name for s in self.config.tool_servers]))} OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} \
+            opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str} {prompt_arg}{launch_suffix} \
         && echo "OpenCode run finished"
         """
 

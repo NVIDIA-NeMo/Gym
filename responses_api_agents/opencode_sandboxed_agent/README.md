@@ -55,6 +55,12 @@ so the model sees `"<prompt>"` with every `"` as `\"`. Set `verbatim_prompt: tru
 sandbox and pass it on stdin, which `opencode run` uses unchanged. It is off by default because it changes the
 model's input: results are not comparable with runs made without it.
 
+The staged file is mode `0644` so a non-root sandbox user can read it, and the launch command deletes it as soon as
+the shell has opened it for stdin. This is best effort: an upload that is root-owned in a sticky `/tmp` cannot be
+removed by a non-root user, and a launch that fails before OpenCode starts leaves it behind. In both cases it lives
+until the sandbox is stopped. OpenCode rejects a blank message, so a prompt that is only whitespace is refused before
+launch when this flag is on. Leading and trailing whitespace in other prompts is delivered unchanged.
+
 ## Offline scientific evaluation with OpenCode or Pi
 
 The dedicated `opencode_sandboxed_agent` and `pi_sandboxed_agent` run their native
