@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
 from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
 from nemo_gym.server_utils import ServerClient
@@ -61,6 +63,22 @@ def test_swe_shared_preparation_preserves_grading_metadata_through_legacy_adapte
     assert params.input[0].content == render_prompt(task)
     assert "private ground truth" not in params.model_dump_json()
     assert "private grading asset" not in params.model_dump_json()
+    for task_source in (adapter.config.name, adapter.config.agent_server.name, adapter.config.resources_server.name):
+        routed = adapter._episode_request_from_row(
+            row
+            | {
+                "_ng_task_index": 0,
+                "_ng_rollout_index": 0,
+                "task_source": task_source,
+                "agent_ref": {"name": adapter.config.agent_server.name},
+            }
+        )
+        assert routed.task.task_id.taskset == task_source
+        assert routed.task.task_input.responses_create_params == params
+    with pytest.raises(ValueError, match="does not match configured agent server"):
+        adapter._episode_request_from_row(row | {"agent_ref": {"name": "different_agent"}})
+    with pytest.raises(ValueError, match="names none of this Environment Server"):
+        adapter._episode_request_from_row(row | {"task_source": "different_resources"})
     assert output.read_bytes() == original
 
 
@@ -69,6 +87,7 @@ def test_swe_recipe_uses_borrowed_sandbox_and_single_agent_turn_environment() ->
 
     from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
     from nemo_gym.global_config import GlobalConfigDictParser
+    from nemo_gym.rollout_collection import RolloutCollectionHelper
     from responses_api_agents.nooa_agent.config import NOOAAgentConfig
 
     parser = GlobalConfigDictParser()
@@ -99,6 +118,16 @@ def test_swe_recipe_uses_borrowed_sandbox_and_single_agent_turn_environment() ->
     assert resources.datasets[0].prepare_script == "benchmarks/swebench/pro/prepare.py"
     assert resources.get("task_network_policy") is None
     instances = parser.filter_for_server_instance_configs(config)
+    assert {(instance.name, instance.SERVER_TYPE) for instance in instances} == {
+        ("swebench_pro_nooa_agent", "responses_api_agents"),
+        ("swebench_pro_nooa_resources_server", "resources_servers"),
+        ("swebench_pro_nooa", "environment_servers"),
+    }
+    rows = [{"agent_ref": {"name": agent.name}, "task_source": environment.resources_server.name}]
+    RolloutCollectionHelper._validate_agent_pairings(rows, config)
+    resources.allowed_agents = ["different_agent"]
+    with pytest.raises(ValueError, match="does not accept the agent"):
+        RolloutCollectionHelper._validate_agent_pairings(rows, config)
     environments = [instance for instance in instances if instance.SERVER_TYPE == "environment_servers"]
     assert [(instance.name, set(instance.environment_servers)) for instance in environments] == [
         ("swebench_pro_nooa", {"single_agent_turn_legacy"})

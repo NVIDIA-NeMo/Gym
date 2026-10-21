@@ -1,7 +1,10 @@
 ---
 title: "NOOA sessions and SWE-bench Pro"
 description: "Run NOOA through single_agent_turn and a Resources-owned sandbox."
+position: 5
 ---
+
+# NOOA sessions and SWE-bench Pro
 
 NOOA uses Gym's agent sessions and existing `single_agent_turn` Environment Server. It seeds Resources,
 opens and invokes NOOA, closes the agent to collect evidence and final Resources cookies, asks Resources to
@@ -28,9 +31,12 @@ NOOA closes its worker and session before Resources verifies; the Resources-owne
 Verification can inspect persisted artifacts after agent cleanup. Tasks whose verifier requires a
 NOOA-started service to remain live are not supported by this lifecycle.
 
-The sandbox needs Linux, a supported portable Python target, writable `/opt`, `tar`, one of `curl`, `wget` or an existing `python3`, and outbound
-HTTPS for runtime installation. Model and Resources URLs must be reachable from the sandbox. A host-loopback URL
-is not automatically rewritten. No host virtual environment or provider credentials are copied into the runner.
+Cold runtime setup requires Linux x86_64 or aarch64 with glibc, `bash`, `tar`, `gzip`, `sha256sum`, `flock`,
+`tee`, `mv` with `-T` support, and writable `/opt/nemo-gym-nooa` and `/tmp`. The controller supplies Python;
+the sandbox needs outbound package and build-dependency access. Alpine/musl images are not supported.
+Model and Resources URLs must be reachable from the sandbox. A host-loopback URL is not automatically
+rewritten; configure `use_absolute_ip` / `default_host` for the deployment. No host virtual environment
+or provider credentials are copied into the runner.
 
 ## Resource tools and observations
 
@@ -63,22 +69,28 @@ The recipe reuses the existing Resources-owned task sandbox, patch extraction, a
 
 ```bash
 python benchmarks/swebench/pro/prepare.py
-gym env start --config benchmarks/swebench/pro/nooa.yaml \
-  --config nemo_gym/sandbox/providers/docker/configs/docker.yaml --model-type vllm_model
+gym env start --config benchmarks/swebench/pro/nooa.yaml --config model-provider.yaml
 
-gym eval run --no-serve --agent swebench_pro_nooa_agent \
+gym eval run --no-serve \
+  --config benchmarks/swebench/pro/nooa.yaml --config model-provider.yaml \
   --input benchmarks/swebench/data/swebench_pro_benchmark.jsonl \
-  --output /tmp/nooa-swebench-pro.jsonl --limit 1 --concurrency 1
+  --output /tmp/nooa-swebench-pro.jsonl --limit 1 --concurrency 1 \
+  +agent_name=swebench_pro_nooa_agent
 ```
 
-Provide model settings through the usual `env.yaml` or model CLI flags. For Docker, configure Gym's published model
+Use `model-provider.yaml` to supply the policy model and sandbox provider settings and credentials. Pass the
+same recipe and overlay to both commands: `--no-serve` does not inherit routing from the running head server.
+For Docker, configure Gym's published model
 and Resources addresses to be reachable from the container before running. Preparation preserves upstream grading
 metadata in the shared flat dataset. The existing `single_agent_turn_legacy` adapter separates that metadata
 from the Responses request before invoking NOOA. Swap the provider configuration for
 remote infrastructure without changing the agent recipe.
 
 The overall deadline belongs to the Environment Server (`default_episode_timeout_seconds`). The standard
-task contract has no separate NOOA agent deadline.
+task contract has no separate NOOA agent deadline. The inherited SWE-bench Pro sandbox TTL is **18,000 seconds
+(five hours)**, shorter than the default six-hour episode deadline and 21,420-second worker ceiling. The sandbox may expire
+first. For long runs, set both deadlines below the TTL and reserve time for verification and cleanup, or raise
+the TTL in the provider overlay; a model-call limit alone is not a wall-clock guarantee.
 NOOA has no model-call limit by default (`max_policy_calls: null`). Set a positive `max_policy_calls` to opt into a
 shared model-call budget for the rollout. The optional `resources_server` agent reference identifies the Resources
 server that owns the dataset and its schema. Runtime tool and sandbox access comes from the standard environment's
