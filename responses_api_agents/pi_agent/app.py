@@ -85,6 +85,16 @@ _MCP_SERVER_NAME = re.compile(r"[A-Za-z0-9_-]{1,62}")
 _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
 
 
+def _reported_model_error(assistant: Mapping[str, Any], cleanup: Mapping[str, Any]) -> bool:
+    """Recognize Pi 0.80.2's final agent_end error report without hiding worker or cleanup failures."""
+    return (
+        cleanup["return_code"] == 0
+        and not cleanup["timed_out"]
+        and not cleanup["error"]
+        and assistant.get("stopReason") == "error"
+    )
+
+
 def _ends_on_finish_tool(messages: list[Any]) -> bool:
     """True when the run's last assistant turn stopped for tool use and called only finish tools that succeeded.
 
@@ -920,6 +930,7 @@ class PiAgent(SimpleResponsesAPIAgent):
                     self.config.model_server,
                     [*conversation, *output],
                     transcript_available=bool(output),
+                    capture_correlated=True,
                 )
             except Exception:
                 LOG.exception("failed to build interrupted Pi observations")
@@ -991,27 +1002,28 @@ class PiAgent(SimpleResponsesAPIAgent):
             # Expected model limits/interruptions do not invalidate partial work.
             # They must not erase an independently confirmed worker or cleanup failure.
             terminal_error = None
-        error = cleanup["error"] or terminal_error
+        execution_error = cleanup["error"]
         if mcp_servers and cleanup["return_code"] == MCP_SETUP_ERROR_EXIT_CODE:
             cause = f": {mcp_setup_failure}" if mcp_setup_failure else ""
-            error = error or f"Required Gym MCP tools could not be initialized{cause}"
+            execution_error = execution_error or f"Required Gym MCP tools could not be initialized{cause}"
         ended_on_finish_tool = _ends_on_finish_tool(messages)
         if cleanup["return_code"] not in (None, 0) and not cleanup["timed_out"] and not model_limit:
-            error = error or f"Pi exited with code {cleanup['return_code']}"
+            execution_error = execution_error or f"Pi exited with code {cleanup['return_code']}"
         if not stop_reasons:
             cached_tokens = None
-            error = error or "Pi produced no assistant result"
+            execution_error = execution_error or "Pi produced no assistant result"
         elif (
             stop_reasons[-1] not in ("stop", "length", "error", "aborted")
             and not cleanup["timed_out"]
             and not ended_on_finish_tool
         ):
-            error = error or "Pi ended without a terminal assistant result"
+            execution_error = execution_error or "Pi ended without a terminal assistant result"
         incomplete = (
             cleanup["timed_out"] or model_limit or (stop_reasons and stop_reasons[-1] in ("length", "aborted"))
         )
         if cleanup["timed_out"] and not stop_reasons and cleanup["error"] is None:
-            error = None
+            execution_error = None
+        error = execution_error or terminal_error
         response = NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
@@ -1052,6 +1064,7 @@ class PiAgent(SimpleResponsesAPIAgent):
                 self.config.model_server,
                 [*conversation_input, *output],
                 transcript_available=bool(output),
+                capture_correlated=True,
             )
         except Exception:
             # Observation parsing must not turn a valid response/patch into a
@@ -1080,12 +1093,7 @@ class PiAgent(SimpleResponsesAPIAgent):
         if error:
             terminal = next((event for _, event in reversed(events) if event.get("type") == "agent_end"), {})
             assistant = next((m for m in reversed(terminal.get("messages") or []) if m.get("role") == "assistant"), {})
-            if (
-                cleanup["return_code"] == 0
-                and not cleanup["timed_out"]
-                and not cleanup["error"]
-                and assistant.get("stopReason") == "error"
-            ):
+            if not execution_error and _reported_model_error(assistant, cleanup):
                 return self.report_outcome(response, assistant)
             raise RuntimeError(f"Pi agent failed: {error}")
         return response
