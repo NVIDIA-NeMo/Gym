@@ -819,6 +819,25 @@ allowed_agents = ["terminus_2_sandboxed_agent", "hermes_agent"]
 num_repeats = 3
 ```
 
+### Typed task fields (`task_data.py`)
+
+A task folder may carry `task_data.json`, a JSON object of the task's own field values; the loader writes them into the
+row's `task_input.task_data` beside `_ng_digest` and `_ng_dataset_digest`, and the file enters the task digest. A dataset
+that ships `task_data.py` beside `dataset.toml`, a module exporting one Pydantic model `TaskData`, types those fields
+(`nemo_gym.tasks.harbor.task_data`). Prepare imports it once per dataset and checks every task folder's
+`task_data.json` against it before any image is recorded or built (and the loaded tasks again before a row is
+written), refusing the dataset, naming the task, when a task's fields do not satisfy the model or carry a key it does
+not declare (unknown keys fail whatever the model's `extra` setting: the model is validated with extras forbidden, so
+the input names pydantic itself reads, aliases, `AliasChoices` and `AliasPath` included, are the declared ones, and a
+key no field consumed, a field's name where only its alias is accepted or a second spelling of a field already given,
+is refused rather than ignored); a validator that raises something pydantic does not wrap (a
+`KeyError` from a lookup) is the same refusal, with the exception named. This server imports each taskset's module at startup
+(`tasksets.<name>.folder/task_data.py`) and validates every row at seed: a row the model rejects, or whose fields differ
+from the pinned folder's `task_data.json`, is a terminal seed failure (422) before anything is provisioned, and a module
+that does not import refuses every episode of its taskset with the import error (logged once at startup). `gym dataset
+collate` validates the rows against this server's `task_data.py` (the reserved keys) and the dataset's model in one
+report. A dataset without the module is checked for the reserved keys only, as before.
+
 ## Example data
 
 `data/tasks/` contains five small Apache-2.0 terminal tasks: copying a file, numeric sorting,
@@ -1146,7 +1165,7 @@ deployment wants the same value; a unit test pins that list.
 | Home | File | Owner | Holds |
 |---|---|---|---|
 | Task | `task.toml` | task author | image, resources, timeouts, env, verifier, agent user (read-only once fetched) |
-| Dataset | `dataset.toml`, `[gym]` table | dataset author | `[gym]` `license` (one of Gym's dataset license values, required for `train` and `validation`), `type` (`train`, `validation`, `example` or `benchmark`; unset means `validation` with a license, else `benchmark`), `allowed_agents` (harness implementation names the dataset admits; unset admits any), `domain` (one of Gym's domain values) and `verified` (boolean); `[gym.defaults]` `timeout_multiplier`, `resource_multiplier`, `num_repeats` (rollouts per task, below `+num_repeats=`); `[gym.tasks."<id>"]` `environment` and `verifier` overrides in Harbor's own fields (`env` merges, other fields replace) and `artifacts` additions appended to the task's own |
+| Dataset | `dataset.toml`, `[gym]` table; `task_data.py` | dataset author | `[gym]` `license` (one of Gym's dataset license values, required for `train` and `validation`), `type` (`train`, `validation`, `example` or `benchmark`; unset means `validation` with a license, else `benchmark`), `allowed_agents` (harness implementation names the dataset admits; unset admits any), `domain` (one of Gym's domain values) and `verified` (boolean); `[gym.defaults]` `timeout_multiplier`, `resource_multiplier`, `num_repeats` (rollouts per task, below `+num_repeats=`); `[gym.tasks."<id>"]` `environment` and `verifier` overrides in Harbor's own fields (`env` merges, other fields replace) and `artifacts` additions appended to the task's own. `task_data.py`: the `TaskData` model every task's `task_data.json` fields are validated against (materialize, seed, collate) |
 | Deployment | the `sandbox:` provider block | operator | image rewrites and registry credentials (`images`), root setup commands (`setup`), networking, shared-memory labels, shared storage and `volume_sources` for Compose volumes |
 | Run | run config | the run | provider selection, GPU routing, repeats, output paths, `sandbox_resources_override` for parity runs, `compose_overlay` (the job's extra Compose files, MCP entries and prompt template) |
 
