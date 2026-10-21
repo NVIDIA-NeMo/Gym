@@ -87,7 +87,12 @@ from nemo_gym.observability.model_calls import (
     model_call_capture_dirs_from_config,
     observability_enabled_from_config,
 )
-from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for, materialized_path_for
+from nemo_gym.path_utils import (
+    aggregate_metrics_path_for,
+    failures_path_for,
+    materialized_path_for,
+    resubmit_offset_path_for,
+)
 from nemo_gym.progress_utils import tqdm
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
@@ -1012,6 +1017,31 @@ def get_max_rollout_attempts() -> int:
 _get_max_rollout_attempts = get_max_rollout_attempts  # Backwards-compatible alias
 
 
+def load_resubmit_offset(output_fpath: str | Path) -> int:
+    """Failures-sidecar lines before this index predate the last `gym eval resubmit` and do not count to the cap."""
+    offset_fpath = resubmit_offset_path_for(Path(output_fpath))
+    return int(offset_fpath.read_text()) if offset_fpath.exists() else 0
+
+
+def record_resubmit_offset(output_fpath: str | Path) -> int:
+    """Start a fresh attempt budget: failures already in the sidecar stop counting to the cap.
+
+    Written atomically, so a run never reads a partial offset. The sidecar itself is not changed.
+    """
+    output_fpath = Path(output_fpath)
+    failures_fpath = failures_path_for(output_fpath)
+    offset = 0
+    if failures_fpath.exists():
+        with failures_fpath.open("rb") as f:
+            offset = sum(1 for _ in f)
+    offset_fpath = resubmit_offset_path_for(output_fpath)
+    offset_fpath.parent.mkdir(parents=True, exist_ok=True)
+    partial = offset_fpath.with_name(offset_fpath.name + ".tmp")
+    partial.write_text(f"{offset}\n")
+    partial.replace(offset_fpath)
+    return offset
+
+
 def _normalize_health_check_ignored_checks(value) -> List[str]:
     from nemo_gym.rollout_health import normalize_ignored_checks
 
@@ -1700,6 +1730,13 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         default=False,
         description="If the same command is run multiple times, check the materialized inputs and current outputs and remove the inputs that have already been run",
     )
+    resubmit: bool = Field(
+        default=False,
+        description=(
+            "Set by a job queued with `gym eval resubmit`: resume from cache whatever resume_from_cache says, "
+            "and give every failed rollout that is not final a fresh attempt budget."
+        ),
+    )
     prompt_config: Optional[str] = Field(
         default=None,
         description="Path to a prompt YAML file. Builds responses_create_params.input from the template at rollout time. Mutually exclusive with pre-populated responses_create_params.input in the JSONL data.",
@@ -1715,6 +1752,13 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         # default to 1 if num_repeats is None
         # for backwards compatibility
         return 1 if v is None else v
+
+    @model_validator(mode="after")
+    def _resubmit_resumes(self) -> "RolloutCollectionConfig":
+        # A resubmit continues its run: a fresh start would delete the rollouts it was queued to finish.
+        if self.resubmit:
+            self.resume_from_cache = True
+        return self
 
     @model_validator(mode="after")
     def _fold_agent_name_into_agent_map(self) -> "RolloutCollectionConfig":
@@ -2902,11 +2946,15 @@ class RolloutCollectionHelper(BaseModel):
         # per key + flag terminal rows so chain-hop 2 retries the right ones.
         failures_fpath = failures_path_for(Path(config.output_jsonl_fpath))
         attempts_by_key: Counter = Counter()
+        # Attempts since the last `gym eval resubmit`: a resubmit gives every non-terminal failure a fresh budget.
+        # If the sidecar is later rewritten shorter (a GDPval stage restart), the offset only gives extra attempts.
+        resubmit_offset = load_resubmit_offset(config.output_jsonl_fpath)
+        budget_used: Counter = Counter()
         terminal_keys: set = set()
         elapsed_by_key: Dict[Tuple, float] = {}
         if failures_fpath.exists():
             with failures_fpath.open("rb") as f:
-                for line in f:
+                for line_index, line in enumerate(f):
                     line = line.strip()
                     if not line:
                         continue
@@ -2915,6 +2963,8 @@ class RolloutCollectionHelper(BaseModel):
                         continue
                     k = (fr[TASK_INDEX_KEY_NAME], fr[ROLLOUT_INDEX_KEY_NAME])
                     attempts_by_key[k] += 1
+                    if line_index >= resubmit_offset:
+                        budget_used[k] += 1
                     if is_terminal_failure(fr, retry_terminal_timeouts=config.retry_terminal_timeouts):
                         terminal_keys.add(k)
                     # A failed attempt still tells us how long this task runs -
@@ -2925,7 +2975,7 @@ class RolloutCollectionHelper(BaseModel):
                         elapsed_by_key[k] = max(elapsed_by_key.get(k, 0.0), observed)
 
         max_attempts = _get_max_rollout_attempts()
-        maxed_out = {k for k, n in attempts_by_key.items() if n >= max_attempts}
+        maxed_out = {k for k, n in budget_used.items() if n >= max_attempts}
         gated = successes_seen | terminal_keys | maxed_out
 
         input_rows = [row for row in original_input_rows if get_key(row) not in gated]
@@ -3011,6 +3061,8 @@ class RolloutCollectionHelper(BaseModel):
             _drop_truncated_tail(output_fpath)
             if failures_fpath.exists():
                 _drop_truncated_tail(failures_fpath)
+            if config.resubmit:
+                print(f"Resubmitted: a fresh attempt budget from failure {record_resubmit_offset(output_fpath)} on.")
             (
                 input_rows,
                 rows,
@@ -3087,6 +3139,7 @@ class RolloutCollectionHelper(BaseModel):
             # A fresh run must not inherit retry attempts or published metrics
             # from an older run that used the same output path.
             failures_fpath.unlink(missing_ok=True)
+            resubmit_offset_path_for(output_fpath).unlink(missing_ok=True)
             aggregate_metrics_path_for(output_fpath).unlink(missing_ok=True)
 
         batch_completed_rows: List[Dict] = []

@@ -930,7 +930,8 @@ def test_build_sbatch_script_not_resumable_omits_prologue(submit_config, bench_d
     compute = next(iter(submit_config.compute.values()))
     script = build_sbatch_script(submit_config, "gsm8k", benchmark, compute, bench_dir)
     assert "Auto-resume chain" not in script
-    assert "resume_from_cache" not in script
+    # Only a resubmit (see test_eval_resubmit.py) turns resume on for a run that is not resumable.
+    assert "\n    +resume_from_cache=True" not in script
 
 
 def test_build_sbatch_script_auto_default_capture_dir(bench_dir):

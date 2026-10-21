@@ -3027,6 +3027,23 @@ class TestFailureRouting:
         assert (2, 0) in gated[0]
         assert (3, 0) not in gated[0]
 
+    def test_a_resubmit_offset_gives_capped_stage_rows_a_fresh_budget(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", raising=False)
+        out = tmp_path / "rollouts.jsonl"
+        out.write_bytes(b"")
+        capped = {"stage_index": 1, TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 0, NG_FAILURE_CLASS_KEY: "x"}
+        failures_path_for(out).write_bytes(b"".join(json.dumps(capped).encode() + b"\n" for _ in range(3)))
+        assert (2, 0) in load_gated_keys(out, {})[1]
+
+        # `gym eval resubmit` records the sidecar length; the three earlier attempts no longer count to the cap.
+        (tmp_path / "rollouts_resubmit_offset").write_text("3\n")
+        assert (2, 0) not in load_gated_keys(out, {}).get(1, set())
+        assert load_failure_attempts(out, since_resubmit=True) == {}
+        # Attempt identities stay cumulative, so a retry's capture key does not collide with an earlier one.
+        assert load_failure_attempts(out) == {1: {(2, 0): 3}}
+
     def test_reopening_stage_prunes_all_downstream_persisted_state(self, tmp_path: Path) -> None:
         out = tmp_path / "rollouts.jsonl"
         journal = journal_path_for(out)
@@ -3381,6 +3398,24 @@ class TestPrepareResume:
         assert journal.exists()
         plans, _, got_fp = read_journal(journal)
         assert 0 in plans and got_fp == fp
+
+    def test_a_resubmit_gives_capped_stage_rows_a_fresh_budget(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", raising=False)
+        out = tmp_path / "rollouts.jsonl"
+        journal = journal_path_for(out)
+        fp = compute_fingerprint(_two_stage_cfg(), REF_ELOS, _distribution(["t0"]))
+        out.write_bytes(b"")
+        append_journal_record(journal, {"stage_index": 0, "status": "planned", "task_ids": ["t0"]}, fp)
+        capped = {"stage_index": 0, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, NG_FAILURE_CLASS_KEY: "x"}
+        failures_path_for(out).write_bytes(b"".join(json.dumps(capped).encode() + b"\n" for _ in range(3)))
+        assert (0, 0) in _prepare_resume(self._cfg(True), out, journal, fp).gated_keys[0]
+
+        resume = _prepare_resume(SimpleNamespace(resume_from_cache=True, resubmit=True), out, journal, fp)
+
+        assert (tmp_path / "rollouts_resubmit_offset").read_text() == "3\n"
+        assert (0, 0) not in resume.gated_keys.get(0, set())
 
     def test_resume_disabled_clears_existing_and_empties_state(self, tmp_path: Path) -> None:
         out = tmp_path / "rollouts.jsonl"
