@@ -39,14 +39,20 @@ PREFILL_INTERVAL_RATIOS = {
     "prefill_requests_per_forward": ("batch_requests", "batches"),
     "prefill_underfilled_batch_fraction": ("underfilled_batches", "batches"),
 }
-PREFILL_DERIVED_METRICS = set(PREFILL_INTERVAL_RATIOS) | {
-    "prefill_batch_token_fill_ratio",
-    "prefill_underfill_reason_fraction",
-    "prefill_kv_lookup_latency_ms",
-    "prefill_kv_lookup_pending_latency_ms",
-    "prefill_delayed_requests_per_step",
-    "prefill_blocked_requests_per_step",
-}
+PREFILL_READINESS_FIELDS = ("ready_requests", "ready_unscheduled_requests", "unexamined_requests")
+PREFILL_ENGINE_COUNTERS = {f"prefill_{field}" for field in (*PREFILL_READINESS_FIELDS, "readiness_steps")}
+PREFILL_DERIVED_METRICS = (
+    set(PREFILL_INTERVAL_RATIOS)
+    | {
+        "prefill_batch_token_fill_ratio",
+        "prefill_underfill_reason_fraction",
+        "prefill_kv_lookup_latency_ms",
+        "prefill_kv_lookup_pending_latency_ms",
+        "prefill_delayed_requests_per_step",
+        "prefill_blocked_requests_per_step",
+    }
+    | {f"prefill_{field}_per_step" for field in PREFILL_READINESS_FIELDS}
+)
 MOONCAKE_STORAGE_GAUGES = {"master_allocated_bytes", "master_total_capacity_bytes"}
 MOONCAKE_EVICTION_GAUGES = {
     "master_eviction_memory_bytes",
@@ -184,7 +190,11 @@ class InferenceMetricsCollector:
                     f"/{label}/{value.strip('/')}"
                     for label, value in sorted(sample.labels.items())
                     if label != "model_name"
-                    and (label != "engine" or name == "cache_inventory")
+                    and (
+                        label != "engine"
+                        or name == "cache_inventory"
+                        or name.removesuffix("_total") in PREFILL_ENGINE_COUNTERS
+                    )
                     # Role is already captured by replica names (prefill0/decode0).
                     # Keep rank, mode, priority and histogram labels distinct.
                     and not (namespace == "sglang" and label == "engine_type")
@@ -227,6 +237,24 @@ class InferenceMetricsCollector:
     @staticmethod
     def add_derived_metrics(metrics: dict[str, float], prefix: str) -> None:
         """Derive interval cache percentages and observation-weighted prefill averages."""
+        # Preserve each DP engine's readiness counts and pool sums/counts for the
+        # node summary. Missing/reset engines cannot contribute an interval rate.
+        step_prefix = f"{prefix}prefill_readiness_steps_per_second"
+        readiness_steps = {
+            key.removeprefix(step_prefix): value
+            for key, value in metrics.items()
+            if key == step_prefix or key.startswith(step_prefix + "/engine/")
+        }
+        for field in PREFILL_READINESS_FIELDS:
+            pooled_count = pooled_steps = 0.0
+            for suffix, steps in readiness_steps.items():
+                count = metrics.get(f"{prefix}prefill_{field}_per_second{suffix}")
+                if count is not None and steps > 0:
+                    metrics[f"{prefix}prefill_{field}_per_step{suffix}"] = count / steps
+                    pooled_count += count
+                    pooled_steps += steps
+            if pooled_steps > 0:
+                metrics[f"{prefix}prefill_{field}_per_step"] = pooled_count / pooled_steps
         for name, (numerator, denominator) in PREFILL_INTERVAL_RATIOS.items():
             total = metrics.get(f"{prefix}prefill_{numerator}_per_second")
             count = metrics.get(f"{prefix}prefill_{denominator}_per_second")

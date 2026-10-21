@@ -978,6 +978,10 @@ async def test_prefill_global_average_pools_counts_instead_of_averaging_engine_m
             f"vllm/{replica}/prefill_delay_steps_per_second": batches,
             f"vllm/{replica}/prefill_blocked_requests_by_reason_per_second/reason/kv_lookup_pending": tokens,
             f"vllm/{replica}/prefill_blocked_requests_per_step/reason/kv_lookup_pending": tokens / batches,
+            f"vllm/{replica}/prefill_readiness_steps_per_second/engine/0": batches,
+            f"vllm/{replica}/prefill_ready_requests_per_second/engine/0": tokens,
+            f"vllm/{replica}/prefill_ready_requests_per_step/engine/0": tokens / batches,
+            f"vllm/{replica}/prefill_ready_requests_per_step": tokens / batches,
         }
 
     def publish(metrics):
@@ -993,6 +997,9 @@ async def test_prefill_global_average_pools_counts_instead_of_averaging_engine_m
     assert published["vllm/total/prefill_blocked_requests_per_step/reason/kv_lookup_pending"] == 190
     assert "vllm/mean/prefill_kv_lookup_latency_ms" not in published
     assert "vllm/mean/prefill_blocked_requests_per_step/reason/kv_lookup_pending" not in published
+    assert published["vllm/total/prefill_ready_requests_per_step"] == 190
+    assert published["vllm/total/prefill_ready_requests_per_step/engine/0"] == 190
+    assert "vllm/mean/prefill_ready_requests_per_step" not in published
 
 
 def test_prefill_lookup_latency_and_request_counts_use_interval_deltas():
@@ -1038,3 +1045,35 @@ def test_prefill_lookup_latency_and_request_counts_use_interval_deltas():
     idle = collector.parse("replica0", payload, 30)
     assert prefix + "prefill_kv_lookup_latency_ms" not in idle
     assert prefix + "prefill_blocked_requests_per_step/reason/kv_lookup_pending" not in idle
+
+
+def test_prefill_readiness_preserves_engines_and_pools_interval_observations():
+    collector = InferenceMetricsCollector(config())
+
+    def payload(values: list[tuple[int, int, int, int]]) -> str:
+        registry = CollectorRegistry()
+        names = ("readiness_steps", "ready_requests", "ready_unscheduled_requests", "unexamined_requests")
+        counters = [
+            Counter(f"vllm:prefill_{name}_total", "Readiness", ["engine"], registry=registry) for name in names
+        ]
+        for engine, row in enumerate(values):
+            for counter, value in zip(counters, row):
+                counter.labels(str(engine)).inc(value)
+        return generate_latest(registry).decode()
+
+    prefix = "vllm/replica0/prefill_"
+    collector.parse("replica0", payload([(0, 0, 0, 0), (0, 0, 0, 0)]), 10)
+    values = [(2, 12, 2, 6), (8, 16, 0, 8)]
+    result = collector.parse("replica0", payload(values), 20)
+    assert result[prefix + "ready_requests_per_step/engine/0"] == pytest.approx(6)
+    assert result[prefix + "ready_requests_per_step/engine/1"] == 2
+    assert result[prefix + "ready_requests_per_step"] == pytest.approx(2.8)
+    assert result[prefix + "ready_unscheduled_requests_per_step/engine/0"] == 1
+    assert result[prefix + "ready_unscheduled_requests_per_step/engine/1"] == 0
+    assert result[prefix + "unexamined_requests_per_step"] == pytest.approx(1.4)
+    idle = collector.parse("replica0", payload(values), 30)
+    assert prefix + "ready_requests_per_step" not in idle
+    reset = collector.parse("replica0", payload([(0, 0, 0, 0), (10, 22, 0, 10)]), 40)
+    assert prefix + "ready_requests_per_step/engine/0" not in reset
+    assert reset[prefix + "ready_requests_per_step/engine/1"] == pytest.approx(3)
+    assert reset[prefix + "ready_requests_per_step"] == pytest.approx(3)
