@@ -72,6 +72,7 @@ def test_swe_recipe_uses_borrowed_sandbox_and_single_agent_turn_environment(
     from omegaconf import OmegaConf
 
     from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
+    from nemo_gym.cli.env import _configured_servers
     from nemo_gym.global_config import GlobalConfigDictParser
     from responses_api_agents.nooa_agent.config import NOOAAgentConfig
 
@@ -120,6 +121,11 @@ def test_swe_recipe_uses_borrowed_sandbox_and_single_agent_turn_environment(
     assert [(instance.name, set(instance.environment_servers)) for instance in environments] == [
         ("swebench_pro_nooa", {"single_agent_turn_legacy"})
     ]
+    assert {(server.top_level_path, server.server_type, server.name) for server in _configured_servers(config)} == {
+        ("swebench_pro_nooa_resources_server", "resources_servers", "swebench_pro"),
+        ("swebench_pro_nooa_agent", "responses_api_agents", "nooa_agent"),
+        ("swebench_pro_nooa", "environment_servers", "single_agent_turn_legacy"),
+    }
 
 
 def test_shared_swe_recipe_keeps_default_networking() -> None:
