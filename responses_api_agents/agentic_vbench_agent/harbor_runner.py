@@ -110,6 +110,10 @@ def job_config(
         # under registry slowdowns the 360 s default fails before the agent even starts.
         # Setup time is outside the agent budget, so a longer allowance changes no score.
         "agent_setup_timeout_multiplier": AGENT_SETUP_TIMEOUT_MULTIPLIER,
+        # The first trial of a task builds its image on the backend (apt, pip, media downloads
+        # from Hugging Face); with 12 trials building at once on a cold backend the tasks' 600 s
+        # default is too short. Build time is outside the agent budget, so no score changes.
+        "environment_build_timeout_multiplier": ENVIRONMENT_BUILD_TIMEOUT_MULTIPLIER,
         "environment": {
             "import_path": "responses_api_agents.agentic_vbench_agent." + environment_class,
             # delete=True removes the task image after the trial (benchmark default). Keeping
@@ -141,6 +145,8 @@ def job_config(
 # subagent whose description makes delegation an explicit option; the task prompt and the
 # primary agent's system prompt are unchanged in every mode.
 AGENT_SETUP_TIMEOUT_MULTIPLIER = 3.0
+# 6 x the tasks' 600 s build_timeout_sec = 1 h for a cold image build on a busy backend.
+ENVIRONMENT_BUILD_TIMEOUT_MULTIPLIER = 6.0
 OPENCODE_SUBAGENT_MODES = ("default", "off", "on")
 OPENCODE_BUILTIN_SUBAGENTS = ("general", "explore", "scout")
 OPENCODE_MEDIA_SUBAGENT = {
