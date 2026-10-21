@@ -11,6 +11,7 @@ import pytest
 
 from nemo_gym.web.actions import ActionParseError, parse_nano_omni_tool_calls
 from nemo_gym.web.computer_use import nano_omni_tools
+from nemo_gym.web.models import WebActionLimits
 from nemo_gym.web.scroll_process import main, run_scroll
 
 
@@ -50,6 +51,35 @@ def test_schema_is_selected_not_mutated():
     assert "maximum" not in amount(nano_omni_tools(max_scroll_amount=None))
     assert amount(nano_omni_tools())["maximum"] == 50
     assert amount(nano_omni_tools(max_scroll_amount=80))["maximum"] == 80
+
+
+def test_relaxed_scroll_and_runtime_wait_limits_compose_without_rewriting_actions() -> None:
+    call = _call(123456)
+    call["arguments"]["actions"].append({"action": "wait", "duration": 60})
+    limits = WebActionLimits(max_wait_seconds=120, max_step_wait_seconds=120)
+
+    action = parse_nano_omni_tool_calls([call], max_scroll_amount=None, limits=limits)
+
+    assert action.arguments["calls"][0]["arguments"] == call["arguments"]
+    with pytest.raises(ActionParseError, match=r"\[0, 50\]"):
+        parse_nano_omni_tool_calls([call], limits=limits)
+    with pytest.raises(ActionParseError, match=r"\[0, 30\]"):
+        parse_nano_omni_tool_calls([call], max_scroll_amount=None)
+
+
+def test_combined_scroll_and_wait_schema_does_not_mutate_defaults() -> None:
+    limits = WebActionLimits(max_wait_seconds=120, max_step_wait_seconds=120)
+    tools = nano_omni_tools(max_scroll_amount=None, limits=limits)
+    computer = next(tool for tool in tools if tool["name"] == "computer")
+    properties = computer["parameters"]["properties"]["actions"]["items"]["properties"]
+
+    assert "maximum" not in properties["scroll_parameters"]["anyOf"][0]["properties"]["scroll_amount"]
+    assert properties["duration"]["anyOf"][0]["maximum"] == 120
+    assert "120 seconds" in computer["description"]
+    default_computer = next(tool for tool in nano_omni_tools() if tool["name"] == "computer")
+    defaults = default_computer["parameters"]["properties"]["actions"]["items"]["properties"]
+    assert defaults["scroll_parameters"]["anyOf"][0]["properties"]["scroll_amount"]["maximum"] == 50
+    assert defaults["duration"]["anyOf"][0]["maximum"] == 30
 
 
 def test_subprocess_receives_exact_amount_and_deadline(monkeypatch):

@@ -15,6 +15,7 @@ from nemo_gym.web.models import (
     BROWSER_TARGET_CLOSED_STATUS,
     CAPTCHA_BUDGET_EXHAUSTED_STATUS,
     WebAction,
+    WebActionLimits,
     WebBenchmark,
     WebObservation,
     WebTask,
@@ -270,6 +271,38 @@ def test_visual_browser_required_solver_and_factory(monkeypatch) -> None:
     assert isinstance(composed.driver, WebVoyagerDriver)
 
 
+def test_captcha_target_closed_recovers_another_live_tab_without_spending_failure_budget(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    driver = _driver(monkeypatch)
+    driver._task = _task()
+    pages = []
+    for url, visible in [("https://old.example", True), ("https://new.example", False)]:
+        page = SimpleNamespace(url=url, closed=False, visible=visible)
+        page.is_closed = lambda page=page: page.closed
+        page.evaluate = lambda _script, page=page: {"visible": page.visible, "focused": page.visible}
+        pages.append(page)
+    driver._context = SimpleNamespace(pages=pages)
+    driver._page = pages[0]
+    target_closed = type("TargetClosedError", (RuntimeError,), {"__module__": "playwright.sync_api"})
+
+    class Solver:
+        def maybe_solve(self, page, *, phase):
+            if page is pages[0]:
+                pages[0].closed = True
+                pages[1].visible = True
+                raise target_closed("old tab closed during CAPTCHA inspection")
+            assert page is pages[1]
+            return True
+
+    driver._captcha_solver = Solver()
+    assert driver._maybe_solve_captcha("after computer", failure_step=0) is False
+    assert driver._page is pages[1]
+    assert not driver._runtime_target_closed()
+    assert driver._captcha_failures == 0
+    assert driver._maybe_solve_captcha("before capture", failure_step=0) is True
+
+
 def test_visual_browser_config_and_nano_tool_schema_are_environment_safe(monkeypatch) -> None:
     config = _config()
     monkeypatch.setenv("CAPSOLVER_API_KEY", "CAP-secret")
@@ -283,6 +316,18 @@ def test_visual_browser_config_and_nano_tool_schema_are_environment_safe(monkeyp
     first = nano_omni_tools()
     first[0]["name"] = "mutated"
     assert nano_omni_tools()[0]["name"] == "navigate"
+
+
+def test_runtime_wait_limit_is_advertised_in_nano_tools_without_mutating_defaults() -> None:
+    limits = WebActionLimits(max_wait_seconds=120, max_step_wait_seconds=120)
+    custom = next(tool for tool in nano_omni_tools(limits=limits) if tool["name"] == "computer")
+    default = next(tool for tool in nano_omni_tools() if tool["name"] == "computer")
+    path = lambda tool: tool["parameters"]["properties"]["actions"]["items"]["properties"]["duration"]
+    assert path(custom)["anyOf"][0]["maximum"] == 120
+    assert "120 seconds" in path(custom)["description"]
+    assert "Combined waiting" in custom["description"]
+    assert path(default)["anyOf"][0]["maximum"] == 30
+    assert nano_omni_tools(limits=WebActionLimits()) == nano_omni_tools()
 
 
 def test_webvoyager_evaluator_exposes_evidence_only_for_external_judging() -> None:
