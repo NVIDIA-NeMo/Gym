@@ -3,6 +3,7 @@
 
 """Resources-backed single-agent environment server."""
 
+import dataclasses
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -40,6 +41,7 @@ from nemo_gym.global_config import (
     TOKEN_ID_CAPTURE_BLOCK,
     get_first_server_config_dict,
 )
+from nemo_gym.model_usage import ModelUsageCapture
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.rollout_observability import NG_AGENT_OBSERVATIONS_KEY, AgentObservationBundle
 from nemo_gym.server_utils import (
@@ -140,6 +142,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             "resources session", lambda: self._close_resources(request, handles)
         )
         closed_agent: list[AgentCloseSessionResponse] = []
+        usage_capture: ModelUsageCapture | None = None
 
         async def close_agent() -> None:
             closed_agent.append(await self._close_agent(request, handles))
@@ -158,11 +161,16 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             # Seeds are idempotent for a caller-assigned session ID, so a checkpoint need not wait for them.
             async with self.checkpoint_step(request, "replay"):
                 seed = await self._seed_resources(request, handles)
+                # Count the agent's model calls from Agent session creation, after Resources seeding.
+                usage_capture = await self._start_usage_capture(request)
                 agent_cleanup = cleanup.register_cleanup("agent session", close_agent)
                 await self._seed_agent(request, handles, seed)
             stage = "invoke_agent"
 
         if stage == "invoke_agent":
+            if usage_capture is None:
+                # A continuation resumes here before the agent made any call.
+                usage_capture = await self._start_usage_capture(request)
             await self.checkpoint_boundary(request, {"next": "invoke_agent", "handles": handles.model_dump()})
             # The agent parks at its own boundaries and continues from them after a restore.
             try:
@@ -192,6 +200,11 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                     "response": agent_response.model_dump(mode="json"),
                 },
             )
+            if usage_capture is None:
+                # A continuation resumes after the agent ran: this process cannot tell which model calls were
+                # the agent's, so enabled capture reports unknown usage instead of a partial total.
+                started = await self._start_usage_capture(request)
+                usage_capture = dataclasses.replace(started, store=None) if started is not None else None
             # Closing returns the agent's observations and final resources cookies exactly once,
             # so a checkpoint waits for it and records them.
             async with self.checkpoint_step(request, "wait"):
@@ -199,6 +212,9 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                     await agent_cleanup.close()
                     close = closed_agent[-1]
                 except Exception as error:
+                    if usage_capture is not None:
+                        # Cleanup has not confirmed the end of model activity.
+                        agent_response = agent_response.model_copy(update={"usage": None})
                     raise self._failure(
                         stage="cleanup",
                         failure_reason=str(error),
@@ -206,6 +222,8 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                         partial_response=agent_response,
                     ) from error
             observations = close.agent_observations
+            if usage_capture is not None:
+                agent_response = agent_response.model_copy(update={"usage": await usage_capture.usage()})
             stage = "verify"
 
         def dumped_observations() -> dict | None:
@@ -223,6 +241,10 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             )
             async with self.checkpoint_step(request, handles.resources_verify):
                 verification = await self._verify(request, handles, agent_response, observations)
+                # The verifier may rewrite the response; the agent's accounted usage stays.
+                verification = verification.model_copy(
+                    update={"response": verification.response.model_copy(update={"usage": agent_response.usage})}
+                )
             stage = "return"
 
         # Every path ends here, at the return stage.
@@ -244,6 +266,11 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             episode_id=request.episode_id,
             task_id=request.task.task_id,
             result=verification.model_copy(update={NG_AGENT_OBSERVATIONS_KEY: observations}),
+        )
+
+    async def _start_usage_capture(self, request: SingleAgentTurnRequest) -> ModelUsageCapture | None:
+        return await ModelUsageCapture.start(
+            self.server_client.global_config_dict, rollout_id=request.episode_id.capture_key
         )
 
     async def _seed_resources(
