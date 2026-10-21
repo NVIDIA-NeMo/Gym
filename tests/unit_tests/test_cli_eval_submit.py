@@ -547,6 +547,9 @@ class TestEvalSubmitResolveOnly:
             def run(self, config, *, dry_run: bool = False):
                 raise AssertionError("persist() does not go through run()")
 
+            def resubmit(self, record, benchmark):  # pragma: no cover - unused
+                raise NotImplementedError
+
         config = SubmitConfig.model_validate(
             {"services": {"svc": SERVICE}, "compute": COMPUTE, "driver": DRIVER, "job": JOB}
         )
@@ -579,6 +582,9 @@ class TestEvalSubmitResolveOnly:
         class _NoRunExecutor(BaseExecutor):
             def run(self, config, *, dry_run: bool = False):
                 raise AssertionError("persist() does not go through run()")
+
+            def resubmit(self, record, benchmark):  # pragma: no cover - unused
+                raise NotImplementedError
 
         _NoRunExecutor().persist(
             _record(), config, lambda path, text, **kw: written.__setitem__(path.name, (text, kw))
