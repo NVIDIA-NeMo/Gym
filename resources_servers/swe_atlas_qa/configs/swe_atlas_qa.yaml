@@ -32,6 +32,11 @@ swe_atlas_qa_agent:
         model: ${policy_model_name}
         command: opencode
         timeout: 10800
+        opencode_config:
+          permission:
+            external_directory:
+              "/logs/*": allow
+              "/tmp/*": allow
       gym_source: ${oc.env:SWE_ATLAS_HARNESS_BUNDLE}
       sandbox_python: ${oc.env:SWE_ATLAS_HARNESS_PYTHON,python3}
       concurrency: 1

@@ -76,7 +76,7 @@ swe_atlas_qa_agent:
         timeout: 10800
 ```
 
-For headless OpenCode, allow the required answer directory and temporary scratch directory inside the task sandbox:
+The default OpenCode configuration allows the required answer directory and temporary scratch directory inside the task sandbox:
 
 ```yaml
 agent_kwargs:
@@ -87,7 +87,7 @@ agent_kwargs:
         "/tmp/*": allow
 ```
 
-Set this on the benchmark's `harness_agent` configuration. Native external-directory permission prompts can otherwise
+Keep these permissions when replacing `agent_kwargs`. Native external-directory permission prompts can otherwise
 auto-reject writes to `/logs/agent/answer.txt`. This does not change OpenCode's global permission defaults.
 
 For DeepAgents, configure its [filesystem root](../../responses_api_agents/nemo_fabric_agent/README.md)
