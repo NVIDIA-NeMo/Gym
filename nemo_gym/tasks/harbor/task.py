@@ -60,8 +60,10 @@ logger = logging.getLogger(__name__)
 TASK_FILE = "task.toml"
 INSTRUCTION_FILE = "instruction.md"
 STEPS_DIR = "steps"
-# Per-step Harbor features this loader does not run yet; a task using one is refused by name.
-UNSUPPORTED_STEP_FILES = ("workdir", "setup.sh")
+# A step's files under ``steps/<name>/``: the folder merged into the working directory before the turn and the
+# script run from there (Harbor's ``_upload_step_workdir`` and ``_run_step_setup``: the script lives inside the folder).
+STEP_WORKDIR = "workdir"
+STEP_SETUP_SCRIPT = "setup.sh"
 # The one value of the pre-1.3 `multi_step_reward_mode` key that older multi-step generators wrote: the per-step
 # average, which is the default `mean` roll-up the task gets once the key is dropped, so it is dropped silently.
 LEGACY_AGGREGATE_REWARD_MODE = "aggregate"
@@ -94,6 +96,18 @@ class HarborTurn:
         """The step's own reference solution, relative to the task folder (Harbor's ``steps/<name>/solution/``);
         may be absent, in which case the task's top-level ``solution/`` stands in for it (:meth:`HarborTask.turn_solution_dir`)."""
         return Path(STEPS_DIR) / self.name / "solution"
+
+    @property
+    def workdir_dir(self) -> Path:
+        """``steps/<name>/workdir/``, relative to the task folder: merged into the sandbox's working directory
+        before the turn's agent session, as Harbor's ``_upload_step_workdir`` uploads it; may be absent."""
+        return Path(STEPS_DIR) / self.name / STEP_WORKDIR
+
+    @property
+    def setup_script(self) -> Path:
+        """``steps/<name>/workdir/setup.sh``, relative to the task folder: run as ``bash <workdir>/setup.sh`` once the
+        folder is in place, as Harbor's ``_run_step_setup`` runs it; may be absent."""
+        return self.workdir_dir / STEP_SETUP_SCRIPT
 
 
 @dataclass(frozen=True)
@@ -746,6 +760,11 @@ def iter_task_folders(root: Path, *, max_depth: int = MAX_DISCOVERY_DEPTH) -> li
     return found
 
 
+def _is_root_user(user: str | int | None) -> bool:
+    """Whether an agent user runs with uid 0 (``None`` is the image's own user, root in most images)."""
+    return user is None or str(user).split(":")[0] in ("root", "0")
+
+
 def _load_turns(path: Path, config: HarborTaskConfig) -> tuple[HarborTurn, ...]:
     """Read every ``[[steps]]`` entry as a turn, refusing the per-step features the server does not run yet.
 
@@ -753,17 +772,48 @@ def _load_turns(path: Path, config: HarborTaskConfig) -> tuple[HarborTurn, ...]:
     ``steps/<name>/tests/`` or the task's under ``tests/``, which is the script Harbor runs for the step.
     A step's own ``[steps.agent].user`` is read as written: the server switches the sandbox's default user,
     the working directory's owner and the harness's user to it for that turn (and refuses a ``name:group``
-    pair at seed on a provider that switches user by name only, as it refuses the task's own).
+    pair at seed on a provider that switches user by name only, as it refuses the task's own). A step's
+    ``workdir/`` and ``workdir/setup.sh`` are read by the server per turn (:attr:`HarborTurn.workdir_dir`,
+    :attr:`HarborTurn.setup_script`); a ``setup.sh`` beside ``instruction.md`` instead of inside ``workdir/`` is
+    not a Harbor file and is warned about, since Harbor 0.22.0 runs ``steps/<name>/workdir/setup.sh`` only.
     """
     turns: list[HarborTurn] = []
+    # The agent users of the steps so far that are not root (`None` is the image's own user, unknown here).
+    earlier_unprivileged: list[tuple[str, str]] = []
     for step in config.steps:
         where = f"{path / TASK_FILE} step {step.name!r}"
         step_dir = path / STEPS_DIR / step.name
         if not step_dir.is_dir():
             raise HarborTaskError(f"{where}: {step_dir} does not exist")
-        for name in UNSUPPORTED_STEP_FILES:
-            if (step_dir / name).exists():
-                raise HarborTaskError(f"{where}: steps/{step.name}/{name} is not supported yet")
+        user = step.agent.user if step.agent.user is not None else config.agent.user
+        if (step_dir / STEP_WORKDIR / STEP_SETUP_SCRIPT).is_file() and _is_root_user(user) and earlier_unprivileged:
+            # The script runs as the step's agent, root here, in the working directory an earlier step's agent
+            # owned: a process that agent left running can replace the uploaded script before it runs. Harbor
+            # shares the window (docker cp, then exec); the step's agent gets root right after anyway.
+            previous, previous_user = earlier_unprivileged[-1]
+            logger.warning(
+                "%s: steps/%s/%s/%s runs as %s after step %r ran as %r; a process that step left running in the "
+                "working directory it owned can replace the script between its upload and its run, so the script "
+                "must not be relied on to undo what the earlier step did (Harbor runs it the same way)",
+                where,
+                step.name,
+                STEP_WORKDIR,
+                STEP_SETUP_SCRIPT,
+                "root" if user is not None else "the image's own user (root unless the image sets USER)",
+                previous,
+                previous_user,
+            )
+        if not _is_root_user(user):
+            earlier_unprivileged.append((step.name, str(user)))
+        if (step_dir / STEP_SETUP_SCRIPT).exists():
+            logger.warning(
+                "%s: steps/%s/%s is not run; Harbor runs steps/<name>/%s/%s (uploaded with the step's workdir/)",
+                where,
+                step.name,
+                STEP_SETUP_SCRIPT,
+                STEP_WORKDIR,
+                STEP_SETUP_SCRIPT,
+            )
         if step.healthcheck is not None or step.artifacts:
             raise HarborTaskError(f"{where}: per-step healthcheck and artifacts are not supported yet")
         if step.verifier.environment_mode == "separate" or step.verifier.environment is not None:

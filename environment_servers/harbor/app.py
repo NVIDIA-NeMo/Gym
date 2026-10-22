@@ -72,6 +72,7 @@ from environment_servers.harbor.sandboxes import (
     HarborSandboxMixin,
 )
 from environment_servers.harbor.session import HarborSession, HarborSessionMixin, resolve_env_templates
+from environment_servers.harbor.steps import HarborStepsMixin, StepPrepareError
 from environment_servers.harbor.users import HarborUsersMixin
 from environment_servers.harbor.verifier import (
     COLLECT_HOOK_GRACE_S,
@@ -140,7 +141,10 @@ class HarborTurnResult(BaseModel):
     """One turn of a multi-step task: what the agent returned and what the step's verifier wrote.
 
     ``verifier_rewards`` is ``None`` when the turn produced no verifier result (``test.sh`` timed out
-    or wrote no valid reward file); such a turn ends the episode.
+    or wrote no valid reward file); such a turn ends the episode. ``response`` is ``None`` for a turn whose
+    step preparation failed (``steps/<name>/workdir/setup.sh`` exited non-zero): no agent session opened and no
+    verifier ran, ``failure_kind`` says why, and the episode stops there too, as Harbor stops after a step whose
+    preparation raised.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -157,7 +161,7 @@ class HarborTurnResult(BaseModel):
     verifier_logs_dir: str | None = None
     verifier_seconds: float | None = None
     verifier_network: str | None = None
-    response: NeMoGymResponse
+    response: NeMoGymResponse | None = None
     agent_observations: AgentObservationBundle | None = None
     # The harness's own turns from the session close, as ``ng_trajectory`` carries them for a single-turn task.
     trajectory: TrajectoryRecord | None = Field(default=None, exclude_if=lambda value: value is None)
@@ -303,11 +307,16 @@ class HarborEnvironmentServerConfig(BaseEnvironmentServerConfig):
     # Give every episode the time budget of its task instead of the run-wide `default_episode_timeout_seconds`
     # alone: once its sandbox is ready, `harness_setup_allowance_s`, `[agent].timeout_sec`, every
     # `[[verifier.collect]]` hook's `timeout_sec` with its grace, `[verifier].timeout_sec` and the verifier
-    # grace (plus a separate verifier's start). Sandbox setup, image pull retries included, is not charged
+    # grace (plus a separate verifier's start), per step for a multi-step task, with each step's `setup.sh` bound
+    # (`step_setup_timeout_s`) when it ships one. Sandbox setup, image pull retries included, is not charged
     # against it; the sandbox lifetime covers both. Off ignores task timeouts.
     enforce_task_timeouts: bool = True
     # Seconds a harness may spend setting itself up in the sandbox before the task's `[agent].timeout_sec` starts.
     harness_setup_allowance_s: float = Field(default=300, ge=0)
+    # Seconds a step's `workdir/setup.sh` may run before the step fails (Harbor bounds it by nothing but the trial's
+    # own timeout). Unset: the step's agent budget, `[steps.agent].timeout_sec` else `[agent].timeout_sec`, the
+    # task's own bound on that step's time. Counted in the episode budget for every step that ships the script.
+    step_setup_timeout_s: float | None = Field(default=None, gt=0)
     # How many times a sandbox start that failed on an image pull (the agent's sandbox, a Compose group or
     # a separate verifier's sandbox) is retried here before the failure is reported as retryable. Bounded,
     # jittered and gated per server.
@@ -358,6 +367,11 @@ def roll_up_turns(turns: list["HarborTurnResult"], strategy: str, *, task_id: st
     sum to the rolled-up reward are dropped with a warning naming the task (``task_id``), the keys and both
     numbers: a results row names ``reward_components`` only when they sum to its ``reward``. With nothing to
     roll up the episode is measured 0, as a single turn without a reward file is.
+
+    A turn whose agent never ran (``response`` is ``None``: its step's own setup or healthcheck failed) is the one
+    exception to that 0: Harbor's trial then has no reward at all under ``final`` (the last step's missing verifier
+    result), so the episode is masked with the step's failure kind rather than labelled 0 for a turn the agent had
+    no part in; under ``mean`` the turns before it are averaged, as Harbor averages the steps with a result.
     """
     masked = next((turn for turn in turns if turn.mask_sample), None)
     if masked is not None:
@@ -367,6 +381,8 @@ def roll_up_turns(turns: list["HarborTurnResult"], strategy: str, *, task_id: st
         last = turns[-1]
         if last.verifier_rewards is None:
             reason = f"turn {last.name!r}: {last.failure_reason}"[:2000]
+            if last.response is None:
+                return HarborEnvironmentServer._masked(last.failure_kind or NO_TURN_RESULT_KIND, reason)
             return {"reward": 0.0, "mask_sample": False, "failure_kind": last.failure_kind, "failure_reason": reason}
         rolled = {"reward": last.reward, "verifier_rewards": last.verifier_rewards}
         components = _named_components(
@@ -379,6 +395,8 @@ def roll_up_turns(turns: list["HarborTurnResult"], strategy: str, *, task_id: st
     if not measured:
         last = turns[-1]
         reason = f"no turn produced a verifier result; turn {last.name!r}: {last.failure_reason}"
+        if last.response is None:
+            return HarborEnvironmentServer._masked(last.failure_kind or NO_TURN_RESULT_KIND, reason)
         return HarborEnvironmentServer._measured(0.0, last.failure_kind or NO_TURN_RESULT_KIND, reason)
     keys = sorted({key for turn in measured for key in turn.verifier_rewards})
     means = {key: sum(turn.verifier_rewards.get(key, 0.0) for turn in measured) / len(measured) for key in keys}
@@ -423,6 +441,7 @@ class HarborEnvironmentServer(
     HarborEntrypointMixin,
     HarborOverlayMixin,
     HarborUsersMixin,
+    HarborStepsMixin,
 ):
     config: HarborEnvironmentServerConfig
     request_model = HarborEpisodeRequest
@@ -625,15 +644,19 @@ class HarborEnvironmentServer(
         The harness's setup, `[agent].timeout_sec`, the `[[verifier.collect]]` hooks (run one after the
         other in both verifier modes, each within its own `timeout_sec` plus the exec grace), then
         `[verifier].timeout_sec` with its grace, plus a second sandbox start (and overlay) for a separate
-        verifier. The seed is not counted: its own bounds are the sandbox ready timeout per start and the
-        image pull retries, so a start that recovered on a retry begins the task with its whole budget.
+        verifier. A multi-step task sums that per step, plus the bound of each step's `setup.sh` when it ships
+        one (:meth:`_step_setup_budget_s`). The seed is not counted: its own bounds are the sandbox ready timeout
+        per start and the image pull retries, so a start that recovered on a retry begins the task with its whole
+        budget.
         """
         separate = self._separate_verifier(task)
         hooks = sum(hook.timeout_sec + COLLECT_HOOK_GRACE_S for hook in task.config.verifier.collect)
         if task.turns:
-            # Every step is a turn of its own: a fresh harness session, the hooks and the step's verifier.
+            # Every step is a turn of its own: a fresh harness session, the step's setup.sh when it ships one, the
+            # hooks and the step's verifier.
             budget = sum(
                 self.config.harness_setup_allowance_s
+                + self._step_setup_budget_s(task, turn)
                 + task.config.step_agent_timeout_sec(turn.config)
                 + hooks
                 + task.config.step_verifier_timeout_sec(turn.config)
@@ -1100,10 +1123,13 @@ class HarborEnvironmentServer(
         Each turn opens a fresh agent session (Harbor's default, ``resume_trajectory = false``), sends the
         step's instruction, closes the session and runs the step's verifier: the task's ``tests/`` with
         ``steps/<name>/tests/`` on top. Before a turn the previous turn's grading files are cleared, the sandbox
-        takes the step's ``[steps.agent].user`` when it has one and the oracle gets the step's own solution
-        (:meth:`_prepare_turn`). The episode stops
-        after a turn that is masked, produces no verifier result, or misses its ``min_reward``; the remaining
-        turns do not run.
+        takes the step's ``[steps.agent].user`` when it has one, the step's ``workdir/`` and ``setup.sh`` are applied
+        and the oracle gets the step's own solution (:meth:`_prepare_turn`). The episode stops after a turn whose
+        preparation failed (recorded as a failed turn with no agent response and no verifier result, Harbor's
+        step ``exception_info``), or that is masked, produces no verifier result, or misses its ``min_reward``;
+        the remaining turns do not run. An episode whose first turn's preparation failed has no agent response
+        at all, so it is a terminal failure at the agent stage with the step's failure kind, as Harbor's trial
+        then ends with no verifier result.
         """
         task = session.task
         inputs = request.task.task_input.turns
@@ -1121,6 +1147,20 @@ class HarborEnvironmentServer(
         for turn, turn_input in zip(task.turns, inputs):
             try:
                 access = await self._prepare_turn(session, turn, access)
+            except StepPrepareError as error:
+                # The step's own setup failed: a failed turn, no agent session, no verifier, and the episode stops.
+                LOGGER.warning(f"{task.task_id}: {error.reason}")
+                results.append(
+                    HarborTurnResult(
+                        name=turn.name,
+                        reward=0.0,
+                        mask_sample=False,
+                        failure_kind=error.kind,
+                        failure_reason=error.reason[:2000],
+                    )
+                )
+                stopped_after = turn.name if len(results) < len(task.turns) else None
+                break
             except HTTPException as error:
                 raise self._failure(
                     stage="agent",
@@ -1178,11 +1218,20 @@ class HarborEnvironmentServer(
 
         strategy = task.config.multi_step_reward_strategy
         last = results[-1]
+        # The last turn whose agent ran: a turn that failed in its preparation has no response of its own.
+        ran = next((result for result in reversed(results) if result.response is not None), None)
+        if ran is None:
+            raise self._failure(
+                stage="agent",
+                failure_reason=f"turn {last.name!r}: {last.failure_reason}",
+                terminal=True,
+                failure_kind=last.failure_kind,
+            )
         episode = HarborEpisodeResult(
-            responses_create_params=inputs[len(results) - 1].responses_create_params,
-            response=last.response,
-            ng_agent_observations=last.agent_observations,
-            ng_trajectory=last.trajectory,
+            responses_create_params=inputs[results.index(ran)].responses_create_params,
+            response=ran.response,
+            ng_agent_observations=ran.agent_observations,
+            ng_trajectory=ran.trajectory,
             verifier_mode="shared",
             turns=results,
             turn_reward_strategy=strategy,
@@ -1194,7 +1243,7 @@ class HarborEnvironmentServer(
 
     async def _prepare_turn(self, session: HarborSession, turn: HarborTurn, access: SandboxAccess) -> SandboxAccess:
         """What a turn needs in place before its agent session opens: no grading files from the previous turn, the
-        step's user and the step's solution.
+        step's user, the step's ``workdir/`` and ``setup.sh``, and the step's solution.
 
         Every turn after the first follows a shared verification in this sandbox (a multi-step task verifies in
         the agent's sandbox), which left its tests, its reward and the previous agent's transcript there, so they
@@ -1209,8 +1258,13 @@ class HarborEnvironmentServer(
         (else the task's ``[agent].user``), so when the turn's user differs from the one the sandbox runs as, the
         sandbox's default user, the working directory's owner and the user the harness is handed switch to it
         (:meth:`_apply_turn_user`), and the access the harness gets is rebuilt for it; the verifier keeps its own
-        user and fallback. The oracle alone then gets the step's ``solution/`` at ``/solution``
-        (:meth:`_place_turn_solution`).
+        user and fallback. Then, as that user, the step's ``steps/<name>/workdir/`` is merged into the working
+        directory and its ``setup.sh`` run (:meth:`_prepare_step_workdir`, Harbor's ``_prepare_step`` order; a
+        failure there is :class:`StepPrepareError`, the step's failure). Nothing stops or pauses what the previous turn left running between the switch and the script, so a
+        process it left behind can touch the working directory, ``setup.sh`` included, before the script runs; a
+        step that takes root after a step that had less is where that matters (see :meth:`_prepare_step_workdir`).
+        The oracle alone then gets the step's
+        ``solution/`` at ``/solution`` (:meth:`_place_turn_solution`).
         """
         task = session.task
         if turn is not task.turns[0]:
@@ -1219,6 +1273,7 @@ class HarborEnvironmentServer(
         if user != session.agent_user:
             await self._apply_turn_user(session, user)
             access = await self._sandbox_access(session)
+        await self._prepare_step_workdir(session, turn)
         await self._place_turn_solution(session, turn)
         return access
 
@@ -1384,7 +1439,8 @@ class HarborEnvironmentServer(
             default = self.config.default_episode_timeout_seconds
             need = (
                 f"its {len(task.turns)} steps need up to {after_seed:.0f}s once the sandbox is ready (harness setup, "
-                f"agent and verifier budgets, hooks and grace per step), {nominal:.0f}s with one sandbox start and "
+                f"setup.sh bound, agent and verifier budgets, hooks and grace per step), {nominal:.0f}s with one "
+                f"sandbox start and "
                 f"up to {bound:.0f}s with every image pull retry"
             )
             if not self.config.enforce_task_timeouts:

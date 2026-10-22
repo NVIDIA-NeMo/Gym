@@ -11,6 +11,7 @@ import posixpath
 import tarfile
 import threading
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
@@ -23,7 +24,7 @@ from environment_servers.harbor.app import (
     roll_up_turns,
 )
 from environment_servers.harbor.sandboxes import SEED_CREATE_GRACE_S
-from environment_servers.harbor.tests.conftest import TASK_TOML, FakeSandbox, agent_response, make_server
+from environment_servers.harbor.tests.conftest import OK, TASK_TOML, FakeSandbox, agent_response, make_server
 from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.tasks.harbor import load_task
@@ -793,10 +794,10 @@ async def test_a_multi_step_task_longer_than_the_default_gets_its_own_budget(tmp
     assert response.failure is None, response.failure
     assert [turn.name for turn in response.result.turns] == ["plan", "build"] and response.result.reward == 1.0
     assert (
-        f"hello: its 2 steps need up to 1s once the sandbox is ready (harness setup, agent and verifier budgets, "
-        f"hooks and grace per step), 2s with one sandbox start and up to {seed_bound + 1.2:.0f}s with every image "
-        f"pull retry; default_episode_timeout_seconds=0 is below that bound, so the episode deadline and the sandbox "
-        f"lifetime follow the task's own bound ({seed_bound + 1.2:.0f}s)"
+        f"hello: its 2 steps need up to 1s once the sandbox is ready (harness setup, setup.sh bound, agent and "
+        f"verifier budgets, hooks and grace per step), 2s with one sandbox start and up to {seed_bound + 1.2:.0f}s "
+        f"with every image pull retry; default_episode_timeout_seconds=0 is below that bound, so the episode "
+        f"deadline and the sandbox lifetime follow the task's own bound ({seed_bound + 1.2:.0f}s)"
     ) in caplog.text
     # The derived deadline is the task's own budget, not a blank cheque: `test_the_task_deadline_ends_an_overrunning_turn`
     # keeps the task deadline firing on a turn that runs past it.
@@ -914,10 +915,10 @@ async def test_without_enforcement_a_multi_step_task_longer_than_the_default_is_
     assert failure is not None and failure.stage == "seed" and failure.terminal
     assert server._task_budget_s(task) == pytest.approx(3.2)
     assert (
-        f"Task 'hello': its 2 steps need up to 2s once the sandbox is ready (harness setup, agent and verifier "
-        f"budgets, hooks and grace per step), 3s with one sandbox start and up to {seed_bound + 2.2:.0f}s with every "
-        f"image pull retry, above default_episode_timeout_seconds=2 after one sandbox start already, and "
-        f"enforce_task_timeouts is off"
+        f"Task 'hello': its 2 steps need up to 2s once the sandbox is ready (harness setup, setup.sh bound, agent "
+        f"and verifier budgets, hooks and grace per step), 3s with one sandbox start and up to "
+        f"{seed_bound + 2.2:.0f}s with every image pull retry, above default_episode_timeout_seconds=2 after one "
+        f"sandbox start already, and enforce_task_timeouts is off"
     ) in failure.failure_reason
     assert (
         f"raise default_episode_timeout_seconds to at least 3 ({seed_bound + 2.2:.0f} to cover a retried seed)"
@@ -932,11 +933,11 @@ async def test_without_enforcement_a_multi_step_task_longer_than_the_default_is_
         response = await server.run_request(request_for(task, rollout="r2"))
     assert response.failure is None and [turn.name for turn in response.result.turns] == ["plan", "build"]
     assert (
-        f"hello: its 2 steps need up to 2s once the sandbox is ready (harness setup, agent and verifier budgets, "
-        f"hooks and grace per step), 3s with one sandbox start and up to {seed_bound + 2.2:.0f}s with every image "
-        f"pull retry; default_episode_timeout_seconds=4 covers the episode after one sandbox start but not after a "
-        f"retried seed, and enforce_task_timeouts is off, so an episode whose seed retries its image pulls may time "
-        f"out and be retried; set enforce_task_timeouts: true to give the episode the task's own bound"
+        f"hello: its 2 steps need up to 2s once the sandbox is ready (harness setup, setup.sh bound, agent and "
+        f"verifier budgets, hooks and grace per step), 3s with one sandbox start and up to {seed_bound + 2.2:.0f}s "
+        f"with every image pull retry; default_episode_timeout_seconds=4 covers the episode after one sandbox start "
+        f"but not after a retried seed, and enforce_task_timeouts is off, so an episode whose seed retries its image "
+        f"pulls may time out and be retried; set enforce_task_timeouts: true to give the episode the task's own bound"
     ) in caplog.text
     # A default that covers the worst case runs them without a word, as before.
     caplog.clear()
@@ -1100,3 +1101,329 @@ class TestRollUp:
 )
 def test_min_reward_follows_harbor(rewards, min_reward, fails):
     assert (min_reward_failure(rewards, min_reward) is not None) == fails
+
+
+# -- steps/<name>/workdir/ and setup.sh (Harbor's _upload_step_workdir and _run_step_setup) -------------------------
+
+
+def write_step_workdir(task_dir: Path, name: str, files: dict[str, str]) -> None:
+    """``steps/<name>/workdir/`` with ``files`` (a ``setup.sh`` among them when the step has one)."""
+    folder = task_dir / "steps" / name / "workdir"
+    for relative, text in files.items():
+        (folder / relative).parent.mkdir(parents=True, exist_ok=True)
+        (folder / relative).write_text(text)
+
+
+@dataclass
+class SetupSandbox(FakeSandbox):
+    """A sandbox whose ``bash <workdir>/setup.sh`` runs answer ``setup_results`` in order (OK once they run out)."""
+
+    setup_results: list[SandboxExecResult] = field(default_factory=list)
+
+    async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+        if command.startswith("bash ") and command.endswith("/setup.sh"):
+            # `ran_as` is the user the container ran the command as, the fake's rule (`FakeSandbox.exec`).
+            effective = user if user is not None else self.default_user
+            ran_as = str(effective) if effective is not None else self.image_user
+            self.execs.append(
+                {
+                    "command": command,
+                    "cwd": cwd,
+                    "env": env,
+                    "timeout_s": timeout_s,
+                    "user": user,
+                    "ran_as": ran_as,
+                    "seen": None,
+                }
+            )
+            return self.setup_results.pop(0) if self.setup_results else OK
+        return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+
+
+def multi_turn_server_with_workdirs(tmp_path, monkeypatch, workdirs: dict[str, dict[str, str]], **kwargs):
+    """Three steps, ``plan``, ``build`` (as user ``tester``) and ``check``; ``workdirs`` maps a step to the files of
+    its ``workdir/``."""
+    task_dir = tmp_path / "datasets" / "ds" / "hello"
+    for name, files in workdirs.items():
+        write_step_workdir(task_dir, name, files)
+    return multi_turn_server(
+        tmp_path,
+        monkeypatch,
+        '[[steps]]\nname = "plan"\n[[steps]]\nname = "build"\n[steps.agent]\nuser = "tester"\n'
+        '[[steps]]\nname = "check"\n',
+        {"plan": "P", "build": "B", "check": "C"},
+        **kwargs,
+    )
+
+
+async def test_a_steps_workdir_is_merged_into_the_working_directory_before_its_agent(tmp_path, monkeypatch):
+    """Harbor's `_upload_step_workdir`: `steps/<name>/workdir/` lands in the environment's working directory before
+    the step's agent runs, over what the previous turns left (an upload, never a wipe), with the digest's ignored
+    names left out; a step without the folder uploads nothing."""
+    sandbox = SetupSandbox()
+    server, task, sandbox, _ = multi_turn_server_with_workdirs(
+        tmp_path,
+        monkeypatch,
+        {"build": {"fixtures/input.txt": "data\n", "notes.md": "n\n", "__pycache__/x.pyc": "\x00"}},
+        sandbox=sandbox,
+    )
+
+    response = await server.run_request(request_for(task))
+
+    assert response.failure is None, response.failure
+    assert [turn.reward for turn in response.result.turns] == [1.0, 1.0, 1.0]
+    assert uploaded_files(sandbox, "input.txt") == [b"data\n"] and uploaded_files(sandbox, "x.pyc") == []
+    # Extracted into the working directory as root, after the first turn's verifier and before the second
+    # turn's agent session opens; nothing removed the directory's contents first.
+    index = next(i for i, e in enumerate(sandbox.execs) if "tar -xzf" in e["command"] and " -C /app" in e["command"])
+    verifies = [i for i, e in enumerate(sandbox.execs) if "timeout -s KILL" in e["command"]]
+    assert verifies[0] < index < verifies[1] and sandbox.execs[index]["user"] == "root"
+    assert not any("rm -rf" in e["command"] and "/app" in e["command"] for e in sandbox.execs)
+    # The one root exec clears a link the previous turn's agent planted at any shipped name before it extracts, so
+    # a BusyBox tar (which follows a link at a directory member's path) lands the merge where GNU tar and Harbor's
+    # docker cp do: the listing loop precedes the extraction in the same shell line (the real tars are exercised in
+    # tests/unit_tests/test_sandbox_transfer.py).
+    extraction = sandbox.execs[index]["command"]
+    assert 'if [ -L /app/"$m" ]; then rm -- /app/"$m"; fi; done; tar -xzf' in extraction
+    assert extraction.index("tar -tzf") < extraction.index("tar -xzf")
+    assert len(server.server_client.seed_bodies()) == 3
+    assert not any(e["command"].startswith("bash ") and e["command"].endswith("setup.sh") for e in sandbox.execs)
+
+
+async def test_a_steps_setup_script_runs_as_the_steps_agent_user_in_the_working_directory(tmp_path, monkeypatch):
+    """Harbor's `_run_step_setup`: `bash <workdir>/setup.sh` as the step's agent user (the sandbox's default under
+    `with_default_user`), once the folder is in place and before the agent session, within the step's agent budget
+    (`step_setup_timeout_s` unset; the harness allowance is not the bound)."""
+    sandbox = SetupSandbox()
+    server, task, sandbox, _ = multi_turn_server_with_workdirs(
+        tmp_path,
+        monkeypatch,
+        {"build": {"setup.sh": "#!/bin/bash\nmake fixtures\n"}},
+        sandbox=sandbox,
+        harness_setup_allowance_s=10,
+    )
+
+    response = await server.run_request(request_for(task))
+
+    assert response.failure is None, response.failure
+    setup = [e for e in sandbox.execs if e["command"] == "bash /app/setup.sh"]
+    assert len(setup) == 1
+    # No explicit user: the sandbox's default at that point, the build step's `tester`, ran it (the fake records the
+    # user in effect as `ran_as`).
+    assert setup[0]["cwd"] == "/app" and setup[0]["user"] is None and setup[0]["ran_as"] == "tester"
+    assert setup[0]["timeout_s"] == 300  # the task's [agent].timeout_sec, not harness_setup_allowance_s=10
+    # The build step's user was installed before the script ran: the default the exec falls back to.
+    upload = next(i for i, e in enumerate(sandbox.execs) if "tar -xzf" in e["command"] and " -C /app" in e["command"])
+    assert sandbox.execs.index(setup[0]) > upload
+    switched = next(e for e in sandbox.execs if e["command"] == "chown tester /app")
+    assert sandbox.execs.index(switched) < sandbox.execs.index(setup[0])
+    assert uploaded_files(sandbox, "setup.sh") == [b"#!/bin/bash\nmake fixtures\n"]
+    assert [turn.reward for turn in response.result.turns] == [1.0, 1.0, 1.0]
+
+
+async def test_a_failing_setup_script_ends_the_episode_as_a_failed_turn_without_agent_or_verifier(
+    tmp_path, monkeypatch, caplog
+):
+    """Harbor records a non-zero setup.sh as the step's exception_info and stops the trial after that step: here the
+    turn is a failed turn (no response, no verifier result, an explicit failure kind) and the roll-up scores what
+    ran before it."""
+    sandbox = SetupSandbox(setup_results=[SandboxExecResult(stdout="", stderr="no fixtures\n", return_code=3)])
+    server, task, sandbox, _ = multi_turn_server_with_workdirs(
+        tmp_path, monkeypatch, {"build": {"setup.sh": "#!/bin/bash\nexit 3\n"}}, sandbox=sandbox
+    )
+    rewards_per_turn(server, sandbox, ["0.5", "1", "1"])
+
+    with caplog.at_level("WARNING"):
+        response = await server.run_request(request_for(task))
+
+    assert response.failure is None, response.failure
+    result = response.result
+    assert [turn.name for turn in result.turns] == ["plan", "build"]
+    failed = result.turns[1]
+    assert failed.response is None and failed.verifier_rewards is None and not failed.mask_sample
+    assert failed.failure_kind == "harbor:step_setup_failed"
+    assert "step 'build' setup.sh exited with code 3: no fixtures" in failed.failure_reason
+    assert "step 'build' setup.sh exited with code 3" in caplog.text
+    # mean over the turns with a result: the first turn alone; the episode stopped after the failed turn.
+    assert (result.reward, result.stopped_after_turn, result.turns_without_verifier_result) == (0.5, "build", 1)
+    assert not result.mask_sample
+    assert result.response is not None and result.response == result.turns[0].response
+    # Neither an agent session nor a verifier ran for the failed turn.
+    assert len(server.server_client.seed_bodies()) == 1
+    assert len([e for e in sandbox.execs if "timeout -s KILL" in e["command"]]) == 1
+
+
+async def test_a_failing_setup_script_under_final_masks_the_episode_as_harbor_has_no_reward(tmp_path, monkeypatch):
+    """Harbor's `_select_multi_step_reward` under `final` returns the last step's verifier result, which a step whose
+    setup failed has not got: the trial has no reward. The episode is masked with the step's kind, not labelled 0
+    for a turn the agent never acted in; the failed turn itself stays an unmasked record of the task's failure."""
+    sandbox = SetupSandbox(setup_results=[SandboxExecResult(stdout="", stderr="no fixtures\n", return_code=3)])
+    server, task, sandbox, _ = multi_turn_server_with_workdirs(
+        tmp_path,
+        monkeypatch,
+        {"build": {"setup.sh": "#!/bin/bash\nexit 3\n"}},
+        sandbox=sandbox,
+        head='multi_step_reward_strategy = "final"\n',
+    )
+    rewards_per_turn(server, sandbox, ["0.5", "1", "1"])
+
+    response = await server.run_request(request_for(task))
+
+    assert response.failure is None, response.failure
+    result = response.result
+    assert [turn.name for turn in result.turns] == ["plan", "build"] and result.turn_reward_strategy == "final"
+    assert result.turns[0].reward == 0.5 and not result.turns[1].mask_sample
+    assert result.mask_sample and result.reward == 0.0 and result.failure_kind == "harbor:step_setup_failed"
+    assert result.failure_reason.startswith("turn 'build': step 'build' setup.sh exited with code 3")
+
+
+def test_the_roll_up_masks_a_turn_the_agent_never_ran_and_measures_one_it_ran_without_a_reward():
+    """The two turns without a verifier result: a prepared turn whose test.sh wrote nothing is measured 0 (as a single
+    turn is), a turn whose preparation failed (no `response`) is masked under `final` and when nothing was measured."""
+    ran = HarborTurnResult(name="a", reward=0.0, failure_kind="harbor:no_reward", failure_reason="x", response=None)
+    unprepared = HarborTurnResult(name="b", reward=0.0, failure_kind="harbor:step_setup_failed", failure_reason="y")
+    measured = HarborTurnResult(name="a", reward=1.0, verifier_rewards={"reward": 1.0}, response=agent_response())
+    assert roll_up_turns([measured, unprepared], "final")["mask_sample"] is True
+    assert roll_up_turns([measured, unprepared], "final")["failure_kind"] == "harbor:step_setup_failed"
+    assert roll_up_turns([measured, unprepared], "mean") == {"reward": 1.0, "verifier_rewards": {"reward": 1.0}}
+    assert roll_up_turns([unprepared], "mean")["mask_sample"] is True
+    assert roll_up_turns([unprepared], "final")["mask_sample"] is True
+    # `response` is None for `ran` too (the fixture carries none), so the distinction is by the agent having run:
+    # a measured-0 turn in the server always carries its response; here the roll-up is asked about the shape alone.
+    assert roll_up_turns([ran], "mean")["mask_sample"] is True
+
+
+def test_the_budget_counts_a_steps_setup_script_at_its_bound(tmp_path, monkeypatch):
+    """With `enforce_task_timeouts` the episode deadline is this sum: a step that ships a setup.sh adds its bound
+    (`step_setup_timeout_s`, else the step's agent budget), one that ships none adds nothing."""
+    server, task, _, _ = multi_turn_server_with_workdirs(tmp_path, monkeypatch, {})
+    without = server._post_seed_budget_s(task)
+    server, task, _, _ = multi_turn_server_with_workdirs(
+        tmp_path / "setup", monkeypatch, {"build": {"setup.sh": "#!/bin/bash\ntrue\n"}, "check": {"notes.md": "n"}}
+    )
+    assert server._post_seed_budget_s(task) == without + 300  # the task's [agent].timeout_sec, build's budget
+    server, task, _, _ = multi_turn_server_with_workdirs(
+        tmp_path / "bound", monkeypatch, {"build": {"setup.sh": "#!/bin/bash\ntrue\n"}}, step_setup_timeout_s=42
+    )
+    assert server._post_seed_budget_s(task) == without + 42
+
+
+async def test_a_failing_setup_script_on_the_first_turn_is_a_terminal_failure_with_the_steps_kind(
+    tmp_path, monkeypatch
+):
+    """No turn ran an agent, so there is no rollout to score: the episode is a terminal agent-stage failure naming
+    the step and carrying its failure kind, as Harbor's trial ends with no verifier result."""
+    sandbox = SetupSandbox(setup_results=[SandboxExecResult(stdout="", stderr="boom", return_code=1)])
+    server, task, sandbox, _ = multi_turn_server_with_workdirs(
+        tmp_path, monkeypatch, {"plan": {"setup.sh": "#!/bin/bash\nexit 1\n"}}, sandbox=sandbox
+    )
+
+    response = await server.run_request(request_for(task))
+
+    failure = response.failure
+    assert failure is not None and failure.stage == "agent" and failure.terminal
+    assert failure.failure_kind == "harbor:step_setup_failed"
+    assert "turn 'plan': step 'plan' setup.sh exited with code 1: boom" in failure.failure_reason
+    assert not server.server_client.seed_bodies()
+
+
+async def test_a_setup_script_past_its_bound_fails_the_step_and_a_sandbox_error_is_retryable(tmp_path, monkeypatch):
+    """The bound is `step_setup_timeout_s` when set, else the step's agent budget (never 0 or unbounded: Harbor's only
+    bound is the trial timeout, the episode deadline here); a run past it is the step's failure, as a non-zero exit is.
+    A sandbox that cannot run the script at all is an outage, retried elsewhere."""
+    timed_out = SandboxExecResult(stdout="", stderr="", return_code=-1, error_type="timeout")
+    sandbox = SetupSandbox(setup_results=[timed_out])
+    server, task, sandbox, _ = multi_turn_server_with_workdirs(
+        tmp_path, monkeypatch, {"build": {"setup.sh": "#!/bin/bash\nsleep 1d\n"}}, sandbox=sandbox
+    )
+    response = await server.run_request(request_for(task))
+    assert response.failure is None, response.failure
+    failed = response.result.turns[1]
+    assert failed.failure_kind == "harbor:step_setup_failed" and "ran past its 300s bound" in failed.failure_reason
+    assert next(e for e in sandbox.execs if e["command"] == "bash /app/setup.sh")["timeout_s"] == 300
+
+    sandbox = SetupSandbox(setup_results=[timed_out])
+    server, task, sandbox, _ = multi_turn_server_with_workdirs(
+        tmp_path / "bound",
+        monkeypatch,
+        {"build": {"setup.sh": "#!/bin/bash\nsleep 1d\n"}},
+        sandbox=sandbox,
+        step_setup_timeout_s=42,
+        harness_setup_allowance_s=0,
+    )
+    response = await server.run_request(request_for(task, rollout="r3"))
+    assert response.failure is None, response.failure
+    assert "ran past its 42s bound" in response.result.turns[1].failure_reason
+    assert next(e for e in sandbox.execs if e["command"] == "bash /app/setup.sh")["timeout_s"] == 42
+
+    lost = SandboxExecResult(stdout="", stderr="", return_code=-1, error_type="connection")
+    sandbox = SetupSandbox(setup_results=[lost])
+    server, task, sandbox, _ = multi_turn_server_with_workdirs(
+        tmp_path, monkeypatch, {"build": {"setup.sh": "#!/bin/bash\ntrue\n"}}, sandbox=sandbox
+    )
+    response = await server.run_request(request_for(task, rollout="r2"))
+    failure = response.failure
+    assert failure is not None and failure.stage == "agent" and not failure.terminal
+    assert "setup.sh could not run: connection" in failure.failure_reason
+
+
+TAR_REFUSAL = SandboxExecResult(
+    stdout="",
+    stderr="tar: setup.sh: Cannot open: File exists\ntar: Exiting with failure status due to previous errors\n",
+    return_code=2,
+)
+
+
+@dataclass
+class PlantedSandbox(SetupSandbox):
+    """The agent's sandbox after the previous turn's agent left a non-empty directory at the name of a file the next
+    step's ``workdir/`` ships: the extraction into the working directory answers ``extraction``."""
+
+    extraction: SandboxExecResult = TAR_REFUSAL
+
+    async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+        result = await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+        if "tar -xzf" in command and " -C /app" in command:
+            return self.extraction
+        return result
+
+
+async def test_a_workdir_entry_the_sandbox_refuses_to_unpack_fails_the_step_instead_of_retrying_the_episode(
+    tmp_path, monkeypatch
+):
+    """The previous turn's agent owns the working directory and can leave a non-empty directory at the name of a file
+    the next step's workdir/ ships (`mkdir -p /app/setup.sh/x`); GNU tar then refuses the entry (`Cannot open: File
+    exists`, exit 2), as Harbor's `docker cp` refuses the mismatch and errors the trial. That is the step's own failure
+    (an unmasked turn, the episode stops, nothing retried), never an outage retried for as long as the policy allows;
+    a provider that cannot run the extraction at all is still the outage it is."""
+    sandbox = PlantedSandbox()
+    server, task, sandbox, _ = multi_turn_server_with_workdirs(
+        tmp_path, monkeypatch, {"build": {"setup.sh": "#!/bin/bash\nmake fixtures\n"}}, sandbox=sandbox
+    )
+    rewards_per_turn(server, sandbox, ["1", "1", "1"])
+
+    response = await server.run_request(request_for(task))
+
+    assert response.failure is None, response.failure
+    result = response.result
+    assert [turn.name for turn in result.turns] == ["plan", "build"]
+    failed = result.turns[1]
+    assert failed.failure_kind == "harbor:step_workdir_failed" and failed.response is None and not failed.mask_sample
+    assert "step 'build' workdir/ could not be merged into /app" in failed.failure_reason
+    assert "tar: setup.sh: Cannot open: File exists" in failed.failure_reason
+    assert (result.reward, result.stopped_after_turn, result.mask_sample) == (1.0, "build", False)
+    # The step's script never ran over the planted tree, no agent session opened for the step, and the extraction
+    # was tried exactly once: nothing retried it.
+    assert not [e for e in sandbox.execs if e["command"] == "bash /app/setup.sh"]
+    assert len(server.server_client.seed_bodies()) == 1
+    assert len([e for e in sandbox.execs if "tar -xzf" in e["command"] and " -C /app" in e["command"]]) == 1
+
+    lost = SandboxExecResult(stdout="", stderr="", return_code=-1, error_type="connection")
+    sandbox = PlantedSandbox(extraction=lost)
+    server, task, sandbox, _ = multi_turn_server_with_workdirs(
+        tmp_path / "lost", monkeypatch, {"build": {"setup.sh": "#!/bin/bash\ntrue\n"}}, sandbox=sandbox
+    )
+    response = await server.run_request(request_for(task, rollout="r2"))
+    failure = response.failure
+    assert failure is not None and failure.stage == "agent" and not failure.terminal
+    assert "SandboxUnavailableError" in failure.failure_reason and "connection" in failure.failure_reason
