@@ -36,3 +36,8 @@ def aggregate_metrics_path_for(output_fpath: Path) -> Path:
     (e.g. `gym eval compare`) derive the same path the writers produced.
     """
     return output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
+
+
+def resolved_config_path_for(output_fpath: Path) -> Path:
+    """`results/rollouts.jsonl` -> `results/rollouts_resolved_config.yaml`."""
+    return output_fpath.with_stem(output_fpath.stem + "_resolved_config").with_suffix(".yaml")
