@@ -76,7 +76,7 @@ A new pairing does not need another combined preset.
 
 ## Runtime and model requirements
 
-Use one agent worker, an exact `pi_version` (default **0.80.2**), and a Gym `model_server`.
+Use an exact `pi_version` (default **0.80.2**), and a Gym `model_server`.
 For a Resources-owned task sandbox, supply direct `SandboxAccess` with an absolute
 task working directory. Without access, configure agent-owned creation as noted below.
 Session setup rejects `pi_version: latest`. Pi's `resources_server` setting is required
@@ -103,8 +103,36 @@ stdout and stderr so provider status messages do not hide the actual failure.
 Project extensions, skills, prompt templates, and themes are disabled; repository context
 files may still be read by Pi.
 
-Keep `resources_tool_transports: []`: Pi provides its own sandbox tools.
-Required Resources HTTP/MCP tools are rejected. Sandbox sessions also reject host command,
+Pi provides its own sandbox tools. It can also use the Resources server's tools through MCP tool grants:
+
+- Set `expose_tools_over_mcp: true` on the Resources server and `resources_tool_transports: [mcp]` on the
+  Environment Server. Pi speaks only the stateless JSON MCP endpoint that Gym's Resources servers expose,
+  and the sandbox must reach the grant's URL, as it must reach the model server; both go through any HTTP
+  proxy the sandbox environment sets.
+- `gym_mcp.mjs` names each tool `<grant name>_<tool name>`, at most 64 letters, digits, `-` or `_`. Seeding
+  refuses a required grant whose name is not 1 to 62 of these characters, and two required grants whose names
+  differ by a `_<suffix>` (such as `web` and `web_v2`), since their tools could not be told apart. An optional
+  grant with either problem is left out and recorded as an `mcp_server_skipped` observation gap. A tool name
+  that does not fit is found only at setup in the sandbox.
+- Tool discovery waits up to 30 seconds per request. Each tool call waits up to
+  `sandbox_mcp_timeout_seconds` (default 300); a call that times out keeps running on the server, so set
+  it above the slowest call the server makes. Tool errors from the server reach the model.
+- A required grant that Pi cannot set up stops Pi before the first model call. The error and an
+  `mcp_setup_failed` gap give the cause, naming the grant and the server's scheme, host and port when a grant
+  failed. An optional one is skipped and recorded as an `mcp_server_skipped` gap.
+- A successful call of a tool in `finish_tool_names` (its name on the server, such as `finish`) ends the run
+  when every tool call of that turn is such a call; a turn that also ran another tool continues. The response
+  and observations then count the run as completed. Pi may still make one compaction call after that turn.
+  A finish call from a reply cut off at the output limit is not run, since its arguments may be cut off, and
+  the model is asked to call it again. A reply counts as cut off when the server reports `length`, or when it
+  used all of its `max_tokens`, as vLLM reports `tool_calls` for a reply it parsed a tool call from. Setup
+  fails if no granted server offers a listed tool. Without usable MCP grants the setting has no effect.
+- Responses name MCP calls `mcp__<grant name>__<tool name>`; a Resources server's `/verify` strips its own
+  grant's prefix. Observations and model calls keep the names the model saw.
+- The grant's headers are readable inside the sandbox, including by the model's tools. For a Resources
+  server grant that is the episode's session token, which gives access only to that episode's tools.
+
+Required Resources HTTP tools (`direct_http`) are rejected. Sandbox sessions also reject host command,
 extra-argument, and environment overrides; those remain available on the local path.
 
 ## Requests and settings
@@ -160,7 +188,8 @@ required; the adapter validates the captured terminal events without inventing a
 Each sandbox session supports one activation and a matching episode and rollout identity.
 Identical request retries join the running activation or replay its result; changed requests
 are rejected. A disconnected HTTP caller does not cancel Pi; session close owns cancellation.
-Use a single agent-server worker. It never falls back to a host CLI when sandbox setup
+With several agent workers, session routing sends each session's requests to the worker that seeded it.
+Pi never falls back to a host CLI when sandbox setup
 fails. Calls without an agent session retain the local Pi behavior; they do not operate
 on the Resources-owned task sandbox.
 
@@ -189,6 +218,9 @@ detail, not a separate endpoint or a setup step users must run.
 - `sandbox_install_timeout_seconds`: sandbox runtime installation timeout (default 600)
 - `sandbox_bash_timeout_seconds`: maximum runtime of each sandbox bash tool call (default 900);
   shorter tool-requested deadlines are preserved
+- `sandbox_mcp_timeout_seconds`: maximum time of each call to a granted MCP tool (default 300)
+- `finish_tool_names`: granted MCP tools whose successful call ends a sandbox session's run (default none;
+  uses Pi's `terminate`, available from Pi 0.69.0)
 - `session_close_timeout_seconds`: sandbox process cleanup timeout (default 60)
 
 ## Results and limits
@@ -215,8 +247,8 @@ evidence or failed release retains the handle for retry. Cleanup is cooperative,
 Local settings retain `output_token_policy` (`fixed` or `remaining_context`),
 `auto_compaction`, and an optional per-call `bash_timeout`. The dedicated
 `pi_sandboxed_agent` also uses this local adapter inside its sandbox and supplies
-`mcp_servers` for authenticated Gym tools. Sandbox sessions continue to reject
-required Resources tool access rather than silently ignoring it.
+`mcp_servers` for authenticated Gym tools. Sandbox sessions take Resources tools from MCP grants
+instead and reject required HTTP tool grants rather than silently ignoring them.
 
 Calls without an agent session retain local CLI compatibility. They do not use the
 Resources-owned task sandbox. Configure a Gym `model_server`, or supply an explicit Pi provider

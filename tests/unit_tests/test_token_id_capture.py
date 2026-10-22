@@ -46,8 +46,8 @@ from nemo_gym.base_responses_api_model import (
     CaptureStore,
     SimpleResponsesAPIModel,
     _request_messages,
-    read_model_call_records,
 )
+from nemo_gym.observability.model_calls import read_model_call_records
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,

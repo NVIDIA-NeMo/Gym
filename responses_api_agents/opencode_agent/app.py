@@ -25,13 +25,17 @@ from asyncio import Semaphore
 from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 from shlex import quote
-from time import time
-from typing import Any, Optional
+from time import monotonic, time
+from typing import Any, ClassVar, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
+from openai.types.responses.response import IncompleteDetails
 from pydantic import ConfigDict, Field, PrivateAttr
 
+from nemo_gym.agent_activation_types import (
+    AgentContinuationCapabilities,
+)
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
 from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
@@ -80,6 +84,7 @@ from responses_api_agents.opencode_agent.artifacts import (
     parse_opencode_export,
     parse_opencode_session,
 )
+from responses_api_agents.opencode_agent.continuation import OpenCodeRunOutcome, classify_opencode_run
 from responses_api_agents.opencode_agent.observability import scope_opencode_trajectory
 from responses_api_agents.opencode_agent.runtime import (
     OBSERVABILITY_PATCH,
@@ -159,6 +164,10 @@ fi
     )
 
 
+class _ActivationDeadlineExpired(Exception):
+    """The immutable activation window elapsed before process launch."""
+
+
 class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef | None = None
     model_server: Optional[ModelServerRef] = None
@@ -209,6 +218,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
     """Run OpenCode locally or in a borrowed or agent-owned sandbox session."""
 
     config: OpenCodeAgentConfig
+    # Sandbox sessions run the CLI inside the task sandbox, which calls the model server from there.
+    calls_model_from_sandbox: ClassVar[bool] = True
     _local_setup_task: asyncio.Task[None] | None = PrivateAttr(default=None)
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -501,6 +512,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         if session_id is not None:
             state = self._require_agent_session(session_id)
             assert isinstance(state, OpenCodeSandboxSession)
+            if state.is_continuation:
+                return await self.activate_agent_session(request, body)
             if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
                 raise HTTPException(409, "OpenCode activation does not match the seeded session and rollout")
             prompt, system = self._session_input(body)
@@ -717,12 +730,19 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             )
 
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
-        """Release only after capture and positive cleanup; retain failed closes for retry."""
+        """Finalize and release the connection; retain release failures for retry."""
         assert isinstance(state, OpenCodeSandboxSession)
         await state.close(self.config.session_close_timeout_seconds)
         observations = state.observations or AgentObservationBundle(
             source="opencode", gaps=[ObservationGap(code="agent_activation_interrupted")]
         )
+        if state.is_continuation:
+            return AgentCloseSessionResponse(
+                agent_session_id=state.request.agent_session_id,
+                agent_observations=observations,
+                trajectory=state.trajectory,
+                cleanup_confirmed=state.session.cleanup_confirmed,
+            )
         return AgentCloseSessionResponse(
             agent_session_id=state.request.agent_session_id, agent_observations=observations
         )
@@ -843,9 +863,169 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             total.output_tokens_details.reasoning_tokens = None
         return total
 
-    async def _session_response(
-        self, state: OpenCodeSandboxSession, body: NeMoGymResponseCreateParamsNonStreaming, *, prompt: str, system: str
+    def _agent_continuation_capabilities(self) -> AgentContinuationCapabilities:
+        return AgentContinuationCapabilities(
+            observations=["trajectory", "timing", "harness_tool_calls", "reasoning", "compaction"],
+        )
+
+    def _continuation_close_timeout(self) -> float:
+        return self.config.session_close_timeout_seconds
+
+    def _validate_agent_activation(
+        self, state: AgentSessionState, body: NeMoGymResponseCreateParamsNonStreaming
+    ) -> None:
+        assert isinstance(state, OpenCodeSandboxSession)
+        _, system = self._session_input(body)
+        supplied_instructions = body.instructions is not None or (
+            not isinstance(body.input, str)
+            and any(getattr(item, "role", None) in {"system", "developer"} for item in body.input)
+        )
+        if state.system_instructions is not None and supplied_instructions and system != state.system_instructions:
+            raise HTTPException(422, "OpenCode continuation cannot replace session instructions")
+
+    async def _activate_agent_session_state(
+        self, state: AgentSessionState, body: NeMoGymResponseCreateParamsNonStreaming, *, activation_id: int
     ) -> NeMoGymResponse:
+        """Run a delta under one budget, including preparation and the concurrency queue."""
+        assert isinstance(state, OpenCodeSandboxSession)
+        prompt, system = self._session_input(body)
+        if state.system_instructions is None:
+            state.system_instructions = system
+        timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
+        started = monotonic()
+        deadline = started + timeout
+        failure: BaseException | None = None
+        try:
+            async with asyncio.timeout_at(deadline):
+                await state.prepare_activation(
+                    activation_id, timeout=min(timeout, self.config.session_close_timeout_seconds)
+                )
+            return await self._session_response(
+                state,
+                body,
+                prompt=prompt,
+                system=state.system_instructions,
+                timeout=timeout,
+                deadline=deadline,
+            )
+        except (TimeoutError, _ActivationDeadlineExpired) as error:
+            if state.session.launch_started:
+                failure = error
+                raise
+            # No OpenCode session is required until a launch persists one. A
+            # pre-launch timeout therefore does not prevent the next activation.
+            invocation_id = state.invocation_prefix
+            if state.harness_session_id is not None:
+                invocation_id += f":{state.harness_session_id}"
+            invocation = AgentInvocation(
+                invocation_id=invocation_id,
+                activation_id=activation_id,
+                harness_session_id=state.harness_session_id,
+                status="incomplete",
+                error_type="timeout",
+                stop_reason="timeout",
+                duration_ms=(monotonic() - started) * 1000,
+            )
+            state.activation_observations = AgentObservationBundle(source="opencode", records=[invocation])
+            state.activation_trajectory = TrajectoryRecord(
+                task_id=state.request.task_id.task_id,
+                rollout_id=state.request.episode_id.capture_key,
+            )
+            return self._make_session_response(
+                state,
+                body,
+                timeout=timeout,
+                outcome=OpenCodeRunOutcome(status="incomplete", error_type="timeout"),
+            )
+        except BaseException as error:
+            failure = error
+            raise
+        finally:
+            # execute() finishes capture before propagating cancellation. Retain
+            # once here, including preparation failures and interrupted launches.
+            if failure is not None:
+                observations = state.activation_observations
+                if observations is None:
+                    observations = AgentObservationBundle(source="opencode")
+                    state.activation_observations = observations
+                if not any(
+                    isinstance(r, AgentInvocation) and r.parent_invocation_id is None for r in observations.records
+                ):
+                    invocation_id = state.invocation_prefix
+                    if state.harness_session_id is not None:
+                        invocation_id += f":{state.harness_session_id}"
+                    cancelled = isinstance(failure, asyncio.CancelledError)
+                    observations.records.append(
+                        AgentInvocation(
+                            invocation_id=invocation_id,
+                            activation_id=activation_id,
+                            harness_session_id=state.harness_session_id,
+                            status="incomplete" if cancelled else "failed",
+                            error_type="cancelled" if cancelled else "server_error",
+                            duration_ms=(monotonic() - started) * 1000,
+                        )
+                    )
+            state.retain_activation()
+
+    def _make_session_response(
+        self,
+        state: OpenCodeSandboxSession,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        timeout: float,
+        outcome: OpenCodeRunOutcome,
+        output: list[NeMoGymResponseOutputItem] | None = None,
+        usage: NeMoGymResponseUsage | None = None,
+    ) -> NeMoGymResponse:
+        runtime = state.runtime_info
+        response = NeMoGymResponse(
+            id=f"resp_{uuid4().hex}",
+            created_at=int(time()),
+            model=self.config.model_server.name,
+            object="response",
+            output=output or [],
+            usage=usage,
+            status=outcome.status,
+            incomplete_details=IncompleteDetails(reason=outcome.incomplete_reason)
+            if state.is_continuation and outcome.incomplete_reason
+            else None,
+            tool_choice=body.tool_choice,
+            tools=body.tools,
+            parallel_tool_calls=body.parallel_tool_calls,
+            metadata={
+                "harness_execution": "sandbox",
+                "opencode_version": self.config.opencode_version,
+                **({"harness_hostname": runtime.hostname, "harness_pid": str(runtime.pid)} if runtime else {}),
+                AGENT_TIMEOUT_METADATA_KEY: str(timeout),
+            },
+        )
+        if state.is_continuation:
+            response.metadata.update({"activation_id": str(state.activation_id)})
+            if state.harness_session_id is not None:
+                response.metadata["harness_session_id"] = state.harness_session_id
+            response = response.model_copy(
+                update={
+                    _INTERNAL_OBSERVATIONS_KEY: state.activation_observations.model_dump(mode="json"),
+                    _INTERNAL_TRAJECTORY_KEY: state.activation_trajectory.model_dump(mode="json")
+                    if state.activation_trajectory is not None
+                    else None,
+                }
+            )
+        return response
+
+    async def _session_response(
+        self,
+        state: OpenCodeSandboxSession,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        prompt: str,
+        system: str,
+        timeout: float | None = None,
+        deadline: float | None = None,
+    ) -> NeMoGymResponse:
+        timeout = timeout if timeout is not None else resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
+        started = monotonic()
+        previous_session_id = state.harness_session_id
         base_url = self.resolve_model_base_url(self.config.model_server.name, state.request.episode_id.capture_key)
         config = {
             "model": "nemo_gym/dummy_model",
@@ -879,25 +1059,29 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         if system:
             config["instructions"] = [f"{state.session.session_dir}/instructions.md"]
         if self._model_call_capture_enabled():
-            apply_observability_patch(config, plugin_path=Path(state.session.session_dir) / OBSERVABILITY_PATCH.name)
+            apply_observability_patch(config, plugin_path=Path(state.persistent_directory) / OBSERVABILITY_PATCH.name)
         config.setdefault("plugin", []).append((Path(state.session.session_dir) / "task_environment.mjs").as_uri())
-        timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
         command = [f"{state.runtime}/opencode", "run", "--format", "json", "--title", "NeMo Gym"]
         if self.config.thinking:
             command.append("--thinking")
+        if state.harness_session_id:
+            command.extend(["--session", state.harness_session_id])
         payload = {
             "instructions": system,
             "directory": state.session.session_dir,
             "cwd": state.session.workdir,
             "command": command,
             "prompt": prompt,
+            "harness_session_id": state.harness_session_id,
+            "previous_message_ids": state.message_ids,
+            "activation_id": state.activation_id,
             "env": {
-                # OpenCode also scans HOME/.opencode independently of XDG config.
-                "HOME": f"{state.session.session_dir}/home",
-                "XDG_DATA_HOME": f"{state.session.session_dir}/data",
-                "XDG_CONFIG_HOME": f"{state.session.session_dir}/config",
-                "XDG_CACHE_HOME": f"{state.session.session_dir}/cache",
-                "XDG_STATE_HOME": f"{state.session.session_dir}/state",
+                "HOME": f"{state.persistent_directory}/home",
+                "XDG_DATA_HOME": f"{state.persistent_directory}/data",
+                "XDG_CONFIG_HOME": f"{state.persistent_directory}/config",
+                "XDG_CACHE_HOME": f"{state.persistent_directory}/cache",
+                "XDG_STATE_HOME": f"{state.persistent_directory}/state",
+                **({"NEMO_GYM_OPENCODE_ACTIVATION_ID": state.invocation_prefix} if state.is_continuation else {}),
                 "OPENCODE_CONFIG_CONTENT": json.dumps(config),
                 "OPENCODE_DISABLE_PROJECT_CONFIG": "true",
                 "OPENCODE_DISABLE_AUTOUPDATE": "true",
@@ -909,24 +1093,48 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         export = {}
         failure = None
         try:
-            async with self.sem:
+            async with asyncio.timeout_at(deadline):
+                await self.sem.acquire()
+            try:
                 await state.execute(
                     payload,
                     timeout=timeout,
                     close_timeout=self.config.session_close_timeout_seconds,
+                    deadline=deadline,
                 )
+            finally:
+                self.sem.release()
+        except TimeoutError as exc:
+            if state.is_continuation and not state.session.launch_started:
+                raise _ActivationDeadlineExpired from None
+            failure = exc
         except BaseException as exc:
             failure = exc
-        if state.observations is None:
-            state.observations = AgentObservationBundle(
+        observations = state.activation_observations if state.is_continuation else state.observations
+        if observations is None:
+            confirmed_oom = isinstance(failure, SandboxOOMKilledError) and state.session.execution_oom is failure
+            invocation_id = state.invocation_prefix if state.is_continuation else state.request.episode_id.capture_key
+            if state.is_continuation and state.harness_session_id is not None:
+                invocation_id += f":{state.harness_session_id}"
+            observations = AgentObservationBundle(
                 source="opencode",
                 records=(
-                    [AgentInvocation(invocation_id=state.request.episode_id.capture_key)]
-                    if isinstance(failure, SandboxOOMKilledError) and state.session.execution_oom is failure
+                    [
+                        AgentInvocation(
+                            invocation_id=invocation_id,
+                            activation_id=state.activation_id if state.is_continuation else None,
+                            harness_session_id=state.harness_session_id if state.is_continuation else None,
+                        )
+                    ]
+                    if confirmed_oom
                     else []
                 ),
                 gaps=[ObservationGap(code="observation_capture_failed")],
             )
+        if state.is_continuation:
+            state.activation_observations = observations
+        else:
+            state.observations = observations
         if state.session.artifacts is not None:
             try:
                 parsed = json.loads(state.session.artifacts)
@@ -944,14 +1152,14 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         usage = None
         if export.get("messages"):
             try:
-                output = self._session_output(export, state.observations)
+                output = self._session_output(export, observations)
                 usage = self._session_usage(export)
                 if (
                     usage is None
                     or usage.input_tokens_details.cached_tokens is None
                     or usage.output_tokens_details.reasoning_tokens is None
                 ):
-                    state.observations.gaps.append(
+                    observations.gaps.append(
                         ObservationGap(
                             code="token_usage_detail_unavailable",
                             detail="Persisted optional counters are absent, invalid, or runtime-defaulted zeros",
@@ -962,45 +1170,35 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         result = state.session.cleanup
         runtime = state.runtime_info
         if runtime is None:
-            state.observations.gaps.append(ObservationGap(code="runtime_info_unavailable"))
+            observations.gaps.append(ObservationGap(code="runtime_info_unavailable"))
         if result is not None and result["return_code"] is None:
-            state.observations.gaps.append(ObservationGap(code="worker_exit_code_unavailable"))
-        if result is not None:
-            error = error or result["error"]
-            if result["return_code"] not in (0, None) and not result["timed_out"]:
-                error = error or f"OpenCode exited with code {result['return_code']}"
-        assistants = [
-            message["info"] for message in export.get("messages", []) if message["info"].get("role") == "assistant"
-        ]
-        for info in assistants:
-            if info.get("error"):
-                error = error or json.dumps(info["error"])
-        if not assistants:
-            error = error or "OpenCode produced no assistant result"
-        incomplete = result is not None and result["timed_out"]
-        if assistants and not incomplete:
-            last = assistants[-1]
-            finish = last.get("finish")
-            if finish in {"length", "content-filter", "tool-calls"}:
-                incomplete = True
-            elif finish != "stop" or not last.get("time", {}).get("completed"):
-                error = error or f"OpenCode ended without a successful terminal assistant result (finish={finish!r})"
-        status = "failed" if error or failure else "incomplete" if incomplete else "completed"
+            observations.gaps.append(ObservationGap(code="worker_exit_code_unavailable"))
+        outcome = classify_opencode_run(
+            export,
+            cleanup=result,
+            previous_session_id=previous_session_id,
+            session_id=state.harness_session_id,
+            stdout=state.activation_log,
+            continuation=state.is_continuation,
+        )
+        error = error or outcome.error
+        status = outcome.status
+        if error or failure:
+            status = "failed"
         # Artifact message completion records a model turn, not the entire invocation.
-        for record in state.observations.records:
+        for record in observations.records:
             if isinstance(record, AgentInvocation) and record.parent_invocation_id is None:
                 record.status = "incomplete" if isinstance(failure, asyncio.CancelledError) else status
-                record.error_type = (
-                    "cancelled"
-                    if isinstance(failure, asyncio.CancelledError)
-                    else "server_error"
-                    if error or failure
-                    else "timeout"
-                    if result and result["timed_out"]
-                    else None
-                )
+                if state.is_continuation:
+                    record.duration_ms = (monotonic() - started) * 1000
+                    record.stop_reason = outcome.error_type
+                record.error_type = outcome.error_type
+                if isinstance(failure, asyncio.CancelledError):
+                    record.error_type = "cancelled"
+                elif error or failure:
+                    record.error_type = "server_error"
         if result is not None:
-            state.observations.records.append(
+            observations.records.append(
                 SandboxObservation(
                     role="agent",
                     provider=state.provider_name,
@@ -1026,53 +1224,27 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 error_type=type(execution_oom).__name__,
                 error_message=str(execution_oom),
             )
-            state.observations.records.append(observation)
-        state.observations.gaps.append(
+            observations.records.append(observation)
+        observations.gaps.append(
             ObservationGap(
                 code="model_usage_reconciliation_unavailable",
                 detail="Usage comes from OpenCode persisted assistant messages; compare against captured Gym model calls.",
             )
         )
         if execution_oom is not None:
-            return NeMoGymResponse(
-                id=f"resp_{uuid4().hex}",
-                created_at=int(time()),
-                model=self.config.model_server.name,
-                object="response",
-                output=[],
-                status="failed",
-                tool_choice=body.tool_choice,
-                tools=body.tools,
-                parallel_tool_calls=body.parallel_tool_calls,
-                metadata={
-                    "harness_execution": "sandbox",
-                    "opencode_version": self.config.opencode_version,
-                    AGENT_TIMEOUT_METADATA_KEY: str(timeout),
-                    NG_AGENT_SANDBOX_OBSERVATION_KEY: observation.model_dump_json(exclude_none=True),
-                },
+            response = self._make_session_response(
+                state,
+                body,
+                timeout=timeout,
+                outcome=OpenCodeRunOutcome(status="failed", error_type="server_error"),
             )
+            response.metadata[NG_AGENT_SANDBOX_OBSERVATION_KEY] = observation.model_dump_json(exclude_none=True)
+            return response
         if failure is not None:
             raise failure
         if error:
             raise HTTPException(502, format_sandbox_error(error, stderr=state.stderr))
-        return NeMoGymResponse(
-            id=f"resp_{uuid4().hex}",
-            created_at=int(time()),
-            model=self.config.model_server.name,
-            object="response",
-            output=output,
-            usage=usage,
-            status=status,
-            tool_choice=body.tool_choice,
-            tools=body.tools,
-            parallel_tool_calls=body.parallel_tool_calls,
-            metadata={
-                "harness_execution": "sandbox",
-                "opencode_version": self.config.opencode_version,
-                **({"harness_hostname": runtime.hostname, "harness_pid": str(runtime.pid)} if runtime else {}),
-                AGENT_TIMEOUT_METADATA_KEY: str(timeout),
-            },
-        )
+        return self._make_session_response(state, body, timeout=timeout, outcome=outcome, output=output, usage=usage)
 
 
 if __name__ == "__main__":

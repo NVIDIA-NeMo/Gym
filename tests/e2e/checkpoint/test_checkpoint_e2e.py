@@ -203,10 +203,10 @@ def environment_record(checkpoint_dir: Path) -> dict:
 
 
 @POLICY_WORKERS
-async def test_native_episode_continues_from_its_last_boundary_after_a_crash(
+async def test_session_episode_continues_from_its_last_boundary_after_a_crash(
     deploy, tmp_path: Path, policy_workers: int
 ) -> None:
-    deployment = deploy("native", policy_workers=policy_workers)
+    deployment = deploy("sessions", policy_workers=policy_workers)
     deployment.backend("/_ctl/hold", {"after_calls": 1})
     async with GymHTTP(deployment.url("environment"), timeout=120) as http:
         first = asyncio.create_task(http.post("/run", json=weather_episode("crash-1")))
@@ -228,7 +228,7 @@ async def test_native_episode_continues_from_its_last_boundary_after_a_crash(
 async def test_a_second_crash_before_the_replacement_starts_still_continues(
     deploy, tmp_path: Path, policy_workers: int
 ) -> None:
-    deployment = deploy("native", policy_workers=policy_workers)
+    deployment = deploy("sessions", policy_workers=policy_workers)
     deployment.backend("/_ctl/hold", {"after_calls": 1})
     async with GymHTTP(deployment.url("environment"), timeout=120) as http:
         first = asyncio.create_task(http.post("/run", json=weather_episode("twice-1")))
@@ -282,7 +282,7 @@ async def test_a_checkpoint_restores_again_after_its_replacement_made_calls(
 
 
 async def test_legacy_run_continues_from_its_last_boundary_after_a_crash(deploy, tmp_path: Path) -> None:
-    deployment = deploy("legacy")
+    deployment = deploy("relay")
     deployment.backend("/_ctl/hold", {"after_calls": 1})
     async with GymHTTP(deployment.url("environment"), timeout=120) as http:
         first = asyncio.create_task(http.post("/run", json=weather_row("legacy-1")))
@@ -351,7 +351,7 @@ async def test_token_lineage_continues_across_a_crash(deploy, tmp_path: Path, po
 async def test_an_in_flight_generation_is_cut_and_its_prefix_continued(
     deploy, tmp_path: Path, policy_workers: int
 ) -> None:
-    deployment = deploy("native", token_capture=True, generation_cuts=True, policy_workers=policy_workers)
+    deployment = deploy("sessions", token_capture=True, generation_cuts=True, policy_workers=policy_workers)
     deployment.backend("/_ctl/hold", {"after_calls": 1})
     async with GymHTTP(deployment.url("environment"), timeout=120) as http:
         first = asyncio.create_task(http.post("/run", json=weather_episode("cut-1")))
@@ -373,7 +373,7 @@ async def test_an_in_flight_generation_is_cut_and_its_prefix_continued(
 async def test_a_checkpoint_without_a_crash_parks_and_then_resumes_the_episode(
     deploy, tmp_path: Path, policy_workers: int
 ) -> None:
-    deployment = deploy("native", policy_workers=policy_workers)
+    deployment = deploy("sessions", policy_workers=policy_workers)
     deployment.backend("/_ctl/hold", {"after_calls": 0})
     async with GymHTTP(deployment.url("environment"), timeout=120) as http:
         run = asyncio.create_task(http.post("/run", json=weather_episode("park-1")))
@@ -469,7 +469,7 @@ async def test_an_episode_that_finishes_during_prepare_is_neither_lost_nor_redon
 )
 async def test_real_model_rollouts_are_either_finished_or_continued_after_a_crash(deploy, tmp_path: Path) -> None:
     deployment = deploy(
-        "native",
+        "sessions",
         inference_url=os.environ["NEMO_GYM_CHECKPOINT_VLLM_URL"],
         model_name=os.environ.get("NEMO_GYM_CHECKPOINT_VLLM_MODEL", "Qwen/Qwen3-0.6B"),
     )
@@ -504,9 +504,16 @@ async def test_real_model_rollouts_are_either_finished_or_continued_after_a_cras
         # An episode the checkpoint holds cannot reply until resume, which never comes before the crash.
         replied_while_prepared = [rollout_id for rollout_id in continued if runs[rollout_id].done()]
         first_results = [(await runs[rollout_id]).json() for rollout_id in sorted(finished)]
-        records = records_file(tmp_path / "ckpt/gym/environment/environment").read_text().splitlines()
-        next_steps = sorted(json.loads(line)["boundary"]["next"] for line in records)
-        agent_sessions = records_file(tmp_path / "ckpt/gym/agent/agent").read_text().splitlines()
+        records = [
+            json.loads(line)
+            for line in records_file(tmp_path / "ckpt/gym/environment/environment").read_text().splitlines()
+        ]
+        next_step = {record["episode_id"]["rollout_id"]: record["boundary"]["next"] for record in records}
+        next_steps = sorted(next_step.values())
+        agent_sessions = {
+            json.loads(line)["episode_id"]["rollout_id"]
+            for line in records_file(tmp_path / "ckpt/gym/agent/agent").read_text().splitlines()
+        }
         await crash_and_restore(deployment, tmp_path / "ckpt", continued)
         for rollout_id in continued:
             runs[rollout_id].cancel()
@@ -523,7 +530,12 @@ async def test_real_model_rollouts_are_either_finished_or_continued_after_a_cras
     assert continued, "the checkpoint caught no rollout mid-episode"
     assert not replied_while_prepared
     # An episode checkpointed inside its agent step continues the agent's own session, not the step.
-    assert len(agent_sessions) == next_steps.count("invoke_agent")
+    # The episode holds that session until its close_agent step finishes,
+    # so an episode parked before close_agent is exported with its session too.
+    holding = {rollout_id for rollout_id, step in next_step.items() if step in ("invoke_agent", "close_agent")}
+    assert holding <= agent_sessions
+    # An agent seed still in flight at prepare is exported as well, with its episode parked before the seed step.
+    assert agent_sessions <= holding | {rollout_id for rollout_id, step in next_step.items() if step == "seed"}
     assert all(response.status_code == 200 and response.json().get("failure") is None for response in replacements)
 
 
@@ -600,7 +612,7 @@ async def test_checkpoint_at_scale(deploy, tmp_path: Path, policy_workers: int) 
     count = int(os.environ["NEMO_GYM_CHECKPOINT_SCALE"])
     # The training framework raises Gym's per-host connection limit the same way.
     deployment = deploy(
-        "native",
+        "sessions",
         policy_workers=policy_workers,
         token_capture=True,
         generation_cuts=True,
@@ -705,7 +717,7 @@ async def test_checkpoint_at_scale(deploy, tmp_path: Path, policy_workers: int) 
 
 
 async def test_a_retired_episode_stops_everywhere_and_leaves_nothing_behind(deploy, tmp_path: Path) -> None:
-    deployment = deploy("native", token_capture=True)
+    deployment = deploy("sessions", token_capture=True)
     # The episode's first model call is answered; the second is held, so the episode is mid-flight.
     deployment.backend("/_ctl/hold", {"after_calls": 1})
     async with GymHTTP(deployment.url("environment"), timeout=120) as http:

@@ -45,6 +45,7 @@ from nemo_gym.sandbox.providers.base import (
     SupportsSandboxRuntimeRequirements,
     SupportsSandboxSharedStorage,
     SupportsSandboxSidecars,
+    clamp_resource_requests,
 )
 from nemo_gym.sandbox.providers.registry import (
     create_provider,
@@ -89,4 +90,5 @@ __all__ = [
     "get_provider_class",
     "list_providers",
     "register_provider",
+    "clamp_resource_requests",
 ]

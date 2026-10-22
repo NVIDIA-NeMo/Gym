@@ -34,6 +34,8 @@ gym dataset rm                # delete a dataset from GitLab
 gym dataset migrate           # move a dataset from GitLab to HF
 gym dataset render            # generate a dataset preview (materialize prompts)
 gym dataset collate           # validate and collate a dataset
+gym dataset init <name>       # scaffold a Harbor-format dataset (dataset.toml plus one task)
+gym dataset validate <target> # run each Harbor task's reference solution through its verifier
 
 # Environments
 gym env init                  # scaffold a resources server, environment, or benchmark
@@ -61,6 +63,7 @@ gym eval compare              # compare a baseline eval run against a candidate 
 
 # Contributor helpers
 gym dev test                  # run NeMo Gym's unit tests
+gym dev compare OLD NEW       # per-task parity report between two rollout files (migration aid)
 ```
 
 ## Common Options
@@ -335,6 +338,47 @@ Commands for preparing, previewing, and managing datasets. By default dataset tr
 <Note>
 HuggingFace commands require an `HF_TOKEN` environment variable (or `huggingface-cli login`). GitLab commands authenticate via `mlflow_tracking_token` in your YAML config (or the `MLFLOW_TRACKING_TOKEN` environment variable). See [Downloading from HuggingFace](/data/download-huggingface) for HF authentication details.
 </Note>
+
+### `gym dataset init`
+
+Scaffold a dataset in the Harbor task format: `dataset.toml` with a `[gym]` table and one task with an
+instruction, a verifier and a reference solution. Refer to [Harbor Tasks](/main/data/harbor-tasks).
+
+| Option | Description |
+| --- | --- |
+| `NAME` | Dataset name as `org/name`; a bare name is written as `local/<name>`. The folder is the name without the org and must not exist yet. |
+| `--root DIR` | Where to create the folder (default: current directory). |
+| `--image IMAGE` | The task's prebuilt image (default: `python:3.12-slim`). |
+
+```bash
+gym dataset init my-dataset --image ubuntu:24.04   # dataset.toml names it local/my-dataset
+```
+
+### `gym dataset validate`
+
+Run each Harbor task's reference solution (`solution/solve.sh`) through its verifier with the oracle harness
+and print one line per task with its reward, or why there is none. `gym eval run TARGET --agent harbor_oracle`
+is the same run. Results go under `results/harbor/validation/<taskset>/` (`rollouts.jsonl` unless `--output`
+names another file, the generated run config and `skipped.json`), apart from any evaluation of the same target,
+so an evaluation never resumes from the oracle's rewards. The exit code is 0 when every selected solution scored
+1, and 1 when a solution scored below 1, was masked or failed, when a task folder did not load, or when no
+selected task had a solution to run. Refer to [Harbor Tasks](/main/data/harbor-tasks).
+
+| Option | Description |
+| --- | --- |
+| `TARGET` | A task folder, a folder of task folders, or a `harbor:<dataset>[@<version>]` hub reference. |
+| `--sandbox PROVIDER` | Sandbox provider for the task containers (for example `opensandbox`, `docker`). |
+| `--config PATH` | Config file to load. Repeatable. |
+| `--only-tasks PATTERNS` | Comma-separated task names or globs; only matching tasks are validated. |
+| `--exclude-tasks PATTERNS` | Comma-separated task names or globs to leave out. |
+| `--limit` | Maximum number of tasks to validate. |
+| `--concurrency` | Maximum number of concurrent tasks. |
+| `--output`, `-o` | Output rollouts JSONL file. |
+
+```bash
+gym dataset validate my-dataset --sandbox opensandbox
+gym dataset validate harbor:terminal-bench/terminal-bench@4.0.0 --sandbox opensandbox --only-tasks 'hello-*'
+```
 
 ### `gym dataset upload`
 
@@ -755,6 +799,8 @@ gym eval plan --schema
 
 Collate data, start the servers, and collect rollouts. This is the main evaluation command. By default it spins up all required servers. Pass `--no-serve` to collect against servers you already started with `gym env start`.
 
+In place of `--benchmark`, a positional `TARGET` runs a dataset in the Harbor task format: a task folder, a folder of task folders, or a `harbor:<dataset>[@<version>]` hub reference. Refer to [Harbor Tasks](/main/data/harbor-tasks) for the layout and the `--sandbox`, `--only-tasks` and `--exclude-tasks` options that apply to such a target.
+
 | Option | Description |
 | --- | --- |
 | `--config PATH` | Config file to load. Repeatable. |
@@ -855,8 +901,7 @@ How it works:
 - **Counting failures in the score.** Metrics are computed over completed rollouts only. `+count_failure_classes_as_zero=[<class>]` includes the named sidecar rows in `/aggregate_metrics` so they land in the denominator: `[agent_run_error]` counts the rollouts that reached the agent and broke, which is what a model emitting unparsable tool calls looks like from here, and needs `+route_failures_to_sidecar=true` to have anything to count. A row that carries no reward is scored zero for the metric input only, so neither the sidecar nor the rollouts JSONL records a verdict that no verifier gave. It works the same in `gym eval run` and `gym eval aggregate`.
 - **Counting lost rollouts.** `+count_missing_rollouts_as_zero=true` scores as zero a rollout that is in the materialized inputs but left no row in the output JSONL or the sidecar, such as one killed mid-flight or one `dispatch_budget_s` never started. The zero goes into the metric input only, so `--resume` still runs the rollout and the resumed run scores it. A rollout recorded in the sidecar is never counted here, so this does not widen `+count_failure_classes_as_zero`. The count is reported as `coverage/imputed`. With `--disable-aggregation` nothing is scored, so a run with no row still fails. `gym eval aggregate` checks each shard against its own rows, materialized inputs and sidecar.
 - **Matching.** On resume, completed work is matched by `(task_index, rollout_index)` against the materialized inputs, and already-completed rows are skipped. The run prints a summary such as the number of original input rows, rows already done, and rows that still need to be run.
-- **Terminal failures.** A sidecar row stamped `_ng_failure_terminal` is never retried. `+retry_terminal_timeouts=true` retries rows of class `timeout_exceeded` even when they are stamped terminal, and does the same for the repairable environment faults `reference_missing`, `eval_missing` and `transport_ineligible`; `skipped` rows are never retried. Retries still stop at `NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`. Off by default, because some agents stamp their timeouts terminal on purpose.
-- **Invalid judge responses.** `+retry_invalid_judge_responses=true` moves rows flagged `invalid_judge_response` out of the output JSONL on resume and into the sidecar as retryable `judge_invalid` attempts, so they leave the score and are judged again. A row whose deliverable is still on disk is marked `reuse_cached_deliverable`, so the agent can judge it again without rerunning the policy. Off by default, because some verifiers score an invalid judge response as zero on purpose.
+- **Terminal failures.** A sidecar row stamped `_ng_failure_terminal` is never retried. `+retry_terminal_timeouts=true` retries rows of class `timeout_exceeded` even when they are stamped terminal. Retries still stop at `NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`. Off by default, because some agents stamp their timeouts terminal on purpose.
 - **Dispatch budget.** `+dispatch_budget_s=<seconds>` stops starting new rollouts that many seconds after collection starts; set it to the usable walltime of the allocation. It requires `--concurrency` or `+max_resident_rollout_tasks`; without either limit, the whole queue could be sent before the budget is checked. Rows that are not started write nothing, so the next `--resume` runs them. `+drain_margin_s=<seconds>` also stops starting rows when less than that much time is left; unset, the margin is the p75 duration of the run's recorded attempts once there are at least 5. An attempt whose agent `/run` returns a usable reply is always recorded, even when the agent reports the rollout itself as failed or timed out; an attempt whose `/run` fails (an error status, or no usable reply) is recorded only if it ran at least as long as the median so far, because a quick failure says nothing about how long rollouts take. Every run ends with a latency summary over the same attempts (median, p90, p99, max) and the number of rows not started.
 - **Longest first.** `+dispatch_longest_first=true` starts the rows whose earlier failed attempts ran longest first on resume, using the `elapsed_seconds` those attempts recorded. Rows with no recorded timing keep their input order and start after them. Without it, rows start in input order.
 - **Fallback.** If either the materialized inputs or the output file is missing, resume is skipped and the run starts fresh. Without `--resume`, the existing output, its `<stem>_failures.jsonl` sidecar and its `<stem>_aggregate_metrics.json` are deleted before the run.
@@ -1049,11 +1094,11 @@ Servers that report `unsupported` or `unknown` cause the command to abort unless
 | `--force` | Override the `UNSUPPORTED` or `UNKNOWN` reverify mode guard; output is prefixed with `unsafe_`. |
 | `--overwrite` | Delete an existing output file instead of raising an error. |
 | `--resume` | Resume a partial run: skip rows already in the output and re-verify only the rest. |
-| `--judge-failed-only` | Recover only the rollouts whose judge call failed or returned an invalid verdict in the original run (`judge_failed` and `judge_invalid` rows in `<rollouts>_failures.jsonl`), reusing the stored responses. Skips the reverify-mode guard. Rejects multi-stage rows (`stage_index`) before writing anything; resume the multi-stage collection instead. |
+| `--judge-failed-only` | Recover only the rollouts whose judge failed in the original run (`judge_failed` rows in `<rollouts>_failures.jsonl`), reusing the stored responses. Skips the reverify-mode guard. Rejects multi-stage rows (`stage_index`) before writing anything; resume the multi-stage collection instead. |
 | `--append` | With `--judge-failed-only`: append recovered rows to an existing `--output` instead of a fresh file. Mutually exclusive with `--overwrite`. |
 | `--disable-aggregation` | Skip aggregate-metrics computation (use when combining shards with `gym eval aggregate` afterward). |
 
-Native Gym input also accepts the rollout collection options `+retry_terminal_timeouts=true` (with `--resume`) and `+retry_invalid_judge_responses=true`. With the second, a verifier result flagged `invalid_judge_response` goes to the output's failures sidecar as `judge_invalid` (`permanent` and terminal when it also sets `invalid_judge_retryable=false`) instead of being scored, and `--judge-failed-only` first moves such rows out of `--rollouts` into its sidecar, rewriting `--rollouts`. When a rollout row carries `deliverables_dir` or `reference_ids`, both are sent to `/verify` with the stored response.
+Native Gym input also accepts the rollout collection option `+retry_terminal_timeouts=true` (with `--resume`). When a rollout row carries `deliverables_dir` or `reference_ids`, both are sent to `/verify` with the stored response.
 
 ATIF input requires a `stateless` resources server and rejects `--force`, `--resume`, `--judge-failed-only`, and `--append`. It fails closed on unsupported or lossy canonical trajectory shapes, including tool-bearing trajectories routed to a resources server with `expose_tools_over_mcp: true`, and preserves source identity under `_ng_atif_provenance` without sending that metadata to the verifier. Provider-native payloads and producer-private status records in optional ATIF `extra` metadata are not interpreted; their producer owns conversion into canonical ATIF fields. A terminal tool step is supported when every call has a correlated observation result.
 
@@ -1112,6 +1157,16 @@ Run NeMo Gym's core unit tests with coverage reporting.
 ```bash
 gym dev test
 ```
+
+### `gym dev compare`
+
+Compare two rollout JSONL files task by task. A temporary migration aid: before an old resources server is deleted in favour of its Harbor-path replacement, run both on the same tasks and use this report as the gate.
+
+```bash
+gym dev compare old/rollouts.jsonl new/rollouts.jsonl --logs-root environment_servers/harbor --json compare.json
+```
+
+Rows are joined by task id (`_ng_task_id` on the Harbor path; `task_name` or a `verifier_metadata` id on legacy servers; override with `--key FIELD`). When both sides span several tasksets, tasks are keyed and listed as `taskset/task_id`. When only one side does, the other side keeps its plain task ids and each is matched to the task id that appears in exactly one taskset (or in that side's own taskset); an id that recurs across tasksets is reported as ambiguous and listed as missing. A masked-failures sidecar (`<name>_failures.jsonl`) is folded back in, keeping only the last record per rollout and none for a rollout that was later scored; a record that names no task is listed as masked under `unknown (<side>) #<n>`. Each task is classified as identical, flipped (split into old-win and new-win), masked, or missing (only one side has it). A task is masked when either side has `mask_sample` true, a `reward` that is absent or null, or a NaN or infinite reward (reported with the raw value). A `failure_kind` on a row with `mask_sample` false (such as the Harbor server's scored zero for a verifier timeout) does not mask: the reward counts, and a flip it causes is listed as a flip with the `failure_kind` printed beside the side that carries it. A flip where one side also reports an agent error is listed separately as a rerun candidate. A string or boolean `reward` is an input error that names the file, line and task. When a side has several rows for a task, the mean reward is compared. For every flip the report prints both rewards and the last `--tail` lines (default 15) of the losing side's verifier output, read from `verifier_logs_dir` (resolved against the losing side's own file directory, then the current directory, then `--logs-root`) or from the row's embedded `test_output`; a log that cannot be read is reported as unavailable with the reason. `gym --json dev compare OLD NEW` prints the JSON summary on stdout instead of the report (the same object `--json PATH` writes). The exit code is 0 for a report and 1 when an input cannot be read or the `--json PATH` file cannot be written.
 
 ---
 

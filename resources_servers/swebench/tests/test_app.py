@@ -30,6 +30,7 @@ from resources_servers.swebench.app import (
     SwebenchResourcesServerConfig,
     SWEBenchVerifyResponse,
 )
+from resources_servers.swebench.swebench_patches import patch_swebench_multilingual_sandbox
 
 
 def make_sandbox(
@@ -276,3 +277,16 @@ class TestApp:
 
         assert observation.outcome == "sandbox_error"
         assert observation.error_type == "RuntimeError"
+
+
+class TestMultilingualMavenSettings:
+    @pytest.mark.parametrize("overwrite", [True, False])
+    async def test_maven_settings_upload_follows_config(self, overwrite: bool) -> None:
+        sandbox = make_sandbox()
+        await patch_swebench_multilingual_sandbox(
+            "google/gson", "google__gson-1", sandbox, overwrite_maven_settings=overwrite
+        )
+
+        destinations = [call.args[1] for call in sandbox.upload.await_args_list]
+        assert ("/root/.m2/settings.xml" in destinations) is overwrite
+        assert "/root/.gradle/init.d/maven_central_mirror.gradle" in destinations
