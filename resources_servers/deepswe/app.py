@@ -270,12 +270,17 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
             # identity unknown". v1.1 grading collects only committed work,
             # so seed an explicit identity instead of relying on the sandbox
             # provider's hostname format.
-            await started.exec(
+            setup_result = await started.exec(
                 'git config --global user.email "agent@nemo-gym.local"'
                 ' && git config --global user.name "NeMo Gym Agent"'
-                " && git config --global --add safe.directory /app || true",
+                " && git config --global --add safe.directory /app",
                 timeout_s=60,
             )
+            if setup_result.return_code != 0 or setup_result.error_type is not None:
+                raise RuntimeError(
+                    f"DeepSWE agent git setup failed with code {setup_result.return_code}, "
+                    f"error_type={setup_result.error_type!r}: {setup_result.stderr or ''}"
+                )
 
         await sandbox.start_with_setup(spec, _run_setup)
         return sandbox
@@ -289,9 +294,12 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
     async def _collect_model_patch(self, sandbox: AsyncSandbox, task: Task) -> bytes:
         collect = task_collect_hook(task)
         result = await sandbox.exec(collect.command, timeout_s=collect.timeout_sec)
-        if result.return_code != 0:
+        if result.return_code != 0 or result.error_type is not None:
             details = ((result.stderr or "") + (result.stdout or "")).strip()
-            raise RuntimeError(f"DeepSWE collect hook exited with code {result.return_code}: {details[-4000:]}")
+            raise RuntimeError(
+                f"DeepSWE collect hook failed with code {result.return_code}, "
+                f"error_type={result.error_type!r}: {details[-4000:]}"
+            )
 
         with tempfile.TemporaryDirectory(prefix="nemo-gym-deepswe-collect-") as temporary_dir:
             local_patch_path = Path(temporary_dir) / "model.patch"
@@ -303,7 +311,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
             "mkdir -p /tests /logs/artifacts /logs/verifier",
             timeout_s=60,
         )
-        if mkdir_result.return_code != 0:
+        if mkdir_result.return_code != 0 or mkdir_result.error_type is not None:
             raise RuntimeError(f"Failed to create DeepSWE verifier directories: {mkdir_result.stderr or ''}")
 
         uploads = [
@@ -317,12 +325,17 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
             await asyncio.gather(*uploads)
 
         chmod_result = await sandbox.exec("chmod 0755 /tests/test.sh /tests/grader.py", timeout_s=60)
-        if chmod_result.return_code != 0:
+        if chmod_result.return_code != 0 or chmod_result.error_type is not None:
             raise RuntimeError(f"Failed to make DeepSWE verifier executable: {chmod_result.stderr or ''}")
 
     async def _download_if_present(self, sandbox: AsyncSandbox, remote_path: str, local_path: Path) -> bool:
         exists = await sandbox.exec(f"test -f {remote_path}", timeout_s=30)
-        if exists.return_code != 0:
+        if exists.error_type is not None or exists.return_code not in (0, 1):
+            raise RuntimeError(
+                f"Could not check DeepSWE verifier artifact {remote_path}: "
+                f"code={exists.return_code}, error_type={exists.error_type!r}"
+            )
+        if exists.return_code == 1:
             return False
         await sandbox.download(remote_path, local_path)
         return True
@@ -364,6 +377,17 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
             name: await self._download_if_present(sandbox, f"/logs/verifier/{name}", path)
             for name, path in artifact_paths.items()
         }
+        if command_result.return_code != 0 or command_result.error_type is not None:
+            return VerifierResult(
+                evaluation_completed=False,
+                reward=0.0,
+                verifier_exit_code=command_result.return_code,
+                verifier_error=(
+                    f"Verifier command failed with code {command_result.return_code}, "
+                    f"error_type={command_result.error_type!r}"
+                ),
+                test_output=combined_output,
+            )
         if not present["reward.json"]:
             return VerifierResult(
                 evaluation_completed=False,
@@ -383,8 +407,16 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 test_output=combined_output,
             )
 
-        reward = float(reward_data.get("reward", 0.0))
-        if reward not in (0.0, 1.0):
+        if not isinstance(reward_data, dict) or "reward" not in reward_data:
+            return VerifierResult(
+                evaluation_completed=False,
+                reward=0.0,
+                verifier_exit_code=command_result.return_code,
+                verifier_error="Verifier reward.json is missing its reward field",
+                test_output=combined_output,
+            )
+        reward = reward_data["reward"]
+        if type(reward) not in (int, float) or reward not in (0.0, 1.0):
             return VerifierResult(
                 evaluation_completed=False,
                 reward=0.0,
@@ -398,6 +430,24 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 reward=0.0,
                 verifier_exit_code=command_result.return_code,
                 verifier_error="Verifier did not produce /logs/verifier/ctrf.json",
+                test_output=combined_output,
+            )
+        try:
+            ctrf_data = json.loads(artifact_paths["ctrf.json"].read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            return VerifierResult(
+                evaluation_completed=False,
+                reward=0.0,
+                verifier_exit_code=command_result.return_code,
+                verifier_error=f"Invalid verifier ctrf.json: {error}",
+                test_output=combined_output,
+            )
+        if not isinstance(ctrf_data, dict):
+            return VerifierResult(
+                evaluation_completed=False,
+                reward=0.0,
+                verifier_exit_code=command_result.return_code,
+                verifier_error="Invalid verifier ctrf.json: expected a JSON object",
                 test_output=combined_output,
             )
 
@@ -556,6 +606,11 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
             finally:
                 if sandbox is not None:
                     await self._stop_sandbox(sandbox, task_id=current_task_id, phase="verifier")
+
+        if not result.evaluation_completed and agent_oom_observation is None:
+            raise RuntimeError(
+                f"DeepSWE verification incomplete for {current_task_id}: {result.verifier_error or 'unknown failure'}"
+            )
 
         if self.config.clear_verifier_logs:
             rmtree(str(log_dir), ignore_errors=True)

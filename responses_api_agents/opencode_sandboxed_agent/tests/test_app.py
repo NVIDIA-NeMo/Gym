@@ -1621,9 +1621,10 @@ class TestBenchmarkLifecycle:
         ("export_status", "Failed to export OpenCode session"),
         ("download", "Failed to download OpenCode export"),
         ("missing", "OpenCode export was not downloaded"),
-        ("empty", "OpenCode export .* was empty or invalid"),
-        ("no_messages", "OpenCode export .* was empty or invalid"),
-        ("not_dict", "OpenCode export .* was empty or invalid"),
+        ("empty", "OpenCode export .* had no assistant messages or was invalid"),
+        ("no_messages", "OpenCode export .* had no assistant messages or was invalid"),
+        ("not_dict", "OpenCode export .* had no assistant messages or was invalid"),
+        ("user_only", "OpenCode export .* had no assistant messages or was invalid"),
         ("invalid_json", "Failed to read OpenCode export"),
     ],
 )
@@ -1663,7 +1664,15 @@ async def test_export_failure_raises_without_a_scored_response(tmp_path, failure
             raise OSError("export unavailable")
         if failure == "missing":
             return
-        local.write_text({"empty": "{}", "no_messages": '{"info":{}}', "not_dict": "[]", "invalid_json": "{"}[failure])
+        local.write_text(
+            {
+                "empty": "{}",
+                "no_messages": '{"info":{}}',
+                "not_dict": "[]",
+                "user_only": '{"messages":[{"info":{"role":"user"},"parts":[]}]}',
+                "invalid_json": "{",
+            }[failure]
+        )
 
     sandbox.download = AsyncMock(side_effect=download)
     server._sandbox_id_to_sandbox = {"session": sandbox}
@@ -1680,7 +1689,13 @@ async def test_export_failure_raises_without_a_scored_response(tmp_path, failure
     assert server._sandbox_id_to_run_result == {}
     export_path = tmp_path / "session" / "export.json"
     if export_path.exists():
-        assert export_path.read_text() in ("{}", "{", '{"info":{}}', "[]")
+        assert export_path.read_text() in (
+            "{}",
+            "{",
+            '{"info":{}}',
+            "[]",
+            '{"messages":[{"info":{"role":"user"},"parts":[]}]}',
+        )
     if failure == "download":
         assert not export_path.exists()
     if failure.startswith("list_") or failure in ("exception", "command", "export_status"):
@@ -1713,7 +1728,7 @@ async def test_export_failure_prevents_verification_and_stops_sandbox(tmp_path):
     request = Request({"type": "http", "headers": [], "session": {SESSION_ID_KEY: "trial"}})
     body = OpenCodeSandboxedAgentRunRequest(responses_create_params={"input": [{"role": "user", "content": "Solve"}]})
 
-    with raises(RuntimeError, match="OpenCode export .* was empty or invalid"):
+    with raises(RuntimeError, match="OpenCode export .* had no assistant messages or was invalid"):
         await server.run(request, body)
 
     assert [call.kwargs["url_path"] for call in client.post.await_args_list] == ["/seed_session"]

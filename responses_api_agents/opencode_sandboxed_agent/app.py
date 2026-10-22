@@ -1098,8 +1098,14 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             not isinstance(opencode_export, dict)
             or not isinstance(opencode_export.get("messages"), list)
             or not opencode_export["messages"]
+            or not any(
+                isinstance(message, dict)
+                and isinstance(message.get("info"), dict)
+                and message["info"].get("role") == "assistant"
+                for message in opencode_export["messages"]
+            )
         ):
-            raise RuntimeError(f"OpenCode export at {results_local_fpath} was empty or invalid")
+            raise RuntimeError(f"OpenCode export at {results_local_fpath} had no assistant messages or was invalid")
 
         observations = None
         trajectory = (
