@@ -55,12 +55,12 @@ opencode_search_resources_server:              # instance name — how agents/CL
       # not us -- the cache is a private directory on our Lustre scratch, so hardcoding a path
       # here would hand every other user a config pointing somewhere they cannot read.
       # Point NEMO_GYM_EXA_CACHE_ROOT at a writable directory to turn it on.
-      exa_cache_root: ${oc.env:NEMO_GYM_EXA_CACHE_ROOT,null}
+      exa_cache_root: ${oc.env:NEMO_GYM_EXA_CACHE_ROOT,""}
       exa_cache_fuzzy_threshold: 0.8
       # An optional pre-existing store, consulted read-only and exact-key only, so it costs
       # nothing at startup and everything it holds is immediately reusable. Ours holds ~2M
       # entries accumulated by the legacy runs.
-      exa_cache_legacy_root: ${oc.env:NEMO_GYM_EXA_CACHE_LEGACY_ROOT,null}
+      exa_cache_legacy_root: ${oc.env:NEMO_GYM_EXA_CACHE_LEGACY_ROOT,""}
       exa_cache_use_tavily: true
 
       sandbox_provider: sandbox
