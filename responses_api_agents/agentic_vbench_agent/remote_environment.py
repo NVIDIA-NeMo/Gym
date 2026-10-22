@@ -17,6 +17,16 @@ from harbor.environments.capabilities import EnvironmentCapabilities
 from harbor.environments.docker.docker import DockerEnvironment
 
 
+def _adapt_dockerfile(original: bytes) -> bytes:
+    # The pinned material downloads are GETs saved with curl -o, so retries
+    # discard partial output. Default --retry misses connection resets/EOFs;
+    # HTTP/1.1 also avoids the observed HTTP/2 stream cancellations.
+    return original.replace(b"apt-get ", b"apt-get -o APT::Sandbox::User=root ").replace(
+        b"curl --fail --silent --show-error --location --retry 5 --retry-delay 3",
+        b"curl --http1.1 --retry-all-errors --fail --silent --show-error --location --retry 5 --retry-delay 3",
+    )
+
+
 class RemoteEnvironment(DockerEnvironment):
     _DOCKER_COMPOSE_BASE_PATH = Path(__file__).with_name("remote-compose.yaml")
 
@@ -30,7 +40,7 @@ class RemoteEnvironment(DockerEnvironment):
         shutil.copytree(environment_dir, staged)
         dockerfile = staged / "Dockerfile"
         original = dockerfile.read_bytes()
-        adapted = original.replace(b"apt-get ", b"apt-get -o APT::Sandbox::User=root ")
+        adapted = _adapt_dockerfile(original)
         dockerfile.write_bytes(adapted)
         (staged.parent / "rootless-build.json").write_text(
             json.dumps(
@@ -38,7 +48,10 @@ class RemoteEnvironment(DockerEnvironment):
                     "source": str(environment_dir),
                     "original_dockerfile_sha256": hashlib.sha256(original).hexdigest(),
                     "build_dockerfile_sha256": hashlib.sha256(adapted).hexdigest(),
-                    "adaptation": "APT sandbox uses mapped container root; task inputs and verifiers unchanged",
+                    "adaptation": (
+                        "APT sandbox uses mapped container root; material GETs retry transport errors over HTTP/1.1; "
+                        "task inputs and verifiers unchanged"
+                    ),
                 },
                 indent=2,
             )
