@@ -204,6 +204,10 @@ class OpenHandsSDKSandboxedAgent(SimpleResponsesAPIAgent):
             'then PY="$c"; break; fi; done; '
             '[ -n "$PY" ] || { echo "no python>=3.12 in sandbox" >&2; exit 41; }; '
             "command -v tmux >/dev/null 2>&1 || { echo 'tmux missing in sandbox' >&2; exit 42; }; "
+            # block_target_v2 wraps python* (real binary kept at <path>.nl2repobench-real); the harness's own venv
+            # creation must bypass that wrapper, which denies `-m venv`.
+            'P=$(command -v "$PY"); R="$(readlink -f "$(dirname "$P")")/$(basename "$P").nl2repobench-real"; '
+            '[ -e "$R" ] && PY="$R"; '
             f'"$PY" -m venv {venv}; '
             f"{venv}/bin/pip install --quiet --disable-pip-version-check {links}{packages}; "
             f"{venv}/bin/python -c 'import openhands.sdk, openhands.tools'; "

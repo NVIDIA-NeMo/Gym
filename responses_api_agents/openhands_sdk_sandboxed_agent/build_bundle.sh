@@ -20,12 +20,14 @@ PY="$(ls -d "$OUT"/py/cpython-${PYVER}-linux-x86_64-gnu/bin/python3.12)"
 # Install the EXACT package set the evals were run with (bundle_requirements.lock.txt = `pip freeze` of the working bundle). Do not replace this with
 # unpinned installs: transitive dependencies drift (a fresh unpinned resolve failed at import).
 LOCK="$(dirname "$(realpath "$0")")/bundle_requirements.lock.txt"
-uv pip install --python "$PY" --break-system-packages -r "$LOCK"
+# --python-platform manylinux_2_28: native wheels (cryptography, pydantic-core, ...) must load on glibc 2.28 (Debian 10) -- many upstream task images are that old.
+PLAT=x86_64-manylinux_2_28
+uv pip install --python "$PY" --break-system-packages --python-platform "$PLAT" -r "$LOCK"
 # `uv pip install -r` silently skipped two locked packages (cryptography, wcwidth) here (it reports them as already installed although they are not
 # in the interpreter), which breaks `import openhands.sdk` in the isolated sandbox interpreter. Install anything the interpreter does not really
 # have with its own pip (--no-deps: the lock is complete).
 for name in $(comm -13 <("$PY" -m pip freeze 2>/dev/null | sed 's/==.*//' | tr 'A-Z_' 'a-z-' | sort) <(grep -v '^#' "$LOCK" | sed 's/==.*//' | tr 'A-Z_' 'a-z-' | sort)); do
-    "$PY" -m pip install --quiet --disable-pip-version-check --no-warn-script-location --break-system-packages --no-deps "$(grep -i "^${name//-/[-_]}==" "$LOCK" | head -1)"
+    uv pip install --quiet --python "$PY" --break-system-packages --python-platform "$PLAT" --no-deps "$(grep -i "^${name//-/[-_]}==" "$LOCK" | head -1)"
 done
 "$PY" -c "import openhands.sdk, openhands.tools.terminal; print('openhands import ok')"
 curl -fsSL https://github.com/mjakob-gh/build-static-tmux/releases/download/v3.7b/tmux.linux-amd64.gz | gunzip > "$OUT/bin/tmux"
