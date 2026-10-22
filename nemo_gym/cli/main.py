@@ -28,6 +28,7 @@ from pathlib import Path
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, _augment_sys_path, component_search_roots
 from nemo_gym._config_aliases import LEGACY_ENVIRONMENT_ALIASES, legacy_config_path_alias
 from nemo_gym.cli.utils import did_you_mean, exit_cleanly_on_config_error
+from nemo_gym.run_exporter_registry import DEFAULT_RUN_EXPORTER, RUN_EXPORTERS
 
 
 logger = logging.getLogger(__name__)
@@ -722,6 +723,40 @@ def _eval_run(args: argparse.Namespace, overrides: list[str]) -> None:
     dispatch(target, overrides)
 
 
+# `gym eval export <exporter>`: which exporter handles the run. Register-only: `_eval_export` consumes it.
+EXPORTER = Flag(
+    register=lambda p: p.add_argument(
+        "exporter",
+        nargs="?",
+        metavar="EXPORTER",
+        help=f"Exporter to run: {', '.join(RUN_EXPORTERS)} (default: {DEFAULT_RUN_EXPORTER}). "
+        "Exporter settings are `key=value` overrides, e.g. `rollouts_jsonl_fpath=results/rollouts.jsonl`.",
+    ),
+)
+
+
+def _eval_export(args: argparse.Namespace, overrides: list[str]) -> None:
+    exporter = args.exporter
+    # argparse can capture the first bare Hydra override (`rollouts_jsonl_fpath=...`) in the optional EXPORTER slot.
+    if exporter and _is_positional_hydra_override(exporter):
+        overrides = [exporter, *overrides]
+        exporter = None
+    if args.format is not None:
+        print(
+            "Warning: `--format` is deprecated; pass the exporter name instead: `gym eval export <exporter>`.",
+            file=sys.stderr,
+        )
+        if exporter and exporter != args.format:
+            args._parser.error(f"conflicting exporter: {exporter!r} and --format {args.format!r}")
+        exporter = exporter or args.format
+    exporter = exporter or DEFAULT_RUN_EXPORTER
+    if exporter not in RUN_EXPORTERS:
+        args._parser.error(f"unknown exporter {exporter!r}; choose from: {', '.join(RUN_EXPORTERS)}")
+    # Exporter settings are new config keys, which Hydra only accepts with a leading `+`; let users omit it.
+    overrides = [f"+{token}" if re.match(r"[A-Za-z_][\w.]*=", token) else token for token in overrides]
+    dispatch("nemo_gym.cli.eval:export_run", [f"+exporter={exporter}", *overrides])
+
+
 # `gym eval run <target>`: a Harbor task folder, a folder of task folders, or `harbor:<dataset>[@<version>]`.
 # Register-only: the target is consumed by `_eval_run`, not translated to a Hydra override.
 TASK_TARGET = Flag(
@@ -1336,10 +1371,15 @@ COMMANDS = {
         ),
     ),
     "eval export": Command(
-        target="nemo_gym.cli.eval:export_rollouts_as_atif",
-        summary="Export supported Gym trajectories as ATIF.",
+        target=_eval_export,
+        summary="Export a finished run with an exporter (default: atif).",
         flags=(
-            _value_flag("format", "format", "Output trajectory format.", choices=("atif",)),
+            EXPORTER,
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--format", choices=tuple(RUN_EXPORTERS), help="Deprecated: pass the exporter name instead."
+                )
+            ),
             _value_flag("rollouts", "rollouts_jsonl_fpath", "Gym rollouts JSONL to export.", quote=True),
             _value_flag("output-dir", "output_dirpath", "New directory for exported trajectories.", quote=True),
             _value_flag("session-id", "session_id", "Stable identifier for the source evaluation run.", quote=True),
