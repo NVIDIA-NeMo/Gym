@@ -14,6 +14,9 @@ arrives while, or before, the seed that opens the browser.
 """
 
 import asyncio
+import json
+from base64 import b64decode
+from itertools import count
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -22,6 +25,8 @@ import pytest
 from app import InteractiveBrowserConfig, InteractiveBrowserResourcesServer
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from itsdangerous import TimestampSigner
+from pytest import MonkeyPatch
 
 from nemo_gym.base_resources_server import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
 from nemo_gym.episode_types import EpisodeId, TaskId
@@ -211,24 +216,37 @@ class TestTypedSessionsOverHttp:
         assert "task_data is not an interactive_browser task" in refused.json()["detail"]
         assert browsers.created == []
 
-    def test_a_refused_seed_leaves_the_clients_cookie_alone(self, browsers) -> None:
+    def test_a_refused_seed_leaves_the_clients_cookie_alone(self, browsers, monkeypatch: MonkeyPatch) -> None:
         """A refused seed must not rebind the client to the session it was refused, which another episode owns."""
+        # Session middleware may renew the signature without changing the client's session.
+        timestamps = count(1_000_000)
+        monkeypatch.setattr(TimestampSigner, "get_timestamp", lambda self: next(timestamps))
         server = _server()
         app = server.setup_webserver()
         owner, other = TestClient(app), TestClient(app)
-        owner.post("/seed_session", json=_seed_json("owner"))
-        other.post("/seed_session", json=_seed_json("other", episode={"rollout_id": "other", "attempt": 0}))
-        cookies = dict(other.cookies)
+        assert owner.post("/seed_session", json=_seed_json("owner")).status_code == 200
+        assert (
+            other.post(
+                "/seed_session", json=_seed_json("other", episode={"rollout_id": "other", "attempt": 0})
+            ).status_code
+            == 200
+        )
+        cookie_key = server.get_session_middleware_key()
+        signer = TimestampSigner(cookie_key)
         bad_task = _seed_json("third", episode={"rollout_id": "other", "attempt": 0})
         bad_task["task_data"] = {"initial_url": 5}
 
-        conflict = other.post("/seed_session", json=_seed_json("owner", episode={"rollout_id": "other", "attempt": 0}))
-        rejected = other.post("/seed_session", json=bad_task)
-        finished = other.post("/browser_finish", json={"answer": "42"})
+        for body, status_code in (
+            (_seed_json("owner", episode={"rollout_id": "other", "attempt": 0}), 409),
+            (bad_task, 422),
+        ):
+            response = other.post("/seed_session", json=body)
+            assert response.status_code == status_code
+            session = json.loads(b64decode(signer.unsign(other.cookies[cookie_key])))
+            assert session == {SESSION_ID_KEY: "other"}
 
-        assert (conflict.status_code, rejected.status_code) == (409, 422)
-        assert dict(other.cookies) == cookies
         # The tool call still reaches this client's own browser, not the owner's.
+        finished = other.post("/browser_finish", json={"answer": "42"})
         assert finished.status_code == 200
         assert server._session_id_to_state["other"].answer == "42"
         assert server._session_id_to_state["owner"].answer is None

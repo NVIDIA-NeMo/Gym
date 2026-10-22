@@ -14,8 +14,11 @@
 # limitations under the License.
 
 import asyncio
+import json
 import shutil
 import subprocess
+from base64 import b64decode
+from itertools import count
 from pathlib import Path
 from shlex import quote
 from types import SimpleNamespace
@@ -24,6 +27,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
+from itsdangerous import TimestampSigner
 from pytest import MonkeyPatch
 
 from nemo_gym.base_resources_server import (
@@ -843,21 +847,26 @@ def test_a_seed_no_retry_can_fix_is_refused_without_starting_a_sandbox(
 
 def test_a_refused_seed_leaves_the_clients_cookie_alone(monkeypatch: MonkeyPatch) -> None:
     """A refused seed must not rebind the client to the session it was refused, which another episode owns."""
+    # Session middleware may renew the signature without changing the client's session.
+    timestamps = count(1_000_000)
+    monkeypatch.setattr(TimestampSigner, "get_timestamp", lambda self: next(timestamps))
     server = make_server(golden=False, apply_anti_cheating=False)
     stub_task_sandboxes(monkeypatch, server)
     app = server.setup_webserver()
     owner, other = TestClient(app), TestClient(app)
     assert owner.post("/seed_session", json=typed_seed_json("owner", rollout_id="owner")).status_code == 200
     assert other.post("/seed_session", json=typed_seed_json("other", rollout_id="other")).status_code == 200
-    cookies = dict(other.cookies)
+    cookie_key = server.get_session_middleware_key()
+    signer = TimestampSigner(cookie_key)
 
-    conflict = other.post("/seed_session", json=typed_seed_json("owner", rollout_id="other"))
-    rejected = other.post(
-        "/seed_session", json=typed_seed_json("third", rollout_id="other", task_data={"repo": "example/repo"})
-    )
-
-    assert (conflict.status_code, rejected.status_code) == (409, 422)
-    assert dict(other.cookies) == cookies
+    for body, status_code in (
+        (typed_seed_json("owner", rollout_id="other"), 409),
+        (typed_seed_json("third", rollout_id="other", task_data={"repo": "example/repo"}), 422),
+    ):
+        response = other.post("/seed_session", json=body)
+        assert response.status_code == status_code
+        session = json.loads(b64decode(signer.unsign(other.cookies[cookie_key])))
+        assert session == {SESSION_ID_KEY: "other"}
 
 
 def test_a_close_naming_another_episode_is_refused_while_open_and_after_close(monkeypatch: MonkeyPatch) -> None:
