@@ -137,7 +137,11 @@ extra-argument, and environment overrides; those remain available on the local p
 
 ## Requests and settings
 
-Sandbox session input is one text user message, optionally preceded by a system message. Both sandbox
+Sandbox session input is one user message, optionally preceded by a system message. The user message
+may include images as base64 data-URI `input_image` parts; the adapter uploads them into the session
+directory and passes them to Pi as `@file` arguments. Sessions always declare image input on the Gym
+model, so Pi also passes on images its read tool returns; a text-only deployment rejects such requests.
+Images in the system message and image URLs are rejected. Both sandbox
 and local execution combine the configured system prompt, request `instructions`, and input
 system message in that order. Sampling and chat-template settings belong on the Gym Model Server.
 Sandbox sessions reject unsupported request controls before execution.

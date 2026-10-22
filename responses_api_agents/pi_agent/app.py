@@ -22,7 +22,7 @@ import re
 import shlex
 import shutil
 from asyncio import Semaphore
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from time import time
 from typing import Any, ClassVar, Literal, Optional
@@ -46,6 +46,7 @@ from nemo_gym.base_responses_api_agent import (
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.failure_kinds import MODEL_REQUEST_ERROR, MODEL_TRANSPORT_ERROR
+from nemo_gym.media_utils import MediaFile, UnsupportedContentError, split_text_and_media, upload_media
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -783,13 +784,14 @@ class PiAgent(SimpleResponsesAPIAgent):
         )
         roles = [getattr(item, "role", None) for item in items]
         if roles not in (["user"], ["system", "user"]):
-            raise HTTPException(422, "Pi accepts one text user prompt with an optional system message")
+            raise HTTPException(422, "Pi accepts one user prompt with an optional system message")
         for item in items:
-            if not isinstance(item.content, str) and any(
-                (part.get("type") if isinstance(part, dict) else getattr(part, "type", None)) != "input_text"
-                for part in item.content
-            ):
-                raise HTTPException(422, "Pi only supports text input")
+            try:
+                _, media = split_text_and_media(item.content)
+            except UnsupportedContentError as error:
+                raise HTTPException(422, f"Pi: {error}") from error
+            if media and item.role != "user":
+                raise HTTPException(422, "Pi accepts media only in the user prompt")
         return body.model_copy(update={"input": items}).model_copy(deep=True)
 
     def _conversation_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
@@ -831,12 +833,18 @@ class PiAgent(SimpleResponsesAPIAgent):
         *,
         prompt: str,
         system: str,
+        media: Sequence[MediaFile] = (),
     ) -> NeMoGymResponse:
         # Sandbox sessions use only Gym's provider; do not copy credentials for
         # unrelated direct providers from the host configuration into the sandbox.
         models = {
             "providers": {"nemo": self._build_models_config(state.request.episode_id.capture_key)["providers"]["nemo"]}
         }
+        # Without image input on the model, Pi leaves images out of model requests.
+        # That includes images its read tool returns, which Pi replaces with an "omitted" note.
+        # A text-only deployment rejects requests that carry an image.
+        for model in models["providers"]["nemo"]["models"]:
+            model["input"] = ["text", "image"]
         await state.upload_json("home/.pi/agent/models.json", models)
         await state.upload_json("home/.pi/agent/settings.json", self._build_settings_config())
         output_limit_extension = "output-limit.mjs"
@@ -890,6 +898,9 @@ class PiAgent(SimpleResponsesAPIAgent):
             command += ["--thinking", self.config.thinking]
         if system:
             command += ["--append-system-prompt", system]
+        # Pi attaches `@file` arguments, media included, to the prompt it reads from stdin.
+        media_paths = await upload_media(state.session.sandbox, media, f"{state.session.session_dir}/input-media")
+        command += [f"@{path}" for path in media_paths]
         payload = {
             "directory": state.session.session_dir,
             "command": command,
@@ -1362,10 +1373,13 @@ class PiAgent(SimpleResponsesAPIAgent):
             if state.session.closing:
                 raise HTTPException(409, "Pi session is closing")
             prompt, system = self._conversation_input(body)
+            _, media = split_text_and_media(body.input[-1].content)
             if state.task is None:
                 # Bind the request before the first await so retries join one invocation.
                 state.activation_request = body.model_copy(deep=True)
-                state.task = asyncio.create_task(self._sandbox_response(state, body, prompt=prompt, system=system))
+                state.task = asyncio.create_task(
+                    self._sandbox_response(state, body, prompt=prompt, system=system, media=media)
+                )
             elif body != state.activation_request:
                 raise HTTPException(409, "Pi sandbox sessions support one activation; retry the same request")
             # Session close owns cancellation. Losing an HTTP waiter must not stop the harness.

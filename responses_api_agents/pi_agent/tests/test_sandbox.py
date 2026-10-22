@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import base64
 import functools
 import json
 import os
@@ -124,7 +125,11 @@ class Sandbox:
         return SimpleNamespace(return_code=0, error_type=None, stdout="", stderr="")
 
     async def upload(self, source, destination):
-        self.files[destination] = Path(source).read_text()
+        data = Path(source).read_bytes()
+        try:
+            self.files[destination] = data.decode()
+        except UnicodeDecodeError:
+            self.files[destination] = data
 
     async def download(self, source, destination):
         Path(destination).write_text(self.files[source])
@@ -206,6 +211,56 @@ def mcp_grant(name, *, required=True):
 
 def seed_with_tools(*accesses):
     return AgentSeedSessionRequest.model_validate({**seed().model_dump(mode="json"), "tool_accesses": list(accesses)})
+
+
+PNG = b"\x89PNG\r\n\x1a\n\x00\xff"
+PNG_URI = "data:image/png;base64," + base64.b64encode(PNG).decode()
+
+
+def test_session_attaches_prompt_images_and_declares_image_input(setup):
+    agent, sandbox = setup
+    prompt = [
+        {"type": "input_text", "text": "What is shown?"},
+        {"type": "input_image", "image_url": PNG_URI, "detail": "auto"},
+    ]
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        result = client.post(
+            "/ng-rollout/pi-smoke-a2/v1/responses", json={"input": [{"role": "user", "content": prompt}]}
+        )
+        assert result.status_code == 200, result.text
+        payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
+        assert payload["prompt"] == "What is shown?"
+        attachments = [arg for arg in payload["command"] if arg.startswith("@")]
+        assert len(attachments) == 1 and attachments[0].endswith(".png")
+        assert sandbox.files[attachments[0][1:]] == PNG
+        models = json.loads(sandbox.files[f"{sandbox.directory}/home/.pi/agent/models.json"])
+        assert models["providers"]["nemo"]["models"][0]["input"] == ["text", "image"]
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        assert closed.status_code == 200, closed.text
+
+
+@pytest.mark.parametrize(
+    "items",
+    [
+        [{"role": "user", "content": [{"type": "input_image", "image_url": "https://example.com/a.png"}]}],
+        [
+            {"role": "system", "content": [{"type": "input_image", "image_url": PNG_URI}]},
+            {"role": "user", "content": "task"},
+        ],
+    ],
+)
+def test_session_rejects_images_it_cannot_attach(setup, items):
+    agent, sandbox = setup
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        result = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": items})
+        assert result.status_code == 422, result.text
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        assert closed.status_code == 200, closed.text
+    assert not sandbox.launch.called
 
 
 def test_http_session_flow_runs_pi_in_borrowed_sandbox(setup):
