@@ -1771,9 +1771,9 @@ class OpenSandboxProvider:
 
         sandbox_id: str | None = None
         sandbox: Any | None = None
-        # A create cancelled before the server answers would drop the only reply that carries
-        # the new sandbox's id, so the request is never cancelled: an abandoned one is left to
-        # finish and its sandbox deleted. Once the id is known, the SDK cleans up on failure.
+        # The attempt key finds a sandbox the server has already recorded, not one it records after
+        # the lookup, so the request is never cancelled: an abandoned one is left to finish and the
+        # sandbox it names deleted. Once the id is known, the SDK cleans up on failure.
         create = asyncio.ensure_future(Sandbox.create(**kwargs))
         try:
             try:

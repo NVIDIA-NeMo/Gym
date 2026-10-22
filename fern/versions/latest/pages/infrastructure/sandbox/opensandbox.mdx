@@ -128,10 +128,11 @@ A `resource_requests` entry above the sandbox's limit is clamped to the limit wi
 declares no `resources` is held to the SDK's default limits (1 CPU, 2048 MiB), since those are what the
 server applies.
 
-When `create.timeout_s` expires or the caller cancels, the provider stops waiting but lets the
-create request finish, then deletes the sandbox it made. Keep `create.request_timeout_s` longer
-than the server takes to create a sandbox so that answer arrives: a request cut off before the
-server answers can leave its sandbox running until its TTL.
+When a create attempt times out or the caller cancels it, the provider finds the sandbox the attempt
+left behind by the attempt's metadata key and deletes it. A create request still open is not cancelled:
+the provider lets it finish and deletes the sandbox the server's answer names, in case the server had not
+recorded that sandbox when the provider looked. `aclose()` waits up to `operations.close_timeout_s` for
+those requests.
 
 Run an agent with the provider config by passing it alongside the agent and model configs:
 

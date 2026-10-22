@@ -250,6 +250,14 @@ async def test_create_deletes_the_sandbox_of_an_abandoned_request(
     if abandon == "timeout":
         create["timeout_s"] = 0.01
     provider = opensandbox_provider.OpenSandboxProvider(create=create, probe={"command": None})
+    sweeps: list[dict[str, str]] = []
+
+    async def server_has_not_listed_it(metadata: dict[str, str], _attempt_key: str) -> list[dict[str, Any]]:
+        sweeps.append(metadata)
+        return []
+
+    # The attempt-key sweep runs first and finds nothing: the server has not recorded the sandbox yet.
+    monkeypatch.setattr(provider, "_reap_orphaned_create", server_has_not_listed_it)
 
     if abandon == "timeout":
         with pytest.raises(opensandbox_provider.OpenSandboxCreateTimeoutError):
@@ -261,6 +269,7 @@ async def test_create_deletes_the_sandbox_of_an_abandoned_request(
         with pytest.raises(asyncio.CancelledError):
             await task
     # The caller is released before the server answers; nothing is deleted yet.
+    assert len(sweeps) == 1
     assert killed == []
     assert len(provider._abandoned_creates) == 1
 
