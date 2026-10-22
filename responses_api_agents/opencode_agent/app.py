@@ -92,7 +92,7 @@ from responses_api_agents.opencode_agent.runtime import (
     OPENCODE_VERSION,
     apply_observability_patch,
 )
-from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession, format_sandbox_error
+from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession, format_error_message
 from responses_api_agents.opencode_agent.setup_opencode import ensure_opencode
 
 
@@ -1229,7 +1229,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         if failure is not None:
             raise failure
         if error and not reported_error:
-            raise HTTPException(502, format_sandbox_error(error, stderr=state.stderr))
+            raise HTTPException(502, format_error_message(error, stderr=state.stderr))
         reported_message = None
         if reported_error:
             error_data = native_result["error"].get("data") or {}
@@ -1239,7 +1239,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             upstream_status = error_data.get("statusCode")
             if type(upstream_status) is int and 400 <= upstream_status <= 599:
                 reported_message = f"HTTP {upstream_status}: {reported_message}"
-            reported_message = format_sandbox_error(reported_message)
+            reported_message = format_error_message(reported_message)
         response = self._make_session_response(
             state,
             body,
