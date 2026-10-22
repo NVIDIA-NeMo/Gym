@@ -83,6 +83,13 @@ class _StubProvider:
 
         return SandboxExecResult(stdout="out", stderr="", return_code=self._return_code)
 
+    async def upload_file(self, handle, source_path, target_path):
+        if target_path.endswith("/refused"):
+            raise RuntimeError("upload refused")
+
+    async def download_file(self, handle, source_path, target_path):
+        target_path.write_bytes(b"downloaded")
+
     async def close(self, handle):
         self.closed = True
 
@@ -130,6 +137,36 @@ async def test_sandbox_stop_emits_a_span_for_the_release(recorded_spans, started
     stop_span = next(span for span in recorded_spans() if span.name == "gym.sandbox.stop")
     assert stop_span.attributes["nemo.gym.sandbox.provider"] == "stub"
     assert stop_span.attributes["nemo.gym.sandbox.id"] == "handle-1"
+
+
+async def test_sandbox_transfers_emit_spans_with_size_but_no_paths(recorded_spans, started_sandbox, tmp_path):
+    """Paths can name task content, so a transfer span records only the provider, the sandbox and the size."""
+    sandbox = await started_sandbox().start()
+    local = tmp_path / "task-secret-name.png"
+    local.write_bytes(b"x" * 64)
+    await sandbox.upload(local, "/workspace/task-secret-name.png")
+    await sandbox.download("/workspace/out.txt", tmp_path / "out.txt")
+
+    spans = {span.name: span for span in recorded_spans()}
+    for name, size in (("gym.sandbox.upload", 64), ("gym.sandbox.download", len(b"downloaded"))):
+        assert spans[name].attributes["nemo.gym.sandbox.provider"] == "stub"
+        assert spans[name].attributes["nemo.gym.sandbox.id"] == "handle-1"
+        assert spans[name].attributes["nemo.gym.sandbox.transfer.size_bytes"] == size
+        assert not any("task-secret-name" in str(value) for value in spans[name].attributes.values())
+
+
+async def test_failed_sandbox_upload_marks_its_span_as_an_error(recorded_spans, started_sandbox, tmp_path):
+    from opentelemetry.trace import StatusCode
+
+    sandbox = await started_sandbox().start()
+    local = tmp_path / "file.bin"
+    local.write_bytes(b"payload")
+    with pytest.raises(RuntimeError, match="upload refused"):
+        await sandbox.upload(local, "/workspace/refused")
+
+    upload_span = next(span for span in recorded_spans() if span.name == "gym.sandbox.upload")
+    assert upload_span.status.status_code == StatusCode.ERROR
+    assert "nemo.gym.sandbox.transfer.size_bytes" not in upload_span.attributes
 
 
 async def test_sandbox_spans_carry_the_rollout_id_inside_a_rollout(
