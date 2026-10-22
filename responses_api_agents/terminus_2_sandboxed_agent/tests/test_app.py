@@ -782,8 +782,9 @@ class TestNativeSessions:
         # them so rollout collection does not rebuild turns from every captured model call.
         trajectory = close.json()["trajectory"]
         assert trajectory["rollout_id"] == "r1"
-        # The turn body carries no task identity; retain the logical task ID supplied by the seed.
-        assert trajectory["task_id"] == _seed_body()["task_id"]["task_id"] == "path-tracing"
+        # The turn body carries no task identity; the trajectory names the seeded task the way the collector
+        # names a materialized row (``str(row["task_id"])``), not the rollout id.
+        assert trajectory["task_id"] == str(_seed_body()["task_id"]) == "{'taskset': 'tb', 'task_id': 'path-tracing'}"
         [turn] = trajectory["turns"]
         assert turn["task_id"] == trajectory["task_id"]
         assert turn["invocation_id"] == observations["records"][0]["invocation_id"]
@@ -826,7 +827,7 @@ class TestNativeSessions:
         assert close.json()["agent_observations"]["records"][0]["invocation_id"] == "terminus2_x"
         assert close.json()["trajectory"] == trajectory.model_dump(mode="json")
         # The one run was handed the seeded task's collector identity.
-        assert identities == [_seed_body()["task_id"]["task_id"]]
+        assert identities == [str(_seed_body()["task_id"])]
 
     def test_seed_requires_sandbox_access(self, monkeypatch):
         _, client, _, _ = self._client(monkeypatch)

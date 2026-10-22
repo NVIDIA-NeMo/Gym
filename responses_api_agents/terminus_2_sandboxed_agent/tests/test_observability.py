@@ -424,8 +424,8 @@ def test_session_decisions_survive_saved_projection(execution, tmp_path, mode, c
     # The harness named the seeded task the way the collector names the row, so the projection keeps the
     # producer's turns as they are instead of recording an identity mismatch and rewriting every turn.
     assert "producer_trajectory_identity_mismatch" not in gap_codes
-    assert closed["trajectory"]["task_id"] == task_id["task_id"]
-    assert {turn["task_id"] for turn in turns} == {task_id["task_id"]}
+    assert closed["trajectory"]["task_id"] == str(task_id)
+    assert {turn["task_id"] for turn in turns} == {str(task_id)}
     assert "agent_turn_hollow" not in health.unobserved
     if mode == "compaction":
         [compaction] = [r for r in result["ng_agent_observations"]["records"] if r["kind"] == "context_compaction"]
@@ -500,7 +500,7 @@ def test_session_decisions_of_a_failed_run_survive_saved_failure_projection(
     [decision] = trajectory["turns"]
     assert (decision["turn_no"], decision["step_count"]) == (1, 0)
     assert [ref["response_id"] for ref in decision["model_calls"]] == ["resp_0"]
-    assert decision["task_id"] == trajectory["task_id"] == task_id["task_id"]
+    assert decision["task_id"] == trajectory["task_id"] == str(task_id)
     gap_codes = {gap["code"] for gap in trajectory["gaps"]}
     assert {"turns_unavailable", "producer_trajectory_identity_mismatch"}.isdisjoint(gap_codes)
     if mode == "cancel_summary":

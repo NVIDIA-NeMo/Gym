@@ -147,6 +147,10 @@ submission replication and confirmed agent/sandbox cleanup. Retain failures and
 all attempt provenance. Smoke health is distinct from benchmark accuracy and
 Gym's generic trajectory health report.
 
+The collector-facing `ng_trajectory` follows Gym's materialized task identity
+convention. `candidate-agent-close.json` retains the candidate's original logical
+task IDs and captured decisions, including when the episode fails.
+
 Candidate swaps must support `resume_harness_session` and the requested observation
 capabilities. Judge swaps need a borrowed single-turn session and confirmed close.
 Change the inherited instances in a configuration overlay and remove unused base

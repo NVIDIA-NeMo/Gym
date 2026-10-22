@@ -307,6 +307,21 @@ async def test_local_lifecycle_closes_candidate_before_verification(tmp_path, mo
     environment = server(tmp_path)
     order = []
     sandbox = SimpleNamespace(serialize=AsyncMock(return_value={}))
+    candidate_trajectory = {
+        "task_id": "task",
+        "rollout_id": "one",
+        "turns": [
+            {
+                "invocation_id": "root",
+                "task_id": "task",
+                "rollout_id": "one",
+                "turn_no": 1,
+                "timestamp": 1.0,
+                "step_count": 0,
+                "answer": "candidate decision",
+            }
+        ],
+    }
 
     async def prepare(self, value):
         value.sandbox = sandbox
@@ -342,7 +357,7 @@ async def test_local_lifecycle_closes_candidate_before_verification(tmp_path, mo
             data = {
                 "agent_session_id": json.agent_session_id,
                 "cleanup_confirmed": True,
-                "trajectory": {"task_id": "task", "rollout_id": "one", "turns": []},
+                "trajectory": candidate_trajectory,
             }
         else:
             order.append("activate")
@@ -370,19 +385,28 @@ async def test_local_lifecycle_closes_candidate_before_verification(tmp_path, mo
     environment.server_client = SimpleNamespace(post=post)
     req = request()
     result = await environment.run_request(req)
+    collected = _episode_record(result.model_dump(mode="json"))
+    collector_task_id = "{'taskset': 'swet', 'task_id': 'task'}"
+    assert collected["ng_trajectory"]["task_id"] == collector_task_id
+    assert collected["ng_trajectory"]["turns"][0]["task_id"] == collector_task_id
+    assert collected["ng_trajectory"]["turns"][0]["answer"] == "candidate decision"
+    raw_close = json.loads((tmp_path / "one" / "candidate-agent-close.json").read_text())
+    assert raw_close["trajectory"]["task_id"] == "task"
+    assert raw_close["trajectory"]["turns"][0]["task_id"] == "task"
     if activation_error:
         assert result.result is None and result.failure.terminal
         assert result.failure.agent_close.cleanup_confirmed is True
         final = json.loads((tmp_path / "one" / "failure.json").read_text())
         assert final["agent_close"]["cleanup_confirmed"] is True
+        assert final["agent_close"]["trajectory"]["task_id"] == "task"
+        assert final["trajectory"]["task_id"] == collector_task_id
         assert final["cleanup_receipts"]["candidate_sandbox"]["cleanup_confirmed"] is True
-        collected = _episode_record(result.model_dump(mode="json"))
         assert collected["ng_trajectory"]["rollout_id"] == "one"
         assert (tmp_path / "one" / "candidate-agent-close.json").exists()
         return
     assert result.result and result.result.reward == 1
-    collected = _episode_record(result.model_dump(mode="json"))
     assert collected["reward"] == 1
+    assert result.result.ng_agent_close.trajectory.task_id == "task"
     assert result.result.ng_trajectory.rollout_id == "one"
     assert collected["ng_trajectory"]["rollout_id"] == "one"
     assert "ng_agent_observations" in collected
