@@ -947,10 +947,32 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         )
         return True
 
+    def _needed_by_open_session(self, cohort: _CohortState) -> bool:
+        """Whether a member whose session is still open may need this cohort's outcome.
+
+        A checkpoint exports the outcome for that session, and its replay after a restore is answered from it.
+        A member that recorded its outcome has closed its session.
+        """
+        participant = self.checkpoint_participant
+        return participant is not None and any(participant.is_open(session) for session in cohort.member_sessions)
+
     def _prune_terminal_cohorts(self) -> None:
-        """Bound process-local cohort tombstones and attempt watermarks."""
+        """Bound process-local cohort tombstones and attempt watermarks.
+
+        A finished cohort an open member session may still need is kept whatever its age, and does not count
+        toward ``max_terminal_cohorts``.
+        """
         now = time.monotonic()
-        terminal = [(key, cohort) for key, cohort in self._verify_cohorts.items() if cohort.terminal_at is not None]
+        needed = {
+            key
+            for key, cohort in self._verify_cohorts.items()
+            if cohort.terminal_at is not None and self._needed_by_open_session(cohort)
+        }
+        terminal = [
+            (key, cohort)
+            for key, cohort in self._verify_cohorts.items()
+            if cohort.terminal_at is not None and key not in needed
+        ]
         terminal_ttl_s = self.config.cohort_result_ttl_s
         if terminal_ttl_s is not None:
             for key, cohort in terminal:
@@ -958,16 +980,21 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                     self._drop_cohort(key)
 
         terminal = sorted(
-            ((key, cohort) for key, cohort in self._verify_cohorts.items() if cohort.terminal_at is not None),
+            (
+                (key, cohort)
+                for key, cohort in self._verify_cohorts.items()
+                if cohort.terminal_at is not None and key not in needed
+            ),
             key=lambda item: item[1].terminal_at or 0.0,
         )
         for key, _ in terminal[: -self.config.max_terminal_cohorts]:
             self._drop_cohort(key)
 
+        # A kept cohort keeps its group's watermark, so the group still refuses older attempts.
         active_group_ids = {
             cohort.group_id
-            for cohort in self._verify_cohorts.values()
-            if cohort.group_id is not None and cohort.terminal_at is None
+            for key, cohort in self._verify_cohorts.items()
+            if cohort.group_id is not None and (cohort.terminal_at is None or key in needed)
         }
         if terminal_ttl_s is not None:
             for group_id, watermark in list(self._latest_group_attempts.items()):

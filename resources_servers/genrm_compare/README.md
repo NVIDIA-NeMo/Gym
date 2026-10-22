@@ -460,7 +460,8 @@ attempt. An individual rollout's retry counter does not advance this shared grou
 
 Run the resources server with one HTTP worker. State is process-local. Completed explicit-ID groups and
 failed groups retain compact response digests, rewards when completed, and failure/attempt information;
-full answer bodies and waiters are released. Retention is bounded by `cohort_result_ttl_s` and `max_terminal_cohorts`.
+full answer bodies and waiters are released. Retention is bounded by `cohort_result_ttl_s` and `max_terminal_cohorts`,
+except for groups an open session still needs during a partial-rollout checkpoint (see below).
 
 The count cap can evict state before the TTL. After eviction or restart, replay and stale-attempt detection
 are no longer guaranteed. The caller must enforce accepted attempt identity across those boundaries and
@@ -484,6 +485,10 @@ member records an outcome after this server exported. If a restored member's ses
 replays, for example after a failed restore, the member is dropped; a restored group left with no member is
 dropped with the attempt watermark its restore installed, so the rollouts that start over from their inputs
 re-form the group under the same attempt.
+
+A finished group that a member with an open session may still need is kept past `cohort_result_ttl_s` and
+does not count toward `max_terminal_cohorts`, so pruning cannot evict an outcome a later checkpoint must export or
+a replay must return. It becomes an ordinary tombstone once those members close their sessions or are retired.
 
 Only groups with an explicit `_ng_group_id` are exported. A member that is started over from its input while
 its restored group still holds continued members gets a conflicting response for its slot; the controller
