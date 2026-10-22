@@ -9,6 +9,14 @@ from urllib.parse import quote
 from nemo_gym.reward_profile import compute_aggregate_metrics
 
 
+def _modality(row: dict[str, Any]) -> str | None:
+    value = row.get("modality")
+    if value in ("text", "vision"):
+        return value
+    has_image = row.get("has_image")
+    return ("vision" if has_image else "text") if type(has_image) is bool else None
+
+
 def repeat_coverage_reason(questions: list[list[dict[str, Any]]]) -> str | None:
     """Require the same labeled questions in every repeat before publishing CIs."""
     coverage = []
@@ -33,9 +41,9 @@ def compute_domain_metrics(tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
     the same public aggregator without this custom hook, so its means and CIs use
     Gym's normal repeat machinery, without recursive slicing or separate CI math.
     """
-    metrics = _compute_slices(tasks, ("category", "raw_subject", "has_image"))
-    for has_image, modality in ((False, "text"), (True, "vision")):
-        questions = [task for task in tasks if task and task[0].get("has_image") is has_image]
+    metrics = _compute_slices(tasks, ("category", "raw_subject", "modality"))
+    for modality in ("text", "vision"):
+        questions = [task for task in tasks if task and _modality(task[0]) == modality]
         scoped = _compute_slices(questions, ("category", "raw_subject"))
         metrics.update({key.replace("domains/", f"domains/{modality}/", 1): value for key, value in scoped.items()})
     metrics["domains/ci_method"] = "Gym Student t interval across repeat-level estimates"
@@ -45,18 +53,16 @@ def compute_domain_metrics(tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
 def _compute_slices(tasks: list[list[dict[str, Any]]], fields: tuple[str, ...]) -> dict[str, Any]:
     metrics: dict[str, Any] = {}
     for field in fields:
-        namespace = "modality" if field == "has_image" else field
+        namespace = field
         groups: dict[str, list[list[dict[str, Any]]]] = {}
         missing = 0
         for task in tasks:
-            labels = [row.get(field) for row in task]
+            labels = [_modality(row) if field == "modality" else row.get(field) for row in task]
             if not labels:
                 continue
             if any(label != labels[0] or type(label) is not type(labels[0]) for label in labels):
                 raise ValueError(f"Inconsistent {field} labels across repeats of a question")
             label = labels[0]
-            if field == "has_image":
-                label = ("vision" if label else "text") if type(label) is bool else None
             if not isinstance(label, str) or not label.strip():
                 missing += len(task)
                 continue

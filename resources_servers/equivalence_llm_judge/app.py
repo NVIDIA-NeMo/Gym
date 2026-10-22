@@ -26,7 +26,7 @@ import re
 from collections import Counter
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Any, ClassVar, Optional
+from typing import Any, ClassVar, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer
 
@@ -38,13 +38,14 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.config_types import ModelServerRef
+from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
 from nemo_gym.judge import call_judge
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.verifier_fixture import VerifierFixture
 from resources_servers.equivalence_llm_judge.domain_metrics import compute_domain_metrics
 from resources_servers.equivalence_llm_judge.verifier_fixture import create_hle_verified_server, invoke_hle_verified
@@ -189,6 +190,10 @@ class LLMJudgeRunRequest(BaseRunRequest):
 
     model_config = ConfigDict(extra="allow")
 
+    category: Optional[str] = None
+    raw_subject: Optional[str] = None
+    has_image: Optional[bool] = None
+    modality: Optional[Literal["text", "vision"]] = None
     uuid: Optional[str | int] = None
     expected_answer: Optional[str] = None
     options: Optional[list[dict[str, str]]] = None
@@ -226,6 +231,18 @@ class JudgeEvaluation(BaseModel):
 class LLMJudgeVerifyResponse(BaseVerifyResponse):
     expected_answer: str
     judge_evaluations: list[JudgeEvaluation]
+    category: Optional[str] = None
+    raw_subject: Optional[str] = None
+    # A boolean would become mean/has_image in RewardProfiler's headline metrics.
+    modality: Optional[Literal["text", "vision"]] = None
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_domain_labels(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        data = handler(self)
+        for field in ("category", "raw_subject", "modality"):
+            if data.get(field) is None:
+                data.pop(field, None)
+        return data
 
 
 def _extract_last_assistant_text(
@@ -425,6 +442,14 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
         """Create verification response with reward and evaluations."""
         payload = body.model_dump()
         payload.pop("expected_answer", None)
+        has_image = payload.pop("has_image", None)
+        if self.config.report_hle_domains:
+            payload["modality"] = (
+                ("vision" if has_image else "text") if type(has_image) is bool else payload.get("modality")
+            )
+        else:
+            for field in ("category", "raw_subject", "modality"):
+                payload.pop(field, None)
         return LLMJudgeVerifyResponse(
             **payload, reward=reward, expected_answer=expected, judge_evaluations=evaluations
         )
@@ -596,6 +621,18 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
             text, equal_label, not_equal_label, truncated=judge_response.status == "incomplete"
         )
         return equal_label != not_equal_label and eval_record.verdict_label == equal_label, eval_record
+
+    async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
+        if not self.config.report_hle_domains:
+            return await super().aggregate_metrics(body)
+        # HLE's many domain slices are CPU work; keep request handling responsive.
+        return await asyncio.to_thread(
+            compute_aggregate_metrics,
+            body.verify_responses,
+            compute_metrics_fn=self.compute_metrics,
+            compute_repeat_metrics_fn=self.compute_repeat_metrics,
+            get_key_metrics_fn=self.get_key_metrics,
+        )
 
     def compute_metrics(self, tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
         """Aggregate parsing issues, recovering missing diagnostics from saved responses.

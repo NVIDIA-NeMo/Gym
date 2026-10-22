@@ -172,7 +172,7 @@ def test_unknown_modality_is_not_assumed_text_and_single_repeat_has_no_interval(
     assert result["domains/modality/text/mean/reward"] == 0
     assert result["domains/modality/text/ci_available/reward"] is False
     assert "domains/modality/vision/mean/reward" not in result
-    with pytest.raises(ValueError, match="Inconsistent has_image"):
+    with pytest.raises(ValueError, match="Inconsistent modality"):
         compute_domain_metrics([[{**row(0, 0, 1), "has_image": True}, {**row(0, 1, 1), "has_image": False}]])
 
 
