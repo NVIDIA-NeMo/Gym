@@ -122,3 +122,12 @@ def test_log_line_includes_rollout_id_and_absolute_time(capsys):
 def test_log_line_defaults_time_to_now(capsys):
     RC.log_line("[x]")
     assert "t=" in capsys.readouterr().out
+
+
+def test_log_line_is_silent_when_logging_is_off(capsys):
+    RC.set_log_enabled(False)
+    try:
+        RC.log_line("[cache][fuzzy]", status="hit")
+        assert capsys.readouterr().out == ""
+    finally:
+        RC.set_log_enabled(True)

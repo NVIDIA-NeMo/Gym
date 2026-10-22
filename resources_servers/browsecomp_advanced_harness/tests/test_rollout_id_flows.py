@@ -33,7 +33,7 @@ def _clean():
     RC.reset_all()
 
 
-def _server(cache_dir=None, verbose=False) -> TavilySearchResourcesServer:
+def _server(cache_dir=None, verbose=False, log_tool_calls=True) -> TavilySearchResourcesServer:
     config = TavilySearchResourcesServerConfig(
         host="0.0.0.0",
         port=8080,
@@ -44,6 +44,7 @@ def _server(cache_dir=None, verbose=False) -> TavilySearchResourcesServer:
         exclude_domains_file_path=_DUMMY_EXCLUDE_DOMAINS_FILE,
         search_cache_dir=cache_dir,
         verbose_phase_log=verbose,
+        log_tool_calls=log_tool_calls,
     )
     return TavilySearchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
@@ -93,3 +94,34 @@ class TestPerRolloutBudget:
         RC.record_phase("search_live", 2.0, rid="rH")
         RC.record_phase("bash_exec", 0.5, rid="rH")
         assert RC.format_phase_totals(RC.pop_phase_totals("rH")) == "bash_exec=0.50s/1 search_live=2.00s/1"
+
+
+class TestLogToolCalls:
+    async def test_per_call_lines_print_by_default(self, tmp_path, capsys) -> None:
+        await _search(_server(cache_dir=str(tmp_path / "c")), _req("rL"))
+        out = capsys.readouterr().out
+        assert "[tavily_call_begin function=search" in out
+        assert "[tavily_call function=search status=success" in out
+
+    async def test_off_silences_search_and_cache_lines(self, tmp_path, capsys) -> None:
+        server = _server(cache_dir=str(tmp_path / "c"), verbose=True, log_tool_calls=False)
+        await _search(server, _req("rM"))
+        out = capsys.readouterr().out
+        assert "[tavily_call" not in out
+        assert "[cache][" not in out
+
+    async def test_off_still_prints_tool_failures(self, tmp_path, capsys) -> None:
+        server = _server(log_tool_calls=False)
+        server._select_tavily_client = MagicMock(
+            return_value=MagicMock(search=AsyncMock(side_effect=RuntimeError("boom"))),
+        )
+        try:
+            await server.search(_req("rN"), TavilySearchRequest(queries=["q"]))
+        except RuntimeError:
+            pass
+        out = capsys.readouterr().out
+        assert "[tavily_call function=search status=error" in out
+
+    async def test_off_does_not_drop_the_per_rollout_totals(self, tmp_path) -> None:
+        await _search(_server(cache_dir=str(tmp_path / "c"), log_tool_calls=False), _req("rO"))
+        assert RC.peek_phase_totals("rO")["cache_get_search_n"] >= 1

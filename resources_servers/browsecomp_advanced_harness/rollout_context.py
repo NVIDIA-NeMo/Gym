@@ -106,6 +106,19 @@ def format_phase_totals(totals: Dict[str, float]) -> str:
     return " ".join(f"{p}={totals.get(f'{p}_s', 0.0):.2f}s/{int(totals.get(f'{p}_n', 0))}" for p in phases)
 
 
+_LOG_ENABLED = True
+
+
+def set_log_enabled(enabled: bool) -> None:
+    """Turn log_line output on or off for this process (the server's log_tool_calls)."""
+    global _LOG_ENABLED
+    _LOG_ENABLED = bool(enabled)
+
+
+def log_enabled() -> bool:
+    return _LOG_ENABLED
+
+
 def log_line(tag: str, t: Optional[float] = None, **kv: Any) -> None:
     """Print one telemetry line carrying the rollout id and an ABSOLUTE timestamp.
 
@@ -114,6 +127,8 @@ def log_line(tag: str, t: Optional[float] = None, **kv: Any) -> None:
     anchors nemo-rl timers emit — and there is no anchor at all during the first
     rollout wave (~65 min).
     """
+    if not _LOG_ENABLED:
+        return
     parts = [tag, f"rid={current_rollout_id()}", f"t={(time() if t is None else t):.3f}"]
     for k, v in kv.items():
         if v is None:
@@ -124,6 +139,8 @@ def log_line(tag: str, t: Optional[float] = None, **kv: Any) -> None:
 
 def reset_all() -> None:
     """Test hook: drop all accumulated state."""
+    global _LOG_ENABLED
     with _LOCK:
         _TOTALS.clear()
     _ROLLOUT_ID.set(UNKNOWN_ROLLOUT_ID)
+    _LOG_ENABLED = True

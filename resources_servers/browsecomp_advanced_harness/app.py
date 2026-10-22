@@ -61,8 +61,10 @@ from resources_servers.browsecomp_advanced_harness.bash_guard import (
 from resources_servers.browsecomp_advanced_harness.judge_prompt import JUDGE_PROMPT_TEMPLATE
 from resources_servers.browsecomp_advanced_harness.rollout_context import (
     format_phase_totals,
+    log_enabled,
     pop_phase_totals,
     rollout_id_from_request,
+    set_log_enabled,
     set_rollout_id,
 )
 from resources_servers.browsecomp_advanced_harness.search_cache import SearchCache
@@ -93,6 +95,9 @@ class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
     judge_model_server: Optional[ModelServerRef] = None
     judge_responses_create_params: Optional[NeMoGymResponseCreateParamsNonStreaming] = None
     debug: bool = False
+    # Per-call lines in the driver log: every search, browse, cache lookup, shell command and judge
+    # call, and the per-rollout phase and cache summaries. Errors and fatal lines print regardless.
+    log_tool_calls: bool = True
     dump_session_id_to_metrics_on_exit: bool = False
     # Per-CALL phase lines for every cache get and put. Off by default: cache gets
     # run several per turn, so this is the one knob that can multiply driver-log size.
@@ -426,10 +431,7 @@ def _filter_results(result_list: List[dict], fn: str, provider: str) -> tuple[Li
     rather than silent."""
     kept, dropped = _drop_contaminated(result_list)
     if dropped:
-        print(
-            f"[browsecomp][contamination] fn={fn} provider={provider} dropped={dropped} kept={len(kept)}",
-            flush=True,
-        )
+        _log_call(f"[browsecomp][contamination] fn={fn} provider={provider} dropped={dropped} kept={len(kept)}")
     return kept, dropped
 
 
@@ -438,6 +440,12 @@ def _sum_provider_retry_counts(metrics: "TavilySearchMetrics") -> tuple:
     n429 = sum(c.num_429_retries for c in metrics.async_tavily_calls)
     n_other = sum(c.num_other_retries for c in metrics.async_tavily_calls)
     return n429, n_other
+
+
+def _log_call(message: str) -> None:
+    """A per-call driver-log line, printed only with log_tool_calls."""
+    if log_enabled():
+        print(message, flush=True)
 
 
 def _abort_on_invalid_api_key(provider: str, status: int, body: str) -> None:
@@ -739,6 +747,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
     JUDGE_MAX_ATTEMPTS: ClassVar[int] = 15
 
     def model_post_init(self, __context) -> None:
+        set_log_enabled(self.config.log_tool_calls)
         # Tavily clients (built only when a Tavily key is configured).
         tavily_api_keys = self.config.tavily_api_key
         if isinstance(tavily_api_keys, str):
@@ -902,7 +911,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         """
         blocked = _bash_denylisted(keystrokes) or _bash_allowlisted(keystrokes)
         if blocked is not None:
-            print(f"[browsecomp][bash][blocked] {blocked}: {(keystrokes or '')[:160]!r}", flush=True)
+            _log_call(f"[browsecomp][bash][blocked] {blocked}: {(keystrokes or '')[:160]!r}")
             return f"[blocked: {blocked}]\n[exit_code=-3]"
 
         loop = asyncio.get_running_loop()
@@ -919,7 +928,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                     timeout=duration + 30,
                 )
         except asyncio.TimeoutError:
-            print(f"[browsecomp][bash] timeout: {(keystrokes or '')[:160]!r}", flush=True)
+            _log_call(f"[browsecomp][bash] timeout: {(keystrokes or '')[:160]!r}")
             return f"[command timed out after {duration:.0f}s]\n[exit_code=-1]"
         except Exception as e:  # pragma: no cover - defensive
             print(f"🚨 [browsecomp][bash] pocketshell error: {e!r}", flush=True)
@@ -1062,13 +1071,12 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             chars_returned=len(results_string),
         )
         if returned < n_offered:
-            print(
+            _log_call(
                 f"[browsecomp][search_truncated][exa] query={query[:120]!r} "
-                f"returned={returned}/{n_offered} budget={max_length}",
-                flush=True,
+                f"returned={returned}/{n_offered} budget={max_length}"
             )
         elif not n_offered:
-            print(f"[browsecomp][search_empty][exa] query={query[:120]!r} provider returned 0 results", flush=True)
+            _log_call(f"[browsecomp][search_empty][exa] query={query[:120]!r} provider returned 0 results")
         return results_string
 
     def _format_exa_search(
@@ -1096,7 +1104,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         if answer is not None and not isinstance(answer, str):
             answer = json.dumps(answer, ensure_ascii=False)
         if answer and _is_contaminated(answer):
-            print("[browsecomp][contamination] fn=search provider=exa dropped=deep_answer", flush=True)
+            _log_call("[browsecomp][contamination] fn=search provider=exa dropped=deep_answer")
             answer = None
         if answer:
             cap = int(max_length * _EXA_DEEP_ANSWER_MAX_FRACTION)
@@ -1141,7 +1149,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             return self._format_search_hit(provider, query, result_list, max_length, None)
 
         client = self._select_tavily_client()
-        print(f"[tavily_call_begin function=search query={query[:80]!r}]", flush=True)
+        _log_call(f"[tavily_call_begin function=search query={query[:80]!r}]")
         call_start = time()
         try:
             results = await client.search(
@@ -1164,9 +1172,8 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             raise
 
         self._record_call(metrics, "search", "tavily", "success", call_start)
-        print(
+        _log_call(
             f"[tavily_call function=search status=success duration_s={time() - call_start:.2f} query={query[:80]!r} n_results={len(results.get('results', []))}]",
-            flush=True,
         )
         await self._cache_put_search(query, results.get("results", []), "tavily")
         postprocessed_results = self._postprocess_search_results(query, results, max_length)
@@ -1312,9 +1319,8 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         result_list: List[dict] = []
         if fetch_urls and self.config.search_provider == "exa":
             exa_client = self._select_exa_client()
-            print(
+            _log_call(
                 f"[exa_call_begin function=browse n_urls={len(fetch_urls)} goal={(body.goal or '')[:80]!r}]",
-                flush=True,
             )
             try:
                 raw = await exa_client.get_contents(urls=fetch_urls, max_characters=max_per_url_length)
@@ -1328,9 +1334,8 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             ]
         elif fetch_urls:
             async_tavily_client = self._select_tavily_client()
-            print(
+            _log_call(
                 f"[tavily_call_begin function=extract n_urls={len(fetch_urls)} goal={(body.goal or '')[:80]!r}]",
-                flush=True,
             )
             try:
                 # NOTE: do NOT pass query/goal — the harness extracts the full page content.
@@ -1343,9 +1348,8 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 print(f"[browsecomp][tool_fail][tavily_extract] urls={fetch_urls} error={e}", flush=True)
                 return BrowseResponse(results_string=f"Failed to extract content: {e}")
             self._record_call(metrics, "browse", "tavily", "success", start_time)
-            print(
+            _log_call(
                 f"[tavily_call function=extract status=success duration_s={time() - start_time:.2f} n_urls={len(fetch_urls)} n_results={len(results.get('results', []))}]",
-                flush=True,
             )
             result_list = results.get("results", [])
 
@@ -1432,11 +1436,10 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         # /verify is the end of a rollout: release its cache phase totals (else they
         # leak for the process life) and log the server-lifetime cache hit rates.
         if self._search_cache.enabled:
-            print(
+            _log_call(
                 f"[browsecomp][phases] rid={rid} t={time():.3f} {format_phase_totals(pop_phase_totals(rid))}",
-                flush=True,
             )
-            print(f"[cache] {self._search_cache.summary_str()}", flush=True)
+            _log_call(f"[cache] {self._search_cache.summary_str()}")
 
         # terminal mode: clean up this session's disk workspace
         if self.config.workspace == "per_session":
@@ -1527,9 +1530,8 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             # Judge samples at temperature 1.0 on every attempt; parse-error retries simply
             # re-sample at 1.0 (which already varies the output — no need to escalate from 0.0).
             judge_create_params.temperature = 1.0
-            print(
+            _log_call(
                 f"[judge_call_begin attempt={attempt + 1}/{self.JUDGE_MAX_ATTEMPTS} temp=1.0]",
-                flush=True,
             )
             try:
                 judge_response, text = await self._call_judge(judge_create_params)
@@ -1545,9 +1547,8 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
             is_correct, extracted, parsed_ok = self._parse_judge(text)
             if parsed_ok:
-                print(
+                _log_call(
                     f"[judge_call attempt={attempt + 1} status=success duration_s={time() - judge_call_start:.2f} is_correct={is_correct}]",
-                    flush=True,
                 )
                 return (
                     JudgeEvaluation(
