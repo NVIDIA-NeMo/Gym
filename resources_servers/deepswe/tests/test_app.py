@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -9,7 +10,16 @@ from pytest import MonkeyPatch
 
 import resources_servers.deepswe.app as app_module
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.sandbox import SandboxResources
+from nemo_gym.failure_kinds import PROVIDER_OOM_KILLED
+from nemo_gym.rollout_observability import NG_AGENT_SANDBOX_OBSERVATION_KEY, SandboxObservation
+from nemo_gym.sandbox import (
+    SandboxBackendUnreachableError,
+    SandboxCommandStatusTimeoutError,
+    SandboxHandle,
+    SandboxIOTimeoutError,
+    SandboxOOMKilledError,
+    SandboxResources,
+)
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.deepswe.app import (
     DeepSWEResourcesServer,
@@ -30,6 +40,7 @@ def _config(
     tasks_dir: Path,
     *,
     golden: bool = True,
+    score_agent_sandbox_oom_as_zero: bool = False,
 ) -> DeepSWEResourcesServerConfig:
     return DeepSWEResourcesServerConfig(
         host="0.0.0.0",
@@ -39,6 +50,7 @@ def _config(
         tasks_dir=tasks_dir,
         expected_task_count=1,
         is_verifying_golden_patch=golden,
+        score_agent_sandbox_oom_as_zero=score_agent_sandbox_oom_as_zero,
         sandbox_provider="test",
         sandbox_config={},
     )
@@ -61,6 +73,21 @@ def _request() -> dict:
             "tools": [],
         },
     }
+
+
+def _agent_oom_request(*, sandbox_id: str = "agent-sandbox") -> dict:
+    observation = SandboxObservation(
+        role="agent",
+        provider="opensandbox",
+        sandbox_id=sandbox_id,
+        phase="agent_execution",
+        outcome="oom",
+        error_type="SandboxOOMKilledError",
+        error_message=f"OpenSandbox status: reason='OOMKilled'; sandbox_id={sandbox_id!r}",
+    )
+    body = _request()
+    body["response"]["metadata"] = {NG_AGENT_SANDBOX_OBSERVATION_KEY: observation.model_dump_json()}
+    return body
 
 
 def test_model_endpoint_is_the_only_added_egress_target(
@@ -176,6 +203,29 @@ async def test_create_sandbox_allows_resource_multiplier_and_explicit_overrides(
     assert spec.resources == SandboxResources(cpu=3, memory_mib=20000, disk_gib=20)
 
 
+@pytest.mark.parametrize("result", [(1, None), (0, "timeout")])
+async def test_agent_git_setup_must_complete_before_sandbox_is_seeded(
+    task_assets: Path, monkeypatch: MonkeyPatch, result: tuple[int, str | None]
+) -> None:
+    server = DeepSWEResourcesServer(config=_config(task_assets), server_client=MagicMock(spec=ServerClient))
+    sandbox = AsyncMock()
+    sandbox.exec.return_value = SimpleNamespace(return_code=result[0], error_type=result[1], stderr="git unavailable")
+    monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: MagicMock())
+    monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *_: {})
+    monkeypatch.setattr(app_module, "AsyncSandbox", MagicMock(return_value=sandbox))
+
+    await server._create_sandbox(server._task_store.get("example-task"), phase="agent")
+    setup = sandbox.start_with_setup.await_args.args[1]
+    with pytest.raises(RuntimeError, match="DeepSWE agent git setup failed"):
+        await setup(sandbox)
+
+    command = sandbox.exec.await_args.args[0]
+    assert "git config --global user.email" in command
+    assert "git config --global --add safe.directory /app" in command
+    assert "|| true" not in command
+
+
 async def test_golden_verify_passes_structured_result(
     task_assets: Path, tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
@@ -259,13 +309,386 @@ async def test_rollout_collects_committed_patch_and_verifies_in_fresh_sandbox(
     assert server._agent_sessions == {}
 
 
+async def test_empty_agent_response_can_still_receive_a_completed_verifier_zero(
+    task_assets: Path, monkeypatch: MonkeyPatch
+) -> None:
+    server = DeepSWEResourcesServer(
+        config=_config(task_assets, golden=False), server_client=MagicMock(spec=ServerClient)
+    )
+    agent_sandbox = AsyncMock()
+    agent_sandbox.serialize.return_value = {"sandbox_id": "agent-sandbox"}
+    verifier_sandbox = AsyncMock()
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(side_effect=[agent_sandbox, verifier_sandbox]))
+    collect_model_patch = AsyncMock(return_value=b"")
+    run_verifier = AsyncMock(return_value=VerifierResult(evaluation_completed=True, reward=0.0, verifier_exit_code=0))
+    monkeypatch.setattr(server, "_collect_model_patch", collect_model_patch)
+    monkeypatch.setattr(server, "_run_verifier", run_verifier)
+    request = MagicMock()
+    request.session = {SESSION_ID_KEY: "agent-timeout"}
+
+    await server.seed_session(request, DeepSWESeedSessionRequest.model_validate(_request()))
+    response = await server.verify(request, DeepSWEVerifyRequest.model_validate(_request()))
+
+    assert response.reward == 0.0
+    assert response.evaluation_completed is True
+    assert response.mask_sample is False
+    assert response.failure_kind is None
+    collect_model_patch.assert_awaited_once()
+    run_verifier.assert_awaited_once()
+    agent_sandbox.stop.assert_awaited_once()
+    verifier_sandbox.stop.assert_awaited_once()
+
+
+async def test_confirmed_agent_sandbox_oom_is_an_unmasked_zero_without_a_verifier(
+    task_assets: Path, monkeypatch: MonkeyPatch
+) -> None:
+    server = DeepSWEResourcesServer(
+        config=_config(task_assets, golden=False, score_agent_sandbox_oom_as_zero=True),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    agent_sandbox = AsyncMock()
+    agent_sandbox.serialize.return_value = {"sandbox_id": "agent-sandbox"}
+    create_sandbox = AsyncMock(return_value=agent_sandbox)
+    collect_model_patch = AsyncMock()
+    run_verifier = AsyncMock()
+    monkeypatch.setattr(server, "_create_sandbox", create_sandbox)
+    monkeypatch.setattr(server, "_collect_model_patch", collect_model_patch)
+    monkeypatch.setattr(server, "_run_verifier", run_verifier)
+    request = MagicMock()
+    request.session = {SESSION_ID_KEY: "test-session"}
+
+    await server.seed_session(request, DeepSWESeedSessionRequest.model_validate(_request()))
+    response = await server.verify(
+        request,
+        DeepSWEVerifyRequest.model_validate(_agent_oom_request()),
+    )
+
+    assert response.reward == 0.0
+    assert response.mask_sample is False
+    assert response.failure_kind == PROVIDER_OOM_KILLED
+    assert response.response.metadata[NG_AGENT_SANDBOX_OBSERVATION_KEY]
+    assert response.model_patch_bytes == 0
+    assert response.evaluation_completed is False
+    assert "no patch could be collected" in (response.failure_reason or "")
+    assert "sandbox_id='agent-sandbox'" in (response.failure_reason or "")
+    create_sandbox.assert_awaited_once()
+    collect_model_patch.assert_not_awaited()
+    run_verifier.assert_not_awaited()
+    agent_sandbox.stop.assert_awaited_once()
+    assert server._agent_sessions == {}
+
+
+async def test_agent_sandbox_oom_zero_requires_a_seeded_session(task_assets: Path) -> None:
+    server = DeepSWEResourcesServer(
+        config=_config(task_assets, golden=False, score_agent_sandbox_oom_as_zero=True),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    request = MagicMock()
+    request.session = {SESSION_ID_KEY: "missing-session"}
+
+    with pytest.raises(RuntimeError, match="without its seeded DeepSWE session"):
+        await server.verify(request, DeepSWEVerifyRequest.model_validate(_agent_oom_request()))
+
+
+async def test_agent_sandbox_oom_zero_cannot_grade_a_golden_patch(task_assets: Path) -> None:
+    server = DeepSWEResourcesServer(
+        config=_config(task_assets, golden=True, score_agent_sandbox_oom_as_zero=True),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    request = MagicMock()
+    request.session = {SESSION_ID_KEY: "golden"}
+
+    with pytest.raises(ValueError, match="non-golden run"):
+        await server.verify(request, DeepSWEVerifyRequest.model_validate(_agent_oom_request()))
+
+
+async def test_agent_sandbox_oom_zero_requires_benchmark_policy(task_assets: Path) -> None:
+    server = DeepSWEResourcesServer(
+        config=_config(task_assets, golden=False), server_client=MagicMock(spec=ServerClient)
+    )
+    request = MagicMock()
+    request.session = {SESSION_ID_KEY: "test-session"}
+
+    with pytest.raises(ValueError, match="zero scoring is disabled"):
+        await server.verify(request, DeepSWEVerifyRequest.model_validate(_agent_oom_request()))
+
+
+async def test_agent_sandbox_oom_zero_requires_matching_sandbox(task_assets: Path, monkeypatch: MonkeyPatch) -> None:
+    server = DeepSWEResourcesServer(
+        config=_config(task_assets, golden=False, score_agent_sandbox_oom_as_zero=True),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    agent_sandbox = AsyncMock()
+    agent_sandbox.serialize.return_value = {"sandbox_id": "agent-sandbox"}
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=agent_sandbox))
+    collect_model_patch = AsyncMock()
+    monkeypatch.setattr(server, "_collect_model_patch", collect_model_patch)
+    request = MagicMock()
+    request.session = {SESSION_ID_KEY: "test-session"}
+    await server.seed_session(request, DeepSWESeedSessionRequest.model_validate(_request()))
+
+    with pytest.raises(ValueError, match="does not match the seeded"):
+        await server.verify(request, DeepSWEVerifyRequest.model_validate(_agent_oom_request(sandbox_id="other")))
+
+    collect_model_patch.assert_not_awaited()
+    agent_sandbox.stop.assert_awaited_once()
+
+
+@pytest.mark.parametrize("failure_phase", ["patch_collection", "verification"])
+@pytest.mark.parametrize(
+    "failure_type",
+    [SandboxOOMKilledError, SandboxBackendUnreachableError, SandboxCommandStatusTimeoutError, SandboxIOTimeoutError],
+)
+async def test_sandbox_loss_without_agent_execution_proof_fails_instead_of_scoring(
+    task_assets: Path, monkeypatch: MonkeyPatch, failure_phase: str, failure_type: type[Exception]
+) -> None:
+    server = DeepSWEResourcesServer(
+        config=_config(task_assets, golden=False), server_client=MagicMock(spec=ServerClient)
+    )
+    agent_sandbox = AsyncMock()
+    agent_sandbox.serialize.return_value = {"sandbox_id": "agent-sandbox"}
+    verifier_sandbox = AsyncMock()
+    create_sandbox = AsyncMock(side_effect=[agent_sandbox, verifier_sandbox])
+    monkeypatch.setattr(server, "_create_sandbox", create_sandbox)
+    collect_model_patch = AsyncMock(return_value=b"valid patch\n")
+    if failure_phase == "patch_collection":
+        collect_model_patch.side_effect = failure_type("sandbox loss during patch collection")
+    monkeypatch.setattr(server, "_collect_model_patch", collect_model_patch)
+    run_verifier = AsyncMock(side_effect=failure_type("sandbox loss during verification"))
+    monkeypatch.setattr(server, "_run_verifier", run_verifier)
+    request = MagicMock()
+    request.session = {SESSION_ID_KEY: "test-session"}
+
+    await server.seed_session(request, DeepSWESeedSessionRequest.model_validate(_request()))
+    with pytest.raises(failure_type, match="sandbox loss during"):
+        await server.verify(request, DeepSWEVerifyRequest.model_validate(_request()))
+
+    agent_sandbox.stop.assert_awaited_once()
+    assert create_sandbox.await_count == (1 if failure_phase == "patch_collection" else 2)
+    if failure_phase == "verification":
+        verifier_sandbox.stop.assert_awaited_once()
+    else:
+        run_verifier.assert_not_awaited()
+
+
+async def test_verifier_status_timeout_propagates_without_scoring(
+    task_assets: Path, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    server = DeepSWEResourcesServer(
+        config=_config(task_assets, golden=False), server_client=MagicMock(spec=ServerClient)
+    )
+    stage_verifier = AsyncMock()
+    monkeypatch.setattr(server, "_stage_verifier", stage_verifier)
+    task = server._task_store.get("example-task")
+    error = SandboxCommandStatusTimeoutError("command status unavailable after recovery deadline")
+    sandbox = AsyncMock()
+    sandbox.exec.side_effect = error
+
+    with pytest.raises(SandboxCommandStatusTimeoutError) as caught:
+        await server._run_verifier(sandbox, task, b"valid patch\n", tmp_path)
+
+    assert caught.value is error
+    sandbox.exec.assert_awaited_once_with(
+        "bash /tests/test.sh", cwd="/app", timeout_s=task.config.verifier.timeout_sec
+    )
+
+
+async def test_verifier_completed_command_with_log_timeout_remains_ungraded(
+    task_assets: Path, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    from nemo_gym.sandbox.api import AsyncSandbox
+    from nemo_gym.sandbox.providers.opensandbox import provider as opensandbox_provider
+
+    class FakeCommands:
+        def __init__(self) -> None:
+            self.submissions = 0
+            self.status_reads = 0
+            self.log_reads = 0
+
+        async def run(self, command: str, *, opts: dict) -> SimpleNamespace:
+            assert command == "bash /tests/test.sh"
+            assert opts["background"] is True
+            self.submissions += 1
+            return SimpleNamespace(id="verifier-exec")
+
+        async def get_command_status(self, execution_id: str) -> SimpleNamespace:
+            assert execution_id == "verifier-exec"
+            self.status_reads += 1
+            return SimpleNamespace(running=False, exit_code=0, error=None)
+
+        async def get_background_command_logs(self, execution_id: str) -> None:
+            assert execution_id == "verifier-exec"
+            self.log_reads += 1
+            raise TimeoutError("log route timed out")
+
+    monkeypatch.setattr(
+        opensandbox_provider, "_require_opensandbox_sdk", lambda: (object, object, dict, object, object)
+    )
+    provider = opensandbox_provider.OpenSandboxProvider(
+        probe={"command": None}, operations={"background_exec": True, "retries": 0}, diagnostics={"inspect_oom": False}
+    )
+    commands = FakeCommands()
+    handle = SandboxHandle(
+        sandbox_id="verifier-sandbox", provider_name="opensandbox", raw=SimpleNamespace(commands=commands)
+    )
+    sandbox = AsyncSandbox(provider)
+    sandbox._handle = handle
+    sandbox._stopped = False
+    server = DeepSWEResourcesServer(
+        config=_config(task_assets, golden=False), server_client=MagicMock(spec=ServerClient)
+    )
+    monkeypatch.setattr(server, "_stage_verifier", AsyncMock())
+    task = server._task_store.get("example-task")
+
+    with pytest.raises(SandboxIOTimeoutError, match="command logs"):
+        await server._run_verifier(sandbox, task, b"valid patch\n", tmp_path)
+
+    assert commands.submissions == 1
+    assert commands.status_reads == 1
+    assert commands.log_reads == 1
+
+
+async def test_verifier_execution_timeout_remains_a_zero_result(
+    task_assets: Path, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    server = DeepSWEResourcesServer(
+        config=_config(task_assets, golden=False), server_client=MagicMock(spec=ServerClient)
+    )
+    monkeypatch.setattr(server, "_stage_verifier", AsyncMock())
+    task = server._task_store.get("example-task")
+    sandbox = AsyncMock()
+    sandbox.exec.side_effect = TimeoutError("verifier execution deadline reached")
+
+    result = await server._run_verifier(sandbox, task, b"valid patch\n", tmp_path)
+
+    assert result.evaluation_completed is False
+    assert result.reward == 0.0
+    assert result.verifier_error == f"Verifier timed out after {task.config.verifier.timeout_sec:g} seconds"
+    sandbox.exec.assert_awaited_once_with(
+        "bash /tests/test.sh", cwd="/app", timeout_s=task.config.verifier.timeout_sec
+    )
+
+
+@pytest.mark.parametrize("failure", ["verifier_timeout", "missing_reward", "verifier_setup"])
+async def test_non_oom_verifier_failure_never_returns_an_unmasked_main_row(
+    task_assets: Path, monkeypatch: MonkeyPatch, failure: str
+) -> None:
+    server = DeepSWEResourcesServer(
+        config=_config(task_assets, golden=False), server_client=MagicMock(spec=ServerClient)
+    )
+    agent_sandbox = AsyncMock()
+    agent_sandbox.serialize.return_value = {"sandbox_id": "agent-sandbox"}
+    verifier_sandbox = AsyncMock()
+    create_sandbox = AsyncMock(side_effect=[agent_sandbox, verifier_sandbox])
+    if failure == "verifier_setup":
+        create_sandbox.side_effect = [agent_sandbox, RuntimeError("verifier sandbox unavailable")]
+    monkeypatch.setattr(server, "_create_sandbox", create_sandbox)
+    monkeypatch.setattr(server, "_collect_model_patch", AsyncMock(return_value=b"patch"))
+    monkeypatch.setattr(server, "_stage_verifier", AsyncMock())
+    if failure == "verifier_timeout":
+        verifier_sandbox.exec.side_effect = TimeoutError("command deadline")
+    else:
+
+        async def execute(command: str, **_kwargs: object) -> SimpleNamespace:
+            return SimpleNamespace(
+                return_code=0 if command == "bash /tests/test.sh" else 1,
+                error_type=None,
+                stdout="",
+                stderr="",
+            )
+
+        verifier_sandbox.exec.side_effect = execute
+    request = MagicMock()
+    request.session = {SESSION_ID_KEY: "test-session"}
+
+    await server.seed_session(request, DeepSWESeedSessionRequest.model_validate(_request()))
+    with pytest.raises(RuntimeError, match="DeepSWE verification incomplete"):
+        await server.verify(request, DeepSWEVerifyRequest.model_validate(_request()))
+
+    agent_sandbox.stop.assert_awaited_once()
+    if failure != "verifier_setup":
+        verifier_sandbox.stop.assert_awaited_once()
+    assert server._agent_sessions == {}
+
+
+@pytest.mark.parametrize(
+    ("return_code", "error_type", "reward_json", "ctrf_json", "expected_error"),
+    [
+        (0, None, '{"reward": 0}', "{}", None),
+        (0, None, "{}", "{}", "missing its reward field"),
+        (0, None, '{"reward": true}', "{}", "non-binary reward"),
+        (0, None, '{"reward": 2}', "{}", "non-binary reward"),
+        (1, None, '{"reward": 0}', "{}", "Verifier command failed with code 1"),
+        (0, "timeout", '{"reward": 0}', "{}", "error_type='timeout'"),
+        (0, None, '{"reward": 0}', "{", "Invalid verifier ctrf.json"),
+    ],
+)
+async def test_verifier_requires_completed_command_and_valid_artifacts(
+    task_assets: Path,
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+    return_code: int,
+    error_type: str | None,
+    reward_json: str,
+    ctrf_json: str,
+    expected_error: str | None,
+) -> None:
+    server = DeepSWEResourcesServer(
+        config=_config(task_assets, golden=False), server_client=MagicMock(spec=ServerClient)
+    )
+    monkeypatch.setattr(server, "_stage_verifier", AsyncMock())
+    sandbox = AsyncMock()
+
+    async def execute(command: str, **_kwargs: object) -> SimpleNamespace:
+        if command == "bash /tests/test.sh":
+            return SimpleNamespace(return_code=return_code, error_type=error_type, stdout="", stderr="")
+        assert command.startswith("test -f /logs/verifier/")
+        return SimpleNamespace(return_code=0, error_type=None)
+
+    async def download(remote_path: str, local_path: Path) -> None:
+        contents = {"reward.json": reward_json, "ctrf.json": ctrf_json, "run.log": "log"}
+        local_path.write_text(contents[Path(remote_path).name])
+
+    sandbox.exec.side_effect = execute
+    sandbox.download.side_effect = download
+
+    result = await server._run_verifier(sandbox, server._task_store.get("example-task"), b"patch", tmp_path)
+
+    assert result.evaluation_completed is (expected_error is None)
+    assert result.reward == 0.0
+    if expected_error is None:
+        assert result.verifier_exit_code == 0
+        assert result.verifier_error is None
+    else:
+        assert expected_error in (result.verifier_error or "")
+    assert sandbox.download.await_count == 3
+
+
+@pytest.mark.parametrize("status", [(1, None), (124, "timeout"), (2, None)])
+async def test_verifier_artifact_probe_distinguishes_missing_file_from_failure(
+    task_assets: Path, tmp_path: Path, status: tuple[int, str | None]
+) -> None:
+    server = DeepSWEResourcesServer(config=_config(task_assets), server_client=MagicMock(spec=ServerClient))
+    sandbox = AsyncMock()
+    sandbox.exec.return_value = SimpleNamespace(return_code=status[0], error_type=status[1])
+    artifact = tmp_path / "reward.json"
+
+    if status == (1, None):
+        assert await server._download_if_present(sandbox, "/logs/verifier/reward.json", artifact) is False
+    else:
+        with pytest.raises(RuntimeError, match="Could not check DeepSWE verifier artifact"):
+            await server._download_if_present(sandbox, "/logs/verifier/reward.json", artifact)
+
+    sandbox.download.assert_not_awaited()
+
+
 async def test_collect_model_patch_executes_upstream_hook(task_assets: Path) -> None:
     server = DeepSWEResourcesServer(
         config=_config(task_assets, golden=False),
         server_client=MagicMock(spec=ServerClient),
     )
     sandbox = AsyncMock()
-    sandbox.exec.return_value = MagicMock(return_code=0, stdout="", stderr="")
+    sandbox.exec.return_value = SimpleNamespace(return_code=0, error_type=None, stdout="", stderr="")
     expected_patch = b"binary patch\x00bytes"
 
     async def download_patch(remote_path: str, local_path: Path) -> None:
@@ -285,7 +708,7 @@ async def test_collect_model_patch_executes_upstream_hook(task_assets: Path) -> 
     )
 
 
-async def test_rollout_collect_failure_is_structured_and_cleans_up(
+async def test_rollout_collect_failure_does_not_return_a_scored_zero(
     task_assets: Path, tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
     server = DeepSWEResourcesServer(
@@ -301,17 +724,14 @@ async def test_rollout_collect_failure_is_structured_and_cleans_up(
     request.session = {SESSION_ID_KEY: "test-session"}
 
     await server.seed_session(request, DeepSWESeedSessionRequest.model_validate(_request()))
-    response = await server.verify(request, DeepSWEVerifyRequest.model_validate(_request()))
+    with pytest.raises(RuntimeError, match="DeepSWE verification incomplete.*broken git repo"):
+        await server.verify(request, DeepSWEVerifyRequest.model_validate(_request()))
 
-    assert response.reward == 0.0
-    assert response.evaluation_completed is False
-    assert response.verifier_error == "RuntimeError: broken git repo"
-    assert response.model_patch_bytes == 0
     assert create_sandbox.await_count == 1
     agent_sandbox.stop.assert_awaited_once()
 
 
-async def test_rollout_without_seed_returns_incomplete_result(
+async def test_rollout_without_seed_does_not_return_a_scored_zero(
     task_assets: Path, tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
     server = DeepSWEResourcesServer(
@@ -323,11 +743,9 @@ async def test_rollout_without_seed_returns_incomplete_result(
     request = MagicMock()
     request.session = {SESSION_ID_KEY: "missing-session"}
 
-    response = await server.verify(request, DeepSWEVerifyRequest.model_validate(_request()))
+    with pytest.raises(RuntimeError, match="DeepSWE verification incomplete.*No DeepSWE agent sandbox"):
+        await server.verify(request, DeepSWEVerifyRequest.model_validate(_request()))
 
-    assert response.reward == 0.0
-    assert response.evaluation_completed is False
-    assert "No DeepSWE agent sandbox" in (response.verifier_error or "")
     create_sandbox.assert_not_awaited()
 
 

@@ -137,7 +137,7 @@ gym env start \
   --config responses_api_models/vllm_model/configs/vllm_model.yaml
 ```
 
-The provider constructor accepts four optional config sections:
+The provider constructor accepts these optional config sections:
 
 | Section | Purpose |
 | --- | --- |
@@ -145,6 +145,14 @@ The provider constructor accepts four optional config sections:
 | `create` | Sandbox create timeout, retry, image pull policy, and health-check behavior. |
 | `probe` | Post-create command probe used to verify command execution before the sandbox is returned. |
 | `operations` | Retry and timeout behavior for SDK operations after create, including command retries, close timeout, background command polling, and the dedicated `status_poll_timeout_s` budget for background status polls. |
+| `diagnostics` | `inspect_oom` enables a two-second authenticated control-plane inspect after ambiguous backend loss (default `true`). Set it to `false` if the deployment does not support the OpenSandbox 1.1.0 plain-text diagnostics route. |
+
+For every OpenSandbox caller, HTTP 410/502 command backend failures outside background status recovery now raise
+`SandboxBackendUnreachableError` when an OOM cannot be confirmed. Background commands keep polling the same
+execution ID for up to five minutes after status reads fail, then raise `SandboxCommandStatusTimeoutError` if the
+outcome remains unknown. Exhausted command submission, log read, and file transfer request timeouts raise
+`SandboxIOTimeoutError` because their outcomes are unknown. Ambiguous failures may make an additional authenticated inspect request when
+`diagnostics.inspect_oom` is enabled. These changes apply independently of any agent or benchmark OOM scoring option.
 
 ## Image policy and setup commands
 

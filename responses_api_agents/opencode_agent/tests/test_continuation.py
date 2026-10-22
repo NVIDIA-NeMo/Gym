@@ -16,6 +16,8 @@ from fastapi.testclient import TestClient
 from nemo_gym.agent_activation_types import AgentContinuationRequirements
 from nemo_gym.base_responses_api_agent import AGENT_ACTIVATION_HEADER, AgentCloseSessionRequest
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.rollout_observability import NG_AGENT_SANDBOX_OBSERVATION_KEY, SandboxObservation
+from nemo_gym.sandbox import SandboxOOMKilledError
 from responses_api_agents.opencode_agent.continuation import classify_opencode_run
 from responses_api_agents.opencode_agent.sandbox_runner import snapshot
 from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import seed, setup  # noqa: F401
@@ -154,6 +156,30 @@ def roots(observations):
     return [
         r for r in observations["records"] if r["kind"] == "agent_invocation" and r["parent_invocation_id"] is None
     ]
+
+
+def test_confirmed_oom_activation_retains_failure_observation(setup):
+    agent, sandbox = setup
+    agent.config.report_agent_sandbox_oom = True
+    error = SandboxOOMKilledError("Sandbox was OOM-killed", sandbox_id=sandbox.sandbox_id)
+    sandbox.launch.side_effect = error
+
+    with TestClient(agent.setup_webserver()) as client:
+        request = start(client)
+        response = activate(client, 1)
+        assert response.status_code == 200, response.text
+        result = response.json()
+        assert result["status"] == "failed" and result["output"] == []
+        observation = SandboxObservation.model_validate_json(result["metadata"][NG_AGENT_SANDBOX_OBSERVATION_KEY])
+        assert observation.outcome == "oom" and observation.sandbox_id == sandbox.sandbox_id
+        [invocation] = roots(result["_ng_agent_observations"])
+        assert invocation["activation_id"] == 1
+        assert invocation["status"] == "failed" and invocation["error_type"] == "server_error"
+
+        receipt = close(client, request)
+        assert roots(receipt["agent_observations"]) == [invocation]
+        assert observation.model_dump() in receipt["agent_observations"]["records"]
+    sandbox.disconnect.assert_awaited_once()
 
 
 @pytest.mark.parametrize("activation_count", [1, 2])
