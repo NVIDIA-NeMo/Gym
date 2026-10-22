@@ -15,6 +15,7 @@ prepare_script_args:
   include_evidence: true
   dscp: name_or_col_dscp
   dialect: sqlite  # the default; other dialects are selected by `eval.sh --dialect` (see README.md, "SQL dialects")
+  split: dev  # the default; the train split is selected by `eval.sh --split train` (see README.md, "Splits")
 
 # Inherit-from directives isolate this benchmark config from the generic server config.
 birdbench_bird_sql_resources_server:

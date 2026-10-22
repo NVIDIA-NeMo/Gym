@@ -8,6 +8,8 @@ Execution-based text-to-SQL on BIRD dev, bound to the `bird_sql` resource server
   via `compute_subset_metrics(field="difficulty")`
 - **Dialects**: the model writes `sqlite` (default) or `spark` SQL; `eval.sh --dialect` switches
   (see [SQL dialects](#sql-dialects))
+- **Splits**: `dev` (default; the 1534-task benchmark) or `train` (for generating training data);
+  `eval.sh --split` switches (see [Splits](#splits))
 - **Rollouts**: one per task by default (1534). The dataset is never repeated
   (see [Files and row counts](#files-and-row-counts))
 
@@ -104,6 +106,31 @@ How the two dialects differ:
   different result when the gold relies on SQLite-specific behavior (bare `GROUP BY` columns, integer division,
   case-insensitive `LIKE`, loose text/number comparison). `spark_gold_check.py` estimates how many tasks are affected
   (about 8%, 121 of 1534, differ or error when the gold is mechanically transpiled to Spark with ANSI mode on).
+
+## Splits
+
+`eval.sh --split dev|train` (default `dev`) picks which BIRD split's questions and databases are used. It combines
+freely with `--dialect`.
+
+| Split | Questions | Databases | Prepared dataset |
+|---|---|---|---|
+| `dev` (default) | BIRD `dev.json` (1534 tasks) | BIRD dev (≈1.4 GB download) | `data/birdbench_<dialect>_benchmark.jsonl` |
+| `train` | the "uberset" (below), one task per `train.json` row | BIRD train (≈9 GB download) | `data/birdbench_train_<dialect>.jsonl` |
+
+- **The uberset** is BIRD's `train.json` with every row that ReViSQL re-verified
+  ([`bird-verified-train.json`](https://github.com/uiuc-kang-lab/ReViSQL/blob/main/data/bird-verified-train.json))
+  replaced by its verified version, matched by `question_id`. It has the same size as `train.json`. Train rows carry
+  no `difficulty` (it is `null`).
+- **Databases** are downloaded on first use by `ensure_bird_train()` (to `resources_servers/bird_sql/.bird_sql/train/`).
+  To use an already-extracted copy, call `prepare(split="train", train_dir=<dir with train.json and train_databases/>)`.
+- **Corpus cap.** Train databases are multi-GB, so `prepare` scans at most 2000 distinct values per column for BM25
+  retrieval there (`TRAIN_CORPUS_LIMIT_PER_COLUMN`); dev scans everything.
+- **Server.** `eval.sh --split train` sets the `bird_sql` server's `split: train`, which makes it verify against
+  `train_databases`, and (for Spark) gives train its own `spark_warehouse_train/` so it does not mix with dev's.
+- **Never repeated, as for dev.** Use `--num-repeats` for several rollouts per task.
+
+When driving `gym` directly, add `+prepare_script_args.split=train`, `+birdbench_bird_sql_resources_server.resources_servers.bird_sql.split=train`
+and a `datasets` override pointing at the train file (see `eval.sh` for the exact list).
 
 ### Leftover processes
 
