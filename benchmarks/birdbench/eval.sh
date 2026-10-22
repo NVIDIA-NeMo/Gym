@@ -16,7 +16,7 @@
 #   ./benchmarks/birdbench/eval.sh --model <name> [options...]
 #
 # Options (all optional except --model):
-#   --output_dir DIR         Default: benchmarks/birdbench/results/<sanitized model name>
+#   --output_dir DIR         Default: benchmarks/birdbench/results/<split>_<dialect>/<sanitized model name>
 #                              (benchmarks/birdbench/data/ is reserved for input/prepared data)
 #   --max-output-tokens N     Default: 16000
 #   --temperature T            Default: 1.0
@@ -30,18 +30,16 @@
 #                                         birdbench_bird_sql_simple_agent's model_server field --
 #                                         required, same as `gym env start --model-type ...`)
 #   --dialect sqlite|spark                Default: sqlite. The SQL dialect the model writes. Selects the prepared
-#                                           file (data/birdbench_<dialect>_benchmark.jsonl), the prompt
-#                                           (prompts/default.yaml for sqlite, prompts/<dialect>.yaml otherwise), what
+#                                           file (data/birdbench_<dialect>_<split>.jsonl), the prompt
+#                                           (prompts/default_<dialect>.yaml), what
 #                                           `prepare` renders, and the engine the server runs the model's SQL on.
 #                                           `spark` needs a JDK (JAVA_HOME or `java` on PATH) and pyspark + sqlglot in
-#                                           resources_servers/bird_sql/.venv -- see the "SQL dialects" section of
-#                                           README.md. By default the output dir gets a `_<dialect>` suffix for
-#                                           non-sqlite dialects.
+#                                           resources_servers/bird_sql/.venv -- see the "Installation" section of
+#                                           README.md.
 #   --split dev|train                      Default: dev. Which BIRD split's questions and databases to use. `train` is the
 #                                            ReViSQL-verified "uberset" of BIRD train (~9 GB download on first use; see
-#                                            README.md, "Splits") and is meant for generating training data. Files get a
-#                                            `train` infix (data/birdbench_train_<dialect>.jsonl) and the output dir a
-#                                            `_train` suffix. Not gym's own `--split` (that one is fixed to `benchmark`).
+#                                            README.md, "Dialects and splits") and is meant for generating training
+#                                            data. Not gym's own `--split` (that one is fixed to `benchmark`).
 #   --concurrency N                        Default: 8. Caps concurrent in-flight requests
 #                                            (nemo_gym's own retry on 429/502/503/504/520 has no
 #                                            upper bound and no backoff growth -- see
@@ -128,37 +126,29 @@ fi
 
 if [[ -z "${OUTPUT_DIR}" ]]; then
     SAFE_MODEL_NAME="$(echo "${MODEL}" | tr '/: ' '___')"
-    OUTPUT_DIR="benchmarks/birdbench/results/${SAFE_MODEL_NAME}"
-    if [[ "${DIALECT}" != "sqlite" ]]; then
-        OUTPUT_DIR="${OUTPUT_DIR}_${DIALECT}"
-    fi
-    if [[ "${SPLIT}" != "dev" ]]; then
-        OUTPUT_DIR="${OUTPUT_DIR}_${SPLIT}"
-    fi
+    OUTPUT_DIR="benchmarks/birdbench/results/${SPLIT}_${DIALECT}/${SAFE_MODEL_NAME}"
 fi
 # dev + sqlite is config.yaml's own default, so it needs no overrides. Any other dialect or split overrides, for both
 # `gym eval prepare` and `gym eval run`: what `prepare` renders, the engine the server runs, and the dataset
 # (Hydra cannot override one list item, so the whole `datasets` list is replaced; `gym eval prepare` also requires
 # prepare()'s output path to equal the dataset's jsonl_fpath). num_repeats is 1: the dataset is never repeated.
-# (File naming mirrors prepare.output_fpath_for.)
+# (File naming mirrors prepare.output_fpath_for and prepare.prompt_config_fpath_for.)
+PREPARED_JSONL="benchmarks/birdbench/data/birdbench_${DIALECT}_${SPLIT}.jsonl"
+PROMPT_CONFIG="benchmarks/birdbench/prompts/default_${DIALECT}.yaml"
 case "${SPLIT}" in
-    dev) PREPARED_JSONL="benchmarks/birdbench/data/birdbench_${DIALECT}_benchmark.jsonl"; DATASET_NAME="birdbench" ;;
-    train) PREPARED_JSONL="benchmarks/birdbench/data/birdbench_train_${DIALECT}.jsonl"; DATASET_NAME="birdbench_train" ;;
+    dev) DATASET_NAME="birdbench" ;;
+    train) DATASET_NAME="birdbench_train" ;;
     *)
         echo "Unsupported --split '${SPLIT}'; expected dev or train." >&2
         exit 1
         ;;
 esac
-PROMPT_CONFIG="benchmarks/birdbench/prompts/default.yaml"
-if [[ "${DIALECT}" != "sqlite" ]]; then
-    PROMPT_CONFIG="benchmarks/birdbench/prompts/${DIALECT}.yaml"
-fi
 DIALECT_ARGS=()
 case "${DIALECT}" in
     sqlite) ;;
     spark)
         if ! "${JAVA_HOME:+${JAVA_HOME}/bin/}java" -version >/dev/null 2>&1; then
-            echo "--dialect spark needs a JDK: set JAVA_HOME or put java on PATH (see README.md, 'SQL dialects')." >&2
+            echo "--dialect spark needs a JDK: set JAVA_HOME or put java on PATH (see README.md, 'Installation')." >&2
             exit 1
         fi
         ;;

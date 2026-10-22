@@ -109,8 +109,8 @@ class TestPrepareDialect:
         prepared([_entry()])
         prepared([_entry()], dialect="spark")
         assert sorted(p.name for p in (tmp_path / "data").iterdir()) == [
-            "birdbench_spark_benchmark.jsonl",
-            "birdbench_sqlite_benchmark.jsonl",
+            "birdbench_spark_dev.jsonl",
+            "birdbench_sqlite_dev.jsonl",
         ]
 
     def test_output_has_one_row_per_task_never_repeated(self, prepared):
@@ -161,7 +161,7 @@ class TestPrepareSplit:
 
     def test_train_split_writes_train_file_with_null_difficulty_and_caps_corpus(self, train_run):
         path = train_run()
-        assert path.name == "birdbench_train_sqlite.jsonl"
+        assert path.name == "birdbench_sqlite_train.jsonl"
         row = json.loads(path.read_text())
         assert (row["question"], row["difficulty"]) == ("e0\nq0", None)
         assert _FakeDbHandle.instances[0].corpus_limit_per_column == birdbench_prepare.TRAIN_CORPUS_LIMIT_PER_COLUMN
@@ -178,8 +178,8 @@ class TestPrepareSplit:
         with pytest.raises(ValueError, match="Unsupported split"):
             prepared([_entry()], split="test")
 
-    def test_dev_output_name_is_unchanged(self):
-        assert birdbench_prepare.output_fpath_for("sqlite").name == "birdbench_sqlite_benchmark.jsonl"
+    def test_output_name_is_dialect_then_split(self):
+        assert birdbench_prepare.output_fpath_for("sqlite", "dev").name == "birdbench_sqlite_dev.jsonl"
 
 
 class TestCli:
