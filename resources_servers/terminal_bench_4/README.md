@@ -89,7 +89,8 @@ Packages that ship only Dockerfiles leave `docker_image` unset. Supply images th
 - `service`: a template for Compose services that the package builds from a Dockerfile. It
   also accepts `{service}`, the Compose service name.
 - `by_task.<task>.agent|verifier` and `by_task.<task>.services.<service>`: explicit per-task
-  images, which take precedence over the templates.
+  images, which take precedence over the templates. The server refuses to start when a key
+  names a task its manifest lacks.
 
 An image declared by the package always wins. A separate verifier without
 `[verifier.environment]` uses the agent image, as in Harbor. A role with no image fails at
@@ -110,7 +111,8 @@ values:
   that declares no CPUs or memory the agent environment's values. Without it, the provider
   default applies.
 - `environment.verifier_timeout_overrides: {<task>: <seconds>}` replaces a task's
-  `[verifier].timeout_sec`. An applied override is recorded in diagnostics.
+  `[verifier].timeout_sec`. An applied override is recorded in diagnostics. As with
+  `by_task`, a key that names no manifest task stops the server at startup.
 
 For local checks on a workstation, a single-container task can also use Gym's `docker`
 sandbox provider. An offline verifier then runs with `docker run --network none`. EFS logs

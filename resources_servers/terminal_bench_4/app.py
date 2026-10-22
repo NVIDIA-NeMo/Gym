@@ -75,6 +75,15 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         # Task packages are published under the dataset's org, e.g. terminal-bench-science/<task>.
         org = self._manifest["dataset"].split("/")[0]
         self._tasks = {f"{org}/{task['name']}": task for task in self._manifest["tasks"]}
+        # A per-task setting keyed by a misspelled task name would silently apply to nothing.
+        names = {task["name"] for task in self._manifest["tasks"]}
+        environment = self.config.environment
+        for setting, keys in (
+            ("verifier_timeout_overrides", environment.verifier_timeout_overrides),
+            ("task_images.by_task", environment.task_images.by_task),
+        ):
+            if unknown := sorted(set(keys) - names):
+                raise ValueError(f"environment.{setting} names tasks that {manifest_path.name} lacks: {unknown}")
         self._sessions: dict[str, Session] = {}
         self._by_identity: dict[str, str] = {}
         self._slots = asyncio.Semaphore(self.config.max_concurrent_sessions)

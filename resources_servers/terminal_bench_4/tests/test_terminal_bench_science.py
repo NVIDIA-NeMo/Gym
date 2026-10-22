@@ -649,3 +649,23 @@ async def test_finalize_session_runs_the_verifier_with_the_profile_timeout(
             {"operation": "verifier_timeout_override", "package_timeout_sec": package_timeout, "timeout_sec": applied}
         ]
     )
+
+
+@pytest.mark.parametrize(
+    ("override", "setting"),
+    [
+        ({"tbsci_verifier_timeout_overrides": {"finite-free-stamp": 1800}}, "verifier_timeout_overrides"),
+        ({"tbsci_task_images": {"symbolic-regresion": {"agent": "registry.invalid/sr"}}}, "task_images.by_task"),
+    ],
+)
+def test_per_task_settings_must_name_manifest_tasks(tmp_path, monkeypatch, override, setting):
+    monkeypatch.chdir(tmp_path)
+    resources = OmegaConf.to_container(
+        benchmark_config(
+            tbsci_jobs_dir=str(tmp_path / "jobs"), **override
+        ).terminal_bench_science.resources_servers.terminal_bench_4,
+        resolve=True,
+    )
+    config = TerminalBench4Config.model_validate(resources | {"host": "", "port": 0, "name": "terminal_bench_science"})
+    with pytest.raises(ValueError, match=f"environment.{setting} names tasks that manifest.json lacks: \\['"):
+        TerminalBench4ResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
