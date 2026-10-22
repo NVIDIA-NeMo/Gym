@@ -463,6 +463,11 @@ class TestEnv:
         assert _make_agent()._env(tmp_path)["CLINE_NO_AUTO_UPDATE"] == "1"
         assert os.environ["CLINE_NO_AUTO_UPDATE"] == "0"
 
+    def test_config_env_can_reenable_auto_update(self, tmp_path) -> None:
+        # config.env is applied last, like for every other key, so an explicit opt-in still wins.
+        env = _make_agent(env={"CLINE_NO_AUTO_UPDATE": "0"})._env(tmp_path)
+        assert env["CLINE_NO_AUTO_UPDATE"] == "0"
+
     def test_command_permissions_serialized(self, tmp_path) -> None:
         agent = _make_agent(command_permissions={"allow": ["python3 *"], "deny": ["sudo *"]})
         env = agent._env(tmp_path)
