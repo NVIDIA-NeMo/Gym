@@ -19,6 +19,7 @@ import asyncio
 import importlib.util
 import json
 import logging
+import shutil
 import sys
 import tempfile
 import time
@@ -70,7 +71,9 @@ class RnaDesignAgentConfig(BaseResponsesAPIAgentConfig):
     )
     rollout_timeout_s: float = Field(default=3600.0, description="Wall-clock limit for one campaign.")
     max_concurrent_rollouts: int = Field(default=8, description="Worker processes running at once.")
-    work_dir: str = Field(default="", description="Where run directories go. Empty uses a temp dir.")
+    work_dir: str = Field(
+        default="", description="Where run directories go and are kept. Empty uses a temp dir, removed after scoring."
+    )
 
 
 class RnaDesignRunRequest(BaseRunRequest):
@@ -196,10 +199,11 @@ class RnaDesignAgent(SimpleResponsesAPIAgent):
             self.server_client.global_config_dict.get("policy_model_name") or "policy_model"
         )
 
+        run_dir = self._run_dir()
         job = {
             "suite_path": str(suite_path),
             "target_name": target_name,
-            "run_dir": str(self._run_dir()),
+            "run_dir": str(run_dir),
             "arm": self.config.arm,
             "model": model,
             "base_url": endpoint.base_url,
@@ -209,7 +213,11 @@ class RnaDesignAgent(SimpleResponsesAPIAgent):
         }
         started = time.time()
         async with self._sem:
-            out = await self._run_worker(job)
+            try:
+                out = await self._run_worker(job)
+            finally:
+                if not self.config.work_dir:  # a temp run dir is scratch, a configured one is the record
+                    shutil.rmtree(run_dir, ignore_errors=True)
 
         base = {
             "responses_create_params": body.responses_create_params,

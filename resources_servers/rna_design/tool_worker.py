@@ -18,6 +18,7 @@ The rds tools keep process-wide state, so each rollout gets its own process. The
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -38,6 +39,9 @@ class Campaign:
     def __init__(self, suite_path: str, target_name: str, run_dir: str) -> None:
         _, self.campaign = worker.find_campaign(suite_path, target_name)
         register(from_dict(self.campaign.inline_target))
+        # What the native campaign runner sets: where report.rules writes, and the target a tool defaults to.
+        os.environ["RDS_RUN_DIR"] = run_dir
+        os.environ["RDS_TARGET"] = self.campaign.target_name
         self.state = CampaignState(run_dir, self.campaign.scoring.direction)
         self.budget = Budget(Limits(**self.campaign.budget))
         self.rank_by = self.campaign.scoring.primary

@@ -22,7 +22,8 @@ The box must reach the Gym node, so Gym binds the node's address (`use_absolute_
 model through the Gym model server at `$NODE_IP:$PORT`. The default image is public. Any image with Python 3.12+
 and Node.js works.
 
-A rollout where the model was never reached, or where every tool call failed and nothing was designed, is masked.
+A rollout where the model was never reached, where the model endpoint failed partway (Claude Code's
+`API Error: <status>`) and nothing was solved, or where every tool call failed and nothing was designed, is masked.
 
 ## Tests
 

@@ -57,13 +57,20 @@ def _have_eternafold() -> bool:
 needs_eternafold = pytest.mark.skipif(not _have_eternafold(), reason="EternaFold and arnie are not configured")
 
 
-def _client(tmp_path: Path) -> TestClient:
-    from nemo_gym.mcp_auto_exposure import maybe_auto_expose
-
-    config = RnaDesignResourcesServerConfig(
+def _server(tmp_path: Path, **overrides) -> RnaDesignResourcesServer:
+    values = dict(
         host="0.0.0.0", port=8080, entrypoint="", name="rna_design", expose_tools_over_mcp=True, work_dir=str(tmp_path)
     )
-    server = RnaDesignResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    values.update(overrides)
+    return RnaDesignResourcesServer(
+        config=RnaDesignResourcesServerConfig(**values), server_client=MagicMock(spec=ServerClient)
+    )
+
+
+def _client(tmp_path: Path, server: RnaDesignResourcesServer | None = None) -> TestClient:
+    from nemo_gym.mcp_auto_exposure import maybe_auto_expose
+
+    server = server or _server(tmp_path)
     app = server.setup_webserver()
     maybe_auto_expose(server, app)
     return TestClient(app, base_url="http://127.0.0.1:8000")
@@ -79,11 +86,11 @@ def _rpc(client: TestClient, method: str, params: dict | None = None, token: str
     return client.post("/mcp", headers=headers, json=body, follow_redirects=False).json()
 
 
+SEED = {"responses_create_params": {"input": []}, "suite": "rnainvbench_eterna100_v2", "target": TARGET}
+
+
 def _seed(client: TestClient) -> str:
-    seeded = client.post(
-        "/seed_session",
-        json={"responses_create_params": {"input": []}, "suite": "rnainvbench_eterna100_v2", "target": TARGET},
-    )
+    seeded = client.post("/seed_session", json=SEED)
     assert seeded.status_code == 200, seeded.text
     _rpc(
         client,
@@ -99,7 +106,7 @@ def _call(client: TestClient, token: str, name: str, arguments: dict, rid: int) 
     return json.loads(result["content"][0]["text"])
 
 
-def _verify(client: TestClient, usage: dict | None = None) -> dict:
+def _verify(client: TestClient, usage: dict | None = None, last_message: str | None = None) -> dict:
     body = {
         "responses_create_params": {"input": []},
         "response": {
@@ -107,7 +114,17 @@ def _verify(client: TestClient, usage: dict | None = None) -> dict:
             "created_at": 0,
             "model": "m",
             "object": "response",
-            "output": [],
+            "output": [
+                {
+                    "id": "m",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": last_message, "annotations": []}],
+                }
+            ]
+            if last_message
+            else [],
             "parallel_tool_calls": False,
             "tool_choice": "auto",
             "tools": [],
@@ -254,6 +271,62 @@ def test_a_rollout_that_never_reached_the_model_is_masked_not_scored(tmp_path: P
     with _client(tmp_path) as client:
         _seed(client)
         stopped = _verify(client, usage=answered)
+    with _client(tmp_path) as client:
+        _seed(client)
+        # Claude Code's last message after the endpoint failed mid-rollout and its own retries ran out.
+        cut = _verify(
+            client, usage=answered, last_message="<think>\nStart.\n</think>\n\nAPI Error: 503 no live replica"
+        )
     assert unreached["tool_calls"] == 0 and unreached["mask_sample"] is True
     assert unreached["failure_reason"] == "the harness made no model call and no tool call"
     assert stopped["tool_calls"] == 0 and stopped["mask_sample"] is False and stopped["reward"] == 0.0
+    assert cut["mask_sample"] is True and cut["failure_reason"] == "the model endpoint failed during the rollout"
+
+
+def test_a_session_that_never_reached_verify_is_closed_by_the_next(tmp_path: Path) -> None:
+    """A rollout that dies before /verify never closes its worker, so the next seed closes stale ones."""
+    server = _server(tmp_path, session_ttl_s=0.0)
+    with _client(tmp_path, server) as client:
+        assert client.post("/seed_session", json=SEED).status_code == 200
+        (abandoned,) = server.workers.values()
+        client.cookies.clear()  # the next rollout, in a session of its own
+        assert client.post("/seed_session", json=SEED).status_code == 200
+        assert abandoned.proc.returncode is not None
+        assert len(server.workers) == 1 and abandoned not in server.workers.values()
+        _verify(client)
+
+
+def test_an_unknown_suite_starts_no_worker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import resources_servers.rna_design.app as app_module
+
+    spawned = []
+    monkeypatch.setattr(app_module.asyncio, "create_subprocess_exec", lambda *args, **kwargs: spawned.append(args))
+    with _client(tmp_path) as client, pytest.raises(ValueError, match="unknown suite"):
+        client.post("/seed_session", json={**SEED, "suite": "no_such_suite"})
+    assert spawned == []
+
+
+def test_a_temp_run_dir_is_removed_after_scoring(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no work_dir the run directory is scratch. A configured work_dir keeps it as the record."""
+    import tempfile
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "tmp"))
+    (tmp_path / "tmp").mkdir()
+    with _client(tmp_path, _server(tmp_path, work_dir="")) as client:
+        assert client.post("/seed_session", json=SEED).status_code == 200
+        assert len(list((tmp_path / "tmp" / "rna_design").iterdir())) == 1
+        _verify(client)
+    assert list((tmp_path / "tmp" / "rna_design").iterdir()) == []
+    with _client(tmp_path) as client:
+        assert client.post("/seed_session", json=SEED).status_code == 200
+        _verify(client)
+    assert len(list(tmp_path.glob("run_*"))) == 1
+
+
+def test_a_tool_called_without_target_uses_the_campaign(tmp_path: Path) -> None:
+    pytest.importorskip("mcp")
+    with _client(tmp_path) as client:
+        token = _seed(client)
+        _call(client, token, "score_constraints", {"sequences": ["G" * TARGET["length"]]}, rid=2)
+        result = _verify(client)
+    assert result["tool_calls"] == 1 and result["tool_failures"] == 0 and result["pool_size"] == 1

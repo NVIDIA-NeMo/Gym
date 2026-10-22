@@ -21,8 +21,12 @@ same reward as the agent.
 
 import asyncio
 import json
+import logging
+import re
+import shutil
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -41,17 +45,28 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.server_utils import SESSION_ID_KEY
 
 
+LOG = logging.getLogger(__name__)
+
 HERE = Path(__file__).resolve().parent
 AGENT_DIR = HERE.parent.parent / "responses_api_agents" / "rna_design_agent"
 SUITES_DIR = AGENT_DIR / "suites"
+# Claude Code's last message when the model endpoint failed and its own retries ran out.
+API_ERROR = re.compile(r"^API Error: \d{3}\b", re.MULTILINE)
 
 
 class RnaDesignResourcesServerConfig(BaseResourcesServerConfig):
     worker_python: Optional[str] = Field(
         default=None, description="Python with torch for gRNAde, from prepare.py --setup. Unset uses this server's."
     )
-    work_dir: str = Field(default="", description="Where run directories go. Empty uses a temp dir.")
+    work_dir: str = Field(
+        default="", description="Where run directories go and are kept. Empty uses a temp dir, removed after scoring."
+    )
     call_timeout_s: float = Field(default=1800.0, description="Wall-clock limit for one tool call.")
+    session_ttl_s: float = Field(
+        default=7200.0,
+        description="A session not verified within this many seconds is closed when the next one starts, so a "
+        "rollout that died before /verify does not leave its worker running.",
+    )
 
 
 class RnaDesignSeedSessionRequest(BaseSeedSessionRequest):
@@ -87,8 +102,9 @@ class ToolWorker:
     worker still runs it, so the next request skips that late reply instead of taking it as its own.
     """
 
-    def __init__(self, proc: asyncio.subprocess.Process, timeout_s: float) -> None:
+    def __init__(self, proc: asyncio.subprocess.Process, timeout_s: float, scratch: Optional[Path] = None) -> None:
         self.proc, self.timeout_s, self.lock, self.next_id = proc, timeout_s, asyncio.Lock(), 0
+        self.scratch, self.started = scratch, time.monotonic()  # scratch is removed on close
 
     async def ask(self, request: dict) -> dict:
         async with self.lock:
@@ -107,6 +123,8 @@ class ToolWorker:
         if self.proc.returncode is None:
             self.proc.kill()
             await self.proc.wait()
+        if self.scratch:
+            shutil.rmtree(self.scratch, ignore_errors=True)
 
 
 def _tool_specs() -> list[tuple[str, str, dict]]:
@@ -167,8 +185,20 @@ class RnaDesignResourcesServer(SimpleResourcesServer):
 
     async def seed_session(self, request: Request, body: RnaDesignSeedSessionRequest) -> BaseSeedSessionResponse:
         session_id = request.session[SESSION_ID_KEY]
+        suite_path = self._suite_path(body.suite)  # before any process starts, so a bad row leaves nothing running
+        # A rollout that fails before /verify never closes its session. Close it on a re-seed, or once it is stale.
+        now = time.monotonic()
+        stale = [
+            sid for sid, w in self.workers.items() if sid == session_id or now - w.started > self.config.session_ttl_s
+        ]
+        for sid in stale:
+            if worker := self.workers.pop(sid, None):
+                await worker.close()
+        if stale:
+            LOG.warning("closed %d rna_design session(s) that never reached /verify", len(stale))
         base = Path(self.config.work_dir) if self.config.work_dir else Path(tempfile.gettempdir()) / "rna_design"
         base.mkdir(parents=True, exist_ok=True)
+        run_dir = Path(tempfile.mkdtemp(prefix="run_", dir=base))
         proc = await asyncio.create_subprocess_exec(
             self.config.worker_python or sys.executable,
             "-I",
@@ -177,13 +207,13 @@ class RnaDesignResourcesServer(SimpleResourcesServer):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
-        worker = ToolWorker(proc, self.config.call_timeout_s)
+        worker = ToolWorker(proc, self.config.call_timeout_s, scratch=None if self.config.work_dir else run_dir)
         opened = await worker.ask(
             {
                 "op": "open",
-                "suite_path": str(self._suite_path(body.suite)),
+                "suite_path": str(suite_path),
                 "target_name": str(body.target.get("name", "")),
-                "run_dir": tempfile.mkdtemp(prefix="run_", dir=base),
+                "run_dir": str(run_dir),
             }
         )
         if not opened["ok"]:
@@ -236,9 +266,14 @@ class RnaDesignResourcesServer(SimpleResourcesServer):
             )
         result = reply["result"]
         usage = body.response.usage
+        last = next((item for item in reversed(body.response.output) if getattr(item, "type", "") == "message"), None)
+        last_text = "".join(getattr(part, "text", "") for part in getattr(last, "content", None) or [])
         if result["tool_calls"] == 0 and not (usage and usage.input_tokens):
             # The model was never reached (a dead or wrong endpoint), so this is no measurement of it.
             failure = "the harness made no model call and no tool call"
+        elif not result["solved"] and API_ERROR.search(last_text):
+            # The endpoint failed partway, so an unsolved pool says nothing about the model. A solved one still counts.
+            failure = "the model endpoint failed during the rollout"
         elif result["tool_calls"] > 0 and result["tool_failures"] == result["tool_calls"] and not result["pool_size"]:
             # Every tool call raised and nothing was designed, so the tools never worked. Same rule as the agent.
             failure = "every tool call failed and no design was produced"

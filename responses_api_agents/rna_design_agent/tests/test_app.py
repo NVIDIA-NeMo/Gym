@@ -323,6 +323,18 @@ class TestRun:
         assert out.failure_reason
 
     @pytest.mark.asyncio
+    async def test_a_temp_run_dir_is_removed_after_the_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With no work_dir the run directory is scratch, removed even when the run is cut short."""
+        import tempfile
+
+        monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+        agent = _agent(tmp_path, work_dir="", rollout_timeout_s=0.05)
+        await agent.run(MagicMock(cookies={}), _request("rnainvbench_eterna100_v1", "eterna100_v1_57"))
+        assert list((tmp_path / "rna_design_agent").iterdir()) == []
+
+    @pytest.mark.asyncio
     async def test_a_timeout_is_masked_with_its_own_kind(self, tmp_path: Path) -> None:
         agent = _agent(tmp_path, rollout_timeout_s=0.05)
         out = await agent.run(MagicMock(cookies={}), _request("rnainvbench_eterna100_v1", "eterna100_v1_57"))
