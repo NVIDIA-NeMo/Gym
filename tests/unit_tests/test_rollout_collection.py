@@ -273,6 +273,68 @@ class TestLoadsJsonlLine:
 
         assert _trajectory_identity(row) == ("task-logical", "rollout-logical")
 
+    @pytest.mark.parametrize(
+        ("indices", "rollout_id"),
+        [
+            ({ROLLOUT_INDEX_KEY_NAME: 0}, "7-0"),
+            ({ROLLOUT_INDEX_KEY_NAME: 1}, "7-1"),
+            ({ROLLOUT_INDEX_KEY_NAME: 1, ATTEMPT_INDEX_KEY_NAME: 2}, "7-1-a2"),
+            ({ROLLOUT_ID_KEY_NAME: "capture-physical", ATTEMPT_INDEX_KEY_NAME: 2}, "capture-physical-a2"),
+        ],
+    )
+    def test_materialized_task_identity_retains_producer_turns(self, indices: dict, rollout_id: str) -> None:
+        row = {
+            "task_id": {"taskset": "example:test", "task_id": "task-logical"},
+            "task_input": {},
+            TASK_INDEX_KEY_NAME: 7,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            **indices,
+        }
+        producer = {
+            "task_id": "task-logical",
+            "rollout_id": rollout_id,
+            "turns": [
+                {
+                    "invocation_id": "root",
+                    "task_id": "task-logical",
+                    "rollout_id": rollout_id,
+                    "turn_no": 1,
+                    "timestamp": 1.0,
+                    "step_count": 0,
+                    "answer": "retained decision",
+                }
+            ],
+        }
+
+        trajectory = _build_trajectory_record(row, {"ng_trajectory": producer})
+
+        assert (trajectory.task_id, trajectory.rollout_id) == ("task-logical", rollout_id)
+        assert trajectory.turns[0].model_dump(include=set(producer["turns"][0])) == producer["turns"][0]
+        assert "producer_trajectory_identity_mismatch" not in {gap.code for gap in trajectory.gaps}
+
+    def test_explicit_trajectory_identity_overrides_materialized_task_identity(self) -> None:
+        row = {
+            "task_id": {"taskset": "example:test", "task_id": "task-logical"},
+            "task_input": {},
+            TASK_INDEX_KEY_NAME: 7,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            "trajectory_identity": {"task_id": "override-task", "rollout_id": "override-rollout"},
+        }
+        assert _trajectory_identity(row) == ("override-task", "override-rollout")
+
+    @pytest.mark.parametrize(
+        ("fields", "task_id"),
+        [
+            ({"task_id": "task", "problem_id": "problem", "instance_id": "instance"}, "task"),
+            ({"problem_id": "problem", "instance_id": "instance"}, "problem"),
+            ({"instance_id": "instance"}, "instance"),
+            ({}, "7"),
+        ],
+    )
+    def test_flat_trajectory_identity_precedence(self, fields: dict, task_id: str) -> None:
+        row = {TASK_INDEX_KEY_NAME: 7, ROLLOUT_INDEX_KEY_NAME: 0, **fields}
+        assert _trajectory_identity(row) == (task_id, "7-0")
+
     def test_malformed_line_raises_config_error_with_location(self) -> None:
         with pytest.raises(ConfigError, match=r"Malformed JSON in 'f.jsonl' at line 3"):
             loads_jsonl_line("{not json", "f.jsonl", 3)
