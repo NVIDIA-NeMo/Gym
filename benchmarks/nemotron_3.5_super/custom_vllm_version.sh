@@ -164,9 +164,10 @@ echo "Output ${OUT_SQSH}"
 
 if ! srun \
     --account="${SLURM_ACCOUNT}" \
+    --partition="${SLURM_PARTITION:-batch}" \
     --job-name=super-vl-evals-v0271 \
-    --nodes=1 --ntasks=1 --segment=1 \
-    --gpus-per-node=4 --mem=0 \
+    --nodes=1 --ntasks=1 \
+    --gpus-per-node=4 \
     --time="${SLURM_TIME:-01:00:00}" \
     --container-image="${BASE_IMAGE}" \
     --container-mounts="${MOUNTS}" \
