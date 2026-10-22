@@ -16,6 +16,8 @@ import asyncio
 import json
 import logging
 import math
+import os
+import shutil
 import tempfile
 from collections.abc import Mapping
 from dataclasses import replace
@@ -23,16 +25,19 @@ from pathlib import Path
 from typing import Any, Awaitable
 
 import yaml
+from fastapi import HTTPException
 
 from environment_servers.harbor.session import _task_sandbox_env, resolve_env_templates
 from environment_servers.harbor.users import _creation_user
 from environment_servers.harbor.verifier import _verifier_image, _verifier_key
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox, AsyncSandboxCompose, SandboxSpec, clamp_resource_requests
+from nemo_gym.sandbox.agent_tools import sandbox_server_url
 from nemo_gym.sandbox.compose_config import adapt_non_root_sidecars, opensandbox_shm_labels, resolve_compose
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.providers.base import ORPHAN_REAP_TIMEOUT_S
 from nemo_gym.sandbox.utils import cpu_cap_env
+from nemo_gym.server_utils import apply_rollout_prefix
 from nemo_gym.tasks.harbor import HarborTask
 from nemo_gym.tasks.harbor.errors import HarborTaskError
 from nemo_gym.tasks.harbor.image_configs import (
@@ -255,11 +260,37 @@ class HarborSandboxMixin:
             )
         return json.loads(path.read_text())
 
-    def _compose_document(self, task: HarborTask) -> dict[str, Any]:
+    def _compose_variable_values(self, episode_key: str) -> dict[str, str]:
+        """The deployment's ``compose_variables`` resolved for one episode.
+
+        A ``model_server`` value is that server's sandbox-reachable root URL with the episode's rollout prefix
+        (no training-capture segment), so a sidecar's model calls are kept with the rollout's evaluation
+        capture and never become training tokens. A missing environment variable or an unreachable model
+        server is a configuration error (422).
+        """
+        values: dict[str, str] = {}
+        for name, source in self.config.compose_variables.items():
+            if source.value is not None:
+                values[name] = source.value
+            elif source.env is not None:
+                if source.env not in os.environ:
+                    raise HTTPException(422, f"compose_variables.{name}: environment variable {source.env!r} is unset")
+                values[name] = os.environ[source.env]
+            else:
+                try:
+                    base_url = sandbox_server_url(source.model_server, require_reachable=True)
+                except Exception as exc:
+                    raise HTTPException(422, f"compose_variables.{name}: {type(exc).__name__}: {exc}") from exc
+                values[name] = apply_rollout_prefix(base_url, episode_key)
+        return values
+
+    def _compose_document(
+        self, task: HarborTask, deployment_variables: Mapping[str, str] | None = None
+    ) -> dict[str, Any]:
         """The published overlay resolved against recorded image metadata, ready for the Compose adapter."""
         image_configs = self._compose_image_configs(task)
-        # The same reader prepare used: env_file inlined and ${VAR} resolved from the task, not the process.
-        document = load_compose_document(task)
+        # The same reader prepare used, plus the deployment's compose_variables for this episode.
+        document = load_compose_document(task, deployment_variables=deployment_variables)
         # The sandbox has no pull step to configure, so ``pull_policy`` is dropped from every service. Prepare
         # ran the adapter's field check on this same document (``nemo_gym.tasks.harbor.cli``).
         document = without_pull_policy(document)
@@ -315,9 +346,24 @@ class HarborSandboxMixin:
             pending.add_done_callback(forget_failed)
         return pending.result() if pending.done() else await asyncio.shield(pending)
 
+    def _write_episode_compose_document(self, task: HarborTask, episode_key: str) -> tuple[dict[str, Any], Path]:
+        """The document with this episode's ``compose_variables``, in a private folder (they may be credentials)."""
+        document = self._compose_document(task, self._compose_variable_values(episode_key))
+        path = Path(tempfile.mkdtemp(prefix="nemo-gym-compose-")) / "compose.yaml"
+        path.write_text(yaml.safe_dump(document, sort_keys=False))
+        return document, path
+
     async def _create_compose(self, task: HarborTask, episode_key: str) -> AsyncSandboxCompose:
-        """Start the task's Compose group; the ``main`` service is the agent's sandbox."""
-        document, path = await self._compose_document_for(task)
+        """Start the task's Compose group; the ``main`` service is the agent's sandbox.
+
+        With ``compose_variables`` the document differs per episode (a model server's URL carries the rollout
+        prefix), so it is resolved for this episode and its private folder is removed once the group starts.
+        """
+        private = bool(self.config.compose_variables)
+        if private:
+            document, path = await asyncio.to_thread(self._write_episode_compose_document, task, episode_key)
+        else:
+            document, path = await self._compose_document_for(task)
         # An overlay task's main service starts without the task workdir, as its single sandbox would (see
         # `_create_sandbox_within_deadline`); the sidecars derive from it and start in their images' own.
         main_spec = self._sandbox_spec(task, None if task.overlay else task.workdir)
@@ -348,7 +394,11 @@ class HarborSandboxMixin:
         )
         # Ownership starts before start(): a group that fails half-way is still stopped whole.
         self._sandboxes[episode_key] = compose
-        await compose.start()
+        try:
+            await compose.start()
+        finally:
+            if private:
+                shutil.rmtree(path.parent, ignore_errors=True)
         return compose
 
     async def _create_verifier_sandbox(self, task: HarborTask, *, episode_key: str | None = None) -> AsyncSandbox:

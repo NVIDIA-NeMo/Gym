@@ -49,9 +49,9 @@ file is third-party content run on the build host, so it is checked first (:func
 interpolated against the build's own environment the way Compose interpolates it (``environment/.env``
 included, its values expanded as Compose's dotenv reader expands them), so a refused value
 cannot hide behind ``${X:-host}``: build secrets, ssh, extra contexts and hosts, host networking, cache
-credentials and any context or Dockerfile outside ``environment/`` are refused, and so is a sidecar with a
-``build:`` section, since no Gym provider starts a locally built sidecar (the loader records sidecars from
-their ``image:``). At seed the loader runs the task from the recorded image, so ``main``'s ``build:`` and
+credentials and any context or Dockerfile outside ``environment/`` are refused. A sidecar with a ``build:``
+section is built on its own, from a context inside ``environment/`` and its ``Dockerfile``, and its recorded
+image stands in for the section. At seed the loader runs the task from the recorded image, so ``main``'s ``build:`` and
 ``pull_policy`` in the task file are dropped there (``nemo_gym.tasks.harbor.image_configs.without_main_build``).
 ``docker build`` is never called. Harbor serialises concurrent builds of one environment with an
 in-process lock; prepare builds each distinct context once, sequentially, so no lock is needed here.
@@ -98,6 +98,7 @@ def build_images(
     builder: ImageBuilder,
     select: Callable[[str], bool] | None = None,
     log: Callable[[str], None] = print,
+    force: bool = False,
 ) -> list[BuildResult]:
     """Build and record every context under ``folder`` that needs it and has no usable record.
 
@@ -105,12 +106,13 @@ def build_images(
     and of the requested platform. Otherwise it is rebuilt and its record replaced, and the reason
     is logged. A context is keyed by its content hash, so a changed build context is a new build;
     deleting a context's entry from ``built-images.json`` forces one for an unchanged context.
+    ``force`` also builds the Dockerfiles of tasks that declare an image (see :func:`plan_builds`).
     Returns the images built by this call. Raises :class:`BuildError` on the first failure, after
     recording whatever was built before it.
     """
     folder = Path(folder).resolve()
     parent = folder.parent if is_task_folder(folder) else folder
-    plan = plan_builds(folder, select=select)
+    plan = plan_builds(folder, select=select, force=force)
     if not plan:
         return []
     recorded = read_built_images(parent)

@@ -29,6 +29,7 @@ from nemo_gym.tasks.harbor.image_configs import (
     without_main_build,
     without_pull_policy,
     without_restated_main_build,
+    without_sidecar_builds,
 )
 from nemo_gym.tasks.harbor.records import read_built_images, read_image_configs
 from nemo_gym.tasks.harbor.task import HarborTask, is_task_folder
@@ -44,9 +45,9 @@ def unsupported_compose_fields_error(task: HarborTask) -> HarborTaskError | None
     ``_compose_document``): interpolated and ``env_file``-inlined by the loader, ``pull_policy`` dropped from
     every service, ``main``'s ``build:`` dropped when the task runs from its recorded built image or when it
     only restates Harbor's own build of the task's Dockerfile (:func:`without_restated_main_build`; a build
-    key Gym cannot apply without a build is this task's reason). A field no provider starts (``deploy``,
-    ``extra_hosts``, ``platform``, a sidecar ``build:``) is then a per-task reason naming the service and the
-    field, recorded in ``skipped.json`` like a task that does not load, instead of a failure of every episode
+    key Gym cannot apply without a build is this task's reason), and a sidecar's ``build:`` replaced by its
+    recorded image. A field no provider starts (``deploy``, ``extra_hosts``, ``platform``) is then a per-task
+    reason naming the service and the field, recorded in ``skipped.json`` like a task that does not load, instead of a failure of every episode
     at seed.
     """
     path = compose_file(task)
@@ -73,7 +74,8 @@ def refused_before_build(plan: list[BuildPlanEntry]) -> dict[str, HarborTaskErro
     tasks load. This one needs only key names, which interpolation and ``env_file`` inlining do not add, so it
     reads the raw file the way the loader's document will look: ``pull_policy`` dropped, ``main``'s ``build:``
     dropped (the task is about to be built and will run from its recorded image) and ``env_file`` set aside,
-    as the loader folds it into ``environment``. A task it names is neither built nor pushed for an image no
+    as the loader folds it into ``environment``; a sidecar's ``build:`` is dropped too, as its recorded image
+    stands in for it. A task it names is neither built nor pushed for an image no
     episode would start, and a build that would fail for it cannot stop the preparation. A file that does not
     parse is left to the loader to report in its own words.
     """
@@ -88,7 +90,7 @@ def refused_before_build(plan: list[BuildPlanEntry]) -> dict[str, HarborTaskErro
             continue
         if not isinstance(document, dict):
             continue
-        document = without_main_build(without_pull_policy(document))
+        document = without_sidecar_builds(without_main_build(without_pull_policy(document)))
         services = document.get("services")
         if isinstance(services, dict):
             for name, service in services.items():
@@ -115,7 +117,7 @@ def _build_dockerfiles(folder: Path, build: BuildOptions, *, select) -> dict[str
     whose Compose file the sandbox adapter would refuse whatever the build gave (:func:`refused_before_build`)
     is returned the same way, and its context is neither built nor pushed.
     """
-    plan = plan_builds(folder, select=select)
+    plan = plan_builds(folder, select=select, force=build.force)
     refused = {task_id: str(error) for task_id, error in refused_before_build(plan).items()}
     plan = [entry for entry in plan if not any(task_id in refused for task_id in entry.tasks)]
     if not plan:
@@ -182,7 +184,7 @@ def _build_dockerfiles(folder: Path, build: BuildOptions, *, select) -> dict[str
         # One build_images call per context, so a failure stops that context only and the rest still build.
         tasks = set(entry.tasks)
         try:
-            results += build_images(folder, builder=builder, select=lambda name: name in tasks)
+            results += build_images(folder, builder=builder, select=lambda name: name in tasks, force=build.force)
         except BuildError as exc:
             reason = f"Could not build the Dockerfile image(s) for task(s) {', '.join(entry.tasks[:3])}: {exc}"
             failures.update(dict.fromkeys(entry.tasks, reason))

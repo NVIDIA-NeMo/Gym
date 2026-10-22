@@ -40,6 +40,7 @@ from nemo_gym.tasks.harbor.build_plan import (
     Runner,
     default_storage_root,
     detect_tool,
+    sidecar_contexts,
 )
 from nemo_gym.tasks.harbor.build_records import build_inputs_digest, platform_key
 from nemo_gym.tasks.harbor.dockerfile import RECORD_VERSION, dockerfile_has_heredoc
@@ -167,6 +168,7 @@ class ImageBuilder:
 
         ``--format docker`` builds the image format BuildKit builds, so ``SHELL`` applies to the ``RUN`` steps and
         ``HEALTHCHECK`` and ``ONBUILD`` reach the image (the tools' default OCI format has none of the three).
+        docker builds that format already and takes no ``--format``; it reaches this line for a sidecar context.
         ``main``'s ``build`` section of the task's Compose file, which ``docker compose build`` would merge over
         Harbor's template, is applied the same way: its context and Dockerfile, ``--build-arg`` per arg and
         ``--target`` (:func:`main_build_settings`).
@@ -181,6 +183,8 @@ class ImageBuilder:
         if self.tool == "buildah":
             storage = self._storage_flags()
             return ["buildah", *storage, "bud", "--format", IMAGE_FORMAT, "--isolation", "chroot", *options, *tail]
+        if self.tool == "docker":
+            return ["docker", "build", *options, *tail]
         return [self.tool, "build", "--format", IMAGE_FORMAT, *options, *tail]
 
     def compose_build_argv(self, entry: BuildPlanEntry, compose_file: Path) -> list[str]:
@@ -191,7 +195,8 @@ class ImageBuilder:
         ``<project>-<service>``; ``main`` is named explicitly, see :func:`harbor_compose_document`); the
         project directory is the context, so relative paths in the task's Compose file resolve as Harbor
         resolves them; the files are Harbor's build template, then the task's ``docker-compose.yaml`` when
-        it has one, in Harbor's order.
+        it has one, in Harbor's order. When a sidecar has a ``build`` section too, the line names ``main``:
+        each sidecar context is built on its own (see :func:`plan_builds`).
         """
         argv = [
             "docker",
@@ -206,7 +211,8 @@ class ImageBuilder:
         task_compose = task_compose_file(entry.context)
         if task_compose is not None:
             argv += ["-f", str(task_compose)]
-        return [*argv, "build"]
+        sidecars = sidecar_contexts(entry.context.parent) if task_compose is not None else {}
+        return [*argv, "build", *([MAIN_SERVICE] if sidecars else [])]
 
     def push_argv(self, tag: str, digest_file: Path) -> list[str]:
         if self.tool == "buildah":
@@ -294,6 +300,11 @@ class ImageBuilder:
         tag = self.tag_for(entry)
         tasks = ", ".join(entry.tasks[:5])
         what = f"Building {tag} for task(s) {tasks}"
+        if entry.service != MAIN_SERVICE:
+            # A sidecar context builds from its own Dockerfile with every tool; Harbor's compose build file
+            # describes main only.
+            self._check(self.build_argv(entry, tag), f"{what} (Compose service {entry.service})", env=self.tool_env())
+            return self._finish(entry, tag)
         if self.tool == "docker":
             self._ensure_compose_plugin()
         env = compose_build_env(entry, tag, self.platform)
@@ -321,6 +332,11 @@ class ImageBuilder:
             if dockerfile_has_heredoc(dockerfile.read_text()):
                 self._ensure_heredoc_support(dockerfile)
             self._check(self.build_argv(entry, tag), what, env=self.tool_env())
+        return self._finish(entry, tag)
+
+    def _finish(self, entry: BuildPlanEntry, tag: str) -> BuildResult:
+        """Check the built image's platform, push it when configured, and return the result to record."""
+        tasks = ", ".join(entry.tasks[:5])
         record = self.inspect(tag)
         built_platform = f"{record.get('os')}/{record.get('architecture')}"
         if platform_key(built_platform) != platform_key(self.platform):

@@ -6,7 +6,8 @@
 Reads task folders and dataset.toml, decides which Dockerfiles need a build rather than a pull
 or an overlay, finds the sidecars with a build section and the separate verifier's tests
 context, and groups the work by context digest into BuildPlanEntry values with BuildResult as
-the record of one finished build. Tool detection and the storage root live here because the
+the record of one finished build. Of a task's Compose file it reads only the sidecars' build
+sections. Tool detection and the storage root live here because the
 plan names the tool. The module runs no subprocess and reads no Compose variables. It is the
 root of the build modules: build_compose, build_records, build_tools and image_build import
 it and it imports none of them.
@@ -24,6 +25,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+import yaml
+
+from nemo_gym.sandbox.compose_fields import ComposeSubstitutionError
+from nemo_gym.tasks.harbor.compose_variables import substitute_compose
 from nemo_gym.tasks.harbor.dataset_config import apply_dataset_config, read_dataset_config
 from nemo_gym.tasks.harbor.digest import context_digest
 from nemo_gym.tasks.harbor.dockerfile import (
@@ -33,8 +38,9 @@ from nemo_gym.tasks.harbor.dockerfile import (
     parse_dockerfile,
     resolve_dockerfile,
 )
+from nemo_gym.tasks.harbor.image_configs import sidecar_build_contexts
 from nemo_gym.tasks.harbor.records import read_image_configs
-from nemo_gym.tasks.harbor.registry import PLATFORM
+from nemo_gym.tasks.harbor.registry import PLATFORM, ImageConfigError
 from nemo_gym.tasks.harbor.task import DOCKERFILE, TASK_FILE, HarborTaskConfig, is_task_folder
 
 
@@ -50,6 +56,9 @@ HARBOR_COMPOSE_FILE = "docker-compose.yaml"
 
 # The default Dockerfile name of a build context, Compose's and the tools' alike.
 DOCKERFILE_NAME = "Dockerfile"
+
+# The name Harbor's build template and task Compose files give the task's service.
+MAIN_SERVICE = "main"
 
 # The seam tests replace: run one tool command and return its completed process (text mode). ``env`` is
 # the full environment of the command when the caller sets one (the docker backend passes Harbor's
@@ -146,6 +155,8 @@ class BuildPlanEntry:
     compose_build: dict[str, Any] | None = None  # the build section as interpolated, see build_inputs_digest
     target: str | None = None
     dockerfile_inline: bool = False
+    # The Compose service the context builds: ``main`` (the task's Dockerfile) or a sidecar with a ``build:``.
+    service: str = MAIN_SERVICE
 
     @property
     def build_dir(self) -> Path:
@@ -158,16 +169,46 @@ class BuildPlanEntry:
         return self.build_dir / self.dockerfile
 
 
-def plan_builds(folder: Path, *, select: Callable[[str], bool] | None = None) -> list[BuildPlanEntry]:
-    """The distinct build contexts among the tasks under ``folder`` whose Dockerfile needs a build.
+def sidecar_contexts(task_folder: Path) -> dict[str, Path]:
+    """The build context of each sidecar with a ``build:`` in the task's ``docker-compose.yaml``, by service name.
+
+    Only the ``build:`` values are interpolated (``${CONTEXT_DIR}`` is the task's ``environment/``), so a
+    variable elsewhere in the file does not stop the plan. A file or a sidecar build this cannot read is logged
+    and left for the loader to report.
+    """
+    environment_dir = task_folder / "environment"
+    path = environment_dir / HARBOR_COMPOSE_FILE
+    if not path.is_file():
+        return {}
+    try:
+        document = yaml.safe_load(path.read_text()) or {}
+        services = document.get("services") if isinstance(document, dict) else None
+        builds = {
+            str(name): {"build": substitute_compose(service["build"], {"CONTEXT_DIR": str(environment_dir)})}
+            for name, service in (services.items() if isinstance(services, dict) else ())
+            if name != MAIN_SERVICE and isinstance(service, dict) and service.get("build") is not None
+        }
+        return sidecar_build_contexts({"services": builds}, environment_dir)
+    except (yaml.YAMLError, UnicodeDecodeError, ComposeSubstitutionError, ImageConfigError) as exc:
+        LOGGER.warning("%s: sidecar builds not planned: %s", path, exc)
+        return {}
+
+
+def plan_builds(
+    folder: Path, *, select: Callable[[str], bool] | None = None, force: bool = False
+) -> list[BuildPlanEntry]:
+    """The distinct build contexts among the tasks under ``folder`` that need a build.
 
     ``folder`` is a task folder or a folder of task folders; ``select`` limits the scan to the
-    tasks whose folder name it accepts. A task counts when it has ``environment/Dockerfile``,
-    declares no ``[environment].docker_image`` after the dataset's overrides, and the Dockerfile
-    is outside pull and overlay mode. Tasks whose ``task.toml`` does not load are left for the
-    loader to report. Entries are ordered by the first task that uses them. The task's Compose file is
-    not read here: nothing in it changes whether a context is built, and reading it is the build's job
-    (:meth:`ImageBuilder.build`), so a file one task gets wrong fails that task's build and nothing else.
+    tasks whose folder name it accepts. A task's Dockerfile counts when it is outside pull and overlay
+    mode and the task declares no ``[environment].docker_image`` after the dataset's overrides, or
+    whenever ``force`` is set: Harbor's ``--force-build`` builds the Dockerfile instead of pulling the
+    declared image, and the loader then runs the recorded build. Each Compose sidecar with a ``build:``
+    section contributes its own context (``service`` names it, see :func:`sidecar_contexts`). Tasks whose
+    ``task.toml`` does not load are left for the loader to report. Entries are ordered by the first task that
+    uses them. The rest of the task's Compose file is not read here: nothing in it changes whether a context is
+    built, and reading it is the build's job (:meth:`ImageBuilder.build`), so a file one task gets wrong fails
+    that task's build and nothing else.
     """
     folder = Path(folder).resolve()
     single = is_task_folder(folder)
@@ -182,9 +223,16 @@ def plan_builds(folder: Path, *, select: Callable[[str], bool] | None = None) ->
     entries: dict[str, list[str]] = {}
     contexts: dict[str, Path] = {}
     settings: dict[str, tuple[dict[str, str], int | None, int | None]] = {}
+    services: dict[str, str] = {}
     for child in children:
         if not is_task_folder(child) or (select is not None and not select(child.name)):
             continue
+        for service, context in sidecar_contexts(child).items():
+            digest = context_digest(context)
+            entries.setdefault(digest, []).append(child.name)
+            contexts.setdefault(digest, context)
+            settings.setdefault(digest, ({}, None, None))
+            services.setdefault(digest, service)
         dockerfile = child / DOCKERFILE
         if not dockerfile.is_file():
             continue
@@ -194,7 +242,7 @@ def plan_builds(folder: Path, *, select: Callable[[str], bool] | None = None) ->
             text = dockerfile.read_text()
         except (tomllib.TOMLDecodeError, UnicodeDecodeError, ValueError):
             continue
-        if config.environment.docker_image or not needs_build(text, image_configs):
+        if (config.environment.docker_image and not force) or not needs_build(text, image_configs):
             continue
         digest = context_digest(dockerfile.parent)
         environment = config.environment
@@ -219,8 +267,10 @@ def plan_builds(folder: Path, *, select: Callable[[str], bool] | None = None) ->
         entries.setdefault(digest, []).append(child.name)
         contexts.setdefault(digest, dockerfile.parent)
         settings.setdefault(digest, declared)
+        services.setdefault(digest, MAIN_SERVICE)
     return [
-        BuildPlanEntry(digest, contexts[digest], tuple(tasks), *settings[digest]) for digest, tasks in entries.items()
+        BuildPlanEntry(digest, contexts[digest], tuple(tasks), *settings[digest], service=services[digest])
+        for digest, tasks in entries.items()
     ]
 
 
@@ -235,7 +285,3 @@ class BuildResult:
     tool: str
     pushed: bool
     record: dict[str, Any] = field(default_factory=dict)
-
-
-# The name Harbor's build template and task Compose files give the task's service.
-MAIN_SERVICE = "main"

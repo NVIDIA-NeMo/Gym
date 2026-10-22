@@ -248,10 +248,9 @@ def validate_task_compose(context: Path, env: dict[str, str], *, tasks: tuple[st
     Compose resolves to the main image passes and a literal other image, or a reference to another variable, is
     refused with what it resolves to.
 
-    A sidecar with a ``build`` section is refused: the loader records a sidecar from its ``image:`` (one
-    without is refused as "builds are not supported") and no provider starts a locally built sidecar, so
-    building it here would spend the time on an image nothing uses, or on one that then differs from the
-    registry image the task runs with. Sidecars name a prebuilt ``image:`` and carry no ``build:``.
+    A sidecar's ``build`` section passes the same checks. Its context is built on its own (a
+    :class:`BuildPlanEntry` with that ``service``, see :func:`plan_builds`), never by this compose build,
+    which then names ``main`` alone, and the recorded image stands in for the section at run time.
     """
     path = task_compose_file(context)
     if path is None:
@@ -306,12 +305,6 @@ def validate_task_compose(context: Path, env: dict[str, str], *, tasks: tuple[st
         build = service.get("build")
         if build is None:
             continue
-        if service_name != MAIN_SERVICE:
-            raise BuildError(
-                f"{path}: service {service_name!r} has a build section; sidecars must name a prebuilt image: and "
-                "carry no build: (the loader records a sidecar's image from the registry and no provider starts a "
-                f"locally built one). Only {MAIN_SERVICE} is built, from environment/Dockerfile."
-            )
         if isinstance(build, str):
             build = {"context": build}
         if not isinstance(build, dict):

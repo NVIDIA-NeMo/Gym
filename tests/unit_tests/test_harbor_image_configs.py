@@ -362,10 +362,45 @@ class TestComposeImageReferences:
         (task,) = discover_tasks(tmp_path)
         assert compose_image_references(task) == []
 
-    def test_a_sidecar_that_builds_is_rejected(self, tmp_path):
-        write_task(tmp_path, "ctr", compose="services:\n  api:\n    build: ./api\n")
+    def test_a_sidecar_that_builds_needs_its_build_recorded(self, tmp_path):
+        task_dir = write_task(tmp_path, "ctr", compose="services:\n  api:\n    build: ./api\n")
+        (task_dir / "environment" / "api").mkdir()
+        (task_dir / "environment" / "api" / "Dockerfile").write_text("FROM python:3.12-slim\n")
         (task,) = discover_tasks(tmp_path)
-        with pytest.raises(ImageConfigError, match="service 'api' names no image"):
+        with pytest.raises(ImageConfigError, match="service 'api' builds .* no built image is recorded"):
+            compose_image_references(task)
+
+    def test_a_recorded_sidecar_build_stands_in_for_its_build_section(self, tmp_path):
+        from nemo_gym.tasks.harbor.digest import context_digest
+        from nemo_gym.tasks.harbor.task import BUILT_IMAGES_FILE
+
+        compose = "services:\n  api:\n    build:\n      context: ${CONTEXT_DIR}/api\n    pull_policy: build\n"
+        task_dir = write_task(tmp_path, "ctr", compose=compose)
+        (task_dir / "environment" / "api").mkdir()
+        (task_dir / "environment" / "api" / "Dockerfile").write_text("FROM python:3.12-slim\n")
+        built = "registry.example/ds/hb__" + "1" * 32 + "@sha256:" + "e" * 64
+        record = {context_digest(task_dir / "environment" / "api"): {"image": built}}
+        (tmp_path / BUILT_IMAGES_FILE).write_text(json.dumps(record))
+        (task,) = discover_tasks(tmp_path)
+
+        assert compose_image_references(task) == [MAIN_IMAGE, built]
+        api = load_compose_document(task)["services"]["api"]
+        assert api == {"image": built}
+
+    @pytest.mark.parametrize(
+        ("build", "message"),
+        [
+            ("      context: ../../outside\n", "outside"),
+            ("      context: ./api\n      args:\n        X: '1'\n", "takes only build.context"),
+            ("      context: ./api\n      dockerfile: Other\n", "its context's Dockerfile only"),
+        ],
+    )
+    def test_unsupported_sidecar_builds_are_refused_by_name(self, tmp_path, build, message):
+        task_dir = write_task(tmp_path, "ctr", compose="services:\n  api:\n    build:\n" + build)
+        (task_dir / "environment" / "api").mkdir()
+        (task_dir / "environment" / "api" / "Dockerfile").write_text("FROM python:3.12-slim\n")
+        (task,) = discover_tasks(tmp_path)
+        with pytest.raises(ImageConfigError, match=message):
             compose_image_references(task)
 
 

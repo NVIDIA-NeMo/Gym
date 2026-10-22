@@ -64,10 +64,42 @@ a sandbox group when a `compose-images.json` with the sidecar images' recorded O
 the task folders, written by `gym dataset fetch`; on OpenSandbox the provider block also needs
 `networking.enabled: true` (with `loopback_forwarding`) and `runtime_requirements.shm_size_metadata_key` (see
 [Compose tasks on OpenSandbox](#compose-tasks-on-opensandbox)); each service's working directory is created once its sandbox is up, as Docker creates a missing `working_dir` or `WORKDIR` at container create. `[environment.healthcheck]` is polled at seed.
+The server's `compose_variables` fill a Compose file's `${NAME}` references at the process environment's
+level, below the task's `[environment].env` and Harbor's own variables: a literal `value`, a process `env`
+variable, or a `model_server`, whose sandbox-reachable URL with the episode's rollout prefix becomes the value
+(a sidecar's model calls are then recorded with the rollout and never become training tokens). An `env` source
+the process lacks fails the seed terminally. With `compose_variables` set, each episode's document is written
+to a private folder removed once the group starts, not under `artifacts_dir`.
+
+```yaml
+compose_variables:
+  LITELLM_BASE_URL: {model_server: user_model}
+  LITELLM_API_KEY: {env: USER_MODEL_API_KEY}
+  SIM_USER_MODEL: {value: gpt-5.5}
+```
 Tasks that declare GPUs run on the `gpu_sandbox_provider` block when one is set. The task's
 `[[environment.mcp_servers]]` and `skills_dir` are written to `/tmp/.nemo-gym/task.json` in the agent's
-sandbox for harnesses that drive task MCP servers from inside it (mini-SWE does). Dockerfiles outside pull
-and overlay mode are built at prepare, see below. Multi-step tasks come in a later milestone.
+sandbox for harnesses that drive task MCP servers from inside it (mini-SWE does). With `task_mcp_grants:
+optional` or `required`, the `streamable-http` URL entries are also granted to the agent as MCP tool
+accesses, as declared; a Compose sidecar's URL names its service, which resolves inside the task's group.
+Dockerfiles outside pull and overlay mode are built at prepare, see below.
+
+## Multi-step tasks
+
+A task with `[[steps]]` runs each step as one turn in the same sandbox, as Harbor's multi-step trial does
+without `resume_trajectory`: a fresh agent session per turn, with the step's
+`steps/<name>/instruction.md` as its only input and the step's `[steps.agent].timeout_sec` (else the task's)
+as its budget. The task's top-level `instruction.md` is never sent; a multi-step task may keep material there
+the agent must not see. After each turn the shared verifier runs the task's `tests/` with
+`steps/<name>/tests/` on top, under the step's verifier timeout, user and environment over the task's.
+
+The episode stops after a turn that is masked, writes no valid reward file, or misses the step's
+`min_reward` (a number gates `reward`, a table gates each named key). `multi_step_reward_strategy` rolls the
+turns up: `mean` (the default) averages the turns with a verifier result, and `final` takes the last turn that
+ran. The result lists every turn under `turns`; its `response` and `ng_agent_observations` are the last
+turn's. Per-step `workdir/`, `setup.sh`, healthchecks, artifacts and separate verification are refused by the
+loader. A long task's turns can budget more than `default_episode_timeout_seconds`; the seed logs a warning,
+because an expired episode is retried rather than scored.
 
 ## Dockerfile builds
 
@@ -93,6 +125,13 @@ Prepare decides one of three image modes per distinct Dockerfile.
   before the build, so a refused task's context is neither built nor pushed and a build that would fail for
   it cannot stop the preparation.
 
+A task that declares `[environment].docker_image` runs that image, unless `builds.force` is set: then its
+Dockerfile is built anyway and the recorded build wins, as Harbor's `--force-build` does (SWE-Interact's
+declared images lack the helper its Dockerfiles copy in). A Compose sidecar with a `build:` section is built
+the same way, once per distinct context, from the context's own `Dockerfile` (a sidecar build takes only
+`context`, inside `environment/`); its recorded image then stands in for the section. With docker, the
+compose build of `main` names `main` alone when a sidecar builds on its own.
+
 The image is named the way Harbor names it, `hb__<hash>`, where the hash is Harbor's 32-character content
 hash of the `environment/` folder, its environment id (vendored from Harbor v0.22.0 in
 `nemo_gym/tasks/harbor/harbor_compat.py`), so identical contexts get the same image name in Harbor and in
@@ -106,6 +145,7 @@ builds:
   repository: registry/path  # push built images under this path; default: $NEMO_GYM_BUILD_REPOSITORY
   platform: linux/amd64    # the platform asked of the tool; default linux/amd64
   enabled: true            # false never builds; tasks that need a build are skipped with a message
+  force: false             # true also builds the Dockerfile of a task that declares docker_image
 ```
 
 With `builds.repository` (or the `NEMO_GYM_BUILD_REPOSITORY` variable) the image is named
@@ -286,7 +326,7 @@ it is, the other providers cannot run commands as it.
 | Network restrictions | Public networking only. Restricted network modes, host allowlists and deny rules are rejected by the loader rather than silently ignored. |
 | Artifacts and hooks | Verifier logs are downloaded. `[[verifier.collect]]` hooks run in both modes, each in the service it names (a non-zero exit or a hook that runs past its `timeout_sec` warns, a hook the sandbox cannot run masks). In separate mode `/logs/artifacts` and the `artifacts` entries are copied into the verifier, each under its own staging root, with their `exclude` rules applied as Harbor passes them to `tar --exclude` (unanchored: `node_modules` at any depth), replacing what the verifier image ships at those paths. The verifier receives each artifact as the archive the agent's sandbox packed, so read-only, world-writable and set-id modes arrive as the agent left them; the host copy under the staging root is unpacked through a filter (widened owner modes, links kept, nothing that escapes and no device nodes) and is the gate the archive must pass plus a diagnostic, and the archive is removed once restored. A probe the sandbox cannot answer masks rather than counting as an absent artifact. |
 | Image ENTRYPOINT | Runs for a plain (non-Compose) task whose image configuration is recorded: a built image, or a pull or overlay Dockerfile whose base image is recorded, unless the Dockerfile says `ENTRYPOINT []`. The sandbox starts with the provider's keepalive; the seed then starts `ENTRYPOINT + sh -c "sleep infinity"` beside it (what Harbor's Compose `command` leaves it with) as the image's `User` in its `WorkingDir` (created for a resolved Dockerfile when the task's workdir is another), after the working directory and `/logs` exist. It then waits as `up --wait` and Harbor's `run_healthcheck()` do: the image `HEALTHCHECK` first, then `[environment.healthcheck]`, both as the image's user (the image check in its `WorkingDir`, the task check in the task workdir; a `CMD-SHELL` check runs through the image's recorded `Shell`, `/bin/sh -c` when it sets none, as the daemon runs it, so `SHELL ["/bin/bash", "-o", "pipefail", "-c"]` fails `false | true` here too), probing the entrypoint's exit status before every attempt and once more before the hand-over. Exit non-zero before the hand-over fails the seed as a task error (terminal, with the output tail), as does a launcher whose own shell fails for the image's user or directory; a provider that cannot run the launcher is retried. Exit zero logs a warning once and the episode continues on the keepalive. At verification the status is read again: in the separate verifier's fresh sandbox a non-zero exit masks the sample as `harbor:entrypoint_failed` (under Harbor the container would have died and the trial errored); in the agent's sandbox it masks only when the exec holding the entrypoint returned on its own with that status, because the runtime folder is world-writable and the agent had the sandbox; otherwise it is recorded as `entrypoint-exit.txt` with an error in the log and the sample is scored. The holding exec lives as long as the provider allows (docker caps it at `exec.default_timeout_s`, OpenSandbox without `operations.background_exec` at `connection.request_timeout_s`); past that the entrypoint is untracked, logged once, and OpenSandbox deployments need `background_exec` for long-lived launchers. An entrypoint that is one `sleep` or `tail` command is not started. A separate verifier that runs in the task image gets that image's entrypoint and `HEALTHCHECK` as a substitute for Harbor's `tests/Dockerfile` verifier image, never the task's healthcheck. The output is kept as `entrypoint-stdout.txt` (and `verifier-entrypoint-stdout.txt`) next to the verifier logs. A prebuilt `docker_image` has no recorded configuration yet, so its entrypoint still does not run. |
-| Other features | Multi-step tasks, in-sandbox MCP tools, Windows and TPU environments are unsupported. |
+| Other features | Windows and TPU environments are unsupported. Multi-step tasks run as turns (see above). |
 
 Shared-mode verification does not stop or quiesce what the agent left running: `test.sh` runs in the same
 sandbox beside those processes, as Harbor's shared mode runs it, so a test that talks to a service the agent

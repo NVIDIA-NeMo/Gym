@@ -25,6 +25,7 @@ the written reference, which is how the task loader and the Compose resolver loo
 
 import logging
 import tomllib
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Callable
 
@@ -40,9 +41,17 @@ from nemo_gym.tasks.harbor.compose_variables import (
     substitute_with_empty,
 )
 from nemo_gym.tasks.harbor.dataset_config import apply_dataset_config, read_dataset_config
+from nemo_gym.tasks.harbor.digest import context_digest
 from nemo_gym.tasks.harbor.dockerfile import RECORD_VERSION
 from nemo_gym.tasks.harbor.models import HarborTaskConfig
-from nemo_gym.tasks.harbor.records import IMAGE_CONFIGS_FILE, read_image_configs, record_lock, write_json_record
+from nemo_gym.tasks.harbor.records import (
+    BUILT_IMAGES_FILE,
+    IMAGE_CONFIGS_FILE,
+    read_built_images,
+    read_image_configs,
+    record_lock,
+    write_json_record,
+)
 from nemo_gym.tasks.harbor.registry import ImageConfigError, RegistryClient
 from nemo_gym.tasks.harbor.task import DOCKERFILE, TASK_FILE, HarborTask, dockerfile_base_image, is_task_folder
 
@@ -62,7 +71,9 @@ def compose_file(task: HarborTask) -> Path | None:
     return None
 
 
-def load_compose_document(task: HarborTask) -> dict[str, Any] | None:
+def load_compose_document(
+    task: HarborTask, *, deployment_variables: Mapping[str, str] | None = None
+) -> dict[str, Any] | None:
     """The task's Compose overlay with ``env_file`` entries inlined and ``${VAR}`` references resolved.
 
     Returns ``None`` for a task without a Compose file. Prepare and the resources server both read the
@@ -70,6 +81,9 @@ def load_compose_document(task: HarborTask) -> dict[str, Any] | None:
     both run with the same process environment (see :func:`compose_variables`). A required variable
     (``${VAR:?msg}``) without a value, a task variable the host does not set or a missing ``env_file``
     raises :class:`ImageConfigError` naming it; a variable nobody sets is an empty string, with a warning.
+
+    ``deployment_variables`` are the environment server's ``compose_variables`` for one episode, at the process
+    environment's level (see :func:`compose_variables`). Prepare reads the file without them.
     """
     path = compose_file(task)
     if path is None:
@@ -81,7 +95,7 @@ def load_compose_document(task: HarborTask) -> dict[str, Any] | None:
     try:
         # Interpolate first, as Compose does, so an env_file path may use ${CONTEXT_DIR}; env_file values are then
         # literal. Anything still carrying a ``$NAME`` afterwards fails here, at prepare, not at seed.
-        variables = compose_variables(task, unset=unset)
+        variables = compose_variables(task, unset=unset, deployment=deployment_variables)
         document = substitute_with_empty(document, variables, unset)
         document = inline_env_files(document, path.parent, variables)
         # Interpolation hands back strings; the adapter reads healthcheck ``disable`` and ``retries`` by type.
@@ -93,11 +107,80 @@ def load_compose_document(task: HarborTask) -> dict[str, Any] | None:
     if residual is not None:
         # The key path only: the value next to it may be a host secret.
         raise ImageConfigError(f"{task.task_id}: {path.name}: unresolved interpolation left at {residual}")
-    return document
+    return with_built_sidecars(document, task)
 
 
 # The keys of ``main`` that describe how Harbor builds its image, meaningless once the image is built and recorded.
 MAIN_BUILD_KEYS = ("build", "pull_policy")
+
+
+def sidecar_build_context(service: str, build: Any, environment_dir: Path) -> Path:
+    """The folder a sidecar's ``build:`` builds: a context inside the task's ``environment/`` with a ``Dockerfile``.
+
+    Only ``context`` and the default ``dockerfile`` are supported for a sidecar; anything else (args, a target,
+    another Dockerfile, a context outside ``environment/``) raises :class:`ImageConfigError` naming it.
+    """
+    if isinstance(build, str):
+        build = {"context": build}
+    if not isinstance(build, dict) or set(build) - {"context", "dockerfile"}:
+        raise ImageConfigError(
+            f"Compose service {service!r}: a sidecar build takes only build.context (and the default dockerfile)"
+        )
+    if build.get("dockerfile", "Dockerfile") != "Dockerfile":
+        raise ImageConfigError(f"Compose service {service!r}: a sidecar builds from its context's Dockerfile only")
+    root = Path(environment_dir).resolve()
+    context = (root / str(build.get("context", "."))).resolve()
+    if context != root and root not in context.parents:
+        raise ImageConfigError(f"Compose service {service!r}: build.context {context} is outside {root}")
+    if not (context / "Dockerfile").is_file():
+        raise ImageConfigError(f"Compose service {service!r}: no Dockerfile in {context}")
+    return context
+
+
+def sidecar_build_contexts(document: dict[str, Any], environment_dir: Path) -> dict[str, Path]:
+    """The build context of every sidecar (a service other than ``main``) with a ``build:`` section."""
+    services = document.get("services") if isinstance(document, dict) else None
+    return {
+        str(name): sidecar_build_context(str(name), service["build"], environment_dir)
+        for name, service in (services.items() if isinstance(services, dict) else ())
+        if name != "main" and isinstance(service, dict) and service.get("build") is not None
+    }
+
+
+def with_built_sidecars(document: dict[str, Any], task: HarborTask) -> dict[str, Any]:
+    """``document`` with each sidecar's ``build:`` replaced by the image prepare built from that context.
+
+    Prepare builds a sidecar's context once, like ``main``'s Dockerfile, and records it in
+    ``built-images.json`` by Harbor's hash of the context; the sandbox Compose adapter starts images only. A
+    sidecar whose build is not recorded raises :class:`ImageConfigError`.
+    """
+    contexts = sidecar_build_contexts(document, task.path / "environment")
+    if not contexts:
+        return document
+    recorded = read_built_images(task.path.parent)
+    for name, context in contexts.items():
+        entry = recorded.get(context_digest(context))
+        image = entry.get("image") if isinstance(entry, dict) else None
+        if not image:
+            raise ImageConfigError(
+                f"{task.task_id}: Compose service {name!r} builds {context} and no built image is recorded in "
+                f"{task.path.parent / BUILT_IMAGES_FILE}; prepare builds it when buildah, podman or docker is "
+                "configured (the builds: block)"
+            )
+        service = {key: value for key, value in document["services"][name].items() if key not in MAIN_BUILD_KEYS}
+        document["services"][name] = service | {"image": str(image)}
+    return document
+
+
+def without_sidecar_builds(document: dict[str, Any]) -> dict[str, Any]:
+    """``document`` with every sidecar's ``build`` and ``pull_policy`` removed, for a check of the raw file that runs
+    before prepare builds them: each such sidecar then starts from its recorded image (:func:`with_built_sidecars`).
+    """
+    services = document.get("services") if isinstance(document, dict) else None
+    for name, service in services.items() if isinstance(services, dict) else ():
+        if name != "main" and isinstance(service, dict) and service.get("build") is not None:
+            services[name] = {key: value for key, value in service.items() if key not in MAIN_BUILD_KEYS}
+    return document
 
 
 def without_main_build(document: dict[str, Any]) -> dict[str, Any]:
@@ -110,8 +193,8 @@ def without_main_build(document: dict[str, Any]) -> dict[str, Any]:
     ``hb__<hash>`` image for ``main`` (``MAIN_IMAGE_NAME`` resolves to it). The two keys describe a build that
     already happened; the sandbox Compose adapter starts images only and refuses them as unsupported fields,
     so they are dropped here rather than failing every episode of a task prepare accepted. Nothing else is
-    touched: a sidecar's ``build:`` is refused at prepare, and a task in pull or overlay mode goes through
-    :func:`without_restated_main_build` instead.
+    touched: a sidecar's ``build:`` gives way to its own recorded image (:func:`with_built_sidecars`), and a task
+    in pull or overlay mode goes through :func:`without_restated_main_build` instead.
     """
     services = document.get("services") if isinstance(document, dict) else None
     main = services.get("main") if isinstance(services, dict) else None
@@ -170,8 +253,8 @@ def without_pull_policy(document: dict[str, Any]) -> dict[str, Any]:
     ``pull_policy: build`` on ``main``; a task file may give a sidecar ``always`` or ``missing``). The sandbox
     starts the recorded image it is given and has no pull step of its own to configure, so the key is dropped
     from the document the sandbox receives, in every image mode, instead of being refused as an unsupported
-    field. ``build:`` is not touched here: a sidecar's is still refused (no provider starts a locally built
-    sidecar) and ``main``'s is dropped by :func:`without_main_build` for a task that runs from its recorded
+    field. ``build:`` is not touched here: a sidecar's gives way to its recorded image (:func:`with_built_sidecars`)
+    and ``main``'s is dropped by :func:`without_main_build` for a task that runs from its recorded
     built image, or by :func:`without_restated_main_build` when it only restates Harbor's build.
     """
     services = document.get("services") if isinstance(document, dict) else None
@@ -197,9 +280,7 @@ def compose_image_references(task: HarborTask) -> list[str]:
             continue
         image = (service or {}).get("image")
         if not image:
-            raise ImageConfigError(
-                f"{task.task_id}: Compose service {name!r} names no image; builds are not supported"
-            )
+            raise ImageConfigError(f"{task.task_id}: Compose service {name!r} names no image and no build")
         references.append(image)
     return list(dict.fromkeys(references))
 

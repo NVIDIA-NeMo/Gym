@@ -145,9 +145,29 @@ class TestTaskConfig:
         with pytest.raises(ValueError, match="Conflicting"):
             HarborTaskConfig.model_validate({"environment": {"memory": "1G", "memory_mb": 512}})
 
-    def test_multi_step_is_rejected_for_now(self):
-        with pytest.raises(ValueError, match="Multi-step"):
-            HarborTaskConfig.model_validate({"steps": [{"name": "a"}]})
+    def test_steps_are_parsed_with_harbor_fallbacks(self):
+        config = HarborTaskConfig.model_validate(
+            {
+                "agent": {"timeout_sec": 600},
+                "verifier": {"timeout_sec": 120},
+                "multi_step_reward_strategy": "final",
+                "steps": [
+                    {"name": "plan", "agent": {"timeout_sec": 30}, "min_reward": 0.5},
+                    {"name": "build", "verifier": {"timeout_sec": 900, "env": {"K": "v"}}},
+                ],
+            }
+        )
+        plan, build = config.steps
+        assert config.is_multi_turn and config.multi_step_reward_strategy == "final"
+        assert (config.step_agent_timeout_sec(plan), config.step_verifier_timeout_sec(plan)) == (30, 120)
+        assert (config.step_agent_timeout_sec(build), config.step_verifier_timeout_sec(build)) == (600, 900)
+        assert plan.min_reward == 0.5 and build.verifier.env == {"K": "v"}
+        assert HarborTaskConfig.model_validate({}).multi_step_reward_strategy == "mean"
+
+    @pytest.mark.parametrize("steps", [[{"name": "a"}, {"name": "a"}], [{"name": "../up"}]])
+    def test_step_names_are_unique_portable_folders(self, steps):
+        with pytest.raises(ValueError, match="Step name"):
+            HarborTaskConfig.model_validate({"steps": steps})
 
     def test_docker_image_is_optional(self):
         assert HarborTaskConfig.model_validate({}).environment.docker_image is None
@@ -835,6 +855,84 @@ class TestMaterialize:
         assert "resources_servers" not in " ".join(config)
 
 
+MULTI_STEP_TOML = (
+    'multi_step_reward_strategy = "final"\n'
+    + HELLO_TOML
+    + """
+[[steps]]
+name = "01_plan"
+[steps.agent]
+timeout_sec = 2400.0
+
+[[steps]]
+name = "02_implement"
+"""
+)
+
+
+def write_multi_step_task(root: Path, *, hidden_spec: str = "The full spec only the simulated user may read.") -> Path:
+    write_task(root, toml=MULTI_STEP_TOML)
+    (root / "instruction.md").write_text(hidden_spec)
+    for name, instruction in (("01_plan", "Agree on a plan with the maintainer."), ("02_implement", "Implement it.")):
+        (root / "steps" / name / "tests").mkdir(parents=True)
+        (root / "steps" / name / "instruction.md").write_text(instruction)
+        (root / "steps" / name / "tests" / "test.sh").write_text("#!/bin/bash\necho 1 > /logs/verifier/reward.txt\n")
+    return root
+
+
+class TestMultiStepTasks:
+    def test_steps_load_as_turns_with_their_own_instructions(self, tmp_path):
+        task = load_task(write_multi_step_task(tmp_path / "t"))
+        assert [(turn.name, turn.instruction) for turn in task.turns] == [
+            ("01_plan", "Agree on a plan with the maintainer."),
+            ("02_implement", "Implement it."),
+        ]
+        assert task.config.multi_step_reward_strategy == "final"
+
+    def test_rows_carry_one_input_per_turn_and_never_the_top_level_instruction(self, tmp_path):
+        hidden = "The full spec only the simulated user may read."
+        task = load_task(write_multi_step_task(tmp_path / "t", hidden_spec=hidden))
+        row = materialize_task(task, "ds").model_dump(mode="json", exclude_unset=True)
+        assert hidden not in json.dumps(row)
+        assert "responses_create_params" not in row["task_input"]
+        turns = row["task_input"]["turns"]
+        assert [turn["name"] for turn in turns] == ["01_plan", "02_implement"]
+        assert [turn["responses_create_params"]["metadata"] for turn in turns] == [
+            {"agent_timeout_sec": "2400.0", "harbor_step": "01_plan"},
+            # A step without its own budget falls back to the task's [agent].timeout_sec.
+            {"agent_timeout_sec": "120.0", "harbor_step": "02_implement"},
+        ]
+
+    def test_top_level_instruction_and_tests_are_optional_for_steps(self, tmp_path):
+        root = write_multi_step_task(tmp_path / "t")
+        (root / "instruction.md").unlink()
+        (root / "tests" / "test.sh").unlink()
+        (root / "tests").rmdir()
+        assert [turn.name for turn in load_task(root).turns] == ["01_plan", "02_implement"]
+
+    @pytest.mark.parametrize(
+        ("change", "message"),
+        [
+            (lambda root: (root / "steps" / "01_plan" / "setup.sh").write_text("true\n"), "setup.sh"),
+            (lambda root: (root / "steps" / "01_plan" / "workdir").mkdir(), "workdir"),
+            (lambda root: (root / "steps" / "02_implement" / "instruction.md").unlink(), "instruction.md"),
+        ],
+    )
+    def test_unsupported_or_incomplete_steps_are_refused_by_name(self, tmp_path, change, message):
+        root = write_multi_step_task(tmp_path / "t")
+        change(root)
+        with pytest.raises(HarborTaskError, match=message):
+            load_task(root)
+
+    def test_a_step_needs_a_test_script_of_its_own_or_the_tasks(self, tmp_path):
+        root = write_multi_step_task(tmp_path / "t")
+        (root / "steps" / "01_plan" / "tests" / "test.sh").unlink()
+        assert load_task(root).turns  # the task's tests/test.sh stands in
+        (root / "tests" / "test.sh").unlink()
+        with pytest.raises(HarborTaskError, match="no test.sh"):
+            load_task(root)
+
+
 class TestTasksetMapping:
     def test_single_task_folder_maps_to_its_parent(self, tmp_path):
         from nemo_gym.tasks.harbor.materialize import taskset_mapping
@@ -1309,7 +1407,7 @@ class TestCli:
             prepared = prepare_target(str(folder), output_root=tmp_path / "out")
         assert [t.task_id for t in prepared.tasks] == ["a"]
         assert list(prepared.skipped) == ["bad"]
-        assert "Multi-step" in prepared.skipped["bad"]
+        assert "step 'x'" in prepared.skipped["bad"]
         assert any("Skipping task bad" in r.getMessage() for r in caplog.records)
         assert len(prepared.rows_path.read_text().splitlines()) == 1
 
