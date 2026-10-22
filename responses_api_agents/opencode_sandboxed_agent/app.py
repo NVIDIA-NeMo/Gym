@@ -1032,7 +1032,14 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         # to the git repo, and resources servers extract the model patch with `git add -N . && git
         # diff`, which would sweep this transcript into the patch.
         export_remote_fpath = f"/tmp/opencode_{export_fname}"
-        session_id = None
+        results_root = (
+            Path(self.config.artifacts_dir) if self.config.artifacts_dir else Path(__file__).parent / "results"
+        )
+        results_dir = results_root / request.session[SESSION_ID_KEY]
+        results_dir.mkdir(parents=True, exist_ok=True)
+        results_local_fpath = results_dir / export_fname
+        # A previous attempt's transcript must never stand in for this run's export.
+        results_local_fpath.unlink(missing_ok=True)
         session_env = {"XDG_DATA_HOME": remote_data_home} if remote_data_home is not None else None
         try:
             session_list_result = await sandbox.exec(
@@ -1040,9 +1047,14 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 env=session_env,
                 timeout_s=self.config.sandbox_timeout,
             )
-            if session_list_result.return_code != 0:
-                raise RuntimeError(f"Failed to list OpenCode sessions: {session_list_result}")
-            session_id = _extract_opencode_session_id(session_list_result.stdout or "")
+        except SandboxLostError:
+            raise
+        except Exception as exc:
+            raise RuntimeError("Failed to list OpenCode sessions") from exc
+        if session_list_result.return_code != 0 or session_list_result.error_type is not None:
+            raise RuntimeError(f"Failed to list OpenCode sessions: {session_list_result}")
+        session_id = _extract_opencode_session_id(session_list_result.stdout or "")
+        try:
             export_result = await sandbox.exec(
                 command=(
                     'export PATH="$HOME/.opencode/bin:$PATH" '
@@ -1053,32 +1065,35 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             )
         except SandboxLostError:
             raise
-        except Exception:
-            export_result = None
-            print("Failed to export results", format_exc(), file=sys.stderr)
-        if self.config.debug and export_result:
+        except Exception as exc:
+            raise RuntimeError(f"Failed to export OpenCode session {session_id}") from exc
+        if export_result.return_code != 0 or export_result.error_type is not None:
+            raise RuntimeError(f"Failed to export OpenCode session {session_id}: {export_result}")
+        if self.config.debug:
             print("Export stdout:\n", export_result.stdout, file=sys.stderr)
             print("Export stderr:\n", export_result.stderr, file=sys.stderr)
 
-        results_root = (
-            Path(self.config.artifacts_dir) if self.config.artifacts_dir else Path(__file__).parent / "results"
-        )
-        results_dir = results_root / request.session[SESSION_ID_KEY]
-        results_dir.mkdir(parents=True, exist_ok=True)
-        results_local_fpath = results_dir / export_fname
-        results_local_fpath.unlink(missing_ok=True)
-        if export_result is not None and export_result.return_code == 0 and not export_result.error_type:
-            if self.config.debug:
-                print(f"Downloading results from {export_remote_fpath} to {results_local_fpath}", file=sys.stderr)
-            try:
-                await sandbox.download(export_remote_fpath, results_local_fpath)
-            except SandboxLostError:
-                raise
-            except Exception:
-                results_local_fpath.unlink(missing_ok=True)
-                print(f"Failed to download export results to {results_local_fpath}", format_exc(), file=sys.stderr)
-                print("Export stdout:\n", export_result.stdout, file=sys.stderr)
-                print("Export stderr:\n", export_result.stderr, file=sys.stderr)
+        if self.config.debug:
+            print(f"Downloading results from {export_remote_fpath} to {results_local_fpath}", file=sys.stderr)
+        try:
+            await sandbox.download(export_remote_fpath, results_local_fpath)
+        except SandboxLostError:
+            raise
+        except Exception as exc:
+            results_local_fpath.unlink(missing_ok=True)
+            raise RuntimeError(f"Failed to download OpenCode export to {results_local_fpath}") from exc
+        if not results_local_fpath.is_file():
+            raise RuntimeError(f"OpenCode export was not downloaded to {results_local_fpath}")
+        try:
+            opencode_export = json.loads(results_local_fpath.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"Failed to read OpenCode export from {results_local_fpath}") from exc
+        if (
+            not isinstance(opencode_export, dict)
+            or not isinstance(opencode_export.get("messages"), list)
+            or not opencode_export["messages"]
+        ):
+            raise RuntimeError(f"OpenCode export at {results_local_fpath} was empty or invalid")
 
         observations = None
         trajectory = (
@@ -1136,10 +1151,6 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     )
             finally:
                 observations_local_fpath.unlink(missing_ok=True)
-
-        opencode_export = dict()
-        if results_local_fpath.exists():
-            opencode_export = json.loads(results_local_fpath.read_text().strip() or "{}")
 
         output = []
         usage = None
@@ -1275,6 +1286,22 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             run_result = self._sandbox_id_to_run_result.get(session_key, {}).copy()
             observations = run_result.pop("_ng_agent_observations", None)
             trajectory = run_result.pop("_ng_trajectory", None)
+            confirmed_agent_oom = (
+                self.config.report_agent_sandbox_oom
+                and run_result.get("opencode_failed") is True
+                and run_result.get("opencode_error_type") == SandboxOOMKilledError.__name__
+                and observations is not None
+                and any(
+                    isinstance(record, SandboxObservation)
+                    and record.role == "agent"
+                    and record.phase == "agent_execution"
+                    and record.outcome == "oom"
+                    and record.error_type == SandboxOOMKilledError.__name__
+                    for record in observations.records
+                )
+            )
+            if not run_result.get("opencode_export_found") and not confirmed_agent_oom:
+                raise RuntimeError("OpenCode export unavailable; refusing to verify an uncaptured agent response")
             response_dict = await verify_agent_response(
                 self.server_client,
                 self.config.resources_server,
