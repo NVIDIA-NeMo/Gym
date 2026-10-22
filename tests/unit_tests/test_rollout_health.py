@@ -2316,6 +2316,138 @@ class TestPerFlagLimitOverride:
         }
 
 
+class TestNoLimitValue:
+    """``none`` on a limit flag removes that one limit; a flag that is not given still keeps the persisted one."""
+
+    @pytest.mark.parametrize(
+        ("flag", "removed", "kept", "remaining_group"),
+        [
+            pytest.param(
+                "--health-max-final-failure-fraction",
+                "max_final_failure_fraction",
+                "max_not_final_failure_fraction",
+                "not final",
+                id="final",
+            ),
+            pytest.param(
+                "--health-max-not-final-failure-fraction",
+                "max_not_final_failure_fraction",
+                "max_final_failure_fraction",
+                "final",
+                id="not-final",
+            ),
+        ],
+    )
+    def test_none_removes_only_that_limit_and_a_recheck_keeps_it_removed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flag: str, removed: str, kept: str, remaining_group: str
+    ) -> None:
+        TestPerFlagLimitOverride._judged_run(tmp_path)
+
+        artifacts = TestPerFlagLimitOverride._recheck(tmp_path, monkeypatch, [flag, "none"])
+
+        assert artifacts["limits"] == {
+            "max_not_final_failure_fraction": None if removed == "max_not_final_failure_fraction" else 0.01,
+            "max_final_failure_fraction": None if removed == "max_final_failure_fraction" else 0.01,
+            "source": {removed: "override", kept: "persisted"},
+        }
+        # Both groups were over their limit; only the one that keeps a limit is still a reason.
+        assert [reason.split(" failures")[0] for reason in artifacts["unhealthy_reasons"]] == [remaining_group]
+
+        again = TestPerFlagLimitOverride._recheck(tmp_path, monkeypatch, [])
+
+        assert again["limits"][removed] is None
+        assert again["limits"]["source"] == {removed: "persisted", kept: "persisted"}
+        assert [reason.split(" failures")[0] for reason in again["unhealthy_reasons"]] == [remaining_group]
+
+    def test_none_on_both_flags_makes_the_run_healthy(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        TestPerFlagLimitOverride._judged_run(tmp_path)
+
+        artifacts = TestPerFlagLimitOverride._recheck(
+            tmp_path,
+            monkeypatch,
+            ["--health-max-final-failure-fraction", "none", "--health-max-not-final-failure-fraction", "none"],
+        )
+
+        assert artifacts["healthy"] is True
+        assert artifacts["limits"]["max_final_failure_fraction"] is None
+        assert artifacts["limits"]["max_not_final_failure_fraction"] is None
+
+    @pytest.mark.parametrize("value", ["none", "None", "NONE", "nOnE"])
+    def test_none_is_accepted_in_any_case(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+        from nemo_gym.health.types import RunHealthLimits
+
+        received = {}
+        monkeypatch.setattr(cli_eval, "health_check_rollouts", lambda run_dir, **kwargs: received.update(kwargs))
+        monkeypatch.setattr(
+            sys, "argv", ["gym", "eval", "health-check", str(tmp_path), "--health-max-final-failure-fraction", value]
+        )
+
+        cli_main.main()
+
+        limits = received["limits"]
+        assert limits == RunHealthLimits(max_final_failure_fraction=None)
+        assert limits.model_fields_set == {"max_final_failure_fraction"}
+
+    def test_a_flag_that_is_not_given_leaves_its_limit_unset(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        received = {}
+        monkeypatch.setattr(cli_eval, "health_check_rollouts", lambda run_dir, **kwargs: received.update(kwargs))
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["gym", "eval", "health-check", str(tmp_path), "--health-max-not-final-failure-fraction", "0.2"],
+        )
+
+        cli_main.main()
+
+        assert received["limits"].model_fields_set == {"max_not_final_failure_fraction"}
+        assert received["limits"].max_not_final_failure_fraction == 0.2
+
+    @pytest.mark.parametrize("value", ["nil", "", "1.5", "-0.1", "nan", "inf"])
+    def test_an_invalid_value_is_an_argparse_error(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        value: str,
+    ) -> None:
+        monkeypatch.setattr(cli_eval, "health_check_rollouts", lambda run_dir, **kwargs: pytest.fail("must not run"))
+        monkeypatch.setattr(
+            sys, "argv", ["gym", "eval", "health-check", str(tmp_path), "--health-max-final-failure-fraction", value]
+        )
+
+        with pytest.raises(SystemExit) as exc:
+            cli_main.main()
+
+        assert exc.value.code == 2
+        assert "--health-max-final-failure-fraction" in capsys.readouterr().err
+
+    def test_python_api_explicit_none_removes_and_unset_keeps(self, tmp_path: Path) -> None:
+        from nemo_gym.health.types import RunHealthLimits
+
+        TestPerFlagLimitOverride._judged_run(tmp_path)
+
+        result = health.health_check_run_dir(
+            tmp_path, workers=1, limits=RunHealthLimits(max_final_failure_fraction=None)
+        )
+
+        limits = result.summary["run"]["artifacts"]["limits"]
+        assert limits == {
+            "max_not_final_failure_fraction": 0.01,
+            "max_final_failure_fraction": None,
+            "source": {"max_not_final_failure_fraction": "persisted", "max_final_failure_fraction": "override"},
+        }
+
+        unchanged = health.health_check_run_dir(tmp_path, workers=1, limits=RunHealthLimits())
+
+        assert unchanged.summary["run"]["artifacts"]["limits"] == {
+            "max_not_final_failure_fraction": 0.01,
+            "max_final_failure_fraction": None,
+            "source": {"max_not_final_failure_fraction": "persisted", "max_final_failure_fraction": "persisted"},
+        }
+
+
 class TestRunExcessiveFailuresCheck:
     """The run-level failure limits are one check of the suite: findings, coverage, and an ignore switch."""
 

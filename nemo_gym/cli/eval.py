@@ -777,8 +777,9 @@ def health_check_rollouts(
 ):
     """Run rollout quality verification for an existing run directory.
 
-    By default the run's persisted limits judge it again. Each limit set in ``limits`` (a ``RunHealthLimits``)
-    overrides only that persisted limit; a limit left as ``None`` keeps its persisted value.
+    By default the run's persisted limits judge it again. Each limit set explicitly on ``limits`` (a
+    ``RunHealthLimits``) overrides only that persisted limit, and ``None`` removes it; a limit not set keeps its
+    persisted value.
     """
     from nemo_gym.rollout_health import health_check_run_dir
 

@@ -802,11 +802,11 @@ def health_check_run_dir(
     json_output: bool = False,
 ) -> HealthCheckResult:
     """Recheck a run directory. The run's own persisted limits judge it, so the verdict of the same artifacts
-    does not change. Each limit set in ``limits`` overrides only that persisted limit and is recorded as an
-    override; a limit left as ``None`` keeps its persisted value."""
+    does not change. Each limit set explicitly on ``limits`` overrides only that persisted limit and is recorded
+    as an override; set to ``None`` it removes the limit. A limit not set keeps its persisted value."""
     path = Path(run_dir)
     rollout_path = _resolve_rollout_path(path, rollout_file)
-    overrides = limits.model_dump(exclude_none=True) if limits is not None else {}
+    overrides = {name: getattr(limits, name) for name in limits.model_fields_set} if limits is not None else {}
     limits = _persisted_limits(path).model_copy(update=overrides)
     limits_source = {name: "override" if name in overrides else "persisted" for name in RunHealthLimits.model_fields}
     result = run_health_checks(
