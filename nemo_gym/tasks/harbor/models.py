@@ -260,9 +260,10 @@ class HarborStepVerifier(HarborPhaseSettings):
 
 
 class HarborStep(HarborSettings):
-    """One ``[[steps]]`` entry, which Gym runs as one turn.
+    """One ``[[steps]]`` entry as ``task.toml`` writes it, named as Harbor names it.
 
-    The turn has its own instruction (``steps/<name>/instruction.md``) and verifier (the task's
+    The loader pairs it with its ``steps/<name>/`` folder into a ``HarborTurn``, which Gym runs as one turn, as
+    ``HarborTaskConfig`` pairs with its folder into a ``HarborTask``. The turn has its own instruction (``steps/<name>/instruction.md``) and verifier (the task's
     ``tests/`` with ``steps/<name>/tests/`` on top). ``min_reward`` stops the episode after this turn
     when its rewards fall short: a number gates the ``reward`` key, a mapping gates each named key, and a
     turn without a verifier result fails every gate.

@@ -46,11 +46,19 @@ DOCKERFILE = Path("environment") / "Dockerfile"
 
 @dataclass(frozen=True)
 class HarborTurn:
-    """One ``[[steps]]`` entry read from disk: the instruction the agent gets for that turn."""
+    """One ``[[steps]]`` entry loaded with its ``steps/<name>/`` folder: the unit Gym runs as one turn.
 
-    name: str
+    ``config`` is the entry as ``task.toml`` writes it (:class:`HarborStep`) and ``instruction`` is
+    ``steps/<name>/instruction.md``, so ``HarborStep`` is to ``HarborTurn`` what ``HarborTaskConfig`` is to
+    ``HarborTask``. The schema keeps Harbor's word, step; what Gym runs is a turn.
+    """
+
     instruction: str
     config: HarborStep
+
+    @property
+    def name(self) -> str:
+        return self.config.name
 
     @property
     def tests_dir(self) -> Path:
@@ -453,7 +461,7 @@ def _load_turns(path: Path, config: HarborTaskConfig) -> tuple[HarborTurn, ...]:
             instruction = read_instruction(instruction_path)
         except (OSError, UnicodeDecodeError) as exc:
             raise HarborTaskError(f"{instruction_path}: {exc}") from exc
-        turns.append(HarborTurn(name=step.name, instruction=instruction, config=step))
+        turns.append(HarborTurn(instruction=instruction, config=step))
     if turns and not config.is_shared_verifier:
         raise HarborTaskError(f"{path / TASK_FILE}: multi-step tasks with a separate verifier are not supported yet")
     return tuple(turns)
