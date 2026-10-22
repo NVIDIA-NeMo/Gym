@@ -62,11 +62,33 @@ def test_judge_payload_preserves_surfaces_but_excludes_analogue_and_model_labels
 
 
 @pytest.mark.parametrize(
-    "wrap", [lambda x: x, lambda x: "<think>internal</think>\n" + x, lambda x: "```json\n" + x + "\n```"]
+    "wrap",
+    [
+        lambda x: x,
+        lambda x: "<think>internal</think>\n" + x,
+        lambda x: "```json\n" + x + "\n```",
+        lambda x: "```\n" + x + "\n```",
+        lambda x: "\n ```JSON " + x + "``` \n",
+        lambda x: "<think>internal</think>\n```Json\n\n" + x + "\n\n```",
+    ],
 )
 def test_known_reasoning_and_json_envelopes_are_parsed_without_losing_verdict(wrap):
     result = llm.parse_verdict(wrap(json.dumps(verdict())), rubric(), EvidenceBundle(answer="HELLO"), gating={"one"})
     assert result[0].passed is True and result[0].evidence == "HELLO"
+
+
+@pytest.mark.parametrize(
+    "wrap",
+    [
+        lambda x: "Verdict:\n```json\n" + x + "\n```",
+        lambda x: "```json\n" + x + "\n```\nDone.",
+        lambda x: "```json\n" + x + "\n```\n```json\n" + x + "\n```",
+        lambda x: "```python\n" + x + "\n```",
+    ],
+)
+def test_only_one_json_fence_around_the_whole_reply_is_unwrapped(wrap):
+    with pytest.raises(ValueError):
+        llm.parse_verdict(wrap(json.dumps(verdict())), rubric(), EvidenceBundle(answer="HELLO"), gating={"one"})
 
 
 @pytest.mark.parametrize(
@@ -230,3 +252,17 @@ def test_missing_if_item_still_rejects_incomplete_judge_response():
     items.append(items[0].model_copy(update={"id": "content", "dimension": "completion"}))
     with pytest.raises(ValueError, match="rubric ID"):
         llm.parse_verdict(json.dumps(verdict(id="content")), items, EvidenceBundle(answer="HELLO"), gating={"one"})
+
+
+@pytest.mark.parametrize("fault", ["missing", "invalid"])
+def test_faulty_prerequisite_verdict_rejects_the_reply_only_when_it_gates_reward(fault):
+    # A prerequisite of an IF rubric gates reward (engine.reward_checks), so its verdict is required.
+    items = [rubric()[0].model_copy(update={"id": "prerequisite"})] + rubric()
+    reply = verdict()
+    if fault == "invalid":
+        reply["items"].append(verdict(id="prerequisite", passed=None)["items"][0])
+    with pytest.raises(ValueError):
+        llm.parse_verdict(json.dumps(reply), items, EvidenceBundle(answer="HELLO"), gating={"prerequisite", "one"})
+    # The same fault in a check that does not gate reward leaves only that check unscorable.
+    results = llm.parse_verdict(json.dumps(reply), items, EvidenceBundle(answer="HELLO"), gating={"one"})
+    assert [r.passed for r in results] == [None, True]

@@ -14,7 +14,7 @@ from fastapi import HTTPException, Request
 from pydantic import Field, JsonValue
 
 from nemo_gym.base_resources_server import ReverifyMode
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.partner_if.app import (
     NoAnswer,
@@ -86,6 +86,12 @@ def build_swe_evidence(
     return bundle
 
 
+def ends_in_assistant_message(response: NeMoGymResponse) -> bool:
+    """Whether the visible output, which leaves out reasoning, ends in an assistant message."""
+    visible = [item for item in response.output if item.type != "reasoning"]
+    return bool(visible) and visible[-1].type == "message" and visible[-1].role == "assistant"
+
+
 class SWEIFResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixin, ScaleSWEResourcesServer):
     config: SWEIFConfig
 
@@ -106,9 +112,10 @@ class SWEIFResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixin, ScaleSW
         # Scale-SWE's verify records the native verdict and releases the actor's sandbox.
         outcome = await super().verify(request, body)
         response = body.response
-        if response.status is None:
-            # OpenCode leaves the status unset for every run that did not stop on the output-token cap, including
-            # failed runs; such a run is graded on the events it left.
+        if response.status is None and ends_in_assistant_message(response):
+            # OpenCode sets a status only on a run the output-token cap cut off, and sends no other sign that a run
+            # finished, so a run counts as finished when it ends in an assistant message. Any other run, such as one
+            # whose transcript export failed or one interrupted mid-step, keeps no status, and check_finished masks it.
             response = response.model_copy(update={"status": "completed"})
 
         def evidence() -> EvidenceBundle:

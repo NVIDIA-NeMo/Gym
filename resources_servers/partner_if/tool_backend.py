@@ -30,8 +30,9 @@ class ToolBackend(Protocol):
 
     def call(self, state: Any, name: str, arguments: dict[str, JsonValue]) -> JsonValue:
         """Run one tool call against the episode's state and return its output. Raise ToolCallError for the
-        model's mistakes, which the model sees as the output; any other exception is an infrastructure error.
-        The server records the call only after this returns, so a call that raises leaves no record."""
+        model's mistakes: the server records the call with `{"error": ...}` as its output, which the model sees.
+        Any other exception is an infrastructure error and leaves no record, so the call has no receipt and the
+        rollout is masked."""
 
     def artifacts(self, state: Any) -> dict[str, str]:
         """The files the episode produced, by name; the judge sees them as artifact evidence."""

@@ -7,11 +7,8 @@ from typing import Literal
 
 from pydantic import Field, StrictBool
 
-from resources_servers.partner_if.task_data import StrictModel, TaskData, Text
-
-
-class VerifierMetadata(TaskData):
-    pass
+from resources_servers.partner_if.task_data import StrictModel, Text
+from resources_servers.partner_if.task_data import VerifierMetadata as VerifierMetadata
 
 
 class JudgeItem(StrictModel):

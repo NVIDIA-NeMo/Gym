@@ -10,7 +10,7 @@ from resources_servers.partner_if.app import VerifyRequest
 from resources_servers.partner_if.grading_contract import GradingContract
 from resources_servers.partner_if.llm import MAX_JUDGE_INPUT_CHARS
 from resources_servers.partner_if.native_evidence import LiveAgentCapture
-from resources_servers.partner_if.tests.test_app import response, server
+from resources_servers.partner_if.tests.test_app import CUTOFF, response, server
 
 
 def shared_request():
@@ -191,12 +191,43 @@ async def test_live_agent_row_is_graded_on_the_evidence_its_agent_captured():
     ],
     ids=["no_capture", "other_input"],
 )
-async def test_live_agent_row_without_matching_capture_is_masked(body, reason):
+@pytest.mark.parametrize("cutoff", [False, True])
+async def test_live_agent_row_without_matching_capture_is_masked(body, reason, cutoff):
     body = body()
     body.verifier_metadata.partner_if.evidence_mode = "live_agent"
+    if cutoff:
+        # A capture fault is masked even in a reply that the output-token cap cut off.
+        body.response = response(**CUTOFF)
     result = await server(accept_verification_input=True).verify(body)
     assert result.mask_sample and result.if_result.status == "unscorable"
     assert result.failure_kind == "partner_if:unscorable" and reason in result.failure_reason
+
+
+@pytest.mark.parametrize(
+    "overrides,row",
+    [
+        # Harbor reports each run it grades as completed, including an OpenHands run stopped at its iteration cap.
+        ({}, (1, False, None)),
+        (CUTOFF, (0, False, "partner_if:truncated")),
+        ({"status": "failed"}, (0, True, "partner_if:unscorable")),
+        ({"status": None}, (0, True, "partner_if:unscorable")),
+    ],
+    ids=["completed", "cut_off", "failed", "no_status"],
+)
+async def test_a_live_agent_reply_is_graded_only_when_it_finished(overrides, row):
+    from resources_servers.partner_if.tests.test_shared_judge import verdict
+
+    body = live_request()
+    body.response = response(**overrides)
+    reply = verdict(id="semantic", references=[{"source": "artifact:submission", "start_line": 1, "end_line": 1}])
+    with patch(
+        "resources_servers.partner_if.grading_service.call_judge",
+        new_callable=AsyncMock,
+        return_value=response(json.dumps(reply)),
+    ) as call:
+        result = await server(accept_verification_input=True).verify(body)
+    assert (result.reward, result.mask_sample, result.failure_kind) == row
+    assert call.called == (row[2] is None)
 
 
 async def test_the_judge_input_holds_only_the_artifacts_the_judged_items_need():

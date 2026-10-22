@@ -12,6 +12,18 @@ from nemo_gym.sandbox.agent_tools import verify_agent_response
 
 JUDGE = "resources_servers.partner_if.grading_service.call_judge"
 SCALE_SWE_VERIFY = "resources_servers.scale_swe.app.ScaleSWEResourcesServer.verify"
+REASONING = {"type": "reasoning", "id": "r", "summary": []}
+TOOL_EXCHANGE = [
+    {"type": "function_call", "id": "f", "call_id": "a", "name": "read", "arguments": "{}", "status": "completed"},
+    {"type": "function_call_output", "call_id": "a", "output": "1: def f():"},
+]
+HELLO = {
+    "id": "m",
+    "type": "message",
+    "role": "assistant",
+    "status": "completed",
+    "content": [{"type": "output_text", "text": "HELLO", "annotations": []}],
+}
 
 
 def test_swe_handoff_carries_working_directory():
@@ -122,33 +134,45 @@ async def test_if_points_do_not_depend_on_patch_correctness(completion, answer, 
     assert result.model_dump()["task_name"] == "swe-1"
 
 
-@pytest.mark.parametrize(
-    "output,cutoff,kind",
-    [
-        (None, True, "partner_if:truncated"),
-        ([], True, "partner_if:truncated"),
-        ([], False, "partner_if:no_answer"),
-        ([{"type": "reasoning", "id": "r", "summary": []}], False, "partner_if:no_answer"),
-    ],
-    ids=["cut_off", "cut_off_empty", "empty", "reasoning_only"],
-)
-async def test_a_cut_off_or_empty_trajectory_fails_every_item_without_the_judge(output, cutoff, kind):
-    body = swe_request(output=output, cutoff=cutoff)
+@pytest.mark.parametrize("output", [None, []], ids=["cut_off", "cut_off_empty"])
+async def test_a_cut_off_trajectory_fails_every_item_without_the_judge(output):
+    body = swe_request(output=output, cutoff=True)
     verify = AsyncMock(return_value=scale_swe_outcome(body))
     with patch(SCALE_SWE_VERIFY, verify), patch(JUDGE, new_callable=AsyncMock) as judge:
         result = await swe_server().verify(SimpleNamespace(), body)
     judge.assert_not_called()
-    assert (result.reward, result.mask_sample, result.failure_kind) == (0, False, kind)
+    assert (result.reward, result.mask_sample, result.failure_kind) == (0, False, "partner_if:truncated")
     assert [item.passed for item in result.if_result.items] == [False]
     # Scale-SWE still records its verdict and releases the actor's sandbox.
     verify.assert_awaited_once()
     assert result.task_outcome["evaluation_completed"] is True
 
 
+@pytest.mark.parametrize(
+    "output,row",
+    [
+        ([*TOOL_EXCHANGE, HELLO, REASONING], (1, False, None)),
+        ([], (0, True, "partner_if:unscorable")),
+        # OpenCode sends no sign that a run finished, so a reasoning-only run cannot be told from an interrupted one.
+        ([REASONING], (0, True, "partner_if:unscorable")),
+        ([HELLO, *TOOL_EXCHANGE], (0, True, "partner_if:unscorable")),
+    ],
+    ids=["ends_in_a_message", "no_export", "reasoning_only", "interrupted_after_a_tool_call"],
+)
+async def test_an_opencode_run_is_graded_only_when_it_ends_in_an_assistant_message(output, row):
+    body = swe_request(output=output)
+    verify = AsyncMock(return_value=scale_swe_outcome(body))
+    with patch(SCALE_SWE_VERIFY, verify), patch(JUDGE, new_callable=AsyncMock) as judge:
+        result = await swe_server().verify(SimpleNamespace(), body)
+    judge.assert_not_called()
+    assert (result.reward, result.mask_sample, result.failure_kind) == row
+    verify.assert_awaited_once()
+
+
 @pytest.mark.parametrize("cutoff", [False, True])
-async def test_the_empty_response_of_opencodes_failure_preset_scores_an_unmasked_zero(cutoff):
+async def test_opencodes_failure_preset_gets_its_unmasked_zero_only_for_a_cut_off_run(cutoff):
     # With execution_failure_reward_zero, OpenCode verifies a failed run with its output emptied and
-    # requires an unmasked zero.
+    # requires an unmasked zero. Emptied, any run but a cut-off one is masked, so the preset fails it.
     body = swe_request(cutoff=cutoff)
     server = swe_server()
 
@@ -157,7 +181,7 @@ async def test_the_empty_response_of_opencodes_failure_preset_scores_an_unmasked
             result = await server.verify(SimpleNamespace(), type(body).model_validate(request["json"]))
         return SimpleNamespace(ok=True, read=AsyncMock(return_value=result.model_dump_json().encode()))
 
-    row = await verify_agent_response(
+    verified = verify_agent_response(
         SimpleNamespace(post=post),
         ResourcesServerRef(type="resources_servers", name="swe"),
         body,
@@ -165,6 +189,11 @@ async def test_the_empty_response_of_opencodes_failure_preset_scores_an_unmasked
         {},
         force_zero_reward=True,
     )
+    if not cutoff:
+        with pytest.raises(ValueError, match="scores an empty response as unmasked zero"):
+            await verified
+        return
+    row = await verified
     assert (row["reward"], row["mask_sample"], row["failure_kind"]) == (0, False, "agent_run_error")
     # The row keeps the run's own response.
     assert row["if_result"]["passed"] == 0 and row["response"]["output"]

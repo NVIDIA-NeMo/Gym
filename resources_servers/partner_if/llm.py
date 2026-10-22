@@ -3,6 +3,7 @@
 """One grounded LLM verifier for text, submitted files and visible agent actions."""
 
 import json
+import re
 
 from pydantic import Field, JsonValue, StrictInt
 
@@ -131,8 +132,11 @@ def parse_verdict(
         if end < 0:
             raise ValueError("Unterminated reasoning envelope")
         text = text[end + len("</think>") :].strip()
-    if text.startswith("```json\n") and text.endswith("\n```"):
-        text = text[8:-4]
+    # Unwrap one code fence, untagged or tagged json in any case, around the whole reply. Text outside it
+    # fails the full match, and a second fence stays inside the captured text, so neither parses.
+    fenced = re.fullmatch(r"```(?:json)?(.*)```", text, flags=re.DOTALL | re.IGNORECASE)
+    if fenced:
+        text = fenced.group(1)
 
     def unique(pairs):
         value = {}

@@ -4,7 +4,7 @@
 
 import pytest
 
-from resources_servers.partner_if.engine import evaluate
+from resources_servers.partner_if.engine import evaluate, reward_checks
 from resources_servers.partner_if.evidence import EvidenceBundle
 from resources_servers.partner_if.grading_contract import GradingContract, RawJudgment
 
@@ -227,6 +227,18 @@ async def test_only_prerequisites_of_if_rubrics_gate_availability(format_depends
     assert result.status == status and result.reward == reward
     assert result.dimensions["if"].points_earned == earned and result.dimensions["if"].points_possible == 1
     assert result.dimensions["completion"].binary_score is None
+
+
+def test_reward_checks_are_if_rubrics_and_their_transitive_prerequisites():
+    contract = GradingContract.model_validate(
+        task([item("if_a")]).model_dump()
+        | {
+            # `if_a` needs `p1`, which needs `p2`; only the completion rubric needs `p3`.
+            "rubrics": [item("if_a", depends_on=["p1"]), item("content", dimension="completion", depends_on=["p3"])],
+            "prerequisites": [item("p1", depends_on=["p2"]), item("p2"), item("p3")],
+        }
+    )
+    assert reward_checks(contract) == {"if_a", "p1", "p2"}
 
 
 @pytest.mark.parametrize("format_depends_on", [["file"], ["relay"]])

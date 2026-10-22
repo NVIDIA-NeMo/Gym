@@ -88,9 +88,14 @@ concurrency of 2.
   runs the example `example_tools.NotesBackend` on `data/mock_tools_example.jsonl`.
 - `swe_app.py` (Scale-SWE with an OpenCode agent) also captures `live_agent` evidence.
   Set `actor_system_prompt` and `tool_description_additions` to what the agent's own
-  config gives the actor; the judge reads them. `configs/swe.yaml` validates, but it runs
-  only with a sandbox provider and Scale-SWE rows that carry a `live_agent` contract,
-  which Gym does not ship.
+  config gives the actor; the judge reads them. OpenCode reports a status only for a run
+  the output-token cap cut off, so a run counts as finished when its trajectory ends in an
+  assistant message. Any other run, such as one whose transcript export failed, is masked
+  as `partner_if:unscorable`. Leave OpenCode's `execution_failure_reward_zero` off: it
+  requires an unmasked 0 for a failed run, which this server masks, so such a run fails its
+  request instead.
+  `configs/swe.yaml` validates, but it runs only with a sandbox provider and Scale-SWE
+  rows that carry a `live_agent` contract, which Gym does not ship.
 - An agent that runs a `live_agent` episode itself, such as
   `responses_api_agents/partner_if_harbor_agent`, sends what it captured to this server's
   `/verify` as `verification_input` (`native_evidence.LiveAgentCapture`: the input the

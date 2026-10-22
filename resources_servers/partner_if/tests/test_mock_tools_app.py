@@ -441,9 +441,14 @@ def test_other_backend_failures_are_logged_infrastructure_errors(tmp_path, plugi
     resource = make_server(tmp_path, backend="synthetic_tools:FailingNotes")
     client = TestClient(resource.setup_webserver(), raise_server_exceptions=False)
     client.post("/seed_session", json=seed_for(row()))
-    assert client.post("/lookup", json={"key": "greeting"}).status_code == 500
+    failed = client.post("/lookup", json={"key": "greeting"})
+    assert failed.status_code == 500
     assert resource._episodes["session-one"].calls == []
     assert "synthetic_tools:FailingNotes failed in lookup" in caplog.text
+    # The agent shows the failure as the call's output, but the call has no receipt, so the rollout is masked.
+    events = [call(), output(failed.text), answer()]
+    body = client.post("/verify", json=row() | {"response": episode(events).model_dump(mode="json")}).json()
+    assert body["mask_sample"] and body["failure_kind"] == "partner_if:unscorable"
 
 
 async def test_a_retired_session_frees_its_episode_and_stays_closed(server):

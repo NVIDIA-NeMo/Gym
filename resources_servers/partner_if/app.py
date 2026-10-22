@@ -231,7 +231,11 @@ class PartnerIFResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixin, Sim
             params = body.responses_create_params.model_dump(exclude_none=True)
             if contract.evidence_mode == "live_agent":
                 output = [item.model_dump(exclude_none=True) for item in body.response.output]
-                return live_agent_evidence(params, output, body.verification_input)
+                bundle = live_agent_evidence(params, output, body.verification_input)
+                # After the capture checks, so a capture fault is masked even in a reply that was cut off. Harbor
+                # reports each run it grades as completed, including an OpenHands run stopped at its iteration cap.
+                check_finished(body.response)
+                return bundle
             validate_input(params, evidence_mode=contract.evidence_mode)
             if contract.evidence_mode == "tool_call_response":
                 return tool_response_evidence(params, body.response)

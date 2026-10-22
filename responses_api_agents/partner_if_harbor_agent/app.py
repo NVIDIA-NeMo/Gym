@@ -20,7 +20,7 @@ from pydantic import JsonValue
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, ModelServerRef, ResourcesServerRef
 from nemo_gym.failure_kinds import AGENT_RUN_ERROR, VERIFIER_ERROR
 from nemo_gym.global_config import ROLLOUT_ID_KEY_NAME
-from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY
+from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_TERMINAL_KEY
 from nemo_gym.sandbox.agent_tools import sandbox_server_url
 from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
 from resources_servers.partner_if.evidence import MAX_EVIDENCE_CHARS
@@ -130,11 +130,15 @@ class PartnerIFHarborAgent(HarborAgent):
         self, body: HarborRunRequest, err: Exception, failure_kind: str = AGENT_RUN_ERROR
     ) -> HarborVerifyResponse:
         """A run that cannot be scored is an outage for the failures file, not a score. The base sends Harbor and
-        OpenHands failures here; run() sends its task check and /verify failures."""
+        OpenHands failures here, and run() its task check failures; they keep the base's harbor_failed class, which a
+        resume runs again. run() also sends a failed /verify. That follows a finished sandbox run, so it is a terminal
+        verifier_error: a resume does not run the sandbox again, and the collector keeps the run's model-call
+        capture, which it drops for an agent_run_error class."""
         data = super().failure_response(body, err).model_dump(mode="json")
-        return HarborVerifyResponse.model_validate(
-            data | {"mask_sample": True, "failure_kind": failure_kind, "failure_reason": data["error"]}
-        )
+        masked = data | {"mask_sample": True, "failure_kind": failure_kind, "failure_reason": data["error"]}
+        if failure_kind == VERIFIER_ERROR:
+            masked |= {NG_FAILURE_CLASS_KEY: VERIFIER_ERROR, NG_TERMINAL_KEY: True}
+        return HarborVerifyResponse.model_validate(masked)
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
         """Proxy aggregate_metrics to the resources server, which computes partner_if's metrics."""
@@ -182,11 +186,15 @@ class PartnerIFHarborAgent(HarborAgent):
             )
             await raise_for_status(verified)
             graded = await get_response_json(verified)
+            # Validated alone first: merged over Harbor's fields, a reply without the score fields would pass, with
+            # Harbor's capture reward as the score.
+            HarborVerifyResponse.model_validate(graded)
+            return HarborVerifyResponse.model_validate(data | graded)
         except Exception as err:
-            # An unreachable resources server or an error status leaves the run ungraded.
+            # An unreachable resources server, an error status or a reply that is not a verify response leaves the
+            # run ungraded. Cancellation is not an Exception, so it propagates.
             logger.exception("/verify failed: task_index=%s rollout_index=%s", body.task_index, body.rollout_index)
             return self.failure_response(body, err, VERIFIER_ERROR)
-        return HarborVerifyResponse.model_validate(data | graded)
 
 
 if __name__ == "__main__":

@@ -86,7 +86,9 @@ class GradingContract(StrictModel):
         return self
 
 
-class TaskData(StrictModel):
+class VerifierMetadata(StrictModel):
+    """What the verify wire reads from a row's `verifier_metadata`."""
+
     partner_if: GradingContract = Field(
         json_schema_extra={
             "legacy_location": "verifier_metadata",
@@ -95,3 +97,27 @@ class TaskData(StrictModel):
     )
     # A benchmark's own annotations, which it validates. Never read by grading.
     curation: dict[str, JsonValue] | None = Field(default=None, exclude_if=lambda value: value is None)
+
+
+class TaskData(VerifierMetadata):
+    """A row's task-owned fields, flat, as Gym's data tooling validates them.
+
+    Native rows add the top-level fields their harness reads: the Harbor agent's `task_name` (`HarborRunRequest`)
+    and, on SWE rows, a Scale-SWE instance (`SWEIFVerifyRequest`), which that wire requires to have `instance_id`,
+    `workdir` and `image_url`. Other rows omit them, so they are optional here.
+    """
+
+    task_name: str | None = Field(default=None, json_schema_extra={"consumed_by": ["run", "provenance"]})
+    # The fields of a Scale-SWE instance (resources_servers/scale_swe/task_data.py).
+    instance_id: str | None = Field(default=None, json_schema_extra={"consumed_by": ["verify", "provenance"]})
+    repo: str | None = Field(default=None, json_schema_extra={"consumed_by": ["provenance"]})
+    language: str | None = Field(default=None, json_schema_extra={"consumed_by": ["verify", "provenance"]})
+    workdir: str | None = Field(default=None, json_schema_extra={"consumed_by": ["verify"]})
+    image_url: str | None = Field(default=None, json_schema_extra={"consumed_by": ["verify"]})
+    patch: str | None = Field(default=None, json_schema_extra={"consumed_by": ["verify"]})
+    pre_commands: str | None = Field(default=None, json_schema_extra={"consumed_by": ["verify"]})
+    problem_statement: str | None = Field(default=None, json_schema_extra={"consumed_by": ["prompt", "provenance"]})
+    f2p_patch: str | None = Field(default=None, json_schema_extra={"consumed_by": ["verify"]})
+    f2p_script: str | None = Field(default=None, json_schema_extra={"consumed_by": ["verify"]})
+    FAIL_TO_PASS: str | list[str] | None = Field(default=None, json_schema_extra={"consumed_by": ["verify"]})
+    PASS_TO_PASS: str | list[str] | None = Field(default=None, json_schema_extra={"consumed_by": ["verify"]})

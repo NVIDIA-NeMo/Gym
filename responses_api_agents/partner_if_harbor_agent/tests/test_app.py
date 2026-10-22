@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+import asyncio
 import json
 import runpy
 from pathlib import Path
@@ -25,7 +26,7 @@ from pydantic import ConfigDict, ValidationError
 from nemo_gym import PARENT_DIR
 from nemo_gym.config_types import AggregateMetricsRequest
 from nemo_gym.judge import JudgeError
-from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY
+from nemo_gym.rollout_collection import _NO_RESULT_FAILURE_CLASSES, NG_FAILURE_CLASS_KEY, is_terminal_failure
 from nemo_gym.server_utils import (
     IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME,
     IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME,
@@ -338,24 +339,39 @@ async def test_failed_judge_call_returns_a_judge_failed_row_through_verify(tmp_p
     [
         (MagicMock(side_effect=ServerDisconnectedError()), "ServerDisconnectedError: Server disconnected"),
         (MagicMock(return_value=httpx.Response(503)), "ClientResponseError: 503"),
+        (MagicMock(return_value=httpx.Response(200, content=b"<html>")), "JSONDecodeError"),
+        (MagicMock(return_value=httpx.Response(200, json=[])), "ValidationError"),
+        # Merged over Harbor's fields, this reply would have scored the run with Harbor's capture reward.
+        (MagicMock(return_value=httpx.Response(200, json={})), "ValidationError"),
     ],
-    ids=["unreachable", "error_status"],
+    ids=["unreachable", "error_status", "not_json", "not_an_object", "no_score_fields"],
 )
-async def test_failed_verify_call_returns_a_masked_verifier_error_row(tmp_path, monkeypatch, post, reason):
+async def test_failed_verify_call_returns_a_masked_terminal_verifier_error_row(tmp_path, monkeypatch, post, reason):
     body = run_body(tmp_path, live_contract())
     monkeypatch.setattr(harbor, "harbor_job_worker", FakeJobWorker(write_trial(tmp_path)))
     agent, client = make_agent(tmp_path)
-    # Harbor finished, but the resources server is unreachable or answers an error status.
+    # Harbor finished, but the resources server is unreachable, answers an error status or sends no verify response.
     client.resources = MagicMock(post=post)
     row = (await agent.run(body)).model_dump()
     assert [path for _, path, _ in client.calls] == ["/verify"]
     assert (row[NG_FAILURE_CLASS_KEY], row["failure_kind"], row["mask_sample"], row["reward"]) == (
-        "harbor_failed",
+        "verifier_error",
         "verifier_error",
         True,
         0.0,
     )
     assert row["failure_reason"].startswith(reason)
+    # A resume does not run the finished sandbox again, and the collector keeps the run's model-call capture.
+    assert is_terminal_failure(row) and row[NG_FAILURE_CLASS_KEY] not in _NO_RESULT_FAILURE_CLASSES
+
+
+async def test_cancelled_verify_call_propagates_without_a_failure_row(tmp_path, monkeypatch):
+    body = run_body(tmp_path, live_contract())
+    monkeypatch.setattr(harbor, "harbor_job_worker", FakeJobWorker(write_trial(tmp_path)))
+    agent, client = make_agent(tmp_path)
+    client.resources = MagicMock(post=MagicMock(side_effect=asyncio.CancelledError()))
+    with pytest.raises(asyncio.CancelledError):
+        await agent.run(body)
 
 
 async def test_controller_error_is_a_harbor_failure_and_is_never_graded(tmp_path, monkeypatch):
@@ -371,6 +387,8 @@ async def test_controller_error_is_a_harbor_failure_and_is_never_graded(tmp_path
         True,
     )
     assert "LLM provider rejected the request" in row["failure_reason"]
+    # A resume runs the sandbox again.
+    assert not is_terminal_failure(row)
 
 
 @pytest.mark.parametrize(
@@ -405,7 +423,7 @@ async def test_failed_task_check_is_a_masked_failure_row_and_starts_no_harbor_jo
         True,
         0.0,
     )
-    assert row["failure_reason"].startswith(reason)
+    assert row["failure_reason"].startswith(reason) and not is_terminal_failure(row)
 
 
 def test_openhands_zero_exit_is_not_enough_without_finished_event(tmp_path):

@@ -19,8 +19,10 @@ cluster (`ray_head_node_address`) the key has to be in that cluster's environmen
 unreadable artifact receipt leaves only the items that need the artifact unscorable. A
 Harbor or OpenHands failure, or a row whose task name or task bundle fails the checks
 before Harbor runs, goes to the failures file masked, with
-`failure_kind: agent_run_error`; a failed `/verify` call goes there masked, with
-`failure_kind: verifier_error`.
+`_ng_failure_class: harbor_failed` and `failure_kind: agent_run_error`, and a resume runs
+it again. A failed `/verify` call, or a `/verify` reply that is not a valid response,
+goes there masked with both set to `verifier_error`. The sandbox run had finished, so
+that row is terminal: a resume does not run it again.
 
 `configs/partner_if_harbor_agent.yaml` validates, but it runs only with an OpenSandbox
 deployment and Harbor tasks with `live_agent` rows, which Gym does not ship.

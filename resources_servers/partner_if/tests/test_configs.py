@@ -30,16 +30,54 @@ def test_frozen_history_cannot_dispatch_live_tools():
     assert parsed.cleanup_timeout_seconds == 180
 
 
-@pytest.mark.parametrize("dataset", ["example.jsonl", "mock_tools_example.jsonl"])
-def test_gym_task_data_tooling_validates_the_same_contract(dataset):
+# The top-level fields that native rows add, with synthetic values: the Harbor task and, on SWE rows, a Scale-SWE
+# instance.
+HARBOR_FIELDS = {"task_name": "synthetic-tools-1"}
+SWE_FIELDS = HARBOR_FIELDS | {
+    "instance_id": "synthetic__notes-1",
+    "repo": "synthetic/notes",
+    "language": "python",
+    "workdir": "/testbed",
+    "image_url": "registry.invalid/synthetic-notes:1",
+    "patch": "diff --git a/notes.py b/notes.py\n+FIXED = True\n",
+    "pre_commands": "pip install -e .",
+    "problem_statement": "Log the greeting note.",
+    "f2p_patch": "diff --git a/tests/test_notes.py b/tests/test_notes.py\n+def test_log(): pass\n",
+    "f2p_script": "pytest tests/test_notes.py",
+    "FAIL_TO_PASS": ["tests/test_notes.py::test_log"],
+    "PASS_TO_PASS": "[]",
+}
+
+
+@pytest.mark.parametrize(
+    ("dataset", "native_fields"),
+    [
+        ("example.jsonl", {}),
+        ("mock_tools_example.jsonl", {}),
+        # The live-agent examples as SWE and Harbor rows.
+        ("mock_tools_example.jsonl", SWE_FIELDS),
+        ("mock_tools_example.jsonl", HARBOR_FIELDS),
+    ],
+    ids=["text", "mock_tools", "swe", "harbor"],
+)
+def test_gym_task_data_tooling_validates_the_same_contract(dataset, native_fields):
     from nemo_gym.task_data import TaskDataValidator, load_task_data_schema
 
     root = PARENT_DIR / "resources_servers/partner_if"
     adapter = load_task_data_schema(root)
     validator = TaskDataValidator("partner_if", adapter, dataset)
     for i, line in enumerate((root / "data" / dataset).read_text().splitlines()):
-        validator.validate_row(i, json.loads(line))
+        validator.validate_row(i, json.loads(line) | native_fields)
     assert validator.report.clean, validator.report.summary()
+
+
+def test_the_swe_row_carries_every_task_field_of_its_wire():
+    # So the swe case above fails when the SWE wire gains a field that the schema does not declare.
+    from nemo_gym.base_resources_server import BaseVerifyRequest
+    from resources_servers.partner_if.swe_app import SWEIFVerifyRequest
+
+    wire = SWEIFVerifyRequest.model_fields.keys() - BaseVerifyRequest.model_fields.keys() - {"verifier_metadata"}
+    assert wire == SWE_FIELDS.keys()
 
 
 def server_config(config_name, server_name):
