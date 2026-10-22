@@ -99,6 +99,7 @@ from responses_api_agents.opencode_agent.setup_opencode import ensure_opencode
 LOG = logging.getLogger(__name__)
 _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
 _INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
+_TESTED_OUTCOME_VERSION = "1.17.11"
 
 
 def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
@@ -680,6 +681,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             r"\d+\.\d+\.\d+", self.config.opencode_version
         ):
             raise HTTPException(422, "OpenCode sandbox execution requires an exact opencode_version")
+        if self.config.opencode_version != _TESTED_OUTCOME_VERSION:
+            LOG.warning(
+                "OpenCode %s is untested: error classification is validated on %s",
+                self.config.opencode_version,
+                _TESTED_OUTCOME_VERSION,
+            )
         if self.config.context_window <= 0 or self.config.timeout <= 0:
             raise HTTPException(422, "OpenCode context window and execution timeout must be positive")
         if not 0 < self.config.max_output_tokens <= self.config.context_window:

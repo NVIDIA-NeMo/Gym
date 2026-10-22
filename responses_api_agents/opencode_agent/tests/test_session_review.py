@@ -24,6 +24,17 @@ from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import (
 )
 
 
+@pytest.mark.parametrize("version,warn", [("1.17.11", False), ("1.18.0", True)])
+def test_session_warns_about_untested_opencode_version(setup, caplog, version, warn):
+    agent, sandbox = setup
+    agent.config.opencode_version = version
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        created.raise_for_status()
+        client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"])).raise_for_status()
+    assert ("error classification is validated on 1.17.11" in caplog.text) == warn
+
+
 @pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize("thinking", [False, True])
 def test_session_uploads_shared_plugin_only_with_model_capture(setup, enabled, thinking):
