@@ -70,6 +70,7 @@ from nemo_gym._checkpoint.settings import checkpoint_settings
 from nemo_gym.anthropic_converter import AnthropicConverter
 from nemo_gym.chat_streaming import SSE_KEEPALIVE, sanitize_streaming_chat_body, synthesize_chat_completion_sse
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT, ModelServerRef
+from nemo_gym.model_call_debug_trace import MODEL_CALL_ID_STATE_KEY, ModelCallDebugTrace, trace_model_call
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -318,6 +319,8 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
     non_generating_model_routes: ClassVar[frozenset[tuple[str, str]]] = frozenset()
     # Main process of a multi-worker policy server under checkpointing: coordinates the workers.
     _policy_coordinator: Optional[PolicyCoordinator] = PrivateAttr(default=None)
+    # Built per serving process by setup_webserver when model_call_debug_trace is enabled.
+    _model_call_debug_trace: Optional[ModelCallDebugTrace] = PrivateAttr(default=None)
 
     async def _finalize_served_response(self, response: Any) -> None:
         """Finalize capture after conversion to the response returned to the client."""
@@ -367,6 +370,10 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             | frozenset(
                 (request.method, request.path) for request in self.config.token_id_capture_non_generating_requests
             ),
+        )
+
+        self._model_call_debug_trace = ModelCallDebugTrace.from_global_config(
+            self.server_client.global_config_dict, server_name=self.config.name
         )
 
         model_attributes = {"nemo.gym.server.name": self.config.name}
@@ -657,21 +664,24 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # all of them.
         # Resolve the parent from the received request before dispatch.
         # Exact prefix supply and capture share this decision.
-        if current_capture_context() is not None:
-            request_messages = _request_messages(params)
-            await resolve_parent(request_messages)
-            await register_call_intent()
-        else:
-            request_messages = None
-        if "request" in inspect.signature(self.chat_completions).parameters:
-            completion = await self.chat_completions(request=request, body=params)
-        else:
-            completion = await self.chat_completions(body=params)
-        await capture_tokens(
-            completion,
-            request_messages=request_messages,
-        )
-        return completion
+        async with trace_model_call(self._model_call_debug_trace, request, params) as trace:
+            if current_capture_context() is not None:
+                request_messages = _request_messages(params)
+                await resolve_parent(request_messages)
+                await register_call_intent()
+            else:
+                request_messages = None
+            if "request" in inspect.signature(self.chat_completions).parameters:
+                completion = await self.chat_completions(request=request, body=params)
+            else:
+                completion = await self.chat_completions(body=params)
+            await capture_tokens(
+                completion,
+                request_messages=request_messages,
+            )
+            if trace is not None:
+                trace.response = completion
+            return completion
 
     async def messages(self, request: Request, body: dict = Body()):
         """Default Anthropic Messages <-> Responses mapping shared by every Gym model server.
@@ -703,24 +713,27 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # all of them.
         # Resolve the parent from the received request before dispatch.
         # Exact prefix supply and capture share this decision.
-        if current_capture_context() is not None:
-            request_messages = _request_messages(params)
-            await resolve_parent(request_messages)
-            await register_call_intent()
-        else:
-            request_messages = None
-        if "request" in inspect.signature(self.responses).parameters:
-            response = await self.responses(request=request, body=params)
-        else:
-            response = await self.responses(body=params)
-        # Capture before streaming dispatch wraps the response.
-        # Anthropic mapping drops the token fields.
-        # The assembled response still carries them here for every dialect.
-        await capture_tokens(
-            response,
-            request_messages=request_messages,
-        )
-        return response
+        async with trace_model_call(self._model_call_debug_trace, request, params) as trace:
+            if current_capture_context() is not None:
+                request_messages = _request_messages(params)
+                await resolve_parent(request_messages)
+                await register_call_intent()
+            else:
+                request_messages = None
+            if "request" in inspect.signature(self.responses).parameters:
+                response = await self.responses(request=request, body=params)
+            else:
+                response = await self.responses(body=params)
+            # Capture before streaming dispatch wraps the response.
+            # Anthropic mapping drops the token fields.
+            # The assembled response still carries them here for every dialect.
+            await capture_tokens(
+                response,
+                request_messages=request_messages,
+            )
+            if trace is not None:
+                trace.response = response
+            return response
 
 
 def _validate_responses_params(body: dict) -> NeMoGymResponseCreateParamsNonStreaming:
@@ -1822,6 +1835,8 @@ class _CaptureMiddleware:
 
         rollout_id = rollout_from_path
         model_call_id = uuid4().hex
+        # Debug tracing joins its record to this call's capture records by this id.
+        request_state[MODEL_CALL_ID_STATE_KEY] = model_call_id
         client_session_id = _unique_request_header(scope.get("headers") or [], _CLIENT_SESSION_HEADER)
         client_assistant_message_id = (
             _unique_request_header(scope.get("headers") or [], self._assistant_message_header)

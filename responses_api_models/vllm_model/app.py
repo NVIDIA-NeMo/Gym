@@ -40,6 +40,7 @@ from nemo_gym.base_responses_api_model import (
     is_propagated_refusal,
     start_model_execution,
 )
+from nemo_gym.model_call_debug_trace import note_engine_response, request_engine_token_data
 from nemo_gym.openai_utils import (
     REQUIRED_TOKEN_METADATA_FIELDS,
     TOKEN_METADATA_FIELDS,
@@ -495,6 +496,8 @@ class VLLMModel(SimpleResponsesAPIModel):
         "required_prefix_token_ids",
     )
     _external_capture_handler: ExternalCaptureHandler | None = PrivateAttr(default=None)
+    # Megatron Inference returns token ids for return_tokenized_data instead of return_token_ids.
+    _megatron_engine: bool = PrivateAttr(default=False)
     _warned_request_chat_template_kwargs_dropped: bool = PrivateAttr(default=False)
     _tar_audio_reader: TarAudioReader = PrivateAttr(default_factory=TarAudioReader)
     _generation_cut_control_urls: Dict[str, str] = PrivateAttr(default_factory=dict)
@@ -599,6 +602,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             self._external_capture_handler = make_external_capture_handler(
                 capture_config.token_id_capture.external_staging_backend
             )
+            self._megatron_engine = capture_config.token_id_capture.external_staging_backend == "megatron_worker"
 
         self._chat_template_tokenizer = None
         if self.config.use_completions_api and self.config.render_chat_template:
@@ -949,6 +953,9 @@ class VLLMModel(SimpleResponsesAPIModel):
             body_dict = self._external_capture_handler.prepare_request(body_dict)
         else:
             body_dict = self._apply_prefix_supply(body_dict)
+        if not self.config.return_token_id_information:
+            # Debug tracing only; the token-echo path already requests this data.
+            request_engine_token_data(body_dict, megatron_engine=self._megatron_engine)
 
         return body_dict
 
@@ -1259,6 +1266,8 @@ class VLLMModel(SimpleResponsesAPIModel):
             raise
 
         execution["response_source"] = "upstream"
+        # Debug tracing reads the engine's token data before conversion or capture strips it.
+        note_engine_response(chat_completion_dict)
         if transport_io_enabled:
             finished_ns = time_ns()
             _append_transport_io(

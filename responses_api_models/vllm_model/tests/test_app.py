@@ -36,6 +36,7 @@ from nemo_gym import PARENT_DIR
 from nemo_gym._checkpoint.control import CheckpointRequest
 from nemo_gym._checkpoint.generation_cut import GenerationCutInventory, GenerationCutPrefixAck, GenerationCutReceipt
 from nemo_gym._checkpoint.model import PolicyModelParticipant, generation_cut_requester
+from nemo_gym.model_call_debug_trace import _CALL_TRACE, CallTrace
 from nemo_gym.openai_utils import (
     CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS,
     NeMoGymAsyncOpenAI,
@@ -73,6 +74,7 @@ from nemo_gym.rollout_collection import _agent_request_failure_row, is_terminal_
 from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient, raise_for_status
 from nemo_gym.token_id_capture import (
+    NG_DEBUG_TOKENS_FIELD,
     CaptureContext,
     InMemoryLineageStore,
     TokenCaptureStore,
@@ -1413,6 +1415,139 @@ class TestApp:
             "generation_log_probs",
         ):
             assert field_name not in served_message, field_name
+
+    @staticmethod
+    def _traced_chat_call(server: VLLMModel, client: MagicMock, context: CaptureContext | None = None):
+        server._clients = [client]
+        request = MagicMock()
+        request.session = {SESSION_ID_KEY: "session-1"}
+        request.headers = {}
+        trace = CallTrace(request_token_data=True)
+        trace_token = _CALL_TRACE.set(trace)
+        sink_token = set_token_sink(context) if context is not None else None
+        try:
+            response = asyncio.run(
+                server.chat_completions(
+                    request,
+                    NeMoGymChatCompletionCreateParamsNonStreaming(messages=[{"role": "user", "content": "go"}]),
+                )
+            )
+        finally:
+            if sink_token is not None:
+                reset_token_sink(sink_token)
+            _CALL_TRACE.reset(trace_token)
+        return response, trace
+
+    def test_debug_trace_reads_engine_tokens_and_serves_the_untraced_response(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(monkeypatch)
+        client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        # The NeMo RL vLLM server answers a token-id logprob request at every location below.
+        client.create_chat_completion = AsyncMock(
+            return_value={
+                "id": "chatcmpl-1",
+                "object": "chat.completion",
+                "created": FIXED_TIME,
+                "model": "dummy_model",
+                "prompt_token_ids": [10, 11],
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "token_ids": [12, 13],
+                        "logprobs": {
+                            "content": [
+                                {"token": "token_id:12", "logprob": -0.1, "bytes": None, "top_logprobs": []},
+                                {"token": "token_id:13", "logprob": -0.2, "bytes": None, "top_logprobs": []},
+                            ]
+                        },
+                        "message": {
+                            "role": "assistant",
+                            "content": "done",
+                            "prompt_token_ids": [10, 11],
+                            "generation_token_ids": [12, 13],
+                            "generation_log_probs": [-0.1, -0.2],
+                        },
+                    }
+                ],
+            }
+        )
+
+        response, trace = self._traced_chat_call(server, client)
+
+        outbound = client.create_chat_completion.await_args.kwargs
+        assert outbound["logprobs"] is True
+        assert outbound["top_logprobs"] == 0
+        assert outbound["return_tokens_as_token_ids"] is True
+        assert outbound["return_token_ids"] is True
+        assert trace.engine_tokens == {
+            "prompt_token_ids": [10, 11],
+            "generation_token_ids": [12, 13],
+            "generation_log_probs": [-0.1, -0.2],
+        }
+        assert trace.engine_tokens_source == "engine_response"
+        served = response.model_dump()
+        assert "prompt_token_ids" not in served
+        assert "token_ids" not in served["choices"][0]
+        assert served["choices"][0]["logprobs"] is None
+        assert served["choices"][0]["message"]["content"] == "done"
+        for field_name in ("prompt_token_ids", "generation_token_ids", "generation_log_probs"):
+            assert field_name not in served["choices"][0]["message"], field_name
+
+    def test_debug_trace_asks_the_vllm_worker_to_echo_staged_tokens(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(monkeypatch, external_staging_backend="vllm_worker")
+        staged = {"prompt_token_ids": [10, 11], "generation_token_ids": [12], "generation_log_probs": [-0.1]}
+        client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        client.create_chat_completion = AsyncMock(
+            return_value={
+                "id": "chatcmpl-1",
+                "object": "chat.completion",
+                "created": FIXED_TIME,
+                "model": "dummy_model",
+                "ng_commit_coords": {"staging_key": "rollout-1/c1"},
+                NG_DEBUG_TOKENS_FIELD: staged,
+                "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "ok"}}],
+            }
+        )
+        context = CaptureContext(
+            rollout_id="rollout-1",
+            model_call_id="c1",
+            token_sink=None,
+            external_staging=True,
+            capture_admission=CaptureAdmission(rollout_id="rollout-1", model_call_id="c1", mode="text"),
+        )
+
+        response, trace = self._traced_chat_call(server, client, context)
+
+        outbound = client.create_chat_completion.await_args.kwargs
+        assert outbound[NG_DEBUG_TOKENS_FIELD] is True
+        assert "return_token_ids" not in outbound
+        assert trace.engine_tokens == staged
+        assert trace.engine_tokens_source == "engine_staged"
+        assert context.external_commit_coords == {"staging_key": "rollout-1/c1"}
+        assert NG_DEBUG_TOKENS_FIELD not in response.model_dump()
+
+    def test_debug_trace_asks_the_megatron_stager_through_offload_params(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(monkeypatch, external_staging_backend="megatron_worker")
+        context = CaptureContext(
+            rollout_id="rollout-1",
+            model_call_id="c1",
+            token_sink=None,
+            external_staging=True,
+            capture_admission=CaptureAdmission(rollout_id="rollout-1", model_call_id="c1", mode="text"),
+        )
+        trace_token = _CALL_TRACE.set(CallTrace(request_token_data=True))
+        sink_token = set_token_sink(context)
+        try:
+            outbound = server._preprocess_chat_completion_create_params(
+                MagicMock(), {"messages": [{"role": "user", "content": "go"}]}
+            )
+        finally:
+            reset_token_sink(sink_token)
+            _CALL_TRACE.reset(trace_token)
+
+        assert outbound["offload_params"][NG_DEBUG_TOKENS_FIELD] is True
+        assert NG_DEBUG_TOKENS_FIELD not in outbound
+        assert "return_tokenized_data" not in outbound
 
     def test_session_client_routing_is_stable_across_workers(self, monkeypatch: MonkeyPatch) -> None:
         workers = [self._setup_server(monkeypatch) for _ in range(2)]

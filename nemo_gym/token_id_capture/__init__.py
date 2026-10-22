@@ -95,6 +95,7 @@ from nemo_gym.token_id_capture.records import (
 from nemo_gym.token_id_capture.sink import (
     NG_CAPTURE_FIELD,
     NG_COMMIT_COORDS_FIELD,
+    NG_DEBUG_TOKENS_FIELD,
     CaptureContext,
     capture_health_snapshot,
     capture_tokens,
@@ -150,6 +151,7 @@ __all__ = [
     "CaptureContext",
     "NG_CAPTURE_FIELD",
     "NG_COMMIT_COORDS_FIELD",
+    "NG_DEBUG_TOKENS_FIELD",
     "UNCOMMITTED_CALL_REASON",
     "UNRESOLVED_PARENT_REASON",
     "set_token_sink",

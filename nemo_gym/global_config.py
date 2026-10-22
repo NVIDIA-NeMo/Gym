@@ -137,6 +137,9 @@ MODEL_CALL_CAPTURE_DIR_KEY_NAME = "model_call_capture_dir"
 # Run-wide training-token capture settings.
 # See ``nemo_gym/token_id_capture/config.py``.
 TOKEN_ID_CAPTURE_BLOCK = "token_id_capture"
+# Per-model-call debug records written by model servers.
+# See ``nemo_gym/model_call_debug_trace.py``.
+MODEL_CALL_DEBUG_TRACE_BLOCK = "model_call_debug_trace"
 COMPONENT_NAME_KEY_NAME = "component_name"
 SKIP_VERIFICATION_KEY_NAME = "skip_verification"
 SKIP_VERIFICATION_REWARD_KEY_NAME = "skip_verification_reward"
@@ -183,6 +186,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     OBSERVABILITY_ENABLED_KEY_NAME,
     MODEL_CALL_CAPTURE_DIR_KEY_NAME,
     TOKEN_ID_CAPTURE_BLOCK,
+    MODEL_CALL_DEBUG_TRACE_BLOCK,
     COMPONENT_NAME_KEY_NAME,
     SKIP_VERIFICATION_KEY_NAME,
     SKIP_VERIFICATION_REWARD_KEY_NAME,

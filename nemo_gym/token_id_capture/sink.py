@@ -67,6 +67,11 @@ if TYPE_CHECKING:
 # response under ``NG_COMMIT_COORDS_FIELD``.
 NG_CAPTURE_FIELD = "ng_capture"
 NG_COMMIT_COORDS_FIELD = "ng_commit_coords"
+# Debug tracing (``model_call_debug_trace``) sets this flag on an admitted request.
+# The worker then echoes the arrays it staged under the same response field:
+# ``prompt_token_ids``, ``generation_token_ids``, and ``generation_log_probs``.
+# The model server reads and removes the echo before the response reaches the agent.
+NG_DEBUG_TOKENS_FIELD = "ng_debug_tokens"
 
 
 @dataclass
