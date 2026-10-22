@@ -25,6 +25,7 @@ from pytest import MonkeyPatch
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from nemo_gym.base_responses_api_model import CaptureStore, _CaptureMiddleware
+from nemo_gym.model_sampling import ModelSamplingMiddleware
 from nemo_gym.observability.model_calls import aggregate_model_call_metrics, read_model_call_records
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -370,7 +371,8 @@ class TestApp:
         server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
         server._client.create_response = AsyncMock(return_value=_response_data())
         app = server.setup_webserver()
-        assert app.user_middleware[0].cls is _CaptureMiddleware
+        middleware_classes = [middleware.cls for middleware in app.user_middleware]
+        assert middleware_classes.index(ModelSamplingMiddleware) < middleware_classes.index(_CaptureMiddleware)
         assert not issubclass(_CaptureMiddleware, BaseHTTPMiddleware)
         client = TestClient(app)
 
