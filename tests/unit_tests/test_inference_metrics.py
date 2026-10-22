@@ -968,7 +968,7 @@ async def test_prefill_global_average_pools_counts_instead_of_averaging_engine_m
 
     async def scrape(replica, url):
         tokens, batches = (100, 1) if replica == "a" else (1800, 9)
-        return {
+        result = {
             f"vllm/{replica}/prefill_batch_tokens_per_second": tokens,
             f"vllm/{replica}/prefill_batches_per_second": batches,
             f"vllm/{replica}/prefill_tokens_per_forward": tokens / batches,
@@ -983,6 +983,16 @@ async def test_prefill_global_average_pools_counts_instead_of_averaging_engine_m
             f"vllm/{replica}/prefill_ready_requests_per_step/engine/0": tokens / batches,
             f"vllm/{replica}/prefill_ready_requests_per_step": tokens / batches,
         }
+        for name, (numerator, denominator, label) in metrics_module.PREFILL_OUTCOME_METRICS.items():
+            result.update(
+                {
+                    f"vllm/{replica}/prefill_{denominator}_per_second/engine/0": batches,
+                    f"vllm/{replica}/prefill_{numerator}_per_second/engine/0/{label}/mamba_alignment": tokens,
+                    f"vllm/{replica}/{name}/engine/0/{label}/mamba_alignment": tokens / batches,
+                    f"vllm/{replica}/{name}/{label}/mamba_alignment": tokens / batches,
+                }
+            )
+        return result
 
     def publish(metrics):
         published.update(metrics)
@@ -1000,6 +1010,10 @@ async def test_prefill_global_average_pools_counts_instead_of_averaging_engine_m
     assert published["vllm/total/prefill_ready_requests_per_step"] == 190
     assert published["vllm/total/prefill_ready_requests_per_step/engine/0"] == 190
     assert "vllm/mean/prefill_ready_requests_per_step" not in published
+    for name, (_, _, label) in metrics_module.PREFILL_OUTCOME_METRICS.items():
+        assert published[f"vllm/total/{name}/{label}/mamba_alignment"] == 190
+        assert published[f"vllm/total/{name}/engine/0/{label}/mamba_alignment"] == 190
+        assert f"vllm/mean/{name}/{label}/mamba_alignment" not in published
 
 
 def test_prefill_lookup_latency_and_request_counts_use_interval_deltas():
@@ -1077,3 +1091,46 @@ def test_prefill_readiness_preserves_engines_and_pools_interval_observations():
     assert prefix + "ready_requests_per_step/engine/0" not in reset
     assert reset[prefix + "ready_requests_per_step/engine/1"] == pytest.approx(3)
     assert reset[prefix + "ready_requests_per_step"] == pytest.approx(3)
+
+
+@pytest.mark.parametrize("metric", metrics_module.PREFILL_OUTCOME_METRICS)
+@pytest.mark.parametrize("openmetrics", [False, True])
+def test_prefill_outcome_averages_preserve_labels_engines_and_reset_handling(metric: str, openmetrics: bool) -> None:
+    collector = InferenceMetricsCollector(config())
+    numerator, denominator, label = metrics_module.PREFILL_OUTCOME_METRICS[metric]
+
+    def payload(values: list[tuple[int, int]]) -> str:
+        registry = CollectorRegistry()
+        steps = Counter(f"vllm:prefill_{denominator}_total", "Steps", ["engine"], registry=registry)
+        counts = Counter(f"vllm:prefill_{numerator}_total", "Outcomes", ["engine", label], registry=registry)
+        for engine, (step_count, request_count) in enumerate(values):
+            steps.labels(str(engine)).inc(step_count)
+            counts.labels(str(engine), "mamba_alignment").inc(request_count)
+            counts.labels(str(engine), "other").inc(0)
+        if openmetrics:
+            from prometheus_client.openmetrics.exposition import generate_latest as generate_openmetrics
+
+            return generate_openmetrics(registry, escaping="allow-utf-8").decode()
+        return generate_latest(registry).decode()
+
+    def parse(values: list[tuple[int, int]], time: float) -> dict[str, float]:
+        return collector.parse(
+            "replica0",
+            payload(values),
+            time,
+            content_type="application/openmetrics-text" if openmetrics else "text/plain",
+        )
+
+    prefix = f"vllm/replica0/{metric}"
+    initial = parse([(0, 0), (0, 0)], 10)
+    assert not any(key.startswith(prefix + "/") for key in initial)
+    result = parse([(2, 12), (8, 16)], 20)
+    assert result[f"{prefix}/engine/0/{label}/mamba_alignment"] == pytest.approx(6)
+    assert result[f"{prefix}/engine/1/{label}/mamba_alignment"] == 2
+    assert result[f"{prefix}/{label}/mamba_alignment"] == pytest.approx(2.8)
+    assert result[f"{prefix}/{label}/other"] == 0
+    idle = parse([(2, 12), (8, 16)], 30)
+    assert not any(key.startswith(prefix + "/") for key in idle)
+    reset = parse([(0, 0), (10, 22)], 40)
+    assert f"{prefix}/engine/0/{label}/mamba_alignment" not in reset
+    assert reset[f"{prefix}/{label}/mamba_alignment"] == pytest.approx(3)

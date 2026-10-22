@@ -40,7 +40,25 @@ PREFILL_INTERVAL_RATIOS = {
     "prefill_underfilled_batch_fraction": ("underfilled_batches", "batches"),
 }
 PREFILL_READINESS_FIELDS = ("ready_requests", "ready_unscheduled_requests", "unexamined_requests")
-PREFILL_ENGINE_COUNTERS = {f"prefill_{field}" for field in (*PREFILL_READINESS_FIELDS, "readiness_steps")}
+PREFILL_OUTCOME_METRICS = {
+    "prefill_requests_per_step": ("request_outcomes", "outcome_steps", "outcome"),
+    "prefill_unexamined_requests_per_step": ("unexamined_by_stop_reason", "outcome_steps", "stop_reason"),
+    "prefill_underfilled_requests_per_forward": (
+        "underfilled_request_outcomes",
+        "underfilled_outcome_steps",
+        "outcome",
+    ),
+    "prefill_underfilled_unexamined_requests_per_forward": (
+        "underfilled_unexamined_by_stop_reason",
+        "underfilled_outcome_steps",
+        "stop_reason",
+    ),
+}
+PREFILL_ENGINE_COUNTERS = {f"prefill_{field}" for field in (*PREFILL_READINESS_FIELDS, "readiness_steps")} | {
+    f"prefill_{field}"
+    for numerator, denominator, _ in PREFILL_OUTCOME_METRICS.values()
+    for field in (numerator, denominator)
+}
 PREFILL_DERIVED_METRICS = (
     set(PREFILL_INTERVAL_RATIOS)
     | {
@@ -52,6 +70,7 @@ PREFILL_DERIVED_METRICS = (
         "prefill_blocked_requests_per_step",
     }
     | {f"prefill_{field}_per_step" for field in PREFILL_READINESS_FIELDS}
+    | set(PREFILL_OUTCOME_METRICS)
 )
 MOONCAKE_STORAGE_GAUGES = {"master_allocated_bytes", "master_total_capacity_bytes"}
 MOONCAKE_EVICTION_GAUGES = {
@@ -255,6 +274,27 @@ class InferenceMetricsCollector:
                     pooled_steps += steps
             if pooled_steps > 0:
                 metrics[f"{prefix}prefill_{field}_per_step"] = pooled_count / pooled_steps
+        for name, (numerator, denominator, label) in PREFILL_OUTCOME_METRICS.items():
+            step_prefix = f"{prefix}prefill_{denominator}_per_second"
+            steps_by_engine = {
+                key.removeprefix(step_prefix): value
+                for key, value in metrics.items()
+                if key == step_prefix or key.startswith(step_prefix + "/engine/")
+            }
+            pooled: dict[str, tuple[float, float]] = {}
+            for engine_suffix, steps in steps_by_engine.items():
+                if steps <= 0:
+                    continue
+                count_prefix = f"{prefix}prefill_{numerator}_per_second{engine_suffix}/{label}/"
+                for key, count in list(metrics.items()):
+                    if not key.startswith(count_prefix):
+                        continue
+                    value = key.removeprefix(count_prefix)
+                    metrics[f"{prefix}{name}{engine_suffix}/{label}/{value}"] = count / steps
+                    total_count, total_steps = pooled.get(value, (0.0, 0.0))
+                    pooled[value] = (total_count + count, total_steps + steps)
+            for value, (count, steps) in pooled.items():
+                metrics[f"{prefix}{name}/{label}/{value}"] = count / steps
         for name, (numerator, denominator) in PREFILL_INTERVAL_RATIOS.items():
             total = metrics.get(f"{prefix}prefill_{numerator}_per_second")
             count = metrics.get(f"{prefix}prefill_{denominator}_per_second")
