@@ -36,7 +36,6 @@ nl2repobench_opencode_resources_server:
     nl2repobench:
       tasks_dir: benchmarks/nl2repobench_vahid1016_v50/tasks
       expected_task_count: 50
-      allowed_agents: [openhands_sdk_sandboxed_agent]
       # verify_image_override intentionally UNSET (v50): the verifier uses the per-task image (task_image_registry_template) in every
       # agent_network_mode, so all modes are graded in the validated, deps-complete environment (ceiling 1.0 on all 50 tasks).
       enforce_agent_no_network: false
