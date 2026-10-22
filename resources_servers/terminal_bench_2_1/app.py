@@ -79,6 +79,8 @@ class TerminalBench21VerifyResponse(BaseVerifyResponse):
 
     task_name: str
     test_output: str
+    # Exit code of tests/test.sh; None when it did not return (timeout or exec error).
+    test_return_code: Optional[int] = None
     golden_patch_output: Optional[str]
 
 
@@ -310,7 +312,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             )
             test_output = (eval_result.stderr or "") + (eval_result.stdout or "")
         except:
-            print(f"Hit exception running TerminalBench 2.1 tests: {format_exc()}", file=stderr)
+            print(f"Hit exception running TerminalBench 2.1 tests for {body.task_name}: {format_exc()}", file=stderr)
             eval_result = None
             test_output = ""
         verification_time_taken = time() - start_time
@@ -329,6 +331,14 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
 
                 evaluation_completed = True
             except:
+                # test.sh returned without a readable reward.txt (e.g. it exited under set -e before writing
+                # it). One line per case, so the task and the failing step can be told apart without debug.
+                print(
+                    f"[tb_verify][reward_missing] task={body.task_name} rc={eval_result.return_code} "
+                    f"verify_s={verification_time_taken:.1f} "
+                    f"stderr_tail={(eval_result.stderr or '')[-300:]!r} stdout_tail={(eval_result.stdout or '')[-300:]!r}",
+                    file=stderr,
+                )
                 if self.config.debug:
                     print(f"Hit an exception downloading and converting reward: {format_exc()}", file=stderr)
 
@@ -343,6 +353,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             reward=reward,
             verification_time_taken=verification_time_taken,
             test_output=test_output,
+            test_return_code=None if eval_result is None else eval_result.return_code,
             golden_patch_output=golden_patch_output,
         )
 

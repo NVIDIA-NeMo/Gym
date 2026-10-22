@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import subprocess
+from io import StringIO
 from pathlib import Path
 from shlex import quote
 from shutil import copyfile
@@ -46,6 +47,13 @@ def _verify_request(task_folder: Path) -> TerminalBench21VerifyRequest:
 
 class TestApp:
     @pytest.fixture
+    def tb_stderr(self, monkeypatch) -> StringIO:
+        # app.py binds sys.stderr at import, so neither capsys nor capfd sees its prints.
+        buffer = StringIO()
+        monkeypatch.setattr(terminal_bench_app, "stderr", buffer)
+        return buffer
+
+    @pytest.fixture
     def server(self) -> TerminalBench21ResourcesServer:
         config = TerminalBench21ResourcesServerConfig(
             sandbox_provider="",
@@ -71,6 +79,7 @@ class TestApp:
         reward_text: str | None,
         expected_reward: float,
         evaluation_completed: bool,
+        tb_stderr: StringIO,
     ) -> None:
         def download_reward(remote_path: str, local_path: str) -> None:
             assert remote_path == "/logs/verifier/reward.txt"
@@ -99,6 +108,14 @@ class TestApp:
         assert result.reward == expected_reward
         assert result.evaluation_completed is evaluation_completed
         assert result.test_output == "verifier output"
+        assert result.test_return_code == 0
+        missing_lines = [l for l in tb_stderr.getvalue().splitlines() if "[tb_verify][reward_missing]" in l]
+        if evaluation_completed:
+            assert missing_lines == []
+        else:
+            assert len(missing_lines) == 1
+            assert "task=terminal-bench/background-server rc=0" in missing_lines[0]
+            assert "stdout_tail='verifier output'" in missing_lines[0]
         sandbox.download.assert_awaited_once()
         sandbox.stop.assert_awaited_once()
         assert "test-session" not in server._session_id_to_sandbox
@@ -270,6 +287,48 @@ class TestApp:
         assert result.test_output == ""
         sandbox.stop.assert_awaited_once()
         assert "test-session" not in server._session_id_to_sandbox
+
+    async def test_set_e_exit_before_reward_is_logged(self, monkeypatch, tmp_path: Path, tb_stderr: StringIO) -> None:
+        """A test.sh that dies under set -e before writing reward.txt (the agent removed the work dir)."""
+        verifier_dir = tmp_path / "logs" / "verifier"
+        script = tmp_path / "test.sh"
+        script.write_text(
+            "set -euo pipefail\n"
+            f"cd {quote(str(tmp_path / 'app'))}\n"
+            f"echo 1 > {quote(str(verifier_dir))}/reward.txt\n"
+        )
+
+        async def execute(command, **kwargs):
+            command = command.replace("/logs/verifier", quote(str(verifier_dir)))
+            command = command.replace("/tests/test.sh", quote(str(script)))
+            result = subprocess.run(["bash", "-c", command], capture_output=True, text=True, timeout=10)
+            return MagicMock(return_code=result.returncode, stdout=result.stdout, stderr=result.stderr)
+
+        async def download(remote_path, local_path):
+            copyfile(verifier_dir / "reward.txt", local_path)
+
+        sandbox = AsyncMock()
+        sandbox.exec.side_effect = execute
+        sandbox.download.side_effect = download
+        server = TerminalBench21ResourcesServer(
+            config=TerminalBench21ResourcesServerConfig(
+                sandbox_provider="test", sandbox_config={}, evaluation_timeout=30, host="", port=0, entrypoint="", name=""
+            ),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        server._session_id_to_sandbox["test-session"] = sandbox
+        monkeypatch.setattr(TerminalBench21ResourcesServer, "_upload_folder", AsyncMock())
+
+        result = await server.verify(
+            Request({"type": "http", "session": {SESSION_ID_KEY: "test-session"}}), _verify_request(tmp_path)
+        )
+
+        assert result.evaluation_completed is False
+        assert result.reward == 0.0
+        assert result.test_return_code == 1
+        line = next(l for l in tb_stderr.getvalue().splitlines() if "[tb_verify][reward_missing]" in l)
+        assert "task=terminal-bench/background-server rc=1" in line
+        assert "No such file or directory" in line
 
 
 @pytest.mark.parametrize("distro", ["debian:bullseye", "debian:bookworm", "ubuntu:noble"])
