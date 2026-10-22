@@ -11,6 +11,7 @@ dependencies = [
     "torch==2.12.0",
     "torchvision==0.27.0",
     "sacrebleu>=2.4",
+    "indic-nlp-library==0.92",
     "sentencepiece",
     "unbabel-comet>=2.2",
     # PyArrow 26 requires NumPy 2, but unbabel-comet requires NumPy <2.

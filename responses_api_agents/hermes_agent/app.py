@@ -23,7 +23,7 @@ import tempfile
 from asyncio import Semaphore
 from collections.abc import Mapping
 from time import monotonic, time
-from typing import Any, Callable, Optional
+from typing import Any, Callable, ClassVar, Optional
 from uuid import uuid4
 
 import model_tools  # noqa: F401  # fail-fast if hermes-agent isn't installed  # pyright: ignore[reportMissingImports]
@@ -42,6 +42,7 @@ from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
+    assert_model_url_reachable_from_sandbox,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import get_global_config_dict
@@ -301,6 +302,8 @@ class HermesAgentVerifyResponse(BaseVerifyResponse):
 
 class HermesAgent(SimpleResponsesAPIAgent):
     config: HermesAgentConfig
+    # The harness runs inside the task sandbox and calls the model server from there.
+    calls_model_from_sandbox: ClassVar[bool] = True
     sem: Semaphore = None
     # Set of agents currently running run_conversation, plus a flag tracking whether the single
     # shared SIGTERM dispatcher has been installed on the event loop. See _ensure_sigterm_handler.
@@ -454,6 +457,12 @@ class HermesAgent(SimpleResponsesAPIAgent):
             workdir = body.sandbox_access.workdir
 
         provider_config = resolve_provider_config(provider_ref, get_global_config_dict())
+        # The runner inside the sandbox calls the Model Server itself, so a loopback URL (the default
+        # without use_absolute_ip) would make every model call fail and the episode score 0 unmasked.
+        assert_model_url_reachable_from_sandbox(
+            self.resolve_model_base_url(self.config.model_server.name, body.episode_id.capture_key),
+            provider_name=next(iter(provider_config), None),
+        )
         provider = create_provider(provider_config)
         try:
             if owns_sandbox:

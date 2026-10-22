@@ -99,6 +99,7 @@ from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_pr
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import (
     NG_AGENT_OBSERVATIONS_KEY,
+    NG_TRAJECTORY_KEY,
     AgentInvocation,
     AgentObservationBundle,
     ModelCallRef,
@@ -133,6 +134,7 @@ _failures_path_for = failures_path_for  # Backwards-compatible alias
 from nemo_gym.server_utils import (
     ServerClient,
     get_response_json,
+    is_global_aiohttp_client_request_debug_enabled,
     raise_for_status,
     request,
 )
@@ -244,7 +246,6 @@ _NO_RESULT_FAILURE_CLASSES = frozenset(
         ENVIRONMENT_SERVER_FAILURE_CLASS,
     }
 )
-NG_TRAJECTORY_KEY = "ng_trajectory"
 NG_PERF_KEY = "ng_perf"
 _MODEL_CALL_PAYLOAD_KEYS = ("request", "response", "request_raw", "response_raw")
 
@@ -380,8 +381,13 @@ def _is_episode_response(result: Any) -> bool:
 
 
 def _is_collector_key(key: str) -> bool:
-    """Keys rollout collection writes itself; an Environment Server result must not use them."""
-    return key.startswith("_ng_") or key in (NG_TRAJECTORY_KEY, "ng_model_call_capture", NG_PERF_KEY)
+    """Keys rollout collection writes itself; an Environment Server result must not use them.
+
+    ``ng_trajectory`` is not one of them: it is the producer's slot, where an Environment Server forwards
+    the harness's own turns from its session close (as an agent's ``/run`` result does), and the collector
+    replaces it with the canonical projection built from those turns.
+    """
+    return key.startswith("_ng_") or key in ("ng_model_call_capture", NG_PERF_KEY)
 
 
 def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
@@ -415,6 +421,9 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
             record["_ng_failure_partial_response"] = failure["partial_response"]
         if failure.get("agent_observations") is not None:
             record[NG_AGENT_OBSERVATIONS_KEY] = failure["agent_observations"]
+        if failure.get("trajectory") is not None:
+            # The harness's own turns before the failure, in the producer's slot the projection reads first.
+            record[NG_TRAJECTORY_KEY] = failure["trajectory"]
         return record
     result = response.get("result")
     if not isinstance(result, Mapping):
@@ -500,6 +509,12 @@ def _has_observation_gap(result: dict[str, Any], code: str) -> bool:
 
 
 def _trajectory_identity(row: dict[str, Any]) -> tuple[str, str]:
+    identity = row.get("trajectory_identity")
+    if isinstance(identity, dict):
+        task_id = identity.get("task_id")
+        rollout_id = identity.get("rollout_id")
+        if isinstance(task_id, str) and task_id and isinstance(rollout_id, str) and rollout_id:
+            return task_id, rollout_id
     task_id = next(
         (str(row[key]) for key in TASK_ID_FIELDS if row.get(key) is not None),
         str(row[TASK_INDEX_KEY_NAME]),
@@ -1943,6 +1958,7 @@ def _rollout_request_debug_summary(row: Dict[str, Any]) -> Dict[str, Any]:
     summary = {
         TASK_INDEX_KEY_NAME: row.get(TASK_INDEX_KEY_NAME),
         ROLLOUT_INDEX_KEY_NAME: row.get(ROLLOUT_INDEX_KEY_NAME),
+        ROLLOUT_ID_KEY_NAME: row.get(ROLLOUT_ID_KEY_NAME),
         "agent_name": agent_ref.get("name") if isinstance(agent_ref, dict) else None,
         "environment_server": row.get(NG_ENVIRONMENT_SERVER_KEY),
         "taskset": _materialized_taskset(row),
@@ -4359,6 +4375,12 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                             environment_server_type=server_type,
                         )
 
+                if is_global_aiohttp_client_request_debug_enabled():
+                    print(
+                        "[rollout_collection] /run dispatch "
+                        f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
+                        flush=True,
+                    )
                 started = time.monotonic()
                 started_at = time.time()
                 if run_timing is not None:

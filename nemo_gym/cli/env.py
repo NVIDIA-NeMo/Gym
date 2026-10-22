@@ -622,7 +622,19 @@ class RunHelper:  # pragma: no cover
                 # starting a private cluster in each of its processes.
                 extra_env[RAY_ENABLE_AUTO_CONNECT_ENV_VAR_NAME] = "0"
             extra_env |= self._startup.server_env(top_level_path, first_key)
-            process = run_command(command, dir_path, server_name=top_level_path, extra_env=extra_env)
+            # Server entrypoints are executed as files (``python app.py``). In a source
+            # checkout, put the component root on PYTHONPATH as well as the server directory
+            # so package-qualified imports such as ``responses_api_agents.foo.helpers``
+            # resolve from the same checkout instead of an older installed Gym distribution.
+            # In a wheel install that root is the parent's site-packages; adding it would
+            # shadow each server venv's own dependencies, so skip it there.
+            process = run_command(
+                command,
+                dir_path,
+                server_name=top_level_path,
+                project_root=dir_path.parent.parent if (PARENT_DIR / "pyproject.toml").is_file() else None,
+                extra_env=extra_env,
+            )
             self._processes[top_level_path] = process
             # In dry run mode, wait for each setup command to finish before starting the next.
             # This installs uv virtual environments serially, which significantly reduces uv

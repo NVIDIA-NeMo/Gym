@@ -29,6 +29,7 @@ import nemo_gym.cli._venv_setup
 import nemo_gym.cli.setup_command
 from nemo_gym.cli._venv_setup import SETUP_COMPLETE_MARKER, setup_environment
 from nemo_gym.cli.setup_command import (
+    _python_request_admits,
     get_venv_path,
     run_command,
     setup_env_command,
@@ -92,6 +93,72 @@ class TestCLISetupCommandSetupEnvCommand:
         server, config = self._setup(tmp_path)
         command = setup_env_command(server, config | {"pip_install_verbose": True}, "sample")
         assert "--verbose" in command
+
+    def test_rejects_empty_server_python_version(self, tmp_path: Path) -> None:
+        server_dir, config = self._setup(tmp_path)
+        (server_dir / ".python-version").write_text("\n# no request here\n")
+
+        with raises(RuntimeError, match="Empty Python version"):
+            setup_env_command(
+                dir_path=server_dir,
+                global_config_dict=config,
+                prefix="osworld agent",
+            )
+
+    @pytest.mark.parametrize(
+        "requested, expected",
+        [
+            # The parent's patch release satisfies the range, so uv must not pick another 3.13.x (Ray rejects that).
+            (">=3.13.14,<3.14", "3.13.14"),
+            ("3.13", "3.13.14"),
+            ("3.13.14", "3.13.14"),
+            ("cpython@3.13", "3.13.14"),
+            # A request that excludes the parent is the component's to make.
+            (">=3.12,<3.13", ">=3.12,<3.13"),
+            ("3.12", "3.12"),
+            ("pypy@3.10", "pypy@3.10"),
+            # A free-threaded build is a different interpreter, even at the parent's version.
+            ("3.13+freethreaded", "3.13+freethreaded"),
+            # uv reads the first request and skips comments.
+            ("# pinned for the model server\n>=3.13.14,<3.14\n3.12", "3.13.14"),
+        ],
+    )
+    def test_server_python_version_keeps_the_parent_patch_release_when_admitted(
+        self, tmp_path: Path, requested: str, expected: str
+    ) -> None:
+        server_dir, config = self._setup(tmp_path)
+        (server_dir / ".python-version").write_text(f"{requested}\n")
+
+        actual_command = setup_env_command(
+            dir_path=server_dir,
+            global_config_dict=config | {"python_version": "3.13.14"},
+            prefix="my server name",
+        )
+
+        assert (
+            f"--python {shlex.quote(expected)} "
+            in shlex.split(actual_command)[shlex.split(actual_command).index("--command") + 1]
+        )
+
+    @pytest.mark.parametrize(
+        "request_, version, admitted",
+        [
+            (">=3.13.14,<3.14", "3.13.15", True),
+            (">=3.13.14,<3.14", "3.13.13", False),
+            ("3.13", "3.13.2", True),
+            ("3.13", "3.12.9", False),
+            ("cpython@3.13", "3.13.14", True),
+            ("cpython3.13", "3.13.14", True),
+            ("cpython@>=3.13.14,<3.14", "3.13.14", True),
+            ("pypy@3.10", "3.10.14", False),
+            ("3.13+freethreaded", "3.13.14", False),
+            ("3.13.14+debug", "3.13.14", False),
+            ("3.13.14rc1", "3.13.14", False),
+            (">=3.13", "test python version", False),
+        ],
+    )
+    def test_python_request_admits(self, request_: str, version: str, admitted: bool) -> None:
+        assert _python_request_admits(request_, version) is admitted
 
 
 @pytest.fixture
@@ -304,6 +371,42 @@ class TestCLISetupCommandRunCommand:
         actual_args = Popen_mock.call_args
         assert expected_args == actual_args
 
+    def test_scheduler_component_root_gate_accepts_pinned_tree(self, monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+        Popen_mock, _ = self._setup(monkeypatch)
+        allowed_root = tmp_path / "paired-gym"
+        server_dir = allowed_root / "responses_api_agents" / "agent"
+        server_dir.mkdir(parents=True)
+        monkeypatch.setattr(
+            nemo_gym.cli.setup_command,
+            "environ",
+            {"NEMO_GYM_ALLOWED_COMPONENT_ROOTS": str(allowed_root)},
+        )
+
+        run_command(command="my command", working_dir_path=server_dir, server_name="agent")
+
+        assert Popen_mock.call_args.kwargs["env"]["NEMO_GYM_ALLOWED_COMPONENT_ROOTS"] == str(allowed_root)
+
+    def test_scheduler_component_root_gate_rejects_stale_tree(self, monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+        Popen_mock, _ = self._setup(monkeypatch)
+        allowed_root = tmp_path / "paired-gym"
+        stale_server_dir = tmp_path / "image-gym" / "responses_api_agents" / "agent"
+        allowed_root.mkdir()
+        stale_server_dir.mkdir(parents=True)
+        monkeypatch.setattr(
+            nemo_gym.cli.setup_command,
+            "environ",
+            {"NEMO_GYM_ALLOWED_COMPONENT_ROOTS": str(allowed_root)},
+        )
+
+        with pytest.raises(RuntimeError, match="potentially stale server"):
+            run_command(
+                command="my command",
+                working_dir_path=stale_server_dir,
+                server_name="agent",
+            )
+
+        Popen_mock.assert_not_called()
+
     def test_project_root_added_to_pythonpath(self, monkeypatch: MonkeyPatch) -> None:
         # Opt-in: callers that need `resources_servers.<name>`-style imports (e.g. gym env test) pass
         # the project root, which is appended after the server dir.
@@ -313,18 +416,40 @@ class TestCLISetupCommandRunCommand:
             command="my command",
             working_dir_path=Path("/root/resources_servers/my_server"),
             project_root=Path("/root"),
+            extra_env={"NEMO_GYM_CONFIG_DICT": "api_key: synthetic-test-secret"},
         )
 
         expected_args = call(
             "my command",
             executable="/bin/bash",
             shell=True,
-            env={"PYTHONPATH": "/root/resources_servers/my_server:/root", "UV_CACHE_DIR": "default uv cache dir"},
+            env={
+                "NEMO_GYM_EXTRA_ROOTS": "/root",
+                "NEMO_GYM_CONFIG_DICT": "api_key: synthetic-test-secret",
+                "PYTHONPATH": "/root/resources_servers/my_server:/root",
+                "UV_CACHE_DIR": "default uv cache dir",
+            },
             stdout="stdout",
             stderr="stderr",
         )
         actual_args = Popen_mock.call_args
         assert expected_args == actual_args
+
+    def test_project_root_precedes_existing_extra_roots(self, monkeypatch: MonkeyPatch) -> None:
+        Popen_mock, get_global_config_dict_mock = self._setup(monkeypatch)
+        monkeypatch.setattr(
+            nemo_gym.cli.setup_command,
+            "environ",
+            {"NEMO_GYM_EXTRA_ROOTS": "/plugin-a:/plugin-b"},
+        )
+
+        run_command(
+            command="my command",
+            working_dir_path=Path("/root/resources_servers/my_server"),
+            project_root=Path("/root"),
+        )
+
+        assert Popen_mock.call_args.kwargs["env"]["NEMO_GYM_EXTRA_ROOTS"] == "/root:/plugin-a:/plugin-b"
 
     def test_custom_uv_cache_dir(self, monkeypatch: MonkeyPatch) -> None:
         Popen_mock, get_global_config_dict_mock = self._setup(monkeypatch)

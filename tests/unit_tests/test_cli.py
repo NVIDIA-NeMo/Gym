@@ -63,6 +63,7 @@ from nemo_gym.config_types import (
     ResourcesServerInstanceConfig,
 )
 from nemo_gym.environment.scaffold import ScaffoldError
+from nemo_gym.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME
 from nemo_gym.registry import EnvironmentCatalogEntry
 
 
@@ -390,6 +391,63 @@ class TestRunHelperDryRunSpinup:
         runner = RunHelper()
         runner._processes = processes
         return runner
+
+    @pytest.mark.parametrize("source_checkout", [True, False], ids=["source-checkout", "wheel-install"])
+    def test_server_process_uses_resolved_component_root(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path, source_checkout: bool
+    ) -> None:
+        server_dir = tmp_path / "responses_api_agents" / "example"
+        server_dir.mkdir(parents=True)
+        (server_dir / "requirements.txt").write_text("nemo-gym\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        # A source checkout has pyproject.toml beside nemo_gym/; a wheel install's PARENT_DIR is
+        # site-packages, whose component root must not be put ahead of a server venv's own packages.
+        parent_dir = tmp_path / "gym-install"
+        parent_dir.mkdir()
+        if source_checkout:
+            (parent_dir / "pyproject.toml").write_text("[project]\nname = 'nemo-gym'\n", encoding="utf-8")
+        monkeypatch.setattr(nemo_gym.cli.env, "PARENT_DIR", parent_dir)
+
+        process = MagicMock(pid=123)
+        process.poll.return_value = 0
+        run = MagicMock(return_value=process)
+        server_client = MagicMock()
+        server_client.poll_for_status.return_value = "success"
+        server_client_cls = MagicMock(return_value=server_client)
+        server_client_cls.load_head_server_config.return_value = MagicMock()
+        config = OmegaConf.create(
+            {
+                "example": {
+                    "responses_api_agents": {
+                        "example": {
+                            "entrypoint": "app.py",
+                            "host": "127.0.0.1",
+                            "port": 5001,
+                        }
+                    }
+                },
+                "dry_run": True,
+                "uv_venv_dir": str(tmp_path),
+            }
+        )
+        monkeypatch.setattr(nemo_gym.cli.env, "run_command", run)
+        monkeypatch.setattr(nemo_gym.cli.env, "setup_env_command", lambda *_: "setup")
+        monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", MagicMock(return_value=config))
+        monkeypatch.setattr(nemo_gym.cli.env, "initialize_ray", MagicMock())
+        monkeypatch.setattr(nemo_gym.cli.env, "ServerClient", server_client_cls)
+        monkeypatch.setattr(
+            nemo_gym.cli.env.HeadServer,
+            "run_webserver",
+            MagicMock(return_value=(MagicMock(), MagicMock(), MagicMock())),
+        )
+
+        runner = RunHelper()
+        runner.start(MagicMock())
+
+        assert run.call_args.kwargs["project_root"] == (tmp_path if source_checkout else None)
+        extra_env = run.call_args.kwargs["extra_env"]
+        assert extra_env[NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME] == "example"
+        assert OmegaConf.create(extra_env[NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME]) == config
 
     def _process(self, returncodes: list) -> MagicMock:
         process = MagicMock()

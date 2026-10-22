@@ -12,6 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import os
+import platform
 import shlex
 import sys
 from os import environ
@@ -21,8 +23,10 @@ from sys import stderr, stdout
 from typing import IO, Any, Mapping
 
 from omegaconf import DictConfig, ListConfig
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
+from packaging.version import InvalidVersion, Version
 
-from nemo_gym import PARENT_DIR
+from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, PARENT_DIR
 from nemo_gym.global_config import (
     COMPONENT_EXTRAS_KEY_NAME,
     HEAD_SERVER_CONSTRAINTS_KEY_NAME,
@@ -38,6 +42,38 @@ from nemo_gym.global_config import (
 )
 
 
+NEMO_GYM_ALLOWED_COMPONENT_ROOTS_ENV_VAR_NAME = "NEMO_GYM_ALLOWED_COMPONENT_ROOTS"
+
+
+def _validate_component_working_dir(
+    working_dir_path: Path,
+    *,
+    server_name: str,
+    environment: dict[str, str],
+) -> None:
+    """Reject a server resolved outside scheduler-approved component roots."""
+
+    configured_roots = environment.get(NEMO_GYM_ALLOWED_COMPONENT_ROOTS_ENV_VAR_NAME, "")
+    if not configured_roots:
+        return
+
+    working_dir = working_dir_path.resolve()
+    allowed_roots = [Path(value).resolve() for value in configured_roots.split(os.pathsep) if value]
+    if not any(working_dir.is_relative_to(root) for root in allowed_roots):
+        raise RuntimeError(
+            "Gym component path is outside scheduler-approved roots; refusing "
+            "to start a potentially stale server. "
+            f"server={server_name or working_dir_path.name}, "
+            f"working_dir={working_dir}, allowed_roots={allowed_roots}"
+        )
+    print(
+        "NEMO_GYM_COMPONENT_PATH_GATE|"
+        f"server={server_name or working_dir_path.name}|"
+        f"working_dir={working_dir}|allowed_roots={configured_roots}",
+        flush=True,
+    )
+
+
 def get_venv_path(dir_path: Path, global_config_dict: DictConfig) -> Path:
     """Resolve the venv a server runs from: ``uv_venv_dir/<type>/<name>/.venv``, else ``<server dir>/.venv``.
 
@@ -50,6 +86,54 @@ def get_venv_path(dir_path: Path, global_config_dict: DictConfig) -> Path:
     if root_venv_path.resolve() != PARENT_DIR.resolve():
         return Path(root_venv_path, *dir_path.parts[-2:], ".venv").absolute()
     return (dir_path / ".venv").absolute()
+
+
+def _python_request_admits(request: str, version: str) -> bool:
+    """Whether a uv Python request admits ``version``.
+
+    The request is a specifier such as ``>=3.13,<3.14`` or a version such as ``3.13``, optionally prefixed with
+    ``cpython@`` or ``cpython``. Requests this cannot interpret, such as ``pypy@3.10`` or the free-threaded
+    ``3.13+freethreaded``, admit nothing and are left to uv.
+    """
+    try:
+        candidate = Version(version)
+    except InvalidVersion:
+        return False
+    if platform.python_implementation() == "CPython":
+        for prefix in ("cpython@", "cpython"):
+            if request.startswith(prefix):
+                request = request.removeprefix(prefix)
+                break
+    try:
+        return candidate in SpecifierSet(request)
+    except InvalidSpecifier:
+        pass
+    try:
+        requested = Version(request)
+    except InvalidVersion:
+        return False
+    # PEP 440 reads uv's variant suffix (``+freethreaded``, ``+debug``) as a local label; a plain parent build
+    # does not satisfy a variant or pre-release request.
+    if requested.local is not None or requested.is_prerelease:
+        return False
+    return candidate.release[: len(requested.release)] == requested.release
+
+
+def _server_python_request(dir_path: Path, parent_python: str) -> str:
+    """The interpreter a server venv is built with: the parent's, unless the server's ``.python-version`` excludes it.
+
+    A range such as ``>=3.13.14,<3.14`` would otherwise let uv pick a different patch release than the parent's,
+    and Ray refuses to connect processes whose Python patch versions differ.
+    """
+    python_version_path = dir_path / ".python-version"
+    if not python_version_path.exists():
+        return parent_python
+    # Like uv, skip blank and comment lines and use the first request.
+    lines = python_version_path.read_text(encoding="utf-8").splitlines()
+    request = next((line.strip() for line in lines if line.strip() and not line.strip().startswith("#")), "")
+    if not request:
+        raise RuntimeError(f"Empty Python version in {python_version_path}")
+    return parent_python if _python_request_admits(request, parent_python) else request
 
 
 def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: str) -> str:
@@ -77,7 +161,7 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
             "--venv",
             str(venv_path),
             "--python",
-            global_config_dict[PYTHON_VERSION_KEY_NAME],
+            _server_python_request(dir_path, str(global_config_dict[PYTHON_VERSION_KEY_NAME])),
         ]
         extras_by_component = global_config_dict.get(COMPONENT_EXTRAS_KEY_NAME) or {}
         if not isinstance(extras_by_component, Mapping):
@@ -137,13 +221,29 @@ def run_command(
     custom_env = environ.copy()
     if extra_env is not None:
         custom_env.update(extra_env)
+    _validate_component_working_dir(
+        working_dir_path,
+        server_name=server_name,
+        environment=custom_env,
+    )
     # The server dir on PYTHONPATH lets `import app` work. When a caller passes `project_root` (the
     # dir containing resources_servers/, responses_api_agents/, ...), it's added so generated
     # `resources_servers.<name>.app`-style imports resolve from outside a repo checkout — opt-in, so
     # this generic helper doesn't bake a layout assumption in for its other callers.
     py_path_entries = [work_dir]
     if project_root is not None:
-        py_path_entries.append(f"{project_root.absolute()}")
+        absolute_project_root = f"{project_root.absolute()}"
+        py_path_entries.append(absolute_project_root)
+        # ``nemo_gym`` normalizes sys.path at import time so component discovery has one
+        # precedence contract. Merely prepending PYTHONPATH is therefore insufficient:
+        # an older editable Gym install can still win after that normalization. Mark the
+        # already-resolved component root as an explicit extra root too; extra roots are
+        # intentionally highest priority in both discovery and Python imports.
+        existing_extra_roots = custom_env.get(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME)
+        extra_roots = [absolute_project_root]
+        if existing_extra_roots:
+            extra_roots.append(existing_extra_roots)
+        custom_env[NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME] = os.pathsep.join(extra_roots)
     existing_py_path = custom_env.get("PYTHONPATH")
     if existing_py_path:
         py_path_entries.append(existing_py_path)
