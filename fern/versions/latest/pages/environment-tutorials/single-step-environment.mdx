@@ -71,7 +71,8 @@ resources_servers/my_weather_tool/
 |   +-- __init__.py
 |   +-- test_app.py             # Verifier fixture test
 |   +-- verifier_cases.jsonl    # Verifier test cases
-+-- requirements.txt            # Python dependencies
++-- pyproject.toml              # Python dependencies
++-- uv.lock                     # Locked dependencies
 +-- README.md                   # Documentation
 ```
 
@@ -340,11 +341,14 @@ The agent entry references the resource server and model server by name, wiring 
 
 ## 4. Add Dependencies (Optional)
 
-If your server needs external packages, add them to `requirements.txt`:
+If your server needs external packages, add them to `pyproject.toml`, then run `uv lock` and commit `uv.lock`:
 
-```text
--e nemo-gym[dev] @ ../../
-# Add any other dependencies here
+```toml
+[project]
+dependencies = [
+    "nemo-gym[dev]",
+    # Add any other dependencies here
+]
 ```
 
 ---
