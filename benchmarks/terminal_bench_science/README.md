@@ -101,6 +101,10 @@ verifiers of one task on one node still share its limit. Each verifier peaks wel
 tightest, `baseline-free-localization`, at 1 of 4), so the three trials of a task fit on one
 node; many more concurrent trials of one task may not.
 
+Nothing in Gym checks the UID. The images are built outside this repository and CI never
+runs them, and a reference-solution run with the shared UID can still pass on a quiet node.
+Check the UID when you build each image.
+
 ### Check images with the reference solutions
 
 Before you spend model time, run each task's `solution/solve.sh` through the same seed and
