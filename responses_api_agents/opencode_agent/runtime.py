@@ -8,6 +8,11 @@ from pathlib import Path
 
 OPENCODE_VERSION = "1.17.11"
 OBSERVABILITY_PATCH = Path(__file__).with_name("assistant_message_header.js")
+# Merged into the Gym model's entry in sandbox sessions.
+# Without it, OpenCode leaves images out of model requests, including images its read tool returns.
+# The read still reports success, so the model is told about an image it never receives.
+# A text-only deployment rejects requests that carry an image.
+IMAGE_INPUT_MODEL_OPTIONS = {"attachment": True, "modalities": {"input": ["text", "image"], "output": ["text"]}}
 
 
 def apply_observability_patch(config: dict, *, plugin_path: Path = OBSERVABILITY_PATCH) -> None:
