@@ -66,12 +66,17 @@ async def upload_text(sandbox: AsyncSandbox, *, path: str, text: str) -> None:
     await upload_bytes(sandbox, path=path, data=text.encode("utf-8"))
 
 
-async def read_text(sandbox: AsyncSandbox, *, path: str) -> str:
-    """Download UTF-8 text, replacing invalid bytes in partial process output."""
+async def download_bytes(sandbox: AsyncSandbox, *, path: str) -> bytes:
+    """Download a file's bytes unchanged through file transfer."""
     with tempfile.TemporaryDirectory(prefix="sandbox-download-") as directory:
         destination = Path(directory) / "payload"
         await sandbox.download(path, destination)
-        return destination.read_text(encoding="utf-8", errors="replace")
+        return destination.read_bytes()
+
+
+async def read_text(sandbox: AsyncSandbox, *, path: str) -> str:
+    """Download UTF-8 text, replacing invalid bytes in partial process output."""
+    return (await download_bytes(sandbox, path=path)).decode("utf-8", errors="replace")
 
 
 def cpu_cap_env(cpu: float | int | None) -> dict[str, str]:
