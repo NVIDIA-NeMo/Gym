@@ -169,10 +169,18 @@ async def run_judge(
         await raise_for_status(response)
         transcript = await get_response_json(response)
         (artifact_dir / "judge-transcript.json").write_text(json.dumps(transcript, indent=2))
+        terminal_text = ""
+        for item in reversed(transcript.get("output", [])):
+            if item.get("type") == "message":
+                terminal_text = "\n".join(
+                    part.get("text", "") for part in item.get("content", []) if part.get("type") == "output_text"
+                )[-4000:]
+                break
         evidence["judge_outcome"] = {
             "status": transcript.get("status"),
             "error": transcript.get("error"),
             "metadata": transcript.get("metadata"),
+            "terminal_text": terminal_text,
         }
     except Exception as error:
         original_error = error

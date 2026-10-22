@@ -174,7 +174,10 @@ async def test_late_simulator_message_is_discarded(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_refusal_preserves_semantic_outcome_and_close_before_verdict(tmp_path, monkeypatch):
+@pytest.mark.parametrize("has_structured_error", [True, False])
+async def test_refusal_preserves_semantic_outcome_and_close_before_verdict(
+    tmp_path, monkeypatch, has_structured_error
+):
     monkeypatch.setattr(evaluation, "uuid4", lambda: SimpleNamespace(hex="test"))
     monkeypatch.setattr(evaluation, "stage_judge", AsyncMock(return_value="judge"))
     monkeypatch.setattr(evaluation, "raise_for_status", AsyncMock())
@@ -186,8 +189,18 @@ async def test_refusal_preserves_semantic_outcome_and_close_before_verdict(tmp_p
                 {},
                 {
                     "status": "failed",
-                    "error": {"message": "Usage Policy refusal"},
-                    "metadata": {"stop_reason": "refusal"},
+                    "error": {"message": "Usage Policy refusal"} if has_structured_error else None,
+                    "metadata": {"stop_reason": "refusal"} if has_structured_error else None,
+                    "output": [
+                        {
+                            "type": "message",
+                            "content": [{"type": "output_text", "text": "Reading the rubric."}],
+                        },
+                        {
+                            "type": "message",
+                            "content": [{"type": "output_text", "text": "Usage Policy refusal"}],
+                        },
+                    ],
                 },
                 {
                     "agent_session_id": "judge-test",
@@ -223,7 +236,8 @@ async def test_refusal_preserves_semantic_outcome_and_close_before_verdict(tmp_p
     assert seed.sandbox_access.workdir == "/tmp/judge_inputs"
     assert evidence["judge_close"]["agent_observations"]["source"] == "claude_code"
     assert evidence["judge_close"]["cleanup_confirmed"] is True
-    assert evidence["judge_outcome"]["metadata"]["stop_reason"] == "refusal"
+    assert evidence["judge_outcome"]["metadata"] == ({"stop_reason": "refusal"} if has_structured_error else None)
+    assert evidence["judge_outcome"]["terminal_text"] == "Usage Policy refusal"
     assert (tmp_path / "judge-close.json").exists()
 
 
