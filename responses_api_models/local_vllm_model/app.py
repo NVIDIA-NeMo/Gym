@@ -152,7 +152,9 @@ class LocalVLLMModel(VLLMModel):
 
         # @bxyu-nvidia: TODO remove, specific to Nemotron 3 Ultra vLLM version.
         # Upstream vLLM only exposes `enable_return_routed_experts`, so alias it across.
-        final_args.return_routed_experts = final_args.enable_return_routed_experts
+        #final_args.return_routed_experts = final_args.enable_return_routed_experts
+        if hasattr(final_args, "enable_return_routed_experts"):
+            final_args.return_routed_experts = final_args.enable_return_routed_experts
 
         if self.config.debug:
             env_vars_to_print = env_vars.copy()

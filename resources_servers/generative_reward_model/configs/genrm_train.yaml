@@ -1,0 +1,44 @@
+# Config for the generative reward model resource server.
+# Trains a model to output per-rubric and overall GenRM scores given
+# an evaluation prompt with conversation context and two candidate responses.
+#
+# Reward formula:
+#   overall_penalty = score_weight * (|s1_err| + |s2_err|) + ranking_weight * |rank_err|
+#   rubric_penalty  = rubric_weight * mean_over_rubrics(score_weight * (|s1_err| + |s2_err|) + ranking_weight * |rank_err|)
+#   reward = -(overall_penalty + rubric_penalty)
+#
+# score_weight: multiplier for individual score L1 error (applied everywhere)
+# ranking_weight: multiplier for ranking L1 error (applied everywhere)
+# rubric_weight: multiplier on averaged rubric penalty (0.5 = 2x less important than overall)
+# parse_failure_penalty: flat reward when model output cannot be parsed
+generative_reward_model:
+  resources_servers:
+    generative_reward_model:
+      entrypoint: app.py
+      domain: rlhf
+      verified: false
+      description: Train GenRM to score and rank response pairs per-rubric and overall
+      score_weight: 1.0
+      ranking_weight: 2.0
+      rubric_weight: 0.5
+      parse_failure_penalty: -100.0
+
+generative_reward_model_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: generative_reward_model
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+        - name: train
+          type: train
+          jsonl_fpath: resources_servers/generative_reward_model/data/train.jsonl
+          license: Apache 2.0
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/generative_reward_model/data/example.jsonl
+

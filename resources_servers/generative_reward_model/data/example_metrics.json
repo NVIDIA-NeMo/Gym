@@ -1,0 +1,10 @@
+{
+  "num_samples": 3,
+  "num_tokens_mean": 1200.0,
+  "num_tokens_std": 300.0,
+  "num_tokens_min": 800,
+  "num_tokens_max": 1600,
+  "num_tokens_p50": 1200,
+  "num_tokens_p90": 1500,
+  "num_tokens_p99": 1590
+}
