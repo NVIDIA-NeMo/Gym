@@ -457,13 +457,31 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
                 output.append(NeMoGymEasyInputMessage(role=role, content=_text(msg.get("content"))).model_dump())
 
         if not any(item.get("generation_token_ids") for item in output):
+            has_assistant_turn = any(
+                item.get("type") == "function_call"
+                or (item.get("type") == "message" and item.get("role") == "assistant")
+                for item in output
+            )
             err = rollout_output.get("error") or {}
             err_msg = err.get("error") or err.get("error_chain_repr") or "unknown (no error info on rollout_output)"
-            logger.warning(
-                "[verifiers_agent] rollout produced no trainable tokens. This can happen when sandbox concurrency quota is exceeded. Returning empty trajectory. "
-                "Underlying error: %s",
-                err_msg,
-            )
+            if not has_assistant_turn:
+                logger.warning(
+                    "[verifiers_agent] rollout produced no trainable tokens. This can happen when sandbox concurrency quota is exceeded. Returning empty trajectory. "
+                    "Underlying error: %s",
+                    err_msg,
+                )
+            elif err:
+                # verifiers stores a mid-rollout error on the state without logging it; this is its only Gym-side log.
+                logger.warning(
+                    "[verifiers_agent] rollout ended with an error after its assistant turns. Underlying error: %s",
+                    err_msg,
+                )
+            else:
+                # Eval mode (return_token_id_information: false) never returns token ids; the trajectory is complete.
+                logger.debug(
+                    "[verifiers_agent] no token ids on assistant turns; token ids were likely not requested. "
+                    "Appending the empty training placeholder."
+                )
             output.append(
                 NeMoGymResponseOutputMessageForTraining(
                     id=_EMPTY_OUTPUT_ITEM_ID,

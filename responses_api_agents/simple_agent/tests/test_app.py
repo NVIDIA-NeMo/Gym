@@ -2148,6 +2148,42 @@ class TestCheckpointAcrossModelCalls:
         assert len(calls) == 1
         assert result.output[0].content[0].text == "cold"
 
+    async def test_a_reply_whose_headers_arrived_before_prepare_and_whose_body_is_held_does_not_hold_up_prepare(
+        self,
+    ) -> None:
+        server, server_client = _make_agent(False)
+        request = await _restored_session(server, activations=0, boundary=None)
+        participant = server.checkpoint_participant
+        controller = ParticipantControlPlane(participant, instance_name="agent", lease_grace_seconds=60)
+        # The model server prepared first: its gate sent the reply's headers and holds the body until it resumes.
+        model_server_resumed = asyncio.Event()
+        reading_body = asyncio.Event()
+
+        async def read() -> bytes:
+            reading_body.set()
+            await model_server_resumed.wait()
+            return json.dumps(_FINAL_RESPONSE).encode()
+
+        reply = _mock_response()
+        reply.read = AsyncMock(side_effect=read)
+        server_client.post = AsyncMock(return_value=reply)
+        activation = asyncio.create_task(
+            server.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="q"))
+        )
+        await asyncio.wait_for(reading_body.wait(), 5)
+        # The agent server prepares after the headers arrived, while the body is still held.
+        prepared = await controller.prepare(CheckpointRequest(**_checkpoint("c1") | {"deadline_ts": time.time() + 1}))
+        [record] = await participant.export(None)
+        await controller.resume(CheckpointRequest(**_checkpoint("c1")))
+        model_server_resumed.set()
+        result = await asyncio.wait_for(activation, 5)
+
+        assert prepared["phase"] == "prepared"
+        # The boundary before the call: a restore calls the model again from there.
+        assert record.boundary == _STEP_ZERO
+        assert server_client.post.await_count == 1
+        assert result.output[0].content[0].text == "cold"
+
     async def test_an_activation_already_completed_is_answered_with_its_reply_without_running_again(self) -> None:
         server, server_client = _make_agent(True)
         server_client.global_config_dict = {

@@ -1859,7 +1859,7 @@ def test_pi_rejects_invalid_execution_deadlines(field, value):
 
 
 @pytest.mark.parametrize("context_overflow", [False, True])
-async def test_provider_failure_is_not_gradable_but_context_limit_preserves_patch(setup, context_overflow):
+async def test_provider_failure_is_reported_but_context_limit_preserves_patch(setup, context_overflow):
     agent, sandbox = setup
     recorded = [json.loads(line)[1] for line in events(stop_reason="error").splitlines()]
     recorded.insert(-2, {"type": "ng_pi_outcome", "context_overflow": context_overflow})
@@ -1871,16 +1871,161 @@ async def test_provider_failure_is_not_gradable_but_context_limit_preserves_patc
         assert response.error is None
         assert response.output[-1].content[0].text == "Fixed"
     else:
-        with pytest.raises(RuntimeError, match="Pi agent failed: model error"):
-            await task
-        # The shared activation replays the failure instead of running the harness again.
-        with pytest.raises(RuntimeError, match="Pi agent failed: model error"):
-            await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+        response = await task
+        assert response.status == "failed"
+        assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "unknown"}
+        # Replay the report without running the harness again; the environment owns policy.
+        assert await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task")) == response
     close = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
     assert len(close.agent_observations.records[0].model_calls) == 2
     assert close.agent_observations.records[0].status == ("incomplete" if context_overflow else "failed")
     sandbox.launch.assert_awaited_once()
     sandbox.stop.assert_not_awaited()
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+async def test_session_retry_ownership_uses_provider_correlation(setup, interrupted) -> None:
+    agent, sandbox = setup
+    failure = {
+        "type": "message_end",
+        "message": {"role": "assistant", "content": [], "stopReason": "error", "errorMessage": "429 retry"},
+    }
+    recorded = [failure, {"type": "auto_retry_start", "attempt": 1}, failure]
+    sandbox.events = "\n".join(json.dumps([float(i), event]) for i, event in enumerate(recorded))
+    if not interrupted:
+        sandbox.events += "\n" + events()
+    sandbox.blocked = interrupted
+    request, session_id, task = await activate(agent, sandbox)
+    if interrupted:
+        close = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    else:
+        assert (await task).status == "completed"
+        close = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    provider = json.loads(sandbox.files[f"{sandbox.directory}/home/.pi/agent/models.json"])["providers"]["nemo"]
+    assert provider["headers"] == {"x-session-id": "pi-smoke-a2"}
+    root = close.agent_observations.records[0]
+    assert root.invocation_id == provider["headers"]["x-session-id"]
+    gaps = [gap.code for gap in close.agent_observations.gaps]
+    assert "model_call_ownership_unavailable" not in gaps
+    if interrupted:
+        from nemo_gym.observability.model_calls import ModelCallRecord
+        from nemo_gym.rollout_observability import join_model_call_observations
+
+        assert "agent_activation_interrupted" in gaps
+        assert root.status == "incomplete"
+        assert root.model_calls == []  # Rejected attempts have no provider response IDs.
+        captured = [
+            ModelCallRecord(model_call_id=f"attempt-{i}", client_session_id=root.invocation_id, call_index=i)
+            for i in range(2)
+        ]
+        joined = join_model_call_observations(close.agent_observations, captured)
+        assert [ref.model_call_id for ref in joined.records[0].model_calls] == ["attempt-0", "attempt-1"]
+        assert all(ref.response_id is None for ref in joined.records[0].model_calls)
+        assert "model_call_ownership_unavailable" not in [gap.code for gap in joined.gaps]
+    else:
+        assert len(root.model_calls) == 2
+
+
+@pytest.mark.parametrize(
+    "error_message",
+    ["400 rejected request", "401 invalid key", "429 exhausted retries", "503 unavailable", "Connection error."],
+)
+@pytest.mark.parametrize("prior_turn", [False, True])
+@pytest.mark.parametrize("partial_output", [False, True])
+async def test_terminal_model_error_reports_partial_output_and_usage(
+    setup: tuple[PiAgent, Sandbox], prior_turn: bool, partial_output: bool, error_message: str
+) -> None:
+    agent, sandbox = setup
+    message = {
+        "role": "assistant",
+        "content": [{"type": "text", "text": "partial answer"}] if partial_output else [],
+        "stopReason": "error",
+        "errorMessage": error_message,
+        "usage": {"input": 5 if partial_output else 0, "output": 2 if partial_output else 0, "cacheRead": 0},
+    }
+    recorded = []
+    if prior_turn:
+        recorded = [
+            {
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "responseId": "earlier-response",
+                    "content": [{"type": "text", "text": "earlier work"}],
+                    "stopReason": "stop",
+                    "usage": {"input": 7, "output": 3, "cacheRead": 2},
+                },
+            }
+        ]
+    recorded.extend(
+        [
+            {"type": "message_end", "message": message},
+            {"type": "agent_end", "messages": [message]},
+        ]
+    )
+    sandbox.events = "\n".join(json.dumps([float(i), event]) for i, event in enumerate(recorded))
+    request, session_id, task = await activate(agent, sandbox)
+    response = await task
+    assert response.status == "failed"
+    assert response.error.message == error_message
+    expected_text = (["earlier work"] if prior_turn else []) + (["partial answer"] if partial_output else [])
+    assert [item.content[0].text for item in response.output] == expected_text
+    assert response.usage.input_tokens == (9 if prior_turn else 0) + (5 if partial_output else 0)
+    assert response.usage.output_tokens == (3 if prior_turn else 0) + (2 if partial_output else 0)
+    assert response.usage.total_tokens == (12 if prior_turn else 0) + (7 if partial_output else 0)
+    close = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    root = close.agent_observations.records[0]
+    assert root.status == "failed"
+    assert [call.response_id for call in root.model_calls] == (["earlier-response"] if prior_turn else [])
+    assert len(root.conversation) == 1 + len(expected_text)  # No fabricated assistant turn for an empty rejection.
+    sandbox.launch.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    "error_message,return_code,ended,timed_out,expected_error",
+    [
+        ("400 rejected request", 1, True, False, "Pi exited with code 1"),
+        ("400 rejected request", 137, True, False, "Pi exited with code 137"),
+        ("400 rejected request", None, True, False, "400 rejected request"),
+        ("400 rejected request", 0, False, False, "400 rejected request"),
+        ("400 rejected request", 0, True, True, "400 rejected request"),
+    ],
+)
+async def test_model_error_does_not_hide_incomplete_execution(
+    setup: tuple[PiAgent, Sandbox],
+    error_message: str,
+    return_code: int | None,
+    ended: bool,
+    timed_out: bool,
+    expected_error: str,
+) -> None:
+    agent, sandbox = setup
+    message = {"role": "assistant", "content": [], "stopReason": "error", "errorMessage": error_message}
+    recorded = [{"type": "message_end", "message": message}]
+    if ended:
+        recorded.append({"type": "agent_end", "messages": [message]})
+    sandbox.events = "\n".join(json.dumps([float(i), event]) for i, event in enumerate(recorded))
+    sandbox.result.update(return_code=return_code, timed_out=timed_out)
+    request, session_id, task = await activate(agent, sandbox)
+    with pytest.raises(RuntimeError, match=expected_error):
+        await task
+    close = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    assert close.agent_observations.records
+    sandbox.launch.assert_awaited_once()
+
+
+async def test_model_rejection_does_not_hide_cleanup_failure(setup: tuple[PiAgent, Sandbox]) -> None:
+    agent, sandbox = setup
+    recorded = [json.loads(line)[1] for line in events(stop_reason="error").splitlines()]
+    recorded[-2]["message"]["errorMessage"] = "400 rejected request"
+    sandbox.events = "\n".join(json.dumps([float(i), event]) for i, event in enumerate(recorded))
+    sandbox.result["error"] = "cleanup failed"
+    request, session_id, task = await activate(agent, sandbox)
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        await task
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
 
 
 @pytest.mark.parametrize("owned", [False, True])
@@ -2162,3 +2307,79 @@ def test_task_timeout_does_not_allow_other_metadata_or_consume_activation(
         assert accepted.status_code == 200, accepted.text
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
         assert closed.status_code == 200, closed.text
+
+
+@pytest.mark.parametrize(
+    "message,status",
+    [
+        ("400 bad request", 400),
+        ("HTTP 503: unavailable", 503),
+        ("500 status code (no body)", 500),
+        ("401 unauthorized", 401),
+    ],
+)
+def test_native_model_error_is_reported_with_classification(setup, message, status):
+    agent, sandbox = setup
+    native = {"role": "assistant", "stopReason": "error", "errorMessage": message, "content": []}
+    response, observations = sandbox_event_response(
+        agent,
+        sandbox,
+        [
+            {"type": "message_end", "message": native},
+            {"type": "agent_end", "messages": [native]},
+        ],
+    )
+    assert response["status"] == "failed"
+    assert response["error"]["message"] == message
+    assert json.loads(response["metadata"]["ng_agent_outcome"]) == {
+        "failure_kind": "model_request_error",
+        "status_code": status,
+    }
+    assert observations["records"][0]["status"] == "failed"
+
+
+@pytest.mark.parametrize(
+    "message,failure_kind",
+    [("Request timed out.", "model_transport_error"), ("Unrecognized failure", "unknown")],
+)
+def test_terminal_provider_failure_uses_default_episode_policy(setup, message, failure_kind):
+    from environment_servers.single_agent_turn.app import OutcomeAction, agent_outcome_policy
+    from nemo_gym.openai_utils import NeMoGymResponse
+
+    agent, sandbox = setup
+    native = {"role": "assistant", "stopReason": "error", "errorMessage": message, "content": []}
+    response, observations = sandbox_event_response(
+        agent,
+        sandbox,
+        [
+            {"type": "message_end", "message": native},
+            {"type": "agent_end", "messages": [native]},
+        ],
+    )
+    assert response["status"] == "failed"
+    assert response["error"]["message"] == message
+    assert json.loads(response["metadata"]["ng_agent_outcome"]) == {"failure_kind": failure_kind}
+    assert observations["records"][0]["status"] == "failed"
+    policy = agent_outcome_policy(NeMoGymResponse.model_validate(response))
+    assert policy == OutcomeAction.RETRY
+
+
+def test_process_exit_before_promised_retry_is_execution_failure(setup):
+    agent, sandbox = setup
+    message = {"role": "assistant", "content": [], "stopReason": "error", "errorMessage": "503 unavailable"}
+    sandbox.events = "\n".join(
+        json.dumps([float(i), event])
+        for i, event in enumerate(
+            [
+                {"type": "message_end", "message": message},
+                {"type": "agent_end", "messages": [message], "willRetry": True},
+            ]
+        )
+    )
+    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        response = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "task"})
+        assert response.status_code == 500
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
+        assert closed.status_code == 200
+        assert closed.json()["agent_observations"]["records"][0]["status"] == "failed"
