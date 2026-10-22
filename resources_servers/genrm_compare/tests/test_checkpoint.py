@@ -3,17 +3,22 @@
 """A checkpoint must not lose a finished cohort that only some of its members have recorded."""
 
 import asyncio
+import tempfile
 import time
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
+from omegaconf import DictConfig
 
 import resources_servers.genrm_compare.app as genrm
 from nemo_gym._checkpoint.control import CheckpointRequest, next_attempt
 from nemo_gym._checkpoint.resources import ResourcesParticipant
+from nemo_gym._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER
 from nemo_gym.episode_types import EpisodeId
 from nemo_gym.judge import JudgeError
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.server_utils import ServerClient
 from resources_servers.genrm_compare.tests.support import request_with_session
 
 
@@ -259,6 +264,24 @@ async def test_a_restore_that_names_a_cohort_inconsistently_installs_nothing(con
     await restored.aclose()
 
 
+async def test_a_restore_whose_sessions_disagree_on_a_member_installs_nothing(config):
+    server, participant = seeded(config)
+    await asyncio.gather(*(verify_as(server, SESSIONS[index], member(index)) for index in range(2)))
+    records = await participant.export(None)
+    await server.aclose()
+    # A second session claims member 1 with another response.
+    impostor = records[1].model_copy(
+        update={"session_id": "impostor", "state": {**records[1].state, "response_digest": "0" * 64}}
+    )
+
+    restored, restored_participant = participant_server(config)
+    with pytest.raises(ValueError, match="disagree"):
+        await restored_participant.install([*records, impostor], [record.episode_id for record in records])
+    assert restored._verify_cohorts == {}
+    assert restored._session_members == {}
+    await restored.aclose()
+
+
 async def test_a_restored_cohort_refuses_an_older_attempt_of_its_group(config):
     server, participant = seeded(config)
     await asyncio.gather(*(verify_as(server, SESSIONS[index], member(index, attempt=1)) for index in range(2)))
@@ -289,4 +312,143 @@ async def test_a_cohort_without_a_group_id_records_no_members(config):
     server, participant = seeded(config)
     await asyncio.gather(*(verify_as(server, SESSIONS[index], member(index, group=None)) for index in range(2)))
     assert server._session_members == {}
+    await server.aclose()
+
+
+async def test_member_records_end_with_their_pruned_cohort(config):
+    config = config.model_copy(update={"cohort_result_ttl_s": 0.01})
+    server, participant = seeded(config)
+    await asyncio.gather(*(verify_as(server, SESSIONS[index], member(index)) for index in range(2)))
+    assert set(server._session_members) == set(SESSIONS)
+
+    # The next cohort's verification prunes the expired one, and its member records go with it.
+    await asyncio.sleep(0.02)
+    pending = asyncio.create_task(verify_as(server, "later", member(0, group="later")))
+    await until(lambda: "later" in server._session_members)
+    assert set(server._session_members) == {"later"}
+    pending.cancel()
+    await asyncio.gather(pending, return_exceptions=True)
+    await server.aclose()
+
+
+@pytest.mark.parametrize("judge_fails", [False, True], ids=["reward", "judge_failure"])
+async def test_an_outcome_stays_held_when_a_checkpoint_closes_admission_again_before_publication(config, judge_fails):
+    """Admission can reopen and close again while the outcome waits for the cohort lock; the check under it holds."""
+    judge = AsyncMock(side_effect=JudgeError("judge is down")) if judge_fails else None
+    server, participant = seeded(config, judge=judge)
+    counts = count_wait_open(participant)
+    await participant.close_admission(CHECKPOINT)
+    members = [asyncio.create_task(verify_as(server, SESSIONS[index], member(index))) for index in range(2)]
+    await until(lambda: counts["entered"] == 1)
+    [cohort] = server._verify_cohorts.values()
+
+    async with cohort.lock:
+        await participant.open_admission()
+        # The held outcome wakes and waits for the lock; a new checkpoint closes admission meanwhile.
+        for _ in range(5):
+            await asyncio.sleep(0)
+        await participant.close_admission(CHECKPOINT)
+    await until(lambda: counts["entered"] == 2)
+    assert not any(task.done() for task in members)
+
+    await participant.open_admission()
+    outcomes = await asyncio.wait_for(asyncio.gather(*members, return_exceptions=True), timeout=0.5)
+    assert all(isinstance(outcome, JudgeError) for outcome in outcomes) == judge_fails
+    await server.aclose()
+
+
+AUTH = {"authorization": "Bearer t"}
+
+
+def http_server(config, *, judge_fails: bool):
+    """A server behind its real app, with checkpointing on, so requests pass the checkpoint middleware."""
+    server_client = MagicMock(spec=ServerClient)
+    server_client.global_config_dict = DictConfig({"checkpoint": {"enabled": True, "control_auth_token": "t"}})
+    server = genrm.GenRMCompareResourcesServer(config=config, server_client=server_client)
+    if judge_fails:
+        server._run_single_comparison = AsyncMock(side_effect=JudgeError("judge is down"))
+    else:
+        server._run_single_comparison = AsyncMock(return_value=comparison_result())
+    return server, httpx.ASGITransport(app=server.setup_webserver())
+
+
+def control(checkpoint_id: str, **extra) -> dict:
+    return {"checkpoint_id": checkpoint_id, "deadline_ts": time.time() + 10, **extra}
+
+
+def body_json(index: int) -> dict:
+    return member(index).model_dump(mode="json", by_alias=True)
+
+
+def outcome(response: httpx.Response) -> object:
+    assert response.status_code == 200, response.text
+    row = response.json()
+    return ("masked", row["failure_kind"]) if row.get("mask_sample") else row["reward"]
+
+
+async def commit(client: httpx.AsyncClient, checkpoint_id: str) -> str:
+    directory = tempfile.mkdtemp()
+    for route, body in (
+        ("prepare", control(checkpoint_id)),
+        ("commit", control(checkpoint_id, checkpoint_dir=directory)),
+    ):
+        (await client.post(f"/ng-control/v1/checkpoint/{route}", json=body, headers=AUTH)).raise_for_status()
+    return directory
+
+
+async def restore_and_resume(client: httpx.AsyncClient, directory: str, scope: list[dict]) -> None:
+    restored = await client.post(
+        "/ng-control/v1/checkpoint/restore",
+        json=control("restore", checkpoint_dir=directory, episode_ids=scope),
+        headers=AUTH,
+    )
+    restored.raise_for_status()
+    (await client.post("/ng-control/v1/checkpoint/resume", json=control("restore"), headers=AUTH)).raise_for_status()
+
+
+@pytest.mark.parametrize("checkpoints", [1, 2])
+@pytest.mark.parametrize("judge_fails", [False, True], ids=["reward", "judge_failure"])
+async def test_a_replay_through_the_checkpoint_control_plane_gets_the_recorded_outcome(
+    config, judge_fails, checkpoints
+):
+    """Member 0 recorded its outcome; member 1, whose caller closes its session later, replays after the crash."""
+    server, transport = http_server(config, judge_fails=judge_fails)
+    clients = [httpx.AsyncClient(transport=transport, base_url="http://genrm") for _ in range(3)]
+    async with clients[0], clients[1], clients[2]:
+        for index in range(2):
+            seed = await clients[index].post(
+                f"/ng-rollout/g{index}/seed_session", json={"responses_create_params": {"input": "hi"}}
+            )
+            seed.raise_for_status()
+        replies = await asyncio.gather(
+            clients[0].post("/ng-rollout/g0/verify", json=body_json(0)),
+            clients[1].post(
+                "/ng-rollout/g1/verify", json=body_json(1), headers={CHECKPOINT_CLOSE_FOLLOWS_HEADER: "1"}
+            ),
+        )
+        recorded = outcome(replies[1])
+        directory = await commit(clients[2], "save-a")
+        cookies = dict(clients[1].cookies)
+    await server.aclose()
+
+    attempt = 0
+    for _ in range(checkpoints):
+        server, transport = http_server(config, judge_fails=judge_fails)
+        control_client = httpx.AsyncClient(transport=transport, base_url="http://genrm")
+        async with control_client:
+            await restore_and_resume(control_client, directory, [{"rollout_id": "g1", "attempt": attempt}])
+            attempt += 1
+            if attempt < checkpoints:
+                # Another checkpoint and crash before member 1 replays.
+                directory = await commit(control_client, f"save-{attempt}")
+                await server.aclose()
+
+    replay = httpx.AsyncClient(transport=transport, base_url="http://genrm", cookies=cookies)
+    async with replay:
+        # Without the saved outcome, this would wait for member 0 until the collection timeout.
+        response = await asyncio.wait_for(
+            replay.post(f"/ng-rollout/g1-a{attempt}/verify", json=body_json(1)), timeout=0.5
+        )
+    assert outcome(response) == recorded
+    server._run_single_comparison.assert_not_awaited()
     await server.aclose()
