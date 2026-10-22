@@ -5,7 +5,7 @@ beam:
       domain: long_context
       verified: false
       description: BEAM (Beyond a Million Tokens) long-term-memory probing questions over long multi-session chats, scored by an LLM judge with the upstream per-question rubrics.
-      value: Improve long-term conversational memory across ten abilities (abstention, contradiction resolution, event ordering, information extraction, instruction following, knowledge update, multi-session reasoning, preference following, summarization, temporal reasoning).
+      value: Improve long-term conversational memory (recall, updates, contradictions, temporal and multi-session reasoning).
       judge_model_server:
         type: responses_api_models
         name: judge_model
