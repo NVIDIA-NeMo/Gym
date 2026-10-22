@@ -242,14 +242,14 @@ class HarborArtifact(HarborSettings):
 _STEP_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
-class HarborStepAgent(HarborPhaseSettings):
+class HarborTaskStepAgent(HarborPhaseSettings):
     """``[steps.agent]``: unset values fall back to the task's ``[agent]``, as in Harbor."""
 
     timeout_sec: float | None = Field(default=None, gt=0)
     user: str | int | None = None
 
 
-class HarborStepVerifier(HarborPhaseSettings):
+class HarborTaskStepVerifier(HarborPhaseSettings):
     """``[steps.verifier]``: unset values fall back to the task's ``[verifier]``, as in Harbor."""
 
     timeout_sec: float | None = Field(default=None, gt=0)
@@ -259,25 +259,26 @@ class HarborStepVerifier(HarborPhaseSettings):
     environment: HarborEnvironment | None = None
 
 
-class HarborStep(HarborSettings):
-    """One ``[[steps]]`` entry as ``task.toml`` writes it, named as Harbor names it.
+class HarborTaskStep(HarborSettings):
+    """One ``[[steps]]`` entry of ``task.toml`` (Harbor's ``StepConfig``): a step of the task, which the task
+    author defines and grades, not a step of a trajectory (``nemo_gym.atif_v1_7.AtifStep``).
 
-    The loader pairs it with its ``steps/<name>/`` folder into a ``HarborTurn``, which Gym runs as one turn, as
-    ``HarborTaskConfig`` pairs with its folder into a ``HarborTask``. The turn has its own instruction (``steps/<name>/instruction.md``) and verifier (the task's
-    ``tests/`` with ``steps/<name>/tests/`` on top). ``min_reward`` stops the episode after this turn
-    when its rewards fall short: a number gates the ``reward`` key, a mapping gates each named key, and a
-    turn without a verifier result fails every gate.
+    The loader pairs it with its ``steps/<name>/`` folder into a ``HarborTurn``, as ``HarborTaskConfig`` pairs
+    with its folder into a ``HarborTask``. The step has its own instruction (``steps/<name>/instruction.md``)
+    and verifier (the task's ``tests/`` with ``steps/<name>/tests/`` on top). ``min_reward`` stops the episode
+    after this step when its rewards fall short: a number gates the ``reward`` key, a mapping gates each named
+    key, and a step without a verifier result fails every gate.
     """
 
     name: str
-    agent: HarborStepAgent = Field(default_factory=HarborStepAgent)
-    verifier: HarborStepVerifier = Field(default_factory=HarborStepVerifier)
+    agent: HarborTaskStepAgent = Field(default_factory=HarborTaskStepAgent)
+    verifier: HarborTaskStepVerifier = Field(default_factory=HarborTaskStepVerifier)
     min_reward: float | dict[str, float] | None = None
     healthcheck: HarborHealthcheck | None = None
     artifacts: list[HarborArtifact] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def portable_name(self) -> "HarborStep":
+    def portable_name(self) -> "HarborTaskStep":
         if not _STEP_NAME.fullmatch(self.name) or self.name in (".", ".."):
             raise ValueError(f"Step name {self.name!r} must be a portable directory name under steps/")
         return self
@@ -298,7 +299,7 @@ class HarborTaskConfig(HarborSettings):
     verifier: HarborVerifier = Field(default_factory=HarborVerifier)
     artifacts: list[HarborArtifact] = Field(default_factory=list)
     # A task with steps runs them in order as turns in one sandbox; ``mean`` is Harbor's default roll-up.
-    steps: list[HarborStep] = Field(default_factory=list)
+    steps: list[HarborTaskStep] = Field(default_factory=list)
     multi_step_reward_strategy: Literal["mean", "final"] = "mean"
 
     @model_validator(mode="before")
@@ -322,10 +323,10 @@ class HarborTaskConfig(HarborSettings):
     def is_multi_turn(self) -> bool:
         return bool(self.steps)
 
-    def step_agent_timeout_sec(self, step: HarborStep) -> float:
+    def step_agent_timeout_sec(self, step: HarborTaskStep) -> float:
         return step.agent.timeout_sec if step.agent.timeout_sec is not None else self.agent.timeout_sec
 
-    def step_verifier_timeout_sec(self, step: HarborStep) -> float:
+    def step_verifier_timeout_sec(self, step: HarborTaskStep) -> float:
         return step.verifier.timeout_sec if step.verifier.timeout_sec is not None else self.verifier.timeout_sec
 
     @property

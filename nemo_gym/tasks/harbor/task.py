@@ -30,7 +30,7 @@ from nemo_gym.tasks.harbor.dockerfile import (
     resolve_dockerfile,
 )
 from nemo_gym.tasks.harbor.errors import HarborTaskError
-from nemo_gym.tasks.harbor.models import HarborStep, HarborTaskConfig
+from nemo_gym.tasks.harbor.models import HarborTaskConfig, HarborTaskStep
 from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE, IMAGE_CONFIGS_FILE, read_built_images, read_image_configs
 
 
@@ -46,15 +46,16 @@ DOCKERFILE = Path("environment") / "Dockerfile"
 
 @dataclass(frozen=True)
 class HarborTurn:
-    """One ``[[steps]]`` entry loaded with its ``steps/<name>/`` folder: the unit Gym runs as one turn.
+    """One task step loaded with its ``steps/<name>/`` folder, which the harbor server runs as one agent turn.
 
-    ``config`` is the entry as ``task.toml`` writes it (:class:`HarborStep`) and ``instruction`` is
-    ``steps/<name>/instruction.md``, so ``HarborStep`` is to ``HarborTurn`` what ``HarborTaskConfig`` is to
-    ``HarborTask``. The schema keeps Harbor's word, step; what Gym runs is a turn.
+    ``config`` is the step as ``task.toml`` writes it (:class:`HarborTaskStep`) and ``instruction`` is
+    ``steps/<name>/instruction.md``, so ``HarborTaskStep`` is to ``HarborTurn`` what ``HarborTaskConfig`` is to
+    ``HarborTask``. One turn per task step is this server's choice, as in Harbor's multi-step trial; a task
+    step does not imply a single turn in general.
     """
 
     instruction: str
-    config: HarborStep
+    config: HarborTaskStep
 
     @property
     def name(self) -> str:
