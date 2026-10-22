@@ -37,6 +37,32 @@ host-based policy. Keep simulator/interaction listeners private; proxies should
 fix their model and reject provider-side tools and arbitrary extensions. Preserve
 `X-Session-Id`, `X-Session-Affinity`, and `X-OpenCode-Assistant-Message-Id` for capture.
 
+Start the benchmark's dependency proxy on a dedicated trusted host/interface
+reachable from the task sandboxes. It needs Python 3.11+ and OpenSSL. Use the same
+random `SWE_TOGETHER_DEPENDENCY_ADMIN_KEY` (at least 32 characters) in that service
+and the trusted Gym environment; keep it out of task environments. Configure
+`SWE_TOGETHER_DEPENDENCY_PROXY_URL=http://<dependency-host>:3128` on the Gym host.
+The endpoint must be separate from both model routes and expose no unauthenticated
+management services. In particular, do not run it in a peer OpenSandbox task:
+allowing that task's IP also exposes its exec daemon. The HTTP endpoint and admin
+traffic belong on a trusted private network.
+
+```bash
+# Additional shell on the dependency host, from this checkout.
+# Set SWE_TOGETHER_DEPENDENCY_ADMIN_KEY from your secret environment first.
+python -m environment_servers.swe_together.egress_proxy \
+  --state-dir /private/path/swet-dependency-ca
+```
+
+The environment registers an immutable package denylist before candidate work
+and reuses it for judging. Sandboxes receive only a scoped lease token and public
+CA trust. The proxy permits the pinned reference's Python, Node, Rust and apt
+registries and model catalogs, while blocking registry searches and the task's
+own packages. Direct registry access stays denied; HTTPS certificate validation
+remains enabled. Leases are revoked after cleanup and expire if the controller
+is lost. A proxy restart invalidates its leases; restart affected episodes rather
+than silently opening access. Stop the service when the campaign is finished.
+
 ```bash
 # Shell 1
 gym env start \
@@ -52,8 +78,10 @@ gym eval run --no-serve \
   --num-repeats 2 --concurrency 12
 ```
 
-The preparation and startup commands preserve the prototype recipe. The required
-deployment correction is role-isolated model routes; its original same-IP settings
+The Gym preparation/start/eval commands preserve the prototype recipe. The
+additional dependency service is needed because OpenSandbox's supported
+host-based policy cannot enforce the reference's package/path restrictions.
+Role-isolated model routes are also required; the prototype's same-IP settings
 do not enforce that isolation. Prepared inputs go directly to `--input`.
 
 ## Runtime and benchmark boundaries
@@ -78,13 +106,15 @@ with the model's native ID. Model identity affects OpenCode's family-specific
 prompts, tools and sampling. This recipe sets explicit context/output limits;
 reasoning effort is controlled by the chosen model route.
 
-The reference's two WebFetch/WebSearch-restricted tasks are covered by this
-recipe's global web-tool denial and restricted egress. This is intentionally
-stricter for the remaining tasks, matching the attached deployment's network
-contract. Some original tasks request public GitHub context or already block it
-in their image. Public network context is not supplied or silently fetched.
+The recipe disables WebFetch/WebSearch globally, which is stricter than the
+reference's tool restrictions on two tasks. Dependency access follows the
+reference host and package/path rules, including task-specific host additions.
+Public GitHub access remains blocked by the reference network policy.
 The recipe overrides Gym’s default bash filters to allow commands, matching the
-reference’s effective bash policy; network restrictions remain provider-enforced.
+reference’s effective bash policy. The provider restricts destinations and the
+dependency proxy enforces registry request restrictions outside task sandboxes.
+Registry paths are URL-decoded before checking package names and search routes;
+this closes an encoded-URL bypass in the pinned reference policy.
 Project guidance is discovered explicitly and appended to the initial input;
 the adapter keeps automatic project config disabled. These choices, supplied
 ripgrep, image-default execution users, and the normalized Responses-based

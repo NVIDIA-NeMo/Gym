@@ -20,6 +20,7 @@ from pydantic import Field, PrivateAttr
 
 from environment_servers.swe_together.artifacts import RepositorySnapshots
 from environment_servers.swe_together.context import INCREMENTAL_NOTICE, project_turn
+from environment_servers.swe_together.egress import DependencyAccess, install_trust_bundle
 from environment_servers.swe_together.evaluation import PASS_THRESHOLD, interaction_metrics, run_judge
 from environment_servers.swe_together.guidance import session_analysis
 from environment_servers.swe_together.metrics import aggregate
@@ -88,6 +89,7 @@ class SWETConfig(BaseEnvironmentServerConfig):
     sandbox_config: dict = Field(default_factory=dict)
     judge_sandbox_config: dict = Field(default_factory=dict)
     runtime_manifest_path: str
+    dependency_proxy_url: str | None = None
     runtime_helper_image: str = "python:3.13-slim"
     planned_trials: int = Field(default=218, gt=0)
     repeats: int = Field(default=2, gt=0)
@@ -137,6 +139,8 @@ class Episode:
     interaction_started: float | None = None
     interaction_deadline: float | None = None
     cleanup_receipts: dict = field(default_factory=dict)
+    dependency_token: str = field(default_factory=lambda: uuid4().hex + uuid4().hex)
+    dependency_access: DependencyAccess | None = None
 
 
 class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
@@ -226,8 +230,14 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                 failure.cleanup_receipts = state.cleanup_receipts
                 (state.directory / "failure.json").write_text(failure.model_dump_json(indent=2))
 
+        async def release_dependency_access() -> None:
+            if state.dependency_access is not None:
+                await state.dependency_access.revoke(state.dependency_token)
+                state.cleanup_receipts["dependency_access"] = {"revoked": True}
+
         # Run after all participant callbacks, including on failure/cancellation.
         cleanup.register_cleanup("episode evidence", persist_cleanup_evidence)
+        dependency_cleanup = cleanup.register_cleanup("dependency access", release_dependency_access)
         runtime_cleanup = cleanup.register_cleanup("runtime bundle", release_runtime)
         candidate_cleanup = cleanup.register_cleanup("candidate sandbox", lambda: close_sandbox("candidate"))
         judge_cleanup = cleanup.register_cleanup("judge sandbox", lambda: close_sandbox("judge"))
@@ -334,6 +344,7 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
             await judge_cleanup.close()
             await candidate_cleanup.close()
             await runtime_cleanup.close()
+            await dependency_cleanup.close()
             response = SWETResponse(
                 episode_id=request.episode_id,
                 task_id=request.task.task_id,
@@ -400,6 +411,14 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
         role = "judge" if judge else "candidate"
         if state.runtime is None:
             raise RuntimeError("Trusted runtime must be prepared before task sandbox creation")
+        if not self.config.dependency_proxy_url:
+            raise ValueError("Configure dependency_proxy_url for reference dependency access")
+        if state.dependency_access is None:
+            state.dependency_access = DependencyAccess(self.config.dependency_proxy_url)
+        certificate = await state.dependency_access.certificate()
+        options["network_policy"], proxy_env, proxy_files = state.dependency_access.sandbox_settings(
+            state.dependency_token, policy, certificate
+        )
         mount = state.runtime.mount_options(state.session_id, role)
         options["volumes"] = list(options.get("volumes", [])) + mount["volumes"]
         provider = resolve_provider_config(self.config.sandbox_provider, self.server_client.global_config_dict)
@@ -420,6 +439,8 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                     ttl_s=sandbox_config.get("ttl_s", 7200),
                     ready_timeout_s=sandbox_config.get("ready_timeout_s", 300),
                     resources=SandboxResources(cpu=4, memory_mib=memory, disk_gib=10),
+                    env=proxy_env,
+                    files=proxy_files,
                     provider_options=options,
                     metadata=state.runtime.metadata()
                     | {
@@ -436,6 +457,7 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
         # Provider creates can complete after transport cancellation. Retain the
         # task and shield it so close can wait for the actual owned handle.
         await asyncio.shield(creation)
+        await install_trust_bundle(sandbox)
         if judge:
             installed = await sandbox.exec(
                 "command -v python3 >/dev/null || ln -s /opt/gym-runtime/python/bin/python3 /usr/local/bin/python3",
@@ -493,6 +515,20 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
         state.runtime = self._runtime
         await state.runtime.prepare(state.session_id)
         sandbox = await self._new_sandbox(state)
+        await state.dependency_access.register(
+            state.dependency_token,
+            sandbox,
+            workdir=state.task.workdir,
+            task_dir=state.task_dir,
+            artifact_dir=state.directory,
+            ttl=min(
+                86400,
+                self.config.setup_timeout_seconds
+                + self.config.interaction_timeout_seconds
+                + self.config.grading_timeout_seconds
+                + 4 * self.config.cleanup_timeout_seconds,
+            ),
+        )
         python = PYTHON
         python_probe = await sandbox.exec(python + " --version", timeout_s=30)
         if python_probe.return_code or python_probe.error_type:

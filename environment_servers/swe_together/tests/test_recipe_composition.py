@@ -30,6 +30,7 @@ async def test_recipe_routes_to_environment_and_aggregates_measurements(monkeypa
         "OPENSANDBOX_SHARED_STORAGE_PATH": "/mnt/shared",
         "SWE_TOGETHER_POLICY_EGRESS_TARGET": "10.0.0.1",
         "SWE_TOGETHER_JUDGE_EGRESS_TARGET": "10.0.0.2",
+        "SWE_TOGETHER_DEPENDENCY_PROXY_URL": "http://10.0.0.3:3128",
     }.items():
         monkeypatch.setenv(key, value)
     paths = ["benchmarks/swe_together/opencode.yaml"]
