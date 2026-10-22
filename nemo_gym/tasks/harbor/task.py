@@ -63,6 +63,13 @@ logger = logging.getLogger(__name__)
 
 TASK_FILE = "task.toml"
 INSTRUCTION_FILE = "instruction.md"
+# Harbor's seed trajectory (``TaskPaths.TRAJECTORY_FILENAME``): an ATIF document a task ships beside its instruction
+# (``steps/<first step>/`` for a multi-step task, where a top-level one is ignored) that Harbor 0.22.0 loads into the
+# agent's session before its first turn, for every agent but the oracle and nop (``Trial._resolve_load_trajectory``).
+# Gym cannot seed a harness with it yet: the loader records the file (:attr:`HarborTask.seed_trajectory`) and the
+# environment server runs the task for the oracle alone, refusing it for any other agent rather than running it
+# without its prior context.
+TRAJECTORY_FILE = "trajectory.json"
 STEPS_DIR = "steps"
 # A step's files under ``steps/<name>/``: the folder merged into the working directory before the turn and the
 # script run from there (Harbor's ``_upload_step_workdir`` and ``_run_step_setup``: the script lives inside the folder).
@@ -217,6 +224,11 @@ class HarborTask:
     parameterized task's rendered row), ``{}`` for a task without one. Materialize writes them into the
     row's ``task_data`` beside the reserved ``_ng_*`` keys, and the dataset's ``task_data.py`` validates
     them when it ships one (:mod:`nemo_gym.tasks.harbor.task_data`).
+
+    ``seed_trajectory`` is Harbor's seed trajectory when the task ships one, relative to the task folder:
+    ``steps/<first step>/trajectory.json`` for a multi-step task, else ``trajectory.json`` (one or the other, as
+    Harbor's ``_task_trajectory_path`` picks it); ``None`` otherwise. The environment server runs such a task for
+    the oracle alone and refuses it for any other agent, naming the file.
     """
 
     path: Path
@@ -249,6 +261,8 @@ class HarborTask:
     # The Python verifier that grades the task (``tests/verifier.py``, or the dataset root's ``verifier.py`` for a
     # task without ``tests/``), run inside the sandbox through the test.sh shim; ``None`` when ``tests/test.sh`` does.
     python_verifier: Path | None = None
+    # Harbor's seed trajectory, relative to the task folder, when the task ships one (see the class docstring).
+    seed_trajectory: Path | None = None
 
     @property
     def needs_sandbox(self) -> bool:
@@ -444,6 +458,7 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
 
     instruction_path = path / INSTRUCTION_FILE
     turns = _load_turns(path, config)
+    seed_trajectory = _seed_trajectory(path, turns)
     # Harbor reads a multi-step task's instructions from its steps; the top-level file is then optional.
     if not turns and not instruction_path.is_file():
         raise HarborTaskError(f"{path} has no {INSTRUCTION_FILE}")
@@ -716,6 +731,7 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
         turns=turns,
         task_data=task_data,
         python_verifier=python_verifier,
+        seed_trajectory=seed_trajectory,
     )
 
 
@@ -776,6 +792,35 @@ def iter_task_folders(root: Path, *, max_depth: int = MAX_DISCOVERY_DEPTH) -> li
             )
         seen[child.name] = child
     return found
+
+
+def _seed_trajectory(path: Path, turns: tuple[HarborTurn, ...]) -> Path | None:
+    """The seed trajectory the task ships, relative to the task folder, or ``None``; warns when there is one.
+
+    Harbor 0.22.0 loads ``trajectory.json`` beside the instruction (``steps/<first step>/trajectory.json`` for a
+    multi-step task, where a top-level one is ignored: ``Trial._task_trajectory_path`` picks one path or the other,
+    never both) into the agent's session as prior context, as its ``--load-trajectory`` option does, for every
+    agent but the oracle and nop (the oracle runs the task's own solution, so the prior context does not apply to
+    it, and task authors validate with it); an agent that cannot load an ATIF trajectory fails the trial before any
+    environment spend. This server hands no prior context to a harness yet, so running the task for a model would
+    grade it without the context the task was written for: the task loads, the oracle runs it as Harbor's does,
+    and the environment server refuses it at seed for any other agent, naming the file. The file stays part of
+    the task's identity and its package (:func:`~nemo_gym.tasks.harbor.digest.content_hash` covers it), so a
+    fetched task verifies against its advertised hash.
+    """
+    seed = path / STEPS_DIR / turns[0].name / TRAJECTORY_FILE if turns else path / TRAJECTORY_FILE
+    if not seed.is_file():
+        return None
+    where = seed.relative_to(path)
+    logger.warning(
+        "%s: %s is Harbor's seed trajectory (the prior context Harbor loads into the agent's session before its first "
+        "turn, as --load-trajectory does, for every agent but the oracle and nop); loading a trajectory into a harness "
+        "is not supported yet, so the environment server runs the task for the oracle alone and refuses it for any "
+        "other agent. Remove the file to run the task without its prior context",
+        path,
+        where.as_posix(),
+    )
+    return where
 
 
 def _is_root_user(user: str | int | None) -> bool:

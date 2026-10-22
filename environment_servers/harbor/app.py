@@ -113,6 +113,7 @@ from nemo_gym.server_utils import (
 )
 from nemo_gym.single_agent_turn_types import SingleAgentTurnFailure, SingleAgentTurnResult
 from nemo_gym.tasks.harbor import DIGEST_KEY, HarborTask, load_task
+from nemo_gym.tasks.harbor.cli import ORACLE_AGENT
 from nemo_gym.tasks.harbor.compose_overlay import ComposeOverlayError, HarborComposeOverlay, wrap_first_instruction
 from nemo_gym.tasks.harbor.dataset_config import DATASET_FILE
 from nemo_gym.tasks.harbor.errors import HarborTaskError
@@ -1426,12 +1427,47 @@ class HarborEnvironmentServer(
             )
         return accesses
 
+    def _check_seed_trajectory(self, task: HarborTask) -> None:
+        """Refuse a task that ships Harbor's seed ``trajectory.json`` for every agent but the oracle, before anything
+        is provisioned.
+
+        Harbor loads the file into the agent's session for every agent but the oracle and nop
+        (``Trial._resolve_load_trajectory``); no harness here can be seeded with it yet, so the oracle runs the task
+        as Harbor's does and any other agent is refused, not retried. An agent block this server cannot read
+        (several implementations under the instance, a client the merged config does not show) is not known to be
+        any harness in particular: the task runs, with a warning, as :meth:`_seed_solution` places no solution for
+        the same shape with a warning, rather than refusing the oracle wired that way.
+        """
+        implementation = self._agent_implementation()
+        where = task.seed_trajectory.as_posix()
+        if implementation is None:
+            LOGGER.warning(
+                "%s: ships Harbor's seed trajectory %s, and agent %r has no single responses_api_agents "
+                "implementation in the run config, so the server cannot tell whether it is the oracle (which runs "
+                "such a task as Harbor's does); the task runs without its prior context",
+                task.task_id,
+                where,
+                self.config.agent_server.name,
+            )
+            return
+        if implementation != ORACLE_AGENT:
+            raise HTTPException(
+                422,
+                f"Task {task.task_id!r} ships Harbor's seed trajectory {where} (the prior context Harbor loads into "
+                "the agent's session before its first turn, as --load-trajectory does, for every agent but the oracle "
+                "and nop); loading a trajectory into a harness is not supported yet, so the task is refused for agent "
+                f"{self.config.agent_server.name!r} rather than run without it. The oracle validates it, as Harbor's "
+                "does; remove the file to run the task without its prior context",
+            )
+
     async def _seed(self, request: HarborEpisodeRequest, episode_key: str) -> HarborSession:
         """Resolve the task and start its sandbox; the sandbox stays owned by the server until it is stopped."""
         if self._shutting_down:
             raise HTTPException(503, "Environment server is shutting down")
         task = await self._resolve_task(request.task.task_id, request.task.task_input.task_data)
         self._check_task_data(request.task.task_id.taskset, task, request.task.task_input.task_data)
+        if task.seed_trajectory is not None:
+            self._check_seed_trajectory(task)
         if not task.needs_sandbox:
             raise HTTPException(
                 422, f"Task {task.task_id!r} declares no image; sandbox-less tasks are not supported yet"
