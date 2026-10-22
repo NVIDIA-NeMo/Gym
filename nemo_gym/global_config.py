@@ -18,12 +18,14 @@ import sys
 import textwrap
 from argparse import ArgumentParser
 from collections import Counter, defaultdict
+from collections.abc import Sequence
 from copy import deepcopy
 from dataclasses import dataclass
 from difflib import get_close_matches
 from importlib import import_module
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as distribution_version
+from ipaddress import ip_address
 from os import environ, getenv
 from pathlib import Path
 from platform import python_version
@@ -66,10 +68,12 @@ from nemo_gym.config_types import (
 )
 from nemo_gym.exporters import setup_exporters
 from nemo_gym.h2_ping_sidecar.config import H2_PING_SIDECAR_KEY_NAME
+from nemo_gym.sandbox.providers.registry import plugin_distributions
 from nemo_gym.secret_utils import recursively_hide_secrets
 from nemo_gym.telemetry.setup import (
     TELEMETRY_KEY_NAME,
     configure_telemetry_env,
+    installed_requirement,
     server_venv_requirements,
     telemetry_config_from_global_config,
 )
@@ -102,6 +106,9 @@ HEAD_SERVER_CONSTRAINTS_KEY_NAME = "head_server_constraints"
 PYTHON_VERSION_KEY_NAME = "python_version"
 PIP_INSTALL_VERBOSE_KEY_NAME = "pip_install_verbose"
 USE_ABSOLUTE_IP = "use_absolute_ip"
+# With `use_absolute_ip`, the server types (`responses_api_models`, ...) that get the resolved address; every other
+# server and the head server stay on loopback. Unset or null: every server, the head included.
+ABSOLUTE_IP_SERVER_TYPES_KEY_NAME = "absolute_ip_server_types"
 UV_PIP_SET_PYTHON_KEY_NAME = "uv_pip_set_python"
 SKIP_VENV_IF_PRESENT_KEY_NAME = "skip_venv_if_present"
 HF_TOKEN_KEY_NAME = "hf_token"
@@ -157,6 +164,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     PYTHON_VERSION_KEY_NAME,
     PIP_INSTALL_VERBOSE_KEY_NAME,
     USE_ABSOLUTE_IP,
+    ABSOLUTE_IP_SERVER_TYPES_KEY_NAME,
     UV_PIP_SET_PYTHON_KEY_NAME,
     SKIP_VENV_IF_PRESENT_KEY_NAME,
     HF_TOKEN_KEY_NAME,
@@ -205,6 +213,14 @@ ALLOWED_AGENTS_KEY_NAME = "allowed_agents"
 ALLOWED_MODEL_TYPES_KEY_NAME = "allowed_model_types"
 MODEL_SERVER_TYPE_KEY_NAME = "responses_api_models"
 RESOURCES_SERVER_TYPE_KEY_NAME = "resources_servers"
+
+# Public config-group keys, in discovery order, for Gym and downstream integrations.
+SERVER_TYPE_KEYS: Tuple[str, ...] = (
+    RESOURCES_SERVER_TYPE_KEY_NAME,
+    AGENT_SERVER_TYPE_KEY_NAME,
+    MODEL_SERVER_TYPE_KEY_NAME,
+    ENVIRONMENT_SERVER_TYPE_KEY_NAME,
+)
 
 
 def environment_server_agent_refs(server: DictConfig) -> list[DictConfig]:
@@ -628,8 +644,12 @@ Duplicate config paths:
         skip_verification: Optional[bool] = None,
         skip_verification_reward: Optional[float] = None,
         probe_ports: bool = True,
+        host_by_server_type: Optional[Mapping[str, str]] = None,
     ) -> List[int]:
+        """``host_by_server_type`` overrides ``default_host`` for the server types it names (a server with its own
+        ``host`` keeps it either way): the scoped form of ``use_absolute_ip``."""
         server_refs = [c.get_server_ref() for c in server_instance_configs]
+        host_by_server_type = host_by_server_type or {}
 
         disallowed_ports = initial_disallowed_ports.copy() if initial_disallowed_ports is not None else []
 
@@ -668,7 +688,9 @@ Duplicate config paths:
             # Populate the host and port values if they are not present in the config.
             with open_dict(run_server_config_dict):
                 if not run_server_config_dict.get("host"):
-                    run_server_config_dict["host"] = default_host
+                    run_server_config_dict["host"] = host_by_server_type.get(
+                        server_instance_config.SERVER_TYPE, default_host
+                    )
                 if not run_server_config_dict.get("port"):
                     if probe_ports:
                         port = _find_open_port_using_range(
@@ -1535,11 +1557,48 @@ Found global config dict yaml:
 
         with open_dict(global_config_dict):
             use_absolute_ip = global_config_dict.setdefault(USE_ABSOLUTE_IP, False)
-        if use_absolute_ip and not parse_config.offline:
-            default_host = gethostbyname(gethostname())
-        else:
-            # Do one pass through all the configs validate and populate various configs for our servers.
-            default_host = global_config_dict.get(DEFAULT_HOST_KEY_NAME) or "127.0.0.1"
+        # An explicit address wins, including on machines whose short hostname has no DNS entry.
+        default_host = global_config_dict.get(DEFAULT_HOST_KEY_NAME)
+        if not default_host and use_absolute_ip and not parse_config.offline:
+            hostname = gethostname()
+            address_hint = (
+                "Set +default_host=<host address reachable from the sandbox>, or set +use_absolute_ip=false "
+                "only when the caller shares the servers' network namespace."
+            )
+            try:
+                default_host = gethostbyname(hostname)
+            except OSError as exc:
+                raise ConfigError(
+                    f"Cannot resolve host {hostname!r} for use_absolute_ip=true. {address_hint}"
+                ) from exc
+            address = ip_address(default_host)
+            if address.is_loopback or address.is_unspecified:
+                raise ConfigError(
+                    f"Host {hostname!r} resolves to {default_host}, which cannot advertise this host to a sandbox. "
+                    f"{address_hint}"
+                )
+        # `absolute_ip_server_types` scopes the resolved address to the servers a sandbox must reach (a Harbor run
+        # names the model server): the head server, whose unauthenticated config endpoint returns the merged
+        # config, and every other server stay on loopback as without `use_absolute_ip`. An explicit
+        # `default_host` is the broader opt-in and applies to every server, as does an unset list.
+        host_by_server_type: dict[str, str] = {}
+        server_types = global_config_dict.get(ABSOLUTE_IP_SERVER_TYPES_KEY_NAME)
+        if server_types is not None:
+            if isinstance(server_types, str) or not isinstance(server_types, Sequence):
+                raise ConfigError(
+                    f"`{ABSOLUTE_IP_SERVER_TYPES_KEY_NAME}` must be a list of server types "
+                    f"({', '.join(SERVER_TYPE_KEYS)}) or null; got {server_types!r}"
+                )
+            unknown = [t for t in server_types if t not in SERVER_TYPE_KEYS]
+            if unknown:
+                raise ConfigError(
+                    f"`{ABSOLUTE_IP_SERVER_TYPES_KEY_NAME}` names unknown server types {unknown!r}; expected "
+                    f"a subset of {', '.join(SERVER_TYPE_KEYS)}"
+                )
+            if default_host and not global_config_dict.get(DEFAULT_HOST_KEY_NAME):
+                host_by_server_type = {str(t): default_host for t in server_types}
+                default_host = None
+        default_host = default_host or "127.0.0.1"
 
         # Only an absent or null block means "all defaults"; any other non-mapping (incl. false, 0, "" and []) is
         # malformed. `host` is not read here: it may reference a server host that validate_and_populate_defaults
@@ -1576,6 +1635,7 @@ Set the keys individually, in a config or as overrides, e.g.:
             skip_verification=global_config_dict.get(SKIP_VERIFICATION_KEY_NAME),
             skip_verification_reward=global_config_dict.get(SKIP_VERIFICATION_REWARD_KEY_NAME),
             probe_ports=not parse_config.offline,
+            host_by_server_type=host_by_server_type,
         )
 
         with open_dict(global_config_dict):
@@ -1624,7 +1684,7 @@ Set the keys individually, in a config or as overrides, e.g.:
             if _openai_version_matches_nemo_gym_constraint(openai_version):
                 head_server_deps.append(f"openai=={openai_version}")
             elif allow_openai_skew:
-                logging.warning(
+                logger.warning(
                     f"Not pinning the parent process's openai=={openai_version} into server venvs: "
                     f"it does not satisfy nemo-gym's own constraint ({_nemo_gym_openai_requirement()}). "
                     "Server venvs resolve openai from nemo-gym's constraint instead, so the parent and "
@@ -1649,6 +1709,12 @@ Set the keys individually, in a config or as overrides, e.g.:
             # lets server_venv_requirements() see that telemetry is on.
             configure_telemetry_env(telemetry_config_from_global_config(global_config_dict))
             head_server_deps.extend(server_venv_requirements())
+            # A server venv is built from that server's own requirements, so a provider
+            # installed only in this process would be unknown there.
+            for dist_name in plugin_distributions():
+                requirement = installed_requirement(dist_name, dist_name)
+                if requirement is not None:
+                    head_server_deps.append(requirement)
 
             global_config_dict[HEAD_SERVER_DEPS_KEY_NAME] = head_server_deps
 
@@ -1780,6 +1846,16 @@ def maybe_get_global_config_dict() -> Optional[DictConfig]:
         return global_config_dict
 
     return None
+
+
+def reset_global_config_dict() -> None:
+    """Forget the cached global config dict, so the next `get_global_config_dict` resolves the command line again.
+
+    For a command that builds the configuration it dispatches (a run config written on the way), whatever this
+    process resolved before, for other tokens, must not stand in for it.
+    """
+    global _GLOBAL_CONFIG_DICT
+    _GLOBAL_CONFIG_DICT = None
 
 
 def get_global_config_dict(
@@ -2194,7 +2270,6 @@ def format_almost_server_warning(server_name: str, error: ValidationError) -> st
     errors = error.errors()
 
     # Identify the actual server type from the error (excluding Union discriminator noise)
-    server_type_keys = ["responses_api_models", "resources_servers", "responses_api_agents", "environment_servers"]
     actual_server_type = None
 
     # Example error structure: ('ResponsesAPIAgentServerInstanceConfig', 'responses_api_agents', 'simple_agent', 'datasets', 0, 'license')
@@ -2202,7 +2277,7 @@ def format_almost_server_warning(server_name: str, error: ValidationError) -> st
         loc = err["loc"]
         # loc[1] is the actual server type key.
         # Skip "missing" errors from the irrelevant Union variants.
-        if len(loc) > 1 and loc[1] in server_type_keys and err["type"] != "missing":
+        if len(loc) > 1 and loc[1] in SERVER_TYPE_KEYS and err["type"] != "missing":
             actual_server_type = loc[1]
             break
 
@@ -2210,7 +2285,7 @@ def format_almost_server_warning(server_name: str, error: ValidationError) -> st
     if not actual_server_type:  # pragma: no cover
         for err in errors:
             if "input" in err and isinstance(err["input"], dict):
-                for key in server_type_keys:
+                for key in SERVER_TYPE_KEYS:
                     if key in err["input"]:
                         actual_server_type = key
                         break
@@ -2226,7 +2301,7 @@ def format_almost_server_warning(server_name: str, error: ValidationError) -> st
         if (
             err["type"] == "missing"
             and len(loc) > 1
-            and loc[1] in server_type_keys
+            and loc[1] in SERVER_TYPE_KEYS
             and actual_server_type
             and loc[1] != actual_server_type
         ):

@@ -1,0 +1,78 @@
+---
+title: "Prefill/Decode Disaggregation"
+description: "Serve a model as separate prefill and decode vLLM tiers behind a vllm-router."
+position: 2
+---
+
+A `vllm_pd` service splits inference into a **prefill** tier and a **decode** tier, each on nodes of its own, with a `vllm-router` in front. The tiers exchange KV cache over NIXL. From the benchmark's point of view the router is the policy model: one OpenAI-compatible endpoint.
+
+## Example
+
+Two pools, one node each, with one tier on each:
+
+```yaml
+compute:
+  cluster:
+    type: slurm
+    account: my-account
+    node_pools:
+      prefill:
+        partition: batch
+        nodes: 1
+        gpus_per_node: 8
+      decode:
+        partition: batch
+        nodes: 1
+        gpus_per_node: 8
+
+services:
+  llm:
+    type: vllm_pd
+    container: my-registry/vllm-with-router:latest   # must provide vllm and vllm-router
+    model: my-org/my-model
+    prefill:
+      node_pool: prefill
+      tensor_parallel_size: 8
+    decode:
+      node_pool: decode
+      tensor_parallel_size: 8
+
+driver:
+  policy_model: llm              # the router
+  benchmarks:
+    gpqa:
+      run:
+        config_paths:
+          - benchmarks/gpqa/config.yaml
+```
+
+This single entry deploys three services:
+
+| Service | Role | Port (defaults) |
+| --- | --- | --- |
+| `llm-prefill` | Prefill tier (`kv_producer`), `vllm serve` | `port + 1` = 8001 |
+| `llm-decode` | Decode tier (`kv_consumer`), `vllm serve` | `port + 2` = 8002 |
+| `llm` | `vllm-router`, listening on all interfaces | `port` = 8000 |
+
+The tiers inherit `container`, `model`, and `served_model_name` from the `vllm_pd` entry. Anything else, such as `tensor_parallel_size`, `number_of_instances`, `extra_args`, `env`, or `mounts`, is set per tier. The router address is what `policy_base_url` points at, so set `driver.policy_model` to the `vllm_pd` name (`llm`), not to a tier.
+
+## Rules
+
+- **Each tier needs a `node_pool`.** The two tiers run side by side, and the router addresses each by its pool's first node. Pools must agree on `partition`, `ntasks_per_node`, and `gpus_per_node`, as always.
+- **Names are reserved.** `llm-prefill` and `llm-decode` may not already exist in `services`.
+- **Tiers use different RPC ports.** `data_parallel_rpc_port` defaults to 13345 for prefill and 13346 for decode. Overriding one so they match is an error.
+- **`server_per_node` and `nixl_side_channel_port` belong on the `vllm_pd` entry**, not on a tier, because they apply to both. Setting them on a tier is an error.
+- **The router, if pinned, goes on the first pool.** The driver reaches it over localhost from the allocation's first node. Leaving `node_pool` unset on the router is simplest.
+- **Each tier is sized against its own pool**, so a one-node pool is a single-node deployment with that pool's GPUs.
+
+## Tuning
+
+| Field | Default | Use |
+| --- | --- | --- |
+| `server_per_node` | `false` | Run an independent server on every node of each tier, and list each as a router endpoint, instead of one data-parallel engine across a tier. Requires `number_of_instances: 1` on each tier. |
+| `prefill_policy`, `decode_policy` | `cache_aware` | Router routing policy per tier. |
+| `request_timeout_secs` | `86400` | Raise or lower the router timeout. The default is long because agentic benchmarks keep requests open for a long time. |
+| `kv_load_failure_policy` | `fail` | Fail loudly if a KV transfer breaks, instead of silently recomputing the prefill. |
+| `nixl_side_channel_port` | `5600` | Prefill's NIXL port; decode uses the next port. |
+
+Each tier's job step exports `VLLM_NIXL_SIDE_CHANNEL_HOST` (the node's hostname) and `VLLM_NIXL_SIDE_CHANNEL_PORT` before `vllm serve` starts, in addition to any `pre_command` you set.

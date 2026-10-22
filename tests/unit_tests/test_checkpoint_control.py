@@ -411,7 +411,7 @@ async def test_a_commit_refused_because_readiness_regressed_is_final_for_its_che
     assert refused.json()["error"]["code"] == retried.json()["error"]["code"] == "export_failed"
     assert not (tmp_path / "gym").exists()
     assert fresh.status_code == 200
-    _, [record] = read_participant_state(tmp_path / "2", kind="fake", instance="fake-1")
+    _, [record], _ = read_participant_state(tmp_path / "2", kind="fake", instance="fake-1")
     assert record["value"] == 2
 
 
@@ -428,6 +428,45 @@ async def test_lease_expiry_resumes_a_participant_whose_controller_went_quiet() 
     assert prepared["phase"] == "prepared" and closed_after_prepare
     assert status["phase"] == "idle" and participant.accepting
     assert stale.status_code == 409 and stale.json()["error"]["code"] == "stale_checkpoint"
+
+
+async def test_a_prepare_that_waited_through_its_lease_expiry_does_not_report_a_later_checkpoint_as_its_own(
+    tmp_path: Path,
+) -> None:
+    """A prepare still waiting when its checkpoint ends replies idle, even once another checkpoint is prepared.
+
+    The first prepare waits at a gate for the participant to become ready.
+    Meanwhile its lease expires, admission reopens, and a second checkpoint is prepared.
+    Only then does the first prepare wake.
+    """
+
+    class HeldWait(FakeParticipant):
+        def __init__(self) -> None:
+            super().__init__()
+            self.waiting = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def wait_changed(self, timeout: float) -> None:
+            self.waiting.set()
+            await self.release.wait()
+
+    participant = HeldWait()
+    participant.executions["r"] = {"parked": False, "value": 1}
+    async with make_client(participant, lease_grace=0.1) as client:
+        first_prepare = asyncio.create_task(client.post("/ng-control/v1/checkpoint/prepare", json=body(timeout=0.1)))
+        await asyncio.wait_for(participant.waiting.wait(), 5)
+        await _until(lambda: participant.accepting, "the lease expired and reopened admission")
+        participant.executions["r"]["parked"] = True
+        second = (await client.post("/ng-control/v1/checkpoint/prepare", json=body("ckpt-2"))).json()
+        participant.release.set()
+        first = (await asyncio.wait_for(first_prepare, 5)).json()
+        stale_commit = await client.post("/ng-control/v1/checkpoint/commit", json=body(checkpoint_dir=str(tmp_path)))
+
+    assert second["phase"] == "prepared"
+    # The first checkpoint ended when its lease expired.
+    # Its prepare reports it idle rather than the phase of the second checkpoint.
+    assert first["phase"] == "idle"
+    assert stale_commit.json()["error"]["code"] == "stale_checkpoint"
 
 
 async def test_renew_keeps_a_slow_but_live_controller_in_charge() -> None:
@@ -626,7 +665,7 @@ def test_stored_records_keep_their_key_order(tmp_path: Path) -> None:
     record = {"episode_id": {"rollout_id": "r", "attempt": 0}, "state": state}
     write_participant_state(tmp_path, kind="resources", instance="r", checkpoint_id="c1", records=[record])
 
-    _, [restored] = read_participant_state(tmp_path, kind="resources", instance="r")
+    _, [restored], _ = read_participant_state(tmp_path, kind="resources", instance="r")
 
     assert json.dumps(restored["state"]) == json.dumps(state)
     assert list(restored) == list(record)
@@ -820,12 +859,12 @@ def test_records_stream_to_disk_and_a_retried_commit_leaves_no_temporary_file(tm
         for attempt in range(3):
             yield {"episode_id": {"rollout_id": "r", "attempt": attempt}, "value": value}
 
-    first = write_participant_state(tmp_path, kind="fake", instance="f", checkpoint_id="c1", records=records(1))
-    again = write_participant_state(tmp_path, kind="fake", instance="f", checkpoint_id="c1", records=records(1))
+    first, _ = write_participant_state(tmp_path, kind="fake", instance="f", checkpoint_id="c1", records=records(1))
+    again, _ = write_participant_state(tmp_path, kind="fake", instance="f", checkpoint_id="c1", records=records(1))
     with pytest.raises(CheckpointStateError, match="different commit"):
         write_participant_state(tmp_path, kind="fake", instance="f", checkpoint_id="c1", records=records(2))
 
-    manifest, restored = read_participant_state(tmp_path, kind="fake", instance="f")
+    manifest, restored, _ = read_participant_state(tmp_path, kind="fake", instance="f")
     directory = participant_dir(tmp_path, kind="fake", instance="f")
     assert first == again == manifest and manifest["record_count"] == 3
     assert [record["episode_id"]["attempt"] for record in restored] == [0, 1, 2]
@@ -837,7 +876,7 @@ def test_a_corrupt_records_file_is_a_checkpoint_state_error(tmp_path: Path) -> N
     from nemo_gym._checkpoint.errors import CheckpointStateError
     from nemo_gym._checkpoint.store import participant_dir, read_participant_state, write_participant_state
 
-    manifest = write_participant_state(
+    manifest, _ = write_participant_state(
         tmp_path, kind="fake", instance="f", checkpoint_id="c1", records=[{"episode_id": {"rollout_id": "r"}}]
     )
     (participant_dir(tmp_path, kind="fake", instance="f") / manifest["records_file"]).write_bytes(b"{not json\n")
@@ -912,7 +951,7 @@ async def test_a_commit_retried_while_its_write_runs_awaits_that_write(
 
     assert late.json()["error"]["code"] == "deadline_exceeded"
     assert retried.status_code == 200 and len(started) == 1
-    _, records = read_participant_state(tmp_path, kind="fake", instance="fake-1")
+    _, records, _ = read_participant_state(tmp_path, kind="fake", instance="fake-1")
     assert [record["value"] for record in records] == [1]
 
 
@@ -938,11 +977,11 @@ def test_a_losing_writer_neither_replaces_the_published_records_nor_leaves_its_o
     def records(value: int) -> list[dict]:
         return [{"episode_id": {"rollout_id": "r"}, "value": value}]
 
-    published = write_participant_state(tmp_path, kind="fake", instance="f", checkpoint_id="c1", records=records(1))
+    published, _ = write_participant_state(tmp_path, kind="fake", instance="f", checkpoint_id="c1", records=records(1))
     with pytest.raises(CheckpointStateError, match="different commit"):
         write_participant_state(tmp_path, kind="fake", instance="f", checkpoint_id="c1", records=records(2))
 
-    manifest, restored = read_participant_state(tmp_path, kind="fake", instance="f")
+    manifest, restored, _ = read_participant_state(tmp_path, kind="fake", instance="f")
     directory = participant_dir(tmp_path, kind="fake", instance="f")
     assert manifest == published and restored == records(1)
     assert sorted(path.name for path in directory.iterdir()) == ["manifest.json", published["records_file"]]
@@ -955,7 +994,8 @@ class PayloadRecord(CheckpointRecord):
 def test_payloads_are_checked_by_what_the_writer_can_write(tmp_path: Path) -> None:
     big = PayloadRecord(episode_id=EpisodeId(rollout_id="big"), state={"hash": 2**70})
     write_participant_state(tmp_path, kind="fake", instance="f", checkpoint_id="c1", records=[big.to_json_record()])
-    assert read_participant_state(tmp_path, kind="fake", instance="f")[1][0]["state"] == {"hash": 2**70}
+    _, [restored], _ = read_participant_state(tmp_path, kind="fake", instance="f")
+    assert restored["state"] == {"hash": 2**70}
 
     with pytest.raises(ValidationError, match="not JSON"):
         PayloadRecord(episode_id=EpisodeId(rollout_id="r"), state={"handle": object()})
@@ -1074,7 +1114,7 @@ async def test_a_commit_retried_after_its_write_failed_stores_the_same_records(
     assert failed.status_code == 422
     assert elsewhere.json()["error"]["code"] == "checkpoint_conflict"
     assert retried.status_code == 200
-    _, records = read_participant_state(tmp_path, kind="fake", instance="fake-1")
+    _, records, _ = read_participant_state(tmp_path, kind="fake", instance="fake-1")
     assert [record["value"] for record in records] == [1]
 
 
@@ -1124,7 +1164,7 @@ def test_a_read_keeps_only_the_selected_records_but_verifies_the_whole_file(tmp_
     rows = [{"episode_id": {"rollout_id": f"r{index}"}, "value": index} for index in range(5)]
     write_participant_state(tmp_path, kind="fake", instance="f", checkpoint_id="c", records=rows)
 
-    manifest, kept = read_participant_state(
+    manifest, kept, _ = read_participant_state(
         tmp_path, kind="fake", instance="f", select=lambda row: row["value"] if row["value"] % 2 else None
     )
 
@@ -1443,7 +1483,7 @@ async def test_an_export_that_outlives_its_commit_is_awaited_by_the_retry_not_re
 
     assert late.json()["error"]["code"] == "deadline_exceeded"
     assert retried.status_code == 200 and exports == ["started"]
-    _, records = read_participant_state(tmp_path, kind="fake", instance="fake-1")
+    _, records, _ = read_participant_state(tmp_path, kind="fake", instance="fake-1")
     assert [record["value"] for record in records] == [1]
 
 
@@ -1618,7 +1658,7 @@ async def test_a_failed_export_is_final_for_its_checkpoint_and_a_new_one_commits
     # The retry neither exported again nor stored anything for the failed checkpoint.
     assert len(exports) == 2 and not first_dir.exists()
     assert committed.status_code == 200
-    _, records = read_participant_state(second_dir, kind="fake", instance="fake-1")
+    _, records, _ = read_participant_state(second_dir, kind="fake", instance="fake-1")
     assert [record["value"] for record in records] == [2]
 
 
@@ -1954,7 +1994,7 @@ def test_a_retried_write_syncs_the_participant_directory_of_the_manifest_it_find
     assert (directory / "manifest.json").exists()
     synced.clear()
 
-    manifest = write_participant_state(tmp_path, **write)
+    manifest, _ = write_participant_state(tmp_path, **write)
 
     # The retry finds the manifest the failed write published, and makes it durable before reporting it.
     assert manifest["checkpoint_id"] == "c1"

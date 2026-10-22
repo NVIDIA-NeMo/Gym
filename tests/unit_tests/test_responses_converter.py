@@ -21,7 +21,7 @@ from types import SimpleNamespace
 import pytest
 from openai.types.completion_usage import CompletionTokensDetails, CompletionUsage, PromptTokensDetails
 
-from nemo_gym.base_responses_api_model import _cache_signal
+from nemo_gym.observability.model_calls import _cache_signal
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -58,6 +58,42 @@ from nemo_gym.responses_converter import (
 
 
 FIXED_UUID = "123"
+
+
+@pytest.mark.parametrize(
+    "metrics",
+    [
+        None,
+        {"speculative_decoding": None},
+        {
+            "speculative_decoding": {
+                "num_spec_steps": 4,
+                "num_draft_tokens": 12,
+                "num_accepted_draft_tokens": 9,
+                "num_spec_tokens": 3,
+                "acceptance_histogram": [1, 0, 0, 3],
+                "per_step_accepted": [0, 3, 3, 3],
+                "per_step_drafted": [3, 3, 3, 3],
+            },
+            "time_to_first_token": 0.5,
+        },
+    ],
+)
+def test_provider_metrics_survive_response_conversion(converter, metrics):
+    completion = NeMoGymChatCompletion.model_validate(
+        {
+            "id": "chatcmpl-metrics",
+            "created": 123,
+            "model": "test",
+            "object": "chat.completion",
+            "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "ok"}}],
+            "metrics": metrics,
+        }
+    )
+    response = converter.chat_completion_to_response(
+        NeMoGymResponseCreateParamsNonStreaming(input="test", model="test"), completion
+    )
+    assert NeMoGymResponse.model_validate_json(response.model_dump_json()).metrics == metrics
 
 
 class FakeUUID:
@@ -1458,6 +1494,28 @@ def test_chat_structured_tool_text_to_responses_preserves_parts(converter: Respo
     assert items[0].model_dump()["output"] == [
         {"type": "input_text", "text": "first"},
         {"type": "input_text", "text": "second"},
+    ]
+
+
+def test_chat_tool_image_to_responses_becomes_input_image(converter: ResponsesConverter):
+    items = converter.chat_completions_messages_to_responses_items(
+        [
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": [
+                    {"type": "text", "text": "Image loaded."},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,YWJj", "detail": "high"}},
+                    {"type": "image_url", "image_url": {"url": "https://example.com/image.png"}},
+                ],
+            }
+        ]
+    )
+
+    assert items[0].model_dump()["output"] == [
+        {"type": "input_text", "text": "Image loaded."},
+        {"type": "input_image", "image_url": "data:image/png;base64,YWJj", "detail": "high"},
+        {"type": "input_image", "image_url": "https://example.com/image.png", "detail": "auto"},
     ]
 
 

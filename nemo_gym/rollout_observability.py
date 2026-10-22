@@ -10,17 +10,20 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer, model_validator
 
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseInputItem
 
 
 if TYPE_CHECKING:
-    from nemo_gym.base_responses_api_model import ModelCallRecord
+    from nemo_gym.observability.model_calls import ModelCallRecord
 
 
 NG_AGENT_OBSERVATIONS_KEY = "ng_agent_observations"
+# The producer trajectory slot: a harness's own turns, forwarded on a result and replaced by the
+# collector's canonical projection.
+NG_TRAJECTORY_KEY = "ng_trajectory"
 
 
 class ObservationModel(BaseModel):
@@ -80,6 +83,11 @@ class TrajectoryModelCall(ObservationModel):
 
 class TrajectoryTurn(ObservationModel):
     invocation_id: str
+    activation_id: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="1-based activation that produced this turn; omitted for producers without activation IDs.",
+    )
     source_message_id: Optional[str] = Field(
         default=None, description="Persisted assistant-message ID in the harness."
     )
@@ -97,9 +105,20 @@ class TrajectoryTurn(ObservationModel):
     step_count: int = Field(ge=0, description="Producer-reported cumulative step count within this invocation.")
     model_calls: list[ModelCallRef] = Field(default_factory=list)
 
+    # Keep the model schema; a serializer return annotation would replace it.
+    @model_serializer(mode="wrap")
+    def _serialize_optional_metadata(self, handler: SerializerFunctionWrapHandler):
+        result = handler(self)
+        if self.activation_id is None:
+            result.pop("activation_id", None)
+        return result
+
 
 class AgentInvocation(ObservationModel):
-    """One root Agent or subagent conversation observed by a harness.
+    """One agent activation or subagent invocation observed by a harness.
+
+    A harness's saved session may span several invocations; ``harness_session_id``
+    retains that context while ``invocation_id`` owns each activation's evidence.
 
     Harness adapters should report an iteration-limit event through an
     ``on_iteration_limit_reached(*, invocation_id: str) -> None`` observer hook.
@@ -111,6 +130,15 @@ class AgentInvocation(ObservationModel):
 
     kind: Literal["agent_invocation"] = "agent_invocation"
     invocation_id: str
+    activation_id: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="1-based activation owning this invocation; omitted for producers without activation IDs.",
+    )
+    harness_session_id: Optional[str] = Field(
+        default=None,
+        description="Session ID assigned by the harness, retained as context across activations; omitted when not reported.",
+    )
     parent_invocation_id: Optional[str] = None
     spawned_by_tool_call_id: Optional[str] = None
     status: Literal["completed", "failed", "incomplete", "unknown"] = Field(
@@ -127,6 +155,15 @@ class AgentInvocation(ObservationModel):
         default_factory=list,
         description="Normalized conversation items supported by this producer; gaps describe unavailable evidence.",
     )
+
+    # Keep the model schema; a serializer return annotation would replace it.
+    @model_serializer(mode="wrap")
+    def _serialize_optional_metadata(self, handler: SerializerFunctionWrapHandler):
+        result = handler(self)
+        for key in ("activation_id", "harness_session_id"):
+            if getattr(self, key) is None:
+                result.pop(key, None)
+        return result
 
 
 class ToolCallObservation(ObservationModel):

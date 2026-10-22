@@ -23,7 +23,7 @@ from dotenv import dotenv_values
 from omegaconf import OmegaConf
 
 from nemo_gym import global_config, server_utils
-from nemo_gym.base_responses_api_model import merge_model_call_capture_into_record
+from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
 from nemo_gym.rollout_collection import _attach_trajectory_record
 from nemo_gym.rollout_health import run_health_checks
 from nemo_gym.server_utils import BaseServerConfig, GlobalAIOHTTPAsyncClientConfig, ServerClient

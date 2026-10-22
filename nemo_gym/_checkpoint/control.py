@@ -38,7 +38,8 @@ import logging
 import time
 from abc import ABC, abstractmethod
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Iterator
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -71,7 +72,14 @@ from nemo_gym._checkpoint.errors import (
     UnauthorizedError,
 )
 from nemo_gym._checkpoint.store import WriteStop, read_participant_state, write_participant_state
+from nemo_gym._checkpoint.telemetry import OperationSpan, checkpoint_span
+from nemo_gym._checkpoint.telemetry import operation as checkpoint_operation
 from nemo_gym.episode_types import EpisodeId
+from nemo_gym.telemetry.gym_metrics import (
+    record_checkpoint_control_error,
+    record_checkpoint_event,
+    record_checkpoint_volume,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -447,7 +455,8 @@ class _Write:
     episode_ids: Optional[list[EpisodeId]]
     records: Optional[list[CheckpointRecord]] = None
     export: Optional["asyncio.Task[list[CheckpointRecord]]"] = None
-    task: Optional["asyncio.Task[dict[str, Any]]"] = None
+    # The manifest it published and the size of its records file in bytes.
+    task: Optional["asyncio.Task[tuple[dict[str, Any], int]]"] = None
     cleanup: Optional["asyncio.Task[None]"] = None
     # Stopped by resume: the writer stops before its next record and never publishes the manifest.
     stop: WriteStop = field(default_factory=WriteStop)
@@ -521,6 +530,7 @@ class ParticipantControlPlane:
             self._lease_task = asyncio.create_task(self._watch_lease(request.checkpoint_id))
 
     async def _watch_lease(self, checkpoint_id: str) -> None:
+        expired = False
         while self._lease_expires_at is not None and self.checkpoint_id in (None, checkpoint_id):
             remaining = self._lease_expires_at - time.time()
             if remaining > 0:
@@ -535,8 +545,17 @@ class ParticipantControlPlane:
                     self.phase.value,
                     self.instance_name,
                 )
+                if not expired:
+                    # Counted once per checkpoint: reopening can take several attempts, each one its own operation.
+                    expired = True
+                    record_checkpoint_event(
+                        "lease_expired", participant_kind=self.participant.kind, phase=self.phase.value
+                    )
                 try:
-                    await self._reopen(resume_id=checkpoint_id, deadline_ts=time.time() + _LEASE_REOPEN_WAIT_SECONDS)
+                    with self._operation("lease_reopen", checkpoint_id):
+                        await self._reopen(
+                            resume_id=checkpoint_id, deadline_ts=time.time() + _LEASE_REOPEN_WAIT_SECONDS
+                        )
                 except DeadlineExceededError:
                     # Restored state is still being deleted, and a replacement may start as that attempt:
                     # stay closed and try again, letting a controller's resume in meanwhile.
@@ -566,6 +585,12 @@ class ParticipantControlPlane:
         if not isinstance(request, PrepareRequest):
             # A caller in this process may build the base request, which names no restarts.
             request = PrepareRequest(checkpoint_id=request.checkpoint_id, deadline_ts=request.deadline_ts)
+        with self._operation("prepare", request.checkpoint_id) as span:
+            result = await self._prepare(request)
+            span.set(phase=result["phase"], blockers=result["report"]["blocker_count"])
+            return result
+
+    async def _prepare(self, request: PrepareRequest) -> dict[str, Any]:
         async with self._lock:
             recorded = self._recorded(request.checkpoint_id, "prepare")
             if recorded is not None:
@@ -587,7 +612,8 @@ class ParticipantControlPlane:
                 await self.participant.carry_restarts(request.restarts)
 
         try:
-            await self._wait_ready(request)
+            with checkpoint_span("gym.checkpoint.wait_ready"):
+                await self._wait_ready(request)
         except BaseException:
             async with self._lock:
                 if self.checkpoint_id == request.checkpoint_id and self.phase == CheckpointPhase.PREPARING:
@@ -595,12 +621,19 @@ class ParticipantControlPlane:
             raise
 
         async with self._lock:
-            if self.checkpoint_id != request.checkpoint_id or self.phase != CheckpointPhase.PREPARING:
-                # A resume, lease expiry, or concurrent prepare finished this checkpoint while we waited.
+            if self.checkpoint_id != request.checkpoint_id:
+                # A resume or lease expiry ended this checkpoint while the prepare waited.
+                # Another checkpoint may be open by now, so its phase says nothing about this one.
+                # The reply is idle, as for a prepare that a resume interrupts.
+                return {"phase": CheckpointPhase.IDLE.value, "report": self.participant.readiness().model_dump()}
+            if self.phase != CheckpointPhase.PREPARING:
+                # A concurrent prepare of this checkpoint finished it while this one waited.
                 return {"phase": self.phase.value, "report": self.participant.readiness().model_dump()}
             report = self.participant.readiness()
             if report.ready:
                 self.phase = CheckpointPhase.PREPARED
+            elif time.time() >= request.deadline_ts:
+                record_checkpoint_event("prepare_not_ready", participant_kind=self.participant.kind)
             result = {"phase": self.phase.value, "report": report.model_dump()}
             if report.ready:
                 self._results[(request.checkpoint_id, "prepare")] = (None, result)
@@ -623,6 +656,11 @@ class ParticipantControlPlane:
         A controller with a straggler resumes first.
         The attempts stay refused, even if this retire fails, until ``forget``.
         """
+        with self._operation("retire", request.checkpoint_id) as span:
+            span.set(episodes=len(request.episode_ids))
+            return await self._retire(request)
+
+    async def _retire(self, request: RetireRequest) -> dict[str, Any]:
         async with self._lock:
             self._admit_outside_checkpoint(request)
             # The refusal comes first and does not wait on the deadline:
@@ -637,10 +675,12 @@ class ParticipantControlPlane:
 
         Callers before callees, like retire, and only once nothing of any attempt of these rollouts can still run.
         """
-        async with self._lock:
-            self._admit_outside_checkpoint(request)
-            await _within(request, lambda: self.participant.forget(request.rollout_ids))
-        return {"forgotten_count": len(set(request.rollout_ids))}
+        with self._operation("forget", request.checkpoint_id) as span:
+            span.set(rollouts=len(request.rollout_ids))
+            async with self._lock:
+                self._admit_outside_checkpoint(request)
+                await _within(request, lambda: self.participant.forget(request.rollout_ids))
+            return {"forgotten_count": len(set(request.rollout_ids))}
 
     def _admit_outside_checkpoint(self, request: CheckpointRequest) -> None:
         if self.phase not in (CheckpointPhase.IDLE, CheckpointPhase.RESTORED):
@@ -704,6 +744,12 @@ class ParticipantControlPlane:
         await _concurrently(self.participant.delete_restored, unscoped)
 
     async def commit(self, request: CommitRequest) -> dict[str, Any]:
+        with self._operation("commit", request.checkpoint_id) as span:
+            result = await self._commit(request)
+            span.set(records=result["manifest"]["record_count"])
+            return result
+
+    async def _commit(self, request: CommitRequest) -> dict[str, Any]:
         async with self._lock:
             arguments = (request.checkpoint_dir, _scope_key(request.episode_ids))
             recorded = self._recorded(request.checkpoint_id, "commit", arguments)
@@ -739,7 +785,9 @@ class ParticipantControlPlane:
             write = await self._start_write(request)
             # The thread cannot be cancelled: a write that outlives the deadline fails this call and keeps going,
             # and a retry awaits the same write.
-            manifest = await _within(request, lambda: asyncio.shield(write.task))
+            with checkpoint_span("gym.checkpoint.write") as span:
+                manifest, size = await _within(request, lambda: asyncio.shield(write.task))
+                span.set(records=manifest["record_count"], bytes=size)
             records = write.records
             # Restored state outside the scope was not exported,
             # so a retry after a failure here returns the same manifest.
@@ -777,17 +825,19 @@ class ParticipantControlPlane:
             if write.export is None:
                 write.export = _background(self.participant.export(request.episode_ids))
             export = write.export
-            try:
-                write.records = await _within(request, lambda: asyncio.shield(export))
-            except Exception as error:
-                if not _failed(export):
-                    raise
-                detail = (
-                    f"checkpoint {request.checkpoint_id!r} cannot be committed because its export failed "
-                    f"({str(error) or type(error).__name__}); resume, then prepare again under a new checkpoint ID"
-                )
-                self._results[(request.checkpoint_id, "export_failed")] = (None, {"detail": detail})
-                raise ExportFailedError(detail) from error
+            with checkpoint_span("gym.checkpoint.export") as span:
+                try:
+                    write.records = await _within(request, lambda: asyncio.shield(export))
+                except Exception as error:
+                    if not _failed(export):
+                        raise
+                    detail = (
+                        f"checkpoint {request.checkpoint_id!r} cannot be committed because its export failed "
+                        f"({str(error) or type(error).__name__}); resume, then prepare again under a new checkpoint ID"
+                    )
+                    self._results[(request.checkpoint_id, "export_failed")] = (None, {"detail": detail})
+                    raise ExportFailedError(detail) from error
+                span.set(records=len(write.records))
         if write.task is None or _failed(write.task):
             write.task = asyncio.create_task(
                 asyncio.to_thread(
@@ -803,9 +853,25 @@ class ParticipantControlPlane:
                 )
             )
             _retrieve_exception(write.task)
+            # Counted when the write finishes, not by each commit call that awaits it, so a retry counts nothing.
+            write.task.add_done_callback(self._count_written)
         return write
 
+    def _count_written(self, task: "asyncio.Task[tuple[dict[str, Any], int]]") -> None:
+        if _failed(task):
+            return
+        manifest, size = task.result()
+        record_checkpoint_volume(
+            operation="commit", kind=self.participant.kind, records=manifest["record_count"], size_bytes=size
+        )
+
     async def restore(self, request: RestoreRequest) -> dict[str, Any]:
+        with self._operation("restore", request.checkpoint_id) as span:
+            result = await self._restore(request)
+            span.set(records=len(result["restored"]))
+            return result
+
+    async def _restore(self, request: RestoreRequest) -> dict[str, Any]:
         async with self._lock:
             arguments = (request.checkpoint_dir, _scope_key(request.episode_ids))
             recorded = self._recorded(request.checkpoint_id, "restore", arguments)
@@ -821,23 +887,29 @@ class ParticipantControlPlane:
             # the scope can be much smaller than the checkpoint.
             scope = {episode_id.capture_key for episode_id in request.episode_ids}
             model = self.participant.record_model
-            manifest, records = await _within(
-                request,
-                lambda: asyncio.to_thread(
-                    read_participant_state,
-                    Path(request.checkpoint_dir),
-                    kind=self.participant.kind,
-                    instance=self.instance_name,
-                    select=lambda record: _validate_record(model, record) if _record_key(record) in scope else None,
-                ),
-            )
+            with checkpoint_span("gym.checkpoint.read") as span:
+                manifest, records, size = await _within(
+                    request,
+                    lambda: asyncio.to_thread(
+                        read_participant_state,
+                        Path(request.checkpoint_dir),
+                        kind=self.participant.kind,
+                        instance=self.instance_name,
+                        select=lambda record: _validate_record(model, record)
+                        if _record_key(record) in scope
+                        else None,
+                    ),
+                )
+                span.set(records=len(records), bytes=size)
             await _within(request, self._installed)
             try:
                 await self.participant.close_admission(request)
                 self._install = asyncio.ensure_future(self.participant.install(records, request.episode_ids))
                 # A restore that fails after this retires what the install brings: the retire waits for it.
                 self._install.add_done_callback(lambda done: done.cancelled() or done.exception())
-                await _within(request, lambda: asyncio.shield(self._install))
+                with checkpoint_span("gym.checkpoint.install") as span:
+                    span.set(records=len(records))
+                    await _within(request, lambda: asyncio.shield(self._install))
             except BaseException:
                 # Closing can fail part way, for example on one of several workers;
                 # nothing else would reopen the rest, because the phase is still idle.
@@ -851,6 +923,10 @@ class ParticipantControlPlane:
                 else:
                     await self._open_after_failed_restore()
                 raise
+            # Counted once the restore succeeds: a retry after a failed install reads the records again.
+            record_checkpoint_volume(
+                operation="restore", kind=self.participant.kind, records=len(records), size_bytes=size
+            )
             self.checkpoint_id = request.checkpoint_id
             self.phase = CheckpointPhase.RESTORED
             self._renew(request)
@@ -863,6 +939,10 @@ class ParticipantControlPlane:
             return result
 
     async def resume(self, request: CheckpointRequest) -> dict[str, Any]:
+        with self._operation("resume", request.checkpoint_id):
+            return await self._resume(request)
+
+    async def _resume(self, request: CheckpointRequest) -> dict[str, Any]:
         async with self._lock:
             if self._reopen_pending and self.phase == CheckpointPhase.IDLE and self.checkpoint_id is None:
                 await self._retry_pending_reopen(request)
@@ -900,6 +980,11 @@ class ParticipantControlPlane:
         self._resumed_ids[checkpoint_id] = None
         while len(self._resumed_ids) > _RESUMED_IDS_KEPT:
             self._resumed_ids.popitem(last=False)
+
+    def _operation(self, name: str, checkpoint_id: str) -> AbstractContextManager[OperationSpan]:
+        return checkpoint_operation(
+            name, kind=self.participant.kind, instance=self.instance_name, checkpoint_id=checkpoint_id
+        )
 
     async def _reopen(self, *, resume_id: Optional[str] = None, deadline_ts: Optional[float] = None) -> None:
         """Reopen admission.
@@ -1058,13 +1143,15 @@ def install_control_routes(app: FastAPI, dispatch: ControlDispatch, *, auth_toke
 
     @router.get("/status")
     async def status(authorization: Optional[str] = Header(default=None)) -> dict[str, Any]:
-        _require_bearer(authorization, auth_token)
-        return await dispatch("status", None)
+        with _counting_control_errors():
+            _require_bearer(authorization, auth_token)
+            return await dispatch("status", None)
 
     def route(operation: str, request_model: type[CheckpointRequest]) -> None:
         async def handle(body: request_model, authorization: Optional[str] = Header(default=None)) -> dict[str, Any]:  # type: ignore[valid-type]
-            _require_bearer(authorization, auth_token)
-            return await dispatch(operation, body)
+            with _counting_control_errors():
+                _require_bearer(authorization, auth_token)
+                return await dispatch(operation, body)
 
         router.add_api_route(f"/{operation}", handle, methods=["POST"], name=operation)
 
@@ -1072,6 +1159,20 @@ def install_control_routes(app: FastAPI, dispatch: ControlDispatch, *, auth_toke
         route(operation, request_model)
     app.include_router(router)
     install_control_error_handler(app)
+
+
+@contextmanager
+def _counting_control_errors() -> Iterator[None]:
+    """Count a control call that fails with a ``ControlError``, once, by its code.
+
+    It is counted here, in the control routes, rather than by the app's exception handler that builds the reply.
+    That handler replies to every ``ControlError`` the app's routes raise, including data-plane refusals.
+    """
+    try:
+        yield
+    except ControlError as error:
+        record_checkpoint_control_error(error.code)
+        raise
 
 
 def install_participant(

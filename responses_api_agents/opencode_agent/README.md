@@ -99,13 +99,14 @@ SQLite observations are captured; services must use task-owned files rather than
 agent session directory, which close removes. Capture requires confirmed termination.
 Missing evidence remains retryable; a final negative receipt skips capture and verification
 but permits connection release. Successful close receipts are retained for `session_close_retry_window_seconds` (default 300).
-Session state is process-local; use one worker. Provider TTL and the episode owner
-handle abandoned sessions. Process cleanup is not a hostile-code security boundary.
+Session state lives in the worker that seeded the session.
+With several agent workers, session routing sends each session's requests to the worker that seeded it.
+Provider TTL and the episode owner handle abandoned sessions. Process cleanup is not a hostile-code security boundary.
 
 Tool shells retain the task HOME and XDG directories through the shell environment hook,
 so home-directory deliverables survive agent close. The CLI keeps private HOME and XDG
 directories for configuration and SQLite state, including its separate `~/.opencode` lookup.
-Use absolute paths for native file tools and shell `workdir`; CLI-side tilde resolution uses
+Use absolute paths for OpenCode file tools and shell `workdir`; CLI-side tilde resolution uses
 its private HOME. The adapter requires a fresh successful-initialization receipt from
 the task environment hook before accepting a gradable result. A missing or invalid
 receipt fails the activation even if the CLI ignored a plugin-loading error.
@@ -152,3 +153,52 @@ stricter, single-activation contract described above. The intentional difference
 Both paths honor configured `thinking` and declare interleaved `reasoning_content`.
 Different prompt placement can affect results; this integration does not establish
 local/session score parity or migrate existing benchmark defaults.
+
+## Multi-turn continuation
+
+Seed an owned or borrowed sandbox session with `continuation: {mode: resume_harness_session}`.
+Call the existing `/v1/responses` endpoint with an ordinary Responses request and
+`x-ng-agent-activation: 1`, then increment the header for each new user message.
+Use the session cookie returned by seed. Checkpointed calls require the
+`/ng-rollout/<id>` URL prefix. When checkpointing is disabled, the prefix is optional.
+Whenever supplied, it must match the seeded episode. For example, after saving the seed cookie:
+
+```bash
+curl -b cookies.txt -H 'Content-Type: application/json' \
+  -H 'x-ng-agent-activation: 1' \
+  -d '{"input":"Implement a first version","metadata":{"agent_timeout_sec":"60"}}' \
+  http://localhost:8000/v1/responses
+
+curl -b cookies.txt -H 'Content-Type: application/json' \
+  -H 'x-ng-agent-activation: 2' \
+  -d '{"input":"Correction: handle empty input","metadata":{"agent_timeout_sec":"60"}}' \
+  http://localhost:8000/v1/responses
+```
+
+Only the new user input is sent on each call. The adapter resumes the same OpenCode
+session, retaining HOME, OpenCode history and compaction state. Runtime installation
+happens once at seed using the existing installer. Identical retries join or replay
+the original response; conflicting inputs, skipped indices and concurrent new
+activations fail. Input validation runs before an index is consumed. A timeout
+before the first process launch leaves the next activation able to start the conversation.
+Retry state is process-local and retained for the session lifetime, without crash recovery.
+
+The existing `metadata.agent_timeout_sec` budget is capped by the configured timeout.
+For continuation it includes directory preparation, queueing, input staging and the
+OpenCode model/tool loop. Cleanup has its own configured bound. The response uses
+ordinary `status` and `incomplete_details`; timeout and OpenCode permission-denial
+evidence are recorded on the activation's invocation. Session instructions cannot
+be replaced by later inputs.
+
+Each response carries the activation's `_ng_agent_observations` and `_ng_trajectory`.
+Output and usage include only new work. Each invocation records its `activation_id`
+and `harness_session_id`; response metadata also reports `harness_session_id`.
+Every trajectory turn carries its activation. The OpenCode header plugin namespaces
+`X-Session-Id` by the staged activation identity, including
+child invocations, so captured model calls join to the activation that made them.
+Close fences new work and returns cumulative observations, trajectory and cleanup
+confirmation. A final negative termination receipt fails the activation and skips
+verification; close releases the borrowed connection with `cleanup_confirmed: false`.
+The task sandbox remains available to its owner for verification or teardown.
+
+Ordinary single-turn sessions keep their existing protocol and evidence shape.

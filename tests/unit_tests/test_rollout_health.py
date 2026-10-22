@@ -16,7 +16,7 @@ import nemo_gym.cli.main as cli_main
 import nemo_gym.health.checks as health_checks
 import nemo_gym.rollout_collection as rollout_collection
 import nemo_gym.rollout_health as health
-from nemo_gym.base_responses_api_model import build_model_call_record
+from nemo_gym.observability.model_calls import build_model_call_record
 from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper, _CompletedRollout
 from nemo_gym.rollout_health import CHECK_REGISTRY, run_health_checks
 from nemo_gym.rollout_observability import TrajectoryRecord

@@ -90,7 +90,7 @@ def test_benchmark_config_is_discoverable_and_uses_generated_tasks() -> None:
     assert "harbor_agent_general_environment_server" not in resolved
     assert agent.harbor_resolve_paths_from_gym_root is True
     assert agent.harbor_unique_job_names is True
-    assert agent.harbor_dataset.path == "environments/labbench2_pdf/data/tasks_docker"
+    assert agent.job.datasets[0].path == "environments/labbench2_pdf/data/tasks_docker"
     assert len(agent.datasets) == 1
     assert agent.datasets[0].type == "benchmark"
 
