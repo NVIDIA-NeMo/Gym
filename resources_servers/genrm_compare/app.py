@@ -145,6 +145,10 @@ class _CohortState:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     collection_timeout_task: Optional[asyncio.Task[None]] = None
     evaluation_task: Optional[asyncio.Task[None]] = None
+    # With checkpointing on, the resources sessions recorded as this cohort's members, and of those a restore
+    # installed, the ones whose member has not replayed yet. Both end with the cohort.
+    member_sessions: set[str] = field(default_factory=set)
+    unreplayed_sessions: set[str] = field(default_factory=set)
 
 
 class _CompletedMemberState(BaseModel):
@@ -405,9 +409,6 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
     # With checkpointing on, the member of a cohort with a group ID that each resources session verified as.
     # A restore installs the same session IDs, so this also serves a session that has not replayed yet.
     _session_members: Dict[str, Tuple[str, int]] = PrivateAttr(default_factory=dict)
-    # Restored sessions whose member has not replayed its verification yet, by cohort.
-    # A member whose restored session is retired first is dropped, and so is a restored cohort left with none.
-    _unreplayed_sessions: Dict[str, set[str]] = PrivateAttr(default_factory=dict)
     # Groups whose attempt watermark a restore installed and no verification has used since.
     _restored_watermarks: set[str] = PrivateAttr(default_factory=set)
 
@@ -943,20 +944,19 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
     def _prune_terminal_cohorts(self) -> None:
         """Bound process-local cohort tombstones and attempt watermarks."""
         now = time.monotonic()
-        cohorts_before = len(self._verify_cohorts)
         terminal = [(key, cohort) for key, cohort in self._verify_cohorts.items() if cohort.terminal_at is not None]
         terminal_ttl_s = self.config.cohort_result_ttl_s
         if terminal_ttl_s is not None:
             for key, cohort in terminal:
                 if now - cohort.terminal_at >= terminal_ttl_s:
-                    self._verify_cohorts.pop(key, None)
+                    self._drop_cohort(key)
 
         terminal = sorted(
             ((key, cohort) for key, cohort in self._verify_cohorts.items() if cohort.terminal_at is not None),
             key=lambda item: item[1].terminal_at or 0.0,
         )
         for key, _ in terminal[: -self.config.max_terminal_cohorts]:
-            self._verify_cohorts.pop(key, None)
+            self._drop_cohort(key)
 
         active_group_ids = {
             cohort.group_id
@@ -980,25 +980,26 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         for group_id, _ in prunable_watermarks[: max(0, excess)]:
             self._latest_group_attempts.pop(group_id, None)
 
-        if len(self._verify_cohorts) < cohorts_before:
-            self._session_members = {
-                session_id: member
-                for session_id, member in self._session_members.items()
-                if member[0] in self._verify_cohorts
-            }
-            self._unreplayed_sessions = {
-                key: sessions for key, sessions in self._unreplayed_sessions.items() if key in self._verify_cohorts
-            }
+    def _drop_cohort(self, key: str) -> None:
+        """Remove a cohort and the member records that name it."""
+        cohort = self._verify_cohorts.pop(key, None)
+        if cohort is None:
+            return
+        for session_id in cohort.member_sessions:
+            if self._session_members.get(session_id, (None,))[0] == key:
+                del self._session_members[session_id]
 
     def _remember_member(self, cohort: _CohortState, rollout_index: int, session_id: Optional[str]) -> None:
         """Record which member of a cohort with a group ID a session verified as; only checkpointing needs it."""
         if cohort.group_id is None or session_id is None or self.checkpoint_participant is None:
             return
+        previous = self._session_members.get(session_id)
+        if previous is not None and previous[0] != cohort.key and (other := self._verify_cohorts.get(previous[0])):
+            other.member_sessions.discard(session_id)
         self._session_members[session_id] = (cohort.key, rollout_index)
-        unreplayed = self._unreplayed_sessions.get(cohort.key)
-        if unreplayed is not None:
-            # This member continued from the restored cohort, so a later retire of its session keeps it.
-            unreplayed.discard(session_id)
+        cohort.member_sessions.add(session_id)
+        # This member continued from the restored cohort, so a later retire of its session keeps it.
+        cohort.unreplayed_sessions.discard(session_id)
 
     def _finished_member_state(self, session_id: str) -> Dict[str, Any]:
         """The outcome a session's member was given, or an empty state while its cohort has none to give."""
@@ -1071,10 +1072,10 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             cohort.members[state.rollout_index] = _CohortMember(body=None, response_digest=state.response_digest)
             if state.result is not None:
                 cohort.results[state.rollout_index] = state.result
+            cohort.member_sessions.add(session_id)
+            cohort.unreplayed_sessions.add(session_id)
         # Validated in full before anything is installed.
         self._session_members.update(session_members)
-        for session_id, (cohort_key, _) in session_members.items():
-            self._unreplayed_sessions.setdefault(cohort_key, set()).add(session_id)
         now = time.monotonic()
         for key, cohort in cohorts.items():
             cohort.terminal_at = now
@@ -1101,22 +1102,19 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         if member is None:
             return
         cohort_key, rollout_index = member
-        unreplayed = self._unreplayed_sessions.get(cohort_key)
-        if unreplayed is None or session_id not in unreplayed:
-            return
-        unreplayed.discard(session_id)
         cohort = self._verify_cohorts.get(cohort_key)
         if cohort is None:
             return
-        if not any(other == member for other in self._session_members.values()):
+        cohort.member_sessions.discard(session_id)
+        if session_id not in cohort.unreplayed_sessions:
+            return
+        cohort.unreplayed_sessions.discard(session_id)
+        if not any(self._session_members.get(other) == member for other in cohort.member_sessions):
             cohort.members.pop(rollout_index, None)
             cohort.results.pop(rollout_index, None)
-        if not unreplayed:
-            del self._unreplayed_sessions[cohort_key]
         if cohort.members:
             return
-        self._unreplayed_sessions.pop(cohort_key, None)
-        del self._verify_cohorts[cohort_key]
+        self._drop_cohort(cohort_key)
         group_id = cohort.group_id
         if group_id in self._restored_watermarks and not any(
             other.group_id == group_id for other in self._verify_cohorts.values()
@@ -1156,7 +1154,6 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         self._verify_cohorts.clear()
         self._latest_group_attempts.clear()
         self._session_members.clear()
-        self._unreplayed_sessions.clear()
         self._restored_watermarks.clear()
 
     def _get_verify_cohort_key(
