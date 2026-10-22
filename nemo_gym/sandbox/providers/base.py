@@ -155,7 +155,9 @@ class SandboxSpec:
     ready_timeout_s: int | float | None = None
     workdir: str | None = None
     env: dict[str, str] = field(default_factory=dict)
-    files: dict[str, str] = field(default_factory=dict)
+    # Uploaded at startup, keyed by remote path.
+    # A str is written as UTF-8 text and bytes are written unchanged, so binary files such as images fit too.
+    files: dict[str, str | bytes] = field(default_factory=dict)
     metadata: dict[str, str] = field(default_factory=dict)
     resources: SandboxResources | Mapping[str, Any] = field(default_factory=SandboxResources)
     entrypoint: list[str] | None = None
