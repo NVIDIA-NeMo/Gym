@@ -907,3 +907,60 @@ class TestStageTests:
 
         assert not (staging_tests / "stale.sh").exists()
         assert (staging_tests / "fresh.sh").exists()
+
+
+# ── AnyTerminalAgent._inner_responses ───────────────────────────────────────────────
+
+
+class TestInnerResponses:
+    async def _inner_response(self, tmp_path: Path, saved_response: dict | None):
+        agent = _make_setup_agent(tmp_path)
+        params = _make_instance_config(tmp_path)
+        if saved_response is not None:
+            (params.persistent_dir / "response.json").write_text(json.dumps(saved_response))
+        remote = MagicMock()
+        remote.options.return_value.remote = AsyncMock(return_value=None)
+        with (
+            patch("responses_api_agents.anyterminal_agent.app._run_remote", remote),
+            patch.object(AnyTerminalAgent, "_ray_resource_opts", return_value={}),
+        ):
+            return await agent._inner_responses(params)
+
+    async def test_keeps_the_inner_agents_usage(self, tmp_path: Path) -> None:
+        usage = {
+            "input_tokens": 5300,
+            "input_tokens_details": {"cached_tokens": 4096},
+            "output_tokens": 812,
+            "output_tokens_details": {"reasoning_tokens": 300},
+            "total_tokens": 6112,
+        }
+        saved = {
+            "id": "resp_inner",
+            "created_at": 0,
+            "model": "inner",
+            "object": "response",
+            "output": [
+                {
+                    "id": "msg_1",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "done", "annotations": []}],
+                }
+            ],
+            "parallel_tool_calls": False,
+            "tool_choice": "auto",
+            "tools": [],
+            "usage": usage,
+        }
+
+        response = await self._inner_response(tmp_path, saved)
+
+        assert response.usage.model_dump(mode="json") == usage
+        assert response.output[0].content[0].text == "done"
+
+    async def test_usage_is_unknown_without_a_saved_response(self, tmp_path: Path) -> None:
+        response = await self._inner_response(tmp_path, None)
+
+        assert response.output == []
+        assert response.usage is None
