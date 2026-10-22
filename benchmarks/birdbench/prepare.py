@@ -89,6 +89,37 @@ def build_uberset(train_entries: List[Dict[str, Any]], verified_entries: List[Di
     return uberset
 
 
+def databases_dir_for(split: str, train_dir: Optional[str] = None) -> Path:
+    """The directory holding ``<db_id>/<db_id>.sqlite`` for ``split``, downloading it on first use.
+
+    The questions file sits one level up (``dev.json`` / ``train.json``); see ``load_entries``.
+    """
+    if split == "dev":
+        return ensure_bird_sql()
+    if split != "train":
+        raise ValueError(f"Unsupported split {split!r}; expected one of {SPLITS}")
+    databases_dir = (Path(train_dir) if train_dir else ensure_bird_train()) / "train_databases"
+    if not databases_dir.is_dir():
+        raise FileNotFoundError(f"Train databases directory not found: {databases_dir}")
+    return databases_dir
+
+
+def prompt_config_fpath_for(dialect: str) -> Path:
+    """``prompts/default.yaml`` for sqlite, ``prompts/<dialect>.yaml`` otherwise (as ``eval.sh`` picks it)."""
+    return BENCHMARK_DIR / "prompts" / ("default.yaml" if dialect == "sqlite" else f"{dialect}.yaml")
+
+
+def load_entries(split: str, databases_dir: Path) -> List[Dict[str, Any]]:
+    """The raw BIRD questions for ``split``: ``dev.json``, or the train uberset (see ``build_uberset``)."""
+    if split == "train":
+        return _load_train_entries(databases_dir.parent)
+    dev_json_path = databases_dir.parent / "dev.json"
+    if not dev_json_path.exists():
+        raise RuntimeError(f"Expected BIRD dev.json at {dev_json_path}")
+    with open(dev_json_path) as f:
+        return json.load(f)
+
+
 def _load_train_entries(train_dir: Path) -> List[Dict[str, Any]]:
     train_json = train_dir / "train.json"
     if not train_json.exists():
@@ -142,22 +173,9 @@ def prepare(
     output_fpath = output_fpath_for(dialect, split)
     output_fpath.parent.mkdir(parents=True, exist_ok=True)
 
-    if split == "dev":
-        databases_dir = ensure_bird_sql()
-        # databases_dir == <base>/dev_20240627/dev_databases → dev.json is one level up.
-        dev_json_path = databases_dir.parent / "dev.json"
-        if not dev_json_path.exists():
-            raise RuntimeError(f"Expected BIRD dev.json at {dev_json_path}")
-        with open(dev_json_path) as f:
-            entries: List[Dict[str, Any]] = json.load(f)
-        corpus_limit = None
-    else:
-        train_path = Path(train_dir) if train_dir else ensure_bird_train()
-        databases_dir = train_path / "train_databases"
-        if not databases_dir.is_dir():
-            raise FileNotFoundError(f"Train databases directory not found: {databases_dir}")
-        entries = _load_train_entries(train_path)
-        corpus_limit = TRAIN_CORPUS_LIMIT_PER_COLUMN
+    databases_dir = databases_dir_for(split, train_dir)
+    entries = load_entries(split, databases_dir)
+    corpus_limit = TRAIN_CORPUS_LIMIT_PER_COLUMN if split == "train" else None
 
     print("Building per-db schemas (types, PK/FK, descriptions, BM25 indexes)...")
     db_ids = sorted({entry["db_id"] for entry in entries})
