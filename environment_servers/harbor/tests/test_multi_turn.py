@@ -8,6 +8,7 @@ import io
 import json
 import logging
 import posixpath
+import shutil
 import tarfile
 import threading
 import time
@@ -27,11 +28,23 @@ from environment_servers.harbor.app import (
 from environment_servers.harbor.entrypoint import HealthcheckFailed
 from environment_servers.harbor.sandboxes import SEED_CREATE_GRACE_S
 from environment_servers.harbor.steps import HEALTHCHECK_EXEC_GRACE_S
-from environment_servers.harbor.tests.conftest import OK, TASK_TOML, FakeSandbox, agent_response, make_server
+from environment_servers.harbor.tests.conftest import (
+    IMAGE_PATH,
+    OK,
+    TASK_TOML,
+    FakeSandbox,
+    agent_response,
+    archive_of,
+    make_server,
+    write_image_config,
+)
+from environment_servers.harbor.verifier import COLLECT_HOOK_GRACE_S
 from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.tasks.harbor import load_task
+from nemo_gym.tasks.harbor.digest import context_digest
 from nemo_gym.tasks.harbor.materialize import STEP_METADATA_KEY, materialize_task
+from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE
 
 
 # The top-level instruction.md `write_task` writes: in a multi-step task it may hold what the agent must not see.
@@ -373,7 +386,9 @@ async def test_a_turn_without_a_reward_file_ends_the_episode_measured(tmp_path, 
     assert result.failure_kind == "harbor:missing_reward"
 
 
-# The command that empties /tests and /logs/verifier (and removes the server's transcript) in the agent's sandbox.
+# The command that empties /tests and /logs/verifier (and removes the server's transcript) in the agent's sandbox:
+# before the next turn's agent, and by the shared verifier itself right before it uploads its tests (round 38 review:
+# the whole folder goes there too, so a planted test report never reaches test.sh), so a shared turn runs it twice.
 GRADING_RESET = "find /tests /logs/verifier -mindepth 1 -delete"
 
 
@@ -408,7 +423,7 @@ async def test_a_sandbox_that_cannot_clear_the_grading_files_ends_the_episode_be
         async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
             if GRADING_RESET in command:
                 self.resets += 1
-                if self.resets == 2:  # the first is the first turn's own verification; the second is the handover
+                if self.resets == 2:  # the handover; the first reset is the first turn's own, before its test.sh
                     return SandboxExecResult(stdout="", stderr="find: Permission denied", return_code=1)
             return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
 
@@ -1917,3 +1932,311 @@ async def test_a_sandbox_that_cannot_run_a_steps_healthcheck_is_an_outage_not_th
     assert response.failure is None, response.failure
     assert response.result.turns[1].failure_kind == "harbor:step_healthcheck_failed"
     assert len([e for e in sandbox.execs if e["command"] == READY]) == 2
+
+
+# -- per-step artifacts (Harbor's _collect_step_artifacts, in shared mode too) ---------------------------------------
+
+
+@dataclass
+class ArtifactSandbox(ScriptedSandbox):
+    """The agent's sandbox with files to collect: ``present`` maps a path to ``dir``/``file``, ``archives`` maps a
+    folder the server archives to the bytes it hands back; anything else (the verifier's files) is the fake's own."""
+
+    present: dict[str, str] = field(default_factory=dict)
+    archives: dict[str, bytes] = field(default_factory=dict)
+    archived: list[str] = field(default_factory=list)
+
+    async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+        if command.startswith("if [ -d "):
+            self.execs.append(
+                {"command": command, "cwd": cwd, "env": env, "timeout_s": timeout_s, "user": user, "seen": None}
+            )
+            path = command.split("if [ -d ")[1].split(" ]")[0].strip("'")
+            return SandboxExecResult(stdout=self.present.get(path, "none") + "\n", stderr="", return_code=0)
+        if "tar -czf" in command:
+            marker = " -C " if " -C " in command else "cd "
+            self.archived.append(command.split(marker)[1].split(" ")[0].strip("'"))
+        return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+
+    async def download(self, remote_path, local_path):
+        source = self.archived[-1] if self.archived else None
+        if source in self.archives:
+            Path(local_path).write_bytes(self.archives[source])
+            return
+        await super().download(remote_path, local_path)
+
+
+def probes(sandbox: FakeSandbox) -> list[str]:
+    """The artifact paths the server asked the sandbox about, in order: one probe per entry per collection pass
+    (the transcript upload's own probe of /logs/agent is not one)."""
+    asked = [
+        e["command"].split("if [ -d ")[1].split(" ]")[0].strip("'")
+        for e in sandbox.execs
+        if "if [ -d " in e["command"]
+    ]
+    return [path for path in asked if path != "/logs/agent"]
+
+
+def manifest_of(turn: HarborTurnResult) -> list[dict]:
+    return json.loads((Path(turn.verifier_logs_dir) / "artifacts" / "manifest.json").read_text())
+
+
+STEP_ARTIFACTS = """
+[[steps]]
+name = "plan"
+
+[[steps]]
+name = "build"
+artifacts = [
+  { source = "/app", destination = "app", exclude = [".venv", "__pycache__"] },
+  { source = "/var/log/api", service = "api" },
+]
+
+[[verifier.collect]]
+command = "cp /app/state.db /logs/artifacts/state.db"
+timeout_sec = 10.0
+"""
+
+
+async def test_a_steps_artifacts_are_collected_with_the_tasks_after_its_agent_and_before_its_verifier(
+    tmp_path, monkeypatch
+):
+    """Harbor's `_collect_step_artifacts` (0.22.0 multi_step.py): after the step's agent and before its verifier,
+    the hooks, then `/logs/artifacts`, the task's artifacts and the step's own, staged per turn in shared mode too;
+    nothing is stopped, and the pass is recorded in a manifest beside the staged trees."""
+    sandbox = ArtifactSandbox(
+        present={"/logs/artifacts": "dir", "/app/out.txt": "file", "/app": "dir"},
+        archives={
+            "/logs/artifacts": archive_of({"state.db": "db"}),
+            "/app": archive_of({"out.txt": "done\n", "src/main.py": "print()\n"}),
+        },
+    )
+    server, task, sandbox, _ = multi_turn_server(
+        tmp_path,
+        monkeypatch,
+        STEP_ARTIFACTS,
+        {"plan": "P", "build": "B"},
+        head='artifacts = ["/app/out.txt"]\n',
+        sandbox=sandbox,
+    )
+
+    response = await server.run_request(request_for(task))
+
+    assert response.failure is None, response.failure
+    plan, build = response.result.turns
+    assert (plan.reward, build.reward) == (1.0, 1.0)
+    # Both turns ran on the one sandbox: nothing stopped it between the first collection pass and the second turn.
+    assert len(server.server_client.seed_bodies()) == 2 and sandbox.execs[-1]["command"] != "stop"
+    # The plan turn collects the convention entry and the task's; the build turn the step's two entries on top.
+    assert probes(sandbox) == ["/logs/artifacts", "/app/out.txt", "/logs/artifacts", "/app/out.txt", "/app"]
+    plan_dir, build_dir = (Path(turn.verifier_logs_dir) / "artifacts" for turn in (plan, build))
+    assert (plan_dir / "00" / "logs" / "artifacts" / "state.db").read_text() == "db"
+    assert (plan_dir / "01" / "app" / "out.txt").read_text() == "done\n" and not (plan_dir / "02").exists()
+    assert (build_dir / "02" / "app" / "src" / "main.py").read_text() == "print()\n"
+    assert (build_dir / "02" / "app" / "out.txt").read_text() == "done\n"
+    # The step's exclude rules reach the archive command, unanchored as Harbor passes them.
+    app_archive = next(
+        e["command"] for e in sandbox.execs if "tar -czf" in e["command"] and " -C /app " in e["command"]
+    )
+    assert "--exclude=.venv --exclude=__pycache__" in app_archive
+    assert [(e["index"], e["source"], e["origin"], e["status"]) for e in manifest_of(build)] == [
+        (0, "/logs/artifacts", "convention", "ok"),
+        (1, "/app/out.txt", "task", "ok"),
+        (2, "/app", "step", "ok"),
+        (3, "/var/log/api", "step", "skipped"),  # no Compose service `api` in this task
+    ]
+    assert manifest_of(build)[2]["destination"] == "artifacts/02/app"
+    assert [e["origin"] for e in manifest_of(plan)] == ["convention", "task"]
+    # Order within the build turn: the hook, the probes and the archives sit between the agent's close and test.sh;
+    # the hook ran once per turn, in the collection pass, not again inside the shared verifier.
+    commands = [e["command"] for e in sandbox.execs]
+    hooks = [i for i, c in enumerate(commands) if c == "cp /app/state.db /logs/artifacts/state.db"]
+    verifies = [i for i, c in enumerate(commands) if "timeout -s KILL" in c]
+    app_probe = next(i for i, c in enumerate(commands) if "if [ -d /app ]" in c)
+    assert len(hooks) == 2 and verifies[0] < hooks[1] < app_probe < verifies[1]
+
+
+STEP_HOOK = "tar -C /app -czf /logs/artifacts/app.tgz ."
+STEP_HOOKS = """
+[[steps]]
+name = "plan"
+
+[[steps]]
+name = "build"
+[[steps.verifier.collect]]
+command = "tar -C /app -czf /logs/artifacts/app.tgz ."
+timeout_sec = 20.0
+
+[[verifier.collect]]
+command = "cp /app/state.db /logs/artifacts/state.db"
+timeout_sec = 10.0
+"""
+
+
+async def test_a_steps_own_collect_hooks_run_after_the_tasks_in_its_collection_pass(tmp_path, monkeypatch):
+    """Harbor's `_collect_hooks_for(step)` is the task's `[[verifier.collect]]` hooks then the step's own
+    `[[steps.verifier.collect]]`, run per step before that step's entries are read. The step's hook used to be dropped
+    at load (an "unknown key" warning), so a step whose hook materialises what its test.sh reads graded 0."""
+    sandbox = ArtifactSandbox(present={"/logs/artifacts": "dir"}, archives={"/logs/artifacts": archive_of({"a": "1"})})
+    server, task, sandbox, _ = multi_turn_server(
+        tmp_path, monkeypatch, STEP_HOOKS, {"plan": "P", "build": "B"}, sandbox=sandbox
+    )
+    plain = multi_turn_server(
+        tmp_path / "plain",
+        monkeypatch,
+        STEP_HOOKS.replace(
+            '[[steps.verifier.collect]]\ncommand = "tar -C /app -czf /logs/artifacts/app.tgz ."\ntimeout_sec = 20.0\n',
+            "",
+        ),
+        {"plan": "P", "build": "B"},
+    )
+    assert [hook.command for hook in task.turns[1].config.verifier.collect] == [STEP_HOOK]
+    # The step's hook is budgeted with the task's: its timeout and the exec grace, for its turn alone.
+    assert server._post_seed_budget_s(task) == plain[0]._post_seed_budget_s(plain[1]) + 20 + COLLECT_HOOK_GRACE_S
+
+    response = await server.run_request(request_for(task))
+
+    assert response.failure is None, response.failure
+    assert [turn.reward for turn in response.result.turns] == [1.0, 1.0]
+    commands = [e["command"] for e in sandbox.execs]
+    task_hooks = [i for i, c in enumerate(commands) if c == "cp /app/state.db /logs/artifacts/state.db"]
+    step_hooks = [i for i, c in enumerate(commands) if c == STEP_HOOK]
+    probes_at = [i for i, c in enumerate(commands) if "if [ -d /logs/artifacts ]" in c]
+    verifies = [i for i, c in enumerate(commands) if "timeout -s KILL" in c]
+    # Once per turn for the task's hook, once in all for the build step's, in Harbor's order within the build turn:
+    # the task's hook, the step's, then the entries are read, then test.sh; nothing runs the step's hook again.
+    assert len(task_hooks) == 2 and len(step_hooks) == 1
+    assert verifies[0] < task_hooks[1] < step_hooks[0] < probes_at[1] < verifies[1]
+    assert probes_at[0] < verifies[0] and probes_at[0] > task_hooks[0] and probes_at[0] < step_hooks[0]
+    # The hook ran in the working directory as the task's hooks do, within its own timeout plus the grace.
+    hook = sandbox.execs[step_hooks[0]]
+    assert hook["cwd"] == "/app" and hook["timeout_s"] == 20 + COLLECT_HOOK_GRACE_S and hook["user"] is None
+
+
+async def test_every_turn_collects_the_convention_folder_even_without_declared_artifacts(tmp_path, monkeypatch):
+    """Harbor's pass always reads /logs/artifacts; a sandbox without the folder stages nothing and the manifest says
+    so."""
+    server, task, sandbox, _ = multi_turn_server(
+        tmp_path, monkeypatch, '[[steps]]\nname = "a"\n[[steps]]\nname = "b"\n', {"a": "A", "b": "B"}
+    )
+    response = await server.run_request(request_for(task))
+    assert response.failure is None, response.failure
+    assert probes(sandbox) == ["/logs/artifacts", "/logs/artifacts"]
+    for turn in response.result.turns:
+        assert manifest_of(turn) == [
+            {
+                "index": 0,
+                "source": "/logs/artifacts",
+                "service": None,
+                "origin": "convention",
+                "destination": "artifacts/00/logs/artifacts",
+                "type": None,
+                "status": "absent",
+            }
+        ]
+        assert not (Path(turn.verifier_logs_dir) / "artifacts" / "00").exists()
+
+
+async def test_planted_verifier_logs_cannot_replace_the_servers_transcript_copy_or_manifest(tmp_path, monkeypatch):
+    """Round 38 review (P2, non-blocking): the optional download of /logs/verifier after test.sh (a folder the agent
+    could write in shared mode) overwrote the host copy of the transcript and the artifacts manifest the server had
+    written in the same logs folder with agent-planted files of those names. The server-owned names are left out of
+    that download now; the reward files it reads are not among them."""
+    steps = '[[steps]]\nname = "plan"\n[[steps]]\nname = "build"\n'
+    server, task, sandbox, _ = multi_turn_server(tmp_path, monkeypatch, steps, {"plan": "P", "build": "B"})
+    planted = {
+        "reward.txt": "1\n",
+        "test-stdout.txt": "1 passed\n",
+        "trajectory.json": '{"planted": true}',
+        "artifacts/manifest.json": '[{"planted": true}]',
+        "entrypoint-stdout.txt": "planted",
+    }
+    server.server_client.turn_hooks.append(lambda: setattr(sandbox, "verifier_files", dict(planted)))
+
+    result = (await server.run_request(request_for(task))).result
+
+    assert [turn.reward for turn in result.turns] == [1.0, 1.0]
+    for turn in result.turns:
+        logs_dir = Path(turn.verifier_logs_dir)
+        transcript = json.loads((logs_dir / "trajectory.json").read_text())
+        assert "planted" not in transcript and transcript["schema_version"].startswith("ATIF")
+        assert [entry["origin"] for entry in manifest_of(turn)] == ["convention"]
+        assert not (logs_dir / "entrypoint-stdout.txt").exists()
+        # The grader's own files still land beside them.
+        assert (logs_dir / "reward.txt").read_text() == "1\n"
+        assert (logs_dir / "test-stdout.txt").read_text() == "1 passed\n"
+
+
+async def test_a_collection_the_sandbox_cannot_serve_masks_the_turn_as_an_outage(tmp_path, monkeypatch):
+    sandbox = ArtifactSandbox(scripted={}, present={"/logs/artifacts": "dir"})
+    sandbox.archives = {}  # the archive command is answered, the download then has nothing to hand back
+
+    async def lost(remote_path, local_path):
+        raise ConnectionError("sandbox gone")
+
+    sandbox.download = lost
+    server, task, sandbox, _ = multi_turn_server(
+        tmp_path, monkeypatch, '[[steps]]\nname = "a"\n[[steps]]\nname = "b"\n', {"a": "A", "b": "B"}, sandbox=sandbox
+    )
+    response = await server.run_request(request_for(task))
+    assert response.failure is None, response.failure
+    (turn,) = response.result.turns
+    assert turn.mask_sample and turn.failure_kind == "provider_unavailable" and "sandbox gone" in turn.failure_reason
+    assert response.result.mask_sample and Path(turn.verifier_logs_dir).is_dir()
+
+
+SLOPCODEBENCH_TASK = (
+    Path(__file__).parents[3] / "tests" / "unit_tests" / "fixtures" / "harbor_slopcodebench" / "code_search"
+)
+
+
+def record_main_build(task_folder: Path, image: str) -> None:
+    """Record ``image`` as the build prepare made of the task's ``environment/`` (its Dockerfile needs a build: the
+    slopcodebench Dockerfiles set ``SHELL``), with the configuration the build would leave."""
+    (task_folder.parent / BUILT_IMAGES_FILE).write_text(
+        json.dumps({context_digest(task_folder / "environment"): {"image": image}})
+    )
+    write_image_config(task_folder.parent, image, Env=[f"PATH={IMAGE_PATH}"], WorkingDir="/app")
+
+
+async def test_a_slopcodebench_task_runs_its_checkpoints_with_their_app_artifacts(tmp_path, monkeypatch):
+    """The shape of the hub's `gabeorlanski/slopcodebench` tasks (a synthetic task.toml and Dockerfile in the
+    fixture, with the tests' own step names, budgets and exclude list): five steps, each collecting `/app` under `app`
+    with its excludes and gating two reward.json keys with `min_reward`. The loader used to refuse all 36 tasks of the
+    dataset for the per-step artifacts."""
+    folder = tmp_path / "datasets" / "ds"
+    shutil.copytree(SLOPCODEBENCH_TASK, folder / "code_search")
+    record_main_build(folder / "code_search", "registry.example/slopcodebench-code-search:abc")
+    sandbox = ArtifactSandbox(
+        present={"/app": "dir"},
+        archives={"/app": archive_of({"code_search/cli.py": "import sys\n"})},
+        verifier_files={"reward.json": '{"core_pass_rate": 1.0, "strict_pass_rate": 0.5}'},
+    )
+    server, _, sandbox, _ = make_server(tmp_path, monkeypatch, sandbox)
+    task = load_task(folder / "code_search")
+    server.config.tasksets["ds"].tasks["code_search"] = task.digest
+    rewards_per_turn(server, sandbox, ['{"core_pass_rate": 1.0, "strict_pass_rate": 0.5}'] * 5, name="reward.json")
+
+    response = await server.run_request(request_for(task))
+
+    assert response.failure is None, response.failure
+    result = response.result
+    assert [turn.name for turn in result.turns] == ["scaffold", "lexer", "index", "query", "report"]
+    assert result.reward == 1.5 and result.verifier_rewards == {"core_pass_rate": 1.0, "strict_pass_rate": 0.5}
+    assert result.stopped_after_turn is None and result.turns_without_verifier_result == 0
+    for turn in result.turns:
+        staged = Path(turn.verifier_logs_dir) / "artifacts" / "01" / "app" / "code_search" / "cli.py"
+        assert staged.read_text() == "import sys\n"
+        assert [(e["origin"], e["status"]) for e in manifest_of(turn)] == [("convention", "absent"), ("step", "ok")]
+    app_archive = next(
+        e["command"] for e in sandbox.execs if "tar -czf" in e["command"] and " -C /app " in e["command"]
+    )
+    assert all(f"--exclude={name}" in app_archive for name in (".venv", "node_modules", "target", ".git"))
+    assert [
+        turn["metadata"]["agent_timeout_sec"]
+        for turn in [
+            call[2]["json"].model_dump(mode="json", exclude_unset=True)
+            for call in server.server_client.calls
+            if call[1].endswith("/v1/responses")
+        ]
+    ] == ["7200.0"] * 5

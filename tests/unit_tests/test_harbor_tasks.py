@@ -29,6 +29,7 @@ from nemo_gym.tasks.harbor.cli import (
     resolve_agent,
     runs_in_sandbox,
 )
+from nemo_gym.tasks.harbor.digest import context_digest
 from nemo_gym.tasks.harbor.dockerfile import (
     DEFAULT_PATH,
     RECORD_VERSION,
@@ -57,7 +58,7 @@ from nemo_gym.tasks.harbor.hub import (
 )
 from nemo_gym.tasks.harbor.materialize import TASK_SOURCE_KEY, dataset_entry, materialize_task, run_config, write_rows
 from nemo_gym.tasks.harbor.package_store import PackageStoreError
-from nemo_gym.tasks.harbor.records import IMAGE_CONFIGS_FILE
+from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE, IMAGE_CONFIGS_FILE
 from nemo_gym.tasks.harbor.task import task_digest
 
 
@@ -1016,6 +1017,8 @@ def write_multi_step_task(root: Path, *, hidden_spec: str = "The full spec only 
 # and Compose file as the adapter writes them (with a placeholder sidecar image), and per step a one-line
 # instruction.md and stub solve.sh / test.sh in place of the dataset's own scripts, which the loader never reads.
 MEMORY_ARENA_TASK = Path(__file__).parent / "fixtures" / "harbor_memory_arena_bundled_shopping" / "0000-baking-item-0"
+SLOPCODEBENCH_TASK = Path(__file__).parent / "fixtures" / "harbor_slopcodebench" / "code_search"
+SLOPCODEBENCH_STEPS = ["scaffold", "lexer", "index", "query", "report"]
 MEMORY_ARENA_STEPS = [
     "01-select-cake-base",
     "02-select-frosting",
@@ -1203,6 +1206,75 @@ class TestMultiStepTasks:
         with caplog.at_level(logging.WARNING, logger="nemo_gym.tasks.harbor.task"):
             load_task(root)
         assert "setup.sh runs as" not in caplog.text
+
+    def test_a_steps_artifacts_load_for_the_server_to_collect_per_turn(self, tmp_path):
+        """Harbor 0.22.0 collects a step's `artifacts` after the step's agent, with the task's (`_collect_step_artifacts`);
+        the loader used to refuse them. They load with the task's entry rules: a source under the verifier's own
+        folders is refused as it is for the task's, naming the step."""
+        root = write_multi_step_task(tmp_path / "t")
+        toml = (root / "task.toml").read_text()
+        (root / "task.toml").write_text(
+            toml + 'artifacts = [{ source = "/app", destination = "app", exclude = [".venv"] }, "/var/log/x"]\n'
+        )
+        plan, implement = load_task(root).turns
+        assert plan.config.artifacts == []
+        assert [(a.source, a.destination, a.exclude) for a in implement.config.artifacts] == [
+            ("/app", "app", [".venv"]),
+            ("/var/log/x", None, []),
+        ]
+        (root / "task.toml").write_text(toml + 'artifacts = ["/tests/helpers"]\n')
+        with pytest.raises(HarborTaskError, match=r"steps\.1\.artifacts\.0[\s\S]*would replace the verifier's /tests"):
+            load_task(root)
+
+    def test_a_steps_own_collect_hooks_load_for_the_server_to_run_after_the_tasks(self, tmp_path, caplog):
+        """Harbor's `StepConfig.verifier` is a full `VerifierConfig`: a step's `[[steps.verifier.collect]]` hooks are run
+        after the task's in that step's collection pass (`_collect_hooks_for`). The table used to be dropped with an
+        "unknown key" warning; it loads with the hook's fields now."""
+        root = write_multi_step_task(tmp_path / "t")
+        (root / "task.toml").write_text(
+            (root / "task.toml").read_text()
+            + '[[steps.verifier.collect]]\ncommand = "pg_dump app > /logs/artifacts/app.sql"\nservice = "db"\n'
+            'timeout_sec = 45.0\nuser = "postgres"\n'
+        )
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.tasks.harbor.task"):
+            plan, implement = load_task(root).turns
+        assert "unknown key" not in caplog.text
+        assert plan.config.verifier.collect == []
+        (hook,) = implement.config.verifier.collect
+        assert (hook.command, hook.service, hook.timeout_sec, hook.user) == (
+            "pg_dump app > /logs/artifacts/app.sql",
+            "db",
+            45.0,
+            "postgres",
+        )
+
+    def test_slopcodebench_code_search_loads_as_harbor_reads_it(self, tmp_path):
+        """The shape of the hub's `gabeorlanski/slopcodebench` (36 tasks, pulled 2026-10-22), as the synthetic fixture
+        reproduces it with its own step names, budgets and exclude list: every `[[steps]]` entry collects `/app` under
+        `app` with excludes and gates two reward keys, on a build-mode Dockerfile with a `SHELL` line. The base loader
+        refused all 36 for the per-step artifacts."""
+        dataset = tmp_path / "slopcodebench"
+        shutil.copytree(SLOPCODEBENCH_TASK, dataset / "code_search")
+        # The Dockerfile sets SHELL, so it is built at prepare (not overlaid at seed): the build's record is needed.
+        with pytest.raises(HarborTaskError, match="needs a build .SHELL."):
+            load_task(dataset / "code_search")
+        built = "registry.example/slopcodebench-code-search:abc"
+        (dataset / BUILT_IMAGES_FILE).write_text(
+            json.dumps({context_digest(dataset / "code_search" / "environment"): {"image": built}})
+        )
+        write_image_config(dataset, built, Env=[f"PATH={IMAGE_PATH}"], WorkingDir="/app")
+        task = load_task(dataset / "code_search")
+        assert [turn.name for turn in task.turns] == SLOPCODEBENCH_STEPS
+        assert task.config.is_shared_verifier and task.config.artifacts == []
+        for turn in task.turns:
+            (artifact,) = turn.config.artifacts
+            assert (artifact.source, artifact.destination, artifact.service) == ("/app", "app", None)
+            assert "node_modules" in artifact.exclude and ".venv" in artifact.exclude
+            assert turn.config.min_reward == {"core_pass_rate": 0.5, "strict_pass_rate": 0.25}
+            # No [steps.agent]: the task's [agent].timeout_sec; each step names its own [steps.verifier].timeout_sec.
+            assert task.config.step_agent_timeout_sec(turn.config) == 7200.0
+            assert task.config.step_verifier_timeout_sec(turn.config) == 300.0
+        assert task.workdir == "/app" and task.overlay == () and task.image == built == task.built_image
 
     def test_a_steps_healthcheck_loads_with_harbors_defaults_for_the_server_to_poll_per_turn(self, tmp_path):
         """Harbor 0.22.0 runs `[steps.healthcheck]` after the step's setup and before its agent
@@ -2212,6 +2284,37 @@ def test_loader_refuses_verifier_allowed_hosts_without_an_allowlist(tmp_path, po
     )
     with pytest.raises(HarborTaskError, match="allowed_hosts is only valid when network_mode='allowlist'"):
         load_task(write_task(tmp_path / "t", toml=toml))
+
+
+def test_declared_sidecar_inputs_come_from_dataset_toml_and_are_plain_file_names(tmp_path):
+    """`[verifier].inputs` (round 38 review, P1): the names under /logs/verifier a sidecar writes for test.sh, which
+    the server's reset of the folder keeps; set from the dataset's `dataset.toml`, part of the task's digest, and
+    never a path, a glob pattern (the server keeps them with `find -path`, which matches a pattern), a grader output
+    or a repeated name."""
+    from nemo_gym.tasks.harbor.models import HarborVerifier
+
+    folder = tmp_path / "ds"
+    write_task(folder / "hello")
+    plain = load_task(folder / "hello")
+    assert plain.config.verifier.inputs == []
+    (folder / "dataset.toml").write_text('[gym.tasks."hello".verifier]\ninputs = ["actions.jsonl"]\n')
+    declared = load_task(folder / "hello")
+    assert declared.config.verifier.inputs == ["actions.jsonl"] and declared.digest != plain.digest
+    for inputs, message in (
+        (["logs/actions.jsonl"], "plain file name"),
+        ([".."], "plain file name"),
+        ([""], "plain file name"),
+        (["log[1].jsonl"], "not a glob pattern"),
+        (["*.jsonl"], "not a glob pattern"),
+        (["a?.jsonl"], "not a glob pattern"),
+        (["reward.json"], "grader's own output"),
+        (["a.jsonl", "a.jsonl"], "names a file twice"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            HarborVerifier(inputs=inputs)
+    (folder / "dataset.toml").write_text('[gym.tasks."hello".verifier]\ninputs = ["reward.txt"]\n')
+    with pytest.raises(HarborTaskError, match="grader's own output"):
+        load_task(folder / "hello")
 
 
 @pytest.mark.parametrize(

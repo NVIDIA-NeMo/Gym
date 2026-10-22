@@ -81,7 +81,7 @@ from environment_servers.harbor.verifier import (
     _verifier_key,
     summing_components,
 )
-from nemo_gym import RESULTS_DIR
+from nemo_gym import RESULTS_DIR, failure_kinds
 from nemo_gym.agent_outcome import AgentOutcomePolicyConfig, OutcomeAction, agent_outcome_policy
 from nemo_gym.atif_export import AtifExportError
 from nemo_gym.base_environment_server import (
@@ -677,13 +677,14 @@ class HarborEnvironmentServer(
         hooks = sum(hook.timeout_sec + COLLECT_HOOK_GRACE_S for hook in task.config.verifier.collect)
         if task.turns:
             # Every step is a turn of its own: a fresh harness session, the step's setup.sh and healthcheck when it
-            # has them, the hooks and the step's verifier.
+            # has them, the task's hooks and the step's own, and the step's verifier.
             budget = sum(
                 self.config.harness_setup_allowance_s
                 + self._step_setup_budget_s(task, turn)
                 + self._step_healthcheck_budget_s(turn)
                 + task.config.step_agent_timeout_sec(turn.config)
                 + hooks
+                + sum(hook.timeout_sec + COLLECT_HOOK_GRACE_S for hook in turn.config.verifier.collect)
                 + task.config.step_verifier_timeout_sec(turn.config)
                 + self.config.verifier_grace_s
                 for turn in task.turns
@@ -927,7 +928,7 @@ class HarborEnvironmentServer(
             budget_parts = (
                 f"over {len(task.turns)} turn(s): each step's workdir/setup.sh and [steps.healthcheck] bounds, "
                 f"harness setup, its [agent].timeout_sec, {len(task.config.verifier.collect)} [[verifier.collect]] "
-                "hook(s), and its [verifier].timeout_sec"
+                "hook(s) plus its own, and its [verifier].timeout_sec"
             )
         else:
             budget_parts = (
@@ -956,8 +957,10 @@ class HarborEnvironmentServer(
         turn: tuple[HarborTurn, Any] | None = None,
     ) -> dict[str, Any]:
         """Export the turn's transcript for the verifier and run it: the task's verifier for a single-turn
-        episode, or the shared verifier with a step's settings and ``tests/`` for ``turn`` (the step and the
-        request it was sent). A transcript the converter cannot represent masks the turn instead of grading it."""
+        episode, or, for ``turn`` (the step and the request it was sent), the turn's collection pass
+        (:meth:`_collect_turn_artifacts`) and then the shared verifier with the step's settings and ``tests/``. A
+        transcript the converter cannot represent masks the turn instead of grading it; a collection the sandbox
+        could not serve masks it as an outage."""
         task = session.task
         try:
             if turn is None:
@@ -970,11 +973,32 @@ class HarborEnvironmentServer(
         if turn is None:
             return await self._run_verifier(session, trajectory, response=agent_response)
         step = turn[0]
+        # Harbor's per-step order: the collection pass (hooks, /logs/artifacts, the task's and the step's artifacts)
+        # after the agent and before the verifier, into the turn's own logs folder, with nothing stopped.
+        try:
+            logs_dir = self._reserve_logs_dir()
+        except (OSError, RuntimeError) as exc:
+            LOGGER.exception("Could not create verifier logs under %s", self._artifacts_dir)
+            return self._masked(
+                failure_kinds.PERSISTENCE_FAILED,
+                f"Could not create verifier logs under {self._artifacts_dir}: {type(exc).__name__}: {exc}",
+            )
+        try:
+            await self._collect_turn_artifacts(session, step, logs_dir / "artifacts")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            LOGGER.exception(f"Artifact collection failed for {task.task_id} turn {step.name!r}")
+            return self._masked(failure_kinds.PROVIDER_UNAVAILABLE, f"{type(exc).__name__}: {exc}") | {
+                "verifier_logs_dir": str(logs_dir.resolve())
+            }
         return await self._run_shared_verifier(
             session,
             trajectory,
             settings=self._turn_verifier_settings(task, step),
             test_dirs=(task.path / "tests", task.path / step.tests_dir),
+            logs_dir=logs_dir,
+            collect_hooks=False,
         )
 
     async def _agent_turn(

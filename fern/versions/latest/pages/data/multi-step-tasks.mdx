@@ -1,6 +1,6 @@
 ---
 title: "Multi-Step Harbor Tasks"
-description: "How a Harbor [[steps]] task runs as turns on the Harbor path: per-step working directories, setup scripts and healthchecks, verification, reward roll-up, early stop, per-step solutions and users, and what is accepted or refused"
+description: "How a Harbor [[steps]] task runs as turns on the Harbor path: per-step working directories, setup scripts, healthchecks and artifacts, verification, reward roll-up, early stop, per-step solutions and users, and what is accepted or refused"
 position: 6
 ---
 
@@ -60,7 +60,7 @@ Each step is one turn. A turn:
    agent does not carry a conversation across steps, only whatever it left in the environment.
 4. Sends the step's own `steps/<name>/instruction.md` as the only input, under the step's
    `[steps.agent].timeout_sec` (else the task's `[agent].timeout_sec`).
-5. Closes the session and runs the step's verifier.
+5. Closes the session, collects the turn's artifacts (see below) and runs the step's verifier.
 
 The task's top-level `instruction.md` is **never sent** for a multi-step task. A multi-step task may keep material
 there that the agent must not see (SWE-Interact puts the full hidden specification in the top-level file); each
@@ -147,12 +147,57 @@ and run past its end, the `start_interval_sec` sleep that follows such an attemp
 grace. Harbor has no deadline derived from such a sum; the server does, so a slow check cannot eat the turns that
 follow.
 
+## Per-step artifacts
+
+A step may declare its own `artifacts` (Harbor's `StepConfig.artifacts`, the same entry shape as the task-level
+`artifacts`):
+
+```toml
+[[steps]]
+name = "checkpoint_1"
+artifacts = [
+  { source = "/app", destination = "app", exclude = [".venv", "__pycache__", "node_modules"] },
+]
+min_reward = { core_pass_rate = 0.0, strict_pass_rate = 0.0 }
+```
+
+This is the shape of every task of the hub's `gabeorlanski/slopcodebench` (36 tasks, each checkpoint collecting
+`/app`). Harbor 0.22.0 runs a collection pass per step after the step's agent and before its verifier, in shared
+mode too (`MultiStepTrial._collect_step_artifacts`; the trial collects before the verifier, whatever the field's
+description says about "after"): the collect hooks, then the main container's entries, then the sidecars'. The
+server does the same for every turn:
+
+- The entries are `/logs/artifacts` first (unless the task or the step declares it for `main` itself), then the
+  task's `artifacts`, then the step's own, appended in that order, as Harbor's `with_convention_entry` builds the
+  list. The task's `[[verifier.collect]]` hooks and then the step's own `[[steps.verifier.collect]]` hooks (Harbor's
+  `_collect_hooks_for` appends the step's to the task's) run for `main` before its entries, then the sidecars' hooks
+  before theirs.
+- Each entry is staged under its own numbered root in **that turn's** verifier logs folder,
+  `artifacts/NN/<destination>` (the destination defaults to the source without its leading slash), the same layout
+  a separate verifier's staging uses, with the archive the sandbox packed kept beside it. `exclude` patterns reach
+  the archive command unanchored, as Harbor passes them.
+- The pass is recorded in `artifacts/manifest.json`, one entry per declared artifact in staging order: `source`,
+  `service`, `origin` (`convention`, `task` or `step`), `destination`, `type` (`directory`, `file` or `null`) and
+  `status` (`ok`, `absent` when the sandbox had nothing at the path, `link` for a symbolic link that is never
+  restored, `failed` when the agent's tree could not be collected, `skipped` when the entry names a Compose service
+  the task has not got). The run summary lists the folder under the turn's `paths.artifacts`.
+- Nothing is stopped: the sandbox and its sidecars keep running for the turns that follow (Harbor stops `main`
+  before the sidecar pass only on the last step of a separate-mode task). The hooks run once per turn, in the pass,
+  and not again inside the shared verifier.
+- A collection the sandbox cannot serve (a lost connection, a full host disk) masks the turn as an outage; an
+  artifact the agent's tree defeats (an unreadable tree, a link escaping it) only warns, as for a single-turn task.
+
+The convention folder is collected for every turn even when the task declares no artifacts, as Harbor collects it.
+A single-turn task in Harbor's shared mode still collects nothing (Harbor collects its task-level artifacts there
+too); that is a follow-up.
+
 ## Verification per step
 
 After each turn the **shared verifier** runs in the agent's sandbox: the task's `tests/` with
 `steps/<name>/tests/` layered on top (a step's `test.sh` wins where it names the same path), under the step's
 `[steps.verifier]` timeout, user and environment over the task's `[verifier]`. The task's `[[verifier.collect]]`
-hooks run for every step, as in Harbor. Each turn's verifier run reports as a single-turn verification does, with
+hooks run for every step, with the step's own `[[steps.verifier.collect]]` hooks after them, as in Harbor. Each
+turn's verifier run reports as a single-turn verification does, with
 its own reward files and its own logs directory.
 
 Multi-step tasks run in Harbor's **shared** verifier mode only; a task that declares a separate verifier (a
@@ -248,7 +293,7 @@ warning naming it, never read as a strategy.
 
 ## What is refused
 
-The loader refuses per-step features the server does not run yet, naming the step: per-step `artifacts`, and
-per-step separate verification (`[steps.verifier].environment` or `environment_mode = "separate"`). A step's
-`[steps.agent].user` and `[steps.verifier].user` are applied per turn, and its `workdir/`, `workdir/setup.sh` and
-`[steps.healthcheck]` run per turn, as described above.
+The loader refuses the per-step feature the server does not run yet, naming the step: per-step separate
+verification (`[steps.verifier].environment` or `environment_mode = "separate"`). A step's `[steps.agent].user` and
+`[steps.verifier].user` are applied per turn, and its `workdir/`, `workdir/setup.sh`, `[steps.healthcheck]` and
+`artifacts` run per turn, as described above.

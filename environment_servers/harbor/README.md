@@ -23,8 +23,9 @@ This is an environment server: one `/run` call owns one whole episode, and no re
   user, and the sandbox access carries the host-resolved `[solution].env` as `env`; that is where Harbor's
   oracle copies and runs the solution. No other harness receives the solution, and a task without
   `solution/` uploads nothing (the oracle reports it unvalidated).
-- Verify: clears `/tests` and `/logs/verifier`, uploads the snapshot's `tests/`, runs `bash /tests/test.sh`
-  in the same sandbox, and downloads the verifier logs.
+- Verify: clears `/tests` and the grader's own files in `/logs/verifier` (`reward.json`, `reward.txt`, the exit
+  record and `test-stdout.txt`; the rest of the folder, a sidecar's input, stays), uploads the snapshot's
+  `tests/`, runs `bash /tests/test.sh` in the same sandbox, and downloads the verifier logs.
 - Cleanup: stops the sandbox after the episode, whatever happened before. Cancellation and the episode
   deadline also reach this cleanup; a failed stop keeps the sandbox owned by the server for a later retry
   or shutdown, and a redelivered episode cannot provision while an owned sandbox of the same episode remains.
@@ -189,6 +190,20 @@ sandbox that cannot run the command (stopped, a provider error) is an outage, re
 The episode budget counts the check's worst case for every step that declares one (the start period, one attempt
 that may start just inside it and its `start_interval_sec` sleep, then `retries` counted attempts with an
 `interval_sec` sleep between them, each attempt `timeout_sec` plus the 5 s exec grace).
+After each turn's agent session and before its verifier, Harbor's per-step collection pass runs, in shared mode too
+(0.22.0 `_collect_step_artifacts`: the trial collects before the step's verifier, whatever `StepConfig.artifacts`'s
+description says about "after"): the task's `[[verifier.collect]]` hooks and then the step's own
+`[[steps.verifier.collect]]` hooks for `main` (Harbor's `_collect_hooks_for`: the task's, then the step's), then
+`/logs/artifacts`, the task's `artifacts` and the step's own `[[steps]] artifacts` entries from `main`, then the
+sidecars' hooks and entries, each staged under its numbered root in that turn's verifier logs folder
+(`artifacts/NN/<destination>`,
+the same layout as a separate verifier's staging) with the pass recorded in `artifacts/manifest.json` (one entry per
+declared artifact: `source`, `service`, where it was declared as `origin`, its `destination`, its `type` and a
+`status` of `ok`, `absent`, `link`, `failed` or `skipped`). Nothing is stopped: the sandbox and its sidecars keep
+running for the turns that follow. The hooks run once per turn, in that pass, not again inside the shared verifier.
+A collection the sandbox cannot serve masks the turn as an outage; an artifact the agent's tree defeats only warns,
+as for a single-turn task. A single-turn task in shared mode still collects nothing (Harbor collects its task-level
+artifacts there too; a follow-up).
 
 The episode stops after a turn that is masked, writes no valid reward file, or misses the step's
 `min_reward` (a number gates `reward`, a table gates each named key). `multi_step_reward_strategy` rolls the
@@ -201,7 +216,7 @@ MemoryArena adapters write) are read as Harbor 0.22.0 reads them: `version` is `
 `multi_step_reward_strategy`), as under Harbor, which has no such field; any other value of that key is dropped
 too, with a warning naming it, never read as a strategy. The result lists every turn under `turns`; its
 `response` and `ng_agent_observations` are the last turn's whose agent ran. Per-step
-artifacts and separate verification are refused by the loader, and `separate_verifier_for_artifacts`
+separate verification is refused by the loader, and `separate_verifier_for_artifacts`
 is refused at seed for such a task. Each turn is seeded with its step's agent budget and hands the verifier an
 ATIF transcript of its own request; with `enforce_task_timeouts` the task deadline sums every turn's harness
 setup, agent budget, hooks and verifier time. A long task's turns can budget more than
@@ -576,9 +591,15 @@ started keeps working, and a process the agent left behind can still interfere. 
 tamper-proof path: the verifier gets its own sandbox and its own image, and nothing the agent started is there
 (see the Verification row for what this layer supports).
 
-Clearing `/tests` and `/logs/verifier` before verification is a deliberate difference from Harbor's
-single-step shared mode, which merges tests. It prevents agent-planted reward files or test helpers
-from being used. Restored artifacts in separate mode are held to the same line: an artifact at `/tests`,
+Emptying `/tests` and `/logs/verifier` before verification is a deliberate difference from Harbor's single-step
+shared mode, which merges tests and reads whatever `reward.json` the folder holds. It prevents agent-planted reward
+files, test reports (an all-pass `results.xml` left behind by a solution that exits during pytest's import, which a
+`test.sh` that reads the report would score as a pass) or test helpers from being used. Only the inputs the task
+declares survive, as regular files at those names: a sidecar that binds the path writes the verifier's input there
+(kumo's `verifier` service appends `actions.jsonl` for `main`'s `tests/score.py`), which emptying the folder would
+delete, so the dataset names such files in its `dataset.toml` (`[gym.tasks."<task_id>".verifier] inputs =
+["actions.jsonl"]`, a Gym extension Harbor has no field for; a path, a grader output name or a repeated name is
+refused at load). They survive the reset before every turn of a multi-step task too. Restored artifacts in separate mode are held to the same line: an artifact at `/tests`,
 inside or over it, or at or inside `/logs/verifier` is refused when the task is loaded (its source is settled
 to one leading slash first), collected on the host but never restored should it reach the server, one that a
 link in the verifier sandbox would divert onto either directory is refused once its target is resolved
@@ -1075,7 +1096,7 @@ Three authoring shapes sit on top of Harbor's task folder, all rendered to plain
   removes any `reward.json` or `reward.txt` already in `/logs/verifier` before the runner starts, and the runner again
   before `verify` runs: Harbor shares that folder with the agent's container for the whole run and reads
   `reward.json` first, so a file planted there would otherwise be the verdict of a published task (this server
-  empties the folder before every upload; Harbor does not). An
+  removes the reward files before every upload; Harbor does not). An
   `async def verify` is awaited. Separate mode is Gym-only for a Python verifier: Harbor uploads nothing into a
   separate verifier container (`skip_tests_upload`), so the published shim could never reach it, and
   `gym dataset publish --harbor` refuses such a task (below).

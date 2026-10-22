@@ -169,18 +169,49 @@ class HarborCollectHook(HarborSettings):
     user: str | int | None = None
 
 
+# The files the shared verifier's own run leaves in /logs/verifier (the reward, the exit record, the wrapper's
+# stdout): never a sidecar input, so `[verifier].inputs` cannot name them.
+VERIFIER_OUTPUT_NAMES = ("reward.json", "reward.txt", "test-stdout.txt", ".ng-exit")
+
+
 class HarborVerifier(HarborPhaseSettings):
+    """``[verifier]``. ``inputs`` is a Gym extension Harbor has no field for, set from the dataset's ``dataset.toml``
+    (``[gym.tasks."<task_id>".verifier] inputs = [...]``): the names of files under ``/logs/verifier`` a Compose
+    sidecar writes during the rollout for ``test.sh`` to read (kumo's ``verifier`` service appends ``actions.jsonl``
+    for ``main``'s ``tests/score.py``). The server empties ``/logs/verifier`` before a shared verification and
+    before the next turn of a multi-step task; these names alone survive, as regular files, so an agent-planted
+    report or reward is never left for the grader. Plain file names: no path separators, never the grader's own
+    outputs (:data:`VERIFIER_OUTPUT_NAMES`)."""
+
     timeout_sec: float = Field(default=600, gt=0)
     user: str | int | None = None
     env: dict[str, str] = Field(default_factory=dict)
     environment_mode: Literal["separate", "shared"] | None = None
     environment: HarborEnvironment | None = None
     collect: list[HarborCollectHook] = Field(default_factory=list)
+    inputs: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def shared_has_no_environment(self) -> "HarborVerifier":
         if self.environment_mode == "shared" and self.environment is not None:
             raise ValueError("A shared verifier cannot declare its own [verifier.environment]")
+        return self
+
+    @model_validator(mode="after")
+    def inputs_are_file_names(self) -> "HarborVerifier":
+        for name in self.inputs:
+            if not name or name in (".", "..") or "/" in name or "\\" in name or "\0" in name:
+                raise ValueError(f"[verifier].inputs entry {name!r} must be a plain file name under /logs/verifier")
+            # The server keeps the name with `find -path`, which matches it as a glob: a literal name only, or a
+            # declared `log[1].jsonl` would be deleted and an undeclared `log1.jsonl` kept.
+            if any(char in name for char in "*?["):
+                raise ValueError(
+                    f"[verifier].inputs entry {name!r} must be a literal file name, not a glob pattern (no *, ? or [)"
+                )
+            if name in VERIFIER_OUTPUT_NAMES:
+                raise ValueError(f"[verifier].inputs entry {name!r} is the grader's own output, not a sidecar input")
+        if len(set(self.inputs)) != len(self.inputs):
+            raise ValueError(f"[verifier].inputs names a file twice: {self.inputs}")
         return self
 
 
@@ -250,13 +281,16 @@ class HarborStepAgent(HarborPhaseSettings):
 
 
 class HarborStepVerifier(HarborPhaseSettings):
-    """``[steps.verifier]``: unset values fall back to the task's ``[verifier]``, as in Harbor."""
+    """``[steps.verifier]``: unset values fall back to the task's ``[verifier]``, as in Harbor. ``collect`` is the
+    step's own ``[[steps.verifier.collect]]`` hooks, run after the task's in the step's collection pass (Harbor's
+    ``_collect_hooks_for``: the task's hooks, then the step's)."""
 
     timeout_sec: float | None = Field(default=None, gt=0)
     user: str | int | None = None
     env: dict[str, str] = Field(default_factory=dict)
     environment_mode: Literal["separate", "shared"] | None = None
     environment: HarborEnvironment | None = None
+    collect: list[HarborCollectHook] = Field(default_factory=list)
 
 
 class HarborStep(HarborSettings):

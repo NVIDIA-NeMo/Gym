@@ -80,10 +80,14 @@ def _unpack(
     names: tuple[str, ...] | None = None,
     skip_unsafe: bool = False,
     links: str = "data",
+    protect: tuple[str, ...] = (),
 ) -> None:
     """Extract ``archive`` into ``target``.
 
-    ``links="data"`` applies :func:`tarfile.data_filter`, which refuses links that point outside the
+    ``protect`` names top-level entries of ``target`` that belong to this host (a transcript copy, a
+    staging folder with its manifest): a member at or under one of them is left out of the extraction,
+    with a warning, so what the sandbox holds under the same name (an agent-planted file in a folder the
+    agent could write) never replaces the host's record. ``links="data"`` applies :func:`tarfile.data_filter`, which refuses links that point outside the
     extraction root: right for verifier output that is read on this host. ``links="keep"`` applies
     :func:`tarfile.tar_filter` instead, which keeps symbolic links as links wherever they point (an
     agent's virtualenv links to ``/usr/bin/python3``): right for artifacts that only pass through
@@ -98,6 +102,9 @@ def _unpack(
 
     def safe_member(member: tarfile.TarInfo, destination: str) -> tarfile.TarInfo | None:
         if names is not None and member.name.removeprefix("./") not in names:
+            return None
+        if protect and member.name.removeprefix("./").split("/", 1)[0] in protect:
+            LOGGER.warning("Skipping archive member %r: the host owns that name under %s", member.name, target)
             return None
         strict = links == "data" or member.islnk()
         try:
@@ -257,11 +264,13 @@ async def download_dir(
     links: str = "data",
     exclude: tuple[str, ...] = (),
     archive_copy: Path | None = None,
+    protect: tuple[str, ...] = (),
 ) -> None:
     """Copy the contents of ``source`` inside the sandbox into the local ``target`` folder.
 
     ``links`` is passed to :func:`_unpack`: ``"keep"`` for artifacts that are restored into another
-    sandbox, ``"data"`` (the default) for files read on this host. ``exclude`` holds an artifact's
+    sandbox, ``"data"`` (the default) for files read on this host, as is ``protect``: top-level names
+    under ``target`` this host owns, which no member of the archive may write (see there). ``exclude`` holds an artifact's
     ``exclude`` rules, passed to ``tar --exclude`` exactly as Harbor passes them, unanchored: so
     ``node_modules`` leaves out every directory of that name at any depth, while ``./cache`` matches
     only the top-level one because member names start with ``./``. ``archive_copy`` keeps the archive
@@ -301,7 +310,9 @@ async def download_dir(
                 archive = archive_copy
             try:
                 await sandbox.download(remote, archive)
-                await asyncio.to_thread(_unpack, archive, target, names=names, skip_unsafe=skip_unsafe, links=links)
+                await asyncio.to_thread(
+                    _unpack, archive, target, names=names, skip_unsafe=skip_unsafe, links=links, protect=protect
+                )
             except BaseException:
                 if archive_copy is not None:
                     archive_copy.unlink(missing_ok=True)
