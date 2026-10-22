@@ -375,7 +375,15 @@ async def test_collector_saves_actual_cohort_failure_class_and_reason(
     online_path = tmp_path / "output_aggregate_metrics.json"
     if count_failure:
         online = json.loads(online_path.read_text())
-        assert online[0]["key_metrics"] == {"mean/reward": 0.0}
+        # The failed rollouts are infra failures still owed a retry: counted as 0, the run stays incomplete.
+        assert online[0]["key_metrics"] == {
+            "mean/reward": 0.0,
+            "rollouts_infra_unresolved": len(failures),
+            "rollouts_infra_unresolved_rate": 1.0,
+            "rollouts_complete": False,
+            "max_infra_unresolved_rate": 0.02,
+            "publishable": False,
+        }
         offline_path = await collection.RolloutAggregationHelper().run_from_config(
             collection.RolloutAggregationConfig(
                 input_glob=str(output_path),

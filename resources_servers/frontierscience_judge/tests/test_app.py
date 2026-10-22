@@ -16,6 +16,7 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import orjson
+import pytest
 from pytest import approx, fixture
 
 from nemo_gym.config_types import ModelServerRef
@@ -624,6 +625,45 @@ class TestFrontierScienceJudgeServer:
         assert "Research question?" in json_payload.messages[0]["content"]
         assert result.reward == approx(1.0)
         assert result.rubric_score == approx(8.0)
+
+    @pytest.mark.parametrize("eval_mode", [True, False], ids=["evaluation", "training"])
+    def test_an_answer_too_long_for_the_judge_is_the_models_final_zero(
+        self, config: FrontierScienceJudgeConfig, monkeypatch: pytest.MonkeyPatch, eval_mode: bool
+    ) -> None:
+        """The judge sees the question, the reference and the answer only, so a judge overflow is the model's 0."""
+        monkeypatch.setattr("nemo_gym.judge.is_eval_mode", lambda: eval_mode)
+        import importlib.util
+        import json
+        from pathlib import Path
+
+        from fastapi.testclient import TestClient
+
+        # This suite's own tests/ package shadows Gym's, so the judge helpers are loaded from their file.
+        spec = importlib.util.spec_from_file_location(
+            "gym_test_judge", Path(__file__).resolve().parents[3] / "tests/unit_tests/test_judge.py"
+        )
+        gym = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(gym)
+
+        upstream = gym.TestJudgeReasonThroughTheModelServer._upstream(400, gym._OVERFLOW_BODY)
+        server = FrontierScienceJudgeServer(
+            config=config, server_client=gym._JudgeRelay(gym._judge_model_server(upstream))
+        )
+        request = FrontierScienceJudgeVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=self._make_model_response("CO2"),
+            question="What is the chemical formula of carbon dioxide?",
+            expected_answer="CO2",
+            subject="chemistry",
+        )
+
+        with TestClient(server.setup_webserver()) as http:
+            row = http.post("/verify", json=json.loads(request.model_dump_json())).json()
+
+        assert (row["_ng_failure_class"], row["reward"], row["mask_sample"]) == (
+            ("judge_input_too_long", 0.0, False) if eval_mode else ("judge_failed", 0.0, True)
+        )
+        assert ("context_length_exceeded" in row["_ng_failure_judge_error"]) is eval_mode
 
 
 class TestComputeMetrics:

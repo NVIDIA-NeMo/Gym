@@ -51,7 +51,7 @@ from nemo_gym.config_types import (
     ConfigError,
     ConfigPathNotFoundError,
 )
-from nemo_gym.failure_kinds import CANCELLED, INFRA
+from nemo_gym.failure_kinds import CANCELLED, INFRA, MODEL
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
@@ -90,17 +90,23 @@ from nemo_gym.rollout_collection import (
     _build_trajectory_record,
     _CompletedRollout,
     _drop_truncated_tail,
+    _episode_record,
     _expand_input_glob,
     _failure_rows_counted_as_zero,
     _failures_path_for,
     _get_max_rollout_attempts,
+    _infra_unresolved_counts,
+    _infra_unresolved_metrics,
     _masking_step_metrics,
     _missing_rollout_rows_counted_as_zero,
     _rollout_for_export,
     _rollout_order_key,
     _rollout_request_debug_summary,
     _round_robin_by_agent,
+    _settled_failure_keys,
     get_max_rollout_attempts,
+    is_infra_unresolved,
+    is_never_redispatched,
     is_terminal_failure,
     loads_jsonl_line,
 )
@@ -197,6 +203,21 @@ def http_error(status: int, message: str = "boom", body: bytes | None = None) ->
     if body is not None:
         error.response_content = body
     return error
+
+
+# Run-level completeness fields evaluation adds when a rollout is unresolved for infra.
+_INFRA_UNRESOLVED_FIELDS = (
+    "rollouts_infra_unresolved",
+    "rollouts_infra_unresolved_rate",
+    "rollouts_complete",
+    "max_infra_unresolved_rate",
+    "publishable",
+)
+
+
+def _headline(key_metrics: dict) -> dict:
+    """The score part of a key-metrics dict, without the completeness fields."""
+    return {k: v for k, v in key_metrics.items() if k not in _INFRA_UNRESOLVED_FIELDS}
 
 
 def install_fake_server_client(
@@ -2428,7 +2449,7 @@ class TestRolloutCollection:
         metrics_fpath = output_jsonl_fpath.with_stem(output_jsonl_fpath.stem + "_aggregate_metrics").with_suffix(
             ".json"
         )
-        assert orjson.loads(metrics_fpath.read_bytes())[0]["key_metrics"] == {"mean/reward": expected_mean}
+        assert _headline(orjson.loads(metrics_fpath.read_bytes())[0]["key_metrics"]) == {"mean/reward": expected_mean}
 
     @pytest.mark.parametrize("count_missing", [False, True], ids=["off by default", "opted in"])
     async def test_a_run_whose_every_rollout_went_missing_is_scored_only_when_opted_in(
@@ -2463,7 +2484,7 @@ class TestRolloutCollection:
             metrics_fpath = output_jsonl_fpath.with_stem(output_jsonl_fpath.stem + "_aggregate_metrics").with_suffix(
                 ".json"
             )
-            assert orjson.loads(metrics_fpath.read_bytes())[0]["key_metrics"] == {"mean/reward": 0.0}
+            assert _headline(orjson.loads(metrics_fpath.read_bytes())[0]["key_metrics"]) == {"mean/reward": 0.0}
         else:
             with pytest.raises(RuntimeError, match="produced a result"):
                 await RolloutCollectionHelper().run_from_config(config)
@@ -2784,7 +2805,7 @@ class TestRolloutCollection:
         metrics_fpath = output_jsonl_fpath.with_stem(output_jsonl_fpath.stem + "_aggregate_metrics").with_suffix(
             ".json"
         )
-        assert orjson.loads(metrics_fpath.read_bytes())[0]["key_metrics"] == {"mean/reward": expected_mean}
+        assert _headline(orjson.loads(metrics_fpath.read_bytes())[0]["key_metrics"]) == {"mean/reward": expected_mean}
 
     @pytest.mark.parametrize("count_judge_failure", [False, True])
     async def test_masked_judge_failure_counts_as_zero_only_when_opted_in(
@@ -2920,7 +2941,7 @@ class TestRolloutCollection:
         assert output_path.read_bytes() == b""
         online_path = output_path.with_stem("output_aggregate_metrics").with_suffix(".json")
         if counted and not disable_aggregation:
-            assert orjson.loads(online_path.read_bytes())[0]["key_metrics"] == {"mean/reward": 0.0}
+            assert _headline(orjson.loads(online_path.read_bytes())[0]["key_metrics"]) == {"mean/reward": 0.0}
         else:
             assert not online_path.exists() and not metric_inputs
 
@@ -2933,7 +2954,7 @@ class TestRolloutCollection:
             )
         )
         if counted:
-            assert orjson.loads(offline_path.read_bytes())[0]["key_metrics"] == {"mean/reward": 0.0}
+            assert _headline(orjson.loads(offline_path.read_bytes())[0]["key_metrics"]) == {"mean/reward": 0.0}
             assert len(metric_inputs) == (1 if disable_aggregation else 2)
             for inputs in metric_inputs:
                 assert len(inputs) == num_failures
@@ -2946,8 +2967,10 @@ class TestRolloutCollection:
     @pytest.mark.parametrize(
         "overrides, expected_reward, expected_n",
         [
-            # The 500 counts as 0; the killed rollout left no row and is not scored.
-            pytest.param({}, 2 / 3, 3, id="defaults"),
+            # The 500 and the killed rollout are unresolved infra: left out of the score and counted.
+            pytest.param({}, 1.0, 2, id="defaults"),
+            # A benchmark whose method scores a persistent infra failure as 0 (Terminal-Bench 4, SWE-bench Pro).
+            pytest.param({"count_infra_unresolved_as_zero": True}, 0.5, 4, id="infra-as-zero"),
             pytest.param(
                 {"count_failure_classes_as_zero": [], "count_missing_rollouts_as_zero": False},
                 1.0,
@@ -3010,6 +3033,14 @@ class TestRolloutCollection:
         assert [(f[TASK_INDEX_KEY_NAME], f[NG_FAILURE_CLASS_KEY]) for f in failures] == [
             (2, AGENT_RUN_ERROR_FAILURE_CLASS)
         ]
+        key_metrics = orjson.loads(metrics_fpath.read_bytes())[0]["key_metrics"]
+        # Either way both rollouts are owed a rerun, and 2 of 4 unresolved is past the 2% publishing limit.
+        assert (key_metrics["rollouts_infra_unresolved"], key_metrics["rollouts_infra_unresolved_rate"]) == (2, 0.5)
+        assert (key_metrics["rollouts_complete"], key_metrics["publishable"]) == (False, False)
+        printed = capsys.readouterr().out
+        assert "2 rows unresolved for infra (50.0%) of the rollouts owed a score" in printed
+        if overrides.get("count_infra_unresolved_as_zero"):
+            assert "Scored as zero because they left no row: 1 of 4 rollouts" in printed
 
     async def test_run_from_config_fails_when_no_rollout_produced_a_result(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
@@ -7448,12 +7479,12 @@ class TestDispatchBudget:
 
         await RolloutCollectionHelper().run_from_config(config(dispatch_budget_s=0.0))
         assert posted == []
-        assert orjson.loads(metrics_fpath.read_bytes())[0]["key_metrics"] == {"mean/reward": 0.0}
+        assert _headline(orjson.loads(metrics_fpath.read_bytes())[0]["key_metrics"]) == {"mean/reward": 0.0}
 
         # The zeros lived in the metrics only, so the resumed run dispatches both rows and scores them.
         await RolloutCollectionHelper().run_from_config(config(resume_from_cache=True))
         assert len(posted) == 2
-        assert orjson.loads(metrics_fpath.read_bytes())[0]["key_metrics"] == {"mean/reward": 1.0}
+        assert _headline(orjson.loads(metrics_fpath.read_bytes())[0]["key_metrics"]) == {"mean/reward": 1.0}
 
 
 class TestDispatchOrderReachesTheServer:
@@ -7633,6 +7664,120 @@ class TestLongestFirstDispatch:
             input_rows, *_ = RolloutCollectionHelper()._load_from_cache(config)
 
             assert 1 not in [r[TASK_INDEX_KEY_NAME] for r in input_rows]
+
+
+class TestAJudgeFailureNeverReRunsTheRollout:
+    """Evaluation: re-dispatching the prompt for a judge failure would score a different answer; it never happens."""
+
+    @staticmethod
+    def _judge_rows() -> list:
+        key = lambda i: {TASK_INDEX_KEY_NAME: i, ROLLOUT_INDEX_KEY_NAME: 0}
+        return [
+            # A judge_failsafe row as written before the in-place retry, with no terminal stamp.
+            {**key(1), NG_FAILURE_CLASS_KEY: "judge_failed", "failure_kind": "judge_failed", "mask_sample": True},
+            # An unparseable verdict, by kind.
+            {**key(2), NG_FAILURE_CLASS_KEY: "masked_sample", "failure_kind": "judge_unparseable"},
+        ]
+
+    def test_a_judge_failure_is_never_re_dispatched_in_evaluation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("nemo_gym.rollout_collection.is_eval_mode", lambda: True)
+        config = TestLongestFirstDispatch._write_resume_state(tmp_path, self._judge_rows())
+
+        input_rows, *_ = RolloutCollectionHelper()._load_from_cache(config)
+
+        assert [r[TASK_INDEX_KEY_NAME] for r in input_rows] == [0, 3]
+
+    @staticmethod
+    def _rule_row(task: int, cause: str) -> dict:
+        from nemo_gym.failure_kinds import judge_failure_after_retries
+
+        return {TASK_INDEX_KEY_NAME: task, ROLLOUT_INDEX_KEY_NAME: 0} | judge_failure_after_retries(
+            judge_error="last judge error", cause=cause, attempts=3, no_verdict="wrong"
+        )
+
+    def test_rule_branch_model_is_the_models_final_zero(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("nemo_gym.rollout_collection.is_eval_mode", lambda: True)
+        row = self._rule_row(1, MODEL)
+        failures = _failures_path_for(tmp_path / "output.jsonl")
+        failures.write_bytes(orjson.dumps(row) + b"\n")
+
+        assert is_terminal_failure(row) and not is_infra_unresolved(row)
+        [counted] = _failure_rows_counted_as_zero([failures], None, set())
+        assert counted["reward"] == 0.0
+        assert (row[NG_FAILURE_CAUSE_KEY], row["_ng_failure_judge_attempts"]) == (MODEL, 3)
+        assert _settled_failure_keys(failures) == {(1, 0)}
+
+    def test_rule_branch_infra_is_unresolved_left_out_and_never_re_dispatched(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("nemo_gym.rollout_collection.is_eval_mode", lambda: True)
+        row = self._rule_row(1, INFRA)
+        config = TestLongestFirstDispatch._write_resume_state(tmp_path, [row])
+        failures = _failures_path_for(Path(config.output_jsonl_fpath))
+
+        input_rows, *_ = RolloutCollectionHelper()._load_from_cache(config)
+
+        assert 1 not in [r[TASK_INDEX_KEY_NAME] for r in input_rows]  # Never re-dispatched.
+        assert not is_terminal_failure(row) and is_infra_unresolved(row)
+        assert _failure_rows_counted_as_zero([failures], None, set()) == []  # Left out of the score.
+        assert _settled_failure_keys(failures) == {(1, 0)}  # The run can finish.
+        unresolved, owed = _infra_unresolved_counts({(1, 0): row}, {(1, 0): 1}, set(), expected=4, missing=0)
+        assert (unresolved, owed) == (1, 4)
+        # One of four owed rollouts is 25%, past the 2% cap: the run is not publishable.
+        assert _infra_unresolved_metrics(unresolved, owed)["publishable"] is False
+
+    @pytest.mark.parametrize(
+        ("attempt_causes", "expected"),
+        [
+            ((MODEL, MODEL, MODEL), MODEL),  # Text and no verdict on every try: the answer was judged.
+            ((INFRA, INFRA, INFRA), INFRA),  # Empty replies or rate limits on every try.
+            ((INFRA, MODEL, MODEL), INFRA),  # Empty, then text with no verdict: not every try was really answered.
+            ((MODEL, MODEL, INFRA), INFRA),  # A last-try outage is infra too, whatever came before it.
+        ],
+        ids=["no-verdict-x3", "infra-x3", "empty-then-no-verdict", "no-verdict-then-infra"],
+    )
+    def test_the_rule_is_the_models_only_when_every_try_was(self, attempt_causes: tuple, expected: str) -> None:
+        from nemo_gym.failure_kinds import judge_failure_after_retries
+
+        # The last try's cause alone would say the opposite in the two mixed cases.
+        row = judge_failure_after_retries(
+            judge_error="last", cause=attempt_causes[-1], attempts=3, attempt_causes=attempt_causes, no_verdict="wrong"
+        )
+
+        assert row[NG_FAILURE_CAUSE_KEY] == row["_ng_failure_judge_cause"] == expected
+        assert is_terminal_failure(row) is (expected == MODEL)
+        assert bool(row.get("_ng_failure_judge_settled")) is (expected == INFRA)
+
+    def test_a_judge_failure_written_before_the_rule_is_settled_infra(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An old masked judge_failed row names no cause; its kind's rule says infra, so it is never a model 0."""
+        monkeypatch.setattr("nemo_gym.rollout_collection.is_eval_mode", lambda: True)
+        [legacy, _] = self._judge_rows()
+
+        assert is_never_redispatched(legacy)
+        assert not is_terminal_failure(legacy) and is_infra_unresolved(legacy)
+
+    def test_training_keeps_retrying_a_judge_failure(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("nemo_gym.rollout_collection.is_eval_mode", lambda: False)
+        config = TestLongestFirstDispatch._write_resume_state(tmp_path, self._judge_rows())
+
+        input_rows, *_ = RolloutCollectionHelper()._load_from_cache(config)
+
+        assert [r[TASK_INDEX_KEY_NAME] for r in input_rows] == [0, 1, 2, 3]
+
+    def test_the_collector_keeps_the_rules_stamp_on_a_judge_failsafe_result(self) -> None:
+        from nemo_gym.failure_kinds import judge_failure_after_retries
+
+        result = {"reward": 0.0, "response": {}} | judge_failure_after_retries(
+            judge_error="HTTP 503", cause=INFRA, attempts=3
+        )
+
+        record = _episode_record({"task_id": "t", "result": result})
+
+        assert (record["_ng_failure_judge_settled"], record[NG_FAILURE_CAUSE_KEY]) == (True, INFRA)
+        assert NG_TERMINAL_KEY not in record
+        assert (record["_ng_failure_judge_cause"], record["_ng_failure_judge_attempts"]) == (INFRA, 3)
 
 
 class TestIsTerminalFailure:
@@ -8087,6 +8232,232 @@ class TestRolloutAggregationHelper:
             disable_health_check=True,
         )
         await RolloutAggregationHelper().run_from_config(config)
+
+    async def _completeness(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *shards: Path) -> dict:
+        exported: list[dict] = []
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_exporters", lambda: [object()])
+        monkeypatch.setattr(nemo_gym.rollout_collection, "export_metrics", lambda m, **kw: exported.append(m))
+        self._serve(monkeypatch, {}, {"env_a": "agent_a"})
+        await RolloutAggregationHelper().run_from_config(
+            RolloutAggregationConfig(
+                input_glob=",".join(str(shard) for shard in shards),
+                output_jsonl_fpath=str(tmp_path / "merged.jsonl"),
+                disable_health_check=True,
+            )
+        )
+        [coverage] = [m for m in exported if "coverage/expected" in m]
+        return coverage
+
+    async def test_a_failure_another_shard_recovered_is_not_owed_twice(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        """Bot 4339235313: 49 rollouts are owed a score, one unresolved: 1/49 is past the 2% limit."""
+        original, retry = tmp_path / "a" / "rollouts.jsonl", tmp_path / "b" / "rollouts.jsonl"
+        server = {NG_ENVIRONMENT_SERVER_KEY: "env_a"}
+        judge = {NG_FAILURE_CLASS_KEY: "judge_failed", **server}
+        self._write_rows(materialized_path_for(original), *(self._rollout(i, "agent_a", **server) for i in range(49)))
+        self._write_rows(original, *(self._rollout(i, "agent_a", reward=1.0, **server) for i in range(1, 48)))
+        self._write_rows(
+            _failures_path_for(original), self._rollout(0, "agent_a", **judge), self._rollout(48, "agent_a", **judge)
+        )
+        self._write_rows(materialized_path_for(retry), self._rollout(0, "agent_a", **server))
+        self._write_rows(retry, self._rollout(0, "agent_a", reward=1.0, **server))
+
+        coverage = await self._completeness(tmp_path, monkeypatch, original, retry)
+
+        assert coverage["rollouts_infra_unresolved"] == 1
+        assert coverage["rollouts_infra_unresolved_rate"] == pytest.approx(1 / 49)
+        assert coverage["publishable"] is False
+
+    async def test_a_rollout_another_shard_landed_is_not_missing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        """Bot 4339235334: the original shard has no row for task 0, the retry shard does; nothing is missing."""
+        original, retry = tmp_path / "a" / "rollouts.jsonl", tmp_path / "b" / "rollouts.jsonl"
+        server = {NG_ENVIRONMENT_SERVER_KEY: "env_a"}
+        self._write_rows(materialized_path_for(original), *(self._rollout(i, "agent_a", **server) for i in range(2)))
+        self._write_rows(original, self._rollout(1, "agent_a", reward=1.0, **server))
+        self._write_rows(materialized_path_for(retry), self._rollout(0, "agent_a", **server))
+        self._write_rows(retry, self._rollout(0, "agent_a", reward=1.0, **server))
+        exported: list[dict] = []
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_exporters", lambda: [object()])
+        monkeypatch.setattr(nemo_gym.rollout_collection, "export_metrics", lambda m, **kw: exported.append(m))
+        self._serve(monkeypatch, {}, {"env_a": "agent_a"})
+
+        metrics_fpath = await RolloutAggregationHelper().run_from_config(
+            RolloutAggregationConfig(
+                input_glob=f"{original},{retry}",
+                output_jsonl_fpath=str(tmp_path / "merged.jsonl"),
+                disable_health_check=True,
+            )
+        )
+
+        # A complete run carries no completeness fields.
+        assert "rollouts_complete" not in orjson.loads(metrics_fpath.read_bytes())[0]["key_metrics"]
+
+    async def test_a_resume_that_completes_clears_the_exported_completeness(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        """Bot 4339235378: MLflow and W&B reopen the earlier run, so a complete pass must overwrite its fields."""
+        original, retry = tmp_path / "a" / "rollouts.jsonl", tmp_path / "b" / "rollouts.jsonl"
+        server = {NG_ENVIRONMENT_SERVER_KEY: "env_a"}
+        self._write_rows(materialized_path_for(original), *(self._rollout(i, "agent_a", **server) for i in range(2)))
+        self._write_rows(original, self._rollout(1, "agent_a", reward=1.0, **server))
+        self._write_rows(
+            _failures_path_for(original),
+            self._rollout(0, "agent_a", **{NG_FAILURE_CLASS_KEY: "judge_failed", **server}),
+        )
+        self._write_rows(materialized_path_for(retry), self._rollout(0, "agent_a", **server))
+        self._write_rows(retry, self._rollout(0, "agent_a", reward=1.0, **server))
+        tracked: dict = {}  # One tracking run that both passes log into, as a reopened MLflow run is.
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_exporters", lambda: [object()])
+        monkeypatch.setattr(nemo_gym.rollout_collection, "export_metrics", lambda m, **kw: tracked.update(m))
+        self._serve(monkeypatch, {}, {"env_a": "agent_a"})
+
+        for shards in ([original], [original, retry]):
+            metrics_fpath = await RolloutAggregationHelper().run_from_config(
+                RolloutAggregationConfig(
+                    input_glob=",".join(str(shard) for shard in shards),
+                    output_jsonl_fpath=str(tmp_path / "merged.jsonl"),
+                    disable_health_check=True,
+                )
+            )
+
+        assert (tracked["rollouts_infra_unresolved"], tracked["rollouts_infra_unresolved_rate"]) == (0, 0.0)
+        assert (tracked["rollouts_complete"], tracked["publishable"]) == (True, True)
+        assert "rollouts_complete" not in orjson.loads(metrics_fpath.read_bytes())[0]["key_metrics"]
+
+    @pytest.mark.parametrize("attempts", [1, 2], ids=["settled-at-cap", "retryable-below-cap"])
+    async def test_gym_eval_aggregate_of_a_settled_scoreless_run_reports_incomplete(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock, attempts: int
+    ) -> None:
+        """Bot 4339235356: offline aggregation writes the scoreless artifact that collection writes."""
+        monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", str(attempts))
+        run = tmp_path / "run" / "rollouts.jsonl"
+        server = {NG_ENVIRONMENT_SERVER_KEY: "env_a"}
+        self._write_rows(materialized_path_for(run), self._rollout(0, "agent_a", **server))
+        self._write_rows(run)
+        self._write_rows(
+            _failures_path_for(run), self._rollout(0, "agent_a", **{NG_FAILURE_CLASS_KEY: "judge_failed", **server})
+        )
+        self._serve(monkeypatch, {}, {"env_a": "agent_a"})
+
+        metrics_fpath = await RolloutAggregationHelper().run_from_config(
+            RolloutAggregationConfig(
+                input_glob=str(run), output_jsonl_fpath=str(tmp_path / "out.jsonl"), disable_health_check=True
+            )
+        )
+
+        if attempts > 1:
+            # A resume still runs the failure, so there is nothing to report yet.
+            assert metrics_fpath is None
+            return
+        [entry] = orjson.loads(metrics_fpath.read_bytes())
+        key_metrics = entry["key_metrics"]
+        assert "mean/reward" not in key_metrics and entry[NG_ENVIRONMENT_SERVER_KEY] == "env_a"
+        assert key_metrics["rollouts_infra_unresolved"] == 1
+        assert (key_metrics["rollouts_complete"], key_metrics["publishable"]) == (False, False)
+
+    @pytest.mark.parametrize("landed", [False, True], ids=["all-infra-at-the-cap", "one-real-result"])
+    async def test_gym_eval_aggregate_scores_infra_zeros_only_beside_a_real_result(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock, landed: bool
+    ) -> None:
+        """With count_infra_unresolved_as_zero, an all-infra run at the cap has no score, as without the option."""
+        monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "1")
+        run = tmp_path / "run" / "rollouts.jsonl"
+        server = {NG_ENVIRONMENT_SERVER_KEY: "env_a"}
+        self._write_rows(materialized_path_for(run), *(self._rollout(i, "agent_a", **server) for i in range(2)))
+        self._write_rows(run, *([self._rollout(0, "agent_a", reward=1.0, **server)] if landed else []))
+        judge = {NG_FAILURE_CLASS_KEY: "judge_failed", **server}
+        self._write_rows(
+            _failures_path_for(run),
+            *(self._rollout(i, "agent_a", **judge) for i in ([1] if landed else [0, 1])),
+        )
+        self._serve(monkeypatch, {}, {"env_a": "agent_a"})
+
+        metrics_fpath = await RolloutAggregationHelper().run_from_config(
+            RolloutAggregationConfig(
+                input_glob=str(run),
+                output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+                disable_health_check=True,
+                count_infra_unresolved_as_zero=True,
+            )
+        )
+
+        key_metrics = orjson.loads(metrics_fpath.read_bytes())[0]["key_metrics"]
+        assert (key_metrics["rollouts_complete"], key_metrics["publishable"]) == (False, False)
+        if landed:
+            assert key_metrics["mean/reward"] == 0.5  # The capped infra rollout counts as 0 beside the real one.
+        else:
+            assert "mean/reward" not in key_metrics
+
+    async def test_gym_eval_aggregate_reports_infra_failures_that_persist(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        """A judge failure and a rollout with no row are left out of the score and counted as unresolved."""
+        run = tmp_path / "run" / "rollouts.jsonl"
+        self._write_rows(materialized_path_for(run), *(self._rollout(i, "agent_a") for i in range(3)))
+        self._write_rows(run, self._rollout(0, "agent_a", reward=1.0))
+        self._write_rows(
+            _failures_path_for(run), self._rollout(1, "agent_a", **{NG_FAILURE_CLASS_KEY: "judge_failed"})
+        )
+        by_server: dict[str, list] = {}
+        self._serve(monkeypatch, by_server, {"env_a": "agent_a"})
+
+        metrics_fpath = await RolloutAggregationHelper().run_from_config(
+            RolloutAggregationConfig(
+                input_glob=str(run), output_jsonl_fpath=str(tmp_path / "rollouts.jsonl"), disable_health_check=True
+            )
+        )
+
+        assert self._scores(by_server["env_a"]) == [(0, 0, 1.0)]
+        key_metrics = orjson.loads(metrics_fpath.read_bytes())[0]["key_metrics"]
+        assert (key_metrics["mean/reward"], key_metrics["rollouts_infra_unresolved"]) == (1.0, 2)
+        assert (key_metrics["rollouts_complete"], key_metrics["publishable"]) == (False, False)
+
+    @pytest.mark.parametrize("path", ["run", "aggregate"])
+    async def test_an_incomplete_run_exports_its_completeness_fields(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock, path: str
+    ) -> None:
+        """The exporters (MLflow) see that the run is incomplete, not only the metrics file."""
+        run = tmp_path / "run" / "rollouts.jsonl"
+        self._write_rows(materialized_path_for(run), *(self._rollout(i, "agent_a") for i in range(3)))
+        self._write_rows(run, self._rollout(0, "agent_a", reward=1.0))
+        self._write_rows(
+            _failures_path_for(run), self._rollout(1, "agent_a", **{NG_FAILURE_CLASS_KEY: "judge_failed"})
+        )
+        by_server: dict[str, list] = {}
+        self._serve(monkeypatch, by_server, {"env_a": "agent_a"})
+        exported: list[dict] = []
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_exporters", lambda: [object()])
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "export_metrics", lambda metrics, **kw: exported.append(metrics)
+        )
+
+        if path == "aggregate":
+            await RolloutAggregationHelper().run_from_config(
+                RolloutAggregationConfig(
+                    input_glob=str(run), output_jsonl_fpath=str(tmp_path / "out.jsonl"), disable_health_check=True
+                )
+            )
+        else:
+            # Nothing left to dispatch: the rollout with no row and the judge failure are still unresolved.
+            monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "1")
+            monkeypatch.setattr(
+                RolloutCollectionHelper, "_run_examples_with_metadata", lambda self, examples, *a, **k: []
+            )
+            await RolloutCollectionHelper().run_from_config(
+                RolloutCollectionConfig(
+                    input_jsonl_fpath=str(run),
+                    output_jsonl_fpath=str(run),
+                    resume_from_cache=True,
+                    disable_health_check=True,
+                )
+            )
+
+        [coverage] = [metrics for metrics in exported if "coverage/expected" in metrics]
+        assert (coverage["rollouts_complete"], coverage["publishable"]) == (False, False)
+        assert coverage["rollouts_infra_unresolved"] == 2
 
     async def test_a_budget_mask_counts_as_zero_in_gym_eval_aggregate(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
@@ -10319,7 +10690,9 @@ class TestEnvironmentServerRouting:
         )
         entries = orjson.loads(metrics_fpath.read_bytes())
         assert [entry[NG_ENVIRONMENT_SERVER_KEY] for entry in entries] == ["environment"]
-        assert entries[0]["key_metrics"]["mean/reward"] == 0.5
+        # The environment-server outage is unresolved infra: left out of the score until a rerun lands it.
+        assert entries[0]["key_metrics"]["mean/reward"] == 1.0
+        assert entries[0]["key_metrics"]["rollouts_infra_unresolved"] == 1
 
         # Resume: only the failed episode is re-dispatched, to the same server, as attempt 1.
         dispatched.clear()

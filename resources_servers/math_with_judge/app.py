@@ -19,7 +19,7 @@ import multiprocessing as mp
 import re
 import unicodedata
 from io import StringIO
-from typing import Any, ClassVar, Dict, List, Optional, Union
+from typing import Any, ClassVar, Dict, List, Literal, Optional, Union
 
 from fastapi import FastAPI
 from math_verify import grader
@@ -37,7 +37,13 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import call_judge, normalize_math_judge_verdict
+from nemo_gym.global_config import is_eval_mode
+from nemo_gym.judge import (
+    call_judge,
+    normalize_math_judge_verdict,
+    raise_unparseable_verdict,
+    retry_judge_in_place,
+)
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -50,6 +56,8 @@ from nemo_gym.telemetry.resources_operations import resources_operation
 
 class LibraryJudgeMathResourcesServerConfig(BaseResourcesServerConfig):
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
+    # NeMo-Skills' math judge scores a judgement with no verdict as not equal: the answer is wrong.
+    judge_no_verdict_outcome: Literal["wrong", "drop"] = "wrong"
     judge_model_server: ModelServerRef
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
     should_use_judge: bool = True
@@ -615,30 +623,45 @@ Example output: "My final verdict is different [[A!=B]]"."""
             ),
         ]
 
+        # The call and its verdict parse are one attempt: in evaluation an unparseable verdict is retried in place on
+        # the same prompt (the same stored answer), never by re-running the rollout.
+        return await retry_judge_in_place(lambda: self._judge_once(responses_create_params))
+
+    async def _judge_once(
+        self, responses_create_params: NeMoGymResponseCreateParamsNonStreaming
+    ) -> tuple[bool, JudgeEvaluation]:
         judge_response = await call_judge(
             self.server_client,
-            server_name=config.judge_model_server.name,
+            server_name=self.config.judge_model_server.name,
             url_path="/v1/responses",
             json=responses_create_params,
             response_model=NeMoGymResponse,
         )
         judge_evaluation = JudgeEvaluation(responses_create_params=responses_create_params, response=judge_response)
 
-        # Currently, for all the cases in which the response from the LLM judge
-        # does not conform to the expected format, the judge's evaluation is
-        # treated as if the answers are not equal.  This may not be ideal, but it
-        # is intended to minimize the number of failures for verify requests.
+        # In evaluation, a reply that carries no verdict is retried in place, then judge_failure_after_retries decides
+        # the row: text with no verdict (a refusal, neither label) is the model's 0, and a reply with no text (no
+        # message, reasoning only) is an empty reply, which is infra. Training treats both as unequal, as before.
+        if is_eval_mode() and not judge_response.output:
+            raise_unparseable_verdict("math_with_judge", "")
         last_output = judge_response.output[-1]
         if last_output.type != "message":
+            if is_eval_mode():
+                raise_unparseable_verdict("math_with_judge", "")
             return False, judge_evaluation
 
         last_content = last_output.content[-1]
         if last_content.type != "output_text":
+            if is_eval_mode():
+                refusal = getattr(last_content, "refusal", None) or f"judge content of type {last_content.type!r}"
+                raise_unparseable_verdict("math_with_judge", refusal)
             return False, judge_evaluation
 
         output_text = normalize_math_judge_verdict(last_content.text)
         equal_choice_position = output_text.rfind(self.JUDGE_EQUAL_LABEL)
         not_equal_choice_position = output_text.rfind(self.JUDGE_NOT_EQUAL_LABEL)
+        if equal_choice_position < 0 and not_equal_choice_position < 0 and is_eval_mode():
+            raise_unparseable_verdict("math_with_judge", last_content.text)
         return equal_choice_position > not_equal_choice_position, judge_evaluation
 
     # ──────────────────────────────────────────────────────────

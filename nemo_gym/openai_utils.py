@@ -1655,6 +1655,16 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         ),
     )
 
+    max_connection_retry_seconds: Optional[float] = Field(
+        default=None,
+        gt=0,
+        description=(
+            "How long one request keeps retrying a connection that fails without a break; None retries "
+            "until max_connection_retries, or forever. A dead endpoint then fails the request instead of "
+            "holding it."
+        ),
+    )
+
     max_http_attempts: int = Field(default=MAX_NUM_TRIES, ge=1)
 
     max_rate_limit_wait_seconds: float = Field(
@@ -1748,6 +1758,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             "_internal": self.internal,
             "_max_num_tries": self.max_num_tries,
             "_max_connection_retries": self.max_connection_retries,
+            "_max_connection_retry_seconds": self.max_connection_retry_seconds,
         }
         if self.request_timeout_seconds is not None:
             request_kwargs["timeout"] = ClientTimeout(

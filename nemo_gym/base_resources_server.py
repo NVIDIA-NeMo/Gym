@@ -116,6 +116,14 @@ class ReverifyMode(str, Enum):
 class BaseResourcesServerConfig(BaseRunServerInstanceConfig):
     # Opt in to serve this server's tool routes over MCP; default off.
     expose_tools_over_mcp: bool = False
+    judge_no_verdict_outcome: Literal["wrong", "drop"] = Field(
+        default="drop",
+        description=(
+            "Evaluation only: what a judge reply with no verdict, after its in-place retries, does to the answer, "
+            "as the benchmark's official grader does it. 'wrong' scores it 0; 'drop' leaves it out of the score "
+            "and counts it. Keep 'drop' unless the official grader is known to score it as wrong."
+        ),
+    )
     # The mode of reverification (for gym eval reverify) of this server.
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.UNKNOWN
 
@@ -332,7 +340,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         # Wrapped outside judge_failsafe so the span covers the failsafe's own handling too.
         app.post("/verify")(
             traced_verify_endpoint(
-                judge_failsafe(self.verify),
+                judge_failsafe(self.verify, no_verdict=self.config.judge_no_verdict_outcome),
                 static_attributes={"nemo.gym.server.name": self.config.name},
             )
         )

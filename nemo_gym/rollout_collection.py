@@ -62,9 +62,13 @@ from nemo_gym.failure_kinds import (
     CANCELLED,
     FAILURE_CAUSE_HEADER,
     FAILURE_RULES,
+    FAILURE_STAGE_HEADER,
     FINAL,
     INFRA,
     JUDGE_FAILED,
+    JUDGE_FAILURE_KINDS,
+    JUDGE_NO_VERDICT,
+    JUDGE_SETTLED_KEY,
     MODEL,
     RETRY,
     RETRY_THEN_UNSCORED,
@@ -93,6 +97,7 @@ from nemo_gym.global_config import (
     environment_server_agent_names,
     environment_server_attributed_agent,
     get_global_config_dict,
+    is_eval_mode,
     label_runs,
     pairing_override_enabled,
     resolve_dataset_agent,
@@ -235,6 +240,7 @@ NG_TERMINAL_KEY = "_ng_failure_terminal"
 # "infra" or "model": where a failure happened, stamped by the collector on every failures-sidecar row.
 NG_FAILURE_CAUSE_KEY = "_ng_failure_cause"
 NG_FAILURE_JUDGE_ERROR_KEY = "_ng_failure_judge_error"
+NG_FAILURE_STAGE_KEY = "_ng_failure_stage"
 AGENT_REQUEST_FAILED_FAILURE_CLASS = "agent_request_failed"
 AGENT_RUN_ERROR_FAILURE_CLASS = "agent_run_error"
 MASKED_SAMPLE_FAILURE_CLASS = "masked_sample"
@@ -434,7 +440,7 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
         if failure.get("failure_kind") is not None:
             record["failure_kind"] = failure["failure_kind"]
         if failure.get("stage") is not None:
-            record["_ng_failure_stage"] = failure["stage"]
+            record[NG_FAILURE_STAGE_KEY] = failure["stage"]
         if failure.get("partial_response") is not None:
             record["_ng_failure_partial_response"] = failure["partial_response"]
         if failure.get("agent_observations") is not None:
@@ -450,6 +456,17 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
             NG_FAILURE_CLASS_KEY: JUDGE_FAILED,
             NG_FAILURE_JUDGE_ERROR_KEY: result.get(NG_FAILURE_JUDGE_ERROR_KEY),
         }
+        # In evaluation judge_failure_after_retries decided the row (the model's final 0, or a settled infra row) and
+        # recorded the judge's attempts and cause; keep those as written.
+        for key in (
+            NG_TERMINAL_KEY,
+            NG_FAILURE_CAUSE_KEY,
+            JUDGE_SETTLED_KEY,
+            "_ng_failure_judge_cause",
+            "_ng_failure_judge_attempts",
+        ):
+            if key in result:
+                judge_failure[key] = result[key]
         # drop the judge failure keys from the result so it doesn't raise in _is_collector_key
         # we don't want to modify the check itself because we want it to raise for other values
         # of `NG_FAILURE_CLASS_KEY` field
@@ -1136,6 +1153,16 @@ class SharedRolloutCollectionConfig(RemovedRolloutOptionsMixin, UploadRolloutsCo
         ),
     )
 
+    count_infra_unresolved_as_zero: bool = Field(
+        default=False,
+        description=(
+            "Score an infra failure still retryable, and a materialized rollout that left no row, as 0 "
+            "instead of leaving it out of the score. Off by default: such a rollout has no measurement. "
+            "Set it in the configs of benchmarks whose own method scores a persistent infra failure as 0 "
+            "(Terminal-Bench 4, SWE-bench Pro). Either way the rollout counts in rollouts_infra_unresolved."
+        ),
+    )
+
     count_missing_rollouts_as_zero: bool = Field(
         default=False,
         description=(
@@ -1680,7 +1707,8 @@ def _masked_result_names_infra(result: Mapping[str, Any]) -> bool:
     cause = result.get(NG_FAILURE_CAUSE_KEY)
     if cause in (INFRA, MODEL):
         return cause == INFRA
-    if result.get(MASK_REASON_KEY) == MASK_REASON_BUDGET:
+    # A budget mask, and an answer the judge gave no verdict where the official grader drops it, are the model's.
+    if result.get(MASK_REASON_KEY) == MASK_REASON_BUDGET or result.get("failure_kind") == JUDGE_NO_VERDICT:
         return False
     rule = FAILURE_RULES.get(result.get("failure_kind"))
     if rule in (RETRY, FINAL):
@@ -1721,6 +1749,25 @@ def is_terminal_failure(record: Mapping[str, Any], *, retry_terminal_timeouts: b
     if record.get(NG_TERMINAL_KEY):
         return True
     return not is_retryable(_rule_kind(record), cause=failure_cause_of_row(record))
+
+
+def _is_judge_failure(record: Mapping[str, Any]) -> bool:
+    return record.get(NG_FAILURE_CLASS_KEY) in JUDGE_FAILURE_KINDS or record.get("failure_kind") in JUDGE_FAILURE_KINDS
+
+
+def is_never_redispatched(record: Mapping[str, Any], *, retry_terminal_timeouts: bool = False) -> bool:
+    """Whether resume leaves a persisted failure alone: a final failure, or, in evaluation, any judge failure.
+
+    Re-running a rollout because its judge failed would give the model another answer and score a different one,
+    so in evaluation every judge failure is settled by ``judge_failure_after_retries``: the model's final 0 when
+    the model's answer caused it (``is_terminal_failure``), otherwise an unresolved infra row that stays out of the
+    score (``is_infra_unresolved``). That holds for a row written before the rule, too. Training keeps the retry.
+    """
+    if is_terminal_failure(record, retry_terminal_timeouts=retry_terminal_timeouts):
+        return True
+    # A failure at verification: the rollout already produced the model's answer, so re-running it would score a
+    # different one. It stays infra-unresolved, out of the score and counted, and gym eval reverify can recover it.
+    return is_eval_mode() and (_is_judge_failure(record) or record.get(NG_FAILURE_STAGE_KEY) == "verification")
 
 
 def is_unscored_failure(record: Mapping[str, Any]) -> bool:
@@ -2090,7 +2137,7 @@ def _agent_request_failure_row(exc: BaseException, status: Optional[int]) -> Dic
     cause = headers.get(FAILURE_CAUSE_HEADER) if hasattr(headers, "get") else None
     if cause not in (INFRA, MODEL):
         cause = failure_cause_of_text(response_body or str(exc)) if rollout_ran else INFRA
-    return {
+    row = {
         NG_FAILURE_CLASS_KEY: (AGENT_RUN_ERROR_FAILURE_CLASS if rollout_ran else AGENT_REQUEST_FAILED_FAILURE_CLASS),
         NG_FAILURE_CAUSE_KEY: cause,
         "_ng_failure_type": type(exc).__name__,
@@ -2098,6 +2145,12 @@ def _agent_request_failure_row(exc: BaseException, status: Optional[int]) -> Dic
         "_ng_failure_http_status": status,
         "_ng_failure_response_body": response_body,
     }
+    if hasattr(headers, "get") and headers.get(FAILURE_STAGE_HEADER) == "verification":
+        row[NG_FAILURE_STAGE_KEY] = "verification"
+        if is_eval_mode():
+            # The answer exists and the verifier did not score it: infra, never the model's 0 and never re-run.
+            row[NG_FAILURE_CAUSE_KEY] = INFRA
+    return row
 
 
 def _truncated_body(body: Optional[bytes]) -> Optional[str]:
@@ -2168,6 +2221,7 @@ def _failure_rows_counted_as_zero(
     scored_keys: set,
     *,
     retry_terminal_timeouts: bool = False,
+    infra_unresolved_as_zero: bool = False,
 ) -> List[Dict[str, Any]]:
     """Sidecar rows counted in the metrics denominator: every final failure, and the classes the caller selected.
 
@@ -2196,8 +2250,142 @@ def _failure_rows_counted_as_zero(
             failure_classes,
             retry_terminal_timeouts=retry_terminal_timeouts,
             at_cap=attempts[key] >= max_attempts,
+            infra_unresolved_as_zero=infra_unresolved_as_zero,
         )
     ]
+
+
+def is_infra_unresolved(row: Mapping[str, Any], *, retry_terminal_timeouts: bool = False) -> bool:
+    """Whether a failure row is an infra failure Gym would still retry: not final, not left out by method.
+
+    Such a row has no measurement. Evaluation leaves it out of the score (unless the benchmark's own method
+    scores it as 0) and counts it in ``rollouts_infra_unresolved``; the row stays non-terminal, so a later
+    attempt can still dispatch it.
+    """
+    return (
+        not is_terminal_failure(row, retry_terminal_timeouts=retry_terminal_timeouts)
+        and not is_unscored_at_cap(_rule_kind(row))
+        and failure_cause_of_row(row) == INFRA
+    )
+
+
+def _left_out_by_method(row: Mapping[str, Any], *, at_cap: bool) -> bool:
+    """A failure row the benchmark's method leaves out of the score: not owed, and never infra-unresolved."""
+    return is_unscored_failure(row) or (at_cap and is_unscored_at_cap(_rule_kind(row)))
+
+
+def _infra_unresolved_counts(
+    latest_rows: Mapping[Any, Mapping[str, Any]],
+    attempts: Mapping[Any, int],
+    scored_keys: Iterable[Any],
+    *,
+    expected: int,
+    missing: int,
+    retry_terminal_timeouts: bool = False,
+) -> Tuple[int, int]:
+    """``(unresolved, owed)``: infra failures still retryable plus missing rollouts, over the rollouts owed a score."""
+    max_attempts = _get_max_rollout_attempts()
+    scored = set(scored_keys)
+    unresolved = left_out = 0
+    for key, row in latest_rows.items():
+        if key in scored:
+            continue
+        if _left_out_by_method(row, at_cap=attempts.get(key, 0) >= max_attempts):
+            left_out += 1
+        elif is_infra_unresolved(row, retry_terminal_timeouts=retry_terminal_timeouts) or is_unscored_at_cap(
+            _rule_kind(row)
+        ):
+            # A rerun the benchmark's method still owes (below the cap) leaves the run incomplete as well.
+            unresolved += 1
+    return unresolved + missing, max(expected - left_out, 0)
+
+
+# Above this share of unresolved infra failures among the rollouts owed a score, a run is not publishable.
+MAX_INFRA_UNRESOLVED_RATE = 0.02
+
+
+def _infra_unresolved_metrics(unresolved: int, owed: int, *, no_score: bool = False) -> Dict[str, Any]:
+    """The run-level completeness fields evaluation adds to every agent's metrics.
+
+    A run that scored nothing is neither complete nor publishable, whatever left its rollouts out.
+    """
+    rate = unresolved / owed if owed else 0.0
+    return {
+        "rollouts_infra_unresolved": unresolved,
+        "rollouts_infra_unresolved_rate": rate,
+        "rollouts_complete": unresolved == 0 and not no_score,
+        "max_infra_unresolved_rate": MAX_INFRA_UNRESOLVED_RATE,
+        "publishable": not no_score and rate <= MAX_INFRA_UNRESOLVED_RATE,
+    }
+
+
+def _unscored_metrics_file(output_fpath: Path, rows: Iterable[Mapping[str, Any]]) -> Path:
+    """The metrics file of a settled run that scored nothing: one entry per run, with no score in it.
+
+    Runs are keyed and labelled as `_call_aggregate_metrics` keys them: a stamped row by its environment
+    server, an unstamped legacy row by its agent.
+    """
+    agent_by_key: Dict[str, Optional[str]] = {}
+    stamped: set = set()
+    for row in rows:
+        agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
+        server_name = row.get(NG_ENVIRONMENT_SERVER_KEY)
+        if isinstance(server_name, str):
+            stamped.add(server_name)
+            if agent_by_key.get(server_name) is None:
+                agent_by_key[server_name] = agent_name
+        elif agent_name:
+            agent_by_key.setdefault(agent_name, agent_name)
+    labels = label_runs(agent_by_key)
+    entries = [
+        {
+            AGENT_REF_KEY_NAME: {"name": labels[key]},
+            **({NG_ENVIRONMENT_SERVER_KEY: key} if key in stamped else {}),
+            "agent_metrics": {},
+            "key_metrics": {},
+            "group_level_metrics": [],
+            "repeat_level_metrics": [],
+        }
+        for key in sorted(agent_by_key, key=lambda key: labels[key])
+    ]
+    metrics_fpath = aggregate_metrics_path_for(output_fpath)
+    metrics_fpath.write_bytes(orjson.dumps(entries, option=orjson.OPT_INDENT_2))
+    return metrics_fpath
+
+
+def _annotate_infra_unresolved(metrics_fpath: Optional[Path], fields: Mapping[str, Any]) -> Dict[str, Any]:
+    """Add the completeness fields to each agent entry of an aggregate-metrics file, and log the count.
+
+    Like the coverage block, they appear only when the run is incomplete, so a complete run publishes exactly
+    the keys it published before; their absence means complete and publishable. Returns the fields for the
+    exporters in every case: MLflow and W&B reopen a resumed run, so a complete pass must overwrite them.
+    """
+    if fields["rollouts_complete"]:
+        return dict(fields)
+    print(
+        f"{fields['rollouts_infra_unresolved']} rows unresolved for infra "
+        f"({fields['rollouts_infra_unresolved_rate']:.1%}) of the rollouts owed a score",
+        flush=True,
+    )
+    if metrics_fpath is None or not metrics_fpath.exists():
+        return dict(fields)
+    entries = orjson.loads(metrics_fpath.read_bytes())
+    for entry in entries:
+        if AGGREGATION_ERROR_KEY in entry:
+            continue
+        entry.setdefault("agent_metrics", {}).update(fields)
+        entry.setdefault("key_metrics", {}).update(fields)
+    metrics_fpath.write_bytes(orjson.dumps(entries, option=orjson.OPT_INDENT_2))
+    return dict(fields)
+
+
+def _infra_zeros_count(opted_in: bool, *, has_result: bool, failure_rows: Iterable[Mapping[str, Any]]) -> bool:
+    """Whether a benchmark's own zeros for infra failures that persist (count_infra_unresolved_as_zero) count.
+
+    Only beside a real result, a saved row or a final failure: a run whose every rollout is infra-unresolved
+    measured nothing, so it has no score, at the attempt cap as below it, exactly as without the option.
+    """
+    return opted_in and (has_result or any(is_terminal_failure(row) for row in failure_rows))
 
 
 def _failure_attempts(failures_fpaths: List[Path]) -> Counter:
@@ -2221,13 +2409,24 @@ def _counts_failure_class(
     *,
     retry_terminal_timeouts: bool = False,
     at_cap: bool = False,
+    infra_unresolved_as_zero: bool = False,
 ) -> bool:
     """Whether a failure row scores 0: its class is selected (``None`` is every class), or it is final.
 
     A data gap (``is_unscored_failure``) never scores 0, whatever the selection, and neither does a failure
-    whose kind leaves the score once it is still failing at the attempt cap (``is_unscored_at_cap``).
+    whose kind leaves the score once it is still failing at the attempt cap (``is_unscored_at_cap``). An infra
+    failure still retryable (``is_infra_unresolved``) has no measurement either: with the default selection
+    (``None``) it is left out, unless the benchmark's own method scores it as 0 (``infra_unresolved_as_zero``)
+    or the caller names its class explicitly.
     """
     if is_unscored_failure(row) or (at_cap and is_unscored_at_cap(_rule_kind(row))):
+        return False
+    named = failure_classes is not None and row.get(NG_FAILURE_CLASS_KEY) in failure_classes
+    if (
+        not infra_unresolved_as_zero
+        and not named
+        and is_infra_unresolved(row, retry_terminal_timeouts=retry_terminal_timeouts)
+    ):
         return False
     selected = failure_classes is None or row.get(NG_FAILURE_CLASS_KEY) in failure_classes
     return selected or is_terminal_failure(row, retry_terminal_timeouts=retry_terminal_timeouts)
@@ -2238,7 +2437,7 @@ def _counted_classes(selected: Optional[List[str]]) -> str:
 
 
 def _settled_failure_keys(failures_fpath: Path, *, retry_terminal_timeouts: bool = False) -> set:
-    """Rollouts that resume will not dispatch again: a final failure, or one at the attempt cap."""
+    """Rollouts that resume will not dispatch again: a final failure, a settled judge failure, or one at the cap."""
     if not failures_fpath.exists():
         return set()
     attempts: Counter = Counter()
@@ -2253,7 +2452,7 @@ def _settled_failure_keys(failures_fpath: Path, *, retry_terminal_timeouts: bool
                 continue
             key = (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME])
             attempts[key] += 1
-            if is_terminal_failure(row, retry_terminal_timeouts=retry_terminal_timeouts):
+            if is_never_redispatched(row, retry_terminal_timeouts=retry_terminal_timeouts):
                 settled.add(key)
     max_attempts = _get_max_rollout_attempts()
     return settled | {key for key, count in attempts.items() if count >= max_attempts}
@@ -2275,9 +2474,23 @@ def _budget_masks_scored_as_zero(results: List[Dict[str, Any]]) -> List[Dict[str
 
 
 def _every_rollout_settled(rows: List[Dict[str, Any]], failures_fpath: Path, retry_terminal_timeouts: bool) -> bool:
-    """Whether a resume would dispatch none of these rows again: each failed for good or is at the attempt cap."""
+    """Whether a resume would dispatch none of these rows again: each failed for good or is at the attempt cap.
+
+    In evaluation, a run whose every rollout is only infra-unresolved (still failing for infra at the cap, or
+    settled judge infra) does not count: it measured nothing, and a resubmit once the service is back is the only
+    way to a score, so it fails instead of finishing. A data gap or any other settled row still lets it finish.
+    """
     settled = _settled_failure_keys(failures_fpath, retry_terminal_timeouts=retry_terminal_timeouts)
-    return all((row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]) in settled for row in rows)
+    keys = {(row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]) for row in rows}
+    if not keys <= settled:
+        return False
+    if not is_eval_mode():
+        return True
+    latest = _latest_failure_rows([failures_fpath])
+    return not all(
+        key in latest and is_infra_unresolved(latest[key], retry_terminal_timeouts=retry_terminal_timeouts)
+        for key in keys
+    )
 
 
 def _counted_failure_row(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -3131,7 +3344,7 @@ class RolloutCollectionHelper(BaseModel):
                         continue
                     k = (fr[TASK_INDEX_KEY_NAME], fr[ROLLOUT_INDEX_KEY_NAME])
                     attempts_by_key[k] += 1
-                    if is_terminal_failure(fr, retry_terminal_timeouts=config.retry_terminal_timeouts):
+                    if is_never_redispatched(fr, retry_terminal_timeouts=config.retry_terminal_timeouts):
                         terminal_keys.add(k)
                     # A failed attempt still tells us how long this task runs -
                     # the only duration signal available for a task that has not
@@ -3784,16 +3997,24 @@ class RolloutCollectionHelper(BaseModel):
             # The scans of whole artifacts after collection run in a worker thread.
             # On the event loop they would stall telemetry, other tasks, and shutdown.
             # The reloads that keep every row use `_read_jsonl` instead.
+            infra_zeros = _infra_zeros_count(
+                config.count_infra_unresolved_as_zero,
+                has_result=persisted_count > 0,
+                failure_rows=(await asyncio.to_thread(_latest_failure_rows, [failures_fpath])).values()
+                if config.count_infra_unresolved_as_zero and persisted_count == 0
+                else (),
+            )
             counted = await asyncio.to_thread(
                 _failure_rows_counted_as_zero,
                 [failures_fpath],
                 config.count_failure_classes_as_zero,
                 persisted_success_keys,
                 retry_terminal_timeouts=config.retry_terminal_timeouts,
+                infra_unresolved_as_zero=infra_zeros,
             )
-            # Opted-in missing rollouts are scored as well, so a run they fill still has a score. Only
-            # when this run aggregates: otherwise it scores nothing, and an empty run must still fail.
-            missing: List[Dict[str, Any]] = (
+            # Missing rollouts are always counted as unresolved infra. They are scored only when opted in, and
+            # only when this run aggregates: otherwise it scores nothing, and an empty run must still fail.
+            no_row: List[Dict[str, Any]] = (
                 await asyncio.to_thread(
                     _missing_rollout_rows_counted_as_zero,
                     [config.materialized_jsonl_fpath],
@@ -3801,11 +4022,15 @@ class RolloutCollectionHelper(BaseModel):
                     persisted_success_keys
                     | {(r.get(TASK_INDEX_KEY_NAME), r.get(ROLLOUT_INDEX_KEY_NAME)) for r in counted},
                 )
-                if config.count_missing_rollouts_as_zero and not config.disable_aggregation
+                if not config.disable_aggregation and config.materialized_jsonl_fpath.exists()
                 else []
             )
+            missing_scored = config.count_missing_rollouts_as_zero or infra_zeros
+            missing: List[Dict[str, Any]] = no_row if missing_scored else []
             # The default counts every class as 0, but a run where only retryable rows landed has nothing to
-            # report yet: a resume runs them. Only a final row, or a class the caller named, is a result.
+            # report yet: a resume runs them. Only a final row, or a class the caller named, is a result. A
+            # benchmark's own zero for a persistent infra failure (count_infra_unresolved_as_zero) counts only
+            # beside a real result: a run whose every rollout is infra-unresolved measured nothing.
             result_failures = (
                 counted
                 if config.count_failure_classes_as_zero is not None
@@ -3818,12 +4043,12 @@ class RolloutCollectionHelper(BaseModel):
                 )
             )
             # A run whose every rollout is settled (a data gap, or at the attempt cap) has no score, but nothing
-            # left for a resume to do.
+            # left for a resume to do: it finishes, and its metrics say it is incomplete.
             if (
                 input_rows
                 and persisted_count == 0
                 and not result_failures
-                and not missing
+                and not (missing and not config.count_infra_unresolved_as_zero)
                 and not await asyncio.to_thread(
                     _every_rollout_settled, input_rows, failures_fpath, config.retry_terminal_timeouts
                 )
@@ -3838,7 +4063,8 @@ class RolloutCollectionHelper(BaseModel):
                 )
                 raise RuntimeError(
                     f"None of the {len(input_rows)} dispatched rollouts produced a result "
-                    f"{dict(failure_counts)}.{drained_note} Inspect {failures_fpath}; the run has no score to report."
+                    f"{dict(failure_counts)}.{drained_note} Inspect {failures_fpath}; the run has no score to report. "
+                    "Resubmit the run (gym eval resubmit) once the failing service is back."
                 )
             collection_succeeded = True
         finally:
@@ -3903,7 +4129,7 @@ class RolloutCollectionHelper(BaseModel):
             if counted or config.count_failure_classes_as_zero != []:
                 classes = _counted_classes(config.count_failure_classes_as_zero)
                 print(f"Counting {len(counted)} failure row(s) as scored zeros: {classes}")
-            if config.count_missing_rollouts_as_zero:
+            if missing_scored:
                 imputed = missing
                 print(f"Counting {len(imputed)} materialized rollout(s) with no row as scored zeros")
                 counted.extend(imputed)
@@ -3939,6 +4165,27 @@ class RolloutCollectionHelper(BaseModel):
             if config.materialized_jsonl_fpath.exists()
             else len(input_rows) + persisted_count
         )
+        # Judge by the run's whole inventory: a resume whose every rollout settled earlier dispatches nothing.
+        no_score = aggregate_metrics_fpath is None and not config.disable_aggregation and expected_rollouts > 0
+        if no_score:
+            inventory = input_rows or await _read_jsonl(config.materialized_jsonl_fpath)
+            aggregate_metrics_fpath = await asyncio.to_thread(_unscored_metrics_file, output_fpath, inventory)
+        completeness: Dict[str, Any] = {}
+        if aggregate_metrics_fpath is not None:
+            unresolved, owed = await asyncio.to_thread(
+                _infra_unresolved_counts,
+                _latest_failure_rows([failures_fpath]),
+                _failure_attempts([failures_fpath]),
+                persisted_success_keys,
+                expected=expected_rollouts,
+                missing=len(no_row),
+                retry_terminal_timeouts=config.retry_terminal_timeouts,
+            )
+            completeness = await asyncio.to_thread(
+                _annotate_infra_unresolved,
+                aggregate_metrics_fpath,
+                _infra_unresolved_metrics(unresolved, owed, no_score=no_score),
+            )
         scored_rollouts = persisted_count + len(counted)
         coverage = _coverage_report(
             expected_rollouts, scored_rollouts, failure_counts, failures_fpath, imputed=len(imputed)
@@ -3950,6 +4197,8 @@ class RolloutCollectionHelper(BaseModel):
                     "coverage/scored": scored_rollouts,
                     "coverage/missing": expected_rollouts - scored_rollouts,
                     **({"coverage/imputed": len(imputed)} if config.count_missing_rollouts_as_zero else {}),
+                    # The run-level completeness fields, as the metrics file carries them when the run is incomplete.
+                    **completeness,
                 }
             )
 
@@ -4720,6 +4969,14 @@ class RolloutAggregationConfig(BaseNeMoGymCLIConfig):
             "servers that reuse task indices do not hide each other's failures."
         ),
     )
+    count_infra_unresolved_as_zero: bool = Field(
+        default=False,
+        description=(
+            "Score an infra failure still retryable, and a materialized rollout that left no row, as 0 "
+            "instead of leaving it out of the score. Set by benchmarks whose method scores a persistent "
+            "infra failure as 0. Either way the rollout counts in rollouts_infra_unresolved."
+        ),
+    )
     count_missing_rollouts_as_zero: bool = Field(
         default=False,
         description=(
@@ -4846,7 +5103,8 @@ class RolloutAggregationHelper(BaseModel):
         def servers_by_agent() -> Mapping[str, list[str]]:
             # With nothing to score and nothing to count, only the coverage report keys rollouts, and an
             # agent's name does for that: the head server is reached for scoring alone.
-            if not (results or config.count_failure_classes_as_zero != [] or config.count_missing_rollouts_as_zero):
+            missing_scored = config.count_missing_rollouts_as_zero or config.count_infra_unresolved_as_zero
+            if not (results or config.count_failure_classes_as_zero != [] or missing_scored):
                 return {}
             return _environment_servers_by_agent(helper.setup_server_client().global_config_dict)
 
@@ -4866,9 +5124,12 @@ class RolloutAggregationHelper(BaseModel):
                     latest_failures[_identity_key(row, group)] = row
                     failure_attempts[_identity_key(row, group)] += shard_attempts[key]
         max_attempts = _get_max_rollout_attempts()
+        infra_zeros = _infra_zeros_count(
+            config.count_infra_unresolved_as_zero, has_result=bool(results), failure_rows=latest_failures.values()
+        )
         result_ids = (
             {_identity_key(r, group) for r in results}
-            if latest_failures or config.count_missing_rollouts_as_zero
+            if latest_failures or config.count_missing_rollouts_as_zero or infra_zeros
             else set()
         )
         # A row that names no agent and no server cannot reach any server's metrics; it stays a dropped one.
@@ -4877,7 +5138,10 @@ class RolloutAggregationHelper(BaseModel):
             for identity, row in latest_failures.items()
             if identity not in result_ids
             and _counts_failure_class(
-                row, config.count_failure_classes_as_zero, at_cap=failure_attempts[identity] >= max_attempts
+                row,
+                config.count_failure_classes_as_zero,
+                at_cap=failure_attempts[identity] >= max_attempts,
+                infra_unresolved_as_zero=infra_zeros,
             )
             and _routing_identity(row) is not None
         ]
@@ -4885,16 +5149,25 @@ class RolloutAggregationHelper(BaseModel):
             classes = _counted_classes(config.count_failure_classes_as_zero)
             print(f"Counting {len(counted)} failure row(s) as scored zeros: {classes}")
         materialized_fpaths = [materialized_path_for(Path(path)) for path in input_paths]
+        # Every missing rollout is counted as unresolved infra, from each shard's own files; it is scored only
+        # when opted in, and only then is it matched across shards, which needs the server grouping.
+        no_row: List[Dict[str, Any]] = []
+        for path, materialized_fpath, failures_fpath in zip(input_paths, materialized_fpaths, failures_fpaths):
+            no_row.extend(
+                _missing_rollout_rows_counted_as_zero([materialized_fpath], [failures_fpath], set(shard_keys[path]))
+            )
+        # A rollout one shard has no row for may have landed, or failed, in another: count each rollout once.
+        if no_row and not result_ids and results:
+            result_ids = {_identity_key(r, group) for r in results}
+        accounted = result_ids | set(latest_failures)
+        unaccounted: List[Dict[str, Any]] = []
+        for zero in no_row:
+            if _identity_key(zero, group) not in accounted:
+                accounted.add(_identity_key(zero, group))
+                unaccounted.append(zero)
         missing: List[Dict[str, Any]] = []
-        if config.count_missing_rollouts_as_zero:
-            accounted = result_ids | set(latest_failures)
-            for path, materialized_fpath, failures_fpath in zip(input_paths, materialized_fpaths, failures_fpaths):
-                for zero in _missing_rollout_rows_counted_as_zero(
-                    [materialized_fpath], [failures_fpath], set(shard_keys[path])
-                ):
-                    if _identity_key(zero, group) not in accounted:
-                        accounted.add(_identity_key(zero, group))
-                        missing.append(zero)
+        if config.count_missing_rollouts_as_zero or infra_zeros:
+            missing = unaccounted
             print(f"Counting {len(missing)} materialized rollout(s) with no row as scored zeros")
             counted.extend(missing)
         if counted:
@@ -4903,6 +5176,29 @@ class RolloutAggregationHelper(BaseModel):
         scored = sorted(_budget_masks_scored_as_zero(results) + counted, key=_rollout_order_key)
         aggregate_metrics_fpath = await helper._call_aggregate_metrics(
             scored, scored, output_fpath, raise_on_error=False
+        )
+        # Nothing scored, and a resume would dispatch nothing: the run reports itself incomplete, as collection does.
+        no_score = (
+            not scored
+            and bool(latest_failures)
+            and not unaccounted
+            and all(
+                is_terminal_failure(row) or failure_attempts[identity] >= max_attempts
+                for identity, row in latest_failures.items()
+            )
+        )
+        if no_score:
+            aggregate_metrics_fpath = _unscored_metrics_file(output_fpath, list(latest_failures.values()))
+        unresolved, owed = _infra_unresolved_counts(
+            latest_failures,
+            failure_attempts,
+            result_ids,
+            # A failure another shard recovered is not owed a second time.
+            expected=len(results) + len(set(latest_failures) - result_ids) + len(unaccounted),
+            missing=len(unaccounted),
+        )
+        completeness = _annotate_infra_unresolved(
+            aggregate_metrics_fpath, _infra_unresolved_metrics(unresolved, owed, no_score=no_score)
         )
         if batch_tracker is not None:
             batch_tracker.write_status(
@@ -4936,6 +5232,7 @@ class RolloutAggregationHelper(BaseModel):
                     "coverage/scored": scored_rollouts,
                     "coverage/missing": sum(dropped.values()),
                     **({"coverage/imputed": len(missing)} if config.count_missing_rollouts_as_zero else {}),
+                    **completeness,
                 }
             )
 

@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from typing import Literal
 
 
@@ -80,6 +80,8 @@ AGENT_COMMAND_NOT_ALLOWED = "agent_command_not_allowed"
 # ``judge_failed`` is produced today by judge_failsafe and by reverification.
 JUDGE_FAILED = "judge_failed"
 JUDGE_UNPARSEABLE = "judge_unparseable"
+# The judge rejected its input as too long, and the server knows the model's own answer made it so.
+JUDGE_INPUT_TOO_LONG = "judge_input_too_long"
 VERIFIER_ERROR = "verifier_error"
 
 # --- provider: sandboxes, browsers, containers ----------------------------------------- #
@@ -116,6 +118,7 @@ FAILURE_KINDS: frozenset[str] = frozenset(
         AGENT_COMMAND_NOT_ALLOWED,
         JUDGE_FAILED,
         JUDGE_UNPARSEABLE,
+        JUDGE_INPUT_TOO_LONG,
         VERIFIER_ERROR,
         PROVIDER_UNAVAILABLE,
         PROVIDER_QUOTA_EXHAUSTED,
@@ -186,6 +189,8 @@ MODEL: FailureCause = "model"
 # Gym's exception middleware names the cause of every 500 it returns in this header, so a relay such
 # as legacy_agent carries it to rollout collection unchanged.
 FAILURE_CAUSE_HEADER = "X-NeMo-Gym-Failure-Cause"
+# Set beside it when the 500 came from a failed /verify call: the rollout already produced the model's answer.
+FAILURE_STAGE_HEADER = "X-NeMo-Gym-Failure-Stage"
 
 
 FAILURE_RULES: dict[str, FailureRule] = {
@@ -200,6 +205,8 @@ FAILURE_RULES: dict[str, FailureRule] = {
     JUDGE_FAILED: RETRY,
     # The judge, a service the model does not control, produced the verdict it could not parse.
     JUDGE_UNPARSEABLE: RETRY,
+    # The model's answer did not fit the judge's context window: the model's 0, as an answer too long to grade.
+    JUDGE_INPUT_TOO_LONG: FINAL,
     VERIFIER_ERROR: EVIDENCE,
     PROVIDER_UNAVAILABLE: RETRY,
     PROVIDER_QUOTA_EXHAUSTED: RETRY,
@@ -405,6 +412,84 @@ def is_retryable(kind: str | None, *, cause: FailureCause | None) -> bool:
     if rule == EVIDENCE:
         return cause == INFRA
     return rule in (RETRY, RETRY_THEN_UNSCORED)
+
+
+# The judge failed on an answer the model already gave. In evaluation such a row is never re-dispatched on resume,
+# whatever the table above says for training (``judge_failure_after_retries``).
+JUDGE_FAILURE_KINDS: frozenset[str] = frozenset({JUDGE_FAILED, JUDGE_UNPARSEABLE})
+
+
+# A judge-infra row the rule settled: never re-dispatched, but not final either, so it stays out of the score.
+JUDGE_SETTLED_KEY = "_ng_failure_judge_settled"
+
+
+# What a benchmark's official grader does with a judge reply that carries no verdict. ``wrong`` scores the answer as
+# wrong (NeMo-Skills, SimpleQA, BrowseComp, MultiChallenge); ``drop`` leaves it out of the score (Arena-Hard-Auto
+# drops a null judgment). ``drop`` is the default: a server with no stated official behaviour never scores it 0.
+JudgeNoVerdictOutcome = Literal["wrong", "drop"]
+# The failure kind of an answer left out of the score because its judge gave no verdict.
+JUDGE_NO_VERDICT = "judge_no_verdict"
+
+
+def judge_failure_after_retries(
+    *,
+    judge_error: str,
+    cause: FailureCause,
+    attempts: int,
+    attempt_causes: Sequence[FailureCause] = (),
+    no_verdict: JudgeNoVerdictOutcome = "drop",
+) -> dict[str, object]:
+    """The evaluation rule for a judge failure that its in-place retries on the same answer did not fix.
+
+    The rollout is never re-dispatched, whatever the cause: that would give the model another answer and score a
+    different one. What the row becomes depends on the cause of each try (``attempt_causes``, one per try; without
+    them, ``cause``, the last error's):
+
+    - ``model`` on every try: the judge answered with text and no verdict it could give, every time, so the answer
+      was judged and got none. The benchmark's official grader decides (``no_verdict``, a server setting):
+      ``wrong`` makes the row the model's final failure, counted as 0; ``drop`` keeps the answer as a result that
+      is no measurement (``mask_sample``, ``failure_kind="judge_no_verdict"``): left out of the score, counted
+      in ``coverage/masked_rollouts``, and never re-dispatched.
+    - ``infra`` on any try: a service the model does not control (a spent budget, a rate limit, a gateway, a
+      timeout or a bad key), or an empty reply, which a throttled judge or a provider-side filter sends as an
+      HTTP 200 with no text. The row is an unresolved infra row: left out of the score, counted in
+      ``rollouts_infra_unresolved``, and the run is not publishable above ``MAX_INFRA_UNRESOLVED_RATE``.
+      In-place retries fix transient outages; a bad key never recovers, and scoring it as the model's 0 would
+      publish a score near 0.
+
+    A mix, such as an empty reply and then text with no verdict, is infra: one try that the judge did not really
+    answer is enough doubt that the answer was judged at all, so the row stays out of the score and is counted.
+
+    The judge's last error, the cause and the attempt count stay on the row either way. Returns the fields of the
+    failures-sidecar row. Resume reads the same rule for every ``JUDGE_FAILURE_KINDS`` row, also one written
+    before this rule existed.
+    """
+    if attempt_causes:
+        cause = MODEL if all(attempt == MODEL for attempt in attempt_causes) else INFRA
+    row: dict[str, object] = {
+        "_ng_failure_class": JUDGE_FAILED,
+        "_ng_failure_cause": cause,
+        "_ng_failure_judge_error": judge_error,
+        "_ng_failure_judge_cause": cause,
+        "_ng_failure_judge_attempts": attempts,
+        "mask_sample": False,
+    }
+    if cause == MODEL and no_verdict == "drop":
+        # A result, not a failure row: the answer was judged, and the official method leaves it out of the score.
+        return {
+            "reward": 0.0,
+            "mask_sample": True,
+            "failure_kind": JUDGE_NO_VERDICT,
+            "failure_reason": judge_error,
+            "judge_error": judge_error,
+            "judge_failure_cause": MODEL,
+            "judge_attempts": attempts,
+        }
+    if cause == MODEL:
+        return row | {"_ng_failure_terminal": True, "reward": 0.0}
+    # A verify reply must carry a reward. This one is no measurement: mask_sample says so, and evaluation leaves the
+    # row out of the score as infra-unresolved whatever reward it carries.
+    return row | {JUDGE_SETTLED_KEY: True, "reward": 0.0, "mask_sample": True}
 
 
 def is_unscored(kind: str | None) -> bool:

@@ -610,7 +610,7 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
         app.router.routes = [r for r in app.router.routes if getattr(r, "path", None) != "/verify"]
         # Re-apply judge_failsafe: replacing the base route would otherwise drop the
         # JudgeError -> failures-sidecar guarantee SimpleResourcesServer makes globally.
-        app.post("/verify")(judge_failsafe(self._verify_and_cleanup))
+        app.post("/verify")(judge_failsafe(self._verify_and_cleanup, no_verdict=self.config.judge_no_verdict_outcome))
 
         # Tear down any sessions still open when the server stops, so a normal
         # shutdown does not leak sandboxes.

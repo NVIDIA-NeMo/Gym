@@ -40,6 +40,7 @@ from nemo_gym.base_responses_api_model import (
     is_propagated_refusal,
     start_model_execution,
 )
+from nemo_gym.global_config import is_eval_mode
 from nemo_gym.openai_utils import (
     REQUIRED_TOKEN_METADATA_FIELDS,
     TOKEN_METADATA_FIELDS,
@@ -402,6 +403,11 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # sessions off it.
     endpoint_connection_retries: Optional[int] = 8
 
+    # Evaluation only: how long one request keeps retrying a model endpoint that refuses or drops every connection.
+    # A dead policy server then fails its rollouts as infra within minutes, instead of holding them until the job
+    # ends. None keeps retrying.
+    endpoint_connection_retry_seconds: Optional[float] = Field(default=300.0, gt=0)
+
     # Expose the Gym session (one per rollout) as the backend's conversation id.
     # ``conversation_params`` is a TensorRT-LLM extension outside the OpenAI Chat Completions
     # schema, and strict OpenAI-compatible backends reject it, so this is off by default and
@@ -563,6 +569,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                     if (self.config.endpoint_file or self.config.route_around_failing_endpoints)
                     else None
                 ),
+                max_connection_retry_seconds=self.config.endpoint_connection_retry_seconds if is_eval_mode() else None,
                 # The wait budget is for outside providers; a job must notice a down model server quickly.
                 max_rate_limit_wait_seconds=0,
             )
@@ -1920,6 +1927,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 api_key=self.config.api_key,
                 default_headers=self.config.default_headers,
                 max_connection_retries=self.config.endpoint_connection_retries,
+                max_connection_retry_seconds=self.config.endpoint_connection_retry_seconds if is_eval_mode() else None,
                 max_rate_limit_wait_seconds=0,
             )
         ]

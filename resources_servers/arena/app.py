@@ -29,7 +29,7 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.config_types import Domain, ModelServerRef
 from nemo_gym.global_config import is_eval_mode
-from nemo_gym.judge import JudgeError
+from nemo_gym.judge import JudgeError, JudgeNoVerdictError, raise_unparseable_verdict, retry_judge_in_place
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -48,6 +48,23 @@ from resources_servers.arena.taxonomy import get_prompt_slices
 
 
 logger = logging.getLogger(__name__)
+
+
+def _last_output_text(judge_response: NeMoGymResponse) -> str:
+    """The text of the judge reply's last output, or "" when it carries none."""
+    if not judge_response.output:
+        return ""
+    last_output = judge_response.output[-1]
+    if last_output.type != "message" or not last_output.content:
+        return ""
+    last_content = last_output.content[-1]
+    return last_content.text if last_content.type == "output_text" else ""
+
+
+def _verdict_of(judge_response: NeMoGymResponse) -> str | None:
+    """The judge's verdict label, or None when the reply carries none."""
+    text = _last_output_text(judge_response)
+    return _extract_verdict(text) if text else None
 
 
 class ArenaResourcesServerConfig(BaseResourcesServerConfig):
@@ -326,6 +343,45 @@ class ArenaResourcesServer(SimpleResourcesServer):
                 NeMoGymEasyInputMessage(role="user", content=judge_prompt),
             ]
 
+            if is_eval_mode():
+                # A failed call or a reply with no verdict is retried in place on the same prompt (the same stored
+                # answer); after the last attempt judge_failsafe records the row by judge_failure_after_retries,
+                # and the rollout is never re-dispatched.
+                async def _judge_once() -> tuple[NeMoGymResponse, str]:
+                    try:
+                        response = await self.server_client.post(
+                            server_name=config.judge_model_server.name,
+                            url_path="/v1/responses",
+                            json=responses_create_params,
+                            timeout=ClientTimeout(total=config.judge_timeout_secs),
+                        )
+                        await raise_for_status(response)
+                        judge_response = NeMoGymResponse.model_validate(await get_response_json(response))
+                    except Exception as exc:
+                        raise JudgeError(f"{type(exc).__name__}: {exc}") from exc
+                    verdict = _verdict_of(judge_response)
+                    if verdict is None:
+                        try:
+                            raise_unparseable_verdict("arena", _last_output_text(judge_response))
+                        except JudgeNoVerdictError as e:
+                            e.judge_response = judge_response
+                            raise
+                    return judge_response, verdict
+
+                try:
+                    judge_response, verdict = await retry_judge_in_place(_judge_once)
+                except JudgeNoVerdictError as e:
+                    # Text with no verdict on every try: Arena-Hard-Auto drops a null judgment, so the game keeps no
+                    # verdict. The metric leaves it out of the win rate and counts it against the failed-rollout gate.
+                    if self.config.judge_no_verdict_outcome != "drop" or any(c != "model" for c in e.attempt_causes):
+                        raise
+                    return ArenaGame(
+                        responses_create_params=responses_create_params, response=e.judge_response, verdict=None
+                    )
+                return ArenaGame(
+                    responses_create_params=responses_create_params, response=judge_response, verdict=verdict
+                )
+
             try:
                 response = await self.server_client.post(
                     server_name=config.judge_model_server.name,
@@ -333,14 +389,8 @@ class ArenaResourcesServer(SimpleResourcesServer):
                     json=responses_create_params,
                     timeout=ClientTimeout(total=config.judge_timeout_secs),
                 )
-                if is_eval_mode():
-                    await raise_for_status(response)
                 judge_response = NeMoGymResponse.model_validate(await get_response_json(response))
             except Exception as exc:
-                if is_eval_mode():
-                    # A failed judge call is not a lost game: judge_failsafe routes it to the sidecar as
-                    # judge_failed, and resume retries it.
-                    raise JudgeError(f"{type(exc).__name__}: {exc}") from exc
                 # Training keeps its behaviour: the game is skipped and scores as it always did.
                 logger.warning("Judge call failed (question skipped): %s", exc)
                 return ArenaGame(
@@ -358,13 +408,7 @@ class ArenaResourcesServer(SimpleResourcesServer):
                     verdict=None,
                 )
 
-            verdict: str | None = None
-            if judge_response.output:
-                last_output = judge_response.output[-1]
-                if last_output.type == "message" and last_output.content:
-                    last_content = last_output.content[-1]
-                    if last_content.type == "output_text":
-                        verdict = _extract_verdict(last_content.text)
+            verdict = _verdict_of(judge_response)
 
             return ArenaGame(
                 responses_create_params=responses_create_params,

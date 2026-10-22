@@ -233,6 +233,8 @@ class SimpleQAServer(SimpleResourcesServer):
         return key
 
     async def _call_judge(self, judge_prompt: str) -> str:
+        # The judge prompt is the grader template, the question, the gold target and the model's answer, with no
+        # documents, so a judge context overflow comes from the answer: the model's final 0.
         if self.config.use_chat_completions_for_judge:
             chat_params = NeMoGymChatCompletionCreateParamsNonStreaming(
                 messages=[{"role": "user", "content": judge_prompt}],
@@ -246,6 +248,7 @@ class SimpleQAServer(SimpleResourcesServer):
                 url_path="/v1/chat/completions",
                 json=chat_params,
                 response_model=NeMoGymChatCompletion,
+                overflow_is_the_models=True,
             )
             content = chat_response.choices[0].message.content if chat_response.choices else None
             return content.strip() if content else ""
@@ -262,6 +265,7 @@ class SimpleQAServer(SimpleResourcesServer):
             url_path="/v1/responses",
             json=request_params,
             response_model=NeMoGymResponse,
+            overflow_is_the_models=True,
         )
         return extract_text_from_response(judge_response)
 

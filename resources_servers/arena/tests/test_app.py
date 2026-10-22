@@ -770,7 +770,7 @@ class TestArenaResourcesServer:
         assert result.reward == approx(0.5)
 
     @mark.parametrize("status", [401, 429, 500])
-    async def test_a_failed_judge_call_is_a_retryable_judge_failure_not_a_lost_game(
+    async def test_a_failed_judge_call_is_a_judge_failure_not_a_lost_game(
         self, server: ArenaResourcesServer, status: int, eval_mode: None
     ):
         """A judge 401, 429 or 500 used to score the game as a policy loss; now it reaches judge_failsafe."""
@@ -787,9 +787,128 @@ class TestArenaResourcesServer:
         wrapped = await judge_failsafe(server.verify)(body=self._make_verify_request("Answer."))
         row = json.loads(wrapped.body)
         assert row["_ng_failure_class"] == "judge_failed"
-        assert not is_terminal_failure(row)
-        # The plain judge_failed kind: at the cap the row reaches arena's metric and counts against the gate.
+        # The plain judge_failed kind reaches arena's metric and counts against the gate.
         assert row["failure_kind"] == "judge_failed"
+
+    @fixture
+    def judged_in_evaluation(self, monkeypatch, eval_mode: None) -> None:
+        """Evaluation on the shared judge path too, with no backoff wait."""
+        monkeypatch.setattr("nemo_gym.judge.is_eval_mode", lambda: True)
+        monkeypatch.setattr("nemo_gym.judge.JUDGE_RETRY_BACKOFF_SECONDS", (0.0,))
+        monkeypatch.delenv("NEMO_GYM_JUDGE_MAX_ATTEMPTS", raising=False)
+
+    @staticmethod
+    def _recording_judge(server: ArenaResourcesServer, game1: list, game2: list) -> tuple[list[str], list[str]]:
+        """Answer each game's judge posts with its next reply and record the exact prompt each attempt sent.
+
+        Game 1 puts the policy's answer first (``A: <policy answer>``); the games run concurrently.
+        """
+        sent: tuple[list[str], list[str]] = ([], [])
+        replies = (list(game1), list(game2))
+
+        async def post(**kwargs):
+            prompt = kwargs["json"].model_dump_json()
+            game = 0 if "A: Paris." not in prompt else 1  # The baseline answer is "Paris."
+            sent[game].append(prompt)
+            reply = replies[game].pop(0)
+            if isinstance(reply, int):
+                failed = MagicMock(ok=False, status=reply)
+                failed.raise_for_status.side_effect = ClientResponseError(
+                    request_info=MagicMock(), history=(), status=reply, message="judge unavailable"
+                )
+                failed.content.read = AsyncMock(return_value=b'{"error": "overloaded"}')
+                return failed
+            return _make_post_mock(json.dumps(_make_response("j", _make_output_message(reply))))
+
+        server.server_client.post = AsyncMock(side_effect=post)
+        return sent
+
+    async def test_a_judge_failure_is_retried_in_place_on_the_same_answer(
+        self, server: ArenaResourcesServer, judged_in_evaluation: None
+    ):
+        # Game 1: a 503, then an unparseable reply, then a verdict. Game 2 answers at once.
+        game1, game2 = self._recording_judge(
+            server, [503, "I cannot decide.", "Final verdict: [[A>B]]"], ["Final: [[B>A]]"]
+        )
+
+        result = await server.verify(self._make_verify_request("Answer é."))
+
+        assert len(game1) == 3 and len(game2) == 1
+        assert game1[0] == game1[1] == game1[2]  # Every attempt sent the stored answer, byte for byte.
+        assert "Answer \\u00e9." in game1[0] or "Answer é." in game1[0]
+        assert [game.verdict for game in result.games] == ["[[A>B]]", "[[B>A]]"]
+        assert result.reward == approx(1.0)
+
+    async def test_a_null_judgment_at_the_cap_is_dropped_as_arena_hard_auto_does(
+        self, server: ArenaResourcesServer, judged_in_evaluation: None
+    ):
+        """Text with no verdict on every try: the game keeps no verdict, never a lost game for the model."""
+        game1, _ = self._recording_judge(server, ["no verdict"] * 3, ["Final: [[B>A]]"])
+
+        result = await server.verify(self._make_verify_request("Answer."))
+
+        assert len(game1) == 3 and len(set(game1)) == 1
+        assert [game.verdict for game in result.games] == [None, "[[B>A]]"]
+        # A result, not a failure row: nothing is re-dispatched, and the game's text is kept.
+        assert "_ng_failure_class" not in result.model_dump()
+        assert "no verdict" in result.games[0].response.output[-1].content[-1].text
+
+        # The metric leaves the rollout out of the win rate and counts it against the failed-rollout gate.
+        rollout = json.loads(result.model_dump_json()) | {"category": "lmarena_v2"}
+        metrics = server.compute_metrics([[rollout]])
+        assert metrics["rollout_failure_rate"] == 1.0
+
+    async def test_a_judge_outage_at_the_cap_is_unresolved_infra_not_a_lost_game(
+        self, server: ArenaResourcesServer, judged_in_evaluation: None
+    ):
+        # A bad key never recovers: scoring it as the model's 0 would publish a score near 0.
+        game1, _ = self._recording_judge(server, [401, 401, 401], ["Final: [[B>A]]"])
+
+        row = json.loads((await judge_failsafe(server.verify)(body=self._make_verify_request("Answer."))).body)
+
+        assert len(game1) == 3 and len(set(game1)) == 1
+        assert (row["_ng_failure_cause"], row["_ng_failure_judge_settled"]) == ("infra", True)
+        assert not is_terminal_failure(row)  # Left out of the score, counted as infra-unresolved.
+        assert row["_ng_failure_judge_attempts"] == 3
+
+    @mark.parametrize(
+        ("replies", "cause"),
+        [
+            (["", "", ""], "infra"),
+            (["", "no verdict", "no verdict"], "infra"),
+            ([429, 429, 429], "infra"),
+        ],
+        ids=["empty-x3", "empty-then-no-verdict", "429-x3"],
+    )
+    async def test_a_reply_with_no_verdict_is_the_models_0_unless_a_try_was_empty_or_limited(
+        self, server: ArenaResourcesServer, judged_in_evaluation: None, replies: list, cause: str
+    ):
+        game1, _ = self._recording_judge(server, replies, ["Final: [[B>A]]"])
+
+        row = json.loads((await judge_failsafe(server.verify)(body=self._make_verify_request("Answer."))).body)
+
+        assert len(game1) == 3 and len(set(game1)) == 1
+        assert row["_ng_failure_cause"] == cause
+        assert is_terminal_failure(row) is (cause == "model")
+
+    async def test_a_judge_422_after_the_tries_reaches_the_score_as_unresolved_infra(
+        self, server: ArenaResourcesServer, judged_in_evaluation: None, monkeypatch, tmp_path: Path
+    ):
+        """End to end: arena's judge_failsafe reply, the agent's response model, the collector, then aggregation."""
+        from nemo_gym.testing.verify_reply import verify_reply_through_collection
+
+        monkeypatch.setattr("nemo_gym.rollout_collection.is_eval_mode", lambda: True)
+        self._recording_judge(server, [422, 422, 422], ["Final: [[B>A]]"])
+
+        reply = json.loads((await judge_failsafe(server.verify)(body=self._make_verify_request("Answer."))).body)
+        record, counted, (unresolved, owed), metrics = verify_reply_through_collection(reply, tmp_path)
+
+        assert (record["_ng_failure_class"], record["failure_kind"]) == ("judge_failed", "judge_failed")
+        assert record["_ng_failure_cause"] == record["_ng_failure_judge_cause"] == "infra"
+        assert (record["_ng_failure_judge_attempts"], record["_ng_failure_judge_settled"]) == (3, True)
+        assert counted == []  # Left out of the score, not a lost game.
+        assert (unresolved, owed) == (1, 10)
+        assert metrics["publishable"] is False
 
     @mark.parametrize("status", [401, 429, 500])
     async def test_training_keeps_a_failed_judge_call_as_a_skipped_game(
@@ -1266,7 +1385,9 @@ class TestArenaResourcesServer:
         warnings = [r for r in caplog.records if "max_rollout_failure_rate" in r.getMessage()]
         assert len(warnings) == 1 and "33.3%" in warnings[0].getMessage()
 
-    async def _collect(self, server, tmp_path, monkeypatch, failure_rows: int, attempts_recorded: int) -> list:
+    async def _collect(
+        self, server, tmp_path, monkeypatch, failure_rows: int, attempts_recorded: int, **overrides
+    ) -> list:
         """Run rollout collection to its end, with Arena's real aggregation, on a sidecar of judge failures.
 
         Two rollouts score; ``failure_rows`` judge failures (plain ``judge_failed``, counted as 0) have
@@ -1291,6 +1412,7 @@ class TestArenaResourcesServer:
             resume_from_cache=True,
             require_complete=True,
             disable_health_check=True,
+            **overrides,
         )
         config.materialized_jsonl_fpath.write_bytes(b"".join(json.dumps(r).encode() + b"\n" for r in rows))
         scored = [{**rows[i], **self._rollout("[[A>B]]", "[[B>A]]", reward=1.0)} for i in range(2)]
@@ -1333,13 +1455,40 @@ class TestArenaResourcesServer:
     async def test_a_settled_run_above_the_failure_rate_finishes_with_metrics(
         self, server: ArenaResourcesServer, tmp_path, monkeypatch, eval_mode: None
     ):
-        """Every judge failure is at the attempt cap: nothing is left to run, so the run must finish."""
-        aggregated = await self._collect(server, tmp_path, monkeypatch, failure_rows=3, attempts_recorded=2)
+        """Every judge failure is at the attempt cap and counted: nothing is left to run, so the run must finish."""
+        aggregated = await self._collect(
+            server,
+            tmp_path,
+            monkeypatch,
+            failure_rows=3,
+            attempts_recorded=2,
+            count_failure_classes_as_zero=["judge_failed"],
+        )
 
         (metrics,) = aggregated
         assert metrics.agent_metrics["rollout_failure_rate"] == approx(0.6)
         assert metrics.agent_metrics["failed_rollout_gate"] is True
         assert "win_rate" not in metrics.key_metrics and metrics.key_metrics["mean/reward"] is None
+
+    async def test_judge_failures_at_the_cap_count_against_the_gate(
+        self, server: ArenaResourcesServer, tmp_path, monkeypatch, eval_mode: None
+    ):
+        """LMArena's config counts judge_failed, so a judge failure at the cap reaches the gate, not the win rate."""
+        lmarena = yaml.safe_load((Path(__file__).parents[3] / "benchmarks/lmarena_v3/config.yaml").read_text())
+        aggregated = await self._collect(
+            server,
+            tmp_path,
+            monkeypatch,
+            failure_rows=3,
+            attempts_recorded=2,
+            count_failure_classes_as_zero=lmarena["count_failure_classes_as_zero"],
+        )
+
+        (metrics,) = aggregated
+        # 3 of 5 rollouts failed their judge: past the gate, so the run publishes no win rate.
+        assert metrics.agent_metrics["rollout_failure_rate"] == approx(0.6)
+        assert metrics.agent_metrics["failed_rollout_gate"] is True
+        assert "win_rate" not in metrics.key_metrics
 
     async def test_unsettled_judge_failures_still_leave_the_run_incomplete(
         self, server: ArenaResourcesServer, tmp_path, monkeypatch, eval_mode: None

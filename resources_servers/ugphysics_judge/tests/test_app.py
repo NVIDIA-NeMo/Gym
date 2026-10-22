@@ -35,6 +35,7 @@ from copy import deepcopy
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from pytest import approx, fixture
 
 from nemo_gym.config_types import ModelServerRef
@@ -605,3 +606,53 @@ class TestServer:
         )
         assert equal is False
         assert verdict is None
+
+    @pytest.mark.parametrize("eval_mode", [True, False], ids=["evaluation", "training"])
+    def test_an_answer_too_long_for_the_judge_is_the_models_final_zero(
+        self,
+        config: UGPhysicsJudgeResourcesServerConfig,
+        model_create_params: NeMoGymResponseCreateParamsNonStreaming,
+        monkeypatch: pytest.MonkeyPatch,
+        eval_mode: bool,
+    ) -> None:
+        """The judge sees no documents, so a judge context overflow comes from the model's answer: a final 0.
+
+        The judge's engine rejects the input with a 400, and Gym's judge model server relays it as a 500,
+        as on a real run; the row is read from the server's own /verify over HTTP.
+        """
+        monkeypatch.setattr("nemo_gym.judge.is_eval_mode", lambda: eval_mode)
+        import importlib.util
+        import sys
+        from pathlib import Path
+
+        from fastapi.testclient import TestClient
+
+        # This server's own tests package shadows the repository's, so the judge helpers are loaded by path.
+        name = "_gym_unit_tests_test_judge"
+        if name not in sys.modules:
+            path = Path(__file__).resolve().parents[3] / "tests/unit_tests/test_judge.py"
+            spec = importlib.util.spec_from_file_location(name, path)
+            sys.modules[name] = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(sys.modules[name])
+        helpers = sys.modules[name]
+
+        upstream = helpers.TestJudgeReasonThroughTheModelServer._upstream(400, helpers._OVERFLOW_BODY)
+        relay = helpers._JudgeRelay(helpers._judge_model_server(upstream))
+        server = UGPhysicsJudgeResourcesServer(config=config, server_client=relay)
+        # Symbolic miss: expected="2", generation has \boxed{3}, so the judge is invoked.
+        request = UGPhysicsJudgeVerifyRequest(
+            responses_create_params=deepcopy(model_create_params),
+            response=NeMoGymResponse(**_make_response("gen", _msg("Wrong: \\boxed{3}"))),
+            question="What is 1+1?",
+            expected_answer="2",
+            solution="1+1=2",
+            subject="QuantumMechanics",
+        )
+
+        with TestClient(server.setup_webserver()) as http:
+            row = http.post("/verify", json=json.loads(request.model_dump_json())).json()
+
+        assert (row["_ng_failure_class"], row["reward"], row["mask_sample"]) == (
+            ("judge_input_too_long", 0.0, False) if eval_mode else ("judge_failed", 0.0, True)
+        )
+        assert ("context_length_exceeded" in row["_ng_failure_judge_error"]) is eval_mode

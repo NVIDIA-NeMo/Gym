@@ -1,3 +1,6 @@
+# Terminal-Bench scores an errored trial as 0, so a persistent infra failure counts as 0 here.
+count_infra_unresolved_as_zero: true
+
 terminal_bench_4:
   resources_servers:
     terminal_bench_4:

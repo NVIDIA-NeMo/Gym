@@ -1932,6 +1932,41 @@ class TestServerUtils:
 
         assert client.request.await_count == expected_attempts
 
+    async def test_a_dead_endpoint_fails_the_request_at_the_time_cap(self, monkeypatch: MonkeyPatch) -> None:
+        """A port nothing listens on refuses every connection; with a short cap the call gives up, as infra."""
+        from nemo_gym.failure_kinds import INFRA, failure_cause_of
+
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            dead_port = sock.getsockname()[1]  # Closed when the block ends: nothing listens there.
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_CONFIG", None)
+        nemo_gym.server_utils.set_global_aiohttp_client(GlobalAIOHTTPAsyncClientConfig())
+
+        started = asyncio.get_running_loop().time()
+        try:
+            async with asyncio.timeout(20):  # Without the cap the call would retry until this outer limit.
+                with raises(ClientOSError) as exc:
+                    await nemo_gym.server_utils.request(
+                        "POST", f"http://127.0.0.1:{dead_port}/v1", _max_connection_retry_seconds=1.5
+                    )
+        finally:
+            if nemo_gym.server_utils._GLOBAL_AIOHTTP_CLIENT is not None:
+                await nemo_gym.server_utils._GLOBAL_AIOHTTP_CLIENT.close()
+            nemo_gym.server_utils._GLOBAL_AIOHTTP_CLIENT = None
+        assert 1.5 <= asyncio.get_running_loop().time() - started < 10
+        assert failure_cause_of(exc.value) == INFRA  # The rollout fails as infra.
+
+    async def test_the_time_cap_is_per_request_and_a_success_returns(self, monkeypatch: MonkeyPatch) -> None:
+        client = self._mock_global_client(monkeypatch, ClientOSError(), failures=4)
+
+        response = await nemo_gym.server_utils.request(
+            "POST", "http://flaky-host:1/v1", _max_connection_retry_seconds=60
+        )
+
+        assert response is client.success_response
+        assert "_max_connection_retry_seconds" not in client.request.call_args.kwargs
+
     async def test_request_connection_retries_unbounded_by_default(self, monkeypatch: MonkeyPatch) -> None:
         client = self._mock_global_client(monkeypatch, ClientOSError(), failures=4)
         response = await nemo_gym.server_utils.request("POST", "http://flaky-host:1/v1")

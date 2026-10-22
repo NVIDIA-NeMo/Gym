@@ -6467,6 +6467,42 @@ class TestSamplingOverrides:
         assert server._apply_sampling_overrides(body)["temperature"] == 1.0
 
 
+class TestDeadEndpointTimeCap:
+    """Evaluation: a policy endpoint that refuses every connection fails its requests within minutes."""
+
+    @staticmethod
+    def _server(monkeypatch, *, eval_mode: bool, **overrides) -> VLLMModel:
+        monkeypatch.setattr("responses_api_models.vllm_model.app.is_eval_mode", lambda: eval_mode)
+        config = VLLMModelConfig(
+            host="0.0.0.0",
+            port=8081,
+            base_url="http://dead-host:8712/v1",
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy_model",
+            entrypoint="",
+            name="policy_model",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            **overrides,
+        )
+        return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
+
+    def test_evaluation_caps_a_dead_endpoint_by_default(self, monkeypatch) -> None:
+        server = self._server(monkeypatch, eval_mode=True)
+
+        assert server._clients[0].max_connection_retry_seconds == 300.0
+
+    def test_the_cap_is_configurable(self, monkeypatch) -> None:
+        server = self._server(monkeypatch, eval_mode=True, endpoint_connection_retry_seconds=30.0)
+
+        assert server._clients[0].max_connection_retry_seconds == 30.0
+
+    def test_training_keeps_retrying(self, monkeypatch) -> None:
+        server = self._server(monkeypatch, eval_mode=False)
+
+        assert server._clients[0].max_connection_retry_seconds is None
+
+
 class TestEndpointFile:
     def _make_server(self, tmp_path, **overrides) -> VLLMModel:
         params = dict(

@@ -15,6 +15,7 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import orjson
+import pytest
 from pytest import approx, fixture
 
 from nemo_gym.base_resources_server import ReverifyMode
@@ -489,3 +490,48 @@ class TestSimpleQAGetKeyMetrics:
         key = server.get_key_metrics(agg)
         assert key["mean/input_tokens"] == 100.0
         assert key["mean/output_tokens"] == 200.0
+
+
+@pytest.mark.parametrize("eval_mode", [True, False], ids=["evaluation", "training"])
+async def test_an_answer_too_long_for_the_judge_is_the_models_final_zero(
+    monkeypatch: pytest.MonkeyPatch, eval_mode: bool
+) -> None:
+    """The judge input carries no documents, so a judge context overflow comes from the model's answer."""
+    monkeypatch.setattr("nemo_gym.judge.is_eval_mode", lambda: eval_mode)
+    from types import SimpleNamespace
+
+    from aiohttp import ClientResponseError
+
+    from nemo_gym.judge import judge_failsafe
+
+    config = SimpleQAConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="",
+        name="",
+        judge_model_server=ModelServerRef(type="responses_api_models", name="judge_model"),
+        judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+    )
+    body = b'{"error": {"message": "maximum context length exceeded", "code": "context_length_exceeded"}}'
+
+    def reject() -> None:
+        info = SimpleNamespace(method="POST", url="http://judge/v1", real_url="http://judge/v1", headers={})
+        raise ClientResponseError(request_info=info, history=(), status=400, message="Bad Request")
+
+    judge_reply = MagicMock(ok=False, status=400, raise_for_status=MagicMock(side_effect=reject))
+    judge_reply.read = AsyncMock(return_value=body)
+    judge_reply.content.read = AsyncMock(return_value=body)
+    server_mock = MagicMock(spec=ServerClient)
+    server_mock.post = AsyncMock(return_value=judge_reply)
+    server = SimpleQAServer(config=config, server_client=server_mock)
+    request = SimpleQAVerifyRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        response=_make_response("Pancreas " * 50_000),
+        question="What organ in the human body produces insulin?",
+        expected_answer="Pancreas",
+    )
+
+    row = orjson.loads((await judge_failsafe(server.verify)(request)).body)
+
+    expected = ("judge_input_too_long", 0.0, False) if eval_mode else ("judge_failed", 0.0, True)
+    assert (row["_ng_failure_class"], row["reward"], row["mask_sample"]) == expected

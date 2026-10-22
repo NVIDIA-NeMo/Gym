@@ -301,6 +301,8 @@ class UGPhysicsJudgeResourcesServer(LibraryJudgeMathResourcesServer):
             NeMoGymEasyInputMessage(role=msg["role"], content=msg["content"]) for msg in message_dicts
         ]
 
+        # The judge prompt is the grader template, the problem, the reference solution and answer, and the model's
+        # generation, with no documents, so a judge context overflow comes from the answer: the model's final 0.
         if self.config.use_chat_completions_for_judge:
             chat_params = NeMoGymChatCompletionCreateParamsNonStreaming(
                 messages=[{"role": msg["role"], "content": msg["content"]} for msg in message_dicts],
@@ -314,6 +316,7 @@ class UGPhysicsJudgeResourcesServer(LibraryJudgeMathResourcesServer):
                 url_path="/v1/chat/completions",
                 json=chat_params,
                 response_model=NeMoGymChatCompletion,
+                overflow_is_the_models=True,
             )
             content = chat_response.choices[0].message.content if chat_response.choices else None
             synthesized_response = NeMoGymResponse.model_validate(
@@ -354,6 +357,7 @@ class UGPhysicsJudgeResourcesServer(LibraryJudgeMathResourcesServer):
             url_path="/v1/responses",
             json=responses_create_params,
             response_model=NeMoGymResponse,
+            overflow_is_the_models=True,
         )
         judge_evaluation = JudgeEvaluation(responses_create_params=responses_create_params, response=judge_response)
 

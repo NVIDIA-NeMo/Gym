@@ -1,6 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# SWE-bench Pro scores an evaluation error as unresolved, so a persistent infra failure counts as 0 here.
+count_infra_unresolved_as_zero: true
+
 config_paths:
   - resources_servers/swebench_pro/configs/swebench_pro.yaml
   - responses_api_agents/hermes_agent/configs/hermes_agent.yaml

@@ -300,12 +300,14 @@ class FrontierScienceJudgeServer(SimpleResourcesServer):
             elif self.config.judge_mode == "olympiad":
                 chat_params_kwargs["top_p"] = 1.0
             chat_params = NeMoGymChatCompletionCreateParamsNonStreaming(**chat_params_kwargs)
+            # The judge sees the question, the reference or rubric and the model's last message, never documents.
             chat_response = await call_judge(
                 self.server_client,
                 server_name=self.config.judge_model_server.name,
                 url_path="/v1/chat/completions",
                 json=chat_params,
                 response_model=NeMoGymChatCompletion,
+                overflow_is_the_models=True,
             )
             content = chat_response.choices[0].message.content if chat_response.choices else None
             return content.strip() if content else ""
@@ -322,6 +324,7 @@ class FrontierScienceJudgeServer(SimpleResourcesServer):
             url_path="/v1/responses",
             json=request_params,
             response_model=NeMoGymResponse,
+            overflow_is_the_models=True,
         )
         return extract_text_from_response(judge_response)
 

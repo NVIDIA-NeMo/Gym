@@ -1,6 +1,10 @@
 # LMArena proxy v2 benchmark.
 judge_api_key: dummy  # pragma: allowlist secret
 
+# LMArena keeps a judge failure at the attempt cap out of the win rate but counts it against
+# max_rollout_failure_rate, so it must reach the metric.
+count_failure_classes_as_zero: [judge_failed]
+
 config_paths:
   - resources_servers/arena/configs/lmarena_v2.yaml
 

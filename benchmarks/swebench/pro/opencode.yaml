@@ -1,3 +1,6 @@
+# SWE-bench Pro scores an evaluation error as unresolved, so a persistent infra failure counts as 0 here.
+count_infra_unresolved_as_zero: true
+
 config_paths:
 - responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml
 - resources_servers/swebench_pro/configs/swebench_pro.yaml

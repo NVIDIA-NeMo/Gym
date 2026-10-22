@@ -125,12 +125,15 @@ class AalcrResourcesServer(SimpleResourcesServer):
         )
         judge_responses_create_params |= self.config.judge_responses_create_params_overrides
 
+        # The judge sees the question, the official answer and the model's answer, never the documents, so a judge
+        # context overflow comes from the answer: the model's final 0.
         judge_response = await call_judge(
             self.server_client,
             server_name=self.config.judge_model_server.name,
             url_path="/v1/responses",
             json=judge_responses_create_params,
             response_model=NeMoGymResponse,
+            overflow_is_the_models=True,
         )
         verdict = _parse_judge_verdict(judge_response.output_text, self.config.judge_protocol)
         if verdict == "CORRECT":
