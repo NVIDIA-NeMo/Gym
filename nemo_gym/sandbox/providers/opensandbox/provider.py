@@ -40,6 +40,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxExecResult,
     SandboxHandle,
     SandboxIOTimeoutError,
+    SandboxLostError,
     SandboxOOMKilledError,
     SandboxPtyError,
     SandboxPtySession,
@@ -2422,8 +2423,16 @@ class OpenSandboxProvider:
             if status is not None:
                 for field in ("running", "exit_code"):
                     if not hasattr(status, field):
-                        raise RuntimeError(f"OpenSandbox status has no {field!r} field; execution_id={execution_id!r}")
-                if not status.running:
+                        raise SandboxLostError(
+                            f"OpenSandbox status has no {field!r} field; "
+                            f"sandbox_id={handle.sandbox_id!r}, execution_id={execution_id!r}"
+                        )
+                if status.running is not True and status.running is not False:
+                    raise SandboxLostError(
+                        f"OpenSandbox background command has unknown running status; "
+                        f"sandbox_id={handle.sandbox_id!r}, execution_id={execution_id!r}"
+                    )
+                if status.running is False:
                     break
             if deadline is not None and loop.time() >= deadline:
                 raise TimeoutError(
@@ -2477,7 +2486,10 @@ class OpenSandboxProvider:
             return_code = 125
             error_type = "sandbox"
         else:
-            return_code = 0
+            raise SandboxLostError(
+                f"OpenSandbox background command finished without exit code or error; "
+                f"sandbox_id={handle.sandbox_id!r}, execution_id={execution_id!r}"
+            )
 
         return SandboxExecResult(stdout=stdout, stderr=stderr, return_code=return_code, error_type=error_type)
 

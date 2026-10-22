@@ -1844,8 +1844,45 @@ async def test_exec_background_rejects_status_missing_a_field(
         sandbox_id="sandbox-bg", provider_name="opensandbox", raw=SimpleNamespace(commands=FakeCommands())
     )
 
-    with pytest.raises(RuntimeError, match=missing):
+    with pytest.raises(opensandbox_provider.SandboxLostError, match=missing):
         await provider.exec(handle, "make build", timeout_s=30)
+
+
+@pytest.mark.parametrize(
+    ("status", "error_message", "expected_log_reads"),
+    [
+        (SimpleNamespace(running=None, exit_code=0, error=None), "unknown running status", 0),
+        (SimpleNamespace(running=False, exit_code=None, error=None), "without exit code or error", 1),
+    ],
+)
+@pytest.mark.asyncio
+async def test_exec_background_rejects_unknown_outcome_with_readable_logs(
+    monkeypatch: pytest.MonkeyPatch, status: Any, error_message: str, expected_log_reads: int
+) -> None:
+    """Readable output cannot establish success when the SDK omits a terminal outcome."""
+    commands = SimpleNamespace(
+        run=AsyncMock(return_value=SimpleNamespace(id="exec-42")),
+        get_command_status=AsyncMock(return_value=status),
+        get_background_command_logs=AsyncMock(return_value=SimpleNamespace(content="command output", cursor=None)),
+    )
+    monkeypatch.setattr(
+        opensandbox_provider, "_require_opensandbox_sdk", lambda: (object, object, dict, object, object)
+    )
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 5},
+        probe={"command": None},
+        operations={"background_exec": True, "background_poll_interval_s": 0.01},
+    )
+    handle = opensandbox_provider.SandboxHandle(
+        sandbox_id="sandbox-bg", provider_name="opensandbox", raw=SimpleNamespace(commands=commands)
+    )
+
+    with pytest.raises(opensandbox_provider.SandboxLostError, match=error_message):
+        await provider.exec(handle, "make build", timeout_s=30)
+
+    commands.run.assert_awaited_once()
+    commands.get_command_status.assert_awaited_once_with("exec-42")
+    assert commands.get_background_command_logs.await_count == expected_log_reads
 
 
 async def test_exec_hard_cap_labels_genuinely_wedged_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
