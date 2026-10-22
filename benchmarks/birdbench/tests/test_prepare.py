@@ -180,3 +180,23 @@ class TestPrepareSplit:
 
     def test_dev_output_name_is_unchanged(self):
         assert birdbench_prepare.output_fpath_for("sqlite").name == "birdbench_sqlite_benchmark.jsonl"
+
+
+class TestCli:
+    def test_flags_are_forwarded_to_prepare(self, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(birdbench_prepare, "prepare", lambda **kw: seen.update(kw))
+        birdbench_prepare.main(["--dialect", "spark", "--split", "train", "--no-evidence", "--dscp", "name,col_dscp"])
+        assert seen == {
+            "include_evidence": False,
+            "dscp": "name,col_dscp",
+            "dialect": "spark",
+            "split": "train",
+            "train_dir": None,
+        }
+
+    def test_defaults_are_dev_sqlite_with_evidence(self, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(birdbench_prepare, "prepare", lambda **kw: seen.update(kw))
+        birdbench_prepare.main([])
+        assert (seen["split"], seen["dialect"], seen["include_evidence"]) == ("dev", "sqlite", True)

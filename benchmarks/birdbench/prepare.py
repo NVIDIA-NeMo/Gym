@@ -34,6 +34,7 @@ server (avoids a duplicate ~1.4 GB download).
 Requires ``bm25s`` and ``nltk`` (``uv pip install bm25s nltk``, see benchmarks/birdbench/README.md), unlike a plain schema dump.
 """
 
+import argparse
 import json
 import shutil
 import sqlite3
@@ -222,5 +223,24 @@ def prepare(
     return output_fpath
 
 
+def main(argv: Optional[List[str]] = None) -> None:
+    parser = argparse.ArgumentParser(description="Prepare BIRD data: python -m benchmarks.birdbench.prepare")
+    parser.add_argument("--dialect", choices=DIALECTS, default="sqlite")
+    parser.add_argument("--split", choices=SPLITS, default="dev")
+    parser.add_argument(
+        "--train-dir", default=None, help="Extracted BIRD train/ dir. Default: downloaded on first use."
+    )
+    parser.add_argument("--dscp", default="name_or_col_dscp", help="See prepare()'s `dscp` argument")
+    parser.add_argument("--no-evidence", action="store_true", help="Do not prepend BIRD's `evidence` to the question")
+    args = parser.parse_args(argv)
+    prepare(
+        include_evidence=not args.no_evidence,
+        dscp=args.dscp,
+        dialect=args.dialect,
+        split=args.split,
+        train_dir=args.train_dir,
+    )
+
+
 if __name__ == "__main__":
-    prepare()
+    main()
