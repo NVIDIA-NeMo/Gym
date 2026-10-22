@@ -30,3 +30,11 @@ math_advanced_calculations_simple_agent:
         - name: example
           type: example
           jsonl_fpath: resources_servers/math_advanced_calculations/data/example.jsonl
+
+math_advanced_calculations_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: math_advanced_calculations_simple_agent

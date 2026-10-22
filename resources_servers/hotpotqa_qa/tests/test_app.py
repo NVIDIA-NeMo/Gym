@@ -581,6 +581,11 @@ class TestComputeMetricsFilteredAndUnfiltered:
         bad_task = [_verify_record(expected_answer="A B C", extracted_answer="x", gt_should_remove=True)]
         assert _task_should_remove(ok_task) is False
         assert _task_should_remove(bad_task) is True
+        # A row counted as zero for a rollout that never ran can come first and carries no flag.
+        assert _task_should_remove([{"reward": 0.0}, *bad_task]) is True
+        # When no rollout of the task ran, the flag comes from the row's expected_answer.
+        assert _task_should_remove([{"reward": 0.0, "expected_answer": "Joseph Robinette Biden"}]) is True
+        assert _task_should_remove([{"reward": 0.0, "expected_answer": "Paris"}]) is False
 
     def test_get_key_metrics_picks_highest_k(self) -> None:
         server = _make_server()

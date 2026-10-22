@@ -32,3 +32,11 @@ lc_niah_simple_agent:
       - name: example
         type: example
         jsonl_fpath: resources_servers/lc_niah/data/example.jsonl
+
+lc_niah_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: lc_niah_simple_agent

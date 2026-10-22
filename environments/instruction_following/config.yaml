@@ -28,3 +28,11 @@ instruction_following_simple_agent:
             repo_id: nvidia/Nemotron-RL-instruction_following
             artifact_fpath: instruction_following.jsonl
           license: Apache 2.0
+
+instruction_following_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: instruction_following_simple_agent

@@ -29,6 +29,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from pydantic import ValidationError
 
 from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.config_types import ModelServerRef
@@ -48,6 +49,9 @@ from resources_servers.finance_agent_v2.cached_tools import (
     CachedParseHtmlPage,
     CachedPriceHistory,
 )
+from resources_servers.finance_agent_v2.local_tools import LocalEDGARSearch, LocalParseHtmlPage, LocalPriceHistory
+from resources_servers.sec_local_index import local_edgar_search
+from resources_servers.sec_local_index.tests.index_fixtures import build_index
 
 
 _PROMPT_DIR = Path(__file__).resolve().parents[1] / "prompt_templates"
@@ -70,6 +74,7 @@ def _make_server(**overrides) -> FinanceAgentV2ResourcesServer:
         name="finance_agent_v2_test",
         tavily_api_key="dummy-tavily",  # pragma: allowlist secret
         sec_api_key="dummy-sec",  # pragma: allowlist secret
+        edgar_search_mode="live",
         pricing_data_api_key="dummy-tiingo",  # pragma: allowlist secret
         retrieval_model_server=ModelServerRef(type="responses_api_models", name="policy"),
         judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
@@ -318,11 +323,8 @@ class TestInitialization:
             assert server._tools.get(name) is not None, f"{name} should be available"
 
     def test_tools_unavailable_without_keys(self) -> None:
-        server = _make_server(
-            tavily_api_key=None, sec_api_key=None, pricing_data_api_key=None, retrieval_model_server=None
-        )
+        server = _make_server(tavily_api_key=None, pricing_data_api_key=None, retrieval_model_server=None)
         assert server._tools["web_search"] is None
-        assert server._tools["edgar_search"] is None
         assert server._tools["price_history"] is None
         assert server._tools["retrieve_information"] is None
         # No-key tools remain available.
@@ -358,6 +360,116 @@ class TestToolSurface:
         assert server._cache.enabled is True
         assert isinstance(server._tools["parse_html_page"], CachedParseHtmlPage)
         assert isinstance(server._tools["price_history"], CachedPriceHistory)
+
+
+# ============================================================================
+# edgar_search_mode
+# ============================================================================
+
+
+class TestEdgarSearchMode:
+    def test_the_mode_is_required(self) -> None:
+        with pytest.raises(ValidationError, match="edgar_search_mode"):
+            _make_server(edgar_search_mode=None)
+
+    def test_live_without_a_key_fails_at_startup(self) -> None:
+        with pytest.raises(ValueError, match="sec_api_key is not set"):
+            _make_server(edgar_search_mode="live", sec_api_key=None)
+
+    def test_local_does_not_need_a_key(self, tmp_path) -> None:
+        server = _make_server(
+            edgar_search_mode="local",
+            sec_api_key=None,
+            local_edgar_index_path=str(build_index(tmp_path / "index.sqlite")),
+        )
+
+        assert isinstance(server._tools["edgar_search"], LocalEDGARSearch)
+
+    def test_live_uses_sec_api(self) -> None:
+        server = _make_server(edgar_search_mode="live")
+
+        assert not isinstance(server._tools["edgar_search"], LocalEDGARSearch)
+        assert not isinstance(server._tools["parse_html_page"], LocalParseHtmlPage)
+
+    def test_local_uses_the_index(self, tmp_path) -> None:
+        server = _make_server(
+            edgar_search_mode="local", local_edgar_index_path=str(build_index(tmp_path / "index.sqlite"))
+        )
+
+        assert isinstance(server._tools["edgar_search"], LocalEDGARSearch)
+
+    def test_a_corpus_is_what_moves_filing_reads_off_the_network(self, tmp_path) -> None:
+        server = _make_server(
+            edgar_search_mode="local",
+            local_edgar_index_path=str(build_index(tmp_path / "index.sqlite")),
+            sec_dump_path=str(tmp_path / "corpus"),
+        )
+
+        assert isinstance(server._tools["parse_html_page"], LocalParseHtmlPage)
+
+    def test_live_wins_over_a_configured_index(self, tmp_path) -> None:
+        """Eval against sec-api.io while the training index stays configured."""
+        server = _make_server(
+            edgar_search_mode="live",
+            local_edgar_index_path=str(build_index(tmp_path / "index.sqlite")),
+        )
+
+        assert not isinstance(server._tools["edgar_search"], LocalEDGARSearch)
+
+    def test_local_without_an_index_fails_at_startup(self) -> None:
+        """Refused at boot rather than per search, which would surface as a
+        rollout of failed tool calls."""
+        with pytest.raises(ValueError, match="local_edgar_index_path is not set"):
+            _make_server(edgar_search_mode="local")
+
+    def test_an_unknown_mode_is_refused(self) -> None:
+        with pytest.raises(ValidationError, match="Input should be 'live' or 'local'"):
+            _make_server(edgar_search_mode="offline")
+
+    def test_an_index_needing_a_sidecar_fails_at_startup(self, tmp_path, monkeypatch) -> None:
+        """A tool registered as unavailable would let rollouts run and be scored
+        without edgar_search, so this has to fail the whole server instead."""
+        monkeypatch.setattr(local_edgar_search, "SLOW_METADATA_LIMIT_BYTES", 1)
+
+        with pytest.raises(ValidationError, match="no metadata sidecar"):
+            _make_server(edgar_search_mode="local", local_edgar_index_path=str(build_index(tmp_path / "index.sqlite")))
+
+
+# ============================================================================
+# price_history_mode
+# ============================================================================
+
+
+class TestPriceHistoryMode:
+    def test_live_is_the_default(self) -> None:
+        server = _make_server()
+
+        assert not isinstance(server._tools["price_history"], LocalPriceHistory)
+
+    def test_local_does_not_need_a_key(self, tmp_path) -> None:
+        (tmp_path / "equity").mkdir()
+        server = _make_server(price_history_mode="local", local_pricing_dir=str(tmp_path), pricing_data_api_key=None)
+
+        assert isinstance(server._tools["price_history"], LocalPriceHistory)
+
+    def test_local_wins_over_the_cache(self, tmp_path) -> None:
+        (tmp_path / "prices" / "equity").mkdir(parents=True)
+        server = _make_server(
+            price_history_mode="local",
+            local_pricing_dir=str(tmp_path / "prices"),
+            use_cache=True,
+            cache_dir=str(tmp_path / "cache"),
+        )
+
+        assert isinstance(server._tools["price_history"], LocalPriceHistory)
+
+    def test_local_without_a_directory_fails_at_startup(self) -> None:
+        with pytest.raises(ValueError, match="local_pricing_dir is not set"):
+            _make_server(price_history_mode="local")
+
+    def test_local_with_a_missing_directory_fails_at_startup(self, tmp_path) -> None:
+        with pytest.raises(ValueError, match="does not exist"):
+            _make_server(price_history_mode="local", local_pricing_dir=str(tmp_path / "missing"))
 
 
 # ============================================================================
@@ -1087,6 +1199,14 @@ class TestAggregateMetrics:
         assert metrics["rubric/rollouts_without_submission"] == 1
         assert metrics["mean/rubric_partial_credit"] == 0.5
         assert metrics["mean/rubric_all_pass"] == 0.5
+
+    def test_repeat_metrics_include_legacy_give_up_as_zero(self) -> None:
+        give_up = {"reward": 0.0, "rubric_judgements": None, "judge_error": None}
+        metrics = _make_server().compute_repeat_metrics([[self._rollout()], [give_up]])
+
+        assert metrics["mean/rubric_fraction"] == 0.5
+        assert metrics["mean/rubric_partial_credit"] == 0.5
+        assert "rubric/rollouts" not in metrics
 
     def test_judge_errors_stay_out_of_the_means_that_give_ups_join(self) -> None:
         """A give-up is a model result and scores zero; a judge failure is not, and

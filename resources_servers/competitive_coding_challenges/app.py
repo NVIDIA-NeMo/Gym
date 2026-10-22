@@ -90,6 +90,10 @@ class CompetitiveCodingChallengesResourcesServerConfig(BaseResourcesServerConfig
 
 
 class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
+    # Each submission is evaluated on its own: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     config: CompetitiveCodingChallengesResourcesServerConfig
 
     _evaluator: Optional[CCCEvaluator] = PrivateAttr(default=None)
@@ -280,7 +284,7 @@ class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
         if os.path.abspath(self.config.shared_dir) == "/tmp":
             LOG.warning(
                 "CCC shared_dir is /tmp. If the resources server and sandbox run in separate containers, "
-                "/tmp may not be visible to both. Set SHARED_TEMP_DIR to a path mounted into both containers."
+                "/tmp may not be visible to both. Set CCC_SHARED_TEMP_DIR to a path mounted into both containers."
             )
 
         print(

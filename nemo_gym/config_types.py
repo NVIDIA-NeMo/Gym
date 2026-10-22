@@ -14,6 +14,7 @@
 # limitations under the License.
 import warnings
 from argparse import ArgumentParser
+from collections.abc import Mapping
 from enum import Enum
 from pathlib import Path
 from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional, Set, Tuple, Union
@@ -26,6 +27,7 @@ from pydantic import (
     Field,
     TypeAdapter,
     ValidationError,
+    model_serializer,
     model_validator,
 )
 from pydantic_core import PydanticUndefined
@@ -126,7 +128,12 @@ class AgentServerRef(BaseModel):
     name: str
 
 
-ServerRef = Union[ModelServerRef, ResourcesServerRef, AgentServerRef]
+class EnvironmentServerRef(BaseModel):
+    type: Literal["environment_servers"]
+    name: str
+
+
+ServerRef = ModelServerRef | ResourcesServerRef | AgentServerRef | EnvironmentServerRef
 ServerRefTypeAdapter = TypeAdapter(ServerRef)
 
 
@@ -155,6 +162,10 @@ class MalformedConfigPathsError(ConfigError, ValueError):
     """`config_paths` was not a list of paths (e.g. a scalar string was passed)."""
 
 
+class HeadServerConfigMalformedError(ConfigError, ValueError):
+    """`head_server` is not a mapping, or a field has the wrong type (e.g. a non-integer `port` from a `++head_server.port=` override)."""
+
+
 class NoServerInstancesError(ConfigError, ValueError):
     """A run was requested but the merged config defines no server instances to start."""
 
@@ -180,6 +191,18 @@ class AlmostServerError(ConfigError, ValueError):
     `error_on_almost_servers` is set, so the run is aborted."""
 
 
+class AgentWithoutEnvironmentServerError(ConfigError, ValueError):
+    """An agent instance has no environment server."""
+
+
+class AmbiguousEnvironmentServerError(ConfigError, ValueError):
+    """Rows route by an agent that more than one environment server fronts."""
+
+
+class AmbiguousAgentRenameError(ConfigError, ValueError):
+    """An environment server references an agent inherited by several new instances."""
+
+
 class AgentCompositionError(ConfigError, ValueError):
     """A standalone agent config could not be composed onto the merged config's agent instances."""
 
@@ -194,6 +217,16 @@ class UnsupportedModelPairingError(ConfigError, ValueError):
 
 class UnsupportedAgentOverrideError(ConfigError, ValueError):
     """A command line override configures an agent that no instance ends up running."""
+
+
+class HeadServerUnreachableError(ConfigError, ValueError):
+    """Nothing answered at the configured head server address, so the merged config could not be fetched
+    from it (the head server is not running, or `head_server.host` / `head_server.port` point elsewhere)."""
+
+
+class PromptConfigMalformedError(ConfigError, ValueError):
+    """A prompt config file is not valid YAML, or is not a mapping with a `user` template (and an optional `system`
+    one)."""
 
 
 ########################################
@@ -444,6 +477,13 @@ class DatasetConfig(BaseModel):
     name: str
     type: DatasetType
     jsonl_fpath: str
+    prepare_script: Optional[Path] = None
+    prepare_dependencies: List[str] = Field(default_factory=list)
+    taskset: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        description="Taskset identifier used to materialize and route this dataset's tasks to an Environment Server.",
+    )
 
     num_repeats: int = Field(default=1, ge=1)
     # Unified, self-describing dataset source. Prefer this over the legacy *_identifier fields below.
@@ -457,6 +497,7 @@ class DatasetConfig(BaseModel):
             Literal["MIT"],
             Literal["Creative Commons Attribution 4.0 International"],
             Literal["Creative Commons Attribution-ShareAlike 4.0 International"],
+            Literal["CC-BY-SA-4.0 AND LicenseRef-OpenMDW-1.1"],
             Literal["CC BY-SA 4.0"],
             Literal["CC BY-NC 3.0"],
             Literal["NVIDIA Internal Use Only, Do Not Distribute"],
@@ -465,6 +506,15 @@ class DatasetConfig(BaseModel):
             Literal["GNU General Public License v3.0"],
         ]
     ] = None
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_preparation_fields(self, handler: Any) -> dict[str, Any]:
+        data = handler(self)
+        if self.prepare_script is None:
+            data.pop("prepare_script", None)
+        if not self.prepare_dependencies:
+            data.pop("prepare_dependencies", None)
+        return data
 
     @model_validator(mode="after")
     def check_train_validation_sets(self) -> "DatasetConfig":
@@ -535,8 +585,17 @@ class BenchmarkDatasetConfig(BaseModel):
     type: Literal["benchmark"]
     jsonl_fpath: Path
     prepare_script: Path
+    taskset: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        description="Taskset identifier used to materialize and route this dataset's tasks to an Environment Server.",
+    )
     prompt_config: Optional[Path] = None
     num_repeats: int = Field(default=1, ge=1)
+    # `uv pip install` arguments the prepare script needs, installed before it is
+    # imported. Without this a benchmark whose prepare pulls something Gym does
+    # not otherwise depend on has to shell out to pip mid-prepare to get it.
+    prepare_dependencies: List[str] = Field(default_factory=list)
     agent: Optional[str] = Field(
         default=None,
         description=(
@@ -544,7 +603,8 @@ class BenchmarkDatasetConfig(BaseModel):
             "Only needed when the config is ambiguous: the dataset is declared on a resources "
             "server that several agents reference. The pin must name one of those agents — rows "
             "are dispatched along the agent -> resources server edge, so any other value is a "
-            "config error. Unambiguous configs resolve without it."
+            "config error. Unambiguous configs resolve without it. A dataset that declares `taskset` "
+            "routes to an Environment Server, not an agent, and cannot set it."
         ),
     )
 
@@ -625,6 +685,7 @@ class BaseServerTypeConfig(BaseModel):
             Literal["responses_api_models"],
             Literal["resources_servers"],
             Literal["responses_api_agents"],
+            Literal["environment_servers"],
         ]
     ]
 
@@ -653,10 +714,19 @@ class ResponsesAPIAgentServerTypeConfig(BaseServerTypeConfig):
     responses_api_agents: Dict[str, BaseRunServerTypeConfig] = Field(min_length=1, max_length=1)
 
 
+class EnvironmentServerTypeConfig(BaseServerTypeConfig):
+    SERVER_TYPE: ClassVar[Literal["environment_servers"]] = "environment_servers"
+
+    model_config = ConfigDict(extra="allow")
+
+    environment_servers: dict[str, BaseRunServerTypeConfig] = Field(min_length=1, max_length=1)
+
+
 ServerTypeConfig = Union[
     ResponsesAPIModelServerTypeConfig,
     ResourcesServerTypeConfig,
     ResponsesAPIAgentServerTypeConfig,
+    EnvironmentServerTypeConfig,
 ]
 
 
@@ -704,10 +774,15 @@ class ResponsesAPIAgentServerInstanceConfig(ResponsesAPIAgentServerTypeConfig, B
     pass
 
 
+class EnvironmentServerInstanceConfig(EnvironmentServerTypeConfig, BaseServerInstanceConfig):
+    pass
+
+
 ServerInstanceConfig = Union[
     ResponsesAPIModelServerInstanceConfig,
     ResourcesServerInstanceConfig,
     ResponsesAPIAgentServerInstanceConfig,
+    EnvironmentServerInstanceConfig,
 ]
 ServerInstanceConfigTypeAdapter = TypeAdapter(ServerInstanceConfig)
 
@@ -733,20 +808,19 @@ def maybe_get_server_instance_config(
 
 def is_almost_server(server_type_config_dict: Any) -> bool:
     """Detects if a config looks like a server but might fail validation."""
-    from nemo_gym.global_config import ENTRYPOINT_KEY_NAME
+    from nemo_gym.global_config import ENTRYPOINT_KEY_NAME, SERVER_TYPE_KEYS
 
     if not isinstance(server_type_config_dict, DictConfig):
         return False
 
     # Check for server type.
-    server_type_keys = ["responses_api_models", "resources_servers", "responses_api_agents"]
-    has_server_type = any(key in server_type_config_dict for key in server_type_keys)
+    has_server_type = any(key in server_type_config_dict for key in SERVER_TYPE_KEYS)
 
     if not has_server_type:
         return False
 
     # Check for entrypoint presence.
-    for server_type_key in server_type_keys:
+    for server_type_key in SERVER_TYPE_KEYS:
         if server_type_key in server_type_config_dict:
             inner_dict = server_type_config_dict[server_type_key]
             if isinstance(inner_dict, DictConfig):
@@ -781,6 +855,28 @@ class ExporterConfig(BaseModel):
     def is_available(self) -> bool:
         """Whether every field the backend needs to connect is set."""
         raise NotImplementedError
+
+
+REMOVED_ROLLOUT_OPTIONS = {
+    "retry_invalid_judge_responses": (
+        "A verifier that cannot produce a usable judgement now returns a `judge_failed` row; recover those "
+        "with `gym eval reverify --judge-failed-only`."
+    ),
+}
+
+
+class RemovedRolloutOptionsMixin(BaseModel):
+    """Reject rollout options that no longer exist, which pydantic would otherwise drop without a word."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_removed_rollout_options(cls, data):
+        # The CLI passes an OmegaConf DictConfig, which is a Mapping but not a dict.
+        if isinstance(data, Mapping):
+            for name, hint in REMOVED_ROLLOUT_OPTIONS.items():
+                if name in data:
+                    raise ConfigError(f"`{name}` was removed. {hint}")
+        return data
 
 
 DEPRECATED_UPLOAD_ROLLOUTS_KEY = "upload_rollouts_to_wandb"
@@ -838,6 +934,8 @@ class MLFlowConfig(ExporterConfig):
     mlflow_tracking_token: Optional[str] = None
     mlflow_experiment_name: Optional[str] = None
     mlflow_run_name: Optional[str] = None
+    mlflow_run_description: Optional[str] = None
+    mlflow_run_tags: Dict[str, str] = Field(default_factory=dict)
 
     @property
     def is_available(self) -> bool:

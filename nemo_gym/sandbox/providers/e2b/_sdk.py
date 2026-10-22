@@ -39,21 +39,15 @@ def _configure_async_http() -> None:
     import httpx
     from e2b.api import client_async
     from e2b.sandbox_async import main as sandbox_async
-    from httpx_aiohttp import AiohttpTransport
 
-    from nemo_gym.server_utils import get_global_aiohttp_client
-
-    class E2BAiohttpTransport(AiohttpTransport):
-        async def aclose(self) -> None:
-            # The shared session is owned and closed by server_utils.
-            return None
+    from nemo_gym.sandbox.providers._http_transport import GymAiohttpTransport
 
     def build_transport(
         config: Any,
         http2: bool = True,
         *,
         for_streaming: bool = False,
-    ) -> E2BAiohttpTransport:
+    ) -> GymAiohttpTransport:
         # aiohttp speaks HTTP/1.1; the E2B endpoints support it. Streamed and
         # regular requests share Gym's globally configured connection pool.
         del http2, for_streaming
@@ -62,11 +56,9 @@ def _configure_async_http() -> None:
             proxy_url = str(proxy.url if isinstance(proxy, httpx.Proxy) else proxy)
             if urlsplit(proxy_url).scheme.lower() not in {"http", "https"}:
                 raise ValueError("The E2B aiohttp integration requires an HTTP or HTTPS proxy URL")
-            proxy = httpx.Proxy(proxy_url)
-        return E2BAiohttpTransport(
-            client=get_global_aiohttp_client,
-            proxy=proxy,
-        )
+            if not isinstance(proxy, httpx.Proxy):
+                proxy = httpx.Proxy(proxy_url)
+        return GymAiohttpTransport(proxy=proxy)
 
     client_async.get_transport = build_transport
     client_async.get_envd_transport = build_transport

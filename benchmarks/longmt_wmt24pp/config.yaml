@@ -18,3 +18,11 @@ longmt_wmt24pp_agent:
         prepare_script: benchmarks/longmt_wmt24pp/prepare.py
         num_repeats: 5
         license: Creative Commons Attribution-ShareAlike 4.0 International
+
+longmt_wmt24pp_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: longmt_wmt24pp_agent

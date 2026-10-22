@@ -19,6 +19,7 @@ and the Chat Completions API format. It is used by model servers that need to
 convert between the two formats (e.g. vllm_model, inference_provider).
 """
 
+import logging
 import re
 from typing import Any, ClassVar, Dict, List, Optional, Tuple
 from uuid import uuid4
@@ -63,7 +64,23 @@ from nemo_gym.openai_utils import (
 )
 
 
-def _message_content_to_text(content: Any) -> str:
+logger = logging.getLogger(__name__)
+
+# Chat tool messages carry text only; with `drop_unrepresentable_request_fields` an image a tool
+# returned becomes this text instead of failing the conversion. The wording is neutral on purpose:
+# it replaces part of the prompt, and it must not teach the model anything about its own inputs.
+_IMAGE_OUTPUT_PLACEHOLDER = "[image omitted from tool output]"
+
+# Responses reasoning fields that only select what the provider reports back (a reasoning
+# summary, under its current and its deprecated name), so a Chat Completions backend answers the
+# request faithfully without them. With `drop_unrepresentable_request_fields` these are removed
+# from the request rather than refused. `reasoning.context` is not among them: it tells the
+# provider which earlier reasoning items to render back to the model, which the conversion cannot
+# honor (it renders every item and leaves the rest to the chat template), so it stays refused.
+_REPORTING_ONLY_REASONING_FIELDS = ("summary", "generate_summary")
+
+
+def message_content_to_text(content: Any) -> str:
     """Plain text of a chat message content (a string, or a list of text parts)."""
     if isinstance(content, str):
         return content
@@ -142,6 +159,50 @@ def _token_information_from_mapping(value: Dict[str, Any]) -> Optional[TokenIDLo
     return TokenIDLogProbMixin.model_validate(value)
 
 
+def _chat_logprobs_to_responses(logprobs: Any) -> Optional[List[Dict[str, Any]]]:
+    """Chat choice logprobs in the shape ``ResponseOutputText.logprobs`` expects.
+
+    Same field names on both sides; the Responses models require ``bytes`` to be
+    iterable where chat allows null.
+    """
+    content = getattr(logprobs, "content", None)
+    if not content:
+        return None
+
+    def _one(entry: Any) -> Dict[str, Any]:
+        out = entry.model_dump()
+        out["bytes"] = out.get("bytes") or []
+        out["top_logprobs"] = [{**alt, "bytes": alt.get("bytes") or []} for alt in (out.get("top_logprobs") or [])]
+        return out
+
+    return [_one(entry) for entry in content]
+
+
+def _align_logprobs_to_text(
+    logprobs: Optional[List[Dict[str, Any]]], original: str, removed: List[Tuple[int, int]]
+) -> Optional[List[Dict[str, Any]]]:
+    """Keep the token entries that survive removing the ``removed`` character spans.
+
+    Reasoning extraction shortens the output text; its logprobs must shrink with it or
+    they describe different text. The kept positions come from the removal itself, never
+    from searching for the answer text, which may also occur inside the reasoning. If the
+    tokens do not reconstruct ``original`` the alignment is unknowable and the logprobs
+    are dropped rather than misattributed.
+    """
+    if not logprobs or not removed:
+        return logprobs
+    if "".join(e.get("token") or "" for e in logprobs) != original:
+        return None
+    kept, offset = [], 0
+    for entry in logprobs:
+        token_end = offset + len(entry.get("token") or "")
+        inside_removed = any(start <= offset and token_end <= end for start, end in removed)
+        if token_end > offset and not inside_removed:
+            kept.append(entry)
+        offset = token_end
+    return kept or None
+
+
 class ResponsesConverter(BaseModel):
     """Converts between OpenAI Responses API and Chat Completions API formats."""
 
@@ -167,8 +228,38 @@ class ResponsesConverter(BaseModel):
     def responses_to_chat_completion_create_params(
         self,
         responses_create_params: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        drop_unrepresentable_request_fields: bool = False,
     ) -> NeMoGymChatCompletionCreateParamsNonStreaming:
+        """Convert Responses create params into Chat Completions create params.
+
+        A Responses field with no Chat Completions representation raises ``NotImplementedError``,
+        so the caller can route the request to a server that serves Responses natively. With
+        ``drop_unrepresentable_request_fields`` the reporting-only fields are removed from the
+        request instead and the conversion proceeds: a non-empty ``include`` (every value; an
+        empty one is already treated as absent), ``reasoning.summary`` and
+        ``reasoning.generate_summary``, and a message ``phase``. An image part in a tool's output
+        becomes the text placeholder ``_IMAGE_OUTPUT_PLACEHOLDER``, which does replace that part
+        of the prompt. Every other unrepresentable field, ``reasoning.context`` included, is still
+        refused.
+        """
         responses_create_params = responses_create_params.model_dump(exclude_none=True, exclude_unset=True)
+        if responses_create_params.get("include") == []:
+            del responses_create_params["include"]
+
+        # Codex serializes include=[] even when no additional fields are requested.
+        # Only the empty list is equivalent to omission; nonempty includes still require Responses.
+        if responses_create_params.get("include") == []:
+            responses_create_params.pop("include")
+
+        # `include` selects extra fields on the response object (for example
+        # `reasoning.encrypted_content`); it does not change what the model generates.
+        if drop_unrepresentable_request_fields:
+            dropped_include = responses_create_params.pop("include", None)
+            if dropped_include:
+                logger.debug(
+                    "Dropping Responses `include` %r: a chat backend returns no such fields.", dropped_include
+                )
 
         unsupported_fields = sorted(
             {
@@ -214,13 +305,17 @@ class ResponsesConverter(BaseModel):
 
             match m["type"]:
                 case "message":
-                    self._format_message(m, state)
+                    self._format_message(
+                        m, state, drop_unrepresentable_request_fields=drop_unrepresentable_request_fields
+                    )
                 case "reasoning":
                     self._format_reasoning(m, state)
                 case "function_call":
                     self._format_function_call(m, state)
                 case "function_call_output":
-                    self._format_function_call_output(m, state)
+                    self._format_function_call_output(
+                        m, state, drop_unrepresentable_request_fields=drop_unrepresentable_request_fields
+                    )
                 case _:
                     # This fires mid-rollout, on whichever model server downconverts.
                     # Most types that reach it are Responses-only by design.
@@ -251,7 +346,7 @@ class ResponsesConverter(BaseModel):
         if instructions:
             leading_parts = [instructions]
             while state.messages and state.messages[0]["role"] in ("system", "developer"):
-                leading_parts.append(_message_content_to_text(state.messages.pop(0)["content"]))
+                leading_parts.append(message_content_to_text(state.messages.pop(0)["content"]))
             state.messages.insert(
                 0,
                 NeMoGymChatCompletionSystemMessageParam(content="\n\n".join(leading_parts), role="system"),
@@ -267,8 +362,22 @@ class ResponsesConverter(BaseModel):
 
         reasoning = responses_create_params.pop("reasoning", None)
         if reasoning is not None:
+            # A chat completion carries only the effort. The summary fields select what the provider
+            # reports back and are dropped when configured; `context` is an instruction about the
+            # prompt and is refused like every other unrepresentable field.
+            representable_fields = {"effort"}
+            if drop_unrepresentable_request_fields:
+                representable_fields.update(_REPORTING_ONLY_REASONING_FIELDS)
+                dropped_reasoning_fields = [
+                    field for field in _REPORTING_ONLY_REASONING_FIELDS if reasoning.get(field) is not None
+                ]
+                if dropped_reasoning_fields:
+                    logger.debug(
+                        "Dropping Responses reasoning field(s) %s: chat completions carry only the effort.",
+                        dropped_reasoning_fields,
+                    )
             unsupported_reasoning_fields = sorted(
-                field for field, value in reasoning.items() if field != "effort" and value is not None
+                field for field, value in reasoning.items() if field not in representable_fields and value is not None
             )
             if unsupported_reasoning_fields:
                 raise NotImplementedError(
@@ -280,8 +389,22 @@ class ResponsesConverter(BaseModel):
 
         text = responses_create_params.pop("text", None)
         if text is not None:
-            if text.get("format") is not None:
-                raise NotImplementedError("Responses text format has no implemented Chat Completions conversion.")
+            text_format = text.get("format")
+            if text_format is not None:
+                format_type = text_format.get("type")
+                if format_type == "json_schema":
+                    json_schema = {"name": text_format["name"], "schema": text_format["schema"]}
+                    for key in ("strict", "description"):
+                        if text_format.get(key) is not None:
+                            json_schema[key] = text_format[key]
+                    responses_create_params["response_format"] = {
+                        "type": "json_schema",
+                        "json_schema": json_schema,
+                    }
+                elif format_type == "json_object":
+                    responses_create_params["response_format"] = {"type": "json_object"}
+                elif format_type != "text":
+                    raise NotImplementedError(f"Unsupported Responses text format type {format_type!r}.")
             if text.get("verbosity") is not None:
                 responses_create_params["verbosity"] = text["verbosity"]
 
@@ -334,6 +457,8 @@ class ResponsesConverter(BaseModel):
         self,
         m: dict,
         state: ResponsesConverterState,
+        *,
+        drop_unrepresentable_request_fields: bool = False,
     ) -> None:
         state.flush_assistant()
 
@@ -342,8 +467,14 @@ class ResponsesConverter(BaseModel):
         if isinstance(output, str):
             content = output
         elif isinstance(output, list):
+            # Chat tool messages carry text only, so every other part type fails the conversion.
+            # An image part is the one exception `drop_unrepresentable_request_fields` covers: the
+            # text placeholder keeps the position of the image in the tool's output.
+            representable_types = {"input_text"}
+            if drop_unrepresentable_request_fields:
+                representable_types.add("input_image")
             unsupported_types = sorted(
-                {part.get("type", "<missing>") for part in output if part.get("type") != "input_text"}
+                {part.get("type", "<missing>") for part in output if part.get("type") not in representable_types}
             )
             if unsupported_types:
                 raise NotImplementedError(
@@ -352,7 +483,19 @@ class ResponsesConverter(BaseModel):
                     "Chat tool messages cannot represent content part type(s) "
                     f"{', '.join(repr(part_type) for part_type in unsupported_types)}"
                 )
-            content = [{"type": "text", "text": part["text"]} for part in output]
+            if any(part["type"] == "input_image" for part in output):
+                # Debug, like the other drops: the conversion re-converts the whole transcript on
+                # every later turn, so one returned image would otherwise warn on every turn after it.
+                logger.debug(
+                    "Rendering the image output of call %r as a text placeholder: chat tool messages carry text only.",
+                    m["call_id"],
+                )
+            content = [
+                {"type": "text", "text": part["text"]}
+                if part["type"] == "input_text"
+                else {"type": "text", "text": _IMAGE_OUTPUT_PLACEHOLDER}
+                for part in output
+            ]
         else:  # pragma: no cover - guarded by NeMoGymFunctionCallOutput validation
             raise TypeError(
                 "Responses function_call_output must be a string or a list of structured content parts, "
@@ -370,11 +513,17 @@ class ResponsesConverter(BaseModel):
         self,
         m: dict,
         state: ResponsesConverterState,
+        *,
+        drop_unrepresentable_request_fields: bool = False,
     ) -> None:
         # Tool-call-only assistant turns may omit `content` entirely, not just null it.
         content = m.get("content")
+        # A message `phase` labels the message rather than changing its content, and Chat
+        # Completions messages have no field for it.
         if m.get("phase") is not None:
-            raise NotImplementedError("Responses message phase has no Chat Completions representation.")
+            if not drop_unrepresentable_request_fields:
+                raise NotImplementedError("Responses message phase has no Chat Completions representation.")
+            logger.debug("Dropping Responses message phase %r: chat messages carry no such label.", m["phase"])
 
         if isinstance(content, list) and m["role"] != "assistant":
             converted_parts = []
@@ -507,6 +656,11 @@ class ResponsesConverter(BaseModel):
         See: https://docs.nvidia.com/nemo/gym/main/infrastructure/engineering-notes/responses-api-evolution
         for background on reasoning in the Responses API.
         """
+        if m.get("encrypted_content") or m.get("content"):
+            raise NotImplementedError(
+                "Responses reasoning content/encrypted_content cannot be preserved by this Chat Completions "
+                "conversion; route the request to a model server that passes Responses through."
+            )
         state.assistant_item_buffered = True
         if "summary" in m and m["summary"]:
             texts = [s["text"] for s in m["summary"]]
@@ -657,15 +811,24 @@ class ResponsesConverter(BaseModel):
     # =======================================================
 
     def postprocess_chat_response(self, choice: NeMoGymChoice) -> List[NeMoGymResponseOutputItem]:
-        return self.postprocess_assistant_message_dict(choice.message.model_dump(exclude_none=True))
+        return self.postprocess_assistant_message_dict(
+            choice.message.model_dump(exclude_none=True),
+            logprobs=_chat_logprobs_to_responses(choice.logprobs),
+        )
 
-    def postprocess_assistant_message_dict(self, message_dict: Dict[str, Any]) -> List[NeMoGymResponseOutputItem]:
+    def postprocess_assistant_message_dict(
+        self, message_dict: Dict[str, Any], *, logprobs: Any = None
+    ) -> List[NeMoGymResponseOutputItem]:
         response_output = []
 
         content = message_dict.get("content") or ""
         refusal = message_dict.get("refusal") or ""
         if self.uses_reasoning_parser:
             reasoning_matches, content = self._extract_reasoning_from_content(content)
+            if reasoning_matches:
+                original = message_dict.get("content") or ""
+                removed = [m.span() for m in self.THINK_TAG_PATTERN.finditer(original)]
+                logprobs = _align_logprobs_to_text(logprobs, original, removed)
         else:
             reasoning_matches = []
         if reasoning_matches:
@@ -690,6 +853,7 @@ class ResponsesConverter(BaseModel):
                         type="output_text",
                         text=content,
                         annotations=[],
+                        logprobs=logprobs,
                     )
                 )
             if refusal:
@@ -736,6 +900,14 @@ class ResponsesConverter(BaseModel):
     def _extract_reasoning_from_content(self, content: str) -> Tuple[List[str], str]:
         return self._parse_think_tags(content)
 
+    @staticmethod
+    def _chat_tool_content_part_to_responses(part: Dict[str, Any]) -> Dict[str, Any]:
+        """A Chat tool message's text or image part as the matching ``function_call_output`` part."""
+        if part["type"] == "image_url":
+            image_url = part["image_url"]
+            return {"type": "input_image", "image_url": image_url["url"], "detail": image_url.get("detail", "auto")}
+        return {"type": "input_text", "text": part["text"]}
+
     def chat_completions_messages_to_responses_items(
         self, messages: List[Dict[str, Any]]
     ) -> List[NeMoGymResponseOutputItem]:
@@ -752,7 +924,7 @@ class ResponsesConverter(BaseModel):
             elif role == "tool":
                 content = message["content"]
                 if isinstance(content, list):
-                    content = [{"type": "input_text", "text": part["text"]} for part in content]
+                    content = [self._chat_tool_content_part_to_responses(part) for part in content]
                 output_items.append(
                     NeMoGymFunctionCallOutput(
                         call_id=message["tool_call_id"],
@@ -841,7 +1013,7 @@ class ResponsesConverter(BaseModel):
             previous_response_id=responses_create_params.previous_response_id,
             prompt=responses_create_params.prompt,
             reasoning=responses_create_params.reasoning,
-            service_tier=responses_create_params.service_tier,
+            service_tier=chat_completion.service_tier or responses_create_params.service_tier,
             text=responses_create_params.text,
             top_logprobs=responses_create_params.top_logprobs,
             truncation=responses_create_params.truncation,
@@ -851,6 +1023,7 @@ class ResponsesConverter(BaseModel):
             status="incomplete" if incomplete_details is not None else "completed",
             incomplete_details=incomplete_details,
             usage=usage,
+            metrics=chat_completion.metrics,
             **provider_metadata,
         )
 

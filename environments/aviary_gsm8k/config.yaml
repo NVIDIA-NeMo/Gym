@@ -30,3 +30,11 @@ gsm8k_aviary_agent:
       - name: example
         type: example
         jsonl_fpath: environments/aviary_gsm8k/data/example.jsonl
+
+gsm8k_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: gsm8k_aviary_agent

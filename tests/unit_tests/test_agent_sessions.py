@@ -1,0 +1,144 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+import asyncio
+from unittest.mock import MagicMock
+
+import pytest
+from pydantic import ValidationError
+
+from nemo_gym.base_responses_api_agent import (
+    AgentCloseSessionRequest,
+    AgentCloseSessionResponse,
+    AgentSeedSessionRequest,
+    AgentSeedSessionResponse,
+    AgentSessionState,
+    SimpleResponsesAPIAgent,
+)
+from nemo_gym.episode_types import EpisodeId, TaskId
+from nemo_gym.rollout_observability import TrajectoryRecord, TrajectoryTurn
+from nemo_gym.tool_access import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
+
+
+class _Agent(SimpleResponsesAPIAgent):
+    async def responses(self, body):
+        raise NotImplementedError
+
+    async def run(self, body):
+        raise NotImplementedError
+
+
+def _seed_request(*, tool_accesses=None) -> AgentSeedSessionRequest:
+    return AgentSeedSessionRequest(
+        agent_session_id="agent-session",
+        episode_id=EpisodeId(rollout_id="rollout", attempt=2),
+        task_id=TaskId(taskset="test", task_id="task"),
+        tool_accesses=tool_accesses or [],
+    )
+
+
+def test_agent_session_rejects_duplicate_tool_names() -> None:
+    duplicate = [
+        MCPToolAccess(
+            name="tools",
+            required=True,
+            connection=MCPStreamableHTTPConnection(url="http://resources:8000/mcp"),
+        ),
+        DirectHTTPToolAccess(
+            name="tools",
+            required=False,
+            base_url="http://resources:8000",
+        ),
+    ]
+
+    with pytest.raises(ValidationError, match="names must be unique"):
+        _seed_request(tool_accesses=duplicate)
+
+
+def test_episode_tool_access_overrides_configured_access_by_name() -> None:
+    configured = DirectHTTPToolAccess(
+        name="memory",
+        required=True,
+        base_url="http://configured:8000",
+    )
+    episode = MCPToolAccess(
+        name="memory",
+        required=True,
+        connection=MCPStreamableHTTPConnection(url="http://episode:8000/mcp"),
+    )
+    agent = _Agent.model_construct(
+        config=MagicMock(tool_accesses=[configured]),
+        server_client=MagicMock(),
+    )
+
+    assert agent.effective_tool_accesses(_seed_request(tool_accesses=[episode])) == [episode]
+
+
+def test_base_agent_exposes_unimplemented_session_routes() -> None:
+    agent = _Agent.model_construct(config=MagicMock(num_workers=1), server_client=MagicMock())
+    request = MagicMock()
+    with pytest.raises(NotImplementedError, match="does not implement"):
+        asyncio.run(agent.seed_agent_session(request, _seed_request()))
+    with pytest.raises(NotImplementedError, match="does not implement"):
+        asyncio.run(
+            agent.close_agent_session(
+                request,
+                AgentCloseSessionRequest(
+                    agent_session_id="agent-session",
+                    episode_id=EpisodeId(rollout_id="rollout", attempt=2),
+                ),
+            )
+        )
+
+    paths = agent.setup_webserver().openapi()["paths"]
+    assert "/v1/agent_sessions" in paths
+    assert "/v1/agent_sessions/close" in paths
+
+
+def test_close_response_carries_the_harness_trajectory() -> None:
+    """The close returns the harness's own turns next to its observations; an older harness's reply still validates."""
+    trajectory = TrajectoryRecord(
+        task_id="task",
+        rollout_id="rollout",
+        turns=[
+            TrajectoryTurn(
+                invocation_id="root", task_id="task", rollout_id="rollout", turn_no=1, timestamp=1.0, step_count=2
+            )
+        ],
+    )
+    close = AgentCloseSessionResponse(agent_session_id="agent-session", trajectory=trajectory)
+    wire = close.model_dump(mode="json")
+    assert wire["trajectory"]["turns"][0]["step_count"] == 2
+    assert AgentCloseSessionResponse.model_validate(wire) == close
+    assert AgentCloseSessionResponse.model_validate({"agent_session_id": "agent-session"}).trajectory is None
+
+
+def test_seed_response_carries_the_harness_task_tool_context_declaration() -> None:
+    """The environment server refuses a task with MCP servers or skills to a harness that answers False here."""
+
+    class _Seeded(_Agent):
+        async def _seed_agent_session_state(self, body):
+            return AgentSessionState(request=body)
+
+    class _ReadsTaskTools(_Seeded):
+        def supports_task_tool_context(self) -> bool:
+            return True
+
+    for agent_cls, declared in ((_Seeded, False), (_ReadsTaskTools, True)):
+        agent = agent_cls.model_construct(config=MagicMock(num_workers=1), server_client=MagicMock())
+        response = asyncio.run(agent.seed_agent_session(MagicMock(session={}), _seed_request()))
+        assert response == AgentSeedSessionResponse(
+            agent_session_id="agent-session", supports_task_tool_context=declared
+        )
+    # The field has a default so an older harness's reply still validates, as not supporting it.
+    assert AgentSeedSessionResponse.model_validate({"agent_session_id": "x"}).supports_task_tool_context is False
+
+
+def test_agent_session_seed_carries_the_tasks_agent_timeout() -> None:
+    """The environment server hands the task's `[agent].timeout_sec` to the harness in the seed."""
+    seed = _seed_request()
+    assert seed.agent_timeout_sec is None and "agent_timeout_sec" in seed.model_dump(mode="json")
+    timed = AgentSeedSessionRequest.model_validate({**seed.model_dump(mode="json"), "agent_timeout_sec": 900.0})
+    assert timed.agent_timeout_sec == 900.0
+    with pytest.raises(ValidationError):
+        AgentSeedSessionRequest.model_validate({**seed.model_dump(mode="json"), "agent_timeout_sec": 0})

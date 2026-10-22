@@ -13,13 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import base64
+import json
+import logging
+import zlib
 from asyncio import Semaphore
 from time import time
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from lcb_integration.compute_code_generation_metrics import check_correctness_remote
 from lcb_integration.extraction_utils import LMStyle, extract_code
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
+from sandbox_execution import check_correctness_in_sandbox
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -28,12 +33,18 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.reward_profile import (
     add_avg_sample_std_dev,
     compute_pass_majority_metrics,
     compute_subset_metrics,
     highest_k_metrics,
 )
+from nemo_gym.sandbox import resolve_provider_config, resolve_provider_metadata
+from nemo_gym.verifier_utils.sandbox_verification import SandboxVerificationConfig, SandboxVerificationError
+
+
+LOG = logging.getLogger(__name__)
 
 
 # ----------------------------
@@ -44,6 +55,17 @@ class CompCodingResourcesServerConfig(BaseResourcesServerConfig):
     unit_test_timeout_secs: int
     debug: bool
     reasoning_format_penalty: float = 0.0
+    # Run unit tests in a fresh provider sandbox per verification instead of on a Ray worker.
+    # Names a top-level sandbox block, such as `sandbox` from
+    # nemo_gym/sandbox/providers/<provider>/configs/<provider>.yaml, or is an inline provider mapping.
+    sandbox_provider: Optional[Union[str, Dict[str, Any]]] = None
+    sandbox_config: SandboxVerificationConfig = Field(default_factory=SandboxVerificationConfig)
+
+    @model_validator(mode="after")
+    def _require_sandbox_image(self) -> "CompCodingResourcesServerConfig":
+        if self.sandbox_provider is not None and not self.sandbox_config.image:
+            raise ValueError("sandbox_config.image is required when sandbox_provider is set")
+        return self
 
 
 # ----------------------------
@@ -80,10 +102,28 @@ class CompCodingVerifyResponse(BaseVerifyResponse):
 # Server
 # ----------------------------
 class CompCodingResourcesServer(SimpleResourcesServer):
+    # Each verification runs its candidate code on its own: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
+    ray_enabled = True
     config: CompCodingResourcesServerConfig
 
     def model_post_init(self, context):
         self._semaphore: Semaphore = Semaphore(value=self.config.num_processes)
+        self._sandbox_target: Optional[Tuple[Dict[str, Any], Dict[str, str]]] = None
+
+    def _resolve_sandbox_target(self) -> Tuple[Dict[str, Any], Dict[str, str]]:
+        """Provider config and sandbox metadata, resolved once from the global config."""
+        if self._sandbox_target is None:
+            global_config_dict = get_global_config_dict()
+            provider = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
+            metadata = {
+                **resolve_provider_metadata(self.config.sandbox_provider, global_config_dict),
+                "nemo_gym_server": self.config.name,
+            }
+            self._sandbox_target = (provider, metadata)
+        return self._sandbox_target
 
     @staticmethod
     def _has_reasoning_format_violation(response) -> bool:
@@ -156,7 +196,20 @@ class CompCodingResourcesServer(SimpleResourcesServer):
                 difficulty=difficulty,
             )
 
-        tests = UnitTests.model_validate(body.verifier_metadata["unit_tests"])
+        # Tests are stored compressed by benchmarks/livecodebench/prepare_utils.py
+        # (_pack_unit_tests) to keep the materialized-inputs file from reaching
+        # 12 GB. Decode here, immediately before use, so the plaintext exists only
+        # for this verification instead of for the whole run. Falls back to the
+        # old plaintext shape so pre-patch artifacts still verify.
+        _raw_tests = body.verifier_metadata["unit_tests"]
+        if isinstance(_raw_tests, dict) and "packed" in _raw_tests:
+            _decoded = json.loads(zlib.decompress(base64.b64decode(_raw_tests["packed"])))
+            _raw_tests = {
+                "inputs": _decoded["inputs"],
+                "outputs": _decoded["outputs"],
+                "fn_name": _raw_tests.get("fn_name"),
+            }
+        tests = UnitTests.model_validate(_raw_tests)
 
         # 3) extract code (code fence or raw)
         code = extract_code(model_out, LMStyle.OpenAIChat)
@@ -168,7 +221,7 @@ class CompCodingResourcesServer(SimpleResourcesServer):
                 difficulty=difficulty,
             )
 
-        # 4) run (no sandbox)
+        # 4) run on a Ray worker, or in a sandbox when sandbox_provider is set
         async with self._semaphore:
             """
             Sample looks like this:
@@ -203,8 +256,32 @@ class CompCodingResourcesServer(SimpleResourcesServer):
                 self.config.debug,  # debug
             )
 
-            future = check_correctness_remote.remote(*task_args)
-            result, metadata = await future
+            if self.config.sandbox_provider is None:
+                future = check_correctness_remote.remote(*task_args)
+                result, metadata = await future
+            else:
+                provider, sandbox_metadata = self._resolve_sandbox_target()
+                try:
+                    result, metadata = await check_correctness_in_sandbox(
+                        *task_args,
+                        num_tests=len(tests.inputs),
+                        provider=provider,
+                        config=self.config.sandbox_config,
+                        metadata=sandbox_metadata,
+                    )
+                except SandboxVerificationError as e:
+                    # The environment failed, not the policy: exclude the sample rather than score it.
+                    LOG.warning("code_gen sandbox verification failed (%s): %s", e.failure_kind, e)
+                    return CompCodingVerifyResponse(
+                        **body.model_dump(),
+                        reward=0.0,
+                        mask_sample=True,
+                        failure_kind=e.failure_kind,
+                        failure_reason=str(e),
+                        extracted_model_output=model_out,
+                        extracted_model_code=code,
+                        difficulty=difficulty,
+                    )
 
             unit_tests_time_taken = time() - start_time
 

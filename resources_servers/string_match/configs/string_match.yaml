@@ -20,3 +20,11 @@ string_match_simple_agent:
       - name: example
         type: example
         jsonl_fpath: resources_servers/string_match/data/example.jsonl
+
+string_match_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: string_match_simple_agent

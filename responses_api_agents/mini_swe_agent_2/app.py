@@ -659,6 +659,7 @@ def run_mini_swe_with_sandbox(**params: Any) -> Any:
 
 
 class MiniSWEAgent(SimpleResponsesAPIAgent):
+    ray_enabled = True
     config: MiniSWEAgentConfig
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -851,7 +852,11 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                 config_output_dir = Path(output_file_dir) / "_configs"
                 config_output_dir.mkdir(parents=True, exist_ok=True)
                 config_path = config_output_dir / f"{instance_id}.sandbox.yaml"
-                config_path.write_text(yaml.safe_dump(config, sort_keys=False))
+                # Repeats of one instance share this path and rewrite it per
+                # rollout; replace atomically so a reader never sees it empty.
+                tmp_path = config_path.with_name(f"{config_path.name}.{uuid4().hex}.tmp")
+                tmp_path.write_text(yaml.safe_dump(config, sort_keys=False))
+                os.replace(tmp_path, config_path)
 
             if self.config.skip_if_exists:
                 if Path(f"{output_file_dir}/{instance_id}/{instance_id}.json").exists():

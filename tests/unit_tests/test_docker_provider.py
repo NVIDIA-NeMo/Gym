@@ -488,6 +488,24 @@ async def test_create_ttl_s_ignored_with_entrypoint(
 # --------------------------------------------------------------------------- #
 # exec
 # --------------------------------------------------------------------------- #
+async def test_create_does_not_pass_the_spec_user_to_docker_run(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # In overlay mode the Dockerfile's final USER may not exist in the base image yet, so `docker run --user`
+    # would fail the create. The sandbox facade applies the default to every exec instead.
+    def responder(argv: list[str]) -> tuple[int, str, str]:
+        if "run" in argv:
+            return (0, "cid", "")
+        if "exec" in argv:
+            return (0, docker_provider.READY_PROBE_EXPECTED, "")
+        return (0, "", "")
+
+    provider, rec = _make_provider(monkeypatch, responder)
+    await provider.create(SandboxSpec(image="ubuntu:22.04", user="agent"))
+    assert rec.calls[0]["argv"][:2] == [FAKE_BINARY, "run"]
+    assert "--user" not in rec.calls[0]["argv"]
+
+
 async def test_exec_normal_with_cwd_and_env(fake_binary: str, monkeypatch: pytest.MonkeyPatch) -> None:
     provider, rec = _make_provider(monkeypatch, lambda argv: (0, "hello", ""))
     result = await provider.exec(_make_handle(), "echo hi", cwd="/work", env={"A": "b"})
@@ -548,6 +566,32 @@ async def test_exec_user_mapping(
         assert "--user" not in argv
     else:
         assert _contains_seq(argv, ["--user", expect_user_flag])
+
+
+async def test_exec_keeps_the_group_of_the_default_user(fake_binary: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review (round 14): the probe through the sandbox facade. A ``name:group`` default (Harbor's ``[agent].user``
+    ``agent:shared``) must reach ``docker exec`` as ``--user agent:shared``, as Harbor's ``-u`` passes it, not as
+    the name alone."""
+    from nemo_gym.sandbox import AsyncSandbox
+
+    def responder(argv: list[str]) -> tuple[int, str, str]:
+        if "run" in argv:
+            return (0, "cid", "")
+        if "exec" in argv:
+            return (0, docker_provider.READY_PROBE_EXPECTED, "")
+        return (0, "", "")
+
+    provider, rec = _make_provider(monkeypatch, responder)
+    sandbox = AsyncSandbox(provider)
+    await sandbox.start(SandboxSpec(image="ubuntu:22.04", user="agent:shared"))
+    await sandbox.exec("id")
+    argv = rec.calls[-1]["argv"]
+    assert argv[:2] == [FAKE_BINARY, "exec"]
+    assert _contains_seq(argv, ["--user", "agent:shared"])
+    # The default a running sandbox is switched to keeps its group the same way (a resolved `uid:gid`).
+    sandbox.set_default_user("1000:1000")
+    await sandbox.exec("id")
+    assert _contains_seq(rec.calls[-1]["argv"], ["--user", "1000:1000"])
 
 
 async def test_exec_passes_stdin(fake_binary: str, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -816,3 +860,70 @@ async def test_run_real_timeout(fake_binary: str) -> None:
     provider = docker_provider.DockerProvider()
     with pytest.raises(TimeoutError):
         await provider._run([shutil.which("sleep"), "5"], timeout_s=0.1)
+
+
+# --------------------------------------------------------------------------- #
+# Reattaching to a container another process created
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_serialize_handle_returns_only_the_sandbox_id(fake_binary: str) -> None:
+    provider = docker_provider.DockerProvider(exec={"exec_shell": "sh"})
+    handle = _make_handle(name="nemo-gym-a", image="img:1", shell="bash", env={"K": "v"}, published_ports=(8080,))
+
+    descriptor = await provider.serialize_handle(handle)
+
+    assert descriptor == {"sandbox_id": "nemo-gym-a"}
+
+
+@pytest.mark.asyncio
+async def test_connect_rebuilds_a_handle_for_a_running_container(
+    monkeypatch: pytest.MonkeyPatch, fake_binary: str
+) -> None:
+    """A resources server creates the container; the agent server only gets the descriptor."""
+    provider, rec = _make_provider(monkeypatch, lambda _argv: (0, "true\timg:1\n", ""))
+
+    handle = await provider.connect({"sandbox_id": "nemo-gym-a"})
+
+    assert handle.sandbox_id == "nemo-gym-a"
+    assert handle.provider_name == "docker"
+    assert handle.raw.image == "img:1"
+    assert handle.raw.shell == "sh"
+    assert handle.raw.env == {}
+    assert _contains_seq(rec.calls[0]["argv"], ["inspect"])
+
+
+@pytest.mark.asyncio
+async def test_connect_carries_the_ports_serialize_layered_on(
+    monkeypatch: pytest.MonkeyPatch, fake_binary: str
+) -> None:
+    """``AsyncSandbox.serialize()`` adds a top-level ``ports`` key; connect() must read it back."""
+    provider, _rec = _make_provider(monkeypatch, lambda _argv: (0, "true\timg:1\n", ""))
+
+    handle = await provider.connect({"sandbox_id": "nemo-gym-a", "ports": [8080]})
+
+    assert handle.raw.published_ports == (8080,)
+
+
+@pytest.mark.asyncio
+async def test_connect_refuses_a_stopped_container(monkeypatch: pytest.MonkeyPatch, fake_binary: str) -> None:
+    """Exec against a stopped container fails later and less clearly, so refuse here."""
+    provider, _rec = _make_provider(monkeypatch, lambda _argv: (0, "false\timg:1\n", ""))
+
+    with pytest.raises(docker_provider.DockerCreateError, match="not running"):
+        await provider.connect({"sandbox_id": "nemo-gym-a"})
+
+
+@pytest.mark.asyncio
+async def test_connect_refuses_an_unknown_container(monkeypatch: pytest.MonkeyPatch, fake_binary: str) -> None:
+    provider, _rec = _make_provider(monkeypatch, lambda _argv: (1, "", "No such object: nemo-gym-a\n"))
+
+    with pytest.raises(docker_provider.DockerCreateError, match="No such object"):
+        await provider.connect({"sandbox_id": "nemo-gym-a"})
+
+
+@pytest.mark.asyncio
+async def test_connect_requires_a_sandbox_id(fake_binary: str) -> None:
+    provider = docker_provider.DockerProvider(exec={"exec_shell": "sh"})
+
+    with pytest.raises(docker_provider.DockerCreateError, match="requires a sandbox_id"):
+        await provider.connect({"image": "img:1"})

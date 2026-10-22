@@ -1,0 +1,16 @@
+{
+    "mechanism_rxn": [
+        {
+            "step": "1",
+            "mapped_rxn": "[CH3:1][C:2](=[O:3])[O:4][CH3:5].[OH-:6]>>CC([O-])(O)OC"
+        },
+        {
+            "step": "2",
+            "mapped_rxn": "CC([O-])(O)OC>>CC(=O)O.[O-]C"
+        },
+        {
+            "step": "3",
+            "mapped_rxn": "CC(=O)O.[O-]C>>CC(=O)[O-].CO"
+        }
+    ]
+}

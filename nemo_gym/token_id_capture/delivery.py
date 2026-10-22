@@ -38,6 +38,7 @@ import warnings
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.token_id_capture.consumer import trajectories_from_source
 from nemo_gym.token_id_capture.protocols import TokenSource
+from nemo_gym.token_id_capture.records import apply_capture_incomplete_verdict
 
 
 # Attach token-capture health to each rollout record.
@@ -51,7 +52,7 @@ _REDUNDANT_CAPTURE_KEY = "_redundant_capture"
 
 # A caller that knows the kept model call names it here on the result.
 # A gate seal or an agent-declared terminal id uses this key.
-# It joins with the response-id and content witnesses for terminal attribution.
+# It joins with the response-id, item-id, and content witnesses for terminal attribution.
 TERMINAL_CALL_KEY = "_ng_terminal_model_call_id"
 # Served response id the harness reports for the completion it kept.
 TERMINAL_RESPONSE_ID_KEY = "terminal_response_id"
@@ -84,13 +85,21 @@ def _unusable(result: dict, error: str, message: str) -> dict:
     return {"rebuilt_response": None, MASK_SAMPLE_KEY: True, "error": error, "metrics": metrics}
 
 
-async def finalize_rollout_token_capture(result: dict, source: TokenSource | None) -> dict | None:
+async def finalize_rollout_token_capture(
+    result: dict, source: TokenSource | None, *, mask_incomplete_when_attributed: bool = True
+) -> dict | None:
     """Rebuild one finished rollout record's ``response.output`` from its recorded token ids.
 
     Call this after the harness and verifier finish the record.
     The function mutates ``result`` in place.
-    It replaces only ``response.output``.
-    It preserves the reward and all other harness and verifier output.
+    It replaces ``response.output``.
+    It preserves the reward and all other harness and verifier output, with one exception:
+    when the rebuilt response is ``incomplete`` because the delivered chain's terminal call
+    was cut (``length`` or ``content_filter``) and the harness reported ``completed`` or no
+    status, the harness response takes that ``status`` and ``incomplete_details``, so a
+    reader of the record sees why the delivered chain stopped. A harness that reported
+    ``incomplete`` or ``failed`` itself keeps its own verdict. ``apply_capture_incomplete_verdict``
+    states that rule once, for this path and for a framework that rebuilds from staged records.
 
     The function freezes capture records through ``source``.
     It rebuilds from that frozen snapshot.
@@ -106,6 +115,10 @@ async def finalize_rollout_token_capture(result: dict, source: TokenSource | Non
     Return the build with its rebuilt response, metrics, and optional error.
     Return ``None`` when no source exists.
     An unusable build has no rebuilt response and sets ``mask_sample``.
+
+    ``mask_incomplete_when_attributed`` is the
+    ``token_id_capture.mask_incomplete_when_attributed`` setting, which decides
+    whether an incomplete snapshot always masks the rollout.
     """
     if source is None:
         return None
@@ -162,6 +175,7 @@ async def finalize_rollout_token_capture(result: dict, source: TokenSource | Non
             model=str(response.get("model") or ""),
             verified_response=response or None,
             explicit_terminal_call_id=str(explicit_terminal) if explicit_terminal else None,
+            mask_incomplete_when_attributed=mask_incomplete_when_attributed,
             declared_response_id=str(declared_terminal) if declared_terminal else None,
         )
     except Exception as error:
@@ -188,6 +202,11 @@ async def finalize_rollout_token_capture(result: dict, source: TokenSource | Non
     if projected is not None:
         if isinstance(result.get("response"), dict):
             result["response"]["output"] = projected["output"]
+            # The rebuilt output's truncation verdict travels with it, under the one precedence
+            # rule ``apply_capture_incomplete_verdict`` states for both capture placements.
+            incomplete_details = projected.get("incomplete_details") or {}
+            reason = incomplete_details.get("reason") if projected.get("status") == "incomplete" else None
+            apply_capture_incomplete_verdict(result["response"], reason)
         else:
             result["response"] = projected
 
