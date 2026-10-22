@@ -1,0 +1,2 @@
+# The separately hashed, self-contained sandbox runtime carries media dependencies.
+-e nemo-gym[dev,sandbox] @ ../../
