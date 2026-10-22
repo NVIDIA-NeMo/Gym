@@ -157,11 +157,9 @@ Cleanup coordinates lifecycle; it is not a security boundary against hostile tas
 
 Responses and close observations preserve text, reasoning, tool events, partial output,
 CLI aggregate usage, and sandbox hostname/PID/version. Wall-time and the pinned CLI's explicit
-model-output-limit event yield incomplete, potentially gradable work. Provider/API/runtime
-failures raise execution errors and bypass verification. Only Resources determines reward.
+model-output-limit event yield incomplete, potentially gradable work. Reported provider failures retain partial output and classified cause; the Environment Server decides grading and episode retries. Worker and cleanup failures remain execution errors. Only Resources determines reward.
 
-CLI events omit exact model-call join IDs and can omit failed-call usage even after a recovered
-retry. Missing/default-zero cache and reasoning details remain unknown, with observation gaps.
+Native session transcripts supply tool-call IDs and outcomes. The sandbox forwarder retains request statuses and invocation correlation across retries; native cumulative usage supplements CLI totals when a failed turn omits them. Missing/default-zero cache and reasoning details remain unknown, with observation gaps.
 Compare CLI totals with captured model calls; do not interpret unavailable usage as zero.
 Known model-metadata/compaction warnings remain visible as gaps after clean completion or a gradable model/wall-time limit.
 

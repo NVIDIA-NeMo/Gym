@@ -22,9 +22,12 @@ import signal
 import socket
 import subprocess
 import time
+import warnings
 from pathlib import Path
 
 import pytest
+from hydra.core.override_parser.overrides_parser import OverridesParser
+from omegaconf import OmegaConf
 
 from nemo_gym.orchestration.api import NodePool, RayServiceConfig, SubmitConfig, VllmPDTierConfig
 from nemo_gym.orchestration.executors.script_templates import (
@@ -546,6 +549,14 @@ def test_build_vllm_ray_serve_command_multi_node_raises_queue_length_response_de
     cmd = _build_vllm_ray_serve_command(vllm_service, total_nodes=2, gpus_per_node_values=[8])
     assert "export RAY_SERVE_QUEUE_LENGTH_RESPONSE_DEADLINE_S=" in cmd
     assert cmd.index("export RAY_SERVE_QUEUE_LENGTH_RESPONSE_DEADLINE_S=") < cmd.index("ray symmetric-run")
+
+
+def test_build_vllm_ray_serve_command_multi_node_spreads_requests_over_all_replicas(vllm_service):
+    # The head node's proxy would otherwise keep every request on its local replica, which never
+    # fills, so it must be switched off before `ray start`/`ray symmetric-run` starts the proxy.
+    cmd = _build_vllm_ray_serve_command(vllm_service, total_nodes=2, gpus_per_node_values=[8])
+    assert "export RAY_SERVE_PROXY_PREFER_LOCAL_NODE_ROUTING=0" in cmd
+    assert cmd.index("export RAY_SERVE_PROXY_PREFER_LOCAL_NODE_ROUTING=0") < cmd.index("ray symmetric-run")
 
 
 def test_build_vllm_ray_serve_command_multi_node_chain_survives_symmetric_run_entrypoint(vllm_service):
@@ -2357,9 +2368,8 @@ def test_kv_settings_are_not_accepted_on_a_tier(tmp_path, field):
         _pd_config(tmp_path, services=services)
 
 
-@pytest.mark.parametrize("field", ["nixl_side_channel_port", "server_per_node"])
-def test_tier_only_settings_are_not_accepted_on_a_plain_vllm_service(tmp_path, field):
-    services = {"policy": {"type": "vllm", "container": "img", "model": "/ckpt", field: 1}}
+def test_tier_only_settings_are_not_accepted_on_a_plain_vllm_service(tmp_path):
+    services = {"policy": {"type": "vllm", "container": "img", "model": "/ckpt", "nixl_side_channel_port": 1}}
     with pytest.raises(ValueError, match="Extra inputs are not permitted"):
         _pd_config(tmp_path, services=services)
 
@@ -2714,6 +2724,131 @@ def test_a_ray_head_on_node_0_is_probed_locally(tmp_path):
     }
     script = _render(tmp_path, {"policy": _vllm(8000, "gpu", tensor_parallel_size=4), "ray": ray})
     assert "Waiting for ray at http://localhost:8011" in script
+
+
+@pytest.fixture
+def pool_size():
+    return 4
+
+
+@pytest.fixture
+def per_node_config(tmp_path, pool_size):
+    def build(**overrides):
+        service = {
+            "type": "vllm",
+            "container": "img",
+            "model": "/ckpt",
+            "served_model_name": "hy4",
+            "node_pool": "gpu",
+            "tensor_parallel_size": 4,
+            "server_per_node": True,
+            **overrides,
+        }
+        pool = {"partition": "batch", "nodes": pool_size, "ntasks_per_node": 1, "gpus_per_node": 4}
+        return SubmitConfig.model_validate(
+            {
+                "services": {"policy": service},
+                "compute": {"hsg": {"type": "slurm", "account": "acct", "node_pools": {"gpu": pool}}},
+                "driver": {"container": "img", "policy_model": "policy", "benchmarks": {"b": {"run": {}}}},
+                "job": {"output_path": str(tmp_path / "jobs")},
+            }
+        )
+
+    return build
+
+
+@pytest.fixture
+def render_per_node_script(tmp_path):
+    def render(config):
+        return build_sbatch_script(
+            config, "b", config.driver.benchmarks["b"], config.compute["hsg"], tmp_path / "jobs" / "b"
+        )
+
+    return render
+
+
+@pytest.fixture
+def per_node_script(per_node_config, render_per_node_script):
+    return render_per_node_script(per_node_config())
+
+
+def test_a_per_node_vllm_service_starts_one_single_node_server_on_every_pool_node(per_node_script, pool_size):
+    step = _step(per_node_script, "policy")
+    assert f'--nodelist="${{GYM_POOL_GPU_NODES}}" --nodes={pool_size} --ntasks={pool_size}' in step
+    assert "vllm serve /ckpt --port 8000 --tensor-parallel-size 4" in step
+    assert "ray" not in step and "--headless" not in step
+
+
+def test_without_server_per_node_the_pool_stays_one_engine_behind_one_url(per_node_config, render_per_node_script):
+    with pytest.warns(UserWarning, match=r"leaving \d+ GPU"):
+        config = per_node_config(server_per_node=False)
+    script = render_per_node_script(config)
+    assert "ray symmetric-run" in _step(script, "policy")
+    assert "GYM_POOL_GPU_NODE_" not in script and "policy-node" not in script
+    assert "+policy_base_url=http://localhost:8000/v1" in script
+
+
+def test_a_per_node_service_is_not_reported_as_leaving_gpus_idle(per_node_config):
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        per_node_config()
+
+
+def test_every_node_of_a_per_node_service_is_probed_where_it_runs(per_node_script, pool_size):
+    assert "Waiting for policy at http://localhost:8000" in per_node_script
+    for node in range(1, pool_size):
+        assert f"Waiting for policy-node{node} at http://${{gym_nodes[{node}]}}:8000" in per_node_script
+    assert "policy-node0" not in per_node_script
+
+
+def test_a_per_node_service_exports_every_pool_node_to_the_driver(per_node_script, pool_size):
+    for node in range(pool_size):
+        assert f'export GYM_POOL_GPU_NODE_{node}="${{gym_nodes[{node}]}}"' in per_node_script
+
+
+def test_a_per_node_service_names_the_variable_and_url_of_each_node(per_node_config, pool_size):
+    config = per_node_config()
+    service = config.services["policy"]
+    assert service.node_host_var(2) == "GYM_POOL_GPU_NODE_2"
+    assert service.node_urls(2) == [
+        "http://${oc.env:GYM_POOL_GPU_NODE_0}:8000/v1",
+        "http://${oc.env:GYM_POOL_GPU_NODE_1}:8000/v1",
+    ]
+    assert config.driver.benchmarks["b"].run["policy_base_url"] == service.node_urls(pool_size)
+
+
+def test_the_driver_resolves_the_policy_url_list_to_the_pool_hosts(per_node_script, pool_size, monkeypatch):
+    token = re.search(r"'(\+policy_base_url=[^']*)'", per_node_script).group(1)
+    for node in range(pool_size):
+        monkeypatch.setenv(f"GYM_POOL_GPU_NODE_{node}", f"host{node}")
+    override = OverridesParser.create().parse_overrides([token])[0]
+    config = OmegaConf.create({"policy_base_url": override.value(), "model": {"base_url": "${policy_base_url}"}})
+    assert OmegaConf.to_container(config, resolve=True)["model"]["base_url"] == [
+        f"http://host{node}:8000/v1" for node in range(pool_size)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"node_pool": None}, "has no node_pool"),
+        ({"number_of_instances": 4}, "number_of_instances must be 1"),
+        ({"use_ray_serve": True}, "drop use_ray_serve"),
+    ],
+    ids=["no_pool", "several_instances", "ray_serve"],
+)
+def test_a_per_node_service_refuses_a_setting_that_leaves_one_server_per_node_undefined(
+    per_node_config, overrides, message
+):
+    with pytest.raises(ValueError, match=message):
+        per_node_config(**overrides)
+
+
+def test_a_prefill_decode_tier_still_cannot_set_server_per_node(tmp_path):
+    services = _pd_services()
+    services["policy"]["prefill"]["server_per_node"] = True
+    with pytest.raises(ValueError, match="Set it on the vllm_pd service itself"):
+        _pd_config(tmp_path, services=services)
 
 
 def _run_job_script(
