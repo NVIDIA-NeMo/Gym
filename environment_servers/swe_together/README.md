@@ -102,6 +102,12 @@ an episode-owned filesystem. Its shared-directory initialization and archive hel
 are candidates for consolidation with this transfer path; this change leaves that
 benchmark unchanged.
 
+Gym's [sandbox transfer helpers](../../nemo_gym/sandbox/transfer.py) copy archives
+through the host and may change the execution user. This transfer stays beside
+SWET because the benchmark requires sealed shared-storage copies, replacement of
+declared roots including deletions, and preservation of protected image subtrees
+under the image's existing user.
+
 Crash recovery currently restarts the entire episode. OpenCode's persisted native
 conversation, simulator state, task filesystem, and remaining interaction time must
 be restored together before checkpoint boundaries can safely resume an episode.
