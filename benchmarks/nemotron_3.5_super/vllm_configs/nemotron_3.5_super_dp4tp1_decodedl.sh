@@ -128,10 +128,11 @@ VLLM_DECODE_ARGS=(
             6, 12, 18, 24, 30, 36, 42, 48,
             72, 96, 144, 192, 240, 288, 336, 384,
             480, 576, 672, 768,
-            864, 960, 1056, 1152, 1248, 1344, 1440, 1536
+            864, 960, 1056, 1152, 1248, 1344, 1440, 1536,
+            1728, 2016, 2304
         ]
     }'
-    --max-cudagraph-capture-size 1536
-    --max-num-batched-tokens 1536
+    --max-cudagraph-capture-size 2304
+    --max-num-batched-tokens 2304
     --max-num-seqs 256
 )
