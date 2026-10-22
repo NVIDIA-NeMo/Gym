@@ -217,14 +217,16 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
             {
                 "context": "span",
                 "statements": [
-                    # Copy, then trim in place: the pinned collector has no converter form of `replace_pattern`.
-                    f'set(attributes["{ROLLOUT_ID_ATTRIBUTE}"], attributes["gen_ai.request.id"]) '
+                    # Derive in the span-local cache, write only while absent: the pinned collector has no converter
+                    # form of `replace_pattern`, and an id the span already carries must stay as it is.
+                    'set(cache["engine_rollout_id"], attributes["gen_ai.request.id"]) '
                     f'where name == "llm_request" and attributes["{ROLLOUT_ID_ATTRIBUTE}"] == nil '
-                    f'and attributes["gen_ai.request.id"] != nil '
+                    'and attributes["gen_ai.request.id"] != nil '
                     f'and IsMatch(attributes["gen_ai.request.id"], "{gym_engine_request_id}")',
-                    f'replace_pattern(attributes["{ROLLOUT_ID_ATTRIBUTE}"], "{gym_engine_request_id}", "$${{1}}") '
-                    f'where name == "llm_request" and attributes["{ROLLOUT_ID_ATTRIBUTE}"] != nil '
-                    f'and attributes["{ROLLOUT_ID_ATTRIBUTE}"] == attributes["gen_ai.request.id"]',
+                    f'replace_pattern(cache["engine_rollout_id"], "{gym_engine_request_id}", "$${{1}}") '
+                    'where cache["engine_rollout_id"] != nil',
+                    f'set(attributes["{ROLLOUT_ID_ATTRIBUTE}"], cache["engine_rollout_id"]) '
+                    f'where attributes["{ROLLOUT_ID_ATTRIBUTE}"] == nil and cache["engine_rollout_id"] != nil',
                 ],
             }
         ]
