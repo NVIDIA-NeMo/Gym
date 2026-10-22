@@ -47,11 +47,15 @@ hello/
 
 Each step is one turn. A turn:
 
-1. Opens a **fresh agent session** on the shared sandbox (Harbor's default, `resume_trajectory = false`): the
+1. Clears the previous turn's grading files (every turn after the first): `/tests` and `/logs/verifier` are
+   emptied and the server's `/logs/agent/trajectory.json` removed, so the agent does not open beside the previous
+   step's tests, reward or transcript. The agent's own files under `/logs/agent` and everything else it left in the
+   environment stay.
+2. Opens a **fresh agent session** on the shared sandbox (Harbor's default, `resume_trajectory = false`): the
    agent does not carry a conversation across steps, only whatever it left in the environment.
-2. Sends the step's own `steps/<name>/instruction.md` as the only input, under the step's
+3. Sends the step's own `steps/<name>/instruction.md` as the only input, under the step's
    `[steps.agent].timeout_sec` (else the task's `[agent].timeout_sec`).
-3. Closes the session and runs the step's verifier.
+4. Closes the session and runs the step's verifier.
 
 The task's top-level `instruction.md` is **never sent** for a multi-step task. A multi-step task may keep material
 there that the agent must not see (SWE-Interact puts the full hidden specification in the top-level file); each
