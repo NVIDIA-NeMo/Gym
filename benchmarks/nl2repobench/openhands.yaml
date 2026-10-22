@@ -1,0 +1,48 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Upstream NL2RepoBench (104 tasks) with the OpenHands SDK harness - the OpenHands counterpart of opencode.yaml in this directory
+# (same resources server, task set, grading and agent_network_mode switch; only the agent differs). Uses the same block names as
+# opencode.yaml so the existing launchers and ++...agent_network_mode overrides apply unchanged.
+#
+# Network modes (override at the CLI, see opencode.yaml): official | block_target | block_target_v2 | no_internet_preinstalled.
+# OpenHands needs an offline bundle for block_target_v2 and no_internet_preinstalled (their sandboxes cannot run the default pip-venv
+# install): build it with responses_api_agents/openhands_sdk_sandboxed_agent/build_bundle.sh and pass
+#   ++nl2repobench_opencode_sandboxed_agent.responses_api_agents.openhands_sdk_sandboxed_agent.bundle_path=<outdir>/openhands_bundle.tar.gz
+# The agent's `user_prompt` defaults to the prompt the OpenHands SFT data was collected with; set it to null to use the benchmark row's own prompt.
+config_paths:
+  - responses_api_agents/openhands_sdk_sandboxed_agent/configs/openhands_sdk_sandboxed_agent.yaml
+  - resources_servers/nl2repobench/configs/nl2repobench.yaml
+
+nl2repobench_opencode_resources_server:
+  _inherit_from: nl2repobench_resources_server
+  resources_servers:
+    nl2repobench:
+      enforce_agent_no_network: false
+      sandbox_model_server:
+        type: responses_api_models
+        name: policy_model
+
+nl2repobench_opencode_sandboxed_agent:
+  _inherit_from: openhands_sdk_sandboxed_agent
+  responses_api_agents:
+    openhands_sdk_sandboxed_agent:
+      sandbox_timeout: 21600
+      model_call_timeout_s: 14400
+      resources_server:
+        type: resources_servers
+        name: nl2repobench_opencode_resources_server
+      datasets:
+        - name: nl2repobench_v1
+          type: benchmark
+          jsonl_fpath: benchmarks/nl2repobench/data/nl2repobench_benchmark.jsonl
+          prepare_script: benchmarks/nl2repobench/prepare.py
+          num_repeats: 1
+
+nl2repobench_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: nl2repobench_opencode_sandboxed_agent
