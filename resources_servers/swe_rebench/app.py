@@ -24,26 +24,28 @@ scoring an agent against it is measuring noise.
 """
 
 import sys
+from collections.abc import Awaitable, Callable
+from functools import partial
 from pathlib import Path
 from shlex import quote
 from time import time
 from traceback import format_exc
 from typing import Any
+from uuid import uuid4
 
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict
 
 from nemo_gym.base_resources_server import (
-    BaseResourcesServerConfig,
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    SimpleResourcesServer,
 )
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
+from nemo_gym.sandbox.owner import SessionData
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
 from resources_servers.swe_rebench.log_parsers import default_cache_dir, resolve_parser
@@ -58,6 +60,11 @@ from resources_servers.swe_rebench.verification import (
     verification_files,
 )
 from resources_servers.swebench.anti_cheat import apply_anti_cheat_setup
+from resources_servers.swebench.native_checkpoint import (
+    NativePreparedPatch,
+    NativeSWESandboxConfig,
+    NativeSWESandboxResourcesServer,
+)
 from resources_servers.swebench.patch_capture import (
     PatchCapture,
     PatchCaptureMode,
@@ -79,8 +86,7 @@ JVM_MIRROR_ENV = {
 }
 
 
-class SWERebenchResourcesServerConfig(BaseResourcesServerConfig):
-    is_verifying_golden_patch: bool = False
+class SWERebenchResourcesServerConfig(NativeSWESandboxConfig):
     # "worktree" (diff of the working tree) or "committed" (committed work only); see swebench/patch_capture.py.
     patch_capture_mode: PatchCaptureMode = "worktree"
     include_model_patch_in_response: bool = True
@@ -152,13 +158,12 @@ class SWERebenchVerifyResponse(BaseVerifyResponse):
     model_patch: str | None = None
 
 
-class SWERebenchResourcesServer(SimpleResourcesServer):
-    config: SWERebenchResourcesServerConfig
+class SWERebenchPreparedVerifyRequest(SWERebenchVerifyRequest, NativePreparedPatch):
+    pass
 
-    def model_post_init(self, context: Any, /) -> None:
-        super().model_post_init(context)
-        self._session_id_to_sandbox: dict[str, AsyncSandbox] = {}
-        self._session_id_to_pristine_untracked: dict[str, frozenset[str]] = {}
+
+class SWERebenchResourcesServer(NativeSWESandboxResourcesServer):
+    config: SWERebenchResourcesServerConfig
 
     @property
     def _parser_cache_dir(self) -> Path:
@@ -180,7 +185,12 @@ class SWERebenchResourcesServer(SimpleResourcesServer):
         )
 
     async def _create_sandbox(
-        self, body: SWERebenchInstanceRequest, files: dict[str, str] | None = None
+        self,
+        body: SWERebenchInstanceRequest,
+        files: dict[str, str] | None = None,
+        *,
+        session_id: str | None = None,
+        setup: Callable[[AsyncSandbox], Awaitable[SessionData]] | None = None,
     ) -> AsyncSandbox:
         global_config_dict = get_global_config_dict()
         provider_config = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
@@ -218,6 +228,8 @@ class SWERebenchResourcesServer(SimpleResourcesServer):
             resources=sandbox_resources,
             provider_options=self.config.sandbox_config.get("provider_options", {}),
         )
+        if session_id is not None:
+            return await self.start_session_sandbox(session_id, spec, setup=setup, workdir=repo_directory(body.repo))
         sandbox = AsyncSandbox(provider_config)
         await sandbox.start(spec)
         return sandbox
@@ -243,41 +255,60 @@ class SWERebenchResourcesServer(SimpleResourcesServer):
             return frozenset()
 
     async def _extract_model_patch(self, session_id: str, workdir: str, base_commit: str) -> PatchCapture:
-        """Capture the agent's patch per ``config.patch_capture_mode``, then stop its sandbox."""
-        original_sandbox = self._session_id_to_sandbox.pop(session_id)
-        pristine_untracked = self._session_id_to_pristine_untracked.pop(session_id, frozenset())
-        try:
-            return await capture_model_patch(
-                original_sandbox,
-                workdir,
-                base_commit,
-                mode=self.config.patch_capture_mode,
-                pristine_untracked=pristine_untracked,
-                drop_sections=drop_patch_sections,
-            )
-        finally:
-            await self._stop_sandbox(original_sandbox)
+        """Capture the agent's patch; the caller ends the session after retaining the result."""
+        original_sandbox = self.require_session_sandbox(session_id)
+        pristine_untracked = frozenset(self.session_data(session_id).get("pristine_untracked") or [])
+        return await capture_model_patch(
+            original_sandbox,
+            workdir,
+            base_commit,
+            mode=self.config.patch_capture_mode,
+            pristine_untracked=pristine_untracked,
+            drop_sections=drop_patch_sections,
+        )
 
     async def seed_session(
         self, request: Request, body: SWERebenchSeedSessionRequest
     ) -> SWERebenchSeedSessionResponse:
         """Start the instance's image so an agent can work in it."""
         session_id = request.session[SESSION_ID_KEY]
-        await self._stop_sandbox(self._session_id_to_sandbox.pop(session_id, None))
-        self._session_id_to_pristine_untracked.pop(session_id, None)
-        sandbox = await self._create_sandbox(body)
-        if self.config.apply_anti_cheating:
-            await apply_anti_cheat_setup(sandbox, repo_directory(body.repo), body.instance_id, "swe_rebench")
-        # The anti-cheat scrub leaves no committer identity, so the agent's `git commit` would fail.
-        await prepare_git_for_commits(sandbox, repo_directory(body.repo), "swe_rebench")
-        self._session_id_to_pristine_untracked[session_id] = await self._pristine_untracked_files(
-            sandbox, repo_directory(body.repo)
-        )
-        self._session_id_to_sandbox[session_id] = sandbox
-        return SWERebenchSeedSessionResponse(sandbox_handle=str(sandbox._handle.sandbox_id))
+        sandbox = self.session_sandbox(session_id)
+        if sandbox is None:
+
+            async def setup(sandbox: AsyncSandbox) -> SessionData:
+                if self.config.apply_anti_cheating:
+                    await apply_anti_cheat_setup(sandbox, repo_directory(body.repo), body.instance_id, "swe_rebench")
+                # The anti-cheat scrub leaves no committer identity, so the agent's `git commit` would fail.
+                await prepare_git_for_commits(sandbox, repo_directory(body.repo), "swe_rebench")
+                pristine_untracked = await self._pristine_untracked_files(sandbox, repo_directory(body.repo))
+                return {"pristine_untracked": sorted(pristine_untracked)}
+
+            sandbox = await self._create_sandbox(body, session_id=session_id, setup=setup)
+        # A restored session already has its prepared checkout and verification metadata.
+        return SWERebenchSeedSessionResponse(sandbox_handle=str(sandbox.handle.sandbox_id))
 
     async def verify(self, request: Request, body: SWERebenchVerifyRequest) -> SWERebenchVerifyResponse:
-        session_id = request.session[SESSION_ID_KEY]
+        try:
+            prepared = await self._capture_patch(request.session[SESSION_ID_KEY], body)
+        finally:
+            await self.end_session_sandbox(request.session[SESSION_ID_KEY])
+        return await self._evaluate_patch(request, body, prepared)
+
+    async def prepare_verify(self, request: Request, body: SWERebenchVerifyRequest) -> NativePreparedPatch:
+        return await self.prepare_verification(
+            request, partial(self._capture_patch, request.session[SESSION_ID_KEY], body)
+        )
+
+    async def verify_prepared(
+        self, request: Request, body: SWERebenchPreparedVerifyRequest
+    ) -> SWERebenchVerifyResponse:
+        self.forget_prepared_verification(request)
+        verify_body = SWERebenchVerifyRequest.model_validate(
+            body.model_dump(exclude={"capture", "extraction_error", "model_patch"})
+        )
+        return await self._evaluate_patch(request, verify_body, body)
+
+    async def _capture_patch(self, session_id: str, body: SWERebenchVerifyRequest) -> NativePreparedPatch:
         extraction_error = None
         mode = self.config.patch_capture_mode
         if self.config.is_verifying_golden_patch:
@@ -288,10 +319,17 @@ class SWERebenchResourcesServer(SimpleResourcesServer):
             except Exception as exc:
                 capture = PatchCapture.static("", mode, "none")
                 extraction_error = f"Failed to extract model patch: {exc}"
+        return NativePreparedPatch(capture=capture, extraction_error=extraction_error)
+
+    async def _evaluate_patch(
+        self, request: Request, body: SWERebenchVerifyRequest, prepared: NativePreparedPatch
+    ) -> SWERebenchVerifyResponse:
+        capture = prepared.capture
+        extraction_error = prepared.extraction_error
         patch = capture.patch
 
         inputs = self._inputs(body, patch)
-        log_dir = Path(__file__).parent / "logs" / body.instance_id
+        log_dir = Path(__file__).parent / "logs" / body.instance_id / uuid4().hex
 
         # Resolve the parser before spending a sandbox on the run: an unknown parser name means
         # this row can never be graded, and finding that out after the tests have run wastes the

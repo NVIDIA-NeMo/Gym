@@ -286,6 +286,32 @@ The provider uses the OpenSandbox SDK file API for uploads and downloads:
 
 Startup files from `SandboxSpec.files` use the same provider file path semantics before the first command runs.
 
+## Native SWE rollout checkpoints
+
+The `swebench`, `swe_rebench`, `scale_swe`, `swemer_v1`, `swemer_v2`, and `swe_next`
+resources servers use the shared sandbox checkpoint owner. With OpenCode, a partial
+rollout checkpoint can preserve both the prepared checkout and the agent session.
+The training framework also needs to save its matching model-call token prefix.
+
+Enable Gym checkpoint coordination with a `checkpoint` block containing `enabled: true`,
+a `control_auth_token`, and a persistent `state_dir`. Keep that directory outside
+checkpoint directories that the training framework prunes, stable across restarts,
+and separate for each Gym replica. Run each sandbox-owning resources server with
+`num_workers: 1`; multi-worker ownership is not supported. A provider without
+snapshot support falls back to restarting unfinished rollouts.
+
+On the OpenCode agent, set `prepare_verification: true` and keep
+`pause_at_checkpoints: true`. Preparation captures the generated patch and its
+grading metadata before ending the agent's sandbox. The agent bookmarks that
+complete payload, so verification can run again in a fresh grading sandbox after
+recovery. Servers that only grade golden patches hold no agent sandbox state.
+
+A restore forks the saved snapshot into a new sandbox and reconnects the agent.
+The native server restores the original Git baseline and initial untracked-file
+metadata, and does not rerun checkout setup on the restored session. Snapshot
+creation waits for the provider's `Ready` state before the rollout resumes;
+receiving a snapshot ID alone does not establish a safe capture boundary.
+
 ## User and Runtime Notes
 
 The neutral `user` argument to `exec()` maps onto OpenSandbox command options:

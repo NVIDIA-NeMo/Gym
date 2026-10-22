@@ -228,11 +228,8 @@ class TestSeedSessionMavenSettings:
         create_sandbox = AsyncMock(side_effect=self._Stop)
         server = SimpleNamespace(
             config=SimpleNamespace(overwrite_maven_settings=overwrite),
-            _stop_sandbox=AsyncMock(),
+            session_sandbox=lambda session_id: None,
             _create_sandbox=create_sandbox,
-            _session_id_to_sandbox={},
-            _session_id_to_pristine_untracked={},
-            _session_id_to_base_commit={},
         )
         with pytest.raises(self._Stop):
             await SwemerV1ResourcesServer.seed_session(

@@ -32,6 +32,8 @@ from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from responses_api_agents.opencode_sandboxed_agent.app import (
     _REMOTE_RESUME_HELPER,
     _SELECT_RESUME_PYTHON,
+    OpenCodeAdapter,
+    OpenCodeOutcome,
     OpenCodeSandboxedAgent,
     OpenCodeSandboxedAgentConfig,
     OpenCodeSandboxedAgentRunRequest,
@@ -294,6 +296,45 @@ def body_for(rollout_id: str, attempt: int = 0) -> OpenCodeSandboxedAgentRunRequ
     return OpenCodeSandboxedAgentRunRequest.model_validate(
         {"responses_create_params": {"input": [{"role": "user", "content": "fix the bug"}]}, "_ng_rollout_id": key}
     )
+
+
+@pytest.mark.parametrize("native", [False, True])
+async def test_prepared_verification_keeps_the_complete_payload_across_a_bookmark(
+    tmp_path: Path, native: bool
+) -> None:
+    agent = make_agent(tmp_path, FakeResourcesServer())
+    packet = {"model_patch": "generated patch"}
+    if native:
+        packet.update(
+            capture={"patch": "generated patch", "source": "committed", "branch": "fix"}, extraction_error=None
+        )
+    agent.server_client.post = AsyncMock(side_effect=[FakeResponse(packet), FakeResponse({"reward": 1.0})])
+    body = body_for("r")
+    adapter = OpenCodeAdapter(agent, make_request("agent-session", {}), body)
+    outcome = OpenCodeOutcome.model_validate(
+        {
+            "response": {
+                "id": "r",
+                "object": "response",
+                "created_at": 0,
+                "model": "m",
+                "output": [],
+                "parallel_tool_calls": False,
+                "tool_choice": "auto",
+                "tools": [],
+            },
+            "run_result": {},
+        }
+    )
+    prepared = await adapter.prepare_verification({"ng_session": "s"}, outcome)
+    assert prepared == packet
+    # The checkpoint writes a JSON bookmark; after recovery the verifier must get all its metadata back.
+    restored = json.loads(json.dumps(prepared))
+    result = await adapter.verify_prepared({"ng_session": "s"}, outcome, restored)
+    assert result["reward"] == 1.0
+    sent = agent.server_client.post.await_args
+    assert sent.kwargs["url_path"] == "/verify_prepared"
+    assert {key: sent.kwargs["json"][key] for key in packet} == packet
 
 
 def is_interrupt(command: str) -> bool:
