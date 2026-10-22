@@ -88,6 +88,12 @@ Tasks that declare GPUs run on the `gpu_sandbox_provider` block when one is set.
 sandbox for harnesses that drive task MCP servers from inside it (mini-SWE does). With `task_mcp_grants:
 optional` or `required`, the `streamable-http` URL entries are also granted to the agent as MCP tool
 accesses, as declared; a Compose sidecar's URL names its service, which resolves inside the task's group.
+A task that declares MCP servers or `skills_dir` is refused to a harness that does not declare
+`supports_task_tool_context`, since its tools would never reach it, unless every declared MCP server was granted
+with `task_mcp_grants: required` and the task has no `skills_dir`: a harness that cannot establish a required
+grant fails its seed or its first turn (Hermes and Pi connect at the first activation) instead of running without
+the tools. Harbor's default transport is `sse`, which cannot be granted, so a task meant for such a harness must
+say `transport = "streamable-http"` explicitly.
 Dockerfiles outside pull and overlay mode are built at prepare, see below.
 
 ## Multi-step tasks
