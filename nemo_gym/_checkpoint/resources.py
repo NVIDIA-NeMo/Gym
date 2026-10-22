@@ -413,14 +413,6 @@ class ResourcesParticipant(CheckpointParticipant):
         if self.on_session_freed is not None:
             self.on_session_freed(session_id, until_forget=session_id in self._retired_session_rollouts)
 
-    def session_episode(self, session_id: str) -> Optional[EpisodeId]:
-        """The attempt that owns ``session_id``, or ``None`` for a session this participant does not track.
-
-        An ``exported`` server whose state is keyed by something other than the session, such as a cohort of
-        rollouts, uses it to find what each session it is asked to export owns.
-        """
-        return self._sessions.get(session_id)
-
     def is_open(self, session_id: str) -> bool:
         """Whether ``session_id`` is a live session of an attempt that has not been retired.
 
