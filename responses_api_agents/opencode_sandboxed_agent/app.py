@@ -88,6 +88,7 @@ from nemo_gym.sandbox.agent_tools import (
     verify_agent_response,
 )
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
+from nemo_gym.sandbox.providers.opensandbox.provider import DELETED_OUTPUT_NOTE
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import (
     SESSION_ID_KEY,
@@ -1013,10 +1014,15 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             )
         except SandboxLostError:
             raise
-        except Exception as exc:
-            result = None
-            run_error_type = type(exc).__name__
-            print("OpenCode exec hit error.", format_exc(), file=sys.stderr)
+
+        result_stdout = result.stdout or ""
+        if DELETED_OUTPUT_NOTE in (result.stderr or ""):
+            raise SandboxLostError("OpenCode command output was deleted before agent result capture")
+        stdout_parts = result_stdout.rsplit("Shell: ", maxsplit=1)
+        if result.return_code == 0 and (
+            result.error_type is not None or len(stdout_parts) < 2 or "OpenCode run finished" not in stdout_parts[1]
+        ):
+            raise SandboxLostError("OpenCode command reported exit 0 without a trustworthy completion marker")
 
         if self.config.debug and result:
             print("OpenCode install and run stdout:\n", result.stdout, file=sys.stderr)
@@ -1178,12 +1184,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     else "OpenCodeError"
                 )
 
-        result_stdout = (result.stdout if result else "") or ""
         result_stderr = (result.stderr if result else "") or ""
         opencode_finished = False
-        std_out_split = result_stdout.rsplit("Shell: ", maxsplit=1)
-        if len(std_out_split) > 1:
-            opencode_finished = "OpenCode run finished" in std_out_split[1]
+        if len(stdout_parts) > 1:
+            opencode_finished = "OpenCode run finished" in stdout_parts[1]
 
         if collect_observations and observations is not None:
             agent_sandbox_observation = self._agent_sandbox_observation(

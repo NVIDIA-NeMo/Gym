@@ -1071,17 +1071,40 @@ def test_connection_config_disable_pooling_sets_fresh_transport(fake_opensandbox
     ("execution", "expected"),
     [
         (SimpleNamespace(exit_code=3, error=None, complete=None), (3, None, None)),
-        (SimpleNamespace(exit_code=None, error=SimpleNamespace(), complete=None), (125, "sandbox", None)),
+        (SimpleNamespace(exit_code=3, error=SimpleNamespace(), complete=None), (3, None, None)),
         (SimpleNamespace(exit_code=None, error=None, complete=SimpleNamespace()), (0, None, None)),
     ],
-    ids=["exit-code", "error-without-code", "completed"],
+    ids=["exit-code", "explicit-nonzero-with-error", "completed"],
 )
 def test_execution_outcome_maps_sdk_results(execution: Any, expected: tuple[int, str | None, str | None]) -> None:
     assert opensandbox_provider._execution_outcome(execution) == expected
 
 
-async def test_exec_without_final_status_is_not_success(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A stream cut short (no exit code, error or completion event) must not read as exit 0."""
+@pytest.mark.parametrize(
+    ("execution", "message"),
+    [
+        (SimpleNamespace(exit_code=None, error=SimpleNamespace(), complete=None), "error without an exit code"),
+        (SimpleNamespace(exit_code=0, error=SimpleNamespace(), complete=None), "exit code 0 and an error"),
+        (SimpleNamespace(exit_code=None, error=None, complete=None), "without an exit code"),
+    ],
+)
+def test_execution_outcome_rejects_unknown_or_contradictory_status(execution: Any, message: str) -> None:
+    with pytest.raises(opensandbox_provider.SandboxLostError, match=message):
+        opensandbox_provider._execution_outcome(execution)
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "error", "message"),
+    [
+        (None, None, "without an exit code"),
+        (None, SimpleNamespace(name="CommandError", value="lost"), "error without an exit code"),
+        (0, SimpleNamespace(name="CommandError", value="lost"), "exit code 0 and an error"),
+    ],
+)
+async def test_exec_rejects_unknown_or_contradictory_stream_status(
+    monkeypatch: pytest.MonkeyPatch, exit_code: int | None, error: Any, message: str
+) -> None:
+    """Partial output and inconsistent SDK fields cannot turn provider loss into a scored command result."""
 
     class FakeRunCommandOpts:
         def __init__(self, **kwargs: Any) -> None:
@@ -1090,8 +1113,8 @@ async def test_exec_without_final_status_is_not_success(monkeypatch: pytest.Monk
     async def run(_command: str, *, opts: FakeRunCommandOpts) -> Any:
         return SimpleNamespace(
             logs=SimpleNamespace(stdout=[SimpleNamespace(text="partial")], stderr=[]),
-            error=None,
-            exit_code=None,
+            error=error,
+            exit_code=exit_code,
             complete=None,
         )
 
@@ -1104,12 +1127,8 @@ async def test_exec_without_final_status_is_not_success(monkeypatch: pytest.Monk
     raw = SimpleNamespace(commands=SimpleNamespace(run=run))
     handle = opensandbox_provider.SandboxHandle(sandbox_id="sandbox-1", provider_name="opensandbox", raw=raw)
 
-    result = await provider.exec(handle, "pytest", timeout_s=30)
-
-    assert result.return_code == 125
-    assert result.error_type == "sandbox"
-    assert result.stdout == "partial"
-    assert result.stderr == "Command ended without a final status: no exit code, error or completion event"
+    with pytest.raises(opensandbox_provider.SandboxLostError, match=message):
+        await provider.exec(handle, "pytest", timeout_s=30)
 
 
 async def test_exec_file_operations_and_reference_validation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -1131,7 +1150,7 @@ async def test_exec_file_operations_and_reference_validation(monkeypatch: pytest
                 return SimpleNamespace(
                     logs=SimpleNamespace(stdout=[], stderr=[FakeLog("stderr")]),
                     error=SimpleNamespace(name="CommandError", value="failed"),
-                    exit_code=None,
+                    exit_code=3,
                 )
             return SimpleNamespace(
                 logs=SimpleNamespace(stdout=[FakeLog("stdout")], stderr=[]),
@@ -1194,8 +1213,8 @@ async def test_exec_file_operations_and_reference_validation(monkeypatch: pytest
     }
 
     result = await provider.exec(handle, "fail", user="agent")
-    assert result.return_code == 125
-    assert result.error_type == "sandbox"
+    assert result.return_code == 3
+    assert result.error_type is None
     assert result.stderr == "stderr\nCommandError: failed"
     assert raw.commands.calls[1][0] == "su -s /bin/sh -c fail agent"
 
@@ -1852,7 +1871,9 @@ async def test_exec_background_rejects_status_missing_a_field(
     ("status", "error_message", "expected_log_reads"),
     [
         (SimpleNamespace(running=None, exit_code=0, error=None), "unknown running status", 0),
-        (SimpleNamespace(running=False, exit_code=None, error=None), "without exit code or error", 1),
+        (SimpleNamespace(running=False, exit_code=None, error=None), "without an exit code", 1),
+        (SimpleNamespace(running=False, exit_code=None, error="provider lost status"), "without an exit code", 1),
+        (SimpleNamespace(running=False, exit_code=0, error="provider lost status"), "exit code 0 and an error", 1),
     ],
 )
 @pytest.mark.asyncio

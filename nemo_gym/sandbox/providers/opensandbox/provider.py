@@ -453,18 +453,18 @@ def _execution_outcome(execution: Any) -> tuple[int, str | None, str | None]:
     """Map a streamed SDK execution to ``(return_code, error_type, stderr_note)``.
 
     The SDK fills in ``exit_code=0`` itself once execd sends its completion
-    event. With no exit code, error or completion event, the stream ended
-    without reporting the command's outcome. The command may have completed
-    or still be running; neither success nor failure is confirmed. Return a
-    sandbox error rather than assuming success.
+    event. A stream that ends without a terminal event has an unknown outcome,
+    even if it contains partial logs or an error without an exit status.
     """
     if execution.exit_code is not None:
+        if execution.exit_code == 0 and execution.error is not None:
+            raise SandboxLostError("OpenSandbox command reported both exit code 0 and an error")
         return execution.exit_code, None, None
     if execution.error is not None:
-        return 125, "sandbox", None
+        raise SandboxLostError("OpenSandbox command reported an error without an exit code")
     if execution.complete is not None:
         return 0, None, None
-    return 125, "sandbox", "Command ended without a final status: no exit code, error or completion event"
+    raise SandboxLostError("OpenSandbox command ended without an exit code, error or completion event")
 
 
 def _log_create_retry(retry_state: Any) -> None:
@@ -2481,13 +2481,15 @@ class OpenSandboxProvider:
             stderr = f"{stderr}\n{DELETED_OUTPUT_NOTE}" if stderr else DELETED_OUTPUT_NOTE
         error_type = None
         if status.exit_code is not None:
+            if status.exit_code == 0 and status_error is not None:
+                raise SandboxLostError(
+                    f"OpenSandbox background command reported both exit code 0 and an error; "
+                    f"sandbox_id={handle.sandbox_id!r}, execution_id={execution_id!r}"
+                )
             return_code = status.exit_code
-        elif status_error is not None:
-            return_code = 125
-            error_type = "sandbox"
         else:
             raise SandboxLostError(
-                f"OpenSandbox background command finished without exit code or error; "
+                f"OpenSandbox background command finished without an exit code; "
                 f"sandbox_id={handle.sandbox_id!r}, execution_id={execution_id!r}"
             )
 
