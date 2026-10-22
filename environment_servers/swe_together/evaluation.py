@@ -149,6 +149,7 @@ async def run_judge(
         ),
     )
     original_error = None
+    transcript = {}
     try:
         response = await client.post(agent.name, "/v1/agent_sessions", json=seed, cookies=judge_cookies)
         await raise_for_status(response)

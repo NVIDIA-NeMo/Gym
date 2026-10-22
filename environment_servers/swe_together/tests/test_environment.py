@@ -242,6 +242,56 @@ async def test_refusal_preserves_semantic_outcome_and_close_before_verdict(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure_phase", ["request", "response_body"])
+async def test_saved_judge_verdict_survives_lost_response(tmp_path, monkeypatch, failure_phase):
+    from aiohttp import ClientConnectionError
+
+    monkeypatch.setattr(evaluation, "uuid4", lambda: SimpleNamespace(hex="test"))
+    monkeypatch.setattr(evaluation, "stage_judge", AsyncMock(return_value="judge"))
+    monkeypatch.setattr(evaluation, "raise_for_status", AsyncMock())
+    lost_response = ClientConnectionError("judge response lost")
+    close = {"agent_session_id": "judge-test", "cleanup_confirmed": True}
+    response = SimpleNamespace(cookies={})
+    post = AsyncMock(side_effect=[response, lost_response if failure_phase == "request" else response, response])
+    payloads = [{}, close] if failure_phase == "request" else [{}, lost_response, close]
+    monkeypatch.setattr(evaluation, "get_response_json", AsyncMock(side_effect=payloads))
+    raw = json.dumps({"goal_results": [{"id": "goal", "met": False}]})
+
+    async def read(sandbox, *, path):
+        assert post.await_args_list[-1].args[1] == "/v1/agent_sessions/close"
+        assert path == "/tmp/judge_inputs/verdict.json"
+        return raw
+
+    monkeypatch.setattr(evaluation, "read_text", read)
+    monkeypatch.setattr(evaluation, "read_test_reward", AsyncMock(return_value={"test_reward_raw": None}))
+    (tmp_path / "canonical_goals.json").write_text(
+        json.dumps({"completeness_goals": [{"id": "goal", "weight": 1}]})
+    )
+    req = request()
+    evidence = {}
+    verdict = await evaluation.run_judge(
+        client=SimpleNamespace(post=post),
+        agent=SimpleNamespace(name="judge"),
+        sandbox=SimpleNamespace(serialize=AsyncMock(return_value={})),
+        provider="sandbox",
+        task_dir=tmp_path,
+        patch="patch",
+        workdir="/workspace",
+        episode=req.episode_id,
+        task_id=req.task.task_id,
+        timeout=100,
+        cookies={},
+        artifact_dir=tmp_path,
+        evidence=evidence,
+    )
+    assert verdict["judge_score"] == 0
+    assert verdict["judge_runtime"] is None
+    assert verdict["judge_close"]["cleanup_confirmed"] is True
+    assert evidence["judge_transport_error"] == "ClientConnectionError: judge response lost"
+    assert (tmp_path / "judge-verdict-raw.json").read_text() == raw
+
+
+@pytest.mark.asyncio
 async def test_webserver_lifespan_closes_runtime_helper(tmp_path):
     environment = server(tmp_path)
     environment.server_client = SimpleNamespace(global_config_dict={})
