@@ -445,6 +445,9 @@ gym eval run \
 - Deliverables are stored by task and repeat only, so give each run its own `PERSIST_DELIVERABLES_DIR`, for example
   by changing `gdpval_pi` in the export above. A run into another run's directory replaces that run's files, and
   re-judging the earlier run then judges the later one's.
+- A Pi run that reaches its `timeout` before a successful `finish` is judged as an empty submission and is not
+  retried. Stirrup reports a timeout with `stop_reason: wall_time`, which GDPVal masks as `agent_timeout` and
+  `--resume` reruns; Pi does not set it yet. So a timeout counts against Pi's score, but not against Stirrup's.
 - The prompt and the harness differ from the certified Stirrup setup, so these are not AA v2 scores.
 
 ## Multi-judge panel
