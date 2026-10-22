@@ -59,8 +59,8 @@ VLLM_COMMON_ARGS=(
 )
 # @bxyu-nvidia: Lease duration is set to 180s since to give nodes a chance to pick up the request. Helps with resilience.
 # @bxyu-nvidia: We set num_speculative_tokens_per_batch_size to 0 here since prefill does not need to speculate any tokens, it just needs to know that we are speculating.
+# --enable-prefill-batching-metrics
 VLLM_PREFILL_ARGS=(
-    --enable-prefill-batching-metrics
     --speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":${NUM_SPECULATIVE_TOKENS},\"num_speculative_tokens_per_batch_size\":[[1,1024,0]]}"
     # MRV2 captures a one-token graph for the zero-draft schedule, but Mamba's
     # full-graph capture requires 1 + num_speculative_tokens. Keep prefill
@@ -91,7 +91,7 @@ VLLM_PREFILL_ARGS=(
         }
     }'
     --max-cudagraph-capture-size 1200
-    --max-num-batched-tokens 16960
+    --max-num-batched-tokens 33920
     --max-num-seqs 256
 )
 # @bxyu-nvidia: We set "enable_lookup": false for the Mooncake store connector because the prefill worker handles the prefix cache lookup and decode just needs to receive the transferred kv cache.
