@@ -29,7 +29,10 @@ rows were materialized (see ``nemo_gym.tasks.harbor``).
 
 Reward rule: when ``test.sh`` ran, the sample is measured. A missing or invalid reward
 file scores 0 with a ``failure_kind``. Only a Gym-side failure (sandbox lost, transfer
-failed) masks the sample. A task that cannot be set up is a handled episode failure:
+failed) masks the sample. A failed agent response whose harness classified the cause
+(``ng_agent_outcome``) goes through ``agent_outcome_policy`` before verification, as on
+``single_agent_turn``: by default a transport or unknown cause is retried ungraded instead
+of scoring 0. A task that cannot be set up is a handled episode failure:
 terminal when the task itself is at fault (unknown task, changed folder, unsupported
 settings), retryable when the sandbox provider failed.
 """
@@ -59,6 +62,7 @@ from environment_servers.harbor.session import HarborSession, HarborSessionMixin
 from environment_servers.harbor.users import HarborUsersMixin
 from environment_servers.harbor.verifier import HarborVerificationMixin, _verifier_image, _verifier_key
 from nemo_gym import RESULTS_DIR
+from nemo_gym.agent_outcome import AgentOutcomePolicyConfig, OutcomeAction, agent_outcome_policy
 from nemo_gym.base_environment_server import (
     BaseEnvironmentServer,
     BaseEnvironmentServerConfig,
@@ -124,6 +128,8 @@ class HarborEnvironmentServerConfig(BaseEnvironmentServerConfig):
 
     # The harness that works in the sandbox; it receives a ``SandboxAccess`` when its session is seeded.
     agent_server: AgentServerRef
+    # Whether a failed agent response the harness classified is verified, retried or failed ungraded.
+    agent_outcome_policy: AgentOutcomePolicyConfig = Field(default_factory=AgentOutcomePolicyConfig)
     tasksets: dict[str, HarborTasksetConfig] = Field(default_factory=dict)
     # Name of the top-level sandbox provider block in the merged config.
     sandbox_provider: str = "sandbox"
@@ -449,6 +455,16 @@ class HarborEnvironmentServer(
                 terminal=not _is_retryable_dependency_error(error),
                 partial_response=agent_response,
             ) from error
+
+        action = agent_outcome_policy(agent_response, config=self.config.agent_outcome_policy)
+        if action != OutcomeAction.VERIFY:
+            raise self._failure(
+                stage="agent",
+                failure_reason=agent_response.error.message if agent_response.error else "Agent reported failure",
+                terminal=action == OutcomeAction.FAIL,
+                partial_response=agent_response,
+                agent_observations=agent_observations,
+            )
 
         try:
             outcome = await self._run_verifier(session)
