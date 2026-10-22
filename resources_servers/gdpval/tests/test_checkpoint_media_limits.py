@@ -327,4 +327,5 @@ async def test_actual_selected_judge_receives_caps_and_nested_inputs(tmp_path, m
     monkeypatch.setattr("openai.OpenAI", lambda **_: client)
     result = await server._verify_comparison(body)
     assert result.model_dump()["_ng_failure_class"] == "transport_ineligible"
+    assert result.model_dump()["_ng_failure_terminal"] is True
     client.chat.completions.create.assert_not_called()

@@ -1023,6 +1023,7 @@ class ResponsesConverter(BaseModel):
             status="incomplete" if incomplete_details is not None else "completed",
             incomplete_details=incomplete_details,
             usage=usage,
+            metrics=chat_completion.metrics,
             **provider_metadata,
         )
 

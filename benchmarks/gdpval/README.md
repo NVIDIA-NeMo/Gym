@@ -76,6 +76,8 @@ The task sandbox runs on OpenSandbox:
 - `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY` — the OpenSandbox endpoint and key
 - `GDPVAL_SANDBOX_IMAGE` — the sandbox image (see `resources_servers/gdpval/README.md`)
 - `TAVILY_API_KEY` — for the `web_search` and `fetch_web_page` tools
+- `PERSIST_DELIVERABLES_DIR` — an absolute directory for the persisted deliverables. There is no default, so runs
+  do not share one by accident
 
 The agent runs inside the sandbox and calls the model and resources servers from there, so pass
 `++use_absolute_ip=true` when the servers' default addresses are not reachable from the sandbox.
@@ -218,13 +220,12 @@ failure outside the agent stage, such as a dependency outage. A crash in the
 agent stage is never retried in process, and is waived only with
 `tolerate_unresolved: true`, which waives any persisted failure class, including
 agent-server outages (`agent_request_failed`), so set the coverage floors tight.
-It also accepts a missing reference deliverable (`reference_missing`) straight
-away. Otherwise GDPVal retries it across `--resume` launches for up to
-`NEMO_GYM_MAX_ROLLOUT_ATTEMPTS` (default 3) attempts before it becomes an
-omission; `transport_assignment_repair` with `reference_availability_only: true`
-avoids it when a stage is planned. Undispatched or drained
-rows always keep the stage open. Terminal and max-attempt omissions still count
-against every coverage floor.
+A missing reference deliverable (`reference_missing`) is terminal: the row is an
+omission from the first launch, with or without `tolerate_unresolved`, and
+`--resume` does not retry it. `transport_assignment_repair` with
+`reference_availability_only: true` avoids it when a stage is planned.
+Undispatched or drained rows always keep the stage open. Terminal and
+max-attempt omissions still count against every coverage floor.
 
 For a freshly planned policy-enabled stage, task-to-reference assignments are
 balanced before dispatch. When the policy is added while resuming an existing
@@ -253,7 +254,7 @@ still scored, but reports `final_stage_degraded: 1` and no flat headline.
 ### Deliverables and re-judging
 
 `/verify` persists each deliverable to `task_<id>/repeat_<n>/` under the GDPVal
-resources server's `persist_deliverables_dir` (`PERSIST_DELIVERABLES_DIR`). Use
+resources server's `persist_deliverables_dir` (`PERSIST_DELIVERABLES_DIR`, required). Use
 an absolute path; `transport_assignment_repair` requires one. A task that recurs
 in a later stage is judged from its persisted deliverable instead of re-running
 the policy.
@@ -528,7 +529,7 @@ Before trials are sampled, a deterministic preflight removes any member that
 cannot carry the matchup within its limits; `images_and_text` members are also
 removed when the matchup's pages and images exceed `judge_max_images_per_request`.
 If every member is removed for every reference matchup, the row fails with the
-terminal class `transport_ineligible` (retried on `--resume`).
+terminal class `transport_ineligible`, which `--resume` does not retry.
 
 Rubric mode samples from the same panel but sends every member the server-level
 `judge_media_mode` (`native_pdf` by default). It ignores the per-member
@@ -775,6 +776,7 @@ that used to skip the policy (`JUDGE_ONLY=true`) now runs it.
   Apptainer. Set `OPENSANDBOX_DOMAIN`, `OPENSANDBOX_API_KEY` and `GDPVAL_SANDBOX_IMAGE`.
 - **Tavily:** `TAVILY_API_KEY` is required and read by the resources server. Without a key the agent used to fall
   back to Stirrup's built-in web tools; now startup fails.
+- **Deliverables directory:** `PERSIST_DELIVERABLES_DIR` is required. The `output/gdpval/deliverables` default is gone.
 - **Timeouts:** `STIRRUP_PER_TASK_TIMEOUT_S` is no longer read; the agent's `sandbox_runner_timeout_seconds`
   (default 12600) replaces it. The environment server also sets `default_episode_timeout_seconds: 18000`,
   `max_concurrent_episodes: 32` and `queue_timeout_seconds: 86400`.

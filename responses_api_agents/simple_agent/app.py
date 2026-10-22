@@ -389,19 +389,18 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 if collect_trajectory:
                     turn_timestamp = time()
 
-                model_response = await self._call_policy(
-                    activation,
-                    lambda: self.server_client.post(
+                async def call_model() -> tuple[Any, Any]:
+                    response = await self.server_client.post(
                         server_name=self.config.model_server.name,
                         url_path=model_url_path,
                         json=new_body,
                         cookies=model_server_cookies,
-                    ),
-                )
-                # We raise for status here since we expect model calls to always work.
-                await raise_for_status(model_response)
-                model_response_json = await get_response_json(model_response)
-                model_server_cookies = model_response.cookies
+                    )
+                    # We raise for status here since we expect model calls to always work.
+                    await raise_for_status(response)
+                    return await get_response_json(response), response.cookies
+
+                model_response_json, model_server_cookies = await self._call_policy(activation, call_model)
                 try:
                     model_response = NeMoGymResponse.model_validate(model_response_json)
                 except ValidationError as e:
@@ -719,7 +718,12 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
     @staticmethod
     async def _call_policy(activation: Activation | None, call: Callable[[], Awaitable[Any]]) -> Any:
-        """Issue a policy call from the latest boundary; a checkpoint may hold its reply."""
+        """Issue a policy call from the latest boundary; a checkpoint may hold its reply.
+
+        ``call`` must read the whole reply, body included.
+        The model server's checkpoint gate can send a held reply's headers and hold its body until resume,
+        so a session that left its boundary on the headers alone would wait on the body and hold up prepare.
+        """
         if activation is None:
             return await call()
         async with activation.awaiting_model():
