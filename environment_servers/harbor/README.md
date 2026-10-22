@@ -175,7 +175,20 @@ errors; the sandbox is sound, so it is not an outage to retry). Nothing stops wh
 before the script runs: a process it left behind can replace the uploaded `setup.sh` in the working directory it
 owned, so a step whose agent is root after a step whose agent was not must not rely on `setup.sh` to undo what the
 earlier step did (Harbor runs it the same way; the loader warns about such a task). A `setup.sh` beside
-`instruction.md` instead of inside `workdir/` is not a Harbor file: the loader warns and nothing runs it.
+`instruction.md` instead of inside `workdir/` is not a Harbor file: the loader warns and nothing runs it. A step's
+`[steps.healthcheck]` is then polled to a pass (after the setup, not after a failed one; Harbor's
+`_run_step_healthcheck`), from the working directory as the turn's agent user, with the same Docker-style timing as
+the seed's checks (`start_period_sec` of uncounted attempts every `start_interval_sec`, then `retries` consecutive
+failures every `interval_sec` fail it; an attempt killed at its `timeout_sec` plus the 5 s exec grace counts as one
+failed attempt, as Docker's `HEALTHCHECK` counts it, where Harbor 0.22.0 errors the whole trial on the first attempt
+that overruns, since its Docker exec raises and no caller of `run_healthcheck` catches it); the task's
+`[environment.healthcheck]` ran at seed and is not run again per
+step, as Harbor runs it once at environment start. A check that never passes is the step's failure too:
+`failure_kind: harbor:step_healthcheck_failed`, the same failed turn and early stop as a failed `setup.sh`; a
+sandbox that cannot run the command (stopped, a provider error) is an outage, retried as a failed `setup.sh` exec is.
+The episode budget counts the check's worst case for every step that declares one (the start period, one attempt
+that may start just inside it and its `start_interval_sec` sleep, then `retries` counted attempts with an
+`interval_sec` sleep between them, each attempt `timeout_sec` plus the 5 s exec grace).
 
 The episode stops after a turn that is masked, writes no valid reward file, or misses the step's
 `min_reward` (a number gates `reward`, a table gates each named key). `multi_step_reward_strategy` rolls the
@@ -187,7 +200,7 @@ MemoryArena adapters write) are read as Harbor 0.22.0 reads them: `version` is `
 `multi_step_reward_mode = "aggregate"` is dropped and the task rolls up with the default `mean` (or its own
 `multi_step_reward_strategy`), as under Harbor, which has no such field; any other value of that key is dropped
 too, with a warning naming it, never read as a strategy. The result lists every turn under `turns`; its
-`response` and `ng_agent_observations` are the last turn's whose agent ran. Per-step healthchecks,
+`response` and `ng_agent_observations` are the last turn's whose agent ran. Per-step
 artifacts and separate verification are refused by the loader, and `separate_verifier_for_artifacts`
 is refused at seed for such a task. Each turn is seeded with its step's agent budget and hands the verifier an
 ATIF transcript of its own request; with `enforce_task_timeouts` the task deadline sums every turn's harness

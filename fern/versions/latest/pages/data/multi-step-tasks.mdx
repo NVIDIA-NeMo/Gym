@@ -1,6 +1,6 @@
 ---
 title: "Multi-Step Harbor Tasks"
-description: "How a Harbor [[steps]] task runs as turns on the Harbor path: per-step working directories and setup scripts, verification, reward roll-up, early stop, per-step solutions and users, and what is accepted or refused"
+description: "How a Harbor [[steps]] task runs as turns on the Harbor path: per-step working directories, setup scripts and healthchecks, verification, reward roll-up, early stop, per-step solutions and users, and what is accepted or refused"
 position: 6
 ---
 
@@ -54,7 +54,8 @@ Each step is one turn. A turn:
    step's tests, reward or transcript. The agent's own files under `/logs/agent` and everything else it left in the
    environment stay.
 2. Switches the sandbox to the step's agent user when it differs (see below), then merges the step's
-   `steps/<name>/workdir/` into the working directory and runs its `setup.sh` (see below).
+   `steps/<name>/workdir/` into the working directory, runs its `setup.sh` and polls the step's
+   `[steps.healthcheck]` to a pass (see below).
 3. Opens a **fresh agent session** on the shared sandbox (Harbor's default, `resume_trajectory = false`): the
    agent does not carry a conversation across steps, only whatever it left in the environment.
 4. Sends the step's own `steps/<name>/instruction.md` as the only input, under the step's
@@ -111,6 +112,40 @@ before the step's agent. The server does the same for each turn:
   what a less privileged earlier step did. The loader warns about such a task.
 - A `setup.sh` placed beside `instruction.md` instead of inside `workdir/` is not a Harbor file (Harbor never runs
   it): the loader warns, naming the path Harbor would run, and nothing runs it.
+
+## Per-step healthcheck
+
+A step may declare its own `[steps.healthcheck]` (Harbor's `StepConfig.healthcheck`, the same keys as
+`[environment.healthcheck]`):
+
+```toml
+[[steps]]
+name = "02-serve"
+[steps.healthcheck]
+command = "curl -sf http://localhost:8000/health"
+start_period_sec = 20.0
+retries = 5
+```
+
+Harbor 0.22.0 runs it in `_prepare_step` after the step's `setup.sh` (and not when the setup failed), before the
+step's agent, through the same `run_healthcheck` loop as the task-level check: attempts every `start_interval_sec`
+inside `start_period_sec`, where a failure counts for nothing, then every `interval_sec`, where `retries`
+consecutive failures fail it. The server polls it the same way (the seed's own loop), from the working directory as
+the turn's agent user, with one deliberate difference: an attempt that runs past its `timeout_sec` (plus the 5 s
+exec grace) counts as one failed attempt, as Docker's `HEALTHCHECK` counts a timed-out probe and as the seed's
+task-level loop does, whereas Harbor 0.22.0's Docker exec raises on the timeout, no caller of `run_healthcheck`
+catches it, and the first attempt that overruns ends the whole trial with an error (no step result, no further
+attempt). Harbor's field description says the step check *supplements* the top-level one: the task's
+`[environment.healthcheck]` ran once at seed, as Harbor runs it once when the environment starts, and is not run
+again per step. A step check that never passes is the step's failure: the turn is recorded with
+`failure_kind: harbor:step_healthcheck_failed`, no agent session or verifier runs for it, and the episode stops
+after it exactly as for a failed `setup.sh`. A sandbox that cannot run the command at all (it was stopped, the
+provider refused the exec) is an outage, a retryable failure, not the step's. The episode's time budget counts the
+check's worst case for every step that declares one: the start period, one attempt that may start just inside it
+and run past its end, the `start_interval_sec` sleep that follows such an attempt, then `retries` counted attempts
+(one, for `retries = 0`) with an `interval_sec` sleep between them, each attempt `timeout_sec` plus the 5 s exec
+grace. Harbor has no deadline derived from such a sum; the server does, so a slow check cannot eat the turns that
+follow.
 
 ## Verification per step
 
@@ -213,7 +248,7 @@ warning naming it, never read as a strategy.
 
 ## What is refused
 
-The loader refuses per-step features the server does not run yet, naming the step: a per-step
-`[steps.*].healthcheck` or `artifacts`, and per-step separate verification (`[steps.verifier].environment` or
-`environment_mode = "separate"`). A step's `[steps.agent].user` and `[steps.verifier].user` are applied per turn,
-and its `workdir/` and `workdir/setup.sh` run per turn, as described above.
+The loader refuses per-step features the server does not run yet, naming the step: per-step `artifacts`, and
+per-step separate verification (`[steps.verifier].environment` or `environment_mode = "separate"`). A step's
+`[steps.agent].user` and `[steps.verifier].user` are applied per turn, and its `workdir/`, `workdir/setup.sh` and
+`[steps.healthcheck]` run per turn, as described above.

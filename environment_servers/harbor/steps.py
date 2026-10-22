@@ -5,16 +5,19 @@
 
 Harbor 0.22.0's ``MultiStepTrial._prepare_step`` (trial/multi_step.py) runs, as the step's agent user: the step's
 ``steps/<name>/workdir/`` uploaded into the environment's working directory (``_upload_step_workdir``), then
-``bash <workdir>/setup.sh`` when the folder ships one (``_run_step_setup``), then the step's own healthcheck
-(``_run_step_healthcheck``). A setup or healthcheck that fails is the step's ``exception_info``: the step runs no
-agent and no verifier, and the trial stops after it. The mixin here does the same for one turn of the environment
-server; :class:`StepPrepareError` is that failure, which the turn loop records as a failed turn.
+``bash <workdir>/setup.sh`` when the folder ships one (``_run_step_setup``), then the step's own
+``[steps.healthcheck]`` (``_run_step_healthcheck``, skipped once the setup failed). A setup or healthcheck that fails
+is the step's ``exception_info``: the step runs no agent and no verifier, and the trial stops after it. The mixin
+here does the same for one turn of the environment server; :class:`StepPrepareError` is that failure, which the
+turn loop records as a failed turn.
 """
 
 import logging
 import shlex
 
+from environment_servers.harbor.entrypoint import HealthcheckFailed
 from environment_servers.harbor.session import HarborSession
+from nemo_gym.sandbox import SandboxExecResult
 from nemo_gym.sandbox.transfer import SandboxProbeError, SandboxTransferError, upload_dir
 from nemo_gym.tasks.harbor.digest import is_ignored
 from nemo_gym.tasks.harbor.task import HarborTask, HarborTurn
@@ -26,6 +29,10 @@ LOGGER = logging.getLogger(__name__)
 STEP_WORKDIR_FAILED_KIND = "harbor:step_workdir_failed"
 # The step's `workdir/setup.sh` exited non-zero (or ran past its bound) before the turn's agent session.
 STEP_SETUP_FAILED_KIND = "harbor:step_setup_failed"
+# The step's `[steps.healthcheck]` never passed before the turn's agent session.
+STEP_HEALTHCHECK_FAILED_KIND = "harbor:step_healthcheck_failed"
+# Seconds the provider exec waits beyond a healthcheck command's own `timeout_sec`, as the seed's checks do.
+HEALTHCHECK_EXEC_GRACE_S = 5
 
 
 class StepPrepareError(Exception):
@@ -52,6 +59,28 @@ class HarborStepsMixin:
     def _step_setup_budget_s(self, task: HarborTask, turn: HarborTurn) -> float:
         """What a step's setup adds to the episode budget: its bound when the step ships a ``setup.sh``, else 0."""
         return self._step_setup_timeout_s(task, turn) if (task.path / turn.setup_script).is_file() else 0.0
+
+    @staticmethod
+    def _step_healthcheck_budget_s(turn: HarborTurn) -> float:
+        """The most a step's ``[steps.healthcheck]`` may take before it passes or fails the step, what the episode
+        budget counts for it: the start period, the one attempt that may start just inside it and run past its end,
+        the ``start_interval_sec`` sleep that follows such an attempt (the loop sleeps by when the attempt began,
+        :meth:`HarborEntrypointMixin._poll_healthcheck`), then the counted attempts (``retries`` of them, or the one
+        that fails a check with ``retries = 0``) with an ``interval_sec`` sleep between them and none after the
+        last, each attempt the command's ``timeout_sec`` plus the exec grace (:meth:`_run_step_healthcheck`); 0
+        without a check. A poll that fails ends at most that long after it began, whatever its alignment."""
+        check = turn.config.healthcheck
+        if check is None:
+            return 0.0
+        attempt = check.timeout_sec + HEALTHCHECK_EXEC_GRACE_S
+        counted = max(check.retries, 1)
+        return (
+            check.start_period_sec
+            + attempt
+            + check.start_interval_sec
+            + counted * attempt
+            + (counted - 1) * check.interval_sec
+        )
 
     async def _prepare_step_workdir(self, session: HarborSession, turn: HarborTurn) -> None:
         """Merge ``steps/<name>/workdir/`` into the working directory and run its ``setup.sh``, as Harbor does.
@@ -119,3 +148,50 @@ class HarborStepsMixin:
                 f"step {turn.name!r} setup.sh exited with code {result.return_code}: "
                 f"{(result.stderr or result.stdout or '')[-600:]}",
             )
+
+    async def _run_step_healthcheck(self, session: HarborSession, turn: HarborTurn) -> None:
+        """Poll the step's ``[steps.healthcheck]`` to a pass before the turn's agent session, as Harbor's
+        ``_run_step_healthcheck`` does after the step's setup.
+
+        The command runs from the working directory as the sandbox's default user at that point, the turn's agent
+        user (Harbor's ``run_healthcheck`` execs it under ``with_default_user(step agent user)``), with Harbor's
+        timing (the seed's loop, :meth:`HarborEntrypointMixin._poll_healthcheck`): attempts every
+        ``start_interval_sec`` inside ``start_period_sec``, where a failure counts for nothing, then every
+        ``interval_sec`` until ``retries`` consecutive failures fail the check. One deliberate difference: an attempt
+        killed at its ``timeout_sec`` (plus the exec grace) counts as a failed attempt here, as under Docker's
+        HEALTHCHECK, where Harbor 0.22.0 errors the trial on the first such attempt (its Docker exec raises and no
+        caller of ``run_healthcheck`` catches a ``RuntimeError``). Harbor's ``StepConfig`` says the check
+        supplements the task's ``[environment.healthcheck]``, which ran at seed and is not run again per step, as
+        Harbor runs it once at environment start. A check that never passes is the step's failure
+        (:class:`StepPrepareError`, kind :data:`STEP_HEALTHCHECK_FAILED_KIND`), as Harbor records the
+        ``HealthcheckError`` in the step's ``exception_info``. A sandbox that cannot run the command (stopped, a
+        provider error on the exec) is an outage and raises, as a failed ``setup.sh`` exec does.
+        """
+        check = turn.config.healthcheck
+        if check is None:
+            return
+        sandbox = session.sandbox
+
+        async def attempt() -> SandboxExecResult:
+            result = await sandbox.exec(
+                check.command, cwd=session.workdir, timeout_s=check.timeout_sec + HEALTHCHECK_EXEC_GRACE_S
+            )
+            if result.error_type and result.error_type != "timeout":
+                # The command did not run (a lost container, a provider error): an outage, not a failed check. A
+                # command killed at its timeout ran and failed, and counts as one failed attempt, as Docker's
+                # HEALTHCHECK counts a timed-out probe and as the seed's task-level loop counts it. Harbor 0.22.0
+                # does not get that far: its Docker exec raises RuntimeError on the timeout, run_healthcheck does
+                # not catch it and _run_step_healthcheck catches HealthcheckError only, so the first attempt that
+                # overruns timeout_sec errors the whole trial (no step result, no further attempt). The lenient
+                # count is kept on purpose: a check that hangs once inside its start period is not the step's end.
+                raise SandboxProbeError(f"step {turn.name!r} healthcheck could not run: {result.error_type}")
+            return result
+
+        try:
+            await self._poll_healthcheck(sandbox, session.task, check, attempt, label=f" (step {turn.name!r})")
+        except HealthcheckFailed as exc:
+            # Only a check that ran and never passed is the step's; a sandbox that stopped or could not run it
+            # raises its own error (a `RuntimeError` too), which propagates as the outage it is.
+            raise StepPrepareError(
+                STEP_HEALTHCHECK_FAILED_KIND, f"step {turn.name!r} healthcheck failed: {exc}"
+            ) from exc

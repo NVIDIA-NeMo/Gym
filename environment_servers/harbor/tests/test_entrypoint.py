@@ -572,7 +572,8 @@ class TestEntrypoint:
     async def test_image_healthcheck_runs_before_the_task_healthcheck_as_the_image_user(self, tmp_path, monkeypatch):
         # Harbor's order: `up --wait` gates on the image HEALTHCHECK, then run_healthcheck() runs the task's, both
         # as the container's user (the agent user is set afterwards): the daemon runs the image check in the image
-        # WorkingDir, Harbor's exec runs the task check in the task workdir.
+        # WorkingDir, Harbor's exec runs the task check in the task workdir; the seed names both directories (the
+        # task's is the prepared workdir, the image's own /app for a task that declares none).
         record = ENTRYPOINT_CONFIG | {"Healthcheck": IMAGE_HEALTHCHECK}
         server, task, sandbox = self.entrypoint_server(
             tmp_path, monkeypatch, toml=AGENT_USER_HEALTH_TOML, record=record
@@ -584,7 +585,7 @@ class TestEntrypoint:
         task_probe = sandbox.index_of("test -f /app/ready.txt")
         assert sandbox.index_of(f"sh {ENTRYPOINT_DIR}/run.sh") < image < task_probe
         assert (sandbox.execs[image]["user"], sandbox.execs[image]["cwd"]) == ("app", "/app")
-        assert (sandbox.execs[task_probe]["user"], sandbox.execs[task_probe]["cwd"]) == ("app", None)
+        assert (sandbox.execs[task_probe]["user"], sandbox.execs[task_probe]["cwd"]) == ("app", "/app")
 
     @pytest.mark.parametrize(
         ("toml", "user"), [(HEALTHCHECK_TOML, None), (AGENT_USER_HEALTH_TOML, "root")], ids=["root", "agent-user"]
@@ -600,7 +601,7 @@ class TestEntrypoint:
         image = sandbox.execs[sandbox.index_of("test -f /tmp/healthy")]
         task_probe = sandbox.execs[sandbox.index_of("test -f /app/ready.txt")]
         assert (image["user"], image["cwd"]) == (user, "/app")
-        assert (task_probe["user"], task_probe["cwd"]) == (user, None)
+        assert (task_probe["user"], task_probe["cwd"]) == (user, "/app")
 
     async def test_slow_service_passes_when_the_image_healthcheck_absorbs_the_wait(self, tmp_path, monkeypatch):
         # domainbench-24's shape: no image USER, [agent] user = "agent", a task check with retries 3 and no start

@@ -13,6 +13,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -23,7 +24,9 @@ from environment_servers.harbor.app import (
     min_reward_failure,
     roll_up_turns,
 )
+from environment_servers.harbor.entrypoint import HealthcheckFailed
 from environment_servers.harbor.sandboxes import SEED_CREATE_GRACE_S
+from environment_servers.harbor.steps import HEALTHCHECK_EXEC_GRACE_S
 from environment_servers.harbor.tests.conftest import OK, TASK_TOML, FakeSandbox, agent_response, make_server
 from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY
 from nemo_gym.sandbox.providers.base import SandboxExecResult
@@ -991,10 +994,10 @@ async def test_a_multi_step_task_longer_than_the_default_gets_its_own_budget(tmp
     assert response.failure is None, response.failure
     assert [turn.name for turn in response.result.turns] == ["plan", "build"] and response.result.reward == 1.0
     assert (
-        f"hello: its 2 steps need up to 1s once the sandbox is ready (harness setup, setup.sh bound, agent and "
-        f"verifier budgets, hooks and grace per step), 2s with one sandbox start and up to {seed_bound + 1.2:.0f}s "
-        f"with every image pull retry; default_episode_timeout_seconds=0 is below that bound, so the episode "
-        f"deadline and the sandbox lifetime follow the task's own bound ({seed_bound + 1.2:.0f}s)"
+        f"hello: its 2 steps need up to 1s once the sandbox is ready (harness setup, setup.sh and healthcheck "
+        f"bounds, agent and verifier budgets, hooks and grace per step), 2s with one sandbox start and up to "
+        f"{seed_bound + 1.2:.0f}s with every image pull retry; default_episode_timeout_seconds=0 is below that "
+        f"bound, so the episode deadline and the sandbox lifetime follow the task's own bound ({seed_bound + 1.2:.0f}s)"
     ) in caplog.text
     # The derived deadline is the task's own budget, not a blank cheque: `test_the_task_deadline_ends_an_overrunning_turn`
     # keeps the task deadline firing on a turn that runs past it.
@@ -1112,10 +1115,10 @@ async def test_without_enforcement_a_multi_step_task_longer_than_the_default_is_
     assert failure is not None and failure.stage == "seed" and failure.terminal
     assert server._task_budget_s(task) == pytest.approx(3.2)
     assert (
-        f"Task 'hello': its 2 steps need up to 2s once the sandbox is ready (harness setup, setup.sh bound, agent "
-        f"and verifier budgets, hooks and grace per step), 3s with one sandbox start and up to "
-        f"{seed_bound + 2.2:.0f}s with every image pull retry, above default_episode_timeout_seconds=2 after one "
-        f"sandbox start already, and enforce_task_timeouts is off"
+        f"Task 'hello': its 2 steps need up to 2s once the sandbox is ready (harness setup, setup.sh and "
+        f"healthcheck bounds, agent and verifier budgets, hooks and grace per step), 3s with one sandbox start and "
+        f"up to {seed_bound + 2.2:.0f}s with every image pull retry, above default_episode_timeout_seconds=2 after "
+        f"one sandbox start already, and enforce_task_timeouts is off"
     ) in failure.failure_reason
     assert (
         f"raise default_episode_timeout_seconds to at least 3 ({seed_bound + 2.2:.0f} to cover a retried seed)"
@@ -1130,11 +1133,12 @@ async def test_without_enforcement_a_multi_step_task_longer_than_the_default_is_
         response = await server.run_request(request_for(task, rollout="r2"))
     assert response.failure is None and [turn.name for turn in response.result.turns] == ["plan", "build"]
     assert (
-        f"hello: its 2 steps need up to 2s once the sandbox is ready (harness setup, setup.sh bound, agent and "
-        f"verifier budgets, hooks and grace per step), 3s with one sandbox start and up to {seed_bound + 2.2:.0f}s "
-        f"with every image pull retry; default_episode_timeout_seconds=4 covers the episode after one sandbox start "
-        f"but not after a retried seed, and enforce_task_timeouts is off, so an episode whose seed retries its image "
-        f"pulls may time out and be retried; set enforce_task_timeouts: true to give the episode the task's own bound"
+        f"hello: its 2 steps need up to 2s once the sandbox is ready (harness setup, setup.sh and healthcheck "
+        f"bounds, agent and verifier budgets, hooks and grace per step), 3s with one sandbox start and up to "
+        f"{seed_bound + 2.2:.0f}s with every image pull retry; default_episode_timeout_seconds=4 covers the episode "
+        f"after one sandbox start but not after a retried seed, and enforce_task_timeouts is off, so an episode "
+        f"whose seed retries its image pulls may time out and be retried; set enforce_task_timeouts: true to give "
+        f"the episode the task's own bound"
     ) in caplog.text
     # A default that covers the worst case runs them without a word, as before.
     caplog.clear()
@@ -1329,14 +1333,18 @@ def write_step_workdir(task_dir: Path, name: str, files: dict[str, str]) -> None
         (folder / relative).write_text(text)
 
 
-@dataclass
-class SetupSandbox(FakeSandbox):
-    """A sandbox whose ``bash <workdir>/setup.sh`` runs answer ``setup_results`` in order (OK once they run out)."""
+SETUP = "bash /app/setup.sh"
 
-    setup_results: list[SandboxExecResult] = field(default_factory=list)
+
+@dataclass
+class ScriptedSandbox(FakeSandbox):
+    """A sandbox whose runs of a scripted command (a step's ``bash /app/setup.sh``, a healthcheck command) answer
+    ``scripted[command]`` in order, OK once the answers run out; every other command is the fake's own."""
+
+    scripted: dict[str, list[SandboxExecResult]] = field(default_factory=dict)
 
     async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
-        if command.startswith("bash ") and command.endswith("/setup.sh"):
+        if command in self.scripted:
             # `ran_as` is the user the container ran the command as, the fake's rule (`FakeSandbox.exec`).
             effective = user if user is not None else self.default_user
             ran_as = str(effective) if effective is not None else self.image_user
@@ -1351,13 +1359,20 @@ class SetupSandbox(FakeSandbox):
                     "seen": None,
                 }
             )
-            return self.setup_results.pop(0) if self.setup_results else OK
+            answers = self.scripted[command]
+            return answers.pop(0) if answers else OK
         return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
 
 
-def multi_turn_server_with_workdirs(tmp_path, monkeypatch, workdirs: dict[str, dict[str, str]], **kwargs):
-    """Three steps, ``plan``, ``build`` (as user ``tester``) and ``check``; ``workdirs`` maps a step to the files of
-    its ``workdir/``."""
+def SetupSandbox(setup_results: list[SandboxExecResult] | None = None) -> ScriptedSandbox:  # noqa: N802
+    return ScriptedSandbox(scripted={SETUP: list(setup_results or [])})
+
+
+def multi_turn_server_with_workdirs(
+    tmp_path, monkeypatch, workdirs: dict[str, dict[str, str]], *, build_toml: str = "", **kwargs
+):
+    """Three steps, ``plan``, ``build`` (as user ``tester``, plus ``build_toml``) and ``check``; ``workdirs`` maps
+    a step to the files of its ``workdir/``."""
     task_dir = tmp_path / "datasets" / "ds" / "hello"
     for name, files in workdirs.items():
         write_step_workdir(task_dir, name, files)
@@ -1365,7 +1380,8 @@ def multi_turn_server_with_workdirs(tmp_path, monkeypatch, workdirs: dict[str, d
         tmp_path,
         monkeypatch,
         '[[steps]]\nname = "plan"\n[[steps]]\nname = "build"\n[steps.agent]\nuser = "tester"\n'
-        '[[steps]]\nname = "check"\n',
+        + build_toml
+        + '[[steps]]\nname = "check"\n',
         {"plan": "P", "build": "B", "check": "C"},
         **kwargs,
     )
@@ -1610,7 +1626,7 @@ TAR_REFUSAL = SandboxExecResult(
 
 
 @dataclass
-class PlantedSandbox(SetupSandbox):
+class PlantedSandbox(ScriptedSandbox):
     """The agent's sandbox after the previous turn's agent left a non-empty directory at the name of a file the next
     step's ``workdir/`` ships: the extraction into the working directory answers ``extraction``."""
 
@@ -1632,7 +1648,7 @@ async def test_a_workdir_entry_the_sandbox_refuses_to_unpack_fails_the_step_inst
     (an unmasked turn scored 0 in the mean, the episode stopped with the step's kind, nothing retried), never an outage
     retried for as long as the policy allows;
     a provider that cannot run the extraction at all is still the outage it is."""
-    sandbox = PlantedSandbox()
+    sandbox = PlantedSandbox(scripted={SETUP: []})
     server, task, sandbox, _ = multi_turn_server_with_workdirs(
         tmp_path, monkeypatch, {"build": {"setup.sh": "#!/bin/bash\nmake fixtures\n"}}, sandbox=sandbox
     )
@@ -1652,12 +1668,12 @@ async def test_a_workdir_entry_the_sandbox_refuses_to_unpack_fails_the_step_inst
     assert result.turns[0].reward == 1.0 and result.failure_kind == "harbor:step_workdir_failed"
     # The step's script never ran over the planted tree, no agent session opened for the step, and the extraction
     # was tried exactly once: nothing retried it.
-    assert not [e for e in sandbox.execs if e["command"] == "bash /app/setup.sh"]
+    assert not [e for e in sandbox.execs if e["command"] == SETUP]
     assert len(server.server_client.seed_bodies()) == 1
     assert len([e for e in sandbox.execs if "tar -xzf" in e["command"] and " -C /app" in e["command"]]) == 1
 
     lost = SandboxExecResult(stdout="", stderr="", return_code=-1, error_type="connection")
-    sandbox = PlantedSandbox(extraction=lost)
+    sandbox = PlantedSandbox(scripted={SETUP: []}, extraction=lost)
     server, task, sandbox, _ = multi_turn_server_with_workdirs(
         tmp_path / "lost", monkeypatch, {"build": {"setup.sh": "#!/bin/bash\ntrue\n"}}, sandbox=sandbox
     )
@@ -1665,3 +1681,239 @@ async def test_a_workdir_entry_the_sandbox_refuses_to_unpack_fails_the_step_inst
     failure = response.failure
     assert failure is not None and failure.stage == "agent" and not failure.terminal
     assert "SandboxUnavailableError" in failure.failure_reason and "connection" in failure.failure_reason
+
+
+# -- [steps.healthcheck] (Harbor's _run_step_healthcheck) ----------------------------------------------------------
+
+READY = "test -f /app/ready"
+BUILD_HEALTHCHECK = (
+    "[steps.healthcheck]\n"
+    f'command = "{READY}"\n'
+    "interval_sec = 0.01\nstart_interval_sec = 0.01\nstart_period_sec = 0.0\ntimeout_sec = 5.0\nretries = 2\n"
+)
+FAILS = SandboxExecResult(stdout="", stderr="no ready file", return_code=1)
+
+
+async def test_a_steps_healthcheck_is_polled_after_its_setup_and_before_its_agent(tmp_path, monkeypatch):
+    """Harbor's `_run_step_healthcheck`: after the step's setup.sh, before its agent, with `run_healthcheck`'s
+    semantics (here one failure then a pass, within `retries`), as the turn's agent user in the working directory."""
+    sandbox = ScriptedSandbox(scripted={SETUP: [], READY: [FAILS]})
+    server, task, sandbox, _ = multi_turn_server_with_workdirs(
+        tmp_path,
+        monkeypatch,
+        {"build": {"setup.sh": "#!/bin/bash\ntouch ready\n"}},
+        build_toml=BUILD_HEALTHCHECK,
+        sandbox=sandbox,
+    )
+
+    response = await server.run_request(request_for(task))
+
+    assert response.failure is None, response.failure
+    assert [turn.reward for turn in response.result.turns] == [1.0, 1.0, 1.0]
+    checks = [i for i, e in enumerate(sandbox.execs) if e["command"] == READY]
+    setup = next(i for i, e in enumerate(sandbox.execs) if e["command"] == SETUP)
+    assert len(checks) == 2 and setup < checks[0]
+    # No explicit user: the sandbox's default at that point, the build step's `tester`, ran each attempt.
+    assert all(sandbox.execs[i]["cwd"] == "/app" and sandbox.execs[i]["user"] is None for i in checks)
+    assert all(sandbox.execs[i]["ran_as"] == "tester" for i in checks)
+    assert sandbox.execs[checks[0]]["timeout_s"] == 10.0
+    # The second turn's agent session opened after the check passed: its seed is the second of three.
+    assert len(server.server_client.seed_bodies()) == 3
+
+
+@pytest.mark.parametrize(
+    ("start_interval", "retries"),
+    [(11.99, 4), (11.99, 0), (5.0, 4), (0.5, 2)],
+    ids=["straddle-tight", "straddle-tight-retries-0", "harbor-defaults", "short-start-interval"],
+)
+async def test_the_budget_counts_a_steps_healthcheck_at_its_worst_case(tmp_path, monkeypatch, start_interval, retries):
+    """A step with a `[steps.healthcheck]` adds the most the poll may take, whatever its alignment with the start
+    period: the loop (`_poll_healthcheck`) is driven here against a scripted clock in which every attempt runs to the
+    provider's kill at `timeout_sec` plus the exec grace, and the budget must cover the elapsed time at the failure.
+    With `start_interval_sec` chosen so that the last in-grace attempt starts 0.01 s before the period ends, the poll
+    ends 0.01 s short of the budget: a budget that charged `interval_sec` for the sleep after that attempt was under
+    by `start_interval_sec - interval_sec` (the straddling attempt is followed by the start interval, as in Harbor).
+    Without the count the last turns of a task with slow checks died at the deadline."""
+    server, task, _, _ = multi_turn_server_with_workdirs(tmp_path, monkeypatch, {})
+    without = server._post_seed_budget_s(task)
+    check_toml = (
+        '[steps.healthcheck]\ncommand = "curl -sf localhost:8000/health"\n'
+        f"start_period_sec = 20.0\ninterval_sec = 2.0\ntimeout_sec = 3.0\nretries = {retries}\n"
+        f"start_interval_sec = {start_interval}\n"
+    )
+    server, task, _, _ = multi_turn_server_with_workdirs(tmp_path / "check", monkeypatch, {}, build_toml=check_toml)
+    turn = task.turns[1]
+    check = turn.config.healthcheck
+    budget = server._step_healthcheck_budget_s(turn)
+    assert server._post_seed_budget_s(task) == pytest.approx(without + budget)
+
+    class Clock:
+        now = 0.0
+
+        def time(self):
+            return self.now
+
+        async def sleep(self, seconds):
+            self.now += seconds
+
+    clock = Clock()
+    monkeypatch.setattr(
+        "environment_servers.harbor.entrypoint.asyncio",
+        SimpleNamespace(get_running_loop=lambda: clock, sleep=clock.sleep),
+    )
+    started: list[float] = []
+
+    async def attempt():
+        started.append(clock.now)
+        # The worst attempt: the provider kills the command at the exec's timeout_s (timeout_sec plus the grace).
+        clock.now += check.timeout_sec + HEALTHCHECK_EXEC_GRACE_S
+        return FAILS
+
+    with pytest.raises(HealthcheckFailed):
+        await server._poll_healthcheck(None, task, check, attempt)
+    elapsed = clock.now
+    assert budget >= elapsed, (budget, elapsed, started)
+    # `retries` attempts began after the start period (one for retries = 0), none counted twice.
+    assert len([t for t in started if t >= check.start_period_sec]) == max(retries, 1)
+    if start_interval == 11.99:
+        # 0 -> 8, sleep 11.99 -> 19.99 (in grace) -> 27.99, sleep 11.99 -> 39.98, then the counted attempts.
+        assert started[1] == pytest.approx(19.99) and started[2] == pytest.approx(39.98)
+        assert budget - elapsed == pytest.approx(0.01)
+
+
+async def test_a_steps_healthcheck_that_never_passes_fails_the_turn_without_agent_or_verifier(tmp_path, monkeypatch):
+    """Harbor records the HealthcheckError in the step's exception_info and stops the trial: a failed turn here,
+    with its own failure kind, scored a measured 0 in the mean as after a failed setup.sh (1.0 and 0 over two turns,
+    not masked: the check ran in the sandbox the previous turn's agent had, see roll_up_turns)."""
+    sandbox = ScriptedSandbox(scripted={READY: [FAILS, FAILS, FAILS]})
+    server, task, sandbox, _ = multi_turn_server_with_workdirs(
+        tmp_path, monkeypatch, {}, build_toml=BUILD_HEALTHCHECK, sandbox=sandbox
+    )
+    rewards_per_turn(server, sandbox, ["1", "1", "1"])
+
+    response = await server.run_request(request_for(task))
+
+    assert response.failure is None, response.failure
+    result = response.result
+    failed = result.turns[1]
+    assert [turn.name for turn in result.turns] == ["plan", "build"]
+    assert failed.failure_kind == "harbor:step_healthcheck_failed" and failed.response is None
+    assert "step 'build' healthcheck failed: Healthcheck failed 2 times: 'test -f /app/ready' (step 'build')" in (
+        failed.failure_reason
+    )
+    assert (result.reward, result.stopped_after_turn, result.mask_sample) == (0.5, "build", False)
+    assert result.turns[0].reward == 1.0 and result.failure_kind == "harbor:step_healthcheck_failed"
+    # retries = 2 consecutive failures after the (empty) start period: two attempts, then the step failed.
+    assert len([e for e in sandbox.execs if e["command"] == READY]) == 2
+    assert len(server.server_client.seed_bodies()) == 1
+
+
+async def test_a_steps_healthcheck_does_not_run_after_its_setup_failed(tmp_path, monkeypatch):
+    sandbox = ScriptedSandbox(scripted={SETUP: [SandboxExecResult(stdout="", stderr="", return_code=2)], READY: []})
+    server, task, sandbox, _ = multi_turn_server_with_workdirs(
+        tmp_path,
+        monkeypatch,
+        {"build": {"setup.sh": "#!/bin/bash\nexit 2\n"}},
+        build_toml=BUILD_HEALTHCHECK,
+        sandbox=sandbox,
+    )
+
+    response = await server.run_request(request_for(task))
+
+    assert response.failure is None, response.failure
+    assert response.result.turns[1].failure_kind == "harbor:step_setup_failed"
+    assert not [e for e in sandbox.execs if e["command"] == READY]
+
+
+async def test_a_deadline_during_the_next_steps_preparation_reports_the_agent_stage_without_the_previous_response(
+    tmp_path, monkeypatch
+):
+    """Round 38 review (P3, non-blocking): the turn progress the task deadline reports was reset by `_agent_turn`
+    only, so a deadline firing in the next step's workdir/setup.sh/healthcheck reported `verification` with the
+    previous step's response. The progress is the new turn's before its preparation now, and the explanation names
+    the preparation phases the budget counts."""
+
+    @dataclass
+    class SlowSetup(FakeSandbox):
+        setup_started: bool = False
+
+        async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+            if command == SETUP:
+                self.setup_started = True
+                await asyncio.sleep(30)
+            return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+
+    steps = "".join(
+        f'[[steps]]\nname = "{name}"\n[steps.agent]\ntimeout_sec = 0.2\n[steps.verifier]\ntimeout_sec = 0.2\n'
+        for name in ("plan", "build")
+    )
+    write_step_workdir(tmp_path / "datasets" / "ds" / "hello", "build", {"setup.sh": "#!/bin/bash\nsleep 1d\n"})
+    server, task, sandbox, _ = multi_turn_server(
+        tmp_path,
+        monkeypatch,
+        steps,
+        {"plan": "P", "build": "B"},
+        sandbox=SlowSetup(),
+        harness_setup_allowance_s=0,
+        verifier_grace_s=0,
+        step_setup_timeout_s=0.2,
+    )
+    assert server._post_seed_budget_s(task) == pytest.approx(1.0)
+
+    response = await server.run_request(request_for(task))
+
+    failure = response.failure
+    assert failure is not None and failure.failure_kind == "harbor:task_deadline" and not failure.terminal
+    # The first turn was graded, and the deadline fired in the second turn's setup.sh, before its agent session.
+    assert len([e for e in sandbox.execs if "bash /tests/test.sh" in e["command"]]) == 1 and sandbox.setup_started
+    assert len(server.server_client.seed_bodies()) == 1
+    assert failure.stage == "agent" and failure.partial_response is None
+    assert "over 2 turn(s): each step's workdir/setup.sh and [steps.healthcheck] bounds" in failure.failure_reason
+    assert sandbox.stopped and not server._sandboxes
+
+
+async def test_a_sandbox_that_cannot_run_a_steps_healthcheck_is_an_outage_not_the_steps_failure(tmp_path, monkeypatch):
+    """Only a check that ran and never passed is the step's failure (Harbor's HealthcheckError). A sandbox that was
+    stopped under the poll (the facade's `RuntimeError('Sandbox has not been started')`), or a provider that could not
+    run the command, is a retryable failure, as the same conditions are for setup.sh and the collect hooks. A command
+    killed at its own timeout ran and failed, and the loop counts it as one failed attempt, as Docker's HEALTHCHECK
+    counts a timed-out probe and as the seed's task-level loop does; Harbor 0.22.0 differs there: its Docker exec
+    raises on the timeout, run_healthcheck does not catch it and _run_step_healthcheck catches HealthcheckError only,
+    so the first attempt that overruns timeout_sec errors the whole trial (no step result, no further attempt). The
+    third case below asserts the server's lenient count, not Harbor's."""
+
+    class Stopped(ScriptedSandbox):
+        async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+            if command == READY:
+                raise RuntimeError("Sandbox has not been started")
+            return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+
+    server, task, sandbox, _ = multi_turn_server_with_workdirs(
+        tmp_path, monkeypatch, {}, build_toml=BUILD_HEALTHCHECK, sandbox=Stopped()
+    )
+    response = await server.run_request(request_for(task))
+    failure = response.failure
+    assert failure is not None and failure.stage == "agent" and not failure.terminal
+    assert "turn 'build': RuntimeError: Sandbox has not been started" in failure.failure_reason
+    assert failure.failure_kind != "harbor:step_healthcheck_failed" and response.result is None
+
+    lost = SandboxExecResult(stdout="", stderr="", return_code=-1, error_type="connection")
+    sandbox = ScriptedSandbox(scripted={READY: [lost]})
+    server, task, sandbox, _ = multi_turn_server_with_workdirs(
+        tmp_path / "lost", monkeypatch, {}, build_toml=BUILD_HEALTHCHECK, sandbox=sandbox
+    )
+    response = await server.run_request(request_for(task, rollout="r2"))
+    failure = response.failure
+    assert failure is not None and failure.stage == "agent" and not failure.terminal
+    assert "step 'build' healthcheck could not run: connection" in failure.failure_reason
+    assert len([e for e in sandbox.execs if e["command"] == READY]) == 1
+
+    killed = SandboxExecResult(stdout="", stderr="", return_code=-1, error_type="timeout")
+    sandbox = ScriptedSandbox(scripted={READY: [killed, killed]})
+    server, task, sandbox, _ = multi_turn_server_with_workdirs(
+        tmp_path / "slow", monkeypatch, {}, build_toml=BUILD_HEALTHCHECK, sandbox=sandbox
+    )
+    response = await server.run_request(request_for(task, rollout="r3"))
+    assert response.failure is None, response.failure
+    assert response.result.turns[1].failure_kind == "harbor:step_healthcheck_failed"
+    assert len([e for e in sandbox.execs if e["command"] == READY]) == 2
